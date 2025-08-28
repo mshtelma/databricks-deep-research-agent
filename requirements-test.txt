@@ -1,0 +1,35 @@
+# Testing dependencies
+pytest>=8.0.0
+pytest-asyncio>=0.21.0
+pytest-mock>=3.12.0
+pytest-cov>=4.1.0
+
+# Core dependencies needed for testing (open source versions)
+mlflow[databricks]>=2.10.0
+langgraph>=0.5.3
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+pydantic>=2.0.0
+
+# Databricks dependencies for workspace integration tests
+databricks-sdk>=0.20.0
+databricks-langchain>=0.1.0
+openai>=1.0.0  # For OpenAI client from Databricks SDK
+pyyaml>=6.0.0  # For config file parsing
+
+# Additional testing utilities
+responses>=0.24.0  # for mocking HTTP requests
+freezegun>=1.2.2   # for mocking time
+factory-boy>=3.3.0 # for test data generation
+
+# Optional: For more comprehensive mocking
+pytest-httpx>=0.21.0
+aioresponses>=0.7.4
+
+backoff
+databricks-agents
+unitycatalog-ai[databricks]
+unitycatalog-langchain[databricks]
+tavily-python>=0.3.0
+requests>=2.31.0

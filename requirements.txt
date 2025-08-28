@@ -1,0 +1,19 @@
+# Core dependencies for Databricks Agent (MLR 17.0 compatible)
+databricks-langchain
+langgraph==0.6.6
+backoff
+databricks-connect
+
+# Unity Catalog integration
+unitycatalog-ai[databricks]
+unitycatalog-langchain[databricks]
+
+# Web search
+tavily-python>=0.3.0
+requests>=2.31.0
+
+# Data processing
+pydantic>=2.0.0
+
+# Development
+python-dotenv>=1.0.0
