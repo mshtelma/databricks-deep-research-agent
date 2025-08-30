@@ -17,3 +17,6 @@ pydantic>=2.0.0
 
 # Development
 python-dotenv>=1.0.0
+
+# CLI Enhancement
+rich>=13.0.0
