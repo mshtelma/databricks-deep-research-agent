@@ -2,18 +2,21 @@
 
 import json
 import logging
+import time
 import traceback
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from server.services.agent_client import AgentClient, AgentMessage
+from server.services.chat_logger import ChatLogger, ChatRequestContext
 from server.services.user_service import UserService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+chat_logger = ChatLogger()
 
 
 class ChatRequest(BaseModel):
@@ -49,38 +52,69 @@ async def get_agent_client() -> AgentClient:
 
 
 @router.post("/send", response_model=ChatResponse)
-async def send_message(request: ChatRequest, agent_client: AgentClient = Depends(get_agent_client)):
-    """Send message to agent (non-streaming response)."""
-    try:
-        # Validate request
-        if not request.messages or len(request.messages) == 0:
-            raise HTTPException(status_code=400, detail="No messages provided")
+async def send_message(
+    request: ChatRequest, 
+    req: Request,
+    agent_client: AgentClient = Depends(get_agent_client)
+):
+    """Send message to agent (non-streaming response) with comprehensive logging."""
+    # Extract user information
+    user_service = UserService()
+    user_info = user_service.get_user_from_request(req)
+    
+    # Get the latest user prompt
+    prompt = request.messages[-1]["content"] if request.messages else ""
+    
+    # Create logging context
+    with ChatRequestContext(chat_logger, user_info, prompt, request.messages) as ctx:
+        try:
+            # Validate request
+            if not request.messages or len(request.messages) == 0:
+                raise HTTPException(status_code=400, detail="No messages provided")
 
-        # Convert to agent message format
-        messages = []
-        for msg in request.messages:
-            if "role" not in msg or "content" not in msg:
-                raise HTTPException(status_code=400, detail="Invalid message format")
-            messages.append(AgentMessage(role=msg["role"], content=msg["content"]))
+            # Convert to agent message format
+            messages = []
+            for msg in request.messages:
+                if "role" not in msg or "content" not in msg:
+                    raise HTTPException(status_code=400, detail="Invalid message format")
+                messages.append(AgentMessage(role=msg["role"], content=msg["content"]))
 
-        # Send to agent
-        response = await agent_client.send_simple_message(messages, request.config)
+            # Send to agent
+            response = await agent_client.send_simple_message(messages, request.config)
+            
+            # Capture response for logging
+            if response and "message" in response:
+                ctx.response_content = response["message"].get("content", "")
 
-        return ChatResponse(message=response["message"], metadata=response["metadata"])
+            return ChatResponse(message=response["message"], metadata=response["metadata"])
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Chat request failed: {str(e)}")
-        logger.error(f"Chat request traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Chat request failed: {str(e)}")
-    finally:
-        await agent_client.close()
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Chat request failed: {str(e)}")
+            logger.error(f"Chat request traceback: {traceback.format_exc()}")
+            raise HTTPException(status_code=500, detail=f"Chat request failed: {str(e)}")
+        finally:
+            await agent_client.close()
 
 
 @router.post("/stream")
-async def stream_message(request: ChatRequest, agent_client: AgentClient = Depends(get_agent_client)):
-    """Stream message to agent (real-time responses)."""
+async def stream_message(
+    request: ChatRequest,
+    req: Request,
+    agent_client: AgentClient = Depends(get_agent_client)
+):
+    """Stream message to agent (real-time responses) with comprehensive logging."""
+    # Extract user information
+    user_service = UserService()
+    user_info = user_service.get_user_from_request(req)
+    
+    # Get the latest user prompt
+    prompt = request.messages[-1]["content"] if request.messages else ""
+    
+    # Create logging context
+    ctx = ChatRequestContext(chat_logger, user_info, prompt, request.messages)
+    ctx.__enter__()  # Start logging
 
     async def event_stream():
         try:
@@ -88,6 +122,7 @@ async def stream_message(request: ChatRequest, agent_client: AgentClient = Depen
             if not request.messages or len(request.messages) == 0:
                 error_data = {"type": "error", "error": "No messages provided"}
                 yield f"data: {json.dumps(error_data)}\n\n"
+                ctx.__exit__(ValueError, ValueError("No messages provided"), None)
                 return
 
             # Convert to agent message format
@@ -96,6 +131,7 @@ async def stream_message(request: ChatRequest, agent_client: AgentClient = Depen
                 if "role" not in msg or "content" not in msg:
                     error_data = {"type": "error", "error": "Invalid message format"}
                     yield f"data: {json.dumps(error_data)}\n\n"
+                    ctx.__exit__(ValueError, ValueError("Invalid message format"), None)
                     return
                 messages.append(AgentMessage(role=msg["role"], content=msg["content"]))
 
@@ -107,6 +143,14 @@ async def stream_message(request: ChatRequest, agent_client: AgentClient = Depen
                 logger.debug(
                     f"Streaming event to UI: type={event.type}, has_content={bool(event.content)}, has_metadata={bool(event.metadata)}"
                 )
+                
+                # Track streaming events in context
+                ctx.add_stream_event(
+                    event.type,
+                    event.content or "",
+                    event.metadata.dict() if event.metadata else None
+                )
+                
                 if event.type == "research_update":
                     logger.info(
                         f"Research update: phase={event.metadata.phase if event.metadata else 'none'}, progress={event.metadata.progress_percentage if event.metadata else 0}%"
@@ -122,12 +166,18 @@ async def stream_message(request: ChatRequest, agent_client: AgentClient = Depen
 
             # End stream
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+            
+            # Complete logging context successfully
+            ctx.__exit__(None, None, None)
 
         except Exception as e:
             logger.error(f"Stream message failed: {str(e)}")
             logger.error(f"Stream request traceback: {traceback.format_exc()}")
             error_data = {"type": "error", "error": str(e), "error_type": "server_error"}
             yield f"data: {json.dumps(error_data)}\n\n"
+            
+            # Complete logging context with error
+            ctx.__exit__(type(e), e, None)
 
         finally:
             await agent_client.close()

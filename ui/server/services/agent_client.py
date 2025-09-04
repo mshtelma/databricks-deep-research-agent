@@ -21,6 +21,28 @@ def is_development_mode() -> bool:
     return dev_mode in ("true", "1", "yes", "on")
 
 
+def is_databricks_app_environment() -> bool:
+    """Detect if running inside a Databricks Apps container.
+
+    Databricks sets several app-specific environment variables that are
+    guaranteed to be present inside an App container but are unlikely to be
+    set in local development or general Databricks jobs / notebooks.  The
+    following variables are currently observed:
+
+    * ``DATABRICKS_APP_NAME``
+    * ``DATABRICKS_APP_URL``
+    * ``DATABRICKS_APP_PORT``
+
+    Presence of any one of them is treated as a positive signal that the code
+    is running inside a Databricks App.
+    """
+    return bool(
+        os.getenv("DATABRICKS_APP_NAME")
+        or os.getenv("DATABRICKS_APP_URL")
+        or os.getenv("DATABRICKS_APP_PORT")
+    )
+
+
 class AgentMessage(BaseModel):
     """Message format for agent communication."""
 
@@ -61,20 +83,67 @@ class AgentClient:
 
     def __init__(self, workspace_client: Optional[WorkspaceClient] = None):
         """Initialize agent client with workspace client."""
-        self.workspace = workspace_client or self._create_workspace_client()
+        self.workspace_client = workspace_client or self._create_workspace_client()
         self.agent_endpoint = self._get_agent_endpoint()
         self.http_client = httpx.AsyncClient(timeout=300.0)  # 5min timeout for research
 
     def _get_auth_headers(self) -> dict:
         """Get authentication headers for HTTP requests."""
+
         # Check if we have a direct token (PAT authentication)
-        if self.workspace.config.token:
-            logger.debug(f"Using PAT authentication (token length: {len(self.workspace.config.token)})")
-            return {"Authorization": f"Bearer {self.workspace.config.token}"}
+        if self.workspace_client.config.token:
+            logger.info(f"Using PAT authentication (token length: {len(self.workspace_client.config.token)})")
+            return {"Authorization": f"Bearer {self.workspace_client.config.token}"}
+
+        # Try to explicitly authenticate via the SDK which, inside Databricks
+        # (including Apps), can mint a short-lived PAT on demand.  This method
+        # is no-op outside the platform and raises if auth fails.
+        if hasattr(self.workspace_client.config, "authenticate"):
+            try:
+                return self.workspace_client.config.authenticate()
+            except Exception as e:
+                logger.info(f"workspace.authenticate() raised an exception: {e}")
+
+
+        # Handle OAuth (service principal / M2M) authentication that Databricks SDK
+        # automatically selects inside Databricks jobs, model-serving and Apps. In
+        # this mode ``config.token`` is ``None`` and ``auth_type`` starts with
+        # "oauth" (e.g. "oauth-m2m").  The SDK stores a credential helper able
+        # to produce an access token via ``get_access_token``.
+        if self.workspace_client.config.auth_type and self.workspace_client.config.auth_type.startswith("oauth"):
+            credentials = getattr(self.workspace_client.config, "credentials", None)
+            try:
+                if credentials is not None:
+                    if hasattr(credentials, "get_access_token"):
+                        token = credentials.get_access_token()
+                    elif callable(credentials):  # older SDK interface
+                        token = credentials().get("access_token")
+                    else:
+                        token = None
+
+                    if token:
+                        logger.info(
+                            f"OAuth cred helper produced token (preview={token[:6]}...{token[-4:]}) auth_type={self.workspace_client.config.auth_type}"
+                        )
+                        logger.info(
+                            f"Using OAuth ({self.workspace_client.config.auth_type}) authentication with dynamic token"
+                        )
+                        return {"Authorization": f"Bearer {token}"}
+                    else:
+                        # No token but OAuth mode - use empty headers (implicit auth)
+                        logger.info(f"OAuth mode ({self.workspace_client.config.auth_type}) but no token - using implicit authentication")
+                        return {}
+            except Exception as e:
+                logger.warning(
+                    f"Failed to obtain OAuth token via SDK credentials object: {e}. Proceeding without explicit header."
+                )
+                # For in-workspace calls an explicit header isn't mandatory; return empty headers
+                logger.info("Using implicit OAuth authentication (no explicit token in header)")
+                return {}
 
         # For CLI profile authentication, the SDK handles auth automatically
         # but we need to get the token manually for direct HTTP requests
-        if self.workspace.config.auth_type == "databricks-cli":
+        if self.workspace_client.config.auth_type == "databricks-cli":
             try:
                 import json
                 import subprocess
@@ -111,11 +180,23 @@ class AgentClient:
                 raise ValueError(f"Failed to get authentication token: {str(e)}")
 
         # Fallback - this shouldn't happen but provides useful error info
-        logger.error(f"Unsupported auth_type: {self.workspace.config.auth_type}")
-        raise ValueError(f"Unsupported authentication type: {self.workspace.config.auth_type}")
+        logger.error(f"Unsupported auth_type: {self.workspace_client.config.auth_type}")
+        raise ValueError(f"Unsupported authentication type: {self.workspace_client.config.auth_type}")
 
     def _create_workspace_client(self) -> WorkspaceClient:
-        """Create workspace client with agent-specific authentication fallback."""
+        """Create workspace client with environment-aware authentication.
+
+        In Databricks Apps we can instantiate ``WorkspaceClient()`` without
+        parameters – the platform injects all required credentials via
+        environment variables / workload identity.  Outside of Apps we keep
+        the existing fallback logic to support local development as well as
+        generic Databricks jobs.
+        """
+        # Fast-path: Databricks Apps container – rely on automatic auth
+        if is_databricks_app_environment():
+            logger.info("Detected Databricks App environment – using default WorkspaceClient() with auto-auth")
+            return WorkspaceClient()
+
         try:
             # Check agent-specific credentials first
             if os.getenv("AGENT_DATABRICKS_TOKEN") and os.getenv("AGENT_DATABRICKS_HOST"):
@@ -170,7 +251,7 @@ class AgentClient:
             agent_host = os.getenv("AGENT_DATABRICKS_HOST")
             if not agent_host:
                 try:
-                    agent_host = self.workspace.config.host
+                    agent_host = self.workspace_client.config.host
                     logger.info(f"Using workspace host for agent: {agent_host}")
                 except Exception as e:
                     logger.error(f"Failed to get workspace host: {str(e)}")
@@ -332,18 +413,18 @@ class AgentClient:
         yield StreamEvent(type="content_delta", content=table_intro)
         full_response += table_intro
         await asyncio.sleep(0.3)
-        
+
         # Stream table parts with noticeable delays to allow placeholder detection
         table_header = "| Item | Value A | Value B |\n"
         yield StreamEvent(type="content_delta", content=table_header)
         full_response += table_header
         await asyncio.sleep(0.5)  # Longer delay after header
-        
+
         table_sep = "| --- | --- | --- |\n"
         yield StreamEvent(type="content_delta", content=table_sep)
         full_response += table_sep
         await asyncio.sleep(0.5)  # Longer delay after separator
-        
+
         # Stream rows with delays
         table_rows = [
             "| Alpha | 10 | 20 |\n",
@@ -394,7 +475,7 @@ class AgentClient:
                 current_node="complete",
             ),
         )
-        
+
         # Ensure stream end is sent
         await asyncio.sleep(0.1)
         yield StreamEvent(type="stream_end")

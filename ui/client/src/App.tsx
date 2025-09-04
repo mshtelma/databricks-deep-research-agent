@@ -3,7 +3,7 @@ import { WelcomePage } from "./pages/WelcomePage";
 import { ChatPage } from "./pages/ChatPage";
 
 function App() {
-  const [currentPage, setCurrentPage] = useState<'welcome' | 'chat'>('welcome')
+  const [currentPage, setCurrentPage] = useState<'welcome' | 'chat'>('chat')
   
   const navigateToChat = () => setCurrentPage('chat')
   // eslint-disable-next-line @typescript-eslint/no-unused-vars

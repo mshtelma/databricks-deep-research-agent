@@ -4,7 +4,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
+# build/  # Commented out to allow ui/client/build for Databricks Apps
 develop-eggs/
 dist/
 downloads/
@@ -260,6 +260,7 @@ local.properties
 *.temp
 temp/
 tmp/
+
 
 # API Keys and Secrets (additional protection)
 *.key

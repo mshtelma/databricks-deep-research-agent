@@ -61,7 +61,7 @@ async def get_debug_config():
             client = AgentClient()
             workspace_connection = {
                 "status": "success",
-                "host": client.workspace.config.host,
+                "host": client.workspace_client.config.host,
                 "error": None,
             }
         except Exception as e:
@@ -99,12 +99,12 @@ async def test_workspace_connection():
 
         # Try to get current user to test authentication
         try:
-            current_user = client.workspace.current_user.me()
+            current_user = client.workspace_client.current_user.me()
             return TestConnectionResponse(
                 success=True,
                 details={
                     "user": current_user.user_name,
-                    "workspace_host": client.workspace.config.host,
+                    "workspace_host": client.workspace_client.config.host,
                     "authentication": "success",
                 },
             )
@@ -112,7 +112,7 @@ async def test_workspace_connection():
             return TestConnectionResponse(
                 success=False,
                 error=f"Authentication failed: {str(e)}",
-                details={"workspace_host": client.workspace.config.host, "error_type": type(e).__name__},
+                details={"workspace_host": client.workspace_client.config.host, "error_type": type(e).__name__},
             )
 
     except Exception as e:
@@ -151,7 +151,7 @@ async def test_agent_connection():
             try:
                 response = await http_client.head(
                     client.agent_endpoint.replace("/invocations", ""),
-                    headers={"Authorization": f"Bearer {client.workspace.config.token}"},
+                    headers={"Authorization": f"Bearer {client.workspace_client.config.token}"},
                     timeout=10.0,
                 )
 
