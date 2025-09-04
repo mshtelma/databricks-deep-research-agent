@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react'
+import { useEffect, useRef } from 'react'
 import { Trash2, Settings } from 'lucide-react'
 import { useChatStore } from '@/stores/chatStore'
 import { ChatMessage } from './ChatMessage'
@@ -6,7 +6,6 @@ import { ChatInput } from './ChatInput'
 import { ResearchProgress } from './ResearchProgress'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
-import { cn } from '@/lib/utils'
 
 export function ChatContainer() {
   const { messages, clearChat } = useChatStore()
@@ -80,7 +79,7 @@ export function ChatContainer() {
       
       {/* Chat Messages */}
       <div className="flex-1 flex flex-col max-w-6xl mx-auto w-full">
-        <ScrollArea className="flex-1 px-4 py-6" ref={scrollAreaRef}>
+        <ScrollArea className="flex-1 px-4 py-6" ref={scrollAreaRef} data-testid="chat-messages">
           {messages.length === 0 ? (
             <div className="flex items-center justify-center h-full">
               <div className="text-center space-y-4 max-w-md">

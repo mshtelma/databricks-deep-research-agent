@@ -49,6 +49,18 @@ export class ChatService {
         });
     }
     /**
+     * Debug Progress Test
+     * Test endpoint that emits sample progress events.
+     * @returns any Successful Response
+     * @throws ApiError
+     */
+    public static debugProgressTestApiChatDebugProgressTestGet(): CancelablePromise<any> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/chat/debug/progress-test',
+        });
+    }
+    /**
      * Chat Health
      * Health check for chat service.
      * @returns any Successful Response

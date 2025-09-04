@@ -5,6 +5,7 @@ This module provides common type definitions, dataclasses, and enums
 used throughout the research agent codebase.
 """
 
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Any, Optional, Union, Annotated, Sequence
@@ -47,6 +48,37 @@ class ToolType(str, Enum):
     UC_FUNCTION = "uc_function"
 
 
+class IntermediateEventType(str, Enum):
+    """Types of intermediate events for enhanced UI tracking."""
+    # Action events
+    ACTION_START = "action_start"
+    ACTION_PROGRESS = "action_progress"
+    ACTION_COMPLETE = "action_complete"
+    
+    # Tool-specific events
+    TOOL_CALL_START = "tool_call_start"
+    TOOL_CALL_PROGRESS = "tool_call_progress"
+    TOOL_CALL_COMPLETE = "tool_call_complete"
+    TOOL_CALL_ERROR = "tool_call_error"
+    
+    # Reasoning/LLM events
+    THOUGHT_SNAPSHOT = "thought_snapshot"
+    SYNTHESIS_PROGRESS = "synthesis_progress"
+    
+    # Content/citation events
+    CITATION_ADDED = "citation_added"
+    
+    # Stage transitions (existing, for compatibility)
+    STAGE_TRANSITION = "stage_transition"
+
+
+class ReasoningVisibility(str, Enum):
+    """Control levels for reasoning visibility."""
+    HIDDEN = "hidden"
+    SUMMARIZED = "summarized"
+    RAW = "raw"
+
+
 @dataclass
 class SearchResult:
     """Represents a search result from any source."""
@@ -67,6 +99,19 @@ class Citation:
     url: Optional[str] = None
     title: Optional[str] = None
     snippet: Optional[str] = None
+
+
+@dataclass
+class IntermediateEvent:
+    """Represents an intermediate event emitted during agent execution."""
+    id: str = field(default_factory=lambda: str(uuid4()))
+    timestamp: float = field(default_factory=time.time)
+    stage_id: Optional[str] = None
+    correlation_id: Optional[str] = None  # Groups related events (thought->action->result)
+    sequence: int = 0  # Monotonic sequence number for ordering
+    event_type: IntermediateEventType = IntermediateEventType.ACTION_START
+    data: Dict[str, Any] = field(default_factory=dict)
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -94,6 +139,16 @@ class ResearchContext:
     completed_searches: int = 0
     search_progress: Dict[str, Any] = field(default_factory=dict)
     
+    # Conversation context tracking
+    conversation_history: List[Any] = field(default_factory=list)  # Previous messages for context
+    current_turn_index: int = 0  # Which question in the conversation this is
+    previous_research_topics: List[str] = field(default_factory=list)  # Topics from previous turns
+    
+    # Streaming support
+    synthesis_chunks: List[str] = field(default_factory=list)  # Store streamed chunks
+    enable_streaming: bool = False  # Enable streaming for this research session
+    streaming_chunk_size: int = 50  # Characters per streaming chunk
+    
     def add_citation(self, url: str, title: str, snippet: str = None):
         """Add a citation to the context."""
         citation = Citation(source=title, url=url, title=title, snippet=snippet)
@@ -116,6 +171,18 @@ class AgentConfiguration:
     max_retries: int = 3
     enable_streaming: bool = True
     enable_citations: bool = True
+    
+    # Intermediate event configuration
+    emit_intermediate_events: bool = True
+    reasoning_visibility: ReasoningVisibility = ReasoningVisibility.SUMMARIZED
+    thought_snapshot_interval_tokens: int = 40
+    thought_snapshot_interval_ms: int = 800
+    max_thought_chars_per_step: int = 1000
+    redact_patterns: List[str] = field(default_factory=lambda: [
+        r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',  # emails
+        r'\b[A-Za-z0-9]{20,}\b',  # potential API keys (20+ alphanumeric chars)
+        r'\bsk-[A-Za-z0-9]{32,}\b',  # OpenAI-style API keys
+    ])
     
     def validate(self) -> None:
         """Validate configuration parameters."""

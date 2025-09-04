@@ -56,4 +56,16 @@ export class DebugService {
             url: '/api/debug/logs',
         });
     }
+    /**
+     * Get Table Test
+     * Get test table content for markdown rendering debugging.
+     * @returns any Successful Response
+     * @throws ApiError
+     */
+    public static getTableTestApiDebugTableTestGet(): CancelablePromise<any> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/debug/table-test',
+        });
+    }
 }

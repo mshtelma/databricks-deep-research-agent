@@ -382,8 +382,9 @@ class TestAdvancedStreaming:
         # Should have multiple delta events for large content
         assert len(delta_events) > 10
         
-        # Verify content integrity
-        assembled = "".join(e.delta for e in delta_events if hasattr(e, 'delta'))
+        # Verify content integrity - filter out progress events
+        content_events = [e for e in delta_events if hasattr(e, 'delta') and not e.delta.startswith("[PHASE:")]
+        assembled = "".join(e.delta for e in content_events)
         done_text = done_events[0].item["content"][0]["text"]
         assert assembled == done_text
         assert len(done_text) == 10000

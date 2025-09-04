@@ -15,6 +15,8 @@ import logging
 from enum import Enum
 
 from deep_research_agent.core.error_handler import retry, ErrorSeverity, RetryPolicy
+from deep_research_agent.core.event_emitter import get_event_emitter
+from deep_research_agent.core.types import IntermediateEventType
 
 
 logger = logging.getLogger(__name__)
@@ -155,9 +157,56 @@ class SearchProvider(ABC):
         Returns:
             List of SearchResult objects
         """
+        # Emit search start event
+        correlation_id = kwargs.get('correlation_id')
+        stage_id = kwargs.get('stage_id')
+        
+        event_emitter = get_event_emitter()
+        event_emitter.emit_tool_call_start(
+            tool_name=f"{self.name}_search",
+            parameters={"query": query, "max_results": max_results},
+            correlation_id=correlation_id,
+            stage_id=stage_id
+        )
+        
+        start_time = time.time()
         try:
-            return asyncio.run(self.search_async(query, max_results, **kwargs))
+            results = asyncio.run(self.search_async(query, max_results, **kwargs))
+            
+            # Emit search completion event
+            execution_time = time.time() - start_time
+            event_emitter.emit_tool_call_complete(
+                tool_name=f"{self.name}_search",
+                success=True,
+                result_summary=f"Found {len(results)} results in {execution_time:.2f}s",
+                correlation_id=correlation_id,
+                stage_id=stage_id,
+                execution_time=execution_time,
+                results_count=len(results)
+            )
+            
+            # Emit citations for top results
+            for i, result in enumerate(results[:3]):  # Top 3 results as citations
+                event_emitter.emit_citation_added(
+                    title=result.title,
+                    url=result.url,
+                    snippet=result.content[:200] if result.content else None,
+                    correlation_id=correlation_id,
+                    stage_id=stage_id
+                )
+            
+            return results
+            
         except Exception as e:
+            # Emit search error event
+            execution_time = time.time() - start_time
+            event_emitter.emit_tool_call_error(
+                tool_name=f"{self.name}_search",
+                error_message=str(e),
+                correlation_id=correlation_id,
+                stage_id=stage_id,
+                is_sanitized=True
+            )
             logger.error(f"Search failed for provider {self.name}: {e}")
             return []
     

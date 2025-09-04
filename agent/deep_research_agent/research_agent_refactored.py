@@ -45,6 +45,10 @@ from deep_research_agent.core import (
     format_duration,
     URLResolver
 )
+from deep_research_agent.core.markdown_utils import extract_and_fix_tables
+from deep_research_agent.core.event_emitter import initialize_event_emitter, get_event_emitter
+from deep_research_agent.core.reasoning_tracer import initialize_reasoning_tracer, get_reasoning_tracer
+from deep_research_agent.core.types import ReasoningVisibility
 from deep_research_agent.components import (
     message_converter,
     create_tool_registry,
@@ -115,11 +119,15 @@ class RefactoredResearchAgent(ResponsesAgent):
             # Initialize response utils
             self.response_utils = ResponseUtils()
             
+            # Initialize intermediate event emitter and reasoning tracer
+            self._initialize_intermediate_events()
+            
             logger.info(
                 "Successfully initialized refactored research agent",
                 llm_endpoint=self.agent_config.llm_endpoint,
                 max_loops=self.agent_config.max_research_loops,
-                phase2_enabled=True
+                phase2_enabled=True,
+                intermediate_events_enabled=self.agent_config.emit_intermediate_events
             )
         except Exception as e:
             # Re-raise configuration errors with clear messaging about YAML requirement
@@ -142,6 +150,68 @@ class RefactoredResearchAgent(ResponsesAgent):
             self.result_evaluator,
             self.adaptive_generator
         ) = AgentInitializer.initialize_phase2_components(self.config_manager)
+    
+    def _initialize_intermediate_events(self):
+        """Initialize intermediate event emitter and reasoning tracer."""
+        if not self.agent_config.emit_intermediate_events:
+            logger.info("Intermediate events disabled by configuration")
+            return
+        
+        # Get intermediate events configuration
+        intermediate_config = self.config_manager.load_yaml_config().get("intermediate_events", {})
+        
+        # Initialize event emitter with stream emission
+        self.event_emitter = initialize_event_emitter(
+            stream_emitter=self._emit_intermediate_event,
+            max_events_per_second=intermediate_config.get("max_events_per_second", 10),
+            batch_events=intermediate_config.get("batch_events", True),
+            batch_size=intermediate_config.get("batch_size", 5),
+            batch_timeout_ms=intermediate_config.get("batch_timeout_ms", 100),
+            redaction_patterns=intermediate_config.get("redact_patterns", [])
+        )
+        
+        # Initialize reasoning tracer
+        visibility = ReasoningVisibility(self.agent_config.reasoning_visibility)
+        self.reasoning_tracer = initialize_reasoning_tracer(
+            visibility=visibility,
+            token_interval=self.agent_config.thought_snapshot_interval_tokens,
+            time_interval_ms=self.agent_config.thought_snapshot_interval_ms,
+            max_chars_per_step=self.agent_config.max_thought_chars_per_step,
+            redaction_patterns=intermediate_config.get("redact_patterns", []),
+            event_emitter=lambda event: self.event_emitter.emit(
+                event.event_type,
+                event.data,
+                correlation_id=event.correlation_id,
+                stage_id=event.stage_id,
+                meta=event.meta
+            )
+        )
+        
+        logger.info(
+            "Initialized intermediate events",
+            visibility=visibility.value,
+            max_events_per_second=intermediate_config.get("max_events_per_second", 10)
+        )
+    
+    def _emit_intermediate_event(self, event_data: dict):
+        """Emit intermediate event through the stream interface."""
+        try:
+            # Convert to ResponsesAgentStreamEvent format for consistency
+            stream_event = ResponsesAgentStreamEvent(
+                type="response.intermediate_event",
+                delta=json.dumps(event_data),
+                item_id=event_data.get("id", str(uuid4()))
+            )
+            
+            # Store for potential batch emission (this could be enhanced to queue)
+            if not hasattr(self, '_pending_intermediate_events'):
+                self._pending_intermediate_events = []
+            self._pending_intermediate_events.append(stream_event)
+            
+            logger.debug(f"Queued intermediate event: {event_data.get('event_type', 'unknown')}")
+            
+        except Exception as e:
+            logger.error(f"Failed to emit intermediate event: {e}")
     
     def _build_workflow_graph(self) -> StateGraph:
         """Build the LangGraph workflow."""
@@ -279,17 +349,43 @@ class RefactoredResearchAgent(ResponsesAgent):
             elif msg.get("role") == "system":
                 langchain_msgs.append(SystemMessage(content=msg.get("content", "")))
         
-        # Extract user question from messages
+        # Extract LATEST user question from messages (not first)
         user_question = ""
-        for msg in langchain_msgs:
+        for msg in reversed(langchain_msgs):
             if isinstance(msg, HumanMessage):
                 user_question = msg.content
                 break
         
+        # Build conversation history (all messages except current question)
+        conversation_history = []
+        human_message_count = 0
+        for msg in langchain_msgs:
+            if isinstance(msg, HumanMessage):
+                human_message_count += 1
+                if human_message_count < len([m for m in langchain_msgs if isinstance(m, HumanMessage)]):
+                    conversation_history.append(msg)
+            elif len(conversation_history) > 0 or human_message_count == 0:
+                conversation_history.append(msg)
+        
+        # Extract previous research topics from conversation history
+        previous_topics = []
+        for msg in conversation_history:
+            if isinstance(msg, HumanMessage):
+                # Simple topic extraction - could be enhanced with NLP
+                topic = msg.content[:50] + "..." if len(msg.content) > 50 else msg.content
+                previous_topics.append(topic)
+        
         # Initialize state for the graph
         initial_state = {
             "messages": langchain_msgs,
-            "research_context": ResearchContext(original_question=user_question),
+            "research_context": ResearchContext(
+                original_question=user_question,
+                conversation_history=conversation_history,
+                current_turn_index=human_message_count - 1,
+                previous_research_topics=previous_topics,
+                enable_streaming=True,  # Enable streaming by default
+                streaming_chunk_size=50  # Default chunk size
+            ),
             "start_time": time.time(),
             "url_resolver": self.url_resolver,
             "search_tasks": {},
@@ -298,44 +394,171 @@ class RefactoredResearchAgent(ResponsesAgent):
         }
         
         try:
-            # Track the item_id for delta events
+            # Track the item_id for delta events - use same ID for all events in this response
             item_id = str(uuid4())
             collected_content = []
             synthesis_started = False
+            
+            # Initialize intermediate event emission
+            correlation_id = str(uuid4())
+            if hasattr(self, 'event_emitter') and self.event_emitter:
+                self.event_emitter.emit_action_start(
+                    action="research_workflow",
+                    query=user_question,
+                    correlation_id=correlation_id,
+                    stage_id="workflow_start"
+                )
+            
+            # Start reasoning tracer
+            if hasattr(self, 'reasoning_tracer') and self.reasoning_tracer:
+                self.reasoning_tracer.start_step(correlation_id, "workflow_start")
+                self.reasoning_tracer.add_reasoning_step(
+                    "Starting research workflow",
+                    f"Question: {user_question[:100]}..." if len(user_question) > 100 else user_question
+                )
+            
+            # Progress tracking
+            progress_tracker = {
+                "start_time": time.time(),
+                "nodes_completed": 0,
+                "total_nodes": 8  # Approximate workflow nodes count
+            }
             
             # Stream the graph execution - use updates mode to track node outputs
             for event in self.graph.stream(initial_state, stream_mode=["updates"]):
                 # Process updates from nodes
                 if isinstance(event, dict):
                     items = event.items()
+                elif isinstance(event, tuple) and len(event) == 2:
+                    # Handle LangGraph tuple format: (mode, data)
+                    mode, data = event
+                    if mode == "updates" and isinstance(data, dict):
+                        items = data.items()
+                    else:
+                        continue
                 else:
-                    # Handle potential tuple format (mode, data)
+                    # Unknown format, skip
                     continue
                 
                 for node_name, node_data in items:
-                    # Only stream content from the synthesis node
+                    # Calculate progress percentage
+                    progress_tracker["nodes_completed"] += 1
+                    progress_percentage = min(
+                        (progress_tracker["nodes_completed"] / progress_tracker["total_nodes"]) * 100,
+                        99  # Cap at 99% until final completion
+                    )
+                    
+                    # Emit intermediate action events
+                    if hasattr(self, 'event_emitter') and self.event_emitter:
+                        self.event_emitter.emit_action_progress(
+                            action=node_name,
+                            status="executing",
+                            progress={"percentage": progress_percentage, "step": progress_tracker["nodes_completed"]},
+                            correlation_id=correlation_id,
+                            stage_id=node_name
+                        )
+                    
+                    # Add reasoning step
+                    if hasattr(self, 'reasoning_tracer') and self.reasoning_tracer:
+                        self.reasoning_tracer.add_reasoning_step(
+                            f"Executing {node_name}",
+                            f"Progress: {progress_percentage:.0f}%"
+                        )
+                    
+                    # Emit any pending intermediate events
+                    if hasattr(self, '_pending_intermediate_events'):
+                        for pending_event in self._pending_intermediate_events:
+                            yield pending_event
+                        self._pending_intermediate_events.clear()
+                    
+                    # Emit progress event for EVERY node (this is the key enhancement!)
+                    # Show progress for ALL nodes including synthesis for better UX
+                    logger.info(f"Creating progress event for node: {node_name}, progress: {progress_percentage:.0f}%")
+                    progress_event = self._create_progress_delta_event(
+                        node_name, 
+                        node_data, 
+                        progress_tracker, 
+                        progress_percentage, 
+                        item_id
+                    )
+                    if progress_event:
+                        logger.debug(f"Yielding progress event: type={progress_event.type}, delta_preview='{progress_event.delta[:100]}...'")
+                        yield progress_event
+                    else:
+                        logger.warning(f"No progress event created for node: {node_name}")
+                    
+                    # Handle synthesis content with proper streaming support
                     if node_name == "synthesize_answer":
                         synthesis_started = True
-                        # Extract the final message from synthesis
-                        if isinstance(node_data, dict) and "messages" in node_data:
-                            messages = node_data["messages"]
-                            if messages and len(messages) > 0:
-                                last_msg = messages[-1]
-                                if hasattr(last_msg, 'content') and last_msg.content:
-                                    # Skip JSON-formatted intermediate outputs
-                                    content = last_msg.content
-                                    if not (content.strip().startswith('{') and content.strip().endswith('}')):
-                                        # Generate delta event for streaming content
+                        
+                        # Check if we have streaming chunks from the synthesis node
+                        research_context = node_data.get('research_context')
+                        if research_context and hasattr(research_context, 'synthesis_chunks'):
+                            synthesis_chunks = research_context.synthesis_chunks
+                        elif isinstance(research_context, dict) and 'synthesis_chunks' in research_context:
+                            synthesis_chunks = research_context['synthesis_chunks']
+                        else:
+                            synthesis_chunks = []
+                        
+                        if synthesis_chunks and len(synthesis_chunks) > 1:
+                            # True streaming: emit multiple delta events
+                            chunk_size = getattr(research_context, 'streaming_chunk_size', 50) if hasattr(research_context, 'streaming_chunk_size') else 50
+                            
+                            for chunk in synthesis_chunks:
+                                if chunk.strip():  # Skip empty chunks
+                                    # Stream raw chunk; avoid per-chunk table fixing to prevent duplication
+                                    fixed_chunk = chunk
+                                    # For very large chunks, split them further for better streaming UX
+                                    if len(fixed_chunk) > chunk_size * 2:
+                                        # Use markdown-preserving chunking
+                                        for sub_chunk in self._chunk_content_preserving_markdown(fixed_chunk):
+                                            yield ResponsesAgentStreamEvent(
+                                                type="response.output_text.delta",
+                                                item_id=item_id,
+                                                delta=sub_chunk
+                                            )
+                                            collected_content.append(sub_chunk)
+                                    else:
+                                        # Chunk is already appropriately sized
                                         yield ResponsesAgentStreamEvent(
                                             type="response.output_text.delta",
                                             item_id=item_id,
-                                            delta=content
+                                            delta=fixed_chunk
                                         )
-                                        collected_content.append(content)
+                                        collected_content.append(fixed_chunk)
+                        else:
+                            # Fallback to existing logic for single chunk or no chunks
+                            if isinstance(node_data, dict) and "messages" in node_data:
+                                messages = node_data["messages"]
+                                if messages and len(messages) > 0:
+                                    last_msg = messages[-1]
+                                    if hasattr(last_msg, 'content') and last_msg.content:
+                                        content = last_msg.content
+                                        if not (content.strip().startswith('{') and content.strip().endswith('}')):
+                                            # Content already fixed during synthesis; stream as-is
+                                            fixed_content = content
+                                            # For single chunk, simulate streaming with proper markdown preservation
+                                            if len(fixed_content) > 100:  # Only simulate for longer content
+                                                # Chunk content preserving markdown structure
+                                                for chunk in self._chunk_content_preserving_markdown(fixed_content):
+                                                    yield ResponsesAgentStreamEvent(
+                                                        type="response.output_text.delta",
+                                                        item_id=item_id,
+                                                        delta=chunk
+                                                    )
+                                                    collected_content.append(chunk)
+                                            else:
+                                                # Short content - emit as single delta
+                                                yield ResponsesAgentStreamEvent(
+                                                    type="response.output_text.delta",
+                                                    item_id=item_id,
+                                                    delta=fixed_content
+                                                )
+                                                collected_content.append(fixed_content)
                     
-                    # Log intermediate outputs as debug info instead of streaming them
-                    elif node_name in ["generate_queries", "reflect"]:
-                        logger.debug(f"[Intermediate] {node_name}: Processing...")
+                    # Enhanced logging for all intermediate outputs
+                    else:
+                        logger.debug(f"[Progress] {node_name}: {progress_percentage:.0f}% complete")
             
             # If no synthesis occurred but we have messages, get the last AI message
             if not synthesis_started and not collected_content:
@@ -347,6 +570,7 @@ class RefactoredResearchAgent(ResponsesAgent):
                             content = msg.content
                             # Skip JSON outputs
                             if not (content.strip().startswith('{') and content.strip().endswith('}')):
+                                # Content already fixed during synthesis; collect as-is
                                 collected_content.append(content)
                                 break
             
@@ -363,11 +587,62 @@ class RefactoredResearchAgent(ResponsesAgent):
                         delta=final_content
                     )
                 
-                final_item = self.create_text_output_item(final_content, item_id)
+                # Note: Final progress event removed to maintain schema compliance
+                # The UI can infer completion when the done event is received
+                
+                # ULTIMATE TABLE CLEANUP - catch any remaining double pipes from ANY source
+                import re
+                absolutely_clean_content = re.sub(r'\|\|+', '|', final_content)
+                double_pipes_removed = final_content.count('||') - absolutely_clean_content.count('||')
+                if double_pipes_removed > 0:
+                    logger.warning(f"FINAL CLEANUP: Removed {double_pipes_removed} more double pipes at response creation")
+                
+                final_item = self.create_text_output_item(absolutely_clean_content, item_id)
+                
+                # Emit completion events
+                if hasattr(self, 'event_emitter') and self.event_emitter:
+                    self.event_emitter.emit_action_complete(
+                        action="research_workflow",
+                        result_summary=f"Generated {len(absolutely_clean_content)} character response",
+                        results_count=len(collected_content),
+                        correlation_id=correlation_id,
+                        stage_id="workflow_complete"
+                    )
+                
+                # End reasoning tracer
+                if hasattr(self, 'reasoning_tracer') and self.reasoning_tracer:
+                    self.reasoning_tracer.add_reasoning_step(
+                        "Completed research workflow",
+                        f"Final response ready ({len(absolutely_clean_content)} chars)"
+                    )
+                    self.reasoning_tracer.end_step()
+                
                 yield ResponsesAgentStreamEvent(type="response.output_item.done", item=final_item)
             else:
                 # Fallback response if no content was collected
                 fallback_content = "I'm ready to help you research any topic. Please provide a specific question or topic you'd like me to explore."
+                # Apply table cleanup even to fallback (shouldn't be needed but for consistency)
+                import re
+                fallback_content = re.sub(r'\|\|+', '|', fallback_content)
+                
+                # Emit completion events for fallback
+                if hasattr(self, 'event_emitter') and self.event_emitter:
+                    self.event_emitter.emit_action_complete(
+                        action="research_workflow",
+                        result_summary="Generated fallback response",
+                        results_count=0,
+                        correlation_id=correlation_id,
+                        stage_id="workflow_complete"
+                    )
+                
+                # End reasoning tracer for fallback
+                if hasattr(self, 'reasoning_tracer') and self.reasoning_tracer:
+                    self.reasoning_tracer.add_reasoning_step(
+                        "Generated fallback response",
+                        "No research content collected"
+                    )
+                    self.reasoning_tracer.end_step()
+                
                 # Generate delta event for fallback
                 yield ResponsesAgentStreamEvent(
                     type="response.output_text.delta",
@@ -540,6 +815,224 @@ class RefactoredResearchAgent(ResponsesAgent):
         
         return response_builder.build_progress_event(node_name, message)
     
+    def _create_progress_delta_event(
+        self, 
+        node_name: str, 
+        node_data: Dict[str, Any], 
+        progress_tracker: Dict[str, Any],
+        progress_percentage: float,
+        item_id: str
+    ) -> Optional[ResponsesAgentStreamEvent]:
+        """Create progress delta event with parseable markers for UI streaming."""
+        import time
+        
+        # Map nodes to research phases that UI understands
+        phase_mapping = {
+            "generate_queries": "QUERYING",
+            "batch_controller": "PREPARING", 
+            "route_to_parallel_search": "PREPARING",
+            "parallel_web_search": "SEARCHING",
+            "aggregate_search_results": "AGGREGATING", 
+            "vector_research": "SEARCHING_INTERNAL",
+            "reflect": "ANALYZING",
+            "synthesize_answer": "SYNTHESIZING",
+            # Additional nodes that might appear during execution
+            "web_search": "SEARCHING",
+            "search": "SEARCHING",
+            "analysis": "ANALYZING",
+            "synthesis": "SYNTHESIZING",
+            "prepare": "PREPARING",
+            "process": "PROCESSING"
+        }
+        
+        phase = phase_mapping.get(node_name, "PROCESSING")
+        logger.debug(f"Progress phase mapping: {node_name} -> {phase}")
+        
+        # Extract rich metadata from node_data
+        metadata_parts = []
+        
+        if node_name == "generate_queries" and isinstance(node_data, dict):
+            if "research_context" in node_data:
+                context = node_data["research_context"]
+                if hasattr(context, 'generated_queries'):
+                    query_count = len(context.generated_queries)
+                    metadata_parts.append(f"[META:queries:{query_count}]")
+                    
+        elif node_name == "aggregate_search_results" and isinstance(node_data, dict):
+            if "research_context" in node_data:
+                context = node_data["research_context"]
+                if hasattr(context, 'web_results'):
+                    result_count = len(context.web_results)
+                    metadata_parts.append(f"[META:results:{result_count}]")
+        
+        elif node_name == "vector_research" and isinstance(node_data, dict):
+            if "research_context" in node_data:
+                context = node_data["research_context"]
+                if hasattr(context, 'vector_results'):
+                    vector_count = len(context.vector_results)
+                    metadata_parts.append(f"[META:vector_results:{vector_count}]")
+        
+        # Build progress message with UI-parseable markers
+        message = f"[PHASE:{phase}] "
+        
+        # Add human-readable description with emojis (percentages shown separately in UI)
+        descriptions = {
+            "QUERYING": "🔍 Analyzing your query and generating search strategies",
+            "PREPARING": "📋 Preparing search execution",
+            "SEARCHING": "🌐 Searching across multiple sources",
+            "SEARCHING_INTERNAL": "🗄️ Searching internal knowledge base",
+            "AGGREGATING": "📊 Aggregating search results",
+            "ANALYZING": "🤔 Analyzing search results and extracting insights",
+            "SYNTHESIZING": "✍️ Synthesizing comprehensive response",
+            "PROCESSING": "⚙️ Processing research data"
+        }
+        
+        message += descriptions.get(phase, f"⚙️ Processing {node_name}")
+        
+        # Add metadata markers
+        if metadata_parts:
+            message += "\n" + "\n".join(metadata_parts)
+        
+        # Add timing and progress metadata
+        elapsed = time.time() - progress_tracker["start_time"]
+        message += f"\n[META:elapsed:{elapsed:.1f}]"
+        message += f"\n[META:progress:{progress_percentage:.0f}]"
+        message += f"\n[META:node:{node_name}]"
+        
+        # Add separator for UI parsing (helps distinguish progress events from content)
+        message += "\n---\n"
+        
+        # Return as plain text delta event (MLflow compliant - no JSON!)
+        return ResponsesAgentStreamEvent(
+            type="response.output_text.delta",
+            item_id=item_id,
+            delta=message
+        )
+    
+    def _chunk_content_preserving_markdown(self, content: str, chunk_size: int = 500) -> List[str]:
+        """
+        Chunk content while preserving markdown structure, especially tables.
+        
+        This enhanced method ensures tables are NEVER split mid-row and treats
+        complete tables as atomic units when possible.
+        
+        Args:
+            content: Text content to chunk
+            chunk_size: Target size for each chunk (increased default for tables)
+            
+        Returns:
+            List of content chunks that preserve markdown structure
+        """
+        # Import table validator for table detection
+        from deep_research_agent.core.table_validator import TableValidator
+        
+        # Quick return for small content
+        if not content or len(content) <= chunk_size:
+            return [content] if content else []
+        
+        # For tables, use a larger minimum chunk size
+        MIN_TABLE_CHUNK_SIZE = 1000
+        effective_chunk_size = max(chunk_size, MIN_TABLE_CHUNK_SIZE)
+        
+        chunks = []
+        lines = content.split('\n')
+        current_chunk = []
+        current_size = 0
+        in_table = False
+        table_buffer = []
+        
+        for i, line in enumerate(lines):
+            # Check if this line is part of a table
+            is_table_line = TableValidator._is_table_row(line.strip()) if line.strip() else False
+            
+            if is_table_line:
+                # We're in a table
+                if not in_table:
+                    # Table is starting
+                    in_table = True
+                    table_buffer = [line]
+                else:
+                    # Continue collecting table
+                    table_buffer.append(line)
+            else:
+                # Not a table line
+                if in_table:
+                    # Table just ended - add entire table as atomic unit
+                    in_table = False
+                    table_content = '\n'.join(table_buffer)
+                    
+                    # Check if current chunk + table would be too large
+                    if current_chunk and (current_size + len(table_content) + 1 > effective_chunk_size):
+                        # Emit current chunk first
+                        chunks.append('\n'.join(current_chunk))
+                        current_chunk = []
+                        current_size = 0
+                    
+                    # Add table to current chunk (tables are atomic)
+                    if table_content:
+                        # If table itself is larger than chunk size, it still goes as one unit
+                        if not current_chunk and len(table_content) > effective_chunk_size:
+                            # Table is very large, emit it as its own chunk
+                            chunks.append(table_content)
+                        else:
+                            # Add table to current chunk
+                            current_chunk.append(table_content)
+                            current_size += len(table_content) + 1
+                    
+                    table_buffer = []
+                
+                # Process non-table line
+                line_length = len(line)
+                
+                # Check if adding this line would exceed chunk size
+                if current_size + line_length + 1 > chunk_size and current_chunk:
+                    # Emit current chunk
+                    chunks.append('\n'.join(current_chunk))
+                    current_chunk = [line]
+                    current_size = line_length
+                else:
+                    # Add to current chunk
+                    current_chunk.append(line)
+                    current_size += line_length + 1
+        
+        # Handle any remaining table
+        if in_table and table_buffer:
+            table_content = '\n'.join(table_buffer)
+            if current_chunk and (current_size + len(table_content) + 1 > effective_chunk_size):
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+            current_chunk.append(table_content)
+        
+        # Add remaining content
+        if current_chunk:
+            chunks.append('\n'.join(current_chunk))
+        
+        # Final pass: ensure chunks are reasonable and no empty chunks
+        final_chunks = []
+        for chunk in chunks:
+            if chunk.strip():
+                # If chunk is still too large and doesn't contain tables, split by paragraphs
+                if len(chunk) > effective_chunk_size * 2 and '|' not in chunk:
+                    # Safe to split by paragraphs
+                    paragraphs = chunk.split('\n\n')
+                    current_para_chunk = ""
+                    
+                    for para in paragraphs:
+                        if len(current_para_chunk) + len(para) + 2 > effective_chunk_size and current_para_chunk:
+                            final_chunks.append(current_para_chunk.rstrip())
+                            current_para_chunk = para
+                        else:
+                            current_para_chunk += ('\n\n' if current_para_chunk else '') + para
+                    
+                    if current_para_chunk.strip():
+                        final_chunks.append(current_para_chunk.rstrip())
+                else:
+                    # Keep chunk as is (especially if it contains tables)
+                    final_chunks.append(chunk)
+        
+        # Ensure no empty chunks
+        return [chunk for chunk in final_chunks if chunk.strip()]
+
     # Backward compatibility methods for tests
     def _extract_text_content(self, content) -> str:
         """Extract text content - backward compatibility method."""

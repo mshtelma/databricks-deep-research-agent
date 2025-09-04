@@ -47,6 +47,7 @@ export function ChatInput() {
         <div className="relative border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-800 shadow-sm hover:shadow-md transition-shadow">
           <textarea
             ref={textareaRef}
+            data-testid="chat-input"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}

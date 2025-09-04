@@ -1,16 +1,45 @@
-import React from 'react'
+
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { cn } from '@/lib/utils'
+import { preprocessMarkdownMinimal } from '@/utils/minimalTableUtils'
+import { processTablesSimplified } from '@/utils/simplifiedTableProcessor'
+import { processTableBoundaries, hasTableBoundaries } from '@/utils/tableBoundaryProcessor'
 
 interface MarkdownRendererProps {
   content: string
   className?: string
+  isStreaming?: boolean
 }
 
-export function MarkdownRenderer({ content, className }: MarkdownRendererProps) {
+export function MarkdownRenderer({ content, className, isStreaming = false }: MarkdownRendererProps) {
+  // Check if content has table boundaries
+  const hasBoundaries = hasTableBoundaries(content)
+  
+  // For streaming content, use minimal preprocessing (tables are buffered)
+  // For final content with boundaries, use boundary processor
+  // Otherwise use simplified processor for malformed tables
+  let processed: string
+  
+  if (isStreaming) {
+    processed = preprocessMarkdownMinimal(content)
+  } else if (hasBoundaries) {
+    // Process bounded tables first
+    const boundaryResult = processTableBoundaries(content)
+    processed = boundaryResult.processed
+    
+    // Log any issues found
+    if (boundaryResult.issues.length > 0) {
+      console.warn('[MarkdownRenderer] Table boundary issues:', boundaryResult.issues)
+    }
+  } else {
+    // Use simplified processor for unbounded tables
+    processed = processTablesSimplified(content)
+  }
   return (
     <div className={cn('max-w-none', className)}>
       <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
         components={{
           // Customize heading styles
           h1: ({ children }) => (
@@ -65,7 +94,7 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
           },
           // Customize link styles
           a: ({ href, children }) => (
-            <a 
+            <a
               href={href}
               target="_blank"
               rel="noopener noreferrer"
@@ -82,25 +111,40 @@ export function MarkdownRenderer({ content, className }: MarkdownRendererProps) 
           ),
           // Customize table styles
           table: ({ children }) => (
-            <div className="overflow-x-auto mb-2">
-              <table className="min-w-full border-collapse border border-gray-300 dark:border-gray-600">
+            <div className="overflow-x-auto mb-4 rounded-lg border border-gray-200 dark:border-gray-700">
+              <table className="min-w-full border-collapse bg-white dark:bg-gray-900 table-auto">
                 {children}
               </table>
             </div>
           ),
+          thead: ({ children }) => (
+            <thead className="bg-gray-50 dark:bg-gray-800">
+              {children}
+            </thead>
+          ),
+          tbody: ({ children }) => (
+            <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+              {children}
+            </tbody>
+          ),
+          tr: ({ children }) => (
+            <tr className="hover:bg-gray-50 dark:hover:bg-gray-800/50">
+              {children}
+            </tr>
+          ),
           th: ({ children }) => (
-            <th className="border border-gray-300 dark:border-gray-600 bg-gray-50 dark:bg-gray-800 px-2 py-1 text-left text-xs font-semibold">
+            <th className="px-4 py-3 text-left text-sm font-semibold text-gray-900 dark:text-gray-100 border-b border-gray-200 dark:border-gray-700">
               {children}
             </th>
           ),
           td: ({ children }) => (
-            <td className="border border-gray-300 dark:border-gray-600 px-2 py-1 text-xs">
+            <td className="px-4 py-3 text-sm text-gray-700 dark:text-gray-300 border-b border-gray-200 dark:border-gray-700 max-w-xs break-words">
               {children}
             </td>
           ),
         }}
       >
-        {content}
+        {processed}
       </ReactMarkdown>
     </div>
   )

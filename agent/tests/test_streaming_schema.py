@@ -274,11 +274,17 @@ class TestStreamingSchema:
         delta_events = [e for e in stream_events if e.type == "response.output_text.delta"]
         done_events = [e for e in stream_events if e.type == "response.output_item.done"]
         
-        assert len(delta_events) == 6, f"Expected 6 delta events, got {len(delta_events)}"
+        # Separate progress events from content events
+        progress_events = [e for e in delta_events if e.delta.startswith("[PHASE:")]
+        content_events = [e for e in delta_events if not e.delta.startswith("[PHASE:")]
+        
+        # We should have both progress and content events now
+        assert len(progress_events) > 0, f"Expected progress events, got {len(progress_events)}"
+        assert len(content_events) == 6, f"Expected 6 content delta events, got {len(content_events)}"
         assert len(done_events) == 1, f"Expected 1 done event, got {len(done_events)}"
         
-        # Verify the assembled content
-        assembled = "".join([e.delta for e in delta_events])
+        # Verify the assembled content from content events only
+        assembled = "".join([e.delta for e in content_events])
         assert assembled == "Hello!", f"Unexpected assembled content: {assembled}"
     
     def test_predict_uses_only_done_events(self):

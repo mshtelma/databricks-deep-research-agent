@@ -5,6 +5,7 @@
 import type { ChatRequest } from '../models/ChatRequest';
 import type { ChatResponse } from '../models/ChatResponse';
 import type { ConfigResponse } from '../models/ConfigResponse';
+import type { TableTestResponse } from '../models/TableTestResponse';
 import type { TestConnectionResponse } from '../models/TestConnectionResponse';
 import type { UserInfo } from '../models/UserInfo';
 import type { UserWorkspaceInfo } from '../models/UserWorkspaceInfo';
@@ -77,6 +78,18 @@ export class ApiService {
         });
     }
     /**
+     * Debug Progress Test
+     * Test endpoint that emits sample progress events.
+     * @returns any Successful Response
+     * @throws ApiError
+     */
+    public static debugProgressTestApiChatDebugProgressTestGet(): CancelablePromise<any> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/chat/debug/progress-test',
+        });
+    }
+    /**
      * Chat Health
      * Health check for chat service.
      * @returns any Successful Response
@@ -146,6 +159,87 @@ export class ApiService {
         return __request(OpenAPI, {
             method: 'GET',
             url: '/api/debug/logs',
+        });
+    }
+    /**
+     * Get Table Test
+     * Get test table content for markdown rendering debugging.
+     * @returns any Successful Response
+     * @throws ApiError
+     */
+    public static getTableTestApiDebugTableTestGet(): CancelablePromise<any> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/debug/table-test',
+        });
+    }
+    /**
+     * Test Table Stream
+     * Stream table content in chunks to test rendering.
+     * @returns any Successful Response
+     * @throws ApiError
+     */
+    public static testTableStreamApiApiTestTableStreamGet(): CancelablePromise<any> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/api/test/table-stream',
+        });
+    }
+    /**
+     * Get Good Table
+     * Return properly formatted table content for testing
+     * @returns TableTestResponse Successful Response
+     * @throws ApiError
+     */
+    public static getGoodTableApiApiTestTableGoodGet(): CancelablePromise<TableTestResponse> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/api/test/table/good',
+        });
+    }
+    /**
+     * Get Malformed Table
+     * Return malformed table content that mimics agent output
+     * @returns TableTestResponse Successful Response
+     * @throws ApiError
+     */
+    public static getMalformedTableApiApiTestTableMalformedGet(): CancelablePromise<TableTestResponse> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/api/test/table/malformed',
+        });
+    }
+    /**
+     * Validate Table Content
+     * Validate table content and return analysis
+     * @param content
+     * @returns any Successful Response
+     * @throws ApiError
+     */
+    public static validateTableContentApiApiTestTableValidatePost(
+        content: string,
+    ): CancelablePromise<any> {
+        return __request(OpenAPI, {
+            method: 'POST',
+            url: '/api/api/test/table/validate',
+            query: {
+                'content': content,
+            },
+            errors: {
+                422: `Validation Error`,
+            },
+        });
+    }
+    /**
+     * Test Health
+     * Simple health check for test endpoints
+     * @returns any Successful Response
+     * @throws ApiError
+     */
+    public static testHealthApiApiTestHealthGet(): CancelablePromise<any> {
+        return __request(OpenAPI, {
+            method: 'GET',
+            url: '/api/api/test/health',
         });
     }
 }

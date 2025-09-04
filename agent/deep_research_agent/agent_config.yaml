@@ -43,6 +43,47 @@ research:
   max_retries: 3
   search_provider: "brave"  # Options: "tavily" or "brave"
 
+# Streaming Configuration
+streaming:
+  enabled: true              # Global streaming enable/disable
+  chunk_size: 50             # Characters per streaming chunk
+  word_boundary: true        # Respect word boundaries when chunking
+  buffer_size: 1024          # Internal buffer for streaming
+  simulate_for_non_streaming: true  # Simulate streaming for non-streaming LLMs
+  
+  # Per-model streaming support (when known)
+  model_support:
+    "databricks-gpt-oss-120b": true       # Supports streaming
+    "databricks-gpt-oss-20b": true        # Supports streaming
+    "databricks-meta-llama-3-1-70b-instruct": true    # Supports streaming
+    "databricks-mixtral-8x7b-instruct": true          # Supports streaming
+    "databricks-dbrx-instruct": false     # May not support streaming
+    
+  # Fallback behavior
+  fallback_to_invoke: true    # Use invoke if stream method fails
+  min_chunk_length: 10       # Minimum characters before emitting a chunk
+
+# Intermediate Events Configuration
+intermediate_events:
+  emit_intermediate_events: true          # Enable intermediate action/thought events
+  reasoning_visibility: "summarized"      # "hidden", "summarized", "raw"
+  thought_snapshot_interval_tokens: 40    # Emit thought snapshot every N tokens
+  thought_snapshot_interval_ms: 800       # Or every N milliseconds
+  max_thought_chars_per_step: 1000       # Truncate thoughts to this length
+  
+  # Privacy and redaction controls
+  redact_patterns:
+    - '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'  # emails
+    - '\b[A-Za-z0-9]{20,}\b'                                 # potential API keys
+    - '\bsk-[A-Za-z0-9]{32,}\b'                             # OpenAI-style keys
+    - '\bBearer\s+[A-Za-z0-9._-]+\b'                        # Bearer tokens
+  
+  # Event throttling
+  max_events_per_second: 10              # Rate limit for event emission
+  batch_events: true                     # Batch multiple events together
+  batch_size: 5                          # Events per batch
+  batch_timeout_ms: 100                  # Max time to wait for batch
+
 # Rate Limiting and Batch Processing Configuration
 rate_limiting:
   max_concurrent_searches: 1      # Max parallel API calls per batch

@@ -656,7 +656,7 @@ class WorkflowNodes:
             # Create synthesis prompt
             synthesis_prompt = PromptManager.create_synthesis_prompt(state.research_context)
             
-            # Get final answer from LLM with caching
+            # Use only invoke() - nodes are atomic in LangGraph
             synthesis_cache_key = f"synthesis_{hash(synthesis_prompt)}"
             cached_synthesis = global_cache_manager.get(synthesis_cache_key, "synthesis")
             
@@ -671,11 +671,107 @@ class WorkflowNodes:
                 # Cache for 30 minutes
                 global_cache_manager.set(synthesis_cache_key, synthesis_response, "synthesis", ttl=1800)
             
-            # Handle both string and list content from LLM response
             synthesis_content = extract_text_from_llm_response(synthesis_response.content)
             
             # Restore original URLs in the synthesis response
-            final_content = state.url_resolver.restore_urls_in_text(synthesis_content)
+            content_with_urls = state.url_resolver.restore_urls_in_text(synthesis_content)
+            
+            # Validate tables for severe malformation patterns
+            def validate_tables(content: str) -> dict:
+                """Detect severe table malformation patterns."""
+                issues = []
+                lines = content.split('\n')
+                
+                for i, line in enumerate(lines):
+                    trimmed = line.strip()
+                    
+                    # Check for headers-separators-data on single line
+                    if '| --- |' in trimmed and trimmed.count('|') > 6:
+                        # Likely has merged content
+                        parts = trimmed.split('|')
+                        has_separator = any('---' in p for p in parts)
+                        has_content = any(p.strip() and '---' not in p for p in parts)
+                        if has_separator and has_content:
+                            issues.append(f"Line {i+1}: Headers/separators/data merged on single line")
+                    
+                    # Check for condensed separators
+                    if '|---|' in trimmed:
+                        issues.append(f"Line {i+1}: Condensed separator pattern |---|")
+                    
+                    # Check for data starting with separator
+                    if trimmed.startswith('| --- | --- |') and len(trimmed) > 20:
+                        issues.append(f"Line {i+1}: Data row starts with separator pattern")
+                    
+                    # Check for trailing separators on content
+                    if trimmed.endswith('| --- |') and any(c.isalpha() for c in trimmed):
+                        issues.append(f"Line {i+1}: Content row has trailing separator")
+                
+                return {
+                    'has_issues': len(issues) > 0,
+                    'issue_count': len(issues),
+                    'issues': issues[:10]  # Limit to first 10 issues
+                }
+            
+            # Validate tables before fixing
+            validation = validate_tables(content_with_urls)
+            if validation['has_issues']:
+                logger.warning(
+                    f"Detected {validation['issue_count']} table malformation issues",
+                    sample_issues=validation['issues']
+                )
+            
+            # Apply comprehensive table preprocessing
+            try:
+                from .core.table_preprocessor import TablePreprocessor
+                
+                logger.info("Applying comprehensive table preprocessing to synthesis content")
+                
+                # Initialize preprocessor
+                table_preprocessor = TablePreprocessor()
+                
+                # Count issues before preprocessing
+                initial_double_pipes = content_with_urls.count('||')
+                initial_condensed_seps = len(re.findall(r'\|---\|', content_with_urls))
+                
+                # Apply comprehensive preprocessing
+                preprocessed_content = table_preprocessor.preprocess_tables(content_with_urls)
+                
+                # Get statistics
+                stats = table_preprocessor.get_stats()
+                
+                # Count remaining issues
+                final_double_pipes = preprocessed_content.count('||')
+                final_condensed_seps = len(re.findall(r'\|---\|', preprocessed_content))
+                
+                logger.info(
+                    "Table preprocessing complete",
+                    initial_double_pipes=initial_double_pipes,
+                    final_double_pipes=final_double_pipes,
+                    initial_condensed_seps=initial_condensed_seps,
+                    final_condensed_seps=final_condensed_seps,
+                    tables_fixed=stats['tables_fixed'],
+                    total_fixes=stats['total_fixes'],
+                    patterns_fixed=stats['patterns_fixed']
+                )
+                
+                if final_double_pipes > 0:
+                    logger.warning(f"Still {final_double_pipes} double pipes after preprocessing")
+                    # Apply final cleanup
+                    import re
+                    preprocessed_content = re.sub(r'\|\|+', '|', preprocessed_content)
+                
+                final_content = preprocessed_content
+                    
+            except ImportError as e:
+                logger.warning(f"Could not import table preprocessor: {e}, falling back to basic fixes")
+                try:
+                    from .core.markdown_utils import extract_and_fix_tables
+                    final_content = extract_and_fix_tables(content_with_urls)
+                except:
+                    final_content = content_with_urls
+            except Exception as e:
+                logger.error(f"Error applying table preprocessing: {e}, using original content")
+                final_content = content_with_urls
             
             # Extract citations
             citations = content_extractor.extract_citations(
@@ -693,8 +789,21 @@ class WorkflowNodes:
                 success_rate=1.0 - (state.workflow_metrics.error_count / max(1, state.research_context.research_loops))
             )
             
+            # Apply one final table fix before storing the message - ULTIMATE PROTECTION
+            import re
+            absolutely_final_content = re.sub(r'\|\|+', '|', final_content)
+            
+            # Verify no double pipes remain
+            remaining_double_pipes = absolutely_final_content.count('||')
+            if remaining_double_pipes > 0:
+                logger.warning(f"STILL {remaining_double_pipes} double pipes found even after final cleanup!")
+                # Apply even more aggressive cleanup
+                absolutely_final_content = re.sub(r'\|\|+', '|', absolutely_final_content)
+            else:
+                logger.info("Final verification: No double pipes in stored message content")
+            
             # Add final response to messages with restored URLs
-            final_message = AIMessage(content=final_content)
+            final_message = AIMessage(content=absolutely_final_content)
             state.messages.append(final_message)
             
             logger.info(

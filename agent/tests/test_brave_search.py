@@ -219,15 +219,17 @@ class TestBraveToolFactory:
     
     def test_create_tool_no_api_key(self):
         """Test that tool creation fails without API key."""
-        factory = BraveToolFactory()
-        config = ToolConfiguration(
-            tool_type=ToolType.BRAVE_SEARCH,
-            enabled=True,
-            config={}
-        )
-        
-        with pytest.raises(ToolInitializationError, match="Failed to create Brave tool"):
-            factory.create_tool(config)
+        # Clear environment variables to ensure no API key is available
+        with patch.dict(os.environ, {}, clear=True):
+            factory = BraveToolFactory()
+            config = ToolConfiguration(
+                tool_type=ToolType.BRAVE_SEARCH,
+                enabled=True,
+                config={}  # No api_key provided
+            )
+            
+            with pytest.raises(ToolInitializationError, match="Failed to create Brave tool"):
+                factory.create_tool(config)
 
 
 if __name__ == "__main__":

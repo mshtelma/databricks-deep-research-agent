@@ -132,6 +132,37 @@ class ConfigManager:
                 True,
                 "research.enable_citations"
             ),
+            # Intermediate events configuration
+            "emit_intermediate_events": self._get_bool_config_value(
+                "emit_intermediate_events",
+                "EMIT_INTERMEDIATE_EVENTS",
+                True,
+                "intermediate_events.emit_intermediate_events"
+            ),
+            "reasoning_visibility": self._get_config_value(
+                "reasoning_visibility",
+                "REASONING_VISIBILITY", 
+                "summarized",
+                "intermediate_events.reasoning_visibility"
+            ),
+            "thought_snapshot_interval_tokens": int(self._get_config_value(
+                "thought_snapshot_interval_tokens",
+                "THOUGHT_SNAPSHOT_INTERVAL_TOKENS",
+                40,
+                "intermediate_events.thought_snapshot_interval_tokens"  
+            )),
+            "thought_snapshot_interval_ms": int(self._get_config_value(
+                "thought_snapshot_interval_ms",
+                "THOUGHT_SNAPSHOT_INTERVAL_MS",
+                800,
+                "intermediate_events.thought_snapshot_interval_ms"
+            )),
+            "max_thought_chars_per_step": int(self._get_config_value(
+                "max_thought_chars_per_step",
+                "MAX_THOUGHT_CHARS_PER_STEP", 
+                1000,
+                "intermediate_events.max_thought_chars_per_step"
+            )),
         }
         
         try:

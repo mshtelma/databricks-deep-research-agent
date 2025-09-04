@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { format } from 'date-fns'
 import { User, Bot, ExternalLink, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
@@ -25,7 +25,12 @@ export function ChatMessage({ message }: ChatMessageProps) {
   }
   
   return (
-    <div className={cn("flex gap-3", isUser ? "justify-end" : "justify-start")}>
+    <div 
+      className={cn("flex gap-3", isUser ? "justify-end" : "justify-start")}
+      data-testid="chat-message"
+      data-streaming={message.isStreaming ? "true" : "false"}
+      data-role={message.role}
+    >
       {/* Assistant Avatar */}
       {!isUser && (
         <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center flex-shrink-0">
@@ -113,6 +118,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
                     "prose-sm",
                     isUser ? "prose-invert" : "prose dark:prose-invert"
                   )}
+                  isStreaming={message.isStreaming}
                 />
               )}
               

@@ -107,11 +107,20 @@ class ResponseBuilder:
             ResponsesAgentResponse object
         """
         try:
+            # Apply final table cleanup to the answer - LAST LINE OF DEFENSE
+            import re
+            clean_final_answer = re.sub(r'\|\|+', '|', final_answer)
+            
+            # Log if we caught any double pipes here
+            double_pipes_caught = final_answer.count('||') - clean_final_answer.count('||')
+            if double_pipes_caught > 0:
+                logger.warning(f"Response builder caught {double_pipes_caught} double pipes in final answer")
+            
             # Create main response item using correct format for ResponsesAgentResponse
             response_item = {
                 "type": "message",
                 "role": "assistant",
-                "content": [{"text": final_answer, "type": "output_text"}],
+                "content": [{"text": clean_final_answer, "type": "output_text"}],
                 "id": str(uuid4())
             }
             

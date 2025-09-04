@@ -65,6 +65,20 @@ Guidelines:
 - Use clear, professional language
 - Organize information logically
 
+MARKDOWN TABLE FORMATTING (CRITICAL):
+When creating tables, follow this EXACT format:
+
+| Column 1 | Column 2 | Column 3 |
+|----------|----------|----------|
+| Row 1 Data | Row 1 Data | Row 1 Data |
+| Row 2 Data | Row 2 Data | Row 2 Data |
+
+REQUIREMENTS:
+- Use single pipe characters (|) as separators - NEVER double pipes (||)
+- Put each table row on a separate line with proper line breaks
+- Include proper header separator row with dashes
+- Ensure proper spacing around pipes
+
 Structure your response:
 1. Main answer addressing the core question
 2. Supporting details and context
@@ -117,7 +131,92 @@ Guidelines:
 - Cite sources appropriately using [Source: Title] format
 - Address different aspects of the question
 - Use clear, professional language
-- Organize information logically"""
+- Organize information logically
+
+MARKDOWN TABLE FORMATTING (CRITICAL - FOLLOW EXACTLY):
+
+When creating tables, follow this EXACT format with proper line breaks:
+
+| Column 1 | Column 2 | Column 3 |
+| --- | --- | --- |
+| Row 1 Data | Row 1 Data | Row 1 Data |
+| Row 2 Data | Row 2 Data | Row 2 Data |
+
+🚨 SEVERE VIOLATIONS THAT BREAK TABLES COMPLETELY 🚨
+
+THESE PATTERNS CAUSE CATASTROPHIC FAILURES - NEVER USE THEM:
+
+1. NEVER put headers, separators, and data on the same line:
+   ❌ CATASTROPHIC: | Header1 | Header2 || --- | --- | --- | Data1 | Data2 |
+   ❌ CATASTROPHIC: | Driver | Indicator || --- | --- | --- | Earnings | CNBC |
+   
+2. NEVER start data rows with separator patterns:
+   ❌ CATASTROPHIC: | --- | --- | --- | --- | Quarterly earnings | CNBC |
+   ❌ CATASTROPHIC: | --- | --- | --- | --- | Azure growth | 39% |
+
+3. NEVER use condensed separators without spaces:
+   ❌ CATASTROPHIC: |---|---|---|---|
+   ❌ CATASTROPHIC: | Spain | €22,800 ||---|---|---|---|
+   
+4. NEVER create multiple empty separator blocks:
+   ❌ CATASTROPHIC: 
+   | --- | --- |
+   |---|---|
+   
+   |
+   
+   | --- | --- |
+   |---|---|
+
+5. NEVER mix content with trailing separators:
+   ❌ CATASTROPHIC: | **Gross salary** | **€45,000** | --- |
+   ❌ CATASTROPHIC: | Tax rate | 25% | --- | --- |
+
+STRICT REQUIREMENTS - VIOLATIONS WILL BREAK THE OUTPUT:
+1. NEVER mix content and separators on the same line:
+   ❌ WRONG: | Country | Population | --- | --- |
+   ✅ RIGHT: | Country | Population |
+            | --- | --- |
+
+2. NEVER append separator patterns to data rows:
+   ❌ WRONG: | Spain | €22,800 | --------- | ------------------------ |
+   ✅ RIGHT: | Spain | €22,800 |
+
+3. NEVER use condensed separator patterns:
+   ❌ WRONG: |---|---|---|
+   ✅ RIGHT: | --- | --- | --- |
+
+4. ALWAYS put each row on its own line:
+   ❌ WRONG: | Header 1 | Header 2 | | --- | --- | | Data 1 | Data 2 |
+   ✅ RIGHT: | Header 1 | Header 2 |
+            | --- | --- |
+            | Data 1 | Data 2 |
+
+5. Use exactly THREE dashes for separators (---), with spaces around pipes
+6. NEVER use double pipes (||) - always single pipes (|)
+7. NEVER mix headers/data/separators on a single line
+8. Each table cell should be separated by single pipes with spaces
+
+BEFORE OUTPUTTING ANY TABLE:
+- Check that headers, separators, and data rows are on separate lines
+- Verify no row contains both content and separator patterns
+- Ensure consistent column count across all rows
+
+TABLE BOUNDARY SYSTEM (RECOMMENDED):
+To ensure tables are never broken during streaming, wrap them with boundaries:
+
+<!-- TABLE_START -->
+| Header 1 | Header 2 | Header 3 |
+| --- | --- | --- |
+| Data 1 | Data 2 | Data 3 |
+| Data 4 | Data 5 | Data 6 |
+<!-- TABLE_END -->
+
+This ensures:
+- Tables are treated as atomic units
+- No splitting across streaming chunks
+- Easy validation of complete tables
+- Clear start/end markers for processing"""
     
     @staticmethod
     def create_reflection_prompt(context, max_research_loops: int, coverage_analysis=None) -> str:
@@ -151,7 +250,7 @@ Evaluate if we have sufficient information to provide a comprehensive answer. Co
     
     @staticmethod
     def create_synthesis_prompt(context) -> str:
-        """Create synthesis prompt from research context."""
+        """Create synthesis prompt from research context with conversation awareness."""
         web_context = "\n\n".join([
             f"Source: {result.source}\nContent: {result.content}"
             for result in context.web_results
@@ -162,7 +261,28 @@ Evaluate if we have sufficient information to provide a comprehensive answer. Co
             for result in context.vector_results
         ])
         
-        return f"""Question: {context.original_question}
+        # Build conversation context if available
+        conversation_context = ""
+        if hasattr(context, 'conversation_history') and context.conversation_history:
+            from langchain_core.messages import HumanMessage, AIMessage
+            context_lines = []
+            for msg in context.conversation_history:
+                if isinstance(msg, HumanMessage):
+                    context_lines.append(f"Previous Question: {msg.content}")
+                elif isinstance(msg, AIMessage):
+                    # Truncate long responses for context
+                    content = msg.content[:200] + "..." if len(msg.content) > 200 else msg.content
+                    context_lines.append(f"Previous Answer: {content}")
+            
+            if context_lines:
+                conversation_context = f"""
+
+Conversation History (for context, but focus on current question):
+{chr(10).join(context_lines)}
+
+"""
+        
+        return f"""Current Question: {context.original_question}{conversation_context}
 
 Web Research:
 {web_context}
@@ -172,4 +292,4 @@ Internal Knowledge:
 
 Reflection: {context.reflection}
 
-Please provide a comprehensive answer with proper citations."""
+Please provide a comprehensive answer to the CURRENT QUESTION. Use conversation history for context but focus entirely on answering the current question with proper citations."""
