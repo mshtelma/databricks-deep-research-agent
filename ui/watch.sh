@@ -25,6 +25,30 @@ if [ -f "$PID_FILE" ]; then
   fi
 fi
 
+# Kill any remaining orphaned processes more aggressively
+echo "🧹 Cleaning up orphaned processes..."
+
+# Kill any remaining uvicorn processes
+echo "  - Killing orphaned uvicorn processes..."
+pkill -f "uvicorn server.app:app" 2>/dev/null || true
+
+# Kill any remaining watchmedo processes
+echo "  - Killing orphaned watchmedo processes..."
+pkill -f "watchmedo auto-restart" 2>/dev/null || true
+
+# Kill any remaining npm processes that might be running dev servers
+echo "  - Killing orphaned npm/node processes..."
+pkill -f "npm run dev" 2>/dev/null || true
+
+# Force kill any processes using our ports
+echo "  - Force killing processes on ports 5173 and 8000..."
+lsof -ti:5173 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+lsof -ti:8000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+
+# Give processes time to fully terminate
+sleep 3
+echo "✅ Cleanup complete"
+
 # Create a new process group so killing this script kills all children
 set -m
 
@@ -52,32 +76,37 @@ if [ -f ".env.local" ]; then
   export DATABRICKS_TOKEN
 fi
 
-# Check if already authenticated to avoid opening browser every time
-check_auth() {
-  if [ ! -z "$DATABRICKS_CONFIG_PROFILE" ]; then
-    databricks auth describe --profile $DATABRICKS_CONFIG_PROFILE > /dev/null 2>&1
-  elif [ ! -z "$DATABRICKS_HOST" ]; then
-    databricks auth describe --host $DATABRICKS_HOST > /dev/null 2>&1
-  else
-    databricks auth describe > /dev/null 2>&1
-  fi
-}
-
-if command -v databricks >/dev/null 2>&1; then
-  if ! check_auth; then
-    echo "🔐 Not authenticated, logging in..."
+# Optionally skip Databricks CLI auth (useful for CI/Playwright dev mode)
+if [ "$SKIP_DATABRICKS_AUTH" = "1" ] || [ "$SKIP_DATABRICKS_AUTH" = "true" ]; then
+  echo "⏭️  Skipping Databricks CLI authentication (SKIP_DATABRICKS_AUTH=$SKIP_DATABRICKS_AUTH)"
+else
+  # Check if already authenticated to avoid opening browser every time
+  check_auth() {
     if [ ! -z "$DATABRICKS_CONFIG_PROFILE" ]; then
-      databricks auth login --profile $DATABRICKS_CONFIG_PROFILE
+      databricks auth describe --profile $DATABRICKS_CONFIG_PROFILE > /dev/null 2>&1
     elif [ ! -z "$DATABRICKS_HOST" ]; then
-      databricks auth login --host $DATABRICKS_HOST
+      databricks auth describe --host $DATABRICKS_HOST > /dev/null 2>&1
     else
-      databricks auth login
+      databricks auth describe > /dev/null 2>&1
+    fi
+  }
+
+  if command -v databricks >/dev/null 2>&1; then
+    if ! check_auth; then
+      echo "🔐 Not authenticated, logging in..."
+      if [ ! -z "$DATABRICKS_CONFIG_PROFILE" ]; then
+        databricks auth login --profile $DATABRICKS_CONFIG_PROFILE
+      elif [ ! -z "$DATABRICKS_HOST" ]; then
+        databricks auth login --host $DATABRICKS_HOST
+      else
+        databricks auth login
+      fi
+    else
+      echo "✅ Already authenticated"
     fi
   else
-    echo "✅ Already authenticated"
+    echo "⚠️  Databricks CLI not found, skipping authentication"
   fi
-else
-  echo "⚠️  Databricks CLI not found, skipping authentication"
 fi
 
 # Generate TypeScript client
@@ -139,7 +168,8 @@ else
   echo "  Watcher PID: $WATCHER_PID"
   echo ""
   # Detect the actual frontend port (default 5173, or next available)
-  FRONTEND_PORT=$(netstat -an | grep LISTEN | grep ':517[3-9]' | head -1 | sed 's/.*:\([0-9]*\).*/\1/' || echo "5173")
+  # macOS uses dots instead of colons in netstat output
+  FRONTEND_PORT=$(netstat -an | grep LISTEN | grep '\.517[3-9]' | head -1 | sed 's/.*\.\([0-9]*\).*/\1/' || echo "5173")
   echo "Frontend: http://localhost:$FRONTEND_PORT"
   echo "Backend:  http://localhost:8000"
 fi
