@@ -20,6 +20,9 @@ class SearchResultType(str, Enum):
     WEB = "web"
     VECTOR = "vector"
     HYBRID = "hybrid"
+    ACADEMIC_PAPER = "academic_paper"  # Added for scholarly sources
+    JOURNAL_ARTICLE = "journal_article"
+    WEB_PAGE = "web_page"
 
 
 class AgentRole(str, Enum):
@@ -83,13 +86,26 @@ class ReasoningVisibility(str, Enum):
 class SearchResult:
     """Represents a search result from any source."""
     content: str
-    source: str
+    source: Optional[str] = None  # Made optional with default None for flexibility
     url: Optional[str] = None
     title: Optional[str] = None
     score: float = 0.0
+    relevance_score: float = 0.0  # Alias for tests
     published_date: Optional[str] = None
     result_type: SearchResultType = SearchResultType.WEB
+    source_type: SearchResultType = SearchResultType.WEB  # Alias for tests
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        # Keep aliases in sync
+        if self.relevance_score == 0.0 and self.score:
+            self.relevance_score = self.score
+        if self.score == 0.0 and self.relevance_score:
+            self.score = self.relevance_score
+
+        # Mirror result_type and source_type
+        if self.source_type and self.result_type != self.source_type:
+            self.result_type = self.source_type
 
 
 @dataclass
@@ -99,6 +115,7 @@ class Citation:
     url: Optional[str] = None
     title: Optional[str] = None
     snippet: Optional[str] = None
+    relevance_score: float = 0.0
 
 
 @dataclass

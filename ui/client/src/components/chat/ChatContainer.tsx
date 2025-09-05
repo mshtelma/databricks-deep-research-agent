@@ -1,9 +1,10 @@
 import { useEffect, useRef } from 'react'
-import { Trash2, Settings } from 'lucide-react'
+import { Trash2 } from 'lucide-react'
 import { useChatStore } from '@/stores/chatStore'
 import { ChatMessage } from './ChatMessage'
 import { ChatInput } from './ChatInput'
 import { ResearchProgress } from './ResearchProgress'
+import { AgentSettings } from './AgentSettings'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
 
@@ -59,13 +60,7 @@ export function ChatContainer() {
                 Clear Chat
               </Button>
             )}
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
-            >
-              <Settings className="h-4 w-4" />
-            </Button>
+            <AgentSettings />
           </div>
         </div>
       </div>

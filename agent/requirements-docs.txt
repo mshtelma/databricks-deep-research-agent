@@ -1,0 +1,14 @@
+# Documentation generation dependencies
+mkdocs>=1.6.0
+mkdocs-material>=9.6.0
+mkdocs-with-pdf>=0.9.0
+weasyprint>=66.0
+pymdown-extensions>=10.0
+markdown>=3.9
+beautifulsoup4>=4.13.0
+libsass>=0.23.0
+
+# Optional dependencies for enhanced features
+mkdocs-mermaid2-plugin>=1.1.0
+mkdocs-pdf-export-plugin>=0.5.10
+mkdocs-print-site-plugin>=2.3.4

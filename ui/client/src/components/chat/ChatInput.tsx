@@ -3,6 +3,7 @@ import { Send, Square } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { useChatStream } from '@/hooks/useChatStream'
 import { useChatStore } from '@/stores/chatStore'
+import { useSettingsStore } from '@/stores/settingsStore'
 import { cn } from '@/lib/utils'
 
 export function ChatInput() {
@@ -10,6 +11,7 @@ export function ChatInput() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const { sendMessage, stopStream } = useChatStream()
   const { isLoading } = useChatStore()
+  const { agentConfig } = useSettingsStore()
   
   // Auto-resize textarea
   useEffect(() => {
@@ -27,7 +29,10 @@ export function ChatInput() {
     const message = input.trim()
     setInput('')
     
-    await sendMessage(message)
+    // Pass agent configuration to the message
+    await sendMessage(message, {
+      agentConfig: agentConfig
+    })
   }
   
   const handleKeyDown = (e: React.KeyboardEvent) => {

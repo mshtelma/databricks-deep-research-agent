@@ -39,7 +39,7 @@ export class ApiService {
     }
     /**
      * Send Message
-     * Send message to agent (non-streaming response).
+     * Send message to agent (non-streaming response) with comprehensive logging.
      * @param requestBody
      * @returns ChatResponse Successful Response
      * @throws ApiError
@@ -59,7 +59,7 @@ export class ApiService {
     }
     /**
      * Stream Message
-     * Stream message to agent (real-time responses).
+     * Stream message to agent (real-time responses) with comprehensive logging.
      * @param requestBody
      * @returns any Successful Response
      * @throws ApiError

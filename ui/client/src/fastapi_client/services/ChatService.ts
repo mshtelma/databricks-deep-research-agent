@@ -10,7 +10,7 @@ import { request as __request } from '../core/request';
 export class ChatService {
     /**
      * Send Message
-     * Send message to agent (non-streaming response).
+     * Send message to agent (non-streaming response) with comprehensive logging.
      * @param requestBody
      * @returns ChatResponse Successful Response
      * @throws ApiError
@@ -30,7 +30,7 @@ export class ChatService {
     }
     /**
      * Stream Message
-     * Stream message to agent (real-time responses).
+     * Stream message to agent (real-time responses) with comprehensive logging.
      * @param requestBody
      * @returns any Successful Response
      * @throws ApiError

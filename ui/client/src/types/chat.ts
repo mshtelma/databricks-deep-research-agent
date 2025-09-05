@@ -26,10 +26,18 @@ export interface ResearchMetadata {
   elapsedTime?: number
   currentNode?: string
   vectorResultsCount?: number
+
+  // Multi-agent fields
+  currentAgent?: string
+  planDetails?: PlanMetadata
+  factualityScore?: number
+  reportStyle?: string
+  verificationLevel?: string
+  grounding?: GroundingMetadata
 }
 
 export interface ResearchProgress {
-  currentPhase: 'querying' | 'searching' | 'analyzing' | 'synthesizing' | 'complete'
+  currentPhase: 'coordinator' | 'background_investigation' | 'planning' | 'research' | 'fact_checking' | 'reporting' | 'complete'
   queriesGenerated: number
   sourcesFound: number
   iterationsComplete: number
@@ -46,6 +54,14 @@ export interface ResearchProgress {
     total: number
     description: string
   }
+
+  // Multi-agent specific fields
+  currentAgent?: string
+  agentHandoffs?: AgentHandoff[]
+  planIterations?: number
+  factualityScore?: number
+  researchQualityScore?: number
+  coverageScore?: number
 }
 
 export interface PhaseConfiguration {
@@ -98,6 +114,18 @@ export enum IntermediateEventType {
   // Content/citation events
   CITATION_ADDED = 'citation_added',
 
+  // Multi-agent specific events
+  AGENT_HANDOFF = 'agent_handoff',
+  PLAN_CREATED = 'plan_created',
+  PLAN_UPDATED = 'plan_updated',
+  PLAN_ITERATION = 'plan_iteration',
+  BACKGROUND_INVESTIGATION = 'background_investigation',
+  GROUNDING_START = 'grounding_start',
+  GROUNDING_COMPLETE = 'grounding_complete',
+  GROUNDING_CONTRADICTION = 'grounding_contradiction',
+  REPORT_GENERATION = 'report_generation',
+  QUALITY_ASSESSMENT = 'quality_assessment',
+
   // Stage transitions (existing, for compatibility)
   STAGE_TRANSITION = 'stage_transition'
 }
@@ -114,4 +142,62 @@ export interface ChatRequest {
 export interface ChatResponse {
   message: { role: string; content: string }
   metadata?: ResearchMetadata
+}
+
+// Multi-agent specific interfaces
+export interface AgentHandoff {
+  fromAgent: string
+  toAgent: string
+  reason: string
+  context?: Record<string, any>
+  timestamp: number
+}
+
+export interface PlanMetadata {
+  steps: PlanStep[]
+  quality?: number
+  iterations: number
+  status: 'draft' | 'approved' | 'executing' | 'completed'
+  hasEnoughContext?: boolean
+}
+
+export interface PlanStep {
+  id: string
+  description: string
+  status: 'pending' | 'in_progress' | 'completed' | 'skipped'
+  result?: string
+  completedAt?: number
+}
+
+export interface GroundingMetadata {
+  factualityScore: number
+  contradictions: Contradiction[]
+  verifications: FactVerification[]
+  verificationLevel: 'basic' | 'moderate' | 'thorough'
+}
+
+export interface Contradiction {
+  id: string
+  claim: string
+  evidence: string
+  severity: 'low' | 'medium' | 'high'
+  resolved?: boolean
+  resolution?: string
+}
+
+export interface FactVerification {
+  id: string
+  fact: string
+  verified: boolean
+  confidence: number
+  sources: string[]
+}
+
+export interface AgentConfig {
+  reportStyle: 'professional' | 'casual' | 'academic' | 'technical'
+  verificationLevel: 'basic' | 'moderate' | 'thorough'
+  enableIterativePlanning: boolean
+  enableBackgroundInvestigation: boolean
+  autoAcceptPlan: boolean
+  maxPlanIterations: number
 }

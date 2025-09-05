@@ -1,0 +1,28 @@
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './tests',
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI ? 1 : undefined,
+  reporter: 'html',
+  use: {
+    baseURL: 'http://localhost:5173',
+    trace: 'on-first-retry',
+  },
+
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+    },
+  ],
+
+  webServer: {
+    command: 'bash -lc "cd .. && SKIP_DATABRICKS_AUTH=1 DEVELOPMENT_MODE=true ./watch.sh"',
+    port: 5173,
+    reuseExistingServer: true,
+    timeout: 60000,
+  },
+});

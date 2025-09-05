@@ -41,71 +41,70 @@ function useAnimatedCounter(target: number, duration: number = 1000) {
 export function ResearchProgress() {
   const { researchProgress, isLoading } = useChatStore()
   
-  // Enhanced phase configuration with better icons and styling - now includes all 7 agent phases
+  // Multi-agent phase configuration - 5 specialized agents with clear workflow
   const phaseConfig = useMemo(() => ({
-    querying: {
-      icon: '🔍',
-      label: 'Analyzing Query',
-      description: 'Understanding your question and generating search strategies',
+    coordinator: {
+      icon: '🎯',
+      label: 'Coordinator',
+      description: 'Analyzing query and routing to appropriate workflow',
       color: 'text-blue-600',
       bgColor: 'bg-blue-50 dark:bg-blue-950',
-      borderColor: 'border-blue-200 dark:border-blue-800'
+      borderColor: 'border-blue-200 dark:border-blue-800',
+      agentType: 'coordinator'
     },
-    preparing: {
-      icon: '📋',
-      label: 'Preparing Search',
-      description: 'Organizing search execution with rate limiting and batching',
+    background_investigation: {
+      icon: '🔍',
+      label: 'Background Investigation',
+      description: 'Gathering initial context and background information',
       color: 'text-indigo-600',
       bgColor: 'bg-indigo-50 dark:bg-indigo-950',
-      borderColor: 'border-indigo-200 dark:border-indigo-800'
+      borderColor: 'border-indigo-200 dark:border-indigo-800',
+      agentType: 'researcher'
     },
-    searching: {
-      icon: '🌐', 
-      label: 'Searching Web',
-      description: 'Gathering information from external web sources',
-      color: 'text-orange-600',
-      bgColor: 'bg-orange-50 dark:bg-orange-950',
-      borderColor: 'border-orange-200 dark:border-orange-800'
-    },
-    searching_internal: {
-      icon: '🗄️',
-      label: 'Internal Search',
-      description: 'Searching internal knowledge base and vector database',
-      color: 'text-cyan-600',
-      bgColor: 'bg-cyan-50 dark:bg-cyan-950',
-      borderColor: 'border-cyan-200 dark:border-cyan-800'
-    },
-    aggregating: {
-      icon: '📊',
-      label: 'Aggregating Results',
-      description: 'Combining and deduplicating search results',
-      color: 'text-yellow-600',
-      bgColor: 'bg-yellow-50 dark:bg-yellow-950',
-      borderColor: 'border-yellow-200 dark:border-yellow-800'
-    },
-    analyzing: {
-      icon: '🤔',
-      label: 'Analyzing Results',
-      description: 'Processing and evaluating search results for insights',
+    planning: {
+      icon: '📋',
+      label: 'Planning',
+      description: 'Creating comprehensive research plan with quality assessment',
       color: 'text-purple-600',
       bgColor: 'bg-purple-50 dark:bg-purple-950',
-      borderColor: 'border-purple-200 dark:border-purple-800'
+      borderColor: 'border-purple-200 dark:border-purple-800',
+      agentType: 'planner'
     },
-    synthesizing: {
-      icon: '✍️',
-      label: 'Synthesizing Response', 
-      description: 'Compiling comprehensive research-backed answer',
+    research: {
+      icon: '🔬',
+      label: 'Research Execution',
+      description: 'Executing research plan step-by-step with context accumulation',
+      color: 'text-orange-600',
+      bgColor: 'bg-orange-50 dark:bg-orange-950',
+      borderColor: 'border-orange-200 dark:border-orange-800',
+      agentType: 'researcher'
+    },
+    fact_checking: {
+      icon: '🔎',
+      label: 'Fact Checking',
+      description: 'Verifying accuracy and identifying contradictions',
+      color: 'text-red-600',
+      bgColor: 'bg-red-50 dark:bg-red-950',
+      borderColor: 'border-red-200 dark:border-red-800',
+      agentType: 'fact_checker'
+    },
+    reporting: {
+      icon: '📄',
+      label: 'Report Generation',
+      description: 'Synthesizing findings into comprehensive report',
       color: 'text-green-600',
       bgColor: 'bg-green-50 dark:bg-green-950',
-      borderColor: 'border-green-200 dark:border-green-800'
+      borderColor: 'border-green-200 dark:border-green-800',
+      agentType: 'reporter'
     },
     complete: {
       icon: '✅',
-      label: 'Research Complete',
-      description: 'Analysis finished successfully',
+      label: 'Complete',
+      description: 'Research workflow completed successfully',
       color: 'text-green-600',
       bgColor: 'bg-green-50 dark:bg-green-950',
-      borderColor: 'border-green-200 dark:border-green-800'
+      borderColor: 'border-green-200 dark:border-green-800',
+      agentType: 'complete'
     }
   }), [])
   
@@ -214,7 +213,7 @@ export function ResearchProgress() {
           </div>
         </div>
         
-        {/* Metadata Badges */}
+        {/* Enhanced Metadata Badges for Multi-Agent */}
         <div className="flex flex-wrap gap-2 mb-4">
           {animatedQueries > 0 && (
             <Badge variant="secondary" className="text-xs transition-all duration-300 hover:scale-105">
@@ -236,6 +235,35 @@ export function ResearchProgress() {
               🔄 {animatedIterations} iterations
             </Badge>
           )}
+          
+          {/* Multi-agent specific badges */}
+          {researchProgress.planIterations && researchProgress.planIterations > 0 && (
+            <Badge variant="secondary" className="text-xs transition-all duration-300 hover:scale-105">
+              📋 {researchProgress.planIterations} plan revisions
+            </Badge>
+          )}
+          {researchProgress.factualityScore && (
+            <Badge variant="secondary" className="text-xs transition-all duration-300 hover:scale-105">
+              🎯 {Math.round(researchProgress.factualityScore * 100)}% factuality
+            </Badge>
+          )}
+          {researchProgress.researchQualityScore && (
+            <Badge variant="secondary" className="text-xs transition-all duration-300 hover:scale-105">
+              ⭐ {Math.round(researchProgress.researchQualityScore * 100)}% quality
+            </Badge>
+          )}
+          {researchProgress.coverageScore && (
+            <Badge variant="secondary" className="text-xs transition-all duration-300 hover:scale-105">
+              📊 {Math.round(researchProgress.coverageScore * 100)}% coverage
+            </Badge>
+          )}
+          
+          {/* Current agent badge */}
+          {researchProgress.currentAgent && (
+            <Badge variant="outline" className="text-xs transition-all duration-300 hover:scale-105">
+              🤖 {researchProgress.currentAgent}
+            </Badge>
+          )}
           {researchProgress.currentNode && (
             <Badge variant="outline" className="text-xs transition-all duration-300 hover:scale-105">
               📍 {researchProgress.currentNode}
@@ -243,11 +271,11 @@ export function ResearchProgress() {
           )}
         </div>
         
-        {/* Phase Progress Timeline */}
+        {/* Multi-Agent Phase Progress Timeline */}
         <div className="relative flex justify-between items-center">
           {Object.entries(phaseConfig).filter(([phase]) => phase !== 'complete').map(([phase, config], index) => {
             const isActive = phase === researchProgress.currentPhase
-            const phaseOrder = ['querying', 'preparing', 'searching', 'searching_internal', 'aggregating', 'analyzing', 'synthesizing']
+            const phaseOrder = ['coordinator', 'background_investigation', 'planning', 'research', 'fact_checking', 'reporting']
             const currentPhaseIndex = phaseOrder.indexOf(researchProgress.currentPhase)
             const isCompleted = currentPhaseIndex > index || researchProgress.currentPhase === 'complete'
             

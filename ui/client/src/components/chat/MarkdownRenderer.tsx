@@ -15,19 +15,19 @@ interface MarkdownRendererProps {
 export function MarkdownRenderer({ content, className, isStreaming = false }: MarkdownRendererProps) {
   // Check if content has table boundaries
   const hasBoundaries = hasTableBoundaries(content)
-  
+
   // For streaming content, use minimal preprocessing (tables are buffered)
   // For final content with boundaries, use boundary processor
   // Otherwise use simplified processor for malformed tables
   let processed: string
-  
+
   if (isStreaming) {
     processed = preprocessMarkdownMinimal(content)
   } else if (hasBoundaries) {
     // Process bounded tables first
     const boundaryResult = processTableBoundaries(content)
     processed = boundaryResult.processed
-    
+
     // Log any issues found
     if (boundaryResult.issues.length > 0) {
       console.warn('[MarkdownRenderer] Table boundary issues:', boundaryResult.issues)

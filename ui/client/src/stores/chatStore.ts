@@ -43,7 +43,15 @@ export const useChatStore = create<ChatState>()(
       currentNode: '',
       vectorResultsCount: 0,
       estimatedTimeRemaining: 0,
-      currentOperation: ''
+      currentOperation: '',
+      
+      // Multi-agent fields
+      currentAgent: '',
+      agentHandoffs: [],
+      planIterations: 0,
+      factualityScore: 0,
+      researchQualityScore: 0,
+      coverageScore: 0
     },
 
     addMessage: (message) => {
@@ -109,7 +117,15 @@ export const useChatStore = create<ChatState>()(
         currentNode: '',
         vectorResultsCount: 0,
         estimatedTimeRemaining: 0,
-        currentOperation: ''
+        currentOperation: '',
+        
+        // Multi-agent fields
+        currentAgent: '',
+        agentHandoffs: [],
+        planIterations: 0,
+        factualityScore: 0,
+        researchQualityScore: 0,
+        coverageScore: 0
       }
     }),
 

@@ -1,12 +1,15 @@
 import { useState } from 'react'
 import { format } from 'date-fns'
-import { User, Bot, ExternalLink, ChevronDown, ChevronUp, Copy, Check } from 'lucide-react'
+import { User, Bot, ExternalLink, ChevronDown, ChevronUp, Copy, Check, Settings, BarChart } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ChatMessage as ChatMessageType } from '@/types/chat'
 import { MarkdownRenderer } from './MarkdownRenderer'
+import { WorkflowVisualizer } from './WorkflowVisualizer'
+import { PlanViewer } from './PlanViewer'
+import { GroundingReport } from './GroundingReport'
 import { cn } from '@/lib/utils'
 
 interface ChatMessageProps {
@@ -15,6 +18,9 @@ interface ChatMessageProps {
 
 export function ChatMessage({ message }: ChatMessageProps) {
   const [sourcesExpanded, setSourcesExpanded] = useState(false)
+  const [multiAgentExpanded, setMultiAgentExpanded] = useState(false)
+  const [planExpanded, setPlanExpanded] = useState(false)
+  const [groundingExpanded, setGroundingExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
   
@@ -71,7 +77,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
               </div>
               
               <div className="flex items-center gap-2">
-                {/* Research Metadata Badges */}
+                {/* Enhanced Research Metadata Badges */}
                 {message.metadata && !isUser && (
                   <div className="flex items-center gap-1">
                     {message.metadata.researchIterations > 0 && (
@@ -87,6 +93,22 @@ export function ChatMessage({ message }: ChatMessageProps) {
                     {message.metadata.confidenceScore && (
                       <Badge variant="secondary" className="text-xs">
                         {Math.round(message.metadata.confidenceScore * 100)}% confidence
+                      </Badge>
+                    )}
+                    {/* Multi-agent badges */}
+                    {message.metadata.currentAgent && (
+                      <Badge variant="outline" className="text-xs">
+                        🤖 {message.metadata.currentAgent}
+                      </Badge>
+                    )}
+                    {message.metadata.factualityScore && (
+                      <Badge variant="secondary" className="text-xs">
+                        🎯 {Math.round(message.metadata.factualityScore * 100)}% factual
+                      </Badge>
+                    )}
+                    {message.metadata.reportStyle && (
+                      <Badge variant="outline" className="text-xs capitalize">
+                        📄 {message.metadata.reportStyle}
                       </Badge>
                     )}
                   </div>
@@ -122,6 +144,46 @@ export function ChatMessage({ message }: ChatMessageProps) {
                 />
               )}
               
+              {/* Multi-Agent Workflow Visualization */}
+              {message.metadata && !isUser && !message.isStreaming && (
+                <div className="space-y-3">
+                  {/* Compact Workflow Visualizer */}
+                  <div className="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
+                    <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                      Multi-Agent Workflow:
+                    </span>
+                    <WorkflowVisualizer compact />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setMultiAgentExpanded(!multiAgentExpanded)}
+                      className="ml-auto h-6 px-2 text-xs"
+                    >
+                      <BarChart className="w-3 h-3 mr-1" />
+                      Details
+                      {multiAgentExpanded ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />}
+                    </Button>
+                  </div>
+
+                  {/* Detailed Multi-Agent Info */}
+                  {multiAgentExpanded && (
+                    <div className="space-y-3">
+                      <WorkflowVisualizer />
+                      
+                      {/* Research Plan */}
+                      {message.metadata.planDetails && (
+                        <PlanViewer planData={message.metadata.planDetails} />
+                      )}
+                      
+                      {/* Grounding Report */}
+                      {message.metadata.grounding && (
+                        <GroundingReport groundingData={message.metadata.grounding} />
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Research Sources */}
               {message.metadata?.sources && message.metadata.sources.length > 0 && !isUser && (
                 <Collapsible open={sourcesExpanded} onOpenChange={setSourcesExpanded}>
