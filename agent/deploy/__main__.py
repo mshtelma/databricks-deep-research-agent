@@ -49,8 +49,45 @@ class DeploymentOrchestrator:
         self.validator: Optional[Validator] = None
     
     def load_configuration(self) -> Dict[str, Any]:
-        """Load deployment configuration from YAML file."""
+        """Load deployment configuration using new ConfigLoader."""
+        try:
+            # Import the new ConfigLoader
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from deep_research_agent.config_loader import ConfigLoader
+            
+            environment = self.args_config["environment"]
+            
+            # Load deployment configuration using new ConfigLoader
+            deploy_config = ConfigLoader.load_deployment(environment)
+            
+            # Convert Pydantic model to dict for compatibility
+            config_dict = deploy_config.model_dump()
+            
+            # Add derived values for backward compatibility
+            config_dict["ENVIRONMENT"] = environment
+            config_dict["UC_MODEL_NAME"] = f"{config_dict['model']['catalog']}.{config_dict['model']['schema']}.{config_dict['model']['name']}"
+            
+            # Override with CLI arguments
+            if self.args_config.get("endpoint_name"):
+                config_dict["endpoint"]["name"] = self.args_config["endpoint_name"]
+            
+            if self.args_config.get("cluster_id"):
+                config_dict.setdefault("command_execution", {})["cluster_id"] = self.args_config["cluster_id"]
+            
+            return config_dict
+            
+        except Exception as e:
+            # Fallback to old method if new ConfigLoader fails
+            logger.warning(f"New ConfigLoader failed ({e}), falling back to old method")
+            return self._load_configuration_fallback()
+    
+    def _load_configuration_fallback(self) -> Dict[str, Any]:
+        """Fallback configuration loading method (original implementation)."""
         config_path = Path(self.args_config["config_file"])
+        
+        # Handle directory paths by appending base.yaml
+        if config_path.is_dir():
+            config_path = config_path / "base.yaml"
         
         if not config_path.exists():
             raise FileNotFoundError(f"Configuration file not found: {config_path}")
@@ -64,8 +101,20 @@ class DeploymentOrchestrator:
                 available = list(full_config["environments"].keys())
                 raise ValueError(f"Environment '{environment}' not found. Available: {available}")
             
-            # Merge environment config with global config
+            # Merge environment config with defaults
             env_config = full_config["environments"][environment].copy()
+            
+            # Apply default_command_execution if it exists
+            if "default_command_execution" in full_config and "command_execution" in env_config:
+                default_cmd = full_config["default_command_execution"]
+                env_config["command_execution"] = {**default_cmd, **env_config["command_execution"]}
+            
+            # Apply default_endpoint if it exists  
+            if "default_endpoint" in full_config and "endpoint" in env_config:
+                default_ep = full_config["default_endpoint"]
+                env_config["endpoint"] = {**default_ep, **env_config["endpoint"]}
+            
+            # Merge global config (if exists)
             env_config.update(full_config.get("global", {}))
             
             # Add derived values
@@ -202,6 +251,10 @@ class DeploymentOrchestrator:
         console.print(Panel(info_table, title="🚀 Deployment Pipeline", expand=False))
         
         try:
+            # Stage 0: Pre-deployment validation
+            if not self.validate_configuration_files():
+                return False
+            
             # Stage 1: Workspace preparation
             if not self.prepare_workspace():
                 return False
@@ -244,6 +297,85 @@ class DeploymentOrchestrator:
             print(f"\\n❌ Unexpected error: {e}")
             return False
     
+    def validate_configuration_files(self) -> bool:
+        """Validate that critical configuration files exist before deployment."""
+        console.print(Panel("🔍 Configuration Validation", style="bold blue"))
+        
+        try:
+            from deep_research_agent.constants import CONFIG_SEARCH_ORDER
+            
+            # Define critical paths to check relative to project root
+            project_root = Path(__file__).parent.parent  # agent/ directory
+            critical_files = []
+            
+            # Check for configuration files using CONFIG_SEARCH_ORDER
+            config_found = False
+            config_locations_checked = []
+            
+            for config_name in CONFIG_SEARCH_ORDER:
+                if ".backup" in config_name:  # Skip backup files
+                    continue
+                
+                # Check multiple potential locations
+                potential_locations = [
+                    project_root / "conf" / config_name,  # conf/base.yaml
+                    project_root / config_name,  # agent_config.yaml at root
+                    project_root / "deep_research_agent" / config_name,  # In package
+                ]
+                
+                for config_path in potential_locations:
+                    config_locations_checked.append(str(config_path))
+                    if config_path.exists():
+                        print(f"✅ Found config file: {config_path}")
+                        config_found = True
+                        break
+                
+                if config_found:
+                    break
+            
+            # Check for essential package files
+            essential_files = [
+                project_root / "deep_research_agent" / "__init__.py",
+                project_root / "deep_research_agent" / "databricks_compatible_agent.py",
+                project_root / "deep_research_agent" / "enhanced_research_agent.py",
+            ]
+            
+            missing_files = []
+            for file_path in essential_files:
+                if file_path.exists():
+                    print(f"✅ Found essential file: {file_path.name}")
+                else:
+                    missing_files.append(str(file_path))
+            
+            # Report validation results
+            if not config_found:
+                print("❌ CRITICAL: No configuration file found!")
+                print("\nSearched in the following locations:")
+                for loc in config_locations_checked[:8]:  # Show first 8 locations
+                    print(f"  - {loc}")
+                if len(config_locations_checked) > 8:
+                    print(f"  ... and {len(config_locations_checked) - 8} more locations")
+                print("\nTo fix this:")
+                print("  1. Create conf/base.yaml in your project root")
+                print("  2. Or ensure agent_config.yaml exists in the agent directory")
+                print("  3. Verify your project structure matches the expected layout")
+                return False
+            
+            if missing_files:
+                print("❌ CRITICAL: Missing essential files!")
+                for file_path in missing_files:
+                    print(f"  - {file_path}")
+                print("\nThese files are required for deployment. Please check your project structure.")
+                return False
+            
+            print("✅ All critical configuration files validated successfully")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Configuration validation failed: {e}")
+            logger.error(f"Configuration validation error: {e}")
+            return False
+    
     def prepare_workspace(self) -> bool:
         """Prepare workspace by cleaning and syncing files."""
         console.print(Panel("📁 Workspace Preparation", style="bold blue"))
@@ -277,6 +409,18 @@ class DeploymentOrchestrator:
                     print("✅ File sync verified successfully")
                 else:
                     print("⚠️  File sync verification had issues")
+                    
+                    # Show details about missing files
+                    missing_files = []
+                    for file_path, result in verification.items():
+                        if isinstance(result, dict) and not result.get("exists", True) and file_path != "summary" and file_path != "workspace_contents":
+                            missing_files.append(file_path.split("/")[-1])  # Show just filename
+                    
+                    if missing_files:
+                        print(f"   Missing files: {', '.join(missing_files[:3])}")
+                        if len(missing_files) > 3:
+                            print(f"   ... and {len(missing_files) - 3} more")
+                    
                     if not self.args_config.get("force"):
                         if input("Continue anyway? [y/N]: ").lower() not in ['y', 'yes']:
                             return False
@@ -440,6 +584,11 @@ if 'dbutils' in globals():
 """
             install_result = executor.execute_python(install_code, "Install dependencies")
             
+            # Always show full logs from the dependency installation step
+            print("=== FULL DEPENDENCY INSTALL OUTPUT ===")
+            print(install_result.output)
+            print("=== END FULL DEPENDENCY INSTALL OUTPUT ===")
+
             if not install_result.success:
                 print(f"❌ Dependency installation failed: {install_result.error}")
                 if install_result.output:
@@ -649,14 +798,27 @@ except Exception as e:
             log_code = """
 import json
 import mlflow
+import logging
+import os
+import sys
 
 print("🔧 Minimal MLflow test - starting...")
 
 try:
+    # Configure logging to capture logs from the agent module and mlflow
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    logging.getLogger("deep_research_agent").setLevel(logging.DEBUG)
+    logging.getLogger("mlflow").setLevel(logging.INFO)
+
     print("🔧 Logging model to MLflow...")
     
-    # Import the agent
+    # Import the agent (this may log, ensure logs are visible)
     from deep_research_agent.databricks_compatible_agent import DatabricksCompatibleAgent
+    
+    # Show environment indicators that affect mlflow.models.set_model guard
+    print("Env PYTEST_CURRENT_TEST:", os.getenv("PYTEST_CURRENT_TEST"))
+    print("Env PYTEST_CURRENT_TEST:", os.getenv("PYTEST_CURRENT_TEST"))
+    print("pytest in sys.modules:", "pytest" in sys.modules)
     
     model_name = "{}"
     environment = "{}"
@@ -703,6 +865,7 @@ try:
         # Debug: Test each component separately to isolate the error
         print("🔍 Testing MLflow components...")
         
+        logged_model_info = None
         try:
             print("  Testing input_example...")
             test_input = input_example
@@ -743,10 +906,9 @@ try:
             print("  ✅ minimal log_model OK")
             
         except Exception as e:
-            print("❌ Debug failed at component test: " + str(e))
+            print("⚠️  Debug/minimal log_model failed (non-fatal): " + str(e))
             import traceback
             traceback.print_exc()
-            raise
         
         print("🔍 All components OK, proceeding with hybrid model logging approach...")
         
@@ -768,12 +930,13 @@ try:
             "environment": environment
         }}
         
+        final_model_uri = None
         try:
-            print("🚀 Logging production model with essential dependencies...")
+            print("🚀 Logging production model with essential dependencies (object-based)...")
             logged_model_info_prod = mlflow.pyfunc.log_model(
                 artifact_path="model_production",
-                python_model="deep_research_agent/databricks_compatible_agent.py",
-                code_paths=["deep_research_agent"],
+                python_model=DatabricksCompatibleAgent(),
+                code_paths=["deep_research_agent", "conf"],
                 input_example=input_example,
                 pip_requirements=essential_pip_reqs,
                 metadata=essential_metadata
@@ -782,10 +945,47 @@ try:
             print("✅ Production model logged successfully")
             final_model_uri = logged_model_info_prod.model_uri
             
-        except Exception as e:
-            print("⚠️  Production model logging failed: " + str(e))
-            print("🔄 Using minimal model as fallback for endpoint deployment")
-            final_model_uri = logged_model_info.model_uri
+        except Exception as e_prod:
+            print("⚠️  Production model logging (object) failed: " + str(e_prod))
+            print("🔁 Retrying with code-based logging including code_paths...")
+            
+            # Debug before attempting code-based logging
+            print("🔍 Pre-flight checks for code-based logging:")
+            print("   Current directory: " + os.getcwd())
+            agent_file = "deep_research_agent/databricks_compatible_agent.py"
+            print("   Agent file (" + agent_file + ") exists: " + str(os.path.exists(agent_file)))
+            
+            if os.path.exists("deep_research_agent"):
+                print("   deep_research_agent directory contents:")
+                for item in sorted(os.listdir("deep_research_agent")):
+                    print("     " + item)
+            else:
+                print("   ❌ deep_research_agent directory does not exist!")
+            
+            try:
+                logged_model_info_prod = mlflow.pyfunc.log_model(
+                    artifact_path="model_production",
+                    python_model="deep_research_agent/databricks_compatible_agent.py",
+                    code_paths=["deep_research_agent", "conf"],
+                    input_example=input_example,
+                    pip_requirements=essential_pip_reqs,
+                    metadata=essential_metadata
+                )
+                print("✅ Production model logged successfully (code-based)")
+                final_model_uri = logged_model_info_prod.model_uri
+            except Exception as e_code:
+                print("⚠️  Production model logging (code) failed: " + str(e_code))
+                import traceback
+                print("🔍 Code-based logging full traceback:")
+                print(traceback.format_exc())
+                print("🔍 Error type: " + str(type(e_code)))
+                print("🔍 Error args: " + str(e_code.args))
+                if logged_model_info is not None:
+                    print("🔄 Using minimal model as fallback for endpoint deployment")
+                    final_model_uri = logged_model_info.model_uri
+                else:
+                    print("❌ No available model_uri from previous steps")
+                    raise
         
         # Register the model (either full or minimal)
         registered_model = mlflow.register_model(
@@ -827,6 +1027,11 @@ except Exception as e:
                     print(f"Output: {log_result.output}")
                 return False
             
+            # Always show full logs from the registration step
+            print("=== FULL MODEL LOGGING OUTPUT ===")
+            print(log_result.output)
+            print("=== END FULL MODEL LOGGING OUTPUT ===")
+
             # Parse JSON from output
             output_lines = log_result.output.strip().split('\n')
             json_line = None
@@ -850,6 +1055,9 @@ except Exception as e:
             
             if not log_data.get("success"):
                 print(f"❌ Model logging failed: {log_data.get('error')}")
+                print("=== FULL MODEL LOGGING OUTPUT ===")
+                print(log_result.output)
+                print("=== END OUTPUT ===")
                 return False
             
             model_uri = log_data["model_uri"]
@@ -903,7 +1111,6 @@ try:
         
         # Environment configuration
         environment_vars={{
-            "TAVILY_API_KEY": "{{{{secrets/msh/TAVILY_API_KEY}}}}",
             "BRAVE_API_KEY": "{{{{secrets/msh/BRAVE_API_KEY}}}}",
             "VECTOR_SEARCH_INDEX": os.getenv("VECTOR_SEARCH_INDEX", "main.msh.docs_index"),
             "ENVIRONMENT": environment,
@@ -957,6 +1164,11 @@ except Exception as e:
                     print("=== END FULL OUTPUT ===")
                 return False
             
+            # Always show full logs from the deployment step
+            print("=== FULL ENDPOINT DEPLOYMENT OUTPUT ===")
+            print(deploy_result.output)
+            print("=== END FULL ENDPOINT DEPLOYMENT OUTPUT ===")
+
             # Parse JSON from output
             output_lines = deploy_result.output.strip().split('\n')
             json_line = None

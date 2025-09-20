@@ -34,7 +34,7 @@ if parent_dir not in sys.path:
 if deep_research_agent_dir not in sys.path:
     sys.path.insert(0, deep_research_agent_dir)
 
-from deep_research_agent.research_agent_refactored import RefactoredResearchAgent
+from deep_research_agent.databricks_compatible_agent import DatabricksCompatibleAgent
 from deep_research_agent.core.types import ResearchContext
 
 
@@ -50,7 +50,7 @@ class TestConversationMemory:
         with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_llm', return_value=self.mock_llm):
             mock_phase2_return = (None, None, None, None, None, None)
             with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_phase2_components', return_value=mock_phase2_return):
-                self.agent = RefactoredResearchAgent()
+                self.agent = DatabricksCompatibleAgent()
                 
                 # Mock the graph to avoid actual workflow execution
                 mock_graph = Mock()
@@ -462,7 +462,7 @@ class TestConversationEdgeCases:
         with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_llm', return_value=self.mock_llm):
             mock_phase2_return = (None, None, None, None, None, None)
             with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_phase2_components', return_value=mock_phase2_return):
-                self.agent = RefactoredResearchAgent()
+                self.agent = DatabricksCompatibleAgent()
                 
                 mock_graph = Mock()
                 mock_graph.stream.return_value = [

@@ -320,7 +320,7 @@ Ready for deployment! 🚀
         
         # Configuration errors
         if "config" in error_lower or "yaml" in error_lower:
-            return "Verify agent_config.yaml exists and has correct format"
+            return "Verify agent config file exists and has correct format"
         
         # API key errors
         if "api" in error_lower and ("key" in error_lower or "authentication" in error_lower):

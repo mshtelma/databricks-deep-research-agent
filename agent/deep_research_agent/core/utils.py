@@ -809,3 +809,70 @@ def clear_secret_cache():
 def get_secret_cache_status() -> Dict[str, Any]:
     """Get the global secret cache status."""
     return _secret_resolver.get_cache_status()
+
+
+def extract_token_usage(response) -> Dict[str, int]:
+    """
+    Extract token usage from LangChain/OpenAI response objects.
+    
+    Supports both structured response objects and response_metadata formats.
+    Returns actual token counts, not estimates.
+    
+    Args:
+        response: LangChain response object with usage metadata
+        
+    Returns:
+        Dict with input_tokens, output_tokens, and total_tokens counts
+    """
+    default_usage = {
+        "input_tokens": 0,
+        "output_tokens": 0, 
+        "total_tokens": 0
+    }
+    
+    if response is None:
+        return default_usage
+    
+    # Try usage_metadata first (LangChain format)
+    if hasattr(response, 'usage_metadata') and response.usage_metadata:
+        usage = response.usage_metadata
+        return {
+            "input_tokens": usage.get("input_tokens", 0),
+            "output_tokens": usage.get("output_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0)
+        }
+    
+    # Try response_metadata (alternative format)
+    if hasattr(response, 'response_metadata') and response.response_metadata:
+        metadata = response.response_metadata
+        
+        # Check for token_usage within response_metadata
+        if "token_usage" in metadata:
+            usage = metadata["token_usage"]
+            return {
+                "input_tokens": usage.get("prompt_tokens", usage.get("input_tokens", 0)),
+                "output_tokens": usage.get("completion_tokens", usage.get("output_tokens", 0)),
+                "total_tokens": usage.get("total_tokens", 0)
+            }
+        
+        # Check for direct usage fields in response_metadata
+        if any(key in metadata for key in ["input_tokens", "output_tokens", "total_tokens"]):
+            return {
+                "input_tokens": metadata.get("input_tokens", 0),
+                "output_tokens": metadata.get("output_tokens", 0),
+                "total_tokens": metadata.get("total_tokens", 0)
+            }
+    
+    # Try direct attributes on response object
+    if hasattr(response, 'token_usage'):
+        usage = response.token_usage
+        return {
+            "input_tokens": usage.get("prompt_tokens", usage.get("input_tokens", 0)),
+            "output_tokens": usage.get("completion_tokens", usage.get("output_tokens", 0)),
+            "total_tokens": usage.get("total_tokens", 0)
+        }
+    
+    # Log when we can't extract usage data
+    logger.debug(f"Could not extract token usage from response type: {type(response)}")
+    
+    return default_usage

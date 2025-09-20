@@ -40,7 +40,7 @@ class StructuredFormatter(logging.Formatter):
         }
         
         # Add exception info if present
-        if record.exc_info:
+        if record.exc_info and record.exc_info[0] is not None:
             log_data["exception"] = {
                 "type": record.exc_info[0].__name__,
                 "message": str(record.exc_info[1]),
@@ -102,6 +102,10 @@ class AgentLogger:
     def debug(self, message: str, **kwargs):
         """Log debug message with optional extra data."""
         self.logger.debug(message, extra=kwargs)
+    
+    def exception(self, message: str, **kwargs):
+        """Log exception with traceback."""
+        self.logger.exception(message, extra=kwargs)
     
     def workflow_step(self, step_name: str, status: str, **kwargs):
         """Log workflow step with consistent formatting."""

@@ -80,3 +80,30 @@ class CircuitBreakerError(ResearchAgentError):
 class RetryExhaustedError(ResearchAgentError):
     """Raised when retry attempts are exhausted."""
     pass
+
+
+class SearchToolsFailedException(SearchToolError):
+    """
+    Raised when all search tools fail to execute successfully.
+    
+    This indicates a critical failure where no search results can be obtained,
+    different from a successful search that returns no results.
+    """
+    
+    def __init__(
+        self,
+        message: str = "All search tools failed to execute",
+        failed_tools: Optional[list] = None,
+        failure_reasons: Optional[Dict[str, str]] = None,
+        **kwargs
+    ):
+        self.failed_tools = failed_tools or []
+        self.failure_reasons = failure_reasons or {}
+        
+        details = {
+            "failed_tools": self.failed_tools,
+            "failure_reasons": self.failure_reasons,
+            **kwargs
+        }
+        
+        super().__init__(message, details)

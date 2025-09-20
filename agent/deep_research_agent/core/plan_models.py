@@ -5,9 +5,14 @@ Based on deer-flow implementation patterns for structured planning.
 """
 
 from enum import Enum
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Iterable, Mapping, MutableMapping, Sequence, Set
 from pydantic import BaseModel, Field
 from datetime import datetime
+from deep_research_agent.core import get_logger
+from deep_research_agent.core.id_generator import PlanIDGenerator
+from deep_research_agent.core.template_generator import DynamicSection
+
+
 
 
 class StepType(str, Enum):
@@ -43,6 +48,12 @@ class Step(BaseModel):
     # Dependencies and context
     depends_on: Optional[List[str]] = Field(default=None, description="Step IDs this step depends on")
     required_context: Optional[List[str]] = Field(default=None, description="Required context from previous steps")
+    requirement_mapping: Optional[List[str]] = Field(default=None, description="Requirements this step addresses")
+    
+    # Step ordering and section linkage (new fields for fixing infinite loop)
+    execution_order: Optional[int] = Field(default=None, description="Order in which this step should be executed")
+    template_section_title: Optional[str] = Field(default=None, description="Dynamic section title associated with this step, if any")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata for the step")
     
     # Results
     execution_result: Optional[str] = Field(default=None, description="Result from executing this step")
@@ -120,6 +131,19 @@ class Plan(BaseModel):
     iteration: int = Field(default=0, description="Plan iteration number")
     quality_assessment: Optional[PlanQuality] = Field(default=None, description="Quality assessment of the plan")
     
+    # Report structure (for adaptive styling)
+    suggested_report_structure: Optional[List[str]] = Field(default=None, description="Suggested section names for the report")
+    structure_metadata: Optional[Dict[str, Any]] = Field(default=None, description="Metadata about structure generation")
+    
+    dynamic_sections: List[DynamicSection] = Field(default_factory=list, description="Dynamic section descriptors for template generation")
+    report_template: Optional[str] = Field(default=None, description="Pre-rendered markdown template to guide report generation")
+    
+    # Presentation requirements (for intelligent table/format decisions)
+    presentation_requirements: Optional[Dict[str, Any]] = Field(default=None, description="Requirements for optimal presentation format")
+    
+    # Entity validation
+    requested_entities: List[str] = Field(default_factory=list, description="Entities (countries, organizations) that should be mentioned in the research")
+    
     # Execution tracking
     current_step_index: int = Field(default=0, description="Index of currently executing step")
     completed_steps: int = Field(default=0, description="Number of completed steps")
@@ -130,19 +154,55 @@ class Plan(BaseModel):
     started_at: Optional[datetime] = Field(default=None)
     completed_at: Optional[datetime] = Field(default=None)
     
+    # Requirement integration (new)
+    extracted_requirements: Optional[Any] = Field(default=None, description="Extracted RequirementSet from instructions")
+    requirement_confidence: Optional[float] = Field(default=None, description="Confidence in requirement extraction")
+    success_criteria: Optional[List[str]] = Field(default=None, description="Success criteria from requirements")
+    complexity_assessment: Optional[str] = Field(default=None, description="Complexity level: simple/moderate/complex")
+    estimated_total_steps: Optional[int] = Field(default=None, description="Estimated steps from requirement analysis")
+    output_requirements: Optional[Dict[str, Any]] = Field(default=None, description="Legacy output requirements (deprecated)")
+    
     def get_next_step(self) -> Optional[Step]:
-        """Get the next pending step to execute."""
+        """Get the next pending step to execute using dependency-aware selection."""
+        # Get completed step IDs for dependency checking
+        completed_step_ids = {step.step_id for step in self.steps if step.status == StepStatus.COMPLETED}
+        
+        # Also get permanently failed step IDs to skip them
+        failed_step_ids = {step.step_id for step in self.steps if step.status == StepStatus.FAILED}
+        
         for step in self.steps:
-            if step.status == StepStatus.PENDING:
-                # Check if dependencies are met
-                if step.depends_on:
-                    deps_met = all(
-                        self.get_step_by_id(dep_id).status == StepStatus.COMPLETED
-                        for dep_id in step.depends_on
-                        if self.get_step_by_id(dep_id)
-                    )
+            # Skip permanently failed steps
+            if step.status == StepStatus.FAILED:
+                # Check if this is marked as permanently failed (after max retries)
+                if hasattr(step, 'metadata') and step.metadata and step.metadata.get('permanent_failure', False):
+                    continue
+                # Otherwise, retry the failed step if not at max retries yet
+                # This allows retrying failed steps up to the circuit breaker limit
+                
+            if step.status in (StepStatus.PENDING, StepStatus.FAILED):
+                # Check if dependencies are met using proper title-to-ID mapping
+                if hasattr(step, 'depends_on') and step.depends_on:
+                    deps_met = True
+                    
+                    for dependency in step.depends_on:
+                        dep_step = self.get_step_by_id(dependency)
+                        if dep_step and dep_step.status == StepStatus.COMPLETED:
+                            continue
+
+                        # Allow title-based dependency matching for backward compatibility
+                        matched = False
+                        for candidate_step in self.steps:
+                            if candidate_step.status == StepStatus.COMPLETED and self._titles_similar(dependency, candidate_step.title):
+                                matched = True
+                                break
+
+                        if not matched:
+                            deps_met = False
+                            break
+
                     if not deps_met:
                         continue
+                
                 return step
         return None
     
@@ -152,6 +212,229 @@ class Plan(BaseModel):
             if step.step_id == step_id:
                 return step
         return None
+
+    def mark_step_completed(
+        self,
+        step_id: str,
+        *,
+        execution_result: Optional[str] = None,
+        observations: Optional[Iterable[str]] = None,
+        citations: Optional[Iterable[Any]] = None,
+    ) -> Step:
+        """Mark the specified step as completed and update execution metadata."""
+
+        step = self.get_step_by_id(step_id)
+        if step is None:
+            raise ValueError(f"Step '{step_id}' not found in plan {self.plan_id}")
+
+        now = datetime.now()
+        if step.started_at is None:
+            step.started_at = now
+        step.completed_at = now
+        step.status = StepStatus.COMPLETED
+
+        if execution_result is not None:
+            step.execution_result = execution_result
+
+        if observations is not None:
+            step.observations = list(observations)
+
+        if citations is not None:
+            step.citations = [
+                citation.to_dict() if hasattr(citation, "to_dict") else dict(citation)
+                for citation in citations
+            ]
+
+        self._refresh_step_counters()
+        return step
+
+    def mark_step_failed(self, step_id: str, *, reason: Optional[str] = None) -> Step:
+        """Mark the specified step as failed."""
+
+        step = self.get_step_by_id(step_id)
+        if step is None:
+            raise ValueError(f"Step '{step_id}' not found in plan {self.plan_id}")
+
+        now = datetime.now()
+        if step.started_at is None:
+            step.started_at = now
+        step.completed_at = now
+        step.status = StepStatus.FAILED
+        if reason:
+            step.execution_result = reason
+
+        self._refresh_step_counters()
+        return step
+
+    _METADATA_ID_LIST_KEYS: Set[str] = {
+        "depends_on",
+        "required_context",
+        "requirement_mapping",
+        "section_dependencies",
+        "source_step_ids",
+        "upstream_steps",
+        "downstream_steps",
+    }
+
+    _METADATA_ID_STRING_KEYS: Set[str] = {
+        "source_step_id",
+        "target_step_id",
+        "section_id",
+        "origin_step_id",
+        "destination_step_id",
+        "next_step_id",
+        "previous_step_id",
+    }
+
+    def renumber_steps(self, id_mapping: Mapping[str, str]) -> Dict[str, str]:
+        """Apply a step ID remapping and keep plan invariants consistent."""
+
+        if not id_mapping:
+            return {}
+
+        normalized_mapping: Dict[str, str] = {}
+        seen_new_ids: Set[str] = set()
+
+        for old_id, new_id in id_mapping.items():
+            if not old_id or not new_id:
+                continue
+
+            normalized_old = PlanIDGenerator.normalize_id(old_id)
+            normalized_new = PlanIDGenerator.normalize_id(new_id)
+
+            normalized_mapping[old_id] = normalized_new
+            normalized_mapping[normalized_old] = normalized_new
+
+            if normalized_new in seen_new_ids:
+                raise ValueError(
+                    f"Duplicate target step ID '{normalized_new}' detected while renumbering plan {self.plan_id}"
+                )
+            seen_new_ids.add(normalized_new)
+
+        if not normalized_mapping:
+            return {}
+
+        for step in self.steps:
+            old_id = step.step_id
+            normalized_old_id = PlanIDGenerator.normalize_id(old_id) if old_id else old_id
+
+            metadata_map: MutableMapping[str, Any]
+            if step.metadata is None:
+                step.metadata = {}
+
+            if isinstance(step.metadata, MutableMapping):
+                metadata_map = step.metadata
+            else:
+                metadata_map = dict(step.metadata)
+                step.metadata = metadata_map
+
+            is_section_step = bool(metadata_map.get("is_section_step", False))
+
+            if not is_section_step:
+                new_id = normalized_mapping.get(old_id) or normalized_mapping.get(normalized_old_id)
+                if new_id and new_id != old_id:
+                    metadata_map.setdefault("original_step_id", old_id)
+                    logger.debug(
+                        "Renumbering plan step",
+                        plan_id=self.plan_id,
+                        old_id=old_id,
+                        new_id=new_id,
+                        step_title=step.title,
+                    )
+                    step.step_id = new_id
+                    normalized_old_id = PlanIDGenerator.normalize_id(new_id)
+
+            self._remap_step_references(step, normalized_mapping)
+
+        self._refresh_step_counters()
+
+        # Return the effective mapping using normalized keys for callers that need it
+        return {
+            PlanIDGenerator.normalize_id(old_id): PlanIDGenerator.normalize_id(new_id)
+            for old_id, new_id in id_mapping.items()
+            if old_id and new_id
+        }
+
+    def _refresh_step_counters(self) -> None:
+        """Recalculate aggregate counters after step mutations."""
+        self.completed_steps = sum(
+            1 for candidate in self.steps if candidate.status == StepStatus.COMPLETED
+        )
+        self.failed_steps = sum(
+            1 for candidate in self.steps if candidate.status == StepStatus.FAILED
+        )
+
+    def _remap_step_references(
+        self,
+        step: Step,
+        mapping: Mapping[str, str],
+    ) -> None:
+        """Update step references that may point to renamed IDs."""
+
+        if step.depends_on:
+            step.depends_on = self._remap_id_list(step.depends_on, mapping)
+
+        if step.required_context:
+            step.required_context = self._remap_id_list(step.required_context, mapping)
+
+        if step.requirement_mapping:
+            step.requirement_mapping = self._remap_id_list(step.requirement_mapping, mapping)
+
+        if step.metadata:
+            self._remap_metadata_dict(step.metadata, mapping)
+
+    def _remap_id(self, candidate: str, mapping: Mapping[str, str]) -> str:
+        if not candidate:
+            return candidate
+
+        normalized_candidate = PlanIDGenerator.normalize_id(candidate)
+        return (
+            mapping.get(candidate)
+            or mapping.get(normalized_candidate)
+            or candidate
+        )
+
+    def _remap_id_list(
+        self,
+        values: Iterable[str],
+        mapping: Mapping[str, str],
+    ) -> List[str]:
+        return [self._remap_id(value, mapping) for value in values]
+
+    def _remap_metadata_dict(
+        self,
+        metadata: MutableMapping[str, Any],
+        mapping: Mapping[str, str],
+    ) -> None:
+        for key in list(metadata.keys()):
+            value = metadata[key]
+
+            if key in self._METADATA_ID_LIST_KEYS and isinstance(value, list):
+                metadata[key] = [
+                    self._remap_id(item, mapping) if isinstance(item, str) else item
+                    for item in value
+                ]
+                continue
+
+            if key in self._METADATA_ID_STRING_KEYS and isinstance(value, str):
+                metadata[key] = self._remap_id(value, mapping)
+                continue
+
+            if isinstance(value, MutableMapping):
+                self._remap_metadata_dict(value, mapping)
+                continue
+
+            if isinstance(value, list):
+                updated_items: List[Any] = []
+                for item in value:
+                    if isinstance(item, MutableMapping):
+                        self._remap_metadata_dict(item, mapping)
+                        updated_items.append(item)
+                    elif isinstance(item, str) and key in self._METADATA_ID_LIST_KEYS:
+                        updated_items.append(self._remap_id(item, mapping))
+                    else:
+                        updated_items.append(item)
+                metadata[key] = updated_items
     
     def get_completed_context(self) -> List[str]:
         """Get accumulated context from completed steps."""
@@ -180,6 +463,38 @@ class Plan(BaseModel):
             "is_complete": self.is_complete(),
             "quality_score": self.quality_assessment.overall_score if self.quality_assessment else None
         }
+    
+    def _titles_similar(self, title1: str, title2: str) -> bool:
+        """Check if two titles are similar enough to be considered a match."""
+        # Normalize titles for comparison
+        norm1 = title1.lower().strip().replace(' ', '').replace('-', '').replace('_', '')
+        norm2 = title2.lower().strip().replace(' ', '').replace('-', '').replace('_', '')
+        
+        # Exact match after normalization
+        if norm1 == norm2:
+            return True
+        
+        # Substring match (one contains the other, minimum 4 chars)
+        if len(norm1) >= 4 and len(norm2) >= 4:
+            if norm1 in norm2 or norm2 in norm1:
+                return True
+        
+        # Word overlap similarity (at least 50% common words)
+        words1 = set(title1.lower().split())
+        words2 = set(title2.lower().split())
+        
+        # Remove common stop words
+        stop_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+        words1 = words1 - stop_words
+        words2 = words2 - stop_words
+        
+        if words1 and words2:
+            overlap = len(words1 & words2)
+            total_unique_words = len(words1 | words2)
+            similarity = overlap / total_unique_words if total_unique_words > 0 else 0
+            return similarity >= 0.5
+        
+        return False
     
     class Config:
         json_schema_extra = {

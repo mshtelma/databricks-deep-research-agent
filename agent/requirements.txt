@@ -14,6 +14,8 @@ requests>=2.31.0
 
 # Data processing
 pydantic>=2.0.0
+pydantic-settings>=2.0.0
+json-repair>=0.6.0
 
 # Development
 python-dotenv>=1.0.0

@@ -5,7 +5,7 @@ Extends the existing state with support for planning, grounding,
 and multi-agent coordination.
 """
 
-from typing import List, Dict, Any, Optional, Literal
+from typing import List, Dict, Any, Optional, Literal, Union
 from datetime import datetime
 from pydantic import BaseModel, Field
 
@@ -24,8 +24,71 @@ from deep_research_agent.core import (
     ResearchContext,
     SearchResult,
     Citation,
-    ResearchQuery
+    ResearchQuery,
+    get_logger
 )
+from deep_research_agent.core.observation_models import StructuredObservation
+
+
+# Reducer functions for concurrent state updates
+def use_latest_plan(left: Optional[Plan], right: Optional[Plan]) -> Optional[Plan]:
+    """Reducer that uses the most recent non-None plan."""
+    return right if right is not None else left
+
+
+def merge_lists(left: List[Any], right: List[Any]) -> List[Any]:
+    """Reducer that merges two lists, avoiding duplicates."""
+    if not left:
+        return right
+    if not right:
+        return left
+    
+    # MEMORY OPTIMIZATION: Limit list sizes to prevent unbounded growth
+    combined = left + right
+    
+    # Apply memory-conscious limits based on list content type
+    MAX_OBSERVATIONS = 50      # Keep most recent observations
+    MAX_SEARCH_RESULTS = 100   # Keep most relevant search results
+    MAX_CITATIONS = 200        # Citations are smaller, allow more
+    MAX_REFLECTIONS = 30       # Limit reflection history
+    MAX_AGENT_HANDOFFS = 20    # Limit handoff history
+    MAX_GENERAL = 100          # Default limit for other lists
+    
+    # Determine appropriate limit (heuristic based on list content)
+    if combined and hasattr(combined[0], 'content') and len(str(combined[0])) > 1000:
+        # Large content items (like SearchResults)
+        limit = MAX_SEARCH_RESULTS if 'SearchResult' in str(type(combined[0])) else MAX_GENERAL
+    elif combined and isinstance(combined[0], str) and len(combined[0]) > 100:
+        # Text observations/reflections
+        limit = MAX_OBSERVATIONS
+    elif combined and isinstance(combined[0], dict) and 'from_agent' in str(combined[0]):
+        # Agent handoffs
+        limit = MAX_AGENT_HANDOFFS
+    else:
+        limit = MAX_GENERAL
+    
+    # Keep most recent items if over limit
+    if len(combined) > limit:
+        combined = combined[-limit:]
+    
+    return combined
+
+
+def use_latest_value(left: Any, right: Any) -> Any:
+    """Reducer that uses the most recent non-None value."""
+    return right if right is not None else left
+
+
+def merge_dicts(left: Optional[Dict[str, Any]], right: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Reducer that merges two dictionaries with right-hand precedence."""
+    if not left:
+        return right or {}
+    if not right:
+        return left
+
+    merged = dict(left)
+    merged.update(right)
+    return merged
 
 
 class EnhancedResearchState(TypedDict):
@@ -39,78 +102,91 @@ class EnhancedResearchState(TypedDict):
     messages: Annotated[List, add_messages]
     
     # Research context
-    research_topic: str
-    research_context: Optional[ResearchContext]
+    research_topic: Annotated[str, use_latest_value]
+    research_context: Annotated[Optional[ResearchContext], use_latest_value]
     
     # Planning state
-    current_plan: Optional[Plan]
-    plan_iterations: int
-    plan_feedback: Optional[List[PlanFeedback]]
-    plan_quality: Optional[PlanQuality]
-    enable_iterative_planning: bool
-    max_plan_iterations: int
+    current_plan: Annotated[Optional[Plan], use_latest_plan]
+    plan_iterations: Annotated[int, use_latest_value]
+    plan_feedback: Annotated[Optional[List[PlanFeedback]], merge_lists]
+    plan_quality: Annotated[Optional[PlanQuality], use_latest_value]
+    enable_iterative_planning: Annotated[bool, use_latest_value]
+    max_plan_iterations: Annotated[int, use_latest_value]
     
     # Background investigation
-    enable_background_investigation: bool
-    background_investigation_results: Optional[str]
+    enable_background_investigation: Annotated[bool, use_latest_value]
+    background_investigation_results: Annotated[Optional[str], use_latest_value]
     
     # Execution state
-    observations: List[str]  # Accumulated observations from all steps
-    completed_steps: List[Step]
-    current_step: Optional[Step]
-    current_step_index: int
+    observations: Annotated[
+        List[Union[str, StructuredObservation, Dict[str, Any]]],
+        merge_lists
+    ]  # Accumulated observations from all steps
+    completed_steps: Annotated[List[Step], merge_lists]
+    current_step: Annotated[Optional[Step], use_latest_value]
+    current_step_index: Annotated[int, use_latest_value]
+    # Loop control (separate counters)
+    research_loops: Annotated[int, use_latest_value]  # reserved for researcher-side loops (not used for cap here)
+    max_research_loops: Annotated[int, use_latest_value]
+    fact_check_loops: Annotated[int, use_latest_value]
+    max_fact_check_loops: Annotated[int, use_latest_value]
     
     # Research results
-    search_results: List[SearchResult]
-    search_queries: List[ResearchQuery]
+    search_results: Annotated[List[SearchResult], merge_lists]
+    search_queries: Annotated[List[ResearchQuery], merge_lists]
+    section_research_results: Annotated[Dict[str, Any], merge_dicts]
     
     # Grounding and factuality
-    enable_grounding: bool
-    grounding_results: Optional[List[GroundingResult]]
-    factuality_report: Optional[FactualityReport]
-    contradictions: Optional[List[Contradiction]]
-    factuality_score: Optional[float]
-    verification_level: VerificationLevel
+    enable_grounding: Annotated[bool, use_latest_value]
+    grounding_results: Annotated[Optional[List[GroundingResult]], merge_lists]
+    factuality_report: Annotated[Optional[FactualityReport], use_latest_value]  # FIX: Add proper annotation
+    contradictions: Annotated[Optional[List[Contradiction]], merge_lists]
+    factuality_score: Annotated[Optional[float], use_latest_value]
+    verification_level: Annotated[VerificationLevel, use_latest_value]
+    
+    # Entity validation
+    requested_entities: Annotated[List[str], use_latest_value]
+    entity_violations: Annotated[List[Dict[str, Any]], merge_lists]
     
     # Citations and references
-    citations: List[Citation]
-    citation_style: str  # APA, MLA, Chicago, etc.
+    citations: Annotated[List[Citation], merge_lists]
+    citation_style: Annotated[str, use_latest_value]  # APA, MLA, Chicago, etc.
     
     # Report generation
-    report_style: ReportStyle
-    final_report: Optional[str]
-    report_sections: Optional[Dict[str, str]]  # Section name -> content
+    report_style: Annotated[ReportStyle, use_latest_value]
+    final_report: Annotated[Optional[str], use_latest_value]
+    report_sections: Annotated[Optional[Dict[str, str]], use_latest_value]  # Section name -> content
     
     # Reflexion and self-improvement
-    enable_reflexion: bool
-    reflections: List[str]  # Self-reflection feedback
-    reflection_memory_size: int
+    enable_reflexion: Annotated[bool, use_latest_value]
+    reflections: Annotated[List[str], merge_lists]  # Self-reflection feedback
+    reflection_memory_size: Annotated[int, use_latest_value]
     
     # Agent coordination
-    current_agent: str  # Which agent is currently active
-    agent_handoffs: List[Dict[str, Any]]  # History of agent handoffs
+    current_agent: Annotated[str, use_latest_value]  # Which agent is currently active
+    agent_handoffs: Annotated[List[Dict[str, Any]], merge_lists]  # History of agent handoffs
     
     # Quality metrics
-    research_quality_score: Optional[float]
-    coverage_score: Optional[float]
-    confidence_score: Optional[float]
+    research_quality_score: Annotated[Optional[float], use_latest_value]
+    coverage_score: Annotated[Optional[float], use_latest_value]
+    confidence_score: Annotated[Optional[float], use_latest_value]
     
     # Configuration
-    enable_deep_thinking: bool
-    enable_human_feedback: bool
-    auto_accept_plan: bool
+    enable_deep_thinking: Annotated[bool, use_latest_value]
+    enable_human_feedback: Annotated[bool, use_latest_value]
+    auto_accept_plan: Annotated[bool, use_latest_value]
     
     # Timing and metadata
-    start_time: datetime
-    end_time: Optional[datetime]
-    total_duration_seconds: Optional[float]
+    start_time: Annotated[datetime, use_latest_value]
+    end_time: Annotated[Optional[datetime], use_latest_value]
+    total_duration_seconds: Annotated[Optional[float], use_latest_value]
     
     # Error handling
-    errors: List[str]
-    warnings: List[str]
+    errors: Annotated[List[str], merge_lists]
+    warnings: Annotated[List[str], merge_lists]
     
     # User preferences
-    user_preferences: Optional[Dict[str, Any]]
+    user_preferences: Annotated[Optional[Dict[str, Any]], use_latest_value]
 
 
 class AgentHandoff(BaseModel):
@@ -152,6 +228,35 @@ class StateManager:
     """Utilities for managing enhanced research state."""
     
     @staticmethod
+    def _initialize_report_style(config: Dict[str, Any]) -> 'ReportStyle':
+        """Initialize report style with detailed logging for debugging."""
+        from deep_research_agent.core.report_styles import ReportStyle
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        
+        # Get values from different config paths
+        report_section = config.get("report", {})
+        default_style_from_report = report_section.get("default_style")
+        default_report_style_legacy = config.get("default_report_style")
+        
+        logger.info("STATE_INIT: Initializing report style...")
+        logger.info(f"STATE_INIT: config.report = {report_section}")
+        logger.info(f"STATE_INIT: config.report.default_style = {default_style_from_report}")
+        logger.info(f"STATE_INIT: config.default_report_style = {default_report_style_legacy}")
+        
+        # Determine the final value using the same logic as before
+        final_value = default_style_from_report or default_report_style_legacy or "default"
+        logger.info(f"STATE_INIT: Final style string value: '{final_value}'")
+        
+        # Convert to ReportStyle enum
+        report_style = ReportStyle(final_value)
+        logger.info(f"STATE_INIT: Final ReportStyle enum: {report_style}")
+        logger.info(f"STATE_INIT: ReportStyle == ReportStyle.DEFAULT: {report_style == ReportStyle.DEFAULT}")
+        
+        return report_style
+    
+    @staticmethod
     def initialize_state(
         research_topic: str,
         config: Dict[str, Any]
@@ -179,6 +284,10 @@ class StateManager:
             completed_steps=[],
             current_step=None,
             current_step_index=0,
+            research_loops=0,
+            max_research_loops=config.get("research", {}).get("max_research_loops", 3),
+            fact_check_loops=0,
+            max_fact_check_loops=config.get("research", {}).get("max_fact_check_loops", 2),
             
             # Research
             search_results=[],
@@ -194,12 +303,16 @@ class StateManager:
                 config.get("grounding", {}).get("verification_level", "moderate")
             ),
             
+            # Entity validation
+            requested_entities=[],
+            entity_violations=[],
+            
             # Citations
             citations=[],
             citation_style=config.get("citation_style", "APA"),
             
-            # Report
-            report_style=ReportStyle(config.get("report", {}).get("default_style", config.get("default_report_style", "professional"))),
+            # Report - enhanced logging for debugging adaptive structure
+            report_style=StateManager._initialize_report_style(config),
             final_report=None,
             report_sections=None,
             
@@ -226,13 +339,16 @@ class StateManager:
             start_time=datetime.now(),
             end_time=None,
             total_duration_seconds=None,
-            
+
             # Error handling
             errors=[],
             warnings=[],
-            
+
             # User preferences
-            user_preferences=config.get("user_preferences", {})
+            user_preferences=config.get("user_preferences", {}),
+
+            # Section research accumulation
+            section_research_results={},
         )
     
     @staticmethod
@@ -289,13 +405,137 @@ class StateManager:
         observation: str,
         step: Optional[Step] = None
     ) -> EnhancedResearchState:
-        """Add an observation to the state."""
+        """Add an observation to the state with memory limits."""
+        # Add to global observations with size limit
         state["observations"].append(observation)
+        
+        # Keep only the last 20 observations to prevent unbounded growth
+        max_observations = 20
+        if len(state["observations"]) > max_observations:
+            state["observations"] = state["observations"][-max_observations:]
         
         if step:
             if not step.observations:
                 step.observations = []
             step.observations.append(observation)
+            
+            # Also limit step observations
+            if len(step.observations) > 10:  # Smaller limit per step
+                step.observations = step.observations[-10:]
+        
+        return state
+    
+    @staticmethod
+    def add_search_results(
+        state: EnhancedResearchState,
+        search_results: List[Any]
+    ) -> EnhancedResearchState:
+        """Add search results to the state with memory limits."""
+        # Add new search results
+        state["search_results"].extend(search_results)
+        
+        # Keep only the last 50 search results to prevent unbounded growth
+        max_search_results = 50
+        if len(state["search_results"]) > max_search_results:
+            state["search_results"] = state["search_results"][-max_search_results:]
+        
+        return state
+    
+    @staticmethod
+    def prune_state_for_memory(
+        state: EnhancedResearchState
+    ) -> EnhancedResearchState:
+        """
+        Prune state to reduce memory usage between workflow nodes.
+        
+        AGGRESSIVE pruning to prevent worker memory exhaustion.
+        Keeps essential data while removing or truncating non-essential accumulated data.
+        """
+        logger = get_logger(__name__)
+        pruned_items = []
+        
+        # CRITICAL FIX: DO NOT PRUNE OBSERVATIONS - they are the core research data!
+        # Observations are already filtered by entity validation, so they're all relevant.
+        # Pruning them causes hallucinations and wrong countries in reports.
+        # OLD CODE (caused issues): state["observations"] = state["observations"][-3:]
+        
+        # Log observation count but DO NOT prune
+        obs_count = len(state.get("observations", []))
+        if obs_count > 0:
+            logger.info(f"Preserving ALL {obs_count} observations (no pruning)")
+            
+        # CRITICAL FIX: DO NOT PRUNE SECTION_RESEARCH_RESULTS - core section mapping data!
+        # Section research results are essential for report generation and must never be lost.
+        section_research = state.get("section_research_results", {})
+        section_count = len(section_research)
+        if section_count > 0:
+            logger.info(f"Preserving ALL {section_count} section research results (no pruning)")
+        elif "section_research_results" in state:
+            logger.warning("section_research_results exists but is empty - this may indicate a bug")
+        
+        # Keep more search results since they're needed for comprehensive reports
+        # Increased from 5 to 20 to ensure we have enough data
+        if len(state.get("search_results", [])) > 20:
+            old_count = len(state["search_results"])
+            state["search_results"] = state["search_results"][-20:]
+            pruned_items.append(f"search_results: {old_count} -> 20")
+            
+        # Keep only 2 reflections (was 2, originally 5) - no change needed
+        if len(state.get("reflections", [])) > 2:
+            old_count = len(state["reflections"])
+            state["reflections"] = state["reflections"][-2:]
+            pruned_items.append(f"reflections: {old_count} -> 2")
+            
+        # DO NOT prune step observations - they're needed for section-specific content
+        # Each step's observations are critical for its section in the report
+        completed_steps = state.get("completed_steps", [])
+        for step in completed_steps:
+            if hasattr(step, 'observations') and step.observations:
+                # Log but don't prune
+                obs_count = len(step.observations)
+                if obs_count > 0:
+                    logger.debug(f"Step {getattr(step, 'step_id', 'unknown')}: preserving {obs_count} observations")
+        
+        # Limit agent handoffs history more aggressively (keep last 5, was 10)
+        if len(state.get("agent_handoffs", [])) > 5:
+            old_count = len(state["agent_handoffs"])
+            state["agent_handoffs"] = state["agent_handoffs"][-5:]
+            pruned_items.append(f"agent_handoffs: {old_count} -> 5")
+            
+        # Clear error and warning lists more aggressively (keep last 3, was 5)
+        if len(state.get("errors", [])) > 3:
+            old_count = len(state["errors"])
+            state["errors"] = state["errors"][-3:]
+            pruned_items.append(f"errors: {old_count} -> 3")
+        if len(state.get("warnings", [])) > 3:
+            old_count = len(state["warnings"])
+            state["warnings"] = state["warnings"][-3:]
+            pruned_items.append(f"warnings: {old_count} -> 3")
+        
+        # Less aggressive message pruning - keep more context for better quality
+        old_message_count = len(state.get("messages", []))
+        state = StateManager.prune_messages(state, max_messages=20, max_content_length=20000)  # Significantly increased for comprehensive research
+        new_message_count = len(state.get("messages", []))
+        if new_message_count != old_message_count:
+            pruned_items.append(f"messages: {old_message_count} -> {new_message_count}")
+        
+        # Remove embeddings from search results if they exist (major memory saver)
+        search_results = state.get("search_results", [])
+        embeddings_removed = 0
+        for result in search_results:
+            if hasattr(result, 'metadata') and result.metadata:
+                if 'embedding' in result.metadata:
+                    del result.metadata['embedding']
+                    embeddings_removed += 1
+                if 'embedding_vector' in result.metadata:
+                    del result.metadata['embedding_vector']
+                    embeddings_removed += 1
+        
+        if embeddings_removed > 0:
+            pruned_items.append(f"embeddings: removed {embeddings_removed}")
+        
+        if pruned_items:
+            logger.info(f"Memory pruning applied: {', '.join(pruned_items)}")
         
         return state
     
@@ -305,6 +545,18 @@ class StateManager:
         reflection: str
     ) -> EnhancedResearchState:
         """Add a self-reflection to the state."""
+        # CRITICAL FIX: Ensure state is a dict
+        if not isinstance(state, dict):
+            raise ValueError(f"Invalid state type for add_reflection: {type(state)}")
+            
+        # Ensure reflections list exists
+        if "reflections" not in state:
+            state["reflections"] = []
+        
+        # Ensure reflection_memory_size exists
+        if "reflection_memory_size" not in state:
+            state["reflection_memory_size"] = 5  # Default value
+            
         state["reflections"].append(reflection)
         
         # Maintain memory size limit
@@ -327,6 +579,39 @@ class StateManager:
             state["coverage_score"] = coverage
         if confidence is not None:
             state["confidence_score"] = confidence
+        
+        return state
+    
+    @staticmethod
+    def prune_messages(
+        state: EnhancedResearchState, 
+        max_messages: int = 15, 
+        max_content_length: int = 15000
+    ) -> EnhancedResearchState:
+        """
+        Prune messages to prevent unbounded growth.
+        
+        This is critical for memory management as messages accumulate LLM responses
+        which can be very large (thousands of tokens each).
+        """
+        if "messages" in state and len(state["messages"]) > max_messages:
+            # Keep only the most recent messages
+            old_count = len(state["messages"])
+            state["messages"] = state["messages"][-max_messages:]
+            logger = get_logger(__name__)
+            logger.info(f"Pruned messages: {old_count} -> {len(state['messages'])}")
+        
+        # Truncate long message content to prevent memory explosion
+        truncated_count = 0
+        for msg in state.get("messages", []):
+            if hasattr(msg, 'content') and isinstance(msg.content, str):
+                if len(msg.content) > max_content_length:
+                    msg.content = msg.content[:max_content_length] + "\n[Content truncated for memory management]"
+                    truncated_count += 1
+        
+        if truncated_count > 0:
+            logger = get_logger(__name__)
+            logger.info(f"Truncated {truncated_count} long messages")
         
         return state
     

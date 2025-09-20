@@ -25,10 +25,12 @@ from deep_research_agent.core import (
     get_logger,
     ToolInitializationError,
     ToolType,
-    ToolConfiguration,
-    ConfigManager,
     retry_with_exponential_backoff,
     CircuitBreaker
+)
+from deep_research_agent.core.unified_config import (
+    get_config_manager,
+    ToolConfigSchema as ToolConfiguration  # Alias for compatibility
 )
 
 logger = get_logger(__name__)
@@ -147,13 +149,18 @@ class TavilyToolFactory(ToolFactory):
     def create_tool(self, config: ToolConfiguration) -> Optional[BaseTool]:
         """Create Tavily search tool."""
         try:
-            from tools_tavily import TavilySearchTool
-            
+            # Check if tool is disabled first
             if not config.enabled:
                 logger.info("Tavily tool disabled in configuration")
                 return None
             
+            # Check if API key is available - Tavily requires API key
             api_key = config.config.get("api_key")
+            if not api_key or api_key.startswith("{{secrets/"):
+                logger.info("Tavily tool disabled - no API key available")
+                return None
+            
+            from tools_tavily import TavilySearchTool
             
             # Create tool with configuration - the BaseSearchTool will handle secret resolution
             tool = TavilySearchTool(
@@ -166,8 +173,9 @@ class TavilyToolFactory(ToolFactory):
             logger.info("Created Tavily search tool", api_key_provided=bool(api_key))
             return tool
         except Exception as e:
-            logger.error("Failed to create Tavily tool", error=e)
-            raise ToolInitializationError(f"Failed to create Tavily tool: {e}")
+            logger.info(f"Tavily tool not available: {e}")
+            # Don't raise an exception for missing Tavily, just return None
+            return None
 
 
 class VectorSearchToolFactory(ToolFactory):
@@ -292,13 +300,15 @@ class UCFunctionToolFactory(ToolFactory):
 class ToolRegistry:
     """Registry for managing all tools."""
     
-    def __init__(self, config_manager: ConfigManager):
+    def __init__(self, config_manager=None):
         """
         Initialize tool registry.
         
         Args:
             config_manager: Configuration manager instance
         """
+        if config_manager is None:
+            config_manager = get_config_manager()
         self.config_manager = config_manager
         self.factories: Dict[ToolType, ToolFactory] = {}
         self.tools: Dict[ToolType, Any] = {}
@@ -366,10 +376,19 @@ class ToolRegistry:
         factory = self.factories[tool_type]
         config = self.config_manager.get_tool_config(tool_type)
         
+        # Pre-check if tool is disabled to avoid unnecessary circuit breaker calls
+        if hasattr(config, 'enabled') and not config.enabled:
+            logger.debug(f"Tool {tool_type.value} is disabled in configuration")
+            return None
+        
         try:
             return circuit_breaker.call(factory.create_tool, config)
         except Exception as e:
-            logger.error(f"Tool creation failed for {tool_type.value}", error=e)
+            # Don't log as error for Tavily if it's just unavailable
+            if tool_type.value == 'tavily_search':
+                logger.info(f"Tavily tool not available: {e}")
+            else:
+                logger.error(f"Tool creation failed for {tool_type.value}", error=e)
             return None
     
     def get_all_tools(self) -> Dict[ToolType, Any]:
@@ -438,6 +457,30 @@ class ToolRegistry:
         
         return status
     
+    def get_tools_by_type(self, tool_type_name: str) -> List[Any]:
+        """
+        Get all tools of a specific type (e.g., "search").
+        
+        Args:
+            tool_type_name: Name of the tool type (e.g., "search")
+            
+        Returns:
+            List of tool instances matching the type
+        """
+        search_tools = []
+        
+        # Map common type names to actual tool types
+        if tool_type_name.lower() == "search":
+            # Get all search-related tools
+            search_tool_types = [ToolType.TAVILY_SEARCH, ToolType.BRAVE_SEARCH]
+            for tool_type in search_tool_types:
+                if tool_type in self.factories:
+                    tool = self.get_tool(tool_type)
+                    if tool is not None:
+                        search_tools.append(tool)
+        
+        return search_tools
+    
     @retry_with_exponential_backoff(max_retries=2)
     def health_check(self, tool_type: ToolType) -> bool:
         """
@@ -464,7 +507,7 @@ class ToolRegistry:
             return False
 
 
-def create_tool_registry(config_manager: Optional[ConfigManager] = None) -> ToolRegistry:
+def create_tool_registry(config_manager=None) -> ToolRegistry:
     """
     Create tool registry with default configuration.
     
@@ -475,6 +518,6 @@ def create_tool_registry(config_manager: Optional[ConfigManager] = None) -> Tool
         Configured ToolRegistry instance
     """
     if config_manager is None:
-        config_manager = ConfigManager()
+        config_manager = get_config_manager()
     
     return ToolRegistry(config_manager)

@@ -11,6 +11,9 @@ from typing import Dict, Any, Optional
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.core import Config
 
+# Import constants for config file paths
+from deep_research_agent.constants import AGENT_CONFIG_PATH
+
 logger = logging.getLogger(__name__)
 
 
@@ -230,7 +233,7 @@ class WorkspaceManager:
         # Check for key files that should exist after sync
         expected_files = [
             f"{self.workspace_base_path}/deep_research_agent/__init__.py",
-            f"{self.workspace_base_path}/deep_research_agent/agent_config.yaml",
+            f"{self.workspace_base_path}/conf/base.yaml",
             f"{self.workspace_base_path}/deep_research_agent/research_agent_refactored.py",
             f"{self.workspace_base_path}/deep_research_agent/databricks_compatible_agent.py",
             f"{self.workspace_base_path}/tests/__init__.py"

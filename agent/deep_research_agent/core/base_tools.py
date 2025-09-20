@@ -40,6 +40,7 @@ class BaseSearchTool(BaseTool, ABC):
     base_url: str = Field(default="")
     timeout_seconds: int = Field(default=30)
     max_retries: int = Field(default=3)
+    test_mode: bool = Field(default=False)
     
     def __init__(
         self, 
@@ -47,6 +48,7 @@ class BaseSearchTool(BaseTool, ABC):
         base_url: Optional[str] = None,
         timeout_seconds: int = 30,
         max_retries: int = 3,
+        test_mode: bool = False,
         **kwargs
     ):
         """
@@ -57,6 +59,7 @@ class BaseSearchTool(BaseTool, ABC):
             base_url: Base URL for the search service
             timeout_seconds: Request timeout in seconds
             max_retries: Maximum number of retries
+            test_mode: If True, skip API key validation for testing
             **kwargs: Additional keyword arguments
         """
         # Set defaults if not provided
@@ -74,17 +77,20 @@ class BaseSearchTool(BaseTool, ABC):
             base_url=base_url,
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
+            test_mode=test_mode,
             **kwargs
         )
         
-        # Validate the resolved API key
-        self._validate_api_key()
+        # Validate the resolved API key (skip in test mode)
+        if not test_mode:
+            self._validate_api_key()
         
         logger.info(
             f"Initialized {self.__class__.__name__}",
             has_api_key=bool(self.api_key and not self.api_key.startswith("{{secrets/")),
             base_url=self.base_url,
-            timeout=self.timeout_seconds
+            timeout=self.timeout_seconds,
+            test_mode=test_mode
         )
     
     @abstractmethod
@@ -141,6 +147,24 @@ class BaseSearchTool(BaseTool, ABC):
             List of search results
         """
         pass
+    
+    def execute(self, query: str, **kwargs) -> List[Dict[str, Any]]:
+        """
+        Execute method for consistency with researcher expectations.
+        
+        This wraps the search method to provide a uniform interface
+        across all search tools, ensuring compatibility with agents
+        that expect an execute() method.
+        
+        Args:
+            query: Search query string
+            **kwargs: Additional parameters (max_results, etc.)
+            
+        Returns:
+            List of search results
+        """
+        max_results = kwargs.get('max_results', 5)
+        return self.search(query, max_results)
 
 
 class BraveSearchInput(BaseSearchInput):

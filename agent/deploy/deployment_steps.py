@@ -99,26 +99,48 @@ class DeploymentSteps:
             os.environ["DATABRICKS_RESPONSE_FORMAT"] = "adaptive"
             os.environ["AGENT_RETURN_FORMAT"] = "dict"
             
-            # Setup secrets using centralized resolver
+            # CRITICAL: Force production mode to prevent mock search results (TEST_MODE removed)
+            os.environ["FORCE_PRODUCTION_MODE"] = "true"
+            print(f"Production mode forced: FORCE_PRODUCTION_MODE={os.environ.get('FORCE_PRODUCTION_MODE')}")
+            
+            # Setup secrets using new config system
             try:
-                from deep_research_agent.core.config import ConfigManager
+                from deep_research_agent.config_loader import ConfigLoader
                 from deep_research_agent.core.types import ToolType
                 from deep_research_agent.core.utils import resolve_secret
                 
-                config_manager = ConfigManager(yaml_path="deep_research_agent/agent_config.yaml")
-                tavily_config = config_manager.get_tool_config(ToolType.TAVILY_SEARCH)
-                brave_config = config_manager.get_tool_config(ToolType.BRAVE_SEARCH)
+                # Load agent config using new ConfigLoader
+                agent_config = ConfigLoader.load_agent()
+                tavily_config = agent_config.search.providers.tavily
+                brave_config = agent_config.search.providers.brave
                 
-                # Resolve secrets if tools are enabled
-                if tavily_config.enabled:
-                    tavily_key = resolve_secret("{{secrets/msh/TAVILY_API_KEY}}")
-                    if tavily_key != "{{secrets/msh/TAVILY_API_KEY}}":
-                        os.environ["TAVILY_API_KEY"] = tavily_key
-                
+                # Resolve secrets if tools are enabled                
                 if brave_config.enabled:
+                    print("Attempting to resolve BRAVE_API_KEY from Databricks secrets...")
                     brave_key = resolve_secret("{{secrets/msh/BRAVE_API_KEY}}")
                     if brave_key != "{{secrets/msh/BRAVE_API_KEY}}":
                         os.environ["BRAVE_API_KEY"] = brave_key
+                        print("✅ BRAVE_API_KEY successfully resolved and set")
+                    else:
+                        # Check for fallback from environment
+                        if os.getenv("BRAVE_API_KEY"):
+                            print("ℹ️ Using BRAVE_API_KEY from environment variable")
+                        else:
+                            print("❌ CRITICAL ERROR: No BRAVE_API_KEY available")
+                            print("   - Databricks secret '{{secrets/msh/BRAVE_API_KEY}}' could not be resolved")
+                            print("   - No BRAVE_API_KEY environment variable found")
+                            print("   - Agent would only return empty search results")
+                            print("   - CANCELLING DEPLOYMENT")
+                            return {
+                                "success": False,
+                                "error": "BRAVE_API_KEY not available - deployment cancelled to prevent mock data usage",
+                                "stage": "secret_resolution",
+                                "details": {
+                                    "secret_path_tried": "{{secrets/msh/BRAVE_API_KEY}}",
+                                    "env_var_tried": "BRAVE_API_KEY",
+                                    "solution": "Ensure BRAVE_API_KEY is set in Databricks secrets or environment"
+                                }
+                            }
                         
             except Exception as secret_error:
                 print(f"Secret resolution warning: {secret_error}")
@@ -214,14 +236,107 @@ class DeploymentSteps:
             print("All imports successful, proceeding with agent creation...")
             print("=" * 60)
             
-            test_agent = DatabricksCompatibleAgent(yaml_path="deep_research_agent/agent_config.yaml")
+            from deep_research_agent.constants import AGENT_CONFIG_PATH
             
-            # Run test queries
+            # CRITICAL: Validate Brave Search before creating agent
+            print("=" * 60)
+            print("VALIDATING BRAVE SEARCH FUNCTIONALITY")
+            print("=" * 60)
+            
+            # First, test Brave search directly
+            if os.getenv("BRAVE_API_KEY"):
+                print("✅ BRAVE_API_KEY is available in environment")
+                
+                # Test Brave search tool directly
+                try:
+                    from deep_research_agent.tools_brave import BraveSearchTool
+                    
+                    print("Testing Brave search with a real query...")
+                    brave_tool = BraveSearchTool()
+                    test_results = brave_tool.search("Python programming language latest version", max_results=3)
+                    
+                    if test_results:
+                        print(f"✅ Brave search returned {len(test_results)} results")
+                        
+                        # Check for mock data patterns
+                        mock_indicators = [
+                            "example.com",
+                            "Mock content about",
+                            "This is relevant information",
+                            "Result 1 for:",
+                            "Result 2 for:"
+                        ]
+                        
+                        is_mock = False
+                        for result in test_results:
+                            result_str = str(result)
+                            for indicator in mock_indicators:
+                                if indicator in result_str:
+                                    is_mock = True
+                                    print(f"❌ DETECTED MOCK DATA: Found '{indicator}' in results")
+                                    break
+                        
+                        if is_mock:
+                            print("❌ CRITICAL: Brave search returned MOCK DATA instead of real results!")
+                            return {
+                                "success": False,
+                                "error": "Brave search is returning mock data - deployment cancelled",
+                                "stage": "search_validation",
+                                "details": {
+                                    "mock_detected": True,
+                                    "test_results": str(test_results[:1])  # Include first result for debugging
+                                }
+                            }
+                        else:
+                            print("✅ Brave search returned REAL data (no mock patterns detected)")
+                            
+                            # Show sample of real data
+                            if test_results:
+                                first_result = test_results[0]
+                                print(f"   Sample result URL: {getattr(first_result, 'url', 'N/A')[:80]}")
+                                print(f"   Sample title: {getattr(first_result, 'title', 'N/A')[:80]}")
+                    else:
+                        print("❌ Brave search returned no results")
+                        return {
+                            "success": False,
+                            "error": "Brave search returned empty results - API key may be invalid",
+                            "stage": "search_validation",
+                            "details": {
+                                "api_key_present": True,
+                                "results_empty": True
+                            }
+                        }
+                        
+                except Exception as search_error:
+                    print(f"❌ Brave search test failed: {search_error}")
+                    return {
+                        "success": False,
+                        "error": f"Brave search test failed: {search_error}",
+                        "stage": "search_validation",
+                        "details": {
+                            "exception": str(search_error)
+                        }
+                    }
+            else:
+                print("❌ BRAVE_API_KEY not available - cannot proceed with deployment")
+                return {
+                    "success": False,
+                    "error": "BRAVE_API_KEY not available after secret resolution",
+                    "stage": "api_key_validation"
+                }
+            
+            print("=" * 60)
+            print("CREATING AGENT WITH VALIDATED SEARCH")
+            print("=" * 60)
+            
+            test_agent = DatabricksCompatibleAgent(yaml_path=AGENT_CONFIG_PATH)
+            
+            # Run test queries with the agent
             test_queries = [
                 {
-                    "name": "Simple Calculation",
-                    "query": "What is 6*7 in Python?",
-                    "type": "simple"
+                    "name": "Search Query Test",
+                    "query": "What are the latest features in Python 3.12?",
+                    "type": "search_required"
                 },
                 {
                     "name": "Research Query", 
@@ -243,12 +358,73 @@ class DeploymentSteps:
                     response_time = end_time - start_time
                     
                     if response and hasattr(response, 'output') and response.output:
-                        test_results[test_query["name"]] = {
-                            "success": True,
-                            "response_time": response_time,
-                            "query_type": test_query["type"]
-                        }
-                        successful_tests += 1
+                        # Extract text content from response
+                        response_text = ""
+                        for output_item in response.output:
+                            if isinstance(output_item, dict) and "content" in output_item:
+                                for content_item in output_item["content"]:
+                                    if isinstance(content_item, dict) and "text" in content_item:
+                                        response_text += content_item["text"]
+                        
+                        # Check for mock data patterns in the response
+                        mock_patterns = [
+                            "example.com",
+                            "Mock content about",
+                            "This is relevant information",
+                            "Result 1 for:",
+                            "Result 2 for:",
+                            "Additional information regarding"
+                        ]
+                        
+                        contains_mock = False
+                        detected_patterns = []
+                        for pattern in mock_patterns:
+                            if pattern in response_text:
+                                contains_mock = True
+                                detected_patterns.append(pattern)
+                        
+                        if contains_mock:
+                            print(f"❌ MOCK DATA DETECTED in {test_query['name']}: {detected_patterns}")
+                            test_results[test_query["name"]] = {
+                                "success": False,
+                                "error": f"Response contains mock data patterns: {detected_patterns}",
+                                "query_type": test_query["type"],
+                                "response_time": response_time,
+                                "contains_mock": True
+                            }
+                            
+                            # For search-required queries, this is a critical failure
+                            if test_query["type"] == "search_required":
+                                print("❌ CRITICAL: Search-required query returned mock data!")
+                                return {
+                                    "success": False,
+                                    "error": "Agent returned mock data for search query - deployment cancelled",
+                                    "stage": "agent_validation",
+                                    "details": {
+                                        "query": test_query["query"],
+                                        "mock_patterns_found": detected_patterns,
+                                        "response_sample": response_text[:500]
+                                    }
+                                }
+                        else:
+                            # Check if response has substantial content
+                            if len(response_text) < 100:
+                                test_results[test_query["name"]] = {
+                                    "success": False,
+                                    "error": f"Response too short ({len(response_text)} chars) - likely empty",
+                                    "query_type": test_query["type"],
+                                    "response_time": response_time
+                                }
+                            else:
+                                print(f"✅ {test_query['name']}: Real content ({len(response_text)} chars, no mock patterns)")
+                                test_results[test_query["name"]] = {
+                                    "success": True,
+                                    "response_time": response_time,
+                                    "query_type": test_query["type"],
+                                    "response_length": len(response_text),
+                                    "contains_mock": False
+                                }
+                                successful_tests += 1
                     else:
                         test_results[test_query["name"]] = {
                             "success": False,
@@ -349,7 +525,8 @@ class DeploymentSteps:
             }
             
             # Create agent instance with correct YAML path
-            agent_instance = DatabricksCompatibleAgent(yaml_path="deep_research_agent/agent_config.yaml")
+            from deep_research_agent.constants import AGENT_CONFIG_PATH
+            agent_instance = DatabricksCompatibleAgent(yaml_path=AGENT_CONFIG_PATH)
             
             with mlflow.start_run(run_name=f"langgraph-agent-{int(time.time())}") as run:
                 # Log configuration parameters
@@ -457,7 +634,6 @@ class DeploymentSteps:
                 
                 # Environment configuration
                 environment_vars={
-                    "TAVILY_API_KEY": "{{secrets/msh/TAVILY_API_KEY}}",
                     "BRAVE_API_KEY": "{{secrets/msh/BRAVE_API_KEY}}",
                     "VECTOR_SEARCH_INDEX": os.getenv("VECTOR_SEARCH_INDEX", "main.msh.docs_index"),
                     "ENVIRONMENT": str(config.get("ENVIRONMENT", "dev")),

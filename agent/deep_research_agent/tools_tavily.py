@@ -66,10 +66,21 @@ class TavilySearchTool(BaseSearchTool):
             # Format results consistently
             formatted_results = []
             for result in results:
+                # Limit content size to prevent memory bloat
+                content = result.get("content", "")
+                # NO TRUNCATION - preserve full content for comprehensive research
+                # if len(content) > 1000:  # Limit to 1000 characters
+                #     content = content[:1000] + "..."
+                
+                title = result.get("title", "")
+                # Keep title truncation but increase limit
+                if len(title) > 500:  # Increased title limit
+                    title = title[:500] + "..."
+                
                 formatted_results.append({
-                    "title": result.get("title", ""),
+                    "title": title,
                     "url": result.get("url", ""),
-                    "content": result.get("content", ""),
+                    "content": content,
                     "score": result.get("score", 0.0),
                     "published_date": result.get("published_date"),
                 })

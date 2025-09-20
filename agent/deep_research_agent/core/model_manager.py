@@ -206,6 +206,31 @@ class ModelManager:
         model_config = self.config.get_model_for_role(role)
         return self._get_or_create_model(model_config, role)
     
+    def get_chat_model(self, model_name: str = "default") -> ChatDatabricks:
+        """
+        Get a chat model instance by name.
+        
+        Args:
+            model_name: Name of the model ("default", "synthesis", etc.)
+            
+        Returns:
+            ChatDatabricks instance
+            
+        Raises:
+            LLMEndpointError: If model initialization fails
+        """
+        # Map string names to model roles
+        role_mapping = {
+            "default": ModelRole.DEFAULT,
+            "synthesis": ModelRole.SYNTHESIS,
+            "web_research": ModelRole.WEB_RESEARCH,
+            "query_generation": ModelRole.QUERY_GENERATION,
+            "reflection": ModelRole.REFLECTION,
+        }
+        
+        role = role_mapping.get(model_name.lower(), ModelRole.DEFAULT)
+        return self.get_llm_for_role(role)
+    
     def _get_or_create_model(self, model_config: ModelConfig, context: Any = None) -> ChatDatabricks:
         """
         Get or create a model instance with caching.

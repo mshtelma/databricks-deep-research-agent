@@ -94,8 +94,8 @@ class CacheEntry(Generic[T]):
 class CacheConfig:
     """Configuration for cache behavior."""
     
-    max_size: int = 10000  # Maximum number of entries
-    max_memory_mb: int = 500  # Maximum memory usage in MB
+    max_size: int = 2000   # Reduced from 10000 - maximum number of entries
+    max_memory_mb: int = 150  # Reduced from 500MB - maximum memory usage in MB
     default_ttl: float = 900.0  # Default TTL in seconds
     strategy: CacheStrategy = CacheStrategy.ADAPTIVE
     

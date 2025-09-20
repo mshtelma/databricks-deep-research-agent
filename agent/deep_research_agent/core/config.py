@@ -414,7 +414,7 @@ class ConfigManager:
     def get_model_config(self) -> Dict[str, Dict[str, Any]]:
         """Get model configuration for different research phases."""
         yaml_config = self.load_yaml_config()
-        models_config = yaml_config.get("models", {})
+        models_config = yaml_config.get("models", {}) if isinstance(yaml_config, dict) else {}
         
         # Default model configurations
         default_config = {
@@ -451,7 +451,7 @@ class ConfigManager:
         # Merge YAML config with defaults
         result = {}
         for phase, defaults in phase_defaults.items():
-            phase_config = models_config.get(phase, {})
+            phase_config = models_config.get(phase, {}) if isinstance(models_config, dict) else {}
             
             if isinstance(phase_config, str):
                 # Support old format where model was just a string
@@ -465,50 +465,55 @@ class ConfigManager:
         return result
     
     def _find_yaml_config_path(self) -> Optional[str]:
-        """Find agent_config.yaml in various locations, including MLflow contexts."""
+        """Find configuration file using the centralized search order."""
+        from deep_research_agent.constants import CONFIG_SEARCH_ORDER
+        
         current_dir = Path.cwd()
-        
-        # Get the directory where this config.py file is located
         config_module_dir = Path(__file__).parent
-        deep_research_agent_dir = config_module_dir.parent  # Should be deep_research_agent/
+        deep_research_agent_dir = config_module_dir.parent
         
-        # Define possible locations for the YAML config
-        possible_paths = [
-            # Standard development locations
-            current_dir / "agent_config.yaml",
-            current_dir / "agent_authoring" / "agent_config.yaml",
-            deep_research_agent_dir / "agent_config.yaml",
+        # Build comprehensive search locations for each config name
+        search_locations = []
+        
+        # Define base paths to check for each config file
+        base_paths = [
+            # Local development
+            current_dir,
+            current_dir / "agent",
             
-            # MLflow model serving contexts - the YAML may be in various locations
-            # When MLflow unpacks models, it creates various directory structures
-            current_dir / "deep_research_agent" / "agent_config.yaml",
-            current_dir / "model" / "deep_research_agent" / "agent_config.yaml",
-            current_dir / "model" / "agent_config.yaml",
+            # MLflow runtime paths (CRITICAL for deployment)
+            Path("/model/code"),
+            Path("/model"),
+            current_dir / "model" / "code",
+            current_dir / "model",
             
-            # MLflow artifact locations (when logged separately)
-            current_dir / "config" / "agent_config.yaml",
-            current_dir / "model" / "config" / "agent_config.yaml",
+            # Module relative paths
+            deep_research_agent_dir.parent,
+            config_module_dir.parent.parent,
             
-            # Parent directory checks (in case we're in a subdirectory)
-            current_dir.parent / "agent_config.yaml",
-            current_dir.parent / "deep_research_agent" / "agent_config.yaml",
-            
-            # Check relative to where the agent module is located
-            config_module_dir / ".." / "agent_config.yaml",
-            config_module_dir / ".." / ".." / "agent_config.yaml",
+            # Parent directory fallbacks
+            current_dir.parent,
+            current_dir.parent / "agent"
         ]
         
-        print(f"[ConfigManager._find_yaml_config_path] Searching in: {len(possible_paths)} locations")
-        for i, path in enumerate(possible_paths):
-            resolved_path = path.resolve()
-            print(f"[ConfigManager._find_yaml_config_path] Checking {i+1}: {resolved_path}")
-            if resolved_path.exists():
-                yaml_path = str(resolved_path)
-                print(f"[ConfigManager._find_yaml_config_path] Found config at: {yaml_path}")
-                logger.info(f"Found YAML config at: {yaml_path}")
-                return yaml_path
+        for config_name in CONFIG_SEARCH_ORDER:
+            for base_path in base_paths:
+                search_locations.append(base_path / config_name)
         
-        print(f"[ConfigManager._find_yaml_config_path] No YAML config found in any location")
+        # Log all paths being searched for debugging
+        print(f"[ConfigManager._find_yaml_config_path] Searching in: {len(search_locations)} locations")
+        
+        for idx, path in enumerate(search_locations, 1):
+            print(f"[ConfigManager._find_yaml_config_path] Checking {idx}: {path}")
+            if path.exists():
+                logger.info(f"Found config at: {path}")
+                return str(path)
+        
+        # Log failure with all attempted paths
+        logger.error(f"Config not found in any of {len(search_locations)} locations")
+        logger.error(f"Searched for: {CONFIG_SEARCH_ORDER}")
+        logger.error(f"In base paths: {[str(p) for p in base_paths[:5]]}")  # Show first 5
+        
         return None
 
     def load_yaml_config(self) -> Dict[str, Any]:
@@ -549,7 +554,11 @@ class ConfigManager:
                 if 'tools' in self._yaml_config:
                     tools = self._yaml_config.get('tools', {})
                     for tool_name, tool_config in tools.items():
-                        enabled = tool_config.get('enabled', 'not specified')
+                        if isinstance(tool_config, dict):
+                            enabled = tool_config.get('enabled', 'not specified')
+                        else:
+                            # Non-dict entries under tools (e.g., integers like max_concurrent_searches)
+                            enabled = 'n/a'
                         print(f"[ConfigManager.load_yaml_config] Tool {tool_name}: enabled={enabled}")
                         logger.info(f"Tool {tool_name} config: enabled={enabled}")
                 
@@ -575,14 +584,19 @@ class ConfigManager:
             return None
         
         # Check environment-specific overrides first
-        if environment and "environments" in yaml_config and environment in yaml_config["environments"]:
+        if (
+            environment
+            and isinstance(yaml_config, dict)
+            and isinstance(yaml_config.get("environments"), dict)
+            and environment in yaml_config["environments"]
+        ):
             env_config = yaml_config["environments"][environment]
             env_value = self._get_nested_value(env_config, key_path)
             if env_value is not None:
                 return env_value
         
         # Fall back to base configuration
-        return self._get_nested_value(yaml_config, key_path)
+        return self._get_nested_value(yaml_config, key_path) if isinstance(yaml_config, dict) else None
     
     def _get_nested_value(self, config: Dict[str, Any], key_path: str) -> Any:
         """Get nested value from dictionary using dot notation."""
@@ -596,6 +610,93 @@ class ConfigManager:
                 return None
         
         return value
+    
+    def validate(self, config: Optional[Dict[str, Any]] = None) -> List[str]:
+        """
+        Validate configuration completeness and correctness.
+        
+        Args:
+            config: Optional configuration to validate (uses current config if None)
+            
+        Returns:
+            List of validation error messages (empty if valid)
+        """
+        errors = []
+        
+        try:
+            # Validate agent configuration can be loaded
+            agent_config = self.get_agent_config()
+            
+            # Check for required LLM endpoint
+            if not agent_config.llm_endpoint:
+                errors.append("LLM endpoint is required")
+            
+            # Check tool configurations
+            for tool_type in [ToolType.BRAVE_SEARCH, ToolType.TAVILY_SEARCH]:
+                try:
+                    tool_config = self.get_tool_config(tool_type)
+                    if tool_config.enabled:
+                        api_key = tool_config.config.get("api_key")
+                        if not api_key:
+                            errors.append(f"{tool_type.value} requires API key when enabled")
+                except Exception as e:
+                    errors.append(f"Error validating {tool_type.value}: {e}")
+            
+            # Validate numeric ranges
+            if agent_config.max_research_loops < 1 or agent_config.max_research_loops > 10:
+                errors.append("max_research_loops must be between 1 and 10")
+            
+            if agent_config.initial_query_count < 1 or agent_config.initial_query_count > 20:
+                errors.append("initial_query_count must be between 1 and 20")
+                
+        except Exception as e:
+            errors.append(f"Configuration validation failed: {e}")
+        
+        return errors
+    
+    @property
+    def default_model(self):
+        """Get default model configuration for compatibility."""
+        model_config = self.get_model_config()
+        default = model_config.get("default", {})
+        
+        # Create a simple object with endpoint attribute
+        class DefaultModel:
+            def __init__(self, endpoint, temperature=0.7, max_tokens=4000):
+                self.endpoint = endpoint
+                self.temperature = temperature
+                self.max_tokens = max_tokens
+        
+        return DefaultModel(
+            endpoint=default.get("endpoint", "databricks-claude-3-7-sonnet"),
+            temperature=default.get("temperature", 0.7),
+            max_tokens=default.get("max_tokens", 4000)
+        )
+    
+    @property
+    def embedding_model(self):
+        """Get embedding model configuration for compatibility."""
+        model_config = self.get_model_config()
+        embedding = model_config.get("embedding", {})
+        
+        # Create a simple object with endpoint attribute
+        class EmbeddingModel:
+            def __init__(self, endpoint):
+                self.endpoint = endpoint
+        
+        return EmbeddingModel(
+            endpoint=embedding.get("endpoint", "databricks-gte-large-en")
+        )
+    
+    @property
+    def enable_fallback(self):
+        """Get fallback configuration for compatibility."""
+        return self._get_config_value(
+            "enable_fallback",
+            "ENABLE_FALLBACK", 
+            True,
+            "tools.enable_fallback"
+        )
 
 
 def get_default_config() -> AgentConfiguration:

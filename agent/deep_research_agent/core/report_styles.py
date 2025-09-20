@@ -18,6 +18,7 @@ class ReportStyle(str, Enum):
     PROFESSIONAL = "professional"
     TECHNICAL = "technical"
     EXECUTIVE = "executive"
+    DEFAULT = "default"  # Adaptive structure based on query context
 
 
 class CitationStyle(str, Enum):
@@ -221,6 +222,33 @@ STYLE_CONFIGS: Dict[ReportStyle, StyleConfig] = {
             "Risk-opportunity balance",
             "Action-oriented"
         ]
+    ),
+    
+    ReportStyle.DEFAULT: StyleConfig(
+        style=ReportStyle.DEFAULT,
+        tone="Comprehensive, analytical, and well-structured",
+        structure=[
+            "Executive Summary",
+            "Key Findings", 
+            "Detailed Analysis",
+            "Comparative Analysis",
+            "Conclusions and Recommendations",
+            "Data Sources and Methodology",
+            "Appendix"
+        ],  # Comprehensive structure with narrative and appendix
+        citation_format=CitationStyle.APA,
+        length_guideline="Comprehensive coverage based on query complexity",
+        language_complexity="Clear and accessible while maintaining analytical depth",
+        use_technical_terms=True,
+        include_visuals=True,
+        key_features=[
+            "Comprehensive coverage",
+            "Clear narrative structure",
+            "Detailed comparative analysis",
+            "Complete appendix with sources",
+            "Executive summary for quick reference",
+            "Methodological transparency"
+        ]
     )
 }
 
@@ -326,6 +354,70 @@ Create a social media hook:
 - Keep under 280 characters
 - Make it shareable and discussion-worthy
 - Include relevant hashtags
+""",
+            # DEFAULT style templates for comprehensive reports
+            (ReportStyle.DEFAULT, "Executive Summary"): """
+Write a comprehensive executive summary (200-300 words) that includes:
+- Brief overview of the research question/objective
+- Key findings summarized in 3-5 bullet points
+- Major insights and patterns discovered
+- Primary conclusions and implications
+- Brief mention of methodology used
+This should stand alone and give readers the complete picture at a glance.
+""",
+            (ReportStyle.DEFAULT, "Key Findings"): """
+Present the most important discoveries from your research:
+- Organize findings thematically or by importance
+- Use clear subheadings to structure content
+- Include relevant data, statistics, and specific examples
+- Highlight surprising or counterintuitive results
+- Support each finding with citations to sources
+- Use bullet points or numbered lists for clarity where appropriate
+""",
+            (ReportStyle.DEFAULT, "Detailed Analysis"): """
+Provide in-depth analysis of the research findings:
+- Explain the significance of each major finding
+- Analyze patterns, trends, and relationships in the data
+- Discuss implications and context
+- Address any limitations or caveats in the data
+- Connect findings to broader themes or principles
+- Include detailed explanations and reasoning
+""",
+            (ReportStyle.DEFAULT, "Comparative Analysis"): """
+Compare and contrast different aspects of your findings:
+- Create clear comparisons between entities, scenarios, or options
+- Use tables or structured formats to highlight differences
+- Analyze advantages and disadvantages
+- Identify best practices or optimal solutions
+- Explain why certain approaches work better than others
+- Provide rankings or recommendations based on criteria
+""",
+            (ReportStyle.DEFAULT, "Conclusions and Recommendations"): """
+Synthesize your research into actionable conclusions:
+- Summarize the main takeaways from your analysis
+- Provide specific, actionable recommendations
+- Prioritize recommendations by importance or feasibility
+- Address potential challenges or implementation considerations
+- Suggest next steps or areas for further research
+- End with a strong, memorable conclusion
+""",
+            (ReportStyle.DEFAULT, "Data Sources and Methodology"): """
+Provide transparency about your research approach:
+- List the primary sources and databases used
+- Explain your search strategy and criteria
+- Describe any limitations in the data or methodology
+- Note the date range and scope of your research
+- Mention any assumptions made during analysis
+- Include confidence levels or data quality assessments where relevant
+""",
+            (ReportStyle.DEFAULT, "Appendix"): """
+Include supporting information and detailed references:
+- Complete list of all sources with URLs where available
+- Detailed data tables or supplementary charts
+- Technical specifications or assumptions used
+- Extended explanations of complex topics
+- Additional context that supports the main analysis
+- Contact information for key sources if applicable
 """
         }
         

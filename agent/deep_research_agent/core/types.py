@@ -68,11 +68,85 @@ class IntermediateEventType(str, Enum):
     THOUGHT_SNAPSHOT = "thought_snapshot"
     SYNTHESIS_PROGRESS = "synthesis_progress"
     
+    # Enhanced LLM events
+    LLM_PROMPT_SENT = "llm_prompt_sent"
+    LLM_STREAMING = "llm_streaming"
+    LLM_RESPONSE_COMPLETE = "llm_response_complete"
+    LLM_THINKING = "llm_thinking"
+    
+    # Enhanced agent events
+    AGENT_START = "agent_start"
+    AGENT_COMPLETE = "agent_complete"
+    AGENT_THINKING = "agent_thinking"
+    AGENT_DECISION = "agent_decision"
+    
+    # Query and search events
+    QUERY_GENERATED = "query_generated"
+    QUERY_EXECUTING = "query_executing"
+    SEARCH_RESULTS_FOUND = "search_results_found"
+    
     # Content/citation events
     CITATION_ADDED = "citation_added"
+    SOURCE_ANALYZED = "source_analyzed"
+    
+    # Multi-agent specific events
+    AGENT_HANDOFF = "agent_handoff"
+    PLAN_CREATED = "plan_created"
+    PLAN_UPDATED = "plan_updated"
+    PLAN_ITERATION = "plan_iteration"
+    BACKGROUND_INVESTIGATION = "background_investigation"
+    GROUNDING_START = "grounding_start"
+    GROUNDING_COMPLETE = "grounding_complete"
+    GROUNDING_CONTRADICTION = "grounding_contradiction"
+    REPORT_GENERATION = "report_generation"
+    QUALITY_ASSESSMENT = "quality_assessment"
     
     # Stage transitions (existing, for compatibility)
     STAGE_TRANSITION = "stage_transition"
+    
+    # NEW: Enhanced event types for transparent UI
+    # Reasoning and reflection events
+    REASONING_REFLECTION = "reasoning_reflection"
+    HYPOTHESIS_FORMED = "hypothesis_formed"
+    SOURCE_EVALUATION = "source_evaluation"
+    PARTIAL_SYNTHESIS = "partial_synthesis"
+    CONFIDENCE_UPDATE = "confidence_update"
+    KNOWLEDGE_GAP_IDENTIFIED = "knowledge_gap_identified"
+    
+    # Planning and strategy events
+    PLAN_CONSIDERATION = "plan_consideration"
+    SEARCH_STRATEGY = "search_strategy"
+    STEP_GENERATED = "step_generated"
+    PLAN_QUALITY_ASSESSMENT = "plan_quality_assessment"
+    PLAN_REVISION = "plan_revision"
+    
+    # Investigation and discovery events
+    INVESTIGATION_START = "investigation_start"
+    SOURCE_DISCOVERED = "source_discovered"
+    CONTEXT_ESTABLISHED = "context_established"
+    
+    # Verification and fact-checking events
+    CLAIM_IDENTIFIED = "claim_identified"
+    VERIFICATION_ATTEMPT = "verification_attempt"
+    CONTRADICTION_FOUND = "contradiction_found"
+    CONFIDENCE_ADJUSTMENT = "confidence_adjustment"
+    
+    # Synthesis and reporting events
+    SYNTHESIS_STRATEGY = "synthesis_strategy"
+    SECTION_GENERATION = "section_generation"
+    CITATION_LINKING = "citation_linking"
+
+
+class EventCategory(str, Enum):
+    """Categories of events for UI organization and visualization."""
+    SEARCH = "search"              # External searches and queries
+    REFLECTION = "reflection"      # Internal reasoning and decision-making
+    ANALYSIS = "analysis"          # Data processing and evaluation
+    SYNTHESIS = "synthesis"        # Conclusion forming and report generation
+    PLANNING = "planning"          # Strategy and approach decisions
+    VERIFICATION = "verification"  # Fact-checking and validation
+    COORDINATION = "coordination"  # Agent handoffs and workflow transitions
+    ERROR = "error"               # Errors and recovery attempts
 
 
 class ReasoningVisibility(str, Enum):
@@ -97,6 +171,11 @@ class SearchResult:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
+        # MEMORY OPTIMIZATION: Increased limit for comprehensive research
+        MAX_CONTENT_LENGTH = 50000  # ~50KB max per result for detailed content
+        if len(self.content) > MAX_CONTENT_LENGTH:
+            self.content = self.content[:MAX_CONTENT_LENGTH] + "...[truncated for memory efficiency]"
+        
         # Keep aliases in sync
         if self.relevance_score == 0.0 and self.score:
             self.relevance_score = self.score
@@ -116,6 +195,16 @@ class Citation:
     title: Optional[str] = None
     snippet: Optional[str] = None
     relevance_score: float = 0.0
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert Citation to dictionary for serialization."""
+        return {
+            "source": self.source,
+            "url": self.url,
+            "title": self.title,
+            "snippet": self.snippet,
+            "relevance_score": self.relevance_score
+        }
 
 
 @dataclass
@@ -129,6 +218,83 @@ class IntermediateEvent:
     event_type: IntermediateEventType = IntermediateEventType.ACTION_START
     data: Dict[str, Any] = field(default_factory=dict)
     meta: Dict[str, Any] = field(default_factory=dict)
+    
+    # NEW: Enhanced fields for rich UI events
+    category: Optional[EventCategory] = None  # Event category for UI organization
+    title: Optional[str] = None  # Human-readable title
+    description: Optional[str] = None  # Detailed description of what's happening
+    confidence: Optional[float] = None  # Confidence score (0.0-1.0)
+    reasoning: Optional[str] = None  # Explanation of why this action was taken
+    alternatives_considered: List[str] = field(default_factory=list)  # Other options considered
+    related_event_ids: List[str] = field(default_factory=list)  # IDs of related events
+    priority: int = 0  # Priority for UI ordering (higher = more important)
+    
+    def set_category_from_event_type(self) -> None:
+        """Set category based on event type if not already set."""
+        if self.category is not None:
+            return
+            
+        # Map event types to categories
+        category_mapping = {
+            # Search events
+            IntermediateEventType.QUERY_GENERATED: EventCategory.SEARCH,
+            IntermediateEventType.QUERY_EXECUTING: EventCategory.SEARCH,
+            IntermediateEventType.SEARCH_RESULTS_FOUND: EventCategory.SEARCH,
+            IntermediateEventType.TOOL_CALL_START: EventCategory.SEARCH,
+            IntermediateEventType.TOOL_CALL_COMPLETE: EventCategory.SEARCH,
+            IntermediateEventType.SOURCE_DISCOVERED: EventCategory.SEARCH,
+            IntermediateEventType.SEARCH_STRATEGY: EventCategory.SEARCH,
+            
+            # Reflection events
+            IntermediateEventType.REASONING_REFLECTION: EventCategory.REFLECTION,
+            IntermediateEventType.AGENT_THINKING: EventCategory.REFLECTION,
+            IntermediateEventType.HYPOTHESIS_FORMED: EventCategory.REFLECTION,
+            IntermediateEventType.CONFIDENCE_UPDATE: EventCategory.REFLECTION,
+            IntermediateEventType.KNOWLEDGE_GAP_IDENTIFIED: EventCategory.REFLECTION,
+            
+            # Analysis events  
+            IntermediateEventType.SOURCE_EVALUATION: EventCategory.ANALYSIS,
+            IntermediateEventType.SOURCE_ANALYZED: EventCategory.ANALYSIS,
+            IntermediateEventType.CONTEXT_ESTABLISHED: EventCategory.ANALYSIS,
+            IntermediateEventType.QUALITY_ASSESSMENT: EventCategory.ANALYSIS,
+            
+            # Synthesis events
+            IntermediateEventType.PARTIAL_SYNTHESIS: EventCategory.SYNTHESIS,
+            IntermediateEventType.SYNTHESIS_PROGRESS: EventCategory.SYNTHESIS,
+            IntermediateEventType.SYNTHESIS_STRATEGY: EventCategory.SYNTHESIS,
+            IntermediateEventType.SECTION_GENERATION: EventCategory.SYNTHESIS,
+            IntermediateEventType.CITATION_LINKING: EventCategory.SYNTHESIS,
+            IntermediateEventType.REPORT_GENERATION: EventCategory.SYNTHESIS,
+            
+            # Planning events
+            IntermediateEventType.PLAN_CONSIDERATION: EventCategory.PLANNING,
+            IntermediateEventType.PLAN_CREATED: EventCategory.PLANNING,
+            IntermediateEventType.PLAN_UPDATED: EventCategory.PLANNING,
+            IntermediateEventType.STEP_GENERATED: EventCategory.PLANNING,
+            IntermediateEventType.PLAN_QUALITY_ASSESSMENT: EventCategory.PLANNING,
+            IntermediateEventType.PLAN_REVISION: EventCategory.PLANNING,
+            IntermediateEventType.INVESTIGATION_START: EventCategory.PLANNING,
+            
+            # Verification events
+            IntermediateEventType.CLAIM_IDENTIFIED: EventCategory.VERIFICATION,
+            IntermediateEventType.VERIFICATION_ATTEMPT: EventCategory.VERIFICATION,
+            IntermediateEventType.CONTRADICTION_FOUND: EventCategory.VERIFICATION,
+            IntermediateEventType.GROUNDING_START: EventCategory.VERIFICATION,
+            IntermediateEventType.GROUNDING_COMPLETE: EventCategory.VERIFICATION,
+            IntermediateEventType.GROUNDING_CONTRADICTION: EventCategory.VERIFICATION,
+            IntermediateEventType.CONFIDENCE_ADJUSTMENT: EventCategory.VERIFICATION,
+            
+            # Coordination events
+            IntermediateEventType.AGENT_HANDOFF: EventCategory.COORDINATION,
+            IntermediateEventType.AGENT_START: EventCategory.COORDINATION,
+            IntermediateEventType.AGENT_COMPLETE: EventCategory.COORDINATION,
+            IntermediateEventType.STAGE_TRANSITION: EventCategory.COORDINATION,
+            
+            # Error events
+            IntermediateEventType.TOOL_CALL_ERROR: EventCategory.ERROR,
+        }
+        
+        self.category = category_mapping.get(self.event_type, EventCategory.ANALYSIS)
 
 
 @dataclass

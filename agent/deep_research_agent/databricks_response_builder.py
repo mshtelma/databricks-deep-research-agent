@@ -18,7 +18,7 @@ from typing import Dict, List, Any, Optional, Union
 from uuid import uuid4
 
 from mlflow.types.responses import ResponsesAgentResponse
-from core import (
+from deep_research_agent.core import (
     get_logger,
     ResearchContext,
     WorkflowMetrics,

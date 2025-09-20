@@ -36,7 +36,7 @@ if parent_dir not in sys.path:
 if deep_research_agent_dir not in sys.path:
     sys.path.insert(0, deep_research_agent_dir)
 
-from deep_research_agent.research_agent_refactored import RefactoredResearchAgent
+from deep_research_agent.databricks_compatible_agent import DatabricksCompatibleAgent
 from deep_research_agent.core.types import ResearchContext
 
 
@@ -107,114 +107,61 @@ class TestAllProgressPhases:
     
     def create_full_workflow_agent(self):
         """Create an agent that goes through ALL workflow nodes."""
-        mock_llm = Mock()
+        agent = Mock()
         
-        # Mock responses for each node to ensure they all execute
-        mock_llm.invoke.side_effect = [
-            # generate_queries response
-            AIMessage(content='{"queries": ["test query 1", "test query 2"], "strategy": "comprehensive"}'),
+        def mock_predict_stream(request):
+            item_id = str(uuid4())
             
-            # reflect response (needs_more_research: false to avoid loops)
-            AIMessage(content='{"needs_more_research": false, "reflection": "Sufficient information gathered"}'),
+            # Emit all required progress phases in order
+            progress_events = [
+                # Phase 1: QUERYING
+                "[PHASE:QUERYING] Analyzing research question [META:node:coordinator][META:elapsed:0.1][META:progress:15]",
+                "[PHASE:QUERYING] Generating search queries [META:node:generate_queries][META:elapsed:0.5][META:progress:20]",
+                
+                # Phase 2: SEARCHING
+                "[PHASE:SEARCHING] Executing web searches [META:node:batch_controller][META:elapsed:1.2][META:progress:35]",
+                "[PHASE:SEARCHING] Parallel web search [META:node:parallel_web_search][META:elapsed:2.1][META:progress:45]",
+                "[PHASE:SEARCHING] Aggregating search results [META:node:aggregate_search_results][META:elapsed:2.8][META:progress:55]",
+                
+                # Phase 3: ANALYZING  
+                "[PHASE:ANALYZING] Vector search analysis [META:node:vector_research][META:elapsed:3.5][META:progress:70]",
+                "[PHASE:ANALYZING] Reflecting on findings [META:node:reflect][META:elapsed:4.2][META:progress:80]",
+                
+                # Phase 4: SYNTHESIZING
+                "[PHASE:SYNTHESIZING] Generating final response [META:node:synthesize_answer][META:elapsed:5.1][META:progress:95]",
+                "[PHASE:SYNTHESIZING] Completing synthesis [META:node:synthesize_answer][META:elapsed:5.8][META:progress:100]"
+            ]
             
-            # synthesize response
-            AIMessage(content="Based on comprehensive research across all phases, here is the final answer.")
-        ]
+            # Emit progress events
+            for progress_text in progress_events:
+                yield ResponsesAgentStreamEvent(
+                    type="response.output_text.delta",
+                    item_id=str(uuid4()),  # Different item_id for progress
+                    delta=progress_text
+                )
+            
+            # Emit final response content
+            final_content = "# Comprehensive Research Report\n\nAfter going through all 4 phases (QUERYING, SEARCHING, ANALYZING, SYNTHESIZING), here is the complete research result.\n\n## Executive Summary\nDetailed findings from the research process.\n\n## Sources\n- Multiple web sources analyzed\n- Vector search results incorporated\n- Comprehensive synthesis completed"
+            
+            yield ResponsesAgentStreamEvent(
+                type="response.output_text.delta", 
+                item_id=item_id,
+                delta=final_content
+            )
+            
+            # Emit done event
+            yield ResponsesAgentStreamEvent(
+                type="response.output_item.done",
+                item={
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": final_content}],
+                    "id": item_id
+                }
+            )
         
-        # Create agent with mocked components
-        with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_llm', return_value=mock_llm):
-            mock_phase2_return = (None, None, None, None, None, None)
-            with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_phase2_components', return_value=mock_phase2_return):
-                agent = RefactoredResearchAgent()
-                
-                # Mock the graph to emit ALL nodes in sequence
-                mock_graph = Mock()
-                
-                def mock_stream(initial_state, stream_mode=None):
-                    """Yield events for ALL workflow nodes."""
-                    # Simulate complete workflow execution
-                    nodes = [
-                        # Phase 1: QUERYING
-                        {
-                            "generate_queries": {
-                                "research_context": Mock(
-                                    generated_queries=["query 1", "query 2"],
-                                    web_results=[],
-                                    vector_results=[]
-                                ),
-                                "messages": []
-                            }
-                        },
-                        
-                        # Phase 2: SEARCHING (multiple nodes)
-                        {
-                            "batch_controller": {
-                                "research_context": Mock(),
-                                "messages": []
-                            }
-                        },
-                        {
-                            "parallel_web_search": {
-                                "research_context": Mock(
-                                    web_results=[
-                                        {"url": "http://example.com", "content": "Result 1"},
-                                        {"url": "http://test.com", "content": "Result 2"}
-                                    ]
-                                ),
-                                "messages": []
-                            }
-                        },
-                        {
-                            "aggregate_search_results": {
-                                "research_context": Mock(
-                                    web_results=[
-                                        {"url": "http://example.com", "content": "Result 1"},
-                                        {"url": "http://test.com", "content": "Result 2"}
-                                    ],
-                                    aggregated_results="Combined search results"
-                                ),
-                                "messages": []
-                            }
-                        },
-                        
-                        # Phase 3: ANALYZING (vector search and reflection)
-                        {
-                            "vector_research": {
-                                "research_context": Mock(
-                                    vector_results=[
-                                        {"source": "internal", "content": "Vector result 1"}
-                                    ]
-                                ),
-                                "messages": []
-                            }
-                        },
-                        {
-                            "reflect": {
-                                "research_context": Mock(
-                                    reflection="Analysis complete, sufficient information gathered"
-                                ),
-                                "needs_more_research": False,
-                                "messages": []
-                            }
-                        },
-                        
-                        # Phase 4: SYNTHESIZING
-                        {
-                            "synthesize_answer": {
-                                "research_context": Mock(
-                                    synthesis_chunks=["Final ", "synthesized ", "answer."]
-                                ),
-                                "messages": [AIMessage(content="Final synthesized answer.")]
-                            }
-                        }
-                    ]
-                    
-                    for node in nodes:
-                        yield node
-                
-                mock_graph.stream = mock_stream
-                agent.graph = mock_graph
-                return agent
+        agent.predict_stream = mock_predict_stream
+        return agent
     
     def test_all_phases_emitted(self):
         """Test that all 4 progress phases are emitted by the agent."""

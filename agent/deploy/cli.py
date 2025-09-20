@@ -146,8 +146,8 @@ Environment Examples:
     # Configuration
     parser.add_argument(
         "--config",
-        default="deploy/config.yaml",
-        help="Path to deployment configuration file (default: deploy/config.yaml)"
+        default="conf/deploy/",
+        help="Path to deployment configuration directory or file (default: conf/deploy/)"
     )
     
     parser.add_argument(

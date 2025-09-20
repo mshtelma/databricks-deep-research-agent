@@ -378,8 +378,17 @@ class UnifiedConfigManager:
         """Get configuration for a specific tool."""
         base_path = f"tools.{tool_name}"
         
+        # Get schema defaults - tavily is disabled by default, others are enabled
+        schema_defaults = {
+            "tavily_search": False,
+            "brave_search": True,
+            "vector_search": True,
+            "uc_function": True
+        }
+        default_enabled = schema_defaults.get(tool_name, True)
+        
         return ToolConfigSchema(
-            enabled=self.get(f"{base_path}.enabled", True, bool),
+            enabled=self.get(f"{base_path}.enabled", default_enabled, bool),
             timeout_seconds=self.get(f"{base_path}.timeout_seconds", None, int),
             max_retries=self.get(f"{base_path}.max_retries", None, int),
             **self._get_tool_specific_config(tool_name, base_path)

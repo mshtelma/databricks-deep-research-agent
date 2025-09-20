@@ -1,15 +1,25 @@
 """
-Pytest configuration for refactored agent tests.
+Pytest configuration for research agent tests.
 
-This module provides common fixtures and configuration for testing
-the refactored research agent with improved architecture.
+NEW TESTING APPROACH (Post-TEST_MODE removal):
+- Uses real services (Databricks LLMs, Brave Search) with test-optimized configurations
+- Dependency injection through config_override parameter instead of environment flags
+- Integration tests that validate actual functionality rather than mock behavior
+- Significantly reduced mock usage - only for specific component isolation
+- TEST_MODE environment variable is no longer used or respected
+
+Legacy mock fixtures are maintained for backward compatibility but new tests
+should use the integration_config fixtures for real service testing.
 """
 
 import pytest
 import os
 import sys
-from unittest.mock import Mock, patch, MagicMock
-from typing import Dict, Any, Optional
+import yaml
+import warnings
+from pathlib import Path
+from unittest.mock import Mock, patch, MagicMock, AsyncMock
+from typing import Dict, Any, Optional, Union
 
 # Add parent directory to path for imports  
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -20,8 +30,10 @@ if parent_dir not in sys.path:
 if deep_research_agent_dir not in sys.path:
     sys.path.insert(0, deep_research_agent_dir)
 
+# No longer set TEST_MODE - agents now use dependency injection for testing
+# Tests provide configuration overrides instead of environment flags
+
 from deep_research_agent.core import (
-    ConfigManager,
     AgentConfiguration,
     SearchResult,
     Citation,
@@ -32,27 +44,71 @@ from deep_research_agent.core import (
 )
 from deep_research_agent.components import create_tool_registry
 
+# Import integration test fixtures
+from tests.integration_config.test_fixtures import (
+    enhanced_agent, databricks_agent, coordinator_agent, 
+    planner_agent, researcher_agent, fact_checker_agent, reporter_agent,
+    assert_real_search_results, assert_real_report_content,
+    skip_if_no_api_key, get_simple_test_query, get_complex_test_query
+)
+
+# Import modern agent classes
+try:
+    from deep_research_agent.enhanced_research_agent import EnhancedResearchAgent
+    from deep_research_agent.databricks_compatible_agent import DatabricksCompatibleAgent
+    from deep_research_agent.databricks_helper import get_workspace_client, create_mock_workspace_client
+    MODERN_AGENTS_AVAILABLE = True
+except ImportError as e:
+    warnings.warn(f"Modern agents not available: {e}")
+    MODERN_AGENTS_AVAILABLE = False
+
+
+def load_test_config():
+    """Load test configuration optimized for real services with test settings."""
+    test_config_path = Path(__file__).parent / "integration_config" / "test_agent_config.yaml"
+    if test_config_path.exists():
+        with open(test_config_path, 'r') as f:
+            return yaml.safe_load(f)
+    else:
+        # Return minimal real test config - no TEST_MODE
+        return {
+            "llm": {
+                "primary_endpoint": "databricks-claude-3-7-sonnet",
+                "temperature": 0.1,
+                "max_tokens": 1000
+            },
+            "search": {
+                "providers": [{"type": "brave", "enabled": True}],
+                "rate_limiting": {"max_concurrent_searches": 2}
+            },
+            "research": {
+                "max_research_loops": 1,
+                "initial_query_count": 2
+            },
+            "workflow": {
+                "enable_background_investigation": True,
+                "auto_accept_plan": True
+            }
+        }
+
 
 @pytest.fixture(scope="session")
-def test_config():
-    """Provide test configuration for all tests."""
-    return {
-        "llm_endpoint": "test-databricks-endpoint",
-        "max_research_loops": 1,
-        "initial_query_count": 2,
-        "temperature": 0.7,
-        "max_tokens": 1000,
-        "timeout_seconds": 10,
-        "max_retries": 1,
-        "tavily_api_key": "test-tavily-key",
-        "vector_search_index": "test.schema.index"
-    }
+def test_config_yaml():
+    """Provide test configuration from YAML file."""
+    return load_test_config()
+
+
+@pytest.fixture(scope="session")
+def test_config(test_config_yaml):
+    """Provide test configuration for all tests - uses real services with test settings."""
+    return test_config_yaml
 
 
 @pytest.fixture
 def config_manager(test_config):
     """Provide configured ConfigManager instance."""
-    return ConfigManager(test_config)
+    from deep_research_agent.core.unified_config import get_config_manager
+    return get_config_manager(override_config=test_config)
 
 
 @pytest.fixture
@@ -395,3 +451,133 @@ def mock_error():
 def sample_request():
     """Provide sample request for testing."""
     return create_test_request("What are the latest AI trends in 2024?")
+
+
+# New fixtures for modern agent architecture
+
+@pytest.fixture(scope="session")
+def mock_workspace_client():
+    """Provide mock Databricks workspace client."""
+    return create_mock_workspace_client()
+
+
+@pytest.fixture
+def enhanced_agent_config():
+    """Provide configuration for EnhancedResearchAgent."""
+    return {
+        "multi_agent": {"enabled": True},
+        "planning": {
+            "enable_iterative_planning": True,
+            "max_plan_iterations": 2,
+            "plan_quality_threshold": 0.7,
+            "auto_accept_plan": True
+        },
+        "background_investigation": {"enabled": True},
+        "grounding": {
+            "enabled": True,
+            "verification_level": "moderate"
+        },
+        "report": {"default_style": "professional"},
+        "reflexion": {"enabled": True}
+    }
+
+
+@pytest.fixture
+def mock_enhanced_agent(enhanced_agent_config):
+    """Provide mock EnhancedResearchAgent for testing."""
+    if not MODERN_AGENTS_AVAILABLE:
+        pytest.skip("Modern agents not available")
+    
+    # Create mock LLM
+    mock_llm = AsyncMock()
+    mock_llm.ainvoke = AsyncMock(return_value=Mock(content="Test response"))
+    
+    # Create mock tools
+    mock_tools = {
+        "search": [Mock(execute=Mock(return_value=[]))]
+    }
+    
+    # Create agent with mocks
+    agent = EnhancedResearchAgent(
+        config_path=None,
+        llm=mock_llm,
+        tool_registry=mock_tools,
+        **enhanced_agent_config
+    )
+    
+    return agent
+
+
+@pytest.fixture
+def mock_databricks_agent():
+    """Provide mock DatabricksCompatibleAgent for testing."""
+    if not MODERN_AGENTS_AVAILABLE:
+        pytest.skip("Modern agents not available")
+    
+    # Create a simple test config
+    test_config = {
+        "models": {"default": {"endpoint": "test-endpoint"}},
+        "research": {"max_research_loops": 1}
+    }
+    
+    agent = DatabricksCompatibleAgent(config=test_config)
+    
+    # Mock the underlying agent's graph to avoid actual execution
+    agent.agent.graph = Mock()
+    agent.agent.graph.ainvoke = AsyncMock(return_value={
+        "final_report": "Test report content",
+        "citations": [],
+        "factuality_score": 0.8
+    })
+    
+    return agent
+
+
+@pytest.fixture
+def agent_factory():
+    """Factory fixture to create different types of agents."""
+    def _create_agent(agent_type="databricks", **kwargs):
+        if agent_type == "enhanced":
+            return mock_enhanced_agent(**kwargs) if MODERN_AGENTS_AVAILABLE else None
+        elif agent_type == "databricks":
+            return mock_databricks_agent(**kwargs) if MODERN_AGENTS_AVAILABLE else None
+        else:
+            raise ValueError(f"Unknown agent type: {agent_type}")
+    
+    return _create_agent
+
+
+@pytest.fixture
+def deprecation_warner():
+    """Fixture to check for deprecation warnings."""
+    with warnings.catch_warnings(record=True) as warning_list:
+        warnings.simplefilter("always")
+        yield warning_list
+
+
+# High-level mocking patterns for multi-agent tests
+@pytest.fixture
+def mock_multi_agent_response():
+    """Provide mock response for multi-agent workflow."""
+    return {
+        "final_report": "# Test Report\n\nThis is a test report with findings.",
+        "factuality_score": 0.85,
+        "citations": [
+            {"source": "example.com", "title": "Test Source", "url": "https://example.com"}
+        ],
+        "plan": {
+            "steps": [
+                {"description": "Research step 1", "status": "completed"},
+                {"description": "Research step 2", "status": "completed"}
+            ]
+        },
+        "observations": [
+            "Found relevant information about the topic",
+            "Verified facts with multiple sources"
+        ],
+        "grounding_report": {
+            "verification_level": "moderate",
+            "verified_claims": 5,
+            "contradictions": 0
+        }
+    }

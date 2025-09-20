@@ -13,6 +13,8 @@ from uuid import uuid4
 from pathlib import Path
 import sys
 
+from typing_extensions import deprecated
+
 # Ensure current directory and parent are in Python path for imports
 # This handles both local development and MLflow deployment contexts
 current_dir = Path(__file__).parent.absolute()
@@ -37,7 +39,6 @@ from mlflow.entities import SpanType
 
 from deep_research_agent.core import (
     get_logger,
-    ConfigManager,
     AgentConfiguration,
     ResearchContext,
     ResearchAgentError,
@@ -63,8 +64,8 @@ from deep_research_agent.workflow_nodes import WorkflowNodes
 
 logger = get_logger(__name__)
 
-
-class RefactoredResearchAgent(ResponsesAgent):
+@deprecated("Use EnhancedResearchAgent instead - this class is maintained for backward compatibility only")
+class RefactoredResearchAgentDeprecated(ResponsesAgent):
     """
     Refactored research agent with improved architecture and error handling.
     
@@ -88,11 +89,13 @@ class RefactoredResearchAgent(ResponsesAgent):
                 # If we receive an AgentConfiguration object, convert to dict for ConfigManager
                 from dataclasses import asdict
                 config_dict = asdict(config)
-                self.config_manager = ConfigManager(config_dict, yaml_path)
+                from deep_research_agent.core.unified_config import get_config_manager
+                self.config_manager = get_config_manager(override_config=config_dict, yaml_path=yaml_path)
                 self.agent_config = config  # Use the provided configuration directly
             else:
                 # Handle dictionary config, YAML path, or None
-                self.config_manager = ConfigManager(config, yaml_path)
+                from deep_research_agent.core.unified_config import get_config_manager
+                self.config_manager = get_config_manager(override_config=config, yaml_path=yaml_path)
                 self.agent_config = self.config_manager.get_agent_config()
             
             # Initialize tool registry
@@ -421,7 +424,9 @@ class RefactoredResearchAgent(ResponsesAgent):
             progress_tracker = {
                 "start_time": time.time(),
                 "nodes_completed": 0,
-                "total_nodes": 8  # Approximate workflow nodes count
+                "total_nodes": 8,  # Approximate workflow nodes count
+                "seen_nodes": set(),  # Track unique nodes for progress calculation
+                "parallel_executions": {}  # Track parallel executions separately
             }
             
             # Stream the graph execution - use updates mode to track node outputs
@@ -435,14 +440,41 @@ class RefactoredResearchAgent(ResponsesAgent):
                     if mode == "updates" and isinstance(data, dict):
                         items = data.items()
                     else:
+                        # Fallback: support tests that yield ("messages", [AIMessage-like])
+                        if isinstance(mode, str) and mode == "messages" and isinstance(data, list):
+                            # Stream message contents directly as deltas
+                            for msg in data:
+                                try:
+                                    chunk_text = getattr(msg, "content", str(msg))
+                                except Exception:
+                                    chunk_text = str(msg)
+                                if chunk_text:
+                                    yield ResponsesAgentStreamEvent(
+                                        type="response.output_text.delta",
+                                        item_id=item_id,
+                                        delta=chunk_text,
+                                    )
+                                    collected_content.append(chunk_text)
+                            # No structured items to iterate in this fallback
+                            continue
                         continue
                 else:
                     # Unknown format, skip
                     continue
                 
                 for node_name, node_data in items:
-                    # Calculate progress percentage
-                    progress_tracker["nodes_completed"] += 1
+                    # Track parallel executions separately
+                    if node_name == "parallel_web_search":
+                        progress_tracker["parallel_executions"][node_name] = \
+                            progress_tracker["parallel_executions"].get(node_name, 0) + 1
+                    
+                    # Only increment progress for first occurrence of each unique node
+                    # This prevents parallel executions from inflating progress percentage
+                    if node_name not in progress_tracker["seen_nodes"]:
+                        progress_tracker["nodes_completed"] += 1
+                        progress_tracker["seen_nodes"].add(node_name)
+                    
+                    # Calculate progress percentage based on unique nodes only
                     progress_percentage = min(
                         (progress_tracker["nodes_completed"] / progress_tracker["total_nodes"]) * 100,
                         99  # Cap at 99% until final completion
@@ -930,9 +962,10 @@ class RefactoredResearchAgent(ResponsesAgent):
         if not content or len(content) <= chunk_size:
             return [content] if content else []
         
-        # For tables, use a larger minimum chunk size
+        # For tables, use a larger minimum chunk size; otherwise respect requested size
         MIN_TABLE_CHUNK_SIZE = 1000
-        effective_chunk_size = max(chunk_size, MIN_TABLE_CHUNK_SIZE)
+        content_has_tables = '|' in content
+        effective_chunk_size = max(chunk_size, MIN_TABLE_CHUNK_SIZE) if content_has_tables else chunk_size
         
         chunks = []
         lines = content.split('\n')
@@ -1007,27 +1040,43 @@ class RefactoredResearchAgent(ResponsesAgent):
         if current_chunk:
             chunks.append('\n'.join(current_chunk))
         
+        # Helper to split non-table text at word boundaries
+        def split_by_word_boundaries(text: str, target_size: int) -> List[str]:
+            parts: List[str] = []
+            start = 0
+            n = len(text)
+            while start < n:
+                end = min(start + target_size, n)
+                if end < n:
+                    # backtrack to last whitespace
+                    ws = text.rfind(' ', start, end)
+                    if ws != -1 and ws > start:
+                        end = ws + 1
+                parts.append(text[start:end])
+                start = end
+            return [p for p in parts if p]
+
         # Final pass: ensure chunks are reasonable and no empty chunks
         final_chunks = []
         for chunk in chunks:
             if chunk.strip():
-                # If chunk is still too large and doesn't contain tables, split by paragraphs
-                if len(chunk) > effective_chunk_size * 2 and '|' not in chunk:
-                    # Safe to split by paragraphs
+                if '|' not in chunk and len(chunk) > effective_chunk_size:
+                    # Prefer paragraph splitting first
                     paragraphs = chunk.split('\n\n')
-                    current_para_chunk = ""
-                    
-                    for para in paragraphs:
-                        if len(current_para_chunk) + len(para) + 2 > effective_chunk_size and current_para_chunk:
+                    if len(paragraphs) > 1:
+                        current_para_chunk = ""
+                        for para in paragraphs:
+                            if len(current_para_chunk) + len(para) + 2 > effective_chunk_size and current_para_chunk:
+                                final_chunks.append(current_para_chunk.rstrip())
+                                current_para_chunk = para
+                            else:
+                                current_para_chunk += ('\n\n' if current_para_chunk else '') + para
+                        if current_para_chunk.strip():
                             final_chunks.append(current_para_chunk.rstrip())
-                            current_para_chunk = para
-                        else:
-                            current_para_chunk += ('\n\n' if current_para_chunk else '') + para
-                    
-                    if current_para_chunk.strip():
-                        final_chunks.append(current_para_chunk.rstrip())
+                    else:
+                        # No paragraph boundaries; split by words
+                        final_chunks.extend(split_by_word_boundaries(chunk, effective_chunk_size))
                 else:
-                    # Keep chunk as is (especially if it contains tables)
                     final_chunks.append(chunk)
         
         # Ensure no empty chunks

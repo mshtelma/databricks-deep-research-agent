@@ -14,14 +14,20 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from deploy.command_executor import CommandExecutor
-from deploy.config import load_config
 
 def main():
     """Deploy endpoint directly using existing model."""
     
-    # Load configuration
-    config_path = Path(__file__).parent / "config.yaml"
-    config = load_config(config_path, "dev")
+    # Load configuration using new ConfigLoader
+    try:
+        from deep_research_agent.config_loader import ConfigLoader
+        deploy_config = ConfigLoader.load_deployment("dev")
+        config = deploy_config.model_dump()
+        config["ENVIRONMENT"] = "dev"
+        config["UC_MODEL_NAME"] = f"{config['model']['catalog']}.{config['model']['schema']}.{config['model']['name']}"
+    except Exception as e:
+        print(f"❌ Failed to load configuration: {e}")
+        return False
     
     print("🚀 DIRECT ENDPOINT DEPLOYMENT")
     print("=" * 50)
@@ -82,7 +88,6 @@ try:
         
         # Environment configuration
         environment_vars={{
-            "TAVILY_API_KEY": "{{{{secrets/msh/TAVILY_API_KEY}}}}",
             "BRAVE_API_KEY": "{{{{secrets/msh/BRAVE_API_KEY}}}}",
             "VECTOR_SEARCH_INDEX": os.getenv("VECTOR_SEARCH_INDEX", "main.msh.docs_index"),
             "ENVIRONMENT": "dev",

@@ -18,6 +18,14 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 from deep_research_agent.core import get_logger, SearchResult
 
+# Import will be added when EmbeddingManager is available
+try:
+    from .embedding_manager import EmbeddingManager
+    EMBEDDING_MANAGER_AVAILABLE = True
+except ImportError:
+    EmbeddingManager = None
+    EMBEDDING_MANAGER_AVAILABLE = False
+
 
 logger = get_logger(__name__)
 
@@ -133,17 +141,20 @@ class ClaimExtractor:
     ]
     
     def extract_claims(self, text: str) -> List[Claim]:
-        """Extract all claims from text."""
+        """Extract atomic claims from text following MiniCheck approach."""
         claims = []
         sentences = self._split_into_sentences(text)
         
         for sentence in sentences:
-            sentence_claims = self._extract_from_sentence(sentence, text)
-            claims.extend(sentence_claims)
+            # Break complex sentences into atomic claims
+            atomic_claims = self._extract_atomic_claims(sentence)
+            for atomic_text in atomic_claims:
+                sentence_claims = self._extract_from_sentence(atomic_text, text)
+                claims.extend(sentence_claims)
         
         # Deduplicate claims
         unique_claims = list(set(claims))
-        logger.info(f"Extracted {len(unique_claims)} unique claims from text")
+        logger.info(f"Extracted {len(unique_claims)} unique atomic claims from text")
         
         return unique_claims
     
@@ -152,6 +163,72 @@ class ClaimExtractor:
         # Simple sentence splitter - could be enhanced with spaCy or NLTK
         sentences = re.split(r'[.!?]\s+', text)
         return [s.strip() for s in sentences if s.strip()]
+    
+    def _extract_atomic_claims(self, sentence: str) -> List[str]:
+        """
+        Break complex sentences into atomic claims (MiniCheck approach).
+        
+        This improves matching by creating shorter, more focused claims
+        rather than using full complex sentences.
+        """
+        if len(sentence.split()) <= 10:
+            # Short sentences are likely already atomic
+            return [sentence]
+        
+        atomic_claims = []
+        
+        # Split on coordinating conjunctions (and, but, or)
+        conjunction_parts = re.split(r'\s+(?:and|but|or|yet|so)\s+', sentence, flags=re.IGNORECASE)
+        
+        for part in conjunction_parts:
+            part = part.strip()
+            if not part:
+                continue
+                
+            # Further split on commas for compound statements
+            comma_parts = [p.strip() for p in part.split(',') if p.strip()]
+            
+            for comma_part in comma_parts:
+                # Split on semicolons
+                semicolon_parts = [p.strip() for p in comma_part.split(';') if p.strip()]
+                
+                for semicolon_part in semicolon_parts:
+                    # Only include parts that look like complete claims
+                    if self._is_complete_claim(semicolon_part):
+                        atomic_claims.append(semicolon_part)
+        
+        # If no good atomic claims found, use the original sentence
+        if not atomic_claims:
+            atomic_claims = [sentence]
+        
+        # Filter out very short fragments
+        atomic_claims = [claim for claim in atomic_claims if len(claim.split()) >= 3]
+        
+        logger.debug(f"Split sentence into {len(atomic_claims)} atomic claims: {sentence[:50]}...")
+        
+        return atomic_claims if atomic_claims else [sentence]
+    
+    def _is_complete_claim(self, text: str) -> bool:
+        """Check if a text fragment looks like a complete factual claim."""
+        text = text.strip()
+        
+        # Must have minimum length
+        if len(text.split()) < 3:
+            return False
+        
+        # Should contain a verb (simple heuristic)
+        verbs = ['is', 'are', 'was', 'were', 'has', 'have', 'had', 'will', 'would', 'can', 'could', 
+                'shows', 'indicates', 'demonstrates', 'proves', 'contains', 'includes', 'reaches']
+        if not any(verb in text.lower() for verb in verbs):
+            return False
+        
+        # Should not start with connecting words that indicate it's a fragment
+        connecting_words = ['which', 'that', 'who', 'where', 'when', 'why', 'how', 
+                           'because', 'since', 'although', 'while', 'if', 'unless']
+        if any(text.lower().startswith(word) for word in connecting_words):
+            return False
+        
+        return True
     
     def _extract_from_sentence(self, sentence: str, full_text: str) -> List[Claim]:
         """Extract claims from a single sentence."""
@@ -210,9 +287,29 @@ class ClaimExtractor:
 class GroundingChecker:
     """Verifies claims against source material."""
     
-    def __init__(self, verification_level: VerificationLevel = VerificationLevel.MODERATE):
+    def __init__(self, 
+                 verification_level: VerificationLevel = VerificationLevel.MODERATE,
+                 embedding_manager: Optional['EmbeddingManager'] = None):
         self.verification_level = verification_level
         self.claim_extractor = ClaimExtractor()
+        self.embedding_manager = embedding_manager
+        
+        # Configuration for semantic similarity
+        self.chunk_size = 200  # tokens
+        self.chunk_overlap = 50
+        self.max_chunks_per_doc = 10
+        
+        # Updated thresholds for better semantic matching
+        self.thresholds = {
+            VerificationLevel.STRICT: {"relevance": 0.75, "support": 0.8},
+            VerificationLevel.MODERATE: {"relevance": 0.65, "support": 0.7},  # Lowered for better matching
+            VerificationLevel.LENIENT: {"relevance": 0.5, "support": 0.6}
+        }
+        
+        logger.info(
+            f"Initialized GroundingChecker with {verification_level.value} verification",
+            semantic_similarity_enabled=bool(self.embedding_manager)
+        )
     
     def verify_content(
         self, 
@@ -270,9 +367,13 @@ class GroundingChecker:
         contradicting_sources = []
         
         for source in sources:
-            relevance_score = self._calculate_relevance(claim.text, source.content)
+            source_content = self._get_source_content(source)
+            relevance_score = self._calculate_relevance(claim.text, source_content)
             
-            if relevance_score > 0.7:
+            # Use dynamic threshold based on verification level
+            relevance_threshold = self.thresholds[self.verification_level]["relevance"]
+            
+            if relevance_score > relevance_threshold:
                 # Check if source supports or contradicts
                 if self._supports_claim(claim, source):
                     supporting_sources.append((source, relevance_score))
@@ -327,42 +428,98 @@ class GroundingChecker:
         
         return contradictions
     
+    def _get_source_content(self, source: Any) -> str:
+        """Extract content from source, handling both dict and object formats."""
+        if isinstance(source, dict):
+            return source.get("content", "")
+        else:
+            return getattr(source, "content", "")
+
     def _calculate_relevance(self, claim_text: str, source_content: str) -> float:
-        """Calculate relevance between claim and source content."""
-        # Simple keyword overlap - could be enhanced with embeddings
-        claim_words = set(claim_text.lower().split())
-        source_words = set(source_content.lower().split())
-        
-        if not claim_words:
+        """Calculate semantic relevance between claim and source content."""
+        # ONLY semantic similarity - no keyword fallback
+        if not self.embedding_manager:
+            logger.warning("No embedding manager available - cannot calculate semantic relevance")
             return 0.0
         
-        overlap = len(claim_words.intersection(source_words))
-        relevance = overlap / len(claim_words)
+        return self._calculate_relevance_semantic(claim_text, source_content)
+    
+    def _calculate_relevance_semantic(self, claim_text: str, source_content: str) -> float:
+        """Calculate semantic relevance using embeddings."""
+        try:
+            # Get claim embedding
+            claim_embedding = self.embedding_manager.get_or_compute_embedding(claim_text)
+            
+            # For long documents, use chunking for better matching
+            if len(source_content) > 1000:
+                return self._calculate_relevance_with_chunking(claim_embedding, source_content)
+            else:
+                # Short document - use full embedding
+                source_embedding = self.embedding_manager.get_or_compute_embedding(source_content[:1000])
+                return self.embedding_manager.compute_similarity(claim_embedding, source_embedding)
+                
+        except Exception as e:
+            logger.error(f"Semantic relevance calculation failed: {e}")
+            # Return 0.0 instead of fallback to keyword matching
+            return 0.0
+    
+    def _calculate_relevance_with_chunking(self, claim_embedding: np.ndarray, source_content: str) -> float:
+        """Calculate relevance using sliding window chunks for long documents."""
+        chunks = self._chunk_text(source_content)
+        if not chunks:
+            return 0.0
         
-        return min(relevance, 1.0)
+        # Limit chunks to avoid excessive computation
+        chunks = chunks[:self.max_chunks_per_doc]
+        
+        # Find best matching chunk
+        max_similarity = 0.0
+        for chunk in chunks:
+            try:
+                chunk_embedding = self.embedding_manager.get_or_compute_embedding(chunk)
+                similarity = self.embedding_manager.compute_similarity(claim_embedding, chunk_embedding)
+                max_similarity = max(max_similarity, similarity)
+            except Exception as e:
+                logger.debug(f"Failed to compute similarity for chunk: {e}")
+                continue
+        
+        return max_similarity
+    
+    
+    def _chunk_text(self, text: str) -> List[str]:
+        """Split text into overlapping chunks for better matching."""
+        words = text.split()
+        if len(words) <= self.chunk_size:
+            return [text]
+        
+        chunks = []
+        for i in range(0, len(words), self.chunk_size - self.chunk_overlap):
+            chunk_words = words[i:i + self.chunk_size]
+            if chunk_words:  # Avoid empty chunks
+                chunk = ' '.join(chunk_words)
+                chunks.append(chunk)
+        
+        return chunks
     
     def _supports_claim(self, claim: Claim, source: SearchResult) -> bool:
-        """Check if source supports the claim."""
-        # Look for claim text or similar content in source
-        claim_lower = claim.text.lower()
-        source_lower = source.content.lower()
+        """Check if source supports the claim using semantic similarity."""
+        if not self.embedding_manager:
+            logger.warning("No embedding manager - cannot check claim support")
+            return False
         
-        # Check for direct mention
-        if claim_lower in source_lower:
-            return True
-        
-        # Check for key entities and numbers
-        if claim.entities:
-            entity_matches = sum(1 for e in claim.entities if e.lower() in source_lower)
-            if entity_matches / len(claim.entities) > 0.5:
-                return True
-        
-        if claim.numbers:
-            number_matches = sum(1 for n in claim.numbers if n in source.content)
-            if number_matches / len(claim.numbers) > 0.5:
-                return True
-        
-        return False
+        try:
+            # Calculate semantic similarity for support
+            source_content = self._get_source_content(source)
+            relevance = self._calculate_relevance_semantic(claim.text, source_content)
+            support_threshold = self.thresholds[self.verification_level]["support"]
+            
+            logger.debug(f"Claim support check: relevance={relevance:.3f}, threshold={support_threshold}")
+            return relevance > support_threshold
+            
+        except Exception as e:
+            logger.error(f"Semantic support check failed: {e}")
+            return False
+    
     
     def _contradicts_claim(self, claim: Claim, source: SearchResult) -> bool:
         """Check if source contradicts the claim."""
@@ -372,7 +529,8 @@ class GroundingChecker:
             "not true", "false", "incorrect", "disputed"
         ]
         
-        source_lower = source.content.lower()
+        source_content = self._get_source_content(source)
+        source_lower = source_content.lower()
         claim_lower = claim.text.lower()
         
         # Check if source mentions claim context with contradiction
@@ -413,23 +571,35 @@ class GroundingChecker:
     ) -> float:
         """Calculate confidence in grounding assessment."""
         if not supporting_sources and not contradicting_sources:
-            return 0.1
+            return 0.0  # No sources = no confidence
         
-        # Base confidence on source quality and agreement
-        support_score = sum(s[1] for s in supporting_sources) if supporting_sources else 0
-        contradict_score = sum(s[1] for s in contradicting_sources) if contradicting_sources else 0
+        # Base confidence on WHETHER claims are supported, not just relevance scores
+        num_supporting = len(supporting_sources)
+        num_contradicting = len(contradicting_sources)
         
-        total_score = support_score + contradict_score
-        if total_score == 0:
-            return 0.1
+        if num_supporting == 0 and num_contradicting == 0:
+            return 0.0
         
-        confidence = support_score / total_score
+        # Higher confidence when more sources support vs contradict
+        base_confidence = num_supporting / (num_supporting + num_contradicting) if (num_supporting + num_contradicting) > 0 else 0.0
+        
+        # Boost confidence based on relevance scores of supporting sources
+        if supporting_sources:
+            avg_relevance = np.mean([s[1] for s in supporting_sources])
+            # Combine structural support (having sources) with quality (relevance)
+            confidence = base_confidence * 0.6 + avg_relevance * 0.4
+        else:
+            confidence = base_confidence
+        
+        # Ensure minimum confidence when we have good support
+        if num_supporting > 0 and num_contradicting == 0:
+            confidence = max(confidence, 0.7)  # At least 70% confidence for uncontested support
         
         # Adjust for claim type
         if claim_type == ClaimType.STATISTICAL:
-            confidence *= 0.9  # Stats need exact matches
+            confidence *= 0.95  # Stats need exact matches
         elif claim_type == ClaimType.OPINION:
-            confidence *= 1.1  # Opinions are less strict
+            confidence = min(confidence * 1.1, 1.0)  # Opinions are less strict
         
         return min(confidence, 1.0)
     
@@ -477,14 +647,16 @@ class GroundingChecker:
         
         # Extract comparable statements from both sources
         # This is a simplified version - could be enhanced with NLP
-        numbers1 = re.findall(r'\d+(?:\.\d+)?%?', source1.content)
-        numbers2 = re.findall(r'\d+(?:\.\d+)?%?', source2.content)
+        source1_content = self._get_source_content(source1)
+        source2_content = self._get_source_content(source2)
+        numbers1 = re.findall(r'\d+(?:\.\d+)?%?', source1_content)
+        numbers2 = re.findall(r'\d+(?:\.\d+)?%?', source2_content)
         
         # Check for conflicting numbers about same topic
         if numbers1 and numbers2 and numbers1 != numbers2:
             # Check if sources discuss same topic
-            common_words = set(source1.content.lower().split()).intersection(
-                set(source2.content.lower().split())
+            common_words = set(source1_content.lower().split()).intersection(
+                set(source2_content.lower().split())
             )
             if len(common_words) > 10:  # Arbitrary threshold
                 contradictions.append(Contradiction(

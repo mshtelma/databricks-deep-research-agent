@@ -14,8 +14,9 @@ from threading import Lock, RLock, Timer
 from uuid import uuid4
 
 from deep_research_agent.core import get_logger
-from deep_research_agent.core.types import IntermediateEvent, IntermediateEventType, ReasoningVisibility
+from deep_research_agent.core.types import IntermediateEvent, IntermediateEventType, ReasoningVisibility, EventCategory
 from deep_research_agent.core.redaction_utils import get_redactor
+from deep_research_agent.core.event_templates import EventTemplates
 
 logger = get_logger(__name__)
 
@@ -76,10 +77,18 @@ class EventEmitter:
         data: Dict[str, Any],
         correlation_id: Optional[str] = None,
         stage_id: Optional[str] = None,
-        meta: Optional[Dict[str, Any]] = None
+        meta: Optional[Dict[str, Any]] = None,
+        title: Optional[str] = None,
+        description: Optional[str] = None,
+        confidence: Optional[float] = None,
+        reasoning: Optional[str] = None,
+        alternatives_considered: Optional[List[str]] = None,
+        related_event_ids: Optional[List[str]] = None,
+        category: Optional[EventCategory] = None,
+        priority: Optional[int] = None
     ) -> bool:
         """
-        Emit an intermediate event.
+        Emit an intermediate event with rich UI metadata.
         
         Args:
             event_type: Type of event to emit
@@ -87,6 +96,14 @@ class EventEmitter:
             correlation_id: Correlation ID for grouping related events
             stage_id: Current stage/phase identifier
             meta: Additional metadata
+            title: Human-readable title (auto-generated if None)
+            description: Detailed description (auto-generated if None)
+            confidence: Confidence score (0.0-1.0)
+            reasoning: Explanation of why this action was taken
+            alternatives_considered: Other options that were considered
+            related_event_ids: IDs of related events
+            category: Event category (auto-determined if None)
+            priority: Priority for UI ordering (auto-determined if None)
         
         Returns:
             True if event was emitted, False if dropped due to rate limiting
@@ -101,7 +118,7 @@ class EventEmitter:
             # Redact sensitive information from data
             redacted_data = self.redactor.redact_event_data(data.copy())
             
-            # Create event
+            # Create event with enhanced fields
             event = IntermediateEvent(
                 timestamp=time.time(),
                 stage_id=stage_id,
@@ -109,8 +126,21 @@ class EventEmitter:
                 sequence=self._get_next_sequence(),
                 event_type=event_type,
                 data=redacted_data,
-                meta=meta or {}
+                meta=meta or {},
+                title=title or EventTemplates.get_title(event_type, redacted_data),
+                description=description or EventTemplates.get_description(event_type, redacted_data),
+                confidence=confidence,
+                reasoning=reasoning,
+                alternatives_considered=alternatives_considered or [],
+                related_event_ids=related_event_ids or [],
+                priority=priority or EventTemplates.get_priority_from_event_type(event_type)
             )
+            
+            # Set category automatically if not provided
+            if category:
+                event.category = category
+            else:
+                event.set_category_from_event_type()
             
             # Emit directly or batch
             if self.batch_events:
@@ -300,6 +330,198 @@ class EventEmitter:
             data,
             correlation_id,
             stage_id
+        )
+    
+    # NEW: Enhanced event emission methods for transparent UI
+    
+    def emit_reasoning_reflection(
+        self,
+        reasoning: str,
+        options: List[str],
+        confidence: float,
+        correlation_id: Optional[str] = None,
+        stage_id: Optional[str] = None
+    ) -> bool:
+        """Emit a reasoning reflection event."""
+        return self.emit(
+            IntermediateEventType.REASONING_REFLECTION,
+            data={"options": options},
+            confidence=confidence,
+            reasoning=reasoning,
+            alternatives_considered=options,
+            correlation_id=correlation_id,
+            stage_id=stage_id
+        )
+    
+    def emit_hypothesis_formed(
+        self,
+        hypothesis: str,
+        confidence: float,
+        supporting_evidence: List[str] = None,
+        correlation_id: Optional[str] = None,
+        stage_id: Optional[str] = None
+    ) -> bool:
+        """Emit a hypothesis formation event."""
+        return self.emit(
+            IntermediateEventType.HYPOTHESIS_FORMED,
+            data={
+                "hypothesis": hypothesis,
+                "supporting_evidence": supporting_evidence or []
+            },
+            confidence=confidence,
+            correlation_id=correlation_id,
+            stage_id=stage_id
+        )
+    
+    def emit_source_evaluation(
+        self,
+        title: str,
+        url: str,
+        relevance: float,
+        reasoning: str,
+        correlation_id: Optional[str] = None,
+        stage_id: Optional[str] = None
+    ) -> bool:
+        """Emit a source evaluation event."""
+        return self.emit(
+            IntermediateEventType.SOURCE_EVALUATION,
+            data={
+                "title": title,
+                "url": url,
+                "relevance": relevance
+            },
+            reasoning=reasoning,
+            confidence=relevance,
+            correlation_id=correlation_id,
+            stage_id=stage_id
+        )
+    
+    def emit_partial_synthesis(
+        self,
+        conclusion: str,
+        source_count: int,
+        confidence: float,
+        supporting_sources: List[str] = None,
+        correlation_id: Optional[str] = None,
+        stage_id: Optional[str] = None
+    ) -> bool:
+        """Emit a partial synthesis event."""
+        return self.emit(
+            IntermediateEventType.PARTIAL_SYNTHESIS,
+            data={
+                "conclusion": conclusion,
+                "source_count": source_count,
+                "supporting_sources": supporting_sources or []
+            },
+            confidence=confidence,
+            correlation_id=correlation_id,
+            stage_id=stage_id
+        )
+    
+    def emit_knowledge_gap_identified(
+        self,
+        topic: str,
+        purpose: str,
+        impact: str = "medium",
+        correlation_id: Optional[str] = None,
+        stage_id: Optional[str] = None
+    ) -> bool:
+        """Emit a knowledge gap identification event."""
+        return self.emit(
+            IntermediateEventType.KNOWLEDGE_GAP_IDENTIFIED,
+            data={
+                "topic": topic,
+                "purpose": purpose,
+                "impact": impact
+            },
+            reasoning=f"Need more information about {topic} to {purpose}",
+            priority=7 if impact == "high" else 5,
+            correlation_id=correlation_id,
+            stage_id=stage_id
+        )
+    
+    def emit_search_strategy(
+        self,
+        query_count: int,
+        focus_areas: List[str],
+        approach: str,
+        correlation_id: Optional[str] = None,
+        stage_id: Optional[str] = None
+    ) -> bool:
+        """Emit a search strategy event."""
+        return self.emit(
+            IntermediateEventType.SEARCH_STRATEGY,
+            data={
+                "query_count": query_count,
+                "focus_areas": focus_areas,
+                "approach": approach
+            },
+            reasoning=f"Focusing on {', '.join(focus_areas)} with {approach} approach",
+            correlation_id=correlation_id,
+            stage_id=stage_id
+        )
+    
+    def emit_confidence_update(
+        self,
+        old_confidence: float,
+        new_confidence: float,
+        reason: str,
+        evidence: str,
+        correlation_id: Optional[str] = None,
+        stage_id: Optional[str] = None
+    ) -> bool:
+        """Emit a confidence update event."""
+        direction = "increased" if new_confidence > old_confidence else "decreased"
+        return self.emit(
+            IntermediateEventType.CONFIDENCE_UPDATE,
+            data={
+                "old_confidence": old_confidence,
+                "new_confidence": new_confidence,
+                "direction": direction,
+                "evidence": evidence
+            },
+            confidence=new_confidence,
+            reasoning=reason,
+            correlation_id=correlation_id,
+            stage_id=stage_id
+        )
+    
+    def emit_plan_consideration(
+        self,
+        approach: str,
+        reasoning: str,
+        alternatives: List[str] = None,
+        correlation_id: Optional[str] = None,
+        stage_id: Optional[str] = None
+    ) -> bool:
+        """Emit a plan consideration event."""
+        return self.emit(
+            IntermediateEventType.PLAN_CONSIDERATION,
+            data={"approach": approach},
+            reasoning=reasoning,
+            alternatives_considered=alternatives or [],
+            correlation_id=correlation_id,
+            stage_id=stage_id
+        )
+    
+    def emit_verification_attempt(
+        self,
+        claim: str,
+        method: str,
+        source: str,
+        correlation_id: Optional[str] = None,
+        stage_id: Optional[str] = None
+    ) -> bool:
+        """Emit a verification attempt event."""
+        return self.emit(
+            IntermediateEventType.VERIFICATION_ATTEMPT,
+            data={
+                "claim": claim,
+                "method": method,
+                "source": source
+            },
+            correlation_id=correlation_id,
+            stage_id=stage_id
         )
     
     def flush_batch(self) -> None:

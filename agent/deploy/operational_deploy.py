@@ -15,7 +15,7 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from deploy.command_executor import CommandExecutor
-from deploy.config import load_config
+from deep_research_agent.constants import AGENT_CONFIG_FILENAME
 
 def main():
     """Execute complete operational deployment pipeline."""
@@ -23,9 +23,16 @@ def main():
     print("🚀 OPERATIONAL DEPLOYMENT PIPELINE")
     print("=" * 60)
     
-    # Load configuration
-    config_path = Path(__file__).parent / "config.yaml"
-    config = load_config(config_path, "dev")
+    # Load configuration using new ConfigLoader
+    try:
+        from deep_research_agent.config_loader import ConfigLoader
+        deploy_config = ConfigLoader.load_deployment("dev")
+        config = deploy_config.model_dump()
+        config["ENVIRONMENT"] = "dev"
+        config["UC_MODEL_NAME"] = f"{config['model']['catalog']}.{config['model']['schema']}.{config['model']['name']}"
+    except Exception as e:
+        print(f"❌ Failed to load configuration: {e}")
+        return False
     
     print(f"Environment: {config.get('ENVIRONMENT', 'dev')}")
     print(f"Endpoint: {config['endpoint']['name']}")
@@ -135,18 +142,48 @@ try:
         agent_file = "deep_research_agent/databricks_compatible_agent.py"
         print("Agent file exists: " + str(os.path.exists(agent_file)))
         
+        # Check config file exists
+        config_file = "deep_research_agent/" + AGENT_CONFIG_FILENAME
+        print("Config file (" + config_file + ") exists: " + str(os.path.exists(config_file)))
+        
+        # Test agent import before attempting log_model
+        print("🔍 Testing agent import in deployment environment...")
+        try:
+            from deep_research_agent.databricks_compatible_agent import DatabricksCompatibleAgent
+            test_agent = DatabricksCompatibleAgent()
+            print("✅ Agent import and initialization successful")
+        except Exception as import_error:
+            print("❌ Agent import failed: " + str(import_error))
+            import traceback
+            print("Import traceback:")
+            print(traceback.format_exc())
+        
+        # Test minimal code-based logging first
+        print("🔍 Testing minimal code-based logging...")
+        try:
+            minimal_logged = mlflow.pyfunc.log_model(
+                artifact_path="minimal_test",
+                python_model="deep_research_agent/databricks_compatible_agent.py"
+            )
+            print("✅ Minimal code-based logging successful")
+        except Exception as minimal_error:
+            print("❌ Minimal code-based logging failed: " + str(minimal_error))
+            import traceback
+            print("Minimal logging traceback:")
+            print(traceback.format_exc())
+        
         # EXACT MLflow logging from backup notebook
         input_example = {{
             "input": [{{"role": "user", "content": "What is 6*7 in Python?"}}]
         }}
-        
+        #+ ([AGENT_CONFIG_FILENAME] if os.path.exists(AGENT_CONFIG_FILENAME) else [])
+        print("🔍 Attempting full code-based logging with all parameters...")
         logged_model_info = mlflow.pyfunc.log_model(
             artifact_path="model",
             python_model="deep_research_agent/databricks_compatible_agent.py",
-            model_config="agent_config.yaml" if os.path.exists("agent_config.yaml") else None,
             code_paths=[
                 "deep_research_agent"
-            ] + (["agent_config.yaml"] if os.path.exists("agent_config.yaml") else []),
+            ] ,
             input_example=input_example,
             pip_requirements=[
                 "databricks-langchain",
@@ -250,6 +287,8 @@ import json
 import os
 import time
 
+from databricks import agents
+
 try:
     print("🔧 Starting agent deployment...")
     
@@ -267,28 +306,6 @@ try:
     import databricks
     print("databricks module contents: " + str(dir(databricks)))
     
-    # Try different import approaches
-    try:
-        from databricks import agents
-        print("✅ databricks.agents imported successfully")
-    except ImportError as e:
-        print("❌ Cannot import from databricks.agents: " + str(e))
-        
-        # Try alternative imports
-        try:
-            import databricks_agents
-            print("✅ databricks_agents module imported")
-            agents = databricks_agents
-        except ImportError as e2:
-            print("❌ Cannot import databricks_agents: " + str(e2))
-            
-            # Try mlflow agents
-            try:
-                from mlflow import agents
-                print("✅ mlflow.agents imported")
-            except ImportError as e3:
-                print("❌ Cannot import mlflow.agents: " + str(e3))
-                raise e  # Re-raise original error
     
     # EXACT deployment call from backup notebook
     deployment = agents.deploy(
@@ -306,7 +323,6 @@ try:
         
         # Environment configuration - EXACT from backup
         environment_vars={{
-            "TAVILY_API_KEY": "{{{{secrets/msh/TAVILY_API_KEY}}}}",
             "BRAVE_API_KEY": "{{{{secrets/msh/BRAVE_API_KEY}}}}",
             "VECTOR_SEARCH_INDEX": os.getenv("VECTOR_SEARCH_INDEX", "main.msh.docs_index"),
             "ENVIRONMENT": environment,

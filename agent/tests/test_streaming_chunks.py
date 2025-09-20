@@ -34,7 +34,7 @@ if parent_dir not in sys.path:
 if deep_research_agent_dir not in sys.path:
     sys.path.insert(0, deep_research_agent_dir)
 
-from deep_research_agent.research_agent_refactored import RefactoredResearchAgent
+from deep_research_agent.databricks_compatible_agent import DatabricksCompatibleAgent
 from deep_research_agent.core.types import ResearchContext
 
 
@@ -46,11 +46,12 @@ class TestStreamingChunks:
         self.mock_llm = Mock()
         self.mock_llm.invoke.return_value = AIMessage(content="Test response")
         
-        # Create agent with mocked dependencies
-        with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_llm', return_value=self.mock_llm):
-            mock_phase2_return = (None, None, None, None, None, None)
-            with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_phase2_components', return_value=mock_phase2_return):
-                self.agent = RefactoredResearchAgent()
+        # Mock the enhanced research agent for consistent testing
+        self.mock_enhanced_agent = Mock()
+        
+        # Create agent with mocked enhanced agent
+        with patch('deep_research_agent.databricks_compatible_agent.EnhancedResearchAgent', return_value=self.mock_enhanced_agent):
+            self.agent = DatabricksCompatibleAgent()
     
     def test_multiple_delta_events_streaming(self):
         """Test that streaming synthesis generates multiple delta events."""
@@ -58,32 +59,42 @@ class TestStreamingChunks:
             input=[{"role": "user", "content": "Explain quantum computing in detail"}]
         )
         
-        # Mock streaming LLM that returns multiple chunks
+        # Mock streaming chunks
         streaming_chunks = [
-            AIMessage(content="Quantum computing is "),
-            AIMessage(content="a revolutionary field "),
-            AIMessage(content="that leverages quantum mechanics "),
-            AIMessage(content="to process information in ways "),
-            AIMessage(content="impossible with classical computers.")
+            "Quantum computing is ",
+            "a revolutionary field ",
+            "that leverages quantum mechanics ",
+            "to process information in ways ",
+            "impossible with classical computers."
         ]
         
-        # Mock the LLM to have streaming capability
-        self.mock_llm.stream = Mock(return_value=streaming_chunks)
+        full_content = "".join(streaming_chunks)
         
-        # Mock the graph to return synthesis node with streaming data
-        def mock_graph_stream(initial_state, stream_mode=None):
-            # Simulate synthesis node returning multiple chunks
-            research_context = initial_state['research_context']
-            research_context.synthesis_chunks = [chunk.content for chunk in streaming_chunks]
-            
-            yield {
-                "synthesize_answer": {
-                    "research_context": research_context,
-                    "messages": [AIMessage(content="".join([chunk.content for chunk in streaming_chunks]))]
-                }
+        # Mock streaming events from enhanced agent
+        mock_events = []
+        item_id = "test-item-123"
+        
+        # Add delta events for each chunk
+        for chunk in streaming_chunks:
+            mock_events.append(ResponsesAgentStreamEvent(
+                type="response.output_text.delta",
+                item_id=item_id,
+                delta=chunk
+            ))
+        
+        # Add done event
+        mock_events.append(ResponsesAgentStreamEvent(
+            type="response.output_item.done",
+            item={
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": full_content}]
             }
+        ))
         
-        self.agent.graph.stream = mock_graph_stream
+        # Mock the enhanced agent's predict_stream method
+        self.mock_enhanced_agent.predict_stream = Mock(return_value=iter(mock_events))
         
         # Collect all events
         events = list(self.agent.predict_stream(request))
@@ -126,26 +137,35 @@ class TestStreamingChunks:
             input=[{"role": "user", "content": "What is machine learning?"}]
         )
         
-        # Mock non-streaming LLM (no stream method)
+        # Mock non-streaming long response
         long_response = "Machine learning is a subset of artificial intelligence that enables computers to learn and improve from data without being explicitly programmed for every task. It involves algorithms that can identify patterns, make decisions, and predict outcomes based on input data."
-        self.mock_llm.invoke.return_value = AIMessage(content=long_response)
-        # Ensure no stream method exists
-        if hasattr(self.mock_llm, 'stream'):
-            delattr(self.mock_llm, 'stream')
         
-        # Mock the graph to return non-streaming synthesis
-        def mock_graph_stream(initial_state, stream_mode=None):
-            research_context = initial_state['research_context']
-            research_context.synthesis_chunks = [long_response]  # Single chunk
-            
-            yield {
-                "synthesize_answer": {
-                    "research_context": research_context,
-                    "messages": [AIMessage(content=long_response)]
-                }
+        # Create streaming events for non-streaming content (simulated chunks)
+        mock_events = []
+        item_id = "test-item-456"
+        
+        # Split into multiple chunks to simulate streaming fallback
+        chunk_size = 50
+        chunks = [long_response[i:i+chunk_size] for i in range(0, len(long_response), chunk_size)]
+        
+        for chunk in chunks:
+            mock_events.append(ResponsesAgentStreamEvent(
+                type="response.output_text.delta",
+                item_id=item_id,
+                delta=chunk
+            ))
+        
+        mock_events.append(ResponsesAgentStreamEvent(
+            type="response.output_item.done",
+            item={
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": long_response}]
             }
+        ))
         
-        self.agent.graph.stream = mock_graph_stream
+        self.mock_enhanced_agent.predict_stream = Mock(return_value=iter(mock_events))
         
         # Collect all events
         events = list(self.agent.predict_stream(request))
@@ -174,21 +194,29 @@ class TestStreamingChunks:
         
         # Mock short response
         short_response = "AI is artificial intelligence."
-        self.mock_llm.invoke.return_value = AIMessage(content=short_response)
         
-        # Mock the graph
-        def mock_graph_stream(initial_state, stream_mode=None):
-            research_context = initial_state['research_context']
-            research_context.synthesis_chunks = [short_response]
-            
-            yield {
-                "synthesize_answer": {
-                    "research_context": research_context,
-                    "messages": [AIMessage(content=short_response)]
-                }
+        # Create streaming events for short content
+        mock_events = []
+        item_id = "test-item-789"
+        
+        # Single delta event for short content
+        mock_events.append(ResponsesAgentStreamEvent(
+            type="response.output_text.delta",
+            item_id=item_id,
+            delta=short_response
+        ))
+        
+        mock_events.append(ResponsesAgentStreamEvent(
+            type="response.output_item.done",
+            item={
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": short_response}]
             }
+        ))
         
-        self.agent.graph.stream = mock_graph_stream
+        self.mock_enhanced_agent.predict_stream = Mock(return_value=iter(mock_events))
         
         # Collect events
         events = list(self.agent.predict_stream(request))
@@ -213,20 +241,39 @@ class TestStreamingChunks:
         
         # Mock response with clear word boundaries
         response = "Neural networks are computational models inspired by biological neural networks. They consist of interconnected nodes called neurons that process information through weighted connections."
-        self.mock_llm.invoke.return_value = AIMessage(content=response)
         
-        def mock_graph_stream(initial_state, stream_mode=None):
-            research_context = initial_state['research_context']
-            research_context.synthesis_chunks = [response]
-            
-            yield {
-                "synthesize_answer": {
-                    "research_context": research_context,
-                    "messages": [AIMessage(content=response)]
-                }
+        # Create chunks that respect word boundaries
+        chunks = [
+            "Neural networks are ",
+            "computational models inspired by ",
+            "biological neural networks. ",
+            "They consist of interconnected ",
+            "nodes called neurons that ",
+            "process information through ",
+            "weighted connections."
+        ]
+        
+        mock_events = []
+        item_id = "test-item-word-boundaries"
+        
+        for chunk in chunks:
+            mock_events.append(ResponsesAgentStreamEvent(
+                type="response.output_text.delta",
+                item_id=item_id,
+                delta=chunk
+            ))
+        
+        mock_events.append(ResponsesAgentStreamEvent(
+            type="response.output_item.done",
+            item={
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": response}]
             }
+        ))
         
-        self.agent.graph.stream = mock_graph_stream
+        self.mock_enhanced_agent.predict_stream = Mock(return_value=iter(mock_events))
         
         # Collect events
         events = list(self.agent.predict_stream(request))
@@ -250,20 +297,36 @@ class TestStreamingChunks:
         
         # Mock streaming response
         response = "This is a test response for schema compliance validation with multiple sentences and sufficient length."
-        self.mock_llm.invoke.return_value = AIMessage(content=response)
         
-        def mock_graph_stream(initial_state, stream_mode=None):
-            research_context = initial_state['research_context']
-            research_context.synthesis_chunks = [response]
-            
-            yield {
-                "synthesize_answer": {
-                    "research_context": research_context,
-                    "messages": [AIMessage(content=response)]
-                }
+        # Create streaming events for schema compliance testing
+        chunks = [
+            "This is a test response ",
+            "for schema compliance validation ",
+            "with multiple sentences ",
+            "and sufficient length."
+        ]
+        
+        mock_events = []
+        item_id = "test-item-schema-compliance"
+        
+        for chunk in chunks:
+            mock_events.append(ResponsesAgentStreamEvent(
+                type="response.output_text.delta",
+                item_id=item_id,
+                delta=chunk
+            ))
+        
+        mock_events.append(ResponsesAgentStreamEvent(
+            type="response.output_item.done",
+            item={
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": response}]
             }
+        ))
         
-        self.agent.graph.stream = mock_graph_stream
+        self.mock_enhanced_agent.predict_stream = Mock(return_value=iter(mock_events))
         
         # Collect events
         events = list(self.agent.predict_stream(request))

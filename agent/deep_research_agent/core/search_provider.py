@@ -287,9 +287,8 @@ class RateLimitConfig:
     """Configuration for rate limiting."""
     
     max_concurrent: int = 3
-    requests_per_minute: int = 60
-    burst_allowance: int = 5
-    cooldown_seconds: float = 2.0
+    requests_per_second: float = 1.0  # Simple per-second rate limiting
+    cooldown_seconds: float = 1.0    # Minimum delay between requests
     adaptive: bool = True  # Adapt based on provider responses
 
 
@@ -346,20 +345,7 @@ class RateLimiter:
         """Enforce rate limiting for a provider."""
         now = time.time()
         
-        # Clean old request timestamps (older than 1 minute)
-        minute_ago = now - 60.0
-        self.request_counts[provider_name] = [
-            t for t in self.request_counts[provider_name] if t > minute_ago
-        ]
-        
-        # Check if we're at the rate limit
-        if len(self.request_counts[provider_name]) >= self.config.requests_per_minute:
-            oldest_request = min(self.request_counts[provider_name])
-            wait_time = 60.0 - (now - oldest_request)
-            
-            if wait_time > 0:
-                logger.info(f"Rate limit reached for {provider_name}, waiting {wait_time:.1f}s")
-                await asyncio.sleep(wait_time)
+        # Simple per-second rate limiting with cooldown only
         
         # Check minimum interval between requests
         if provider_name in self.last_request_times:
