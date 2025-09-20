@@ -30,9 +30,6 @@ from mlflow.types.responses import (
 )
 
 from deep_research_agent.enhanced_research_agent import EnhancedResearchAgent
-from deep_research_agent.research_agent_refactored import (
-    RefactoredResearchAgentDeprecated as RefactoredResearchAgent,
-)
 from deep_research_agent.core.report_styles import ReportStyle
 from deep_research_agent.core.grounding import VerificationLevel
 from deep_research_agent.core import get_logger

@@ -5,21 +5,20 @@ Executes research steps, accumulates observations, and manages citations.
 """
 
 import asyncio
-from dataclasses import asdict, is_dataclass
+from dataclasses import dataclass, asdict
 from enum import Enum
-from typing import Dict, Any, Optional, List, Literal, Tuple
+from typing import Dict, Any, Optional, List, Literal
 from datetime import datetime
 import json
 import os
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.types import Command
 
 from deep_research_agent.core import (
     get_logger,
     SearchResult,
     Citation,
-    ResearchQuery,
     SearchResultType,
     SectionResearchResult,
 )
