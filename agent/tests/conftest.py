@@ -73,7 +73,7 @@ def load_test_config():
         # Return minimal real test config - no TEST_MODE
         return {
             "llm": {
-                "primary_endpoint": "databricks-claude-3-7-sonnet",
+                "primary_endpoint": "databricks-gpt-oss-120b",
                 "temperature": 0.1,
                 "max_tokens": 1000
             },

@@ -59,7 +59,7 @@ class AgentConfigSchema(ConfigSchema):
     
     def __init__(
         self,
-        llm_endpoint: str = "databricks-claude-3-7-sonnet",
+        llm_endpoint: str = "databricks-gpt-oss-120b",
         max_research_loops: int = 2,
         initial_query_count: int = 3,
         max_concurrent_searches: int = 2,
@@ -360,7 +360,7 @@ class UnifiedConfigManager:
     def get_agent_config(self) -> AgentConfigSchema:
         """Get validated agent configuration."""
         return AgentConfigSchema(
-            llm_endpoint=self.get("models.default.endpoint", "databricks-claude-3-7-sonnet", str),
+            llm_endpoint=self.get("models.default.endpoint", "databricks-gpt-oss-120b", str),
             max_research_loops=self.get("research.max_research_loops", 2, int),
             initial_query_count=self.get("research.initial_query_count", 3, int),
             max_concurrent_searches=self.get("rate_limiting.max_concurrent_searches", 2, int),
@@ -430,7 +430,7 @@ class UnifiedConfigManager:
         
         for phase in phases:
             phase_config = {
-                "endpoint": self.get(f"models.{phase}.endpoint", "databricks-claude-3-7-sonnet", str),
+                "endpoint": self.get(f"models.{phase}.endpoint", "databricks-gpt-oss-120b", str),
                 "temperature": self.get(f"models.{phase}.temperature", 0.7, float),
                 "max_tokens": self.get(f"models.{phase}.max_tokens", 4000, int)
             }

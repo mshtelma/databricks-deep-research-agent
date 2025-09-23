@@ -61,7 +61,7 @@ def load_deploy_config(config_path: Optional[str] = None, test_mode: bool = Fals
                 }
             },
             "model_defaults": {
-                "llm_endpoint": "databricks-claude-3-7-sonnet"
+                "llm_endpoint": "databricks-gpt-oss-120b"
             }
         }
     
@@ -178,7 +178,7 @@ def get_databricks_llm_endpoint(env: str = "dev") -> str:
     
     if not llm_endpoint:
         # Default to Claude Sonnet if not specified
-        llm_endpoint = "databricks-claude-3-7-sonnet"
+        llm_endpoint = "databricks-gpt-oss-120b"
     
     return llm_endpoint
 

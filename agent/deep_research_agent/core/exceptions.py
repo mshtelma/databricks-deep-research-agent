@@ -82,6 +82,30 @@ class RetryExhaustedError(ResearchAgentError):
     pass
 
 
+class PermanentWorkflowError(ResearchAgentError):
+    """
+    Raised when a permanent, non-retryable error occurs in the workflow.
+    
+    This indicates an error that cannot be resolved by retrying, such as:
+    - Authentication/authorization failures (403, 401)
+    - IP access control list blocking
+    - Configuration issues that require manual intervention
+    """
+    pass
+
+
+class AuthenticationError(PermanentWorkflowError):
+    """
+    Raised when authentication or authorization fails.
+    
+    This includes:
+    - 403 Forbidden errors (IP ACL blocking, insufficient permissions)
+    - 401 Unauthorized errors (invalid credentials, expired tokens)
+    - Other authentication-related failures
+    """
+    pass
+
+
 class SearchToolsFailedException(SearchToolError):
     """
     Raised when all search tools fail to execute successfully.

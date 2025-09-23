@@ -23,10 +23,11 @@ from deep_research_agent.core.section_models import (
 from deep_research_agent.core.utils import extract_token_usage
 from deep_research_agent.core.multi_agent_state import EnhancedResearchState, StateManager
 from deep_research_agent.core.message_utils import get_last_user_message
-from deep_research_agent.core.exceptions import SearchToolsFailedException
+from deep_research_agent.core.exceptions import SearchToolsFailedException, PermanentWorkflowError, AuthenticationError
 from deep_research_agent.core.state_validator import StateValidator, global_propagation_tracker
 from deep_research_agent.core.validated_command import ValidatedCommand
 from deep_research_agent.core.routing_policy import track_structural_error, track_executed_step, track_step_execution
+from deep_research_agent.core.observation_models import observation_to_text
 from deep_research_agent.agents import (
     CoordinatorAgent,
     PlannerAgent,
@@ -66,6 +67,10 @@ class EnhancedWorkflowNodes:
         
         # Legacy circuit breaker method for backward compatibility
         self.should_terminate_workflow = should_terminate_workflow
+        
+        # Extract search configuration
+        search_config = self.agent_config.get('search', {})
+        self.max_results_per_query = search_config.get('max_results_per_query', 10)  # Default to 10 as per SearchConfig
         
         # Initialize specialized agents with optional event emitter and embedding manager
         self.coordinator = CoordinatorAgent(llm=self.llm, config=self.agent_config, event_emitter=self.event_emitter)
@@ -170,9 +175,9 @@ class EnhancedWorkflowNodes:
             if hasattr(obs, 'content'):
                 content = obs.content
             elif isinstance(obs, dict):
-                content = obs.get('content', obs.get('observation', str(obs)))
+                content = obs.get('content', obs.get('observation', observation_to_text(obs)))
             else:
-                content = str(obs)
+                content = observation_to_text(obs)
             
             # Format with [Obs#N] label
             formatted.append(f"[Obs#{i}] {content}")
@@ -191,7 +196,7 @@ class EnhancedWorkflowNodes:
             return [obs.content for obs in payload.observations]
         if isinstance(payload, dict):
             observations = payload.get('observations') or payload.get('research', {}).get('observations', [])
-            return [str(item) for item in observations]
+            return [observation_to_text(item) for item in observations]
         return []
 
     def _extract_citations(self, payload: Any) -> List[Any]:
@@ -548,9 +553,9 @@ class EnhancedWorkflowNodes:
                         if results:
                             logger.info(f"BACKGROUND_INVESTIGATION: Got {len(results)} results from {tool_name}")
                             # Convert raw dictionaries to SearchResult objects if needed
-                            processed_results = self._process_search_results(results[:5])
+                            processed_results = self._process_search_results(results[:self.max_results_per_query])
                             search_results.extend(processed_results)
-                            logger.info(f"BACKGROUND_INVESTIGATION: Processed {len(processed_results)} results")
+                            logger.info(f"BACKGROUND_INVESTIGATION: Processed {len(processed_results)} results (max={self.max_results_per_query})")
                             
                             # Emit background search complete event
                             if self.event_emitter:
@@ -911,7 +916,9 @@ class EnhancedWorkflowNodes:
                 return state
             
         except Exception as e:
-            logger.error(f"Planner node failed: {e}")
+            import traceback
+            full_traceback = traceback.format_exc()
+            logger.error(f"Planner node failed: {e}\n\n=== FULL STACK TRACE ===\n{full_traceback}\n=== END STACK TRACE ===")
             
             # Emit error event
             if self.event_emitter:
@@ -1526,9 +1533,27 @@ class EnhancedWorkflowNodes:
                                     # CRITICAL FIX: Update plan in state to persist step status changes
                                     state["current_plan"] = plan
                                 logger.info(f"Completed {current_step.step_type} step {current_step.step_id}")
-                            except Exception as e:
-                                error_msg = f"Failed {current_step.step_type} step {current_step.step_id}: {e}"
+                            except (PermanentWorkflowError, AuthenticationError) as e:
+                                # Handle permanent errors - these should stop the entire workflow
+                                error_msg = f"Permanent error in {current_step.step_type} step {current_step.step_id}: {e}"
                                 logger.error(error_msg)
+                                
+                                # Add clear user-facing error message
+                                if "warnings" not in state:
+                                    state["warnings"] = []
+                                state["warnings"].append(
+                                    f"Research stopped due to a permanent error: {e}. "
+                                    f"This error cannot be resolved by retrying."
+                                )
+                                
+                                # Re-raise to stop the workflow immediately
+                                raise e
+                                
+                            except Exception as e:
+                                import traceback
+                                full_traceback = traceback.format_exc()
+                                error_msg = f"Failed {current_step.step_type} step {current_step.step_id}: {e}"
+                                logger.error(f"{error_msg}\n\n=== FULL STACK TRACE ===\n{full_traceback}\n=== END STACK TRACE ===")
                                 
                                 # CRITICAL FIX: Track this as a structural error for circuit breaker
                                 state = track_structural_error(state, error_msg)
@@ -1901,20 +1926,100 @@ class EnhancedWorkflowNodes:
             raise e
             
         except Exception as e:
+            import traceback
+            full_traceback = traceback.format_exc()
             error_msg = f"Researcher node failed: {e}"
+            logger.error(f"{error_msg}\n\n=== FULL STACK TRACE ===\n{full_traceback}\n=== END STACK TRACE ===")
             logger.exception(error_msg)
             
             # CRITICAL FIX: Track this as a structural error for circuit breaker
             state = track_structural_error(state, error_msg)
             
-            # Emit error event
+            # Handle step retry logic
+            current_step = state.get("current_step")
+            if current_step:
+                step_id = current_step.step_id if hasattr(current_step, 'step_id') else str(current_step)
+                
+                # Increment retry attempts using routing_policy function
+                from deep_research_agent.core.routing_policy import (
+                    increment_failed_attempts, 
+                    should_skip_failed_step
+                )
+                
+                # Track this failure
+                state = increment_failed_attempts(state, step_id)
+                
+                # Check if we should permanently skip this step
+                max_retries = 3  # Default retry limit, could be configurable
+                if should_skip_failed_step(state, step_id, max_retries=max_retries):
+                    logger.warning(f"Permanently marking step {step_id} as failed after max retries")
+                    
+                    # Mark step with permanent_failure metadata
+                    plan = state.get("current_plan")
+                    if plan:
+                        retry_count = state.get("failed_step_attempts", {}).get(step_id, 0)
+                        plan.mark_step_failed(
+                            step_id, 
+                            reason=str(e),
+                            metadata={
+                                'permanent_failure': True,
+                                'retry_count': retry_count,
+                                'max_retries': max_retries,
+                                'final_error': str(e),
+                                'error_type': type(e).__name__
+                            }
+                        )
+                        state["current_plan"] = plan
+                        
+                        # Add to permanently failed steps list for reporting
+                        if "permanently_failed_steps" not in state:
+                            state["permanently_failed_steps"] = []
+                        state["permanently_failed_steps"].append({
+                            'step_id': step_id,
+                            'reason': str(e),
+                            'attempts': retry_count,
+                            'error_type': type(e).__name__
+                        })
+                        
+                        logger.info(f"Step {step_id} added to permanently failed steps list")
+                else:
+                    # Just mark as failed for retry
+                    plan = state.get("current_plan")  
+                    if plan:
+                        retry_count = state.get("failed_step_attempts", {}).get(step_id, 0)
+                        plan.mark_step_failed(
+                            step_id,
+                            reason=f"Attempt {retry_count} failed: {str(e)}",
+                            metadata={
+                                'retry_count': retry_count,
+                                'max_retries': max_retries,
+                                'last_error': str(e),
+                                'error_type': type(e).__name__
+                            }
+                        )
+                        state["current_plan"] = plan
+                        logger.info(f"Step {step_id} marked for retry (attempt {retry_count}/{max_retries})")
+                
+                # Clear current step to avoid confusion
+                state["current_step"] = None
+            
+            # Emit error event with retry information
             if self.event_emitter:
+                retry_info = {}
+                if current_step:
+                    step_id = current_step.step_id if hasattr(current_step, 'step_id') else str(current_step)
+                    retry_info = {
+                        "attempts": state.get("failed_step_attempts", {}).get(step_id, 0),
+                        "permanent": should_skip_failed_step(state, step_id, max_retries=3)
+                    }
+                
                 self.event_emitter.emit(
                     event_type="tool_call_error",
                     data={
                         "tool_name": "researcher",
                         "error_message": str(e),
-                        "step": current_step
+                        "step": current_step,
+                        "retry_info": retry_info
                     },
                     correlation_id=correlation_id,
                     stage_id="researcher"
@@ -2543,7 +2648,9 @@ class EnhancedWorkflowNodes:
                 return state
             
         except Exception as e:
-            logger.error(f"Reporter node failed: {e}")
+            import traceback
+            full_traceback = traceback.format_exc()
+            logger.error(f"Reporter node failed: {e}\n\n=== FULL STACK TRACE ===\n{full_traceback}\n=== END STACK TRACE ===")
             
             # Parse error for user-friendly message
             error_str = str(e)

@@ -48,7 +48,7 @@ class NodeModelConfiguration:
     """Configuration for per-node model assignments."""
     
     # Per-node model configurations
-    default_model: ModelConfig = field(default_factory=lambda: ModelConfig(endpoint="databricks-claude-3-7-sonnet"))
+    default_model: ModelConfig = field(default_factory=lambda: ModelConfig(endpoint="databricks-gpt-oss-20b"))
     query_generation_model: Optional[ModelConfig] = None
     web_research_model: Optional[ModelConfig] = None
     reflection_model: Optional[ModelConfig] = None

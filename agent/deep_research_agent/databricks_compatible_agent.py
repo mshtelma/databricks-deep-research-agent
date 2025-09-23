@@ -142,7 +142,7 @@ class DatabricksCompatibleAgent(ResponsesAgent):
                     config_override=config_override,
                     enable_grounding=True,
                     enable_background_investigation=True,
-                    default_report_style=ReportStyle.PROFESSIONAL,
+                    default_report_style=ReportStyle.DEFAULT,
                     verification_level=VerificationLevel.MODERATE,
                     stream_emitter=None  # Will be set in predict_stream if needed
                 )
@@ -153,7 +153,7 @@ class DatabricksCompatibleAgent(ResponsesAgent):
                     config_path=yaml_path,
                     enable_grounding=True,
                     enable_background_investigation=True,
-                    default_report_style=ReportStyle.PROFESSIONAL,
+                    default_report_style=ReportStyle.DEFAULT,
                     verification_level=VerificationLevel.MODERATE,
                     stream_emitter=None  # Will be set in predict_stream if needed
                 )

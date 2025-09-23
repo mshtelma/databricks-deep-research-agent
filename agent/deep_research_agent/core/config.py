@@ -57,7 +57,7 @@ class ConfigManager:
             "llm_endpoint": self._get_config_value(
                 "llm_endpoint", 
                 "LLM_ENDPOINT", 
-                "databricks-claude-3-7-sonnet",
+                "databricks-gpt-oss-120b",
                 "models.default.endpoint"
             ),
             "max_research_loops": int(self._get_config_value(
@@ -418,7 +418,7 @@ class ConfigManager:
         
         # Default model configurations
         default_config = {
-            "endpoint": "databricks-claude-3-7-sonnet",
+            "endpoint": "databricks-gpt-oss-120b",
             "temperature": 0.7,
             "max_tokens": 4000
         }
@@ -427,18 +427,18 @@ class ConfigManager:
         phase_defaults = {
             "default": default_config,
             "query_generation": {
-                "endpoint": "databricks-claude-3-7-sonnet",
+                "endpoint": "databricks-gpt-oss-120b",
                 "temperature": 0.5,
                 "max_tokens": 2000
             },
             "web_research": default_config.copy(),
             "reflection": {
-                "endpoint": "databricks-claude-3-7-sonnet", 
+                "endpoint": "databricks-gpt-oss-120b", 
                 "temperature": 0.8,
                 "max_tokens": 3000
             },
             "synthesis": {
-                "endpoint": "databricks-claude-3-7-sonnet",
+                "endpoint": "databricks-gpt-oss-120b",
                 "temperature": 0.7,
                 "max_tokens": 6000
             },

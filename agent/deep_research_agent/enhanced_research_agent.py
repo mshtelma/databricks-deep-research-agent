@@ -50,7 +50,7 @@ from deep_research_agent.agents import (
     FactCheckerAgent,
 )
 from deep_research_agent.components import create_tool_registry
-from deep_research_agent.core.exceptions import SearchToolsFailedException
+from deep_research_agent.core.exceptions import SearchToolsFailedException, PermanentWorkflowError, AuthenticationError
 
 
 logger = get_logger(__name__)
@@ -206,6 +206,17 @@ class EnhancedResearchAgent(ResponsesAgent):
             )
             self._thread_local.graph = self._graph_builder()
         return self._thread_local.graph
+    
+    @graph.setter
+    def graph(self, value):
+        """Set the workflow graph (for test compatibility)."""
+        self._thread_local.graph = value
+    
+    @graph.deleter
+    def graph(self):
+        """Delete the workflow graph (for test cleanup)."""
+        if hasattr(self._thread_local, "graph"):
+            delattr(self._thread_local, "graph")
 
     def _load_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
         """Load configuration using the new ConfigLoader."""
@@ -408,6 +419,24 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Researcher routing
         def researcher_router(state):
             """Route from researcher based on step completion."""
+            
+            # SAFETY CHECK: Check for permanent error flags in state
+            if state.get("permanent_failure"):
+                logger.error("[ROUTER] Permanent failure detected in state - halting workflow")
+                if "warnings" not in state:
+                    state["warnings"] = []
+                state["warnings"].append(
+                    "Research stopped due to a permanent error that cannot be resolved by retrying."
+                )
+                return "reporter"  # Skip to reporter to generate final report with error
+            
+            # SAFETY CHECK: Check for permanent error conditions in warnings
+            warnings = state.get("warnings", [])
+            for warning in warnings:
+                if any(indicator in warning.lower() for indicator in ["permanent error", "ip acl", "blocked", "authentication"]):
+                    logger.error(f"[ROUTER] Permanent error condition detected in warnings: {warning}")
+                    return "reporter"  # Skip to reporter to generate final report with error
+            
             plan = state.get("current_plan")
             
             # Enhanced diagnostic logging

@@ -47,12 +47,15 @@ def merge_lists(left: List[Any], right: List[Any]) -> List[Any]:
     combined = left + right
     
     # Apply memory-conscious limits based on list content type
-    MAX_OBSERVATIONS = 50      # Keep most recent observations
-    MAX_SEARCH_RESULTS = 100   # Keep most relevant search results
-    MAX_CITATIONS = 200        # Citations are smaller, allow more
-    MAX_REFLECTIONS = 30       # Limit reflection history
-    MAX_AGENT_HANDOFFS = 20    # Limit handoff history
-    MAX_GENERAL = 100          # Default limit for other lists
+    # Import constants from memory_config for consistency
+    from deep_research_agent.core.memory_config import MemoryOptimizedConfig
+    
+    MAX_OBSERVATIONS = MemoryOptimizedConfig.MAX_OBSERVATIONS        # Keep most recent observations
+    MAX_SEARCH_RESULTS = MemoryOptimizedConfig.MAX_SEARCH_RESULTS   # Keep most relevant search results
+    MAX_CITATIONS = MemoryOptimizedConfig.MAX_CITATIONS             # Citations are smaller, allow more
+    MAX_REFLECTIONS = MemoryOptimizedConfig.MAX_REFLECTIONS         # Limit reflection history
+    MAX_AGENT_HANDOFFS = MemoryOptimizedConfig.MAX_AGENT_HANDOFFS   # Limit handoff history
+    MAX_GENERAL = MemoryOptimizedConfig.MAX_GENERAL_LIST_SIZE        # Default limit for other lists
     
     # Determine appropriate limit (heuristic based on list content)
     if combined and hasattr(combined[0], 'content') and len(str(combined[0])) > 1000:
@@ -402,12 +405,17 @@ class StateManager:
     @staticmethod
     def add_observation(
         state: EnhancedResearchState,
-        observation: str,
+        observation: Union[str, Any],
         step: Optional[Step] = None
     ) -> EnhancedResearchState:
-        """Add an observation to the state with memory limits."""
+        """Add an observation to the state with memory limits, normalizing to StructuredObservation."""
+        from deep_research_agent.core.observation_models import ensure_structured_observation
+        
+        # Normalize observation to StructuredObservation
+        structured_obs = ensure_structured_observation(observation)
+        
         # Add to global observations with size limit
-        state["observations"].append(observation)
+        state["observations"].append(structured_obs)
         
         # Keep only the last 20 observations to prevent unbounded growth
         max_observations = 20
@@ -417,7 +425,7 @@ class StateManager:
         if step:
             if not step.observations:
                 step.observations = []
-            step.observations.append(observation)
+            step.observations.append(structured_obs)
             
             # Also limit step observations
             if len(step.observations) > 10:  # Smaller limit per step
@@ -441,6 +449,109 @@ class StateManager:
         
         return state
     
+    @staticmethod
+    def prune_search_results_by_relevance(
+        search_results: List['SearchResult'], 
+        target_count: int = None
+    ) -> List['SearchResult']:
+        """
+        Intelligently prune search results keeping the most relevant and diverse.
+        
+        Args:
+            search_results: List of SearchResult objects to prune
+            target_count: Target number of results to keep (defaults to config constant)
+            
+        Returns:
+            Pruned list of search results sorted by relevance
+        """
+        from deep_research_agent.core.memory_config import MemoryOptimizedConfig
+        from deep_research_agent.core.types import SearchResultType
+        
+        # Use config constant if no target specified
+        if target_count is None:
+            target_count = MemoryOptimizedConfig.MAX_PRUNED_SEARCH_RESULTS
+        
+        if len(search_results) <= target_count:
+            return search_results
+        
+        # Calculate composite scores for each result
+        scored_results = []
+        for result in search_results:
+            # Base relevance score (0-1)
+            base_score = getattr(result, 'relevance_score', 0) or getattr(result, 'score', 0) or 0.5
+            
+            # Source type bonus - prioritize academic sources
+            source_bonus = 0.0
+            result_type = getattr(result, 'result_type', SearchResultType.WEB)
+            if result_type == SearchResultType.ACADEMIC_PAPER:
+                source_bonus = 0.3
+            elif result_type == SearchResultType.JOURNAL_ARTICLE:
+                source_bonus = 0.25
+            elif result_type == SearchResultType.WEB:
+                source_bonus = 0.1
+            
+            # Content richness (longer, more detailed content gets bonus)
+            content = getattr(result, 'content', '') or ''
+            content_score = min(len(content) / 10000, 0.2)  # Up to 0.2 bonus for rich content
+            
+            # Title/source authority bonus
+            title = getattr(result, 'title', '') or ''
+            source = getattr(result, 'source', '') or ''
+            authority_bonus = 0.0
+            
+            # Check for authoritative domains
+            url = getattr(result, 'url', '') or ''
+            if any(domain in url.lower() for domain in ['gov', 'edu', 'org', 'wikipedia']):
+                authority_bonus = 0.15
+            elif any(domain in url.lower() for domain in ['reuters', 'bloomberg', 'wsj', 'ft.com']):
+                authority_bonus = 0.1
+            
+            # Calculate composite score with weights
+            composite_score = (
+                base_score * 0.4 +         # 40% weight on base relevance
+                source_bonus * 0.25 +      # 25% weight on source type
+                content_score * 0.15 +     # 15% weight on content richness
+                authority_bonus * 0.2      # 20% weight on source authority
+            )
+            
+            scored_results.append((composite_score, result))
+        
+        # Sort by composite score (highest first)
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        
+        # Select top results with diversity consideration
+        selected = []
+        seen_domains = {}
+        
+        for score, result in scored_results:
+            # Always include top 50 results regardless of domain
+            if len(selected) < 50:
+                selected.append(result)
+                # Track domain count
+                url = getattr(result, 'url', '') or ''
+                if url and '//' in url:
+                    domain = url.split('//')[1].split('/')[0]
+                    seen_domains[domain] = seen_domains.get(domain, 0) + 1
+            else:
+                # For remaining slots, ensure diversity
+                url = getattr(result, 'url', '') or ''
+                domain = None
+                if url and '//' in url:
+                    domain = url.split('//')[1].split('/')[0]
+                
+                # Avoid too many results from same domain (max 5 per domain)
+                if domain and seen_domains.get(domain, 0) >= 5:
+                    continue
+                    
+                selected.append(result)
+                if domain:
+                    seen_domains[domain] = seen_domains.get(domain, 0) + 1
+            
+            if len(selected) >= target_count:
+                break
+        
+        return selected
+
     @staticmethod
     def prune_state_for_memory(
         state: EnhancedResearchState
@@ -473,12 +584,16 @@ class StateManager:
         elif "section_research_results" in state:
             logger.warning("section_research_results exists but is empty - this may indicate a bug")
         
-        # Keep more search results since they're needed for comprehensive reports
-        # Increased from 5 to 20 to ensure we have enough data
-        if len(state.get("search_results", [])) > 20:
+        # Smart pruning for search results using relevance-based selection
+        from deep_research_agent.core.memory_config import MemoryOptimizedConfig
+        max_pruned = MemoryOptimizedConfig.MAX_PRUNED_SEARCH_RESULTS  # 200
+        if len(state.get("search_results", [])) > max_pruned:
             old_count = len(state["search_results"])
-            state["search_results"] = state["search_results"][-20:]
-            pruned_items.append(f"search_results: {old_count} -> 20")
+            state["search_results"] = StateManager.prune_search_results_by_relevance(
+                state["search_results"], 
+                target_count=max_pruned
+            )
+            pruned_items.append(f"search_results: {old_count} -> {max_pruned} (relevance-based)")
             
         # Keep only 2 reflections (was 2, originally 5) - no change needed
         if len(state.get("reflections", [])) > 2:

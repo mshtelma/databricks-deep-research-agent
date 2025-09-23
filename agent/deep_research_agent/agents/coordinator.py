@@ -245,11 +245,9 @@ Important: Only reply with the category name (RESEARCH, CLARIFICATION, GREETING,
             # Use the LLM to classify
             response = self.llm.invoke(classification_prompt)
             
-            # Extract the classification from response
-            if hasattr(response, 'content'):
-                classification = response.content.strip().upper()
-            else:
-                classification = str(response).strip().upper()
+            # Extract the classification from response using helper
+            from deep_research_agent.core.llm_response_parser import extract_text_from_response
+            classification = extract_text_from_response(response).upper()
             
             # Map to our RequestType enum
             classification_map = {

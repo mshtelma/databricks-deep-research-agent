@@ -211,7 +211,12 @@ class PlannerAgent:
             # ENTITY VALIDATION: Check for hallucinated entities in LLM response
             original_query = state.get("original_user_query") or get_last_user_message(state.get("messages", []))
             requested_entities = extract_entities_from_query(original_query, self.llm)
-            response_entities = extract_entities_from_query(response.content, self.llm)
+            
+            # Handle structured responses using centralized parser
+            from deep_research_agent.core.llm_response_parser import extract_text_from_response
+            response_content = extract_text_from_response(response)
+            
+            response_entities = extract_entities_from_query(response_content, self.llm)
             
             # Check for hallucinated entities
             hallucinated = set(response_entities) - set(requested_entities)
@@ -219,7 +224,13 @@ class PlannerAgent:
                 logger.warning(f"🚨 ENTITY_HALLUCINATION [planner]: LLM added entities not in original query: {hallucinated}")
                 logger.warning(f"🚨 REQUESTED: {requested_entities} vs GENERATED: {response_entities}")
             
-            plan_dict = self._parse_plan_response(response.content)
+            # Ensure response.content is properly formatted for parsing
+            if isinstance(response.content, list):
+                logger.info("PLANNER: Response content is a list (structured reasoning), parsing accordingly")
+                plan_dict = self._parse_plan_response(response.content)
+            else:
+                logger.info("PLANNER: Response content is a string, parsing directly")
+                plan_dict = self._parse_plan_response(response.content)
         else:
             # Fallback to simple plan generation
             plan_dict = self._generate_simple_plan(state["research_topic"])
@@ -401,19 +412,113 @@ Output your plan as a JSON object with this structure:
         
         return "".join(prompt_parts)
     
-    def _parse_plan_response(self, response: str) -> Dict[str, Any]:
+    def _parse_plan_response(self, response) -> Dict[str, Any]:
         """Parse LLM response into plan dictionary."""
+        import re
+        import json
+        
         try:
+            logger.info(f"PLANNER PARSER: Processing response of type {type(response)}")
+            if hasattr(response, '__len__'):
+                logger.info(f"PLANNER PARSER: Response length {len(response)}")
+            
+            # Handle case where response is already a list (structured reasoning)
+            if isinstance(response, list):
+                logger.info("PLANNER PARSER: Response is already a list (structured reasoning)")
+                logger.info(f"PLANNER PARSER: Found list with {len(response)} items")
+                for i, item in enumerate(response):
+                    logger.info(f"PLANNER PARSER: Item {i}: type={type(item)}, keys={list(item.keys()) if isinstance(item, dict) else 'N/A'}")
+                    if isinstance(item, dict) and item.get('type') == 'text' and 'text' in item:
+                        text_content = item['text']
+                        logger.info(f"PLANNER PARSER: Found text content, length {len(text_content)}")
+                        logger.info(f"PLANNER PARSER: Text content preview: {text_content[:200]}...")
+                        
+                        # Remove code block markers if present
+                        if text_content.startswith('```json'):
+                            text_content = text_content.replace('```json', '').replace('```', '').strip()
+                            logger.info("PLANNER PARSER: Removed JSON code block markers")
+                        
+                        # Try to parse the text content as JSON
+                        json_match = re.search(r'\{.*\}', text_content, re.DOTALL)
+                        if json_match:
+                            json_str = json_match.group()
+                            logger.info(f"PLANNER PARSER: Extracted JSON string, length {len(json_str)}")
+                            result = json.loads(json_str)
+                            logger.info("PLANNER PARSER: Successfully parsed JSON from text content")
+                            return result
+                        # Try parsing the text content directly
+                        try:
+                            result = json.loads(text_content)
+                            logger.info("PLANNER PARSER: Successfully parsed text content as JSON directly")
+                            return result
+                        except Exception as parse_error:
+                            logger.warning(f"PLANNER PARSER: Failed to parse text content: {parse_error}")
+                            continue
+                            
+                logger.warning("PLANNER PARSER: No valid JSON found in structured response items")
+                return self._generate_simple_plan("Research task")
+            
+            # Handle string response
+            response_str = str(response)
+            logger.info(f"PLANNER PARSER: Response string starts with: {response_str[:100]}...")
+            
+            # Handle structured reasoning responses in string format
+            if response_str.startswith('[') and 'type' in response_str:
+                logger.info("PLANNER PARSER: Detected structured reasoning response in string format")
+                parsed = json.loads(response_str)
+                # Extract the actual JSON plan from structured response
+                if isinstance(parsed, list):
+                    logger.info(f"PLANNER PARSER: Found list with {len(parsed)} items")
+                    for i, item in enumerate(parsed):
+                        logger.info(f"PLANNER PARSER: Item {i}: type={type(item)}, keys={list(item.keys()) if isinstance(item, dict) else 'N/A'}")
+                        if isinstance(item, dict) and item.get('type') == 'text' and 'text' in item:
+                            text_content = item['text']
+                            logger.info(f"PLANNER PARSER: Found text content, length {len(text_content)}")
+                            logger.info(f"PLANNER PARSER: Text content preview: {text_content[:200]}...")
+                            
+                            # Remove code block markers if present
+                            if text_content.startswith('```json'):
+                                text_content = text_content.replace('```json', '').replace('```', '').strip()
+                                logger.info("PLANNER PARSER: Removed JSON code block markers")
+                            
+                            # Try to parse the text content as JSON
+                            json_match = re.search(r'\{.*\}', text_content, re.DOTALL)
+                            if json_match:
+                                json_str = json_match.group()
+                                logger.info(f"PLANNER PARSER: Extracted JSON string, length {len(json_str)}")
+                                result = json.loads(json_str)
+                                logger.info("PLANNER PARSER: Successfully parsed JSON from text content")
+                                return result
+                            # Try parsing the text content directly
+                            try:
+                                result = json.loads(text_content)
+                                logger.info("PLANNER PARSER: Successfully parsed text content as JSON directly")
+                                return result
+                            except Exception as parse_error:
+                                logger.warning(f"PLANNER PARSER: Failed to parse text content: {parse_error}")
+                                continue
+            
             # Try to extract JSON from response
-            import re
-            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            logger.info("PLANNER PARSER: Trying standard JSON extraction")
+            json_match = re.search(r'\{.*\}', response_str, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group())
+                json_str = json_match.group()
+                logger.info(f"PLANNER PARSER: Extracted JSON string, length {len(json_str)}")
+                result = json.loads(json_str)
+                logger.info("PLANNER PARSER: Successfully parsed JSON from response")
+                return result
             else:
                 # Try to parse entire response as JSON
-                return json.loads(response)
-        except json.JSONDecodeError:
-            logger.warning("Failed to parse plan response as JSON, generating fallback plan")
+                logger.info("PLANNER PARSER: Trying to parse entire response as JSON")
+                result = json.loads(response_str)
+                logger.info("PLANNER PARSER: Successfully parsed entire response as JSON")
+                return result
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.error(f"PLANNER PARSER: Failed to parse plan response: {e}")
+            logger.error(f"PLANNER PARSER: Response type: {type(response)}")
+            response_preview = str(response)[:500] if response else "None"
+            logger.error(f"PLANNER PARSER: Response preview: {response_preview}...")
+            logger.warning("PLANNER PARSER: Generating fallback plan")
             return self._generate_simple_plan("Research task")
     
     def _generate_simple_plan(self, topic: str) -> Dict[str, Any]:
@@ -1001,10 +1106,17 @@ Output your plan as a JSON object with this structure:
                 return
 
             structure_prompt = (
-                f"Design a concise yet comprehensive outline for this deep research request:\n\n"
+                f"Design a domain-specific, use-case-tailored outline for this research request:\n\n"
                 f"{query}\n\n"
+                "CRITICAL: Create section titles that are SPECIFIC to the query topic and domain.\n"
+                "DO NOT use generic academic sections like 'Executive Summary', 'Key Findings', 'Detailed Analysis'.\n"
+                "INSTEAD, create sections that directly address the specific research question.\n\n"
+                "Examples of good domain-specific sections:\n"
+                "- For tax comparison: 'Tax Rate Analysis by Country', 'Social Contribution Breakdown', 'Family Scenario Comparisons'\n"
+                "- For technology evaluation: 'Performance Benchmarks', 'Implementation Complexity', 'Cost-Benefit Analysis'\n"
+                "- For market analysis: 'Market Size by Region', 'Competitive Landscape', 'Growth Projections'\n\n"
                 "Return JSON with a \"sections\" array. Each section entry must include:\n"
-                "  - title\n"
+                "  - title (SPECIFIC to the query domain, not generic)\n"
                 "  - purpose\n"
                 "  - section_type (research | synthesis | hybrid)\n"
                 "  - priority (integer, lower renders earlier)\n"
@@ -1014,24 +1126,78 @@ Output your plan as a JSON object with this structure:
             )
 
             messages = [
-                SystemMessage(content="You are an expert report architect designing adaptive outlines."),
+                SystemMessage(content="You are an expert report architect who creates domain-specific, tailored outlines. Your sections should directly address the specific research question rather than using generic academic templates. Focus on the unique aspects of each query domain."),
                 HumanMessage(content=structure_prompt),
             ]
 
-            structure_response = self.llm.invoke(messages)
-            if not structure_response:
-                logger.warning("PLANNER: LLM returned empty response for structure generation")
+            # Call LLM with retry logic for robustness
+            structure_response = None
+            max_retries = 2
+            for attempt in range(max_retries + 1):
+                try:
+                    structure_response = self.llm.invoke(messages)
+                    if structure_response and structure_response.content:
+                        break
+                    logger.warning(f"PLANNER: LLM returned empty response for structure generation (attempt {attempt + 1})")
+                except Exception as e:
+                    logger.warning(f"PLANNER: LLM call failed for structure generation (attempt {attempt + 1}): {e}")
+                    if attempt == max_retries:
+                        logger.error("PLANNER: All LLM attempts failed for structure generation")
+                        return
+            
+            if not structure_response or not structure_response.content:
+                logger.error("PLANNER: LLM failed to generate structure after all retries")
                 return
 
-            structure_payload = robust_json_loads(structure_response.content)
-            if not structure_payload:
-                logger.warning("PLANNER: Failed to parse structure JSON from LLM output")
+            # Handle Databricks structured response format with improved parsing
+            structure_content = None
+            if isinstance(structure_response.content, list):
+                # Extract from structured response (reasoning + text blocks)
+                for item in structure_response.content:
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        structure_content = item.get('text', '')
+                        break
+                else:
+                    logger.warning("PLANNER: No text block found in structured response")
+                    # Try to concatenate all text content as fallback
+                    text_parts = []
+                    for item in structure_response.content:
+                        if isinstance(item, dict):
+                            text_parts.append(str(item.get('text', item.get('content', ''))))
+                    structure_content = ' '.join(text_parts) if text_parts else ''
+            else:
+                structure_content = str(structure_response.content)
+            
+            if not structure_content.strip():
+                logger.error("PLANNER: No usable content found in LLM response")
                 return
+                
+            # Try to parse JSON with improved error handling
+            structure_payload = robust_json_loads(structure_content)
+            if not structure_payload:
+                logger.warning(f"PLANNER: Failed to parse structure JSON from LLM output. Content: {structure_content[:500]}...")
+                # Try to extract JSON from the content using regex as fallback
+                import re
+                json_match = re.search(r'\{.*\}', structure_content, re.DOTALL)
+                if json_match:
+                    try:
+                        structure_payload = robust_json_loads(json_match.group(0))
+                        logger.info("PLANNER: Successfully extracted JSON using regex fallback")
+                    except Exception as e:
+                        logger.error(f"PLANNER: Regex JSON extraction also failed: {e}")
+                        return
+                else:
+                    logger.error("PLANNER: No JSON-like content found in response")
+                    return
 
             raw_sections = structure_payload.get("sections", [])
             if not isinstance(raw_sections, list) or not raw_sections:
-                logger.warning("PLANNER: Structure JSON did not include sections")
-                return
+                logger.warning("PLANNER: Structure JSON did not include sections, generating fallback structure")
+                # Generate a basic domain-specific fallback structure
+                raw_sections = self._generate_fallback_structure(query)
+                if not raw_sections:
+                    logger.error("PLANNER: Failed to generate even fallback structure")
+                    return
 
             dynamic_sections: List[DynamicSection] = []
 
@@ -1082,18 +1248,143 @@ Output your plan as a JSON object with this structure:
             )
 
             plan.suggested_report_structure = [section.title for section in dynamic_sections]
+            
+            # Debug logging for structure assignment
+            logger.info(f"PLANNER: Setting suggested_report_structure: {plan.suggested_report_structure}")
+            logger.info(f"PLANNER: Plan now has suggested_report_structure: {hasattr(plan, 'suggested_report_structure')}")
 
             logger.info(
                 "PLANNER: Dynamic template generated",
                 extra={
                     "sections": [section.title for section in dynamic_sections],
                     "include_appendix": include_appendix,
+                    "suggested_report_structure": plan.suggested_report_structure,
                 },
             )
 
         except Exception as exc:
             logger.error(f"Error generating dynamic report structure: {exc}")
             logger.exception(exc)
+            
+    def _generate_fallback_structure(self, query: str) -> List[Dict[str, Any]]:
+        """Generate a basic domain-specific structure when LLM fails."""
+        logger.info("PLANNER: Generating fallback adaptive structure")
+        
+        # Basic keyword-based domain detection
+        query_lower = query.lower()
+        
+        if any(word in query_lower for word in ['tax', 'income', 'salary', 'country', 'comparison']):
+            # Tax/income comparison query
+            return [
+                {
+                    "title": "Tax Rate Analysis",
+                    "purpose": "Compare tax rates and deductions across jurisdictions",
+                    "section_type": "research",
+                    "priority": 10,
+                    "requires_search": True,
+                    "style_hints": ["Use tables for comparison", "Include percentages"]
+                },
+                {
+                    "title": "Net Income Calculations", 
+                    "purpose": "Calculate take-home pay after taxes and deductions",
+                    "section_type": "analysis",
+                    "priority": 20,
+                    "requires_search": False,
+                    "style_hints": ["Show calculation methodology", "Include examples"]
+                },
+                {
+                    "title": "Cost of Living Factors",
+                    "purpose": "Compare living costs and benefits",
+                    "section_type": "research", 
+                    "priority": 30,
+                    "requires_search": True,
+                    "style_hints": ["Include housing, childcare, benefits"]
+                }
+            ]
+        elif any(word in query_lower for word in ['technology', 'software', 'tech', 'ai', 'ml']):
+            # Technology query
+            return [
+                {
+                    "title": "Technology Overview",
+                    "purpose": "Provide technical background and context",
+                    "section_type": "research",
+                    "priority": 10,
+                    "requires_search": True,
+                    "style_hints": ["Focus on current state"]
+                },
+                {
+                    "title": "Implementation Analysis",
+                    "purpose": "Analyze implementation approaches and requirements",
+                    "section_type": "analysis",
+                    "priority": 20,
+                    "requires_search": True,
+                    "style_hints": ["Include pros and cons", "Technical requirements"]
+                },
+                {
+                    "title": "Performance and Benchmarks",
+                    "purpose": "Compare performance metrics and benchmarks",
+                    "section_type": "comparison",
+                    "priority": 30,
+                    "requires_search": True,
+                    "style_hints": ["Use performance data", "Include metrics"]
+                }
+            ]
+        elif any(word in query_lower for word in ['market', 'business', 'industry', 'competition']):
+            # Market/business query
+            return [
+                {
+                    "title": "Market Landscape",
+                    "purpose": "Analyze current market conditions and trends",
+                    "section_type": "research",
+                    "priority": 10,
+                    "requires_search": True,
+                    "style_hints": ["Include market size", "Growth trends"]
+                },
+                {
+                    "title": "Competitive Analysis",
+                    "purpose": "Compare key players and their strategies",
+                    "section_type": "comparison",
+                    "priority": 20,
+                    "requires_search": True,
+                    "style_hints": ["Use comparison tables", "Market share data"]
+                },
+                {
+                    "title": "Strategic Insights",
+                    "purpose": "Provide strategic recommendations and insights",
+                    "section_type": "synthesis",
+                    "priority": 30,
+                    "requires_search": False,
+                    "style_hints": ["Forward-looking", "Actionable insights"]
+                }
+            ]
+        else:
+            # Generic fallback
+            return [
+                {
+                    "title": "Background and Context",
+                    "purpose": "Provide essential background information",
+                    "section_type": "research",
+                    "priority": 10,
+                    "requires_search": True,
+                    "style_hints": ["Comprehensive overview"]
+                },
+                {
+                    "title": "Detailed Analysis",
+                    "purpose": "Conduct in-depth analysis of the topic",
+                    "section_type": "analysis",
+                    "priority": 20,
+                    "requires_search": True,
+                    "style_hints": ["Data-driven insights"]
+                },
+                {
+                    "title": "Implications and Recommendations",
+                    "purpose": "Synthesize findings and provide recommendations",
+                    "section_type": "synthesis",
+                    "priority": 30,
+                    "requires_search": False,
+                    "style_hints": ["Forward-looking", "Actionable"]
+                }
+            ]
     def _extract_and_validate_requirements(self, state: EnhancedResearchState) -> RequirementExtractionResult:
         """Extract and validate requirements from user instructions using LLM-based analysis."""
         try:

@@ -13,6 +13,9 @@ from deep_research_agent.core.id_generator import PlanIDGenerator
 from deep_research_agent.core.template_generator import DynamicSection
 
 
+logger = get_logger(__name__)
+
+
 
 
 class StepType(str, Enum):
@@ -175,7 +178,21 @@ class Plan(BaseModel):
             if step.status == StepStatus.FAILED:
                 # Check if this is marked as permanently failed (after max retries)
                 if hasattr(step, 'metadata') and step.metadata and step.metadata.get('permanent_failure', False):
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.debug(f"Skipping permanently failed step {step.step_id}")
                     continue
+                    
+                # Check retry count from metadata
+                retry_count = step.metadata.get('retry_count', 0) if hasattr(step, 'metadata') and step.metadata else 0
+                max_retries = step.metadata.get('max_retries', 3) if hasattr(step, 'metadata') and step.metadata else 3
+                
+                if retry_count >= max_retries:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(f"Step {step.step_id} reached max retries ({retry_count}/{max_retries}), skipping")
+                    continue
+                    
                 # Otherwise, retry the failed step if not at max retries yet
                 # This allows retrying failed steps up to the circuit breaker limit
                 
@@ -248,8 +265,15 @@ class Plan(BaseModel):
         self._refresh_step_counters()
         return step
 
-    def mark_step_failed(self, step_id: str, *, reason: Optional[str] = None) -> Step:
-        """Mark the specified step as failed."""
+    def mark_step_failed(self, step_id: str, *, reason: Optional[str] = None,
+                         metadata: Optional[Dict[str, Any]] = None) -> Step:
+        """Mark the specified step as failed with optional metadata.
+        
+        Args:
+            step_id: ID of the step to mark as failed
+            reason: Optional failure reason
+            metadata: Optional metadata including retry info and permanent_failure flag
+        """
 
         step = self.get_step_by_id(step_id)
         if step is None:
@@ -262,6 +286,20 @@ class Plan(BaseModel):
         step.status = StepStatus.FAILED
         if reason:
             step.execution_result = reason
+
+        # Store metadata including permanent_failure flag and retry info
+        if metadata:
+            if not hasattr(step, 'metadata') or step.metadata is None:
+                step.metadata = {}
+            step.metadata.update(metadata)
+            
+            # Log retry information if present
+            import logging
+            logger = logging.getLogger(__name__)
+            if 'permanent_failure' in metadata:
+                logger.info(f"Step {step_id} marked with permanent_failure={metadata['permanent_failure']}")
+            if 'retry_count' in metadata:
+                logger.info(f"Step {step_id} retry count: {metadata['retry_count']}")
 
         self._refresh_step_counters()
         return step

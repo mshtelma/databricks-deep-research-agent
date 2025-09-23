@@ -115,6 +115,15 @@ class BraveToolFactory(ToolFactory):
             return tool
         except Exception as e:
             print(f"[BraveToolFactory] ERROR: Exception during tool creation: {e}")
+            
+            # Check if this is an API key resolution issue - if so, return None instead of raising
+            error_message = str(e)
+            if "API key could not be resolved" in error_message or "API key is required but not provided" in error_message:
+                print("[BraveToolFactory] API key resolution failed - returning None for graceful degradation")
+                logger.info("Brave tool unavailable due to missing API key - returning None")
+                return None
+            
+            # For other errors, still raise the exception
             logger.error("Failed to create Brave tool", error=e)
             raise ToolInitializationError(f"Failed to create Brave tool: {e}")
 

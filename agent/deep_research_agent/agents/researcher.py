@@ -26,13 +26,14 @@ from deep_research_agent.core import id_generator as id_gen
 from deep_research_agent.core.entity_validation import EntityExtractor
 from deep_research_agent.core.multi_agent_state import EnhancedResearchState, StateManager
 from deep_research_agent.core.plan_models import Step, StepStatus, StepType
-from deep_research_agent.core.exceptions import SearchToolsFailedException
+from deep_research_agent.core.exceptions import SearchToolsFailedException, PermanentWorkflowError, AuthenticationError
 from deep_research_agent.core.observation_models import (
     StructuredObservation,
     ExtractionMethod,
     observation_to_text,
     observations_to_text_list,
 )
+from deep_research_agent.core.routing_policy import track_step_execution, track_structural_error
 
 
 logger = get_logger(__name__)
@@ -151,7 +152,10 @@ class ResearcherAgent:
             # Update step with results
             if results:
                 current_step.execution_result = results["summary"]
-                current_step.observations = results.get("observations", [])
+                # Normalize observations to StructuredObservation objects
+                from deep_research_agent.core.observation_models import ensure_structured_observation
+                raw_observations = results.get("observations", [])
+                current_step.observations = [ensure_structured_observation(obs) for obs in raw_observations]
                 current_step.citations = results.get("citations", [])
                 current_step.confidence_score = results.get("confidence", 0.8)
                 current_step.status = StepStatus.COMPLETED
@@ -161,14 +165,22 @@ class ResearcherAgent:
                 for observation in current_step.observations:
                     # CRITICAL FIX: Validate entities in observations before adding to state
                     from deep_research_agent.core.entity_validation import validate_content_global
-                    validation_result = validate_content_global(observation, context="observation_validation")
+                    from deep_research_agent.core.observation_models import observation_to_text
+                    
+                    # Convert observation to text for validation (handles all types safely)
+                    observation_text = observation_to_text(observation)
+                    
+                    validation_result = validate_content_global(observation_text, context="observation_validation")
                     
                     if validation_result.is_valid:
                         state = StateManager.add_observation(state, observation, current_step)
                     else:
+                        # Get text representation of observation for logging
+                        from deep_research_agent.core.observation_models import observation_to_text
+                        obs_text = observation_to_text(observation)
                         logger.warning(
                             f"Observation rejected due to entity validation violations: {validation_result.violations}. "
-                            f"Original observation: {observation[:100]}..."
+                            f"Original observation: {obs_text[:100]}..."
                         )
                         # Track entity violations in state
                         if "entity_violations" not in state:
@@ -176,7 +188,7 @@ class ResearcherAgent:
                         state["entity_violations"].append({
                             "step_id": current_step.step_id,
                             "violations": list(validation_result.violations),
-                            "observation_preview": observation[:100] + "..." if len(observation) > 100 else observation
+                            "observation_preview": obs_text[:100] + "..." if len(obs_text) > 100 else obs_text
                         })
                 
                 # Add citations to state (with deduplication)
@@ -254,7 +266,16 @@ class ResearcherAgent:
                 if isinstance(results, dict) and results.get("research_observations"):
                     rich_observations = results["research_observations"]
                     existing_rich_obs = state.get("research_observations", [])
-                    state["research_observations"] = existing_rich_obs + rich_observations
+                    
+                    # Ensure rich_observations is a list before concatenation
+                    if isinstance(rich_observations, list):
+                        state["research_observations"] = existing_rich_obs + rich_observations
+                    elif isinstance(rich_observations, str):
+                        # Convert string to list
+                        state["research_observations"] = existing_rich_obs + [rich_observations]
+                    else:
+                        # Convert other types to string then to list
+                        state["research_observations"] = existing_rich_obs + [str(rich_observations)]
             else:
                 current_step.status = StepStatus.FAILED
                 plan.failed_steps += 1
@@ -268,10 +289,62 @@ class ResearcherAgent:
             logger.error(f"Search tools failed during step execution: {e.message}")
             raise
         except Exception as e:
-            logger.error(f"Error executing step {current_step.step_id}: {str(e)}")
+            error_message = str(e)
+            logger.error(f"Error executing step {current_step.step_id}: {error_message}")
+            
+            # Check if this is a permanent error (403, 401, IP ACL blocking, etc.)
+            permanent_error_indicators = [
+                "403", "401", "forbidden", "unauthorized", 
+                "ip acl", "ip address", "blocked", "access denied",
+                "authentication failed", "authorization failed"
+            ]
+            
+            is_permanent_error = any(
+                indicator.lower() in error_message.lower() 
+                for indicator in permanent_error_indicators
+            )
+            
+            if is_permanent_error:
+                # Mark step as permanently failed
+                current_step.metadata = current_step.metadata or {}
+                current_step.metadata["permanent_failure"] = True
+                current_step.metadata["error_type"] = "authentication_error"
+                
+                # Track this as a structural error for circuit breaker
+                state = track_structural_error(state, f"Permanent authentication error in step {current_step.step_id}: {error_message}")
+                
+                logger.error(f"Permanent error detected in step {current_step.step_id}, failing workflow")
+                raise AuthenticationError(
+                    f"Step {current_step.step_id} failed with permanent authentication error: {error_message}. "
+                    f"This typically indicates IP ACL blocking or invalid credentials that cannot be resolved by retrying."
+                )
+            
+            # For non-permanent errors, track retry count
+            current_step.metadata = current_step.metadata or {}
+            retry_count = current_step.metadata.get("retry_count", 0) + 1
+            current_step.metadata["retry_count"] = retry_count
+            
+            # If too many retries, mark as permanently failed
+            max_step_retries = 3
+            if retry_count >= max_step_retries:
+                current_step.metadata["permanent_failure"] = True
+                current_step.metadata["error_type"] = "max_retries_exceeded"
+                
+                # Track this as a structural error for circuit breaker
+                state = track_structural_error(state, f"Max retries exceeded for step {current_step.step_id}")
+                
+                logger.error(f"Step {current_step.step_id} failed after {retry_count} retries")
+                raise PermanentWorkflowError(
+                    f"Step {current_step.step_id} failed after {max_step_retries} retry attempts: {error_message}"
+                )
+            
+            # For retryable errors, mark step as failed but continue
             current_step.status = StepStatus.FAILED
             plan.failed_steps += 1
-            state["errors"].append(str(e))
+            state["errors"].append(f"Step {current_step.step_id} failed (attempt {retry_count}/{max_step_retries}): {error_message}")
+            
+            # Track step execution for circuit breaker pattern
+            state = track_step_execution(state, current_step.step_id)
         
         finally:
             # Update timing
@@ -442,7 +515,8 @@ class ResearcherAgent:
                 parsed = json.loads(synthesis)
                 # Observations
                 if isinstance(parsed.get("observations"), list):
-                    parsed_observations = [str(o) for o in parsed["observations"]]
+                    from deep_research_agent.core.observation_models import ensure_structured_observation
+                    parsed_observations = [ensure_structured_observation(o) for o in parsed["observations"]]
                     logger.info(f"Parsed {len(parsed_observations)} observations from JSON")
                 # Citations (optional)
                 if isinstance(parsed.get("citations"), list):
@@ -596,7 +670,7 @@ class ResearcherAgent:
                 "summary": "Processing skipped - no data available",
                 "confidence": 0.0,
                 "extracted_data": {},
-                "observations": ["Processing step executed but no observations available"]
+                "observations": [StructuredObservation.from_string("Processing step executed but no observations available")]
             }
         
         # Process the accumulated information
@@ -633,7 +707,11 @@ Provide a clear, analytical response focused ONLY on the requested entities.
             logger.info(f"🔍 LLM_PROMPT [researcher_processing]: {processing_prompt[:500]}...")
             
             response = self.llm.invoke(messages)
-            analysis = response.content
+            
+            # CRITICAL FIX: Handle structured responses properly using centralized parser
+            from deep_research_agent.core.llm_response_parser import extract_text_from_response
+            analysis = extract_text_from_response(response)
+            analysis_text = analysis
             
             # Log the response received from LLM
             logger.info(f"🔍 LLM_RESPONSE [researcher_processing]: {analysis[:500]}...")
@@ -642,7 +720,7 @@ Provide a clear, analytical response focused ONLY on the requested entities.
             if requested_entities:
                 from deep_research_agent.core.entity_validation import EntityExtractor
                 extractor = EntityExtractor()
-                response_entities = extractor.extract_entities(analysis)
+                response_entities = extractor.extract_entities(analysis_text)
                 hallucinated = response_entities - set(requested_entities)
                 if hallucinated:
                     logger.warning(f"🚨 ENTITY_HALLUCINATION [researcher_processing]: LLM mentioned entities not in original query: {hallucinated}")
@@ -653,7 +731,7 @@ Provide a clear, analytical response focused ONLY on the requested entities.
         
         return {
             "summary": analysis,
-            "observations": [analysis],
+            "observations": [StructuredObservation.from_string(analysis)],
             "citations": [],  # Processing steps don't generate new citations
             "confidence": 0.9
         }
@@ -679,7 +757,7 @@ Provide a clear, analytical response focused ONLY on the requested entities.
                 "summary": "Synthesis skipped - no data available", 
                 "confidence": 0.0,
                 "extracted_data": {},
-                "observations": ["Synthesis step executed but no observations available"]
+                "observations": [StructuredObservation.from_string("Synthesis step executed but no observations available")]
             }
         
         # Create synthesis prompt
@@ -724,7 +802,10 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
             logger.info(f"🔍 LLM_PROMPT [researcher_synthesis]: {synthesis_prompt[:500]}...")
             
             response = self.llm.invoke(messages)
-            synthesis = response.content
+            
+            # CRITICAL FIX: Handle structured responses properly
+            from deep_research_agent.core.llm_response_parser import extract_text_from_response
+            synthesis = extract_text_from_response(response)
             
             # Log the response received from LLM
             logger.info(f"🔍 LLM_RESPONSE [researcher_synthesis]: {synthesis[:500]}...")
@@ -1269,7 +1350,10 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
             ]
             
             response = self.llm.invoke(messages)
-            synthesis_content = response.content
+            
+            # CRITICAL FIX: Handle structured responses properly using centralized parser
+            from deep_research_agent.core.llm_response_parser import extract_text_from_response
+            synthesis_content = extract_text_from_response(response)
             
             # CRITICAL FIX: Validate entities in synthesis to prevent wrong countries
             from deep_research_agent.core.entity_validation import validate_content_global
@@ -1380,6 +1464,12 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
         """Extract key findings from synthesis."""
         findings = []
         
+        # Ensure synthesis is a string
+        if isinstance(synthesis, list):
+            synthesis = " ".join(str(item) for item in synthesis)
+        elif not isinstance(synthesis, str):
+            synthesis = str(synthesis)
+        
         # Split synthesis into sentences
         sentences = synthesis.split(". ")
         
@@ -1407,6 +1497,12 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
     def _extract_insights(self, synthesis: str) -> List[str]:
         """Extract insights from synthesis."""
         insights = []
+        
+        # Ensure synthesis is a string
+        if isinstance(synthesis, list):
+            synthesis = " ".join(str(item) for item in synthesis)
+        elif not isinstance(synthesis, str):
+            synthesis = str(synthesis)
         
         # Look for insight indicators
         insight_patterns = [

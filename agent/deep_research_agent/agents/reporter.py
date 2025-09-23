@@ -35,6 +35,7 @@ from deep_research_agent.core.observation_models import (
 )
 from deep_research_agent.core.observation_selector import ObservationSelector
 from deep_research_agent.core.plan_models import StepStatus
+from deep_research_agent.core.response_handlers import parse_structured_response, ParsedResponse, ResponseType
 
 
 logger = get_logger(__name__)
@@ -143,6 +144,71 @@ class ReporterAgent:
         # Unknown errors - don't retry
         return False, None
     
+    # NOTE: _extract_content_from_reasoning method has been removed as it's replaced
+    # by the universal response handler in _invoke_llm_with_smart_retry
+
+    def _transform_reasoning_to_report(self, reasoning_text: str, section_name: str, findings: Dict[str, Any] = None) -> str:
+        """
+        Transform reasoning text into proper report content.
+        
+        Args:
+            reasoning_text: The reasoning text to transform
+            section_name: Name of the section being generated
+            findings: Research findings for fallback context
+            
+        Returns:
+            str: Transformed report content
+        """
+        logger.info(f"🔄 TRANSFORMATION: Converting reasoning to report content for {section_name}")
+        
+        if not self.llm:
+            logger.warning(f"No LLM available for reasoning transformation, using fallback")
+            return f"## {section_name}\n\n{reasoning_text[:500]}..."
+        
+        # Create transformation prompt
+        transform_prompt = f"""You received reasoning about a research topic. Transform it into a professional report section.
+
+Original reasoning:
+{reasoning_text}
+
+Instructions:
+1. Convert the reasoning into clear, professional report content
+2. Remove any meta-commentary like "I need to", "Let me think", "I should"
+3. Focus on the facts, analysis, and conclusions from the reasoning
+4. Use proper formatting with paragraphs and structure
+5. Write in third person, professional tone
+6. Present information as facts and analysis, not thought process
+7. Keep the substantial content but make it report-appropriate
+
+Generate the report section content:"""
+
+        try:
+            messages = [
+                SystemMessage(content="You are a professional report writer. Transform reasoning into clear, structured report content. Remove thinking process and present facts directly."),
+                HumanMessage(content=transform_prompt)
+            ]
+            
+            response = self.llm.invoke(messages)
+            
+            # Parse the transformation response
+            from deep_research_agent.core.response_handlers import parse_structured_response
+            parsed = parse_structured_response(response)
+            
+            if parsed.content and len(parsed.content.strip()) > 50:
+                logger.info(f"✅ TRANSFORMATION_SUCCESS: {section_name} ({len(parsed.content)} chars)")
+                return parsed.content.strip()
+            else:
+                logger.warning(f"⚠️ TRANSFORMATION_FAILED: {section_name} - insufficient content generated")
+                # Return clean version of original reasoning
+                clean_reasoning = reasoning_text.replace("I need to", "").replace("Let me", "").replace("I should", "")
+                return f"## {section_name}\n\n{clean_reasoning[:800]}..."
+                
+        except Exception as e:
+            logger.error(f"❌ TRANSFORMATION_ERROR: {section_name} - {e}")
+            # Return cleaned version of reasoning as fallback
+            clean_reasoning = reasoning_text.replace("I need to", "The analysis shows").replace("Let me", "").replace("I should", "The research indicates")
+            return f"## {section_name}\n\n{clean_reasoning[:800]}..."
+
     def _invoke_llm_with_smart_retry(self, messages: List, section_name: str, state: EnhancedResearchState = None) -> str:
         """
         Invoke LLM with intelligent retry for transient errors only.
@@ -192,7 +258,54 @@ class ReporterAgent:
                 if attempt > 0:
                     logger.info(f"LLM call succeeded for {section_name} after {attempt} retries")
                 
-                return response.content
+                # Parse response using the universal response handler
+                parsed = parse_structured_response(response)
+                
+                # Extract content and reasoning
+                content = parsed.content
+                reasoning_text = parsed.reasoning
+                
+                # Log response analysis
+                logger.info(f"Section {section_name}: Using {parsed.response_type.value} content ({len(content)} chars)")
+                if reasoning_text:
+                    logger.debug(f"Section {section_name}: Reasoning available ({len(reasoning_text)} chars)")
+                if parsed.metadata:
+                    logger.debug(f"Section {section_name}: Metadata: {parsed.metadata}")
+                
+                # Emit reasoning event if available
+                if reasoning_text and self.event_emitter:
+                    try:
+                        # Truncate reasoning for events to avoid sending full reports as reasoning
+                        reasoning_for_event = reasoning_text[:500] if len(reasoning_text) > 500 else reasoning_text
+                        self.event_emitter.emit_reasoning_reflection(
+                            reasoning=reasoning_for_event,
+                            options=["content_generation"],
+                            confidence=0.8,
+                            stage_id="reporter"
+                        )
+                        logger.info(f"Emitted reasoning event for {section_name} ({len(reasoning_for_event)} chars)")
+                    except Exception as e:
+                        logger.warning(f"Failed to emit reasoning event for {section_name}: {e}")
+                
+                # NEW: Transform reasoning to report if we got reasoning (regardless of content)
+                if reasoning_text and len(reasoning_text.strip()) > 100:
+                    logger.warning(f"🔄 REASONING_TO_REPORT: Got reasoning response for {section_name}, transforming to proper report...")
+                    
+                    # Avoid infinite recursion by checking if this is already a transformation
+                    if not section_name.endswith("_transformed"):
+                        transformed_content = self._transform_reasoning_to_report(reasoning_text, section_name)
+                        logger.info(f"🔄 REASONING_TO_REPORT: Transformation completed for {section_name} ({len(transformed_content)} chars)")
+                        content = transformed_content  # Always use transformed content
+                    else:
+                        logger.warning(f"🔄 REASONING_TO_REPORT: Avoiding recursive transformation for {section_name}")
+                        # Keep existing content if we have it, otherwise use cleaned reasoning
+                
+                # Ensure we never return None or empty content
+                if not content:
+                    logger.warning(f"No content extracted for {section_name}, using empty string")
+                    content = ""
+                
+                return content
                 
             except Exception as e:
                 attempt += 1
@@ -409,6 +522,9 @@ class ReporterAgent:
             report_style
         )
         
+        # SAFEGUARD: Validate final report quality
+        report_with_metadata = self._validate_final_report(report_with_metadata, state)
+        
         # Don't mutate state directly - let LangGraph handle updates through Command
         
         logger.info(
@@ -471,16 +587,13 @@ class ReporterAgent:
         guideline_text = "\n".join(f"- {rule}" for rule in guidelines)
         background = findings.get("background_context") or state.get("background_investigation_results")
 
-        template_prompt = f"""# Task
-Fill the provided markdown template using the research findings.
+        template_prompt = f"""# Task: Research Analysis
+Perform detailed analysis and calculations for this research topic. Focus on generating comprehensive insights, data, and findings.
 
 ## Research Topic
 {research_topic}
 
-## Template
-{template}
-
-## Guidelines
+## Guidelines for Analysis
 {guideline_text}
 
 ## Research Observations
@@ -497,20 +610,58 @@ Fill the provided markdown template using the research findings.
 - Requested entities: {', '.join(requested_entities) if requested_entities else 'Not specified'}
 - Background notes: {background[:500] + ('...' if background and len(background) > 500 else '') if background else 'None'}
 
-Produce the final report in Markdown, rewriting every placeholder bracket with prose, data, or an explicit note that data is unavailable.
+## Instructions:
+1. **Analyze the research data thoroughly**
+2. **Perform all necessary calculations and computations** 
+3. **Extract key insights and findings**
+4. **Create detailed comparative analysis**
+5. **Compute financial data, tax rates, costs as needed**
+6. **Provide comprehensive coverage of all requested entities**
+
+**Output detailed analysis with calculations, findings, comparisons, and insights. This will be used to create the final report structure.**
 """
 
         messages = [
             SystemMessage(
                 content=(
-                    "You are a meticulous report writer. Fill the template exactly once, "
-                    "respecting its structure and ensuring factual accuracy."
+                    "You are a research analyst. Perform comprehensive analysis of the research data. "
+                    "Calculate financial figures, tax rates, comparative costs, and other quantitative metrics. "
+                    "Extract key insights and findings. Create detailed analysis that covers all requested "
+                    "entities and scenarios. Your analysis will be used to create a structured report."
                 )
             ),
             HumanMessage(content=template_prompt),
         ]
 
-        report_content = self._invoke_llm_with_smart_retry(messages, "template_report")
+        # First, get reasoning and analysis 
+        analysis_content = self._invoke_llm_with_smart_retry(messages, "template_analysis")
+        
+        # Second, format the analysis into the template structure
+        formatting_prompt = f"""You have completed detailed analysis for a research report. Now format this analysis into the provided template structure.
+
+## Your Analysis:
+{analysis_content}
+
+## Template to Fill (COMPLETE ALL SECTIONS):
+{template}
+
+## Critical Instructions:
+1. **COMPLETE THE ENTIRE TEMPLATE** - do not stop until every section is filled
+2. The template contains multiple sections - fill ALL of them, not just the first few
+3. Replace EVERY [bracketed instruction] with actual content from your analysis
+4. Each section must be completed with real content, data, tables, and insights
+5. Use markdown formatting: proper headings (##), bullet points, tables as needed
+6. Include ALL sections shown in the template - do not omit any
+7. The output must be the complete template with every section filled
+
+**You must output the entire completed template from start to finish. Do not truncate or stop early.**"""
+
+        formatting_messages = [
+            SystemMessage(content="You are a report formatter. Your task is to complete the ENTIRE template provided - every single section from start to finish. Take the analysis content and organize it into ALL sections of the template. Replace all [bracketed instructions] with real content. Do not stop early or omit sections - the output must include every section in the template."),
+            HumanMessage(content=formatting_prompt)
+        ]
+        
+        report_content = self._invoke_llm_with_smart_retry(formatting_messages, "template_report")
         metadata = {
             "observation_count": len(findings.get("observations", [])),
             "observations_truncated": truncated,
@@ -551,7 +702,7 @@ Produce the final report in Markdown, rewriting every placeholder bracket with p
                 source = obs.get("source")
                 extracted = obs.get("extracted_data") or {}
             else:
-                content = str(obs)
+                content = observation_to_text(obs)
                 source = None
                 extracted = {}
 
@@ -664,37 +815,62 @@ Produce the final report in Markdown, rewriting every placeholder bracket with p
                 logger.info(f"REPORTER: current_plan exists: {current_plan is not None}")
                 
                 if current_plan:
+                    # Debug plan attributes
+                    plan_attrs = [attr for attr in dir(current_plan) if not attr.startswith('_')]
+                    logger.info(f"REPORTER: plan attributes: {plan_attrs}")
+                    
                     has_structure_attr = hasattr(current_plan, 'suggested_report_structure')
                     logger.info(f"REPORTER: plan has suggested_report_structure attribute: {has_structure_attr}")
                     
                     if has_structure_attr:
                         structure = current_plan.suggested_report_structure
                         logger.info(f"REPORTER: suggested_report_structure content: {structure}")
+                        logger.info(f"REPORTER: suggested_report_structure type: {type(structure)}")
                         
-                        if structure:
+                        if structure and isinstance(structure, list) and len(structure) > 0:
                             # Create dynamic style config with adaptive structure
                             base_config = STYLE_CONFIGS[ReportStyle.DEFAULT]
                             
                             # Create new config with adaptive sections
                             from copy import deepcopy
                             adaptive_config = deepcopy(base_config)
-                            adaptive_config.structure = current_plan.suggested_report_structure
+                            adaptive_config.structure = structure
                             
                             logger.info(f"✅ REPORTER: Using adaptive structure with {len(adaptive_config.structure)} sections")
                             for i, section in enumerate(adaptive_config.structure, 1):
                                 logger.info(f"  📄 Section {i}: {section}")
                             return adaptive_config
                         else:
-                            logger.info("REPORTER: suggested_report_structure is empty")
+                            logger.info(f"REPORTER: suggested_report_structure is empty or invalid: {structure}")
                     else:
                         logger.info("REPORTER: plan does not have suggested_report_structure attribute")
+                        
+                    # Also check if dynamic_sections exist as alternative
+                    if hasattr(current_plan, 'dynamic_sections') and current_plan.dynamic_sections:
+                        dynamic_sections = current_plan.dynamic_sections
+                        logger.info(f"REPORTER: Found dynamic_sections as fallback: {len(dynamic_sections)} sections")
+                        
+                        # Extract titles from dynamic sections
+                        section_titles = [section.title for section in dynamic_sections]
+                        logger.info(f"REPORTER: Dynamic section titles: {section_titles}")
+                        
+                        # Create adaptive config from dynamic sections
+                        from copy import deepcopy
+                        base_config = STYLE_CONFIGS[ReportStyle.DEFAULT]
+                        adaptive_config = deepcopy(base_config)
+                        adaptive_config.structure = section_titles
+                        
+                        logger.info(f"✅ REPORTER: Using dynamic_sections fallback with {len(adaptive_config.structure)} sections")
+                        for i, section in enumerate(adaptive_config.structure, 1):
+                            logger.info(f"  📄 Section {i}: {section}")
+                        return adaptive_config
                 else:
                     logger.info("REPORTER: no current_plan found in state")
                 
-                # Fall back to professional style
-                logger.info("❌ REPORTER: No valid adaptive structure found, falling back to PROFESSIONAL style")
-                logger.info("REPORTER: This explains why you see professional style in the final output")
-                return STYLE_CONFIGS[ReportStyle.PROFESSIONAL]
+                # Fall back to comprehensive DEFAULT style instead of PROFESSIONAL
+                logger.info("❌ REPORTER: No valid adaptive structure found, falling back to comprehensive DEFAULT style")
+                logger.info("REPORTER: Using DEFAULT style for comprehensive coverage")
+                return STYLE_CONFIGS[ReportStyle.DEFAULT]
             else:
                 # Use standard configuration
                 logger.info(f"REPORTER: Using standard configuration for style: {report_style}")
@@ -1216,9 +1392,9 @@ Produce the final report in Markdown, rewriting every placeholder bracket with p
                 if hasattr(obs, 'content'):
                     obs_content = obs.content
                 elif isinstance(obs, dict):
-                    obs_content = obs.get('content', str(obs))
+                    obs_content = obs.get('content', observation_to_text(obs))
                 else:
-                    obs_content = str(obs)
+                    obs_content = observation_to_text(obs)
                 prompt_parts.append(f"{i}. {obs_content}")
             
             # Log token usage estimate
@@ -1299,15 +1475,25 @@ Produce the final report in Markdown, rewriting every placeholder bracket with p
             if hasattr(obs, 'content'):
                 content = obs.content
                 entities = getattr(obs, 'entity_tags', [])
+                # Ensure entities is always a list
+                if isinstance(entities, str):
+                    entities = [entities] if entities else []
+                elif not isinstance(entities, list):
+                    entities = []
                 metrics = getattr(obs, 'metric_values', {})
                 confidence = getattr(obs, 'confidence', 1.0)
             elif isinstance(obs, dict):
-                content = obs.get('content', str(obs))
+                content = obs.get('content', observation_to_text(obs))
                 entities = obs.get('entity_tags', [])
+                # Ensure entities is always a list
+                if isinstance(entities, str):
+                    entities = [entities] if entities else []
+                elif not isinstance(entities, list):
+                    entities = []
                 metrics = obs.get('metric_values', {})
                 confidence = obs.get('confidence', 1.0)
             else:
-                content = str(obs)
+                content = observation_to_text(obs)
                 entities = []
                 metrics = {}
                 confidence = 1.0
@@ -1530,6 +1716,20 @@ Produce the final report in Markdown, rewriting every placeholder bracket with p
             for citation in formatted_citations:
                 references += f"• {citation}\n"
         
+        # CRITICAL FIX: Ensure report is always a string before concatenation
+        if isinstance(report, list):
+            logger.warning(f"_add_citations_and_references received list for report, converting to string. List length: {len(report)}")
+            # Join list elements into a single string
+            report = "\n".join(str(item) for item in report if item is not None)
+        elif not isinstance(report, str):
+            logger.warning(f"_add_citations_and_references received {type(report)} for report, converting to string")
+            report = str(report) if report is not None else ""
+        
+        # Ensure report is never None
+        if report is None:
+            logger.warning("_add_citations_and_references received None for report, using empty string")
+            report = ""
+        
         # Append to report
         return report + "\n\n" + references
     
@@ -1561,6 +1761,11 @@ Produce the final report in Markdown, rewriting every placeholder bracket with p
             )
             
             # Insert after title
+            # Ensure report is a string before splitting
+            if isinstance(report, list):
+                report = "\n".join(report) if report else ""
+            elif not isinstance(report, str):
+                report = str(report) if report else ""
             parts = report.split("\n\n", 1)
             if len(parts) == 2:
                 report = parts[0] + "\n" + grounding_summary + parts[1]
@@ -1949,7 +2154,9 @@ Return reorganized sections as valid JSON using the target structure section nam
                 HumanMessage(content=table_prompt)
             ])
             
-            return response.content
+            # Handle structured responses properly
+            from deep_research_agent.core.llm_response_parser import extract_text_from_response
+            return extract_text_from_response(response)
         else:
             # Fallback - create simple table from data
             if all_data:
@@ -2070,7 +2277,7 @@ Return reorganized sections as valid JSON using the target structure section nam
                             "confidence": table_specifications.get("confidence", 0.9),
                             "reasoning": table_specifications.get("reasoning", "LLM extraction successful"),
                             "method": "llm_extraction",
-                            "data_sources": len(research_content.split('\n'))
+                            "data_sources": len((research_content if isinstance(research_content, str) else "\n".join(research_content) if isinstance(research_content, list) else str(research_content)).split('\n'))
                         }
                     }
                 else:
@@ -2122,6 +2329,11 @@ Return reorganized sections as valid JSON using the target structure section nam
         content = special_output.get("content", "")
         # Parse out table section if embedded in larger content
         if "| " in content:  # Markdown table marker
+            # Ensure content is a string before splitting
+            if isinstance(content, list):
+                content = "\n".join(content) if content else ""
+            elif not isinstance(content, str):
+                content = str(content) if content else ""
             lines = content.split("\n")
             table_lines = []
             in_table = False
@@ -2390,7 +2602,7 @@ Return reorganized sections as valid JSON using the target structure section nam
             elif isinstance(obs, dict):
                 obs_text = obs.get("content", "")
             else:
-                obs_text = str(obs)  # Fallback
+                obs_text = observation_to_text(obs)  # Fallback
                 
             if obs_text:
                 # Rough token estimation: 1 token ≈ 4 characters
@@ -2488,6 +2700,11 @@ EXAMPLE FORMAT:
         if not table_content or '|' not in table_content:
             return False
         
+        # Ensure table_content is a string before splitting
+        if isinstance(table_content, list):
+            table_content = "\n".join(table_content) if table_content else ""
+        elif not isinstance(table_content, str):
+            table_content = str(table_content) if table_content else ""
         lines = table_content.strip().split('\n')
         table_lines = [line for line in lines if line.strip().startswith('|')]
         
@@ -2515,7 +2732,9 @@ EXAMPLE FORMAT:
             
             table_rows = []
             for row in rows:
-                row_data = [row] + ["N/A"] * len(columns)
+                # Ensure row is a string before concatenation
+                row_str = str(row) if not isinstance(row, str) else row
+                row_data = [row_str] + ["N/A"] * len(columns)
                 table_rows.append("| " + " | ".join(row_data) + " |")
             
             table_content = "\n".join([header, separator] + table_rows)
@@ -2550,7 +2769,9 @@ EXAMPLE FORMAT:
         
         table_rows = []
         for row in rows:
-            row_data = [row]
+            # Ensure row is a string before using in list
+            row_str = str(row) if not isinstance(row, str) else row
+            row_data = [row_str]
             
             # Try to extract some data for this row
             for col in columns:
@@ -2672,9 +2893,108 @@ Keep it concise and factual."""
                 HumanMessage(prompt)
             ])
             
-            analysis = response.content if hasattr(response, 'content') else str(response)
+            # Handle structured responses properly
+            from deep_research_agent.core.llm_response_parser import extract_text_from_response
+            analysis = extract_text_from_response(response)
             return analysis.strip() if analysis and len(analysis) > 10 else None
             
         except Exception as e:
             logger.warning(f"Failed to generate table analysis: {e}")
             return None
+
+    def _validate_final_report(self, report: str, state: EnhancedResearchState) -> str:
+        """
+        Validate the final report to ensure it's not empty, reasoning, or incomplete.
+        
+        Args:
+            report: The generated report
+            state: Current research state
+            
+        Returns:
+            str: Validated report or fallback content
+        """
+        if not report or not report.strip():
+            logger.error("Final report is empty - generating fallback")
+            return self._generate_fallback_report(state)
+        
+        report_lower = report.lower()
+        
+        # Check if report looks like reasoning instead of actual content
+        reasoning_indicators = [
+            "i need to", "let me", "i should", "i will", "first i", 
+            "thinking about", "considering", "my approach", "i'll",
+            "step 1:", "step 2:", "next, i", "based on this",
+            "i'm going to", "let's start by", "the first step"
+        ]
+        
+        reasoning_count = sum(1 for indicator in reasoning_indicators if indicator in report_lower)
+        
+        # If the report is very short or contains many reasoning indicators, it might be reasoning
+        if len(report.strip()) < 200 or reasoning_count >= 3:
+            logger.warning(f"Report appears to be reasoning (length={len(report)}, reasoning_indicators={reasoning_count}) - generating fallback")
+            return self._generate_fallback_report(state)
+        
+        # Check for placeholder content that indicates incomplete generation
+        placeholder_indicators = [
+            "[content to be added]", "[analysis content to be added]", 
+            "[recommendations content to be added]", "[executive summary content to be added]",
+            "content placeholder", "section content will be generated"
+        ]
+        
+        placeholder_count = sum(1 for indicator in placeholder_indicators if indicator in report_lower)
+        
+        if placeholder_count > 0:
+            logger.warning(f"Report contains {placeholder_count} placeholders - generating fallback")
+            return self._generate_fallback_report(state)
+        
+        logger.info(f"Final report validation passed: {len(report)} characters")
+        return report
+
+    def _generate_fallback_report(self, state: EnhancedResearchState) -> str:
+        """
+        Generate a fallback report when the main report generation fails.
+        
+        Args:
+            state: Current research state
+            
+        Returns:
+            str: Basic fallback report
+        """
+        research_topic = state.get("research_topic", "Research Query")
+        observations = state.get("observations", [])
+        citations = state.get("citations", [])
+        
+        fallback_report = f"""# Research Report: {research_topic}
+
+## Executive Summary
+
+I have conducted research on the requested topic but encountered issues generating the full report. 
+Based on the available research findings, I can provide the following summary:
+
+## Research Findings
+
+"""
+
+        # Add basic findings from observations
+        if observations:
+            fallback_report += f"During my research, I gathered {len(observations)} key observations:\n\n"
+            for i, obs in enumerate(observations[:5], 1):  # Limit to first 5
+                if hasattr(obs, 'content') and obs.content:
+                    content = obs.content[:200] + "..." if len(obs.content) > 200 else obs.content
+                    fallback_report += f"{i}. {content}\n\n"
+        else:
+            fallback_report += "No detailed research findings were successfully gathered.\n\n"
+
+        # Add citations if available
+        if citations:
+            fallback_report += "## Sources\n\n"
+            for i, citation in enumerate(citations[:10], 1):  # Limit to first 10
+                if hasattr(citation, 'url') and hasattr(citation, 'title'):
+                    fallback_report += f"{i}. [{citation.title}]({citation.url})\n"
+                elif hasattr(citation, 'source'):
+                    fallback_report += f"{i}. {citation.source}\n"
+
+        fallback_report += "\n\n*Note: This is a fallback report generated due to technical issues with the main report generation.*"
+        
+        logger.info(f"Generated fallback report: {len(fallback_report)} characters")
+        return fallback_report

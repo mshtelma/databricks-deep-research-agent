@@ -21,6 +21,7 @@ from deep_research_agent.core.grounding import (
     VerificationLevel
 )
 from deep_research_agent.core.entity_validation import get_global_validator, validate_content_global
+from deep_research_agent.core.observation_models import observation_to_text
 # from deep_research_agent.core.multi_agent_state import EnhancedResearchState  # Not needed
 
 logger = logging.getLogger(__name__)
@@ -225,7 +226,7 @@ class FactCheckerAgent:
         observations = state.get('observations', [])
         if observations:
             # Join all observations into content
-            content = '\n'.join(str(obs) for obs in observations if obs)
+            content = '\n'.join(observation_to_text(obs) for obs in observations if obs)
             if content.strip():
                 logger.debug(f"Using {len(observations)} observations for fact checking")
                 return content
@@ -233,7 +234,7 @@ class FactCheckerAgent:
         # Check research_observations (alternative field name)
         research_obs = state.get('research_observations', [])
         if research_obs:
-            content = '\n'.join(str(obs) for obs in research_obs if obs)
+            content = '\n'.join(observation_to_text(obs) for obs in research_obs if obs)
             if content.strip():
                 logger.debug(f"Using {len(research_obs)} research_observations for fact checking")
                 return content
@@ -395,7 +396,11 @@ Claims:"""
             ]
             
             response = self.llm.invoke(messages)
-            claim_texts = response.content.strip().split('\n')
+            
+            # Handle structured responses properly
+            from deep_research_agent.core.llm_response_parser import extract_text_from_response
+            content = extract_text_from_response(response)
+            claim_texts = content.strip().split('\n')
             
             for text in claim_texts:
                 text = text.strip()

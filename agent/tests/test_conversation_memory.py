@@ -46,18 +46,26 @@ class TestConversationMemory:
         self.mock_llm = Mock()
         self.mock_llm.invoke.return_value = AIMessage(content="Test response")
         
-        # Create agent with mocked dependencies
-        with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_llm', return_value=self.mock_llm):
-            mock_phase2_return = (None, None, None, None, None, None)
-            with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_phase2_components', return_value=mock_phase2_return):
+        # Create agent with mocked dependencies using current initialization pattern
+        with patch('deep_research_agent.core.llm_factory.create_llm', return_value=self.mock_llm):
+            with patch('deep_research_agent.components.create_tool_registry') as mock_tool_registry:
+                mock_tool_registry.return_value = Mock()
+                
                 self.agent = DatabricksCompatibleAgent()
                 
-                # Mock the graph to avoid actual workflow execution
+                # Mock the graph property to avoid actual workflow execution
                 mock_graph = Mock()
                 mock_graph.stream.return_value = [
                     {"synthesize_answer": {"messages": [Mock(content="Test synthesis response")]}}
                 ]
-                self.agent.graph = mock_graph
+                # Use patch.object to mock the read-only graph property
+                self._graph_patch = patch.object(self.agent.agent, 'graph', new_callable=lambda: mock_graph)
+                self._graph_patch.start()
+    
+    def teardown_method(self):
+        """Clean up test environment."""
+        if hasattr(self, '_graph_patch'):
+            self._graph_patch.stop()
     
     def test_single_question_extraction(self):
         """Test that single question is extracted correctly."""
@@ -459,16 +467,26 @@ class TestConversationEdgeCases:
         self.mock_llm = Mock()
         self.mock_llm.invoke.return_value = AIMessage(content="Test response")
         
-        with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_llm', return_value=self.mock_llm):
-            mock_phase2_return = (None, None, None, None, None, None)
-            with patch('deep_research_agent.agent_initialization.AgentInitializer.initialize_phase2_components', return_value=mock_phase2_return):
+        # Create agent with mocked dependencies using current initialization pattern
+        with patch('deep_research_agent.core.llm_factory.create_llm', return_value=self.mock_llm):
+            with patch('deep_research_agent.components.create_tool_registry') as mock_tool_registry:
+                mock_tool_registry.return_value = Mock()
+                
                 self.agent = DatabricksCompatibleAgent()
                 
+                # Mock the graph property to avoid actual workflow execution
                 mock_graph = Mock()
                 mock_graph.stream.return_value = [
                     {"synthesize_answer": {"messages": [Mock(content="Test synthesis")]}}
                 ]
-                self.agent.graph = mock_graph
+                # Use patch.object to mock the read-only graph property
+                self._graph_patch = patch.object(self.agent.agent, 'graph', new_callable=lambda: mock_graph)
+                self._graph_patch.start()
+    
+    def teardown_method(self):
+        """Clean up test environment."""
+        if hasattr(self, '_graph_patch'):
+            self._graph_patch.stop()
     
     def test_mixed_role_conversation(self):
         """Test conversation with mixed roles and system messages."""

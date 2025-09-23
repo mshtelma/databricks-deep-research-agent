@@ -341,7 +341,7 @@ class ResearchContext:
 @dataclass
 class AgentConfiguration:
     """Configuration for the research agent."""
-    llm_endpoint: str = "databricks-claude-3-7-sonnet"
+    llm_endpoint: str = "databricks-gpt-oss-120b"
     max_research_loops: int = 2
     initial_query_count: int = 3
     max_concurrent_searches: int = 2
