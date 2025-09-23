@@ -15,12 +15,6 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
-def is_development_mode() -> bool:
-    """Check if development mode is enabled."""
-    dev_mode = os.getenv("DEVELOPMENT_MODE", "false").lower()
-    return dev_mode in ("true", "1", "yes", "on")
-
-
 def is_databricks_app_environment() -> bool:
     """Detect if running inside a Databricks Apps container.
 
@@ -36,11 +30,7 @@ def is_databricks_app_environment() -> bool:
     Presence of any one of them is treated as a positive signal that the code
     is running inside a Databricks App.
     """
-    return bool(
-        os.getenv("DATABRICKS_APP_NAME")
-        or os.getenv("DATABRICKS_APP_URL")
-        or os.getenv("DATABRICKS_APP_PORT")
-    )
+    return bool(os.getenv("DATABRICKS_APP_NAME") or os.getenv("DATABRICKS_APP_URL") or os.getenv("DATABRICKS_APP_PORT"))
 
 
 class AgentMessage(BaseModel):
@@ -69,6 +59,14 @@ class ResearchMetadata(BaseModel):
     current_node: str = ""
     vector_results_count: int = 0
 
+    # Multi-agent and plan visualization fields
+    plan_details: Optional[Dict] = None
+    factuality_score: Optional[float] = None
+    report_style: Optional[str] = None
+    verification_level: Optional[str] = None
+    grounding: Optional[Dict] = None
+    current_agent: Optional[str] = None
+
 
 class StreamEvent(BaseModel):
     """Real-time stream event structure."""
@@ -76,6 +74,9 @@ class StreamEvent(BaseModel):
     type: str  # "message_start" | "content_delta" | "research_update" | "message_complete"
     content: Optional[str] = None
     metadata: Optional[ResearchMetadata] = None
+    event: Optional[Dict] = None  # For intermediate events
+    events: Optional[List[Dict]] = None  # For event batches
+    batch_size: Optional[int] = None  # For event batches
 
 
 class AgentClient:
@@ -93,7 +94,9 @@ class AgentClient:
         # Check if we have a direct token (PAT authentication)
         if self.workspace_client.config.token:
             logger.info(f"Using PAT authentication (token length: {len(self.workspace_client.config.token)})")
-            return {"Authorization": f"Bearer {self.workspace_client.config.token}"}
+            headers = {"Authorization": f"Bearer {self.workspace_client.config.token}"}
+            self._log_headers("PAT Authentication", headers)
+            return headers
 
         # Try to explicitly authenticate via the SDK which, inside Databricks
         # (including Apps), can mint a short-lived PAT on demand.  This method
@@ -103,7 +106,6 @@ class AgentClient:
                 return self.workspace_client.config.authenticate()
             except Exception as e:
                 logger.info(f"workspace.authenticate() raised an exception: {e}")
-
 
         # Handle OAuth (service principal / M2M) authentication that Databricks SDK
         # automatically selects inside Databricks jobs, model-serving and Apps. In
@@ -128,10 +130,14 @@ class AgentClient:
                         logger.info(
                             f"Using OAuth ({self.workspace_client.config.auth_type}) authentication with dynamic token"
                         )
-                        return {"Authorization": f"Bearer {token}"}
+                        headers = {"Authorization": f"Bearer {token}"}
+                        self._log_headers("OAuth Authentication", headers)
+                        return headers
                     else:
                         # No token but OAuth mode - use empty headers (implicit auth)
-                        logger.info(f"OAuth mode ({self.workspace_client.config.auth_type}) but no token - using implicit authentication")
+                        logger.info(
+                            f"OAuth mode ({self.workspace_client.config.auth_type}) but no token - using implicit authentication"
+                        )
                         return {}
             except Exception as e:
                 logger.warning(
@@ -169,7 +175,9 @@ class AgentClient:
                     token = result.stdout.strip()
 
                 logger.info(f"Retrieved token via CLI profile '{profile}' (length: {len(token)})")
-                return {"Authorization": f"Bearer {token}"}
+                headers = {"Authorization": f"Bearer {token}"}
+                self._log_headers("CLI Profile Authentication", headers)
+                return headers
 
             except subprocess.CalledProcessError as e:
                 logger.error(f"Failed to get token via CLI: {e}")
@@ -242,11 +250,6 @@ class AgentClient:
                 logger.info(f"Using direct agent endpoint URL: {endpoint_url}")
                 return endpoint_url
 
-            # For development mode, provide a mock endpoint
-            if is_development_mode():
-                logger.info("Development mode enabled - using mock agent endpoint")
-                return "http://localhost:8001/mock-agent"
-
             # Get host - prefer agent-specific, fall back to workspace
             agent_host = os.getenv("AGENT_DATABRICKS_HOST")
             if not agent_host:
@@ -300,19 +303,21 @@ class AgentClient:
         }
 
         try:
-            # For development mode, simulate streaming response
-            if is_development_mode():
-                async for event in self._simulate_agent_response(messages[-1].content):
-                    yield event
-                return
-
             # Real agent endpoint streaming
             headers = self._get_auth_headers()
             headers["Content-Type"] = "application/json"
+            headers["User-Agent"] = "Databricks-Deep-Research-UI/1.0"
+            headers["Connection"] = "keep-alive"
+            headers["Keep-Alive"] = "timeout=300"
+
+            # Log full request details for debugging
+            self._log_request_details("POST", self.agent_endpoint, request_data, headers)
 
             async with self.http_client.stream(
                 "POST", self.agent_endpoint, json=request_data, headers=headers
             ) as response:
+                # Log response details immediately
+                self._log_response_details(response)
                 if response.status_code != 200:
                     error_text = await response.aread()
                     raise HTTPException(
@@ -363,148 +368,65 @@ class AgentClient:
             # Yield error event with detailed information
             yield StreamEvent(type="error", content=f"{error_type}: {str(e)}")
 
-    async def _simulate_agent_response(self, query: str) -> AsyncGenerator[StreamEvent, None]:
-        """Simulate agent response for development mode with predictable timing."""
-        import asyncio
-
-        # Start event
-        yield StreamEvent(type="stream_start")
-        await asyncio.sleep(0.3)  # Shorter initial delay
-
-        # Research phases with better timing
-        phases = [
-            ("querying", "Analyzing your query and generating search strategies..."),
-            ("searching", "Searching through multiple sources..."),
-            ("analyzing", "Analyzing search results and extracting insights..."),
-            ("synthesizing", "Synthesizing comprehensive response..."),
-        ]
-
-        full_response = ""
-
-        for i, (phase, description) in enumerate(phases):
-            # Progress update with more metadata
-            progress_percentage = (i + 1) * 25  # 25%, 50%, 75%, 100%
-            yield StreamEvent(
-                type="research_update",
-                metadata=ResearchMetadata(
-                    phase=phase,
-                    progress_percentage=progress_percentage,
-                    search_queries=["query 1", "query 2"] if phase != "querying" else [],
-                    sources=[{"url": "example.com", "title": "Example Source"}]
-                    if phase in ["analyzing", "synthesizing"]
-                    else [],
-                    research_iterations=1 if phase == "synthesizing" else 0,
-                    total_sources_found=2 if phase in ["analyzing", "synthesizing"] else 0,
-                    elapsed_time=i * 2.0,  # Simulated elapsed time
-                    current_node=phase,
-                ),
-            )
-            await asyncio.sleep(0.5)  # Shorter delay between phases
-
-            # Content delta
-            content_chunk = f"\n\n**{phase.title()} Phase:**\n{description}\n"
-            full_response += content_chunk
-            yield StreamEvent(type="content_delta", content=content_chunk)
-            await asyncio.sleep(0.3)  # Shorter content delay
-
-        # Simulate a table being streamed to exercise UI placeholder logic
-        # Make table streaming more noticeable with longer delays
-        table_intro = "\n\nHere is a comparison table based on your request:\n\n"
-        yield StreamEvent(type="content_delta", content=table_intro)
-        full_response += table_intro
-        await asyncio.sleep(0.3)
-
-        # Stream table parts with noticeable delays to allow placeholder detection
-        table_header = "| Item | Value A | Value B |\n"
-        yield StreamEvent(type="content_delta", content=table_header)
-        full_response += table_header
-        await asyncio.sleep(0.5)  # Longer delay after header
-
-        table_sep = "| --- | --- | --- |\n"
-        yield StreamEvent(type="content_delta", content=table_sep)
-        full_response += table_sep
-        await asyncio.sleep(0.5)  # Longer delay after separator
-
-        # Stream rows with delays
-        table_rows = [
-            "| Alpha | 10 | 20 |\n",
-            "| Beta | 30 | 40 |\n",
-            "| Gamma | 50 | 60 |\n",
-        ]
-        for row in table_rows:
-            yield StreamEvent(type="content_delta", content=row)
-            full_response += row
-            await asyncio.sleep(0.3)  # Delay between rows
-
-        # Final response content
-        final_content = (
-            f"\n\nBased on my research, here's what I found about: {query}\n\n"
-            "This is a simulated response for development. The actual agent would provide "
-            "comprehensive research-backed answers with citations and detailed analysis."
-        )
-
-        # Stream final content in smaller chunks for smoother experience
-        for chunk in [final_content[i : i + 30] for i in range(0, len(final_content), 30)]:
-            yield StreamEvent(type="content_delta", content=chunk)
-            full_response += chunk
-            await asyncio.sleep(0.05)  # Very short delays for text streaming
-
-        # Small delay before completion to ensure UI catches up
-        await asyncio.sleep(0.5)
-
-        # Complete event with full response and metadata
-        yield StreamEvent(
-            type="message_complete",
-            content=full_response,  # Include full content in complete event
-            metadata=ResearchMetadata(
-                phase="complete",
-                progress_percentage=100,
-                search_queries=["primary query", "secondary query"],
-                sources=[
-                    {
-                        "url": "https://example.com",
-                        "title": "Example Research Source",
-                        "relevanceScore": 0.95,
-                    },
-                    {"url": "https://research.org", "title": "Research Paper", "relevanceScore": 0.87},
-                ],
-                research_iterations=2,
-                confidence_score=0.92,
-                total_sources_found=2,
-                elapsed_time=10.0,
-                current_node="complete",
-            ),
-        )
-
-        # Ensure stream end is sent
-        await asyncio.sleep(0.1)
-        yield StreamEvent(type="stream_end")
-
     def _parse_stream_event(self, data: Dict) -> StreamEvent:
-        """Parse agent stream event to UI format with progress marker detection."""
+        """Parse agent stream event to UI format with enhanced event support."""
+        # Add defensive check for data
+        if not data or not isinstance(data, dict):
+            return StreamEvent(type="content_delta", content="")
+
         # Handle Databricks agent response format
         response_type = data.get("type", "")
 
+        # Check for enhanced intermediate events first
+        if response_type == "intermediate_event" or "event" in data:
+            return self._parse_intermediate_event(data)
+        elif response_type == "event_batch" or "events" in data:
+            return self._parse_event_batch(data)
+
         # Streaming content delta
-        if response_type == "response.output_text.delta":
+        elif response_type == "response.output_text.delta":
             content = data.get("delta", "")
 
-            # Check for progress markers in the delta content
-            if "[PHASE:" in content:
-                logger.info(f"Progress event detected, parsing: {content[:100]}...")
-                return self._parse_progress_delta(content)
-            else:
-                # Regular content delta
-                return StreamEvent(type="content_delta", content=content)
+            # Always send content delta, even if it contains progress markers
+            # The UI will handle filtering out markers from displayed content
+            return StreamEvent(type="content_delta", content=content)
 
         # Complete content (for final response)
         elif response_type == "response.output_item.done":
             item = data.get("item", {})
             content_list = item.get("content", [])
-            if content_list and len(content_list) > 0:
+            if content_list and len(content_list) > 0 and content_list[0]:
                 content = content_list[0].get("text", "")
-                return StreamEvent(type="message_complete", content=content)
-            return StreamEvent(type="message_complete", content="")
+            else:
+                content = ""
+
+            # Extract metadata from the event if present
+            event_metadata = data.get("metadata", {})
+            metadata = None
+            if event_metadata:
+                # Convert metadata to ResearchMetadata format for UI
+                metadata = ResearchMetadata(
+                    search_queries=event_metadata.get("searchQueries", []),
+                    sources=event_metadata.get("sources", []),
+                    research_iterations=event_metadata.get("researchIterations", 0),
+                    confidence_score=event_metadata.get("confidenceScore"),
+                    reasoning_steps=[],
+                    total_sources_found=len(event_metadata.get("sources", [])),
+                    phase="complete",
+                    progress_percentage=100.0,
+                    elapsed_time=0.0,
+                    current_node="reporter",
+                    vector_results_count=0,
+                    # Pass through additional metadata for UI components
+                    plan_details=event_metadata.get("planDetails"),
+                    factuality_score=event_metadata.get("factualityScore"),
+                    report_style=event_metadata.get("reportStyle"),
+                    verification_level=event_metadata.get("verificationLevel"),
+                    grounding=event_metadata.get("grounding"),
+                    current_agent=event_metadata.get("currentAgent", "reporter"),
+                )
+
+            return StreamEvent(type="message_complete", content=content, metadata=metadata)
 
         # Legacy format support (for backward compatibility)
         elif "content" in data:
@@ -515,6 +437,67 @@ class AgentClient:
         # Default case
         else:
             return StreamEvent(type="content_delta", content="")
+
+    def _parse_intermediate_event(self, data: Dict) -> StreamEvent:
+        """Parse enhanced intermediate event from agent."""
+        if not data or not isinstance(data, dict):
+            return StreamEvent(type="intermediate_event", event={})
+
+        event_data = data.get("event", data)  # Handle both formats
+        if not event_data or not isinstance(event_data, dict):
+            return StreamEvent(type="intermediate_event", event={})
+
+        # Create StreamEvent with enhanced event data
+        return StreamEvent(
+            type="intermediate_event",
+            event={
+                "id": event_data.get("id", "unknown"),
+                "timestamp": event_data.get("timestamp", 0),
+                "correlation_id": event_data.get("correlation_id"),
+                "sequence": event_data.get("sequence", 0),
+                "event_type": event_data.get("event_type", "action_start"),
+                "data": event_data.get("data", {}),
+                "meta": event_data.get("meta", {}),
+                # Enhanced fields for UI
+                "category": event_data.get("category"),
+                "title": event_data.get("title"),
+                "description": event_data.get("description"),
+                "confidence": event_data.get("confidence"),
+                "reasoning": event_data.get("reasoning"),
+                "alternatives_considered": event_data.get("alternatives_considered", []),
+                "related_event_ids": event_data.get("related_event_ids", []),
+                "priority": event_data.get("priority", 5),
+            },
+        )
+
+    def _parse_event_batch(self, data: Dict) -> StreamEvent:
+        """Parse batch of intermediate events from agent."""
+        events = data.get("events", [])
+
+        # Process each event in the batch
+        processed_events = []
+        for event_data in events:
+            processed_event = {
+                "id": event_data.get("id", "unknown"),
+                "timestamp": event_data.get("timestamp", 0),
+                "correlation_id": event_data.get("correlation_id"),
+                "sequence": event_data.get("sequence", 0),
+                "event_type": event_data.get("event_type", "action_start"),
+                "data": event_data.get("data", {}),
+                "meta": event_data.get("meta", {}),
+                # Enhanced fields for UI
+                "category": event_data.get("category"),
+                "title": event_data.get("title"),
+                "description": event_data.get("description"),
+                "confidence": event_data.get("confidence"),
+                "reasoning": event_data.get("reasoning"),
+                "alternatives_considered": event_data.get("alternatives_considered", []),
+                "related_event_ids": event_data.get("related_event_ids", []),
+                "priority": event_data.get("priority", 5),
+            }
+            processed_events.append(processed_event)
+
+        return StreamEvent(type="event_batch", events=processed_events, batch_size=len(processed_events))
 
     def _parse_progress_delta(self, content: str) -> StreamEvent:
         """Parse progress markers from delta text to extract research phase information."""
@@ -612,6 +595,57 @@ class AgentClient:
             "message": {"role": "assistant", "content": full_response},
             "metadata": final_metadata.dict() if final_metadata else None,
         }
+
+    def _log_headers(self, context: str, headers: dict) -> None:
+        """Log headers for debugging (with sensitive data masked)."""
+        safe_headers = {}
+        for key, value in headers.items():
+            if key.lower() in ["authorization", "x-api-key", "cookie"]:
+                # Mask sensitive headers
+                safe_headers[key] = f"{value[:10]}...{value[-4:]}" if len(value) > 14 else "***"
+            else:
+                safe_headers[key] = value
+
+        logger.info(f"{context} - Headers: {safe_headers}")
+
+    def _log_request_details(self, method: str, url: str, data: dict, headers: dict) -> None:
+        """Log detailed request information for debugging."""
+        logger.info(f"🚀 HTTP REQUEST: {method} {url}")
+        logger.info(f"📤 Request payload keys: {list(data.keys())}")
+        logger.info(f"📤 Request payload size: {len(str(data))} chars")
+
+        # Log first few input messages for context (without full content)
+        if "input" in data and isinstance(data["input"], list):
+            input_messages = data["input"]
+            logger.info(f"📤 Input messages: {len(input_messages)} messages")
+            for i, msg in enumerate(input_messages[:2]):  # Log first 2 messages
+                content_preview = (
+                    msg.get("content", "")[:100] + "..."
+                    if len(msg.get("content", "")) > 100
+                    else msg.get("content", "")
+                )
+                logger.info(f"   Message {i+1}: {msg.get('role', 'unknown')} - '{content_preview}'")
+
+        # Log all headers
+        self._log_headers("Request", headers)
+
+    def _log_response_details(self, response) -> None:
+        """Log detailed response information for debugging."""
+        logger.info(f"📥 HTTP RESPONSE: {response.status_code} {response.reason_phrase}")
+        logger.info(f"📥 Response headers: {dict(response.headers)}")
+
+        # Check for specific headers that indicate endpoint status
+        if "x-served-by" in response.headers:
+            logger.info(f"📥 Served by: {response.headers['x-served-by']}")
+
+        if "x-request-id" in response.headers:
+            logger.info(f"📥 Request ID: {response.headers['x-request-id']}")
+
+        # Check for rate limiting headers
+        rate_limit_headers = ["x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-limit"]
+        for header in rate_limit_headers:
+            if header in response.headers:
+                logger.info(f"📥 Rate limit - {header}: {response.headers[header]}")
 
     async def close(self):
         """Close the HTTP client."""

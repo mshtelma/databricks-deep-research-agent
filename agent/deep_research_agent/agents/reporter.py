@@ -31,7 +31,8 @@ from deep_research_agent.core.message_utils import get_last_user_message, extrac
 from deep_research_agent.core.observation_models import (
     StructuredObservation, 
     ensure_structured_observation, 
-    observations_to_research_data
+    observations_to_research_data,
+    observation_to_text,
 )
 from deep_research_agent.core.observation_selector import ObservationSelector
 from deep_research_agent.core.plan_models import StepStatus
@@ -163,7 +164,9 @@ class ReporterAgent:
         
         if not self.llm:
             logger.warning(f"No LLM available for reasoning transformation, using fallback")
-            return f"## {section_name}\n\n{reasoning_text[:500]}..."
+            # Clean the reasoning text and return full content
+            clean_reasoning = reasoning_text.replace("I need to", "The analysis shows").replace("Let me", "").replace("I should", "The research indicates")
+            return f"## {section_name}\n\n{clean_reasoning}"
         
         # Create transformation prompt
         transform_prompt = f"""You received reasoning about a research topic. Transform it into a professional report section.
@@ -199,15 +202,15 @@ Generate the report section content:"""
                 return parsed.content.strip()
             else:
                 logger.warning(f"⚠️ TRANSFORMATION_FAILED: {section_name} - insufficient content generated")
-                # Return clean version of original reasoning
-                clean_reasoning = reasoning_text.replace("I need to", "").replace("Let me", "").replace("I should", "")
-                return f"## {section_name}\n\n{clean_reasoning[:800]}..."
+                # Return clean version of original reasoning without truncation
+                clean_reasoning = reasoning_text.replace("I need to", "The analysis shows").replace("Let me", "").replace("I should", "The research indicates")
+                return f"## {section_name}\n\n{clean_reasoning}"
                 
         except Exception as e:
             logger.error(f"❌ TRANSFORMATION_ERROR: {section_name} - {e}")
-            # Return cleaned version of reasoning as fallback
+            # Return cleaned version of reasoning as fallback without truncation
             clean_reasoning = reasoning_text.replace("I need to", "The analysis shows").replace("Let me", "").replace("I should", "The research indicates")
-            return f"## {section_name}\n\n{clean_reasoning[:800]}..."
+            return f"## {section_name}\n\n{clean_reasoning}"
 
     def _invoke_llm_with_smart_retry(self, messages: List, section_name: str, state: EnhancedResearchState = None) -> str:
         """
@@ -287,18 +290,31 @@ Generate the report section content:"""
                     except Exception as e:
                         logger.warning(f"Failed to emit reasoning event for {section_name}: {e}")
                 
-                # NEW: Transform reasoning to report if we got reasoning (regardless of content)
-                if reasoning_text and len(reasoning_text.strip()) > 100:
-                    logger.warning(f"🔄 REASONING_TO_REPORT: Got reasoning response for {section_name}, transforming to proper report...")
+                # FIXED: Only transform reasoning to report if we have NO proper content
+                if reasoning_text and len(reasoning_text.strip()) > 100 and (not content or len(content.strip()) < 50):
+                    logger.warning(f"🔄 REASONING_TO_REPORT: No proper content found for {section_name}, transforming reasoning to report...")
                     
                     # Avoid infinite recursion by checking if this is already a transformation
                     if not section_name.endswith("_transformed"):
                         transformed_content = self._transform_reasoning_to_report(reasoning_text, section_name)
                         logger.info(f"🔄 REASONING_TO_REPORT: Transformation completed for {section_name} ({len(transformed_content)} chars)")
-                        content = transformed_content  # Always use transformed content
+                        content = transformed_content
                     else:
                         logger.warning(f"🔄 REASONING_TO_REPORT: Avoiding recursive transformation for {section_name}")
                         # Keep existing content if we have it, otherwise use cleaned reasoning
+                elif content and reasoning_text:
+                    logger.info(f"✅ PROPER_CONTENT: Using actual report content for {section_name} ({len(content)} chars), ignoring reasoning ({len(reasoning_text)} chars)")
+                
+                # Apply content sanitization as final cleanup before returning
+                from deep_research_agent.core.content_sanitizer import sanitize_agent_content
+                
+                if content:
+                    sanitization_result = sanitize_agent_content(content)
+                    if sanitization_result.sanitization_applied:
+                        logger.info(f"Applied content sanitization to {section_name}: {len(content)} -> {len(sanitization_result.clean_content)} chars")
+                        for warning in sanitization_result.warnings:
+                            logger.warning(f"Content sanitization warning for {section_name}: {warning}")
+                    content = sanitization_result.clean_content
                 
                 # Ensure we never return None or empty content
                 if not content:
@@ -386,6 +402,14 @@ Generate the report section content:"""
 
         current_plan = state.get("current_plan")
         template = getattr(current_plan, "report_template", None) if current_plan else None
+        dynamic_sections = getattr(current_plan, "dynamic_sections", None) if current_plan else None
+
+        # Debug logging for template and dynamic sections
+        logger.info(f"REPORTER: Template available: {template is not None}")
+        logger.info(f"REPORTER: Dynamic sections available: {dynamic_sections is not None}")
+        if dynamic_sections:
+            section_titles = [getattr(s, 'title', str(s)) for s in dynamic_sections]
+            logger.info(f"REPORTER: Dynamic section titles: {section_titles}")
 
         if template:
             report_body, template_metadata = self._render_template_report(
@@ -437,6 +461,76 @@ Generate the report section content:"""
                 update={
                     "final_report": final_report,
                     "report_sections": {"mode": "template", "template": template},
+                    "citations": state.get("citations", []),
+                    "report_metadata": report_metadata,
+                }
+            )
+        
+        # NEW: Handle case where we have dynamic_sections but no template
+        elif dynamic_sections:
+            logger.info("REPORTER: No template but dynamic_sections found - using section-based generation")
+            # Use the dynamic sections directly with the _generate_sections_from_dynamic_sections method
+            from copy import deepcopy
+            base_config = style_config
+            
+            # Ensure we use the dynamic sections for structure
+            if hasattr(base_config, 'structure'):
+                section_titles = [getattr(s, 'title', str(s)) for s in dynamic_sections]
+                base_config.structure = section_titles
+                logger.info(f"REPORTER: Updated style config structure with {len(section_titles)} dynamic sections")
+            
+            # Generate report sections using dynamic sections
+            report_sections = self._generate_sections_from_dynamic_sections(
+                dynamic_sections,
+                compiled_findings,
+                base_config,
+                state,
+                embedded_table=None,
+                table_section=None,
+                table_metadata={}
+            )
+            
+            # Build final report from sections
+            final_report = self.formatter.format_final_report(
+                report_sections,
+                state.get("citations", []),
+                report_style
+            )
+            
+            final_report = self._add_citations_and_references(
+                final_report,
+                state.get("citations", []),
+                report_style
+            )
+            final_report = self._add_report_metadata(
+                final_report,
+                state,
+                report_style
+            )
+
+            report_metadata = {
+                "rendering_mode": "dynamic_sections",
+                "template_sections": [getattr(s, 'title', str(s)) for s in dynamic_sections],
+                "observation_count": len(compiled_findings.get("observations", [])),
+                "has_embedded_table": False,
+                "table_confidence": 0.0,
+            }
+
+            logger.info(
+                "Final report generated via dynamic sections fallback",
+                extra={
+                    "length": len(final_report),
+                    "section_count": len(dynamic_sections),
+                },
+            )
+
+            state = StateManager.finalize_state(state)
+
+            return Command(
+                goto="end",
+                update={
+                    "final_report": final_report,
+                    "report_sections": {"mode": "dynamic_sections", "sections": report_sections},
                     "citations": state.get("citations", []),
                     "report_metadata": report_metadata,
                 }
@@ -683,7 +777,7 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
     def _build_observation_context(
         self,
         findings: Dict[str, Any],
-        limit: int = 25,
+        limit: int = 100,  # Increased from 25 to 100 to provide more comprehensive data
     ) -> Tuple[str, int]:
         """Convert compiled observations into a compact prompt block."""
 
@@ -982,7 +1076,7 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         if not observations and "search_results" in state:
             logger.warning("[OBSERVATION TRACKING] No observations found, converting search results")
             search_results = state.get("search_results", [])
-            for result in search_results[:10]:  # Limit to 10 most recent
+            for result in search_results[:25]:  # Increased from 10 to 25 for more comprehensive data
                 observations.append({
                     "content": result.get("snippet", ""),
                     "source": result.get("title", "Search Result"),
@@ -1681,15 +1775,23 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         if not citations:
             return report
         
-        # Format citations according to style
+        # Deduplicate citations first
+        unique_citations = []
+        seen_urls = set()
+        for citation in citations:
+            if citation.source not in seen_urls:
+                unique_citations.append(citation)
+                seen_urls.add(citation.source)
+        
+        # Format unique citations according to style
         formatted_citations = []
-        for i, citation in enumerate(citations, 1):
+        for i, citation in enumerate(unique_citations, 1):
             citation_dict = {
                 "number": i,
                 "title": citation.title,
                 "url": citation.source,
-                "author": "Unknown",  # Would need to extract from source
-                "date": datetime.now().strftime("%Y")
+                "author": "",  # Remove "Unknown" - leave empty
+                "date": ""     # Remove current year - leave empty
             }
             formatted = self.formatter.format_citation(citation_dict, style)
             formatted_citations.append(formatted)
@@ -2978,7 +3080,7 @@ Based on the available research findings, I can provide the following summary:
         # Add basic findings from observations
         if observations:
             fallback_report += f"During my research, I gathered {len(observations)} key observations:\n\n"
-            for i, obs in enumerate(observations[:5], 1):  # Limit to first 5
+            for i, obs in enumerate(observations[:15], 1):  # Increased from 5 to 15 for more comprehensive fallback
                 if hasattr(obs, 'content') and obs.content:
                     content = obs.content[:200] + "..." if len(obs.content) > 200 else obs.content
                     fallback_report += f"{i}. {content}\n\n"

@@ -11,7 +11,6 @@ export function ChatInput() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const { sendMessage, stopStream } = useChatStream()
   const { isLoading } = useChatStore()
-  const { agentConfig } = useSettingsStore()
   
   // Auto-resize textarea
   useEffect(() => {
@@ -29,10 +28,8 @@ export function ChatInput() {
     const message = input.trim()
     setInput('')
     
-    // Pass agent configuration to the message
-    await sendMessage(message, {
-      agentConfig: agentConfig
-    })
+    // Pass configuration to the message (agentConfig not part of ChatRequest interface)
+    await sendMessage(message)
   }
   
   const handleKeyDown = (e: React.KeyboardEvent) => {

@@ -1,9 +1,10 @@
 import { useCallback, useRef } from 'react'
 import { useChatStore } from '@/stores/chatStore'
-import { StreamEvent, ChatRequest } from '@/types/chat'
+import { StreamEvent, ChatRequest, IntermediateEvent, IntermediateEventType } from '@/types/chat'
 import {
   processStreamingWithTableReconstruction
 } from '@/utils/tableStreamReconstructor'
+import { filterContent, ContentType } from '@/utils/contentFilter'
 
 export function useChatStream() {
   const {
@@ -142,7 +143,62 @@ export function useChatStream() {
 
       case 'content_delta':
         if (data.content) {
-          const newContent = currentContent + data.content
+          // Check if content contains plan creation markers
+          if (data.content.includes('📋 Created research plan with') || 
+              data.content.includes('Created research plan') ||
+              data.content.includes('Research plan:')) {
+            // Extract plan steps count from the content
+            const stepsMatch = data.content.match(/with (\d+) steps/)
+            const stepsCount = stepsMatch ? parseInt(stepsMatch[1]) : 5
+            
+            // Create placeholder plan metadata
+            const planMetadata = {
+              planDetails: {
+                steps: Array.from({ length: stepsCount }, (_, i) => ({
+                  id: `step-${i + 1}`,
+                  description: `Step ${i + 1}`,
+                  status: 'pending' as const
+                })),
+                quality: 0.8,
+                iterations: 1,
+                status: 'executing' as const,
+                hasEnoughContext: true
+              }
+            }
+            
+            // Update the message metadata with plan details
+            const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
+            if (currentMessage) {
+              const updatedMetadata = {
+                ...currentMessage.metadata,
+                ...planMetadata
+              }
+              updateStreamingMessage(messageId, currentMessage.content, updatedMetadata as any)
+            }
+          }
+          
+          // Apply content filtering to incoming content to prevent JSON contamination
+          const filterResult = filterContent(data.content)
+          
+          // Log filtering activity for debugging
+          if (filterResult.filteringApplied) {
+            console.warn(`[ContentFilter] Applied filtering to content_delta:`, {
+              originalLength: filterResult.originalLength,
+              cleanLength: filterResult.cleanLength,
+              contentType: filterResult.contentType,
+              extractedData: filterResult.extractedData.length,
+              warnings: filterResult.warnings
+            })
+            
+            // Log any warnings
+            filterResult.warnings.forEach(warning => {
+              console.warn(`[ContentFilter] Warning: ${warning}`)
+            })
+          }
+          
+          // Use the filtered content for accumulation
+          const filteredContent = filterResult.cleanContent
+          const newContent = currentContent + filteredContent
 
           // Process streaming content - returns both display and raw versions
           const processed = processStreamingWithTableReconstruction(newContent)
@@ -206,6 +262,28 @@ export function useChatStream() {
           // Use the raw content that was being tracked
           let finalContent = data.content && data.content.length > 0 ? data.content : currentContent
 
+          // Apply content filtering to final content to remove any JSON elements
+          const filterResult = filterContent(finalContent)
+          
+          // Log filtering activity for final content
+          if (filterResult.filteringApplied) {
+            console.warn(`[ContentFilter] Applied filtering to final report:`, {
+              originalLength: filterResult.originalLength,
+              cleanLength: filterResult.cleanLength,
+              contentType: filterResult.contentType,
+              extractedData: filterResult.extractedData.length,
+              warnings: filterResult.warnings
+            })
+            
+            // Log any warnings
+            filterResult.warnings.forEach(warning => {
+              console.warn(`[ContentFilter] Warning: ${warning}`)
+            })
+          }
+          
+          // Use the filtered content
+          finalContent = filterResult.cleanContent
+
           // Debug logging for final content
           if (finalContent.includes('|') && finalContent.includes('---')) {
             console.log('[TABLE DEBUG] Final content with tables:', {
@@ -252,17 +330,229 @@ export function useChatStream() {
         break
 
       case 'intermediate_event':
-        // Handle single intermediate event
+        // Handle single intermediate event with enhanced processing
         if (data.event) {
-          addIntermediateEvent(data.event)
+          console.log('Adding intermediate event:', data.event.event_type, data.event)
+          
+          // Check if this is a plan-related event and update metadata accordingly
+          if (data.event.event_type === IntermediateEventType.PLAN_CREATED || 
+              data.event.event_type === IntermediateEventType.PLAN_UPDATED ||
+              data.event.event_type === IntermediateEventType.PLAN_STRUCTURE_VISUALIZE) {
+            
+            // Extract plan details from the event
+            const planData = data.event.data?.plan || data.event.data
+            
+            if (planData && planData.steps) {
+              // Convert the plan to the expected format
+              const planMetadata = {
+                planDetails: {
+                  steps: planData.steps.map((step: any, index: number) => ({
+                    id: step.id || `step-${index + 1}`,
+                    description: step.description || step.content || '',
+                    status: step.status || 'pending',
+                    result: step.result,
+                    completedAt: step.completedAt
+                  })),
+                  quality: planData.quality || planData.confidence || 0,
+                  iterations: planData.iterations || 1,
+                  status: planData.status || 'executing',
+                  hasEnoughContext: planData.hasEnoughContext || false
+                }
+              }
+              
+              // Update the message metadata with plan details
+              const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
+              if (currentMessage) {
+                const updatedMetadata = {
+                  ...currentMessage.metadata,
+                  ...planMetadata
+                }
+                updateStreamingMessage(messageId, currentMessage.content, updatedMetadata as any)
+              }
+            }
+          }
+          
+          // Check for step activation/completion events
+          if (data.event.event_type === IntermediateEventType.STEP_ACTIVATED ||
+              data.event.event_type === IntermediateEventType.STEP_COMPLETED) {
+            
+            const stepId = data.event.data?.step_id
+            const newStatus = data.event.event_type === IntermediateEventType.STEP_COMPLETED ? 'completed' : 'in_progress'
+            
+            // Update the specific step in the plan
+            const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
+            if (currentMessage?.metadata?.planDetails?.steps) {
+              const updatedSteps = currentMessage.metadata.planDetails.steps.map((step: any) => 
+                step.id === stepId ? { ...step, status: newStatus, completedAt: newStatus === 'completed' ? Date.now() : step.completedAt } : step
+              )
+              
+              const updatedMetadata = {
+                ...currentMessage.metadata,
+                planDetails: {
+                  ...currentMessage.metadata.planDetails,
+                  steps: updatedSteps
+                }
+              }
+              
+              updateStreamingMessage(messageId, currentMessage.content, updatedMetadata as any)
+            }
+          }
+          
+          // Ensure event has proper structure for UI
+          const processedEvent = {
+            ...data.event,
+            timestamp: data.event.timestamp || Date.now() / 1000,
+            meta: {
+              ...data.event.meta,
+              // Ensure we have display fields from the agent's event templates
+              title: data.event.meta?.title || data.event.event_type?.replace(/_/g, ' '),
+              description: data.event.meta?.description,
+              category: data.event.meta?.category,
+              icon: data.event.meta?.icon,
+              priority: data.event.meta?.priority,
+              confidence: data.event.meta?.confidence,
+              reasoning: data.event.meta?.reasoning
+            }
+          }
+          
+          addIntermediateEvent(processedEvent)
         }
         break
 
       case 'event_batch':
-        // Handle batch of intermediate events
+        // Handle batch of intermediate events with enhanced processing
         if (data.events && Array.isArray(data.events)) {
-          addIntermediateEvents(data.events)
+          console.log('Adding batch of events:', data.events.length, data.events)
+          
+          // Check for plan events in the batch
+          data.events.forEach(event => {
+            if (event.event_type === IntermediateEventType.PLAN_CREATED || 
+                event.event_type === IntermediateEventType.PLAN_UPDATED ||
+                event.event_type === IntermediateEventType.PLAN_STRUCTURE_VISUALIZE) {
+              
+              const planData = event.data?.plan || event.data
+              
+              if (planData && planData.steps) {
+                const planMetadata = {
+                  planDetails: {
+                    steps: planData.steps.map((step: any, index: number) => ({
+                      id: step.id || `step-${index + 1}`,
+                      description: step.description || step.content || '',
+                      status: step.status || 'pending',
+                      result: step.result,
+                      completedAt: step.completedAt
+                    })),
+                    quality: planData.quality || planData.confidence || 0,
+                    iterations: planData.iterations || 1,
+                    status: planData.status || 'executing',
+                    hasEnoughContext: planData.hasEnoughContext || false
+                  }
+                }
+                
+                const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
+                if (currentMessage) {
+                  const updatedMetadata = {
+                    ...currentMessage.metadata,
+                    ...planMetadata
+                  }
+                  updateStreamingMessage(messageId, currentMessage.content, updatedMetadata as any)
+                }
+              }
+            }
+            
+            // Check for step updates
+            if (event.event_type === IntermediateEventType.STEP_ACTIVATED ||
+                event.event_type === IntermediateEventType.STEP_COMPLETED) {
+              
+              const stepId = event.data?.step_id
+              const newStatus = event.event_type === IntermediateEventType.STEP_COMPLETED ? 'completed' : 'in_progress'
+              
+              const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
+              if (currentMessage?.metadata?.planDetails?.steps) {
+                const updatedSteps = currentMessage.metadata.planDetails.steps.map((step: any) => 
+                  step.id === stepId ? { ...step, status: newStatus, completedAt: newStatus === 'completed' ? Date.now() : step.completedAt } : step
+                )
+                
+                const updatedMetadata = {
+                  ...currentMessage.metadata,
+                  planDetails: {
+                    ...currentMessage.metadata.planDetails,
+                    steps: updatedSteps
+                  }
+                }
+                
+                updateStreamingMessage(messageId, currentMessage.content, updatedMetadata as any)
+              }
+            }
+          })
+          
+          // Process each event in the batch
+          const processedEvents = data.events.map(event => ({
+            ...event,
+            timestamp: event.timestamp || Date.now() / 1000,
+            meta: {
+              ...event.meta,
+              title: event.meta?.title || event.event_type?.replace(/_/g, ' '),
+              description: event.meta?.description,
+              category: event.meta?.category,
+              icon: event.meta?.icon,
+              priority: event.meta?.priority,
+              confidence: event.meta?.confidence,
+              reasoning: event.meta?.reasoning
+            }
+          }))
+          
+          addIntermediateEvents(processedEvents)
         }
+        break
+        
+      // Handle enhanced agent streaming events
+      case 'agent_start':
+      case 'agent_complete':
+      case 'tool_start':
+      case 'tool_complete':
+      case 'llm_streaming':
+        // These come from the enhanced _process_stream_event method
+        // Create intermediate events for the UI with enhanced metadata
+        const eventType = data.metadata?.event_type || data.type
+        const eventData = {
+          agent: data.metadata?.agent,
+          current_agent: data.metadata?.agent,
+          action: data.content,
+          tool_name: data.metadata?.tool,
+          query: data.metadata?.query,
+          result_count: data.metadata?.result_count,
+          is_streaming: data.metadata?.is_streaming
+        }
+        
+        // Map event types to categories for backward compatibility
+        const getEventCategory = (type: string) => {
+          if (type.includes('agent')) return 'coordination'
+          if (type.includes('tool')) return 'search'
+          if (type.includes('llm')) return 'reflection'
+          return 'unknown'
+        }
+        
+        // Create intermediate event with enhanced structure
+        const intermediateEvent = {
+          id: crypto.randomUUID(),
+          timestamp: Date.now() / 1000,
+          correlation_id: 'stream_' + messageId,
+          sequence: Date.now(),
+          event_type: eventType,
+          data: eventData,
+          meta: {
+            title: eventType.replace(/_/g, ' '),
+            description: data.content,
+            category: getEventCategory(eventType),
+            priority: eventType.includes('error') ? 8 : eventType.includes('start') ? 6 : 4,
+            confidence: data.metadata?.confidence,
+            reasoning: data.metadata?.reasoning
+          }
+        }
+        
+        console.log('Creating intermediate event from stream:', intermediateEvent)
+        addIntermediateEvent(intermediateEvent)
         break
     }
 

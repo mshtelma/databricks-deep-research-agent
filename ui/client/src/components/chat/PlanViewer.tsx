@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { ChevronDown, ChevronRight, Clock, CheckCircle, AlertCircle, RotateCcw } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
@@ -9,9 +9,10 @@ import { cn } from '@/lib/utils'
 interface PlanViewerProps {
   planData: PlanMetadata
   className?: string
+  isStreaming?: boolean
 }
 
-export function PlanViewer({ planData, className = '' }: PlanViewerProps) {
+export function PlanViewer({ planData, className = '', isStreaming = false }: PlanViewerProps) {
   const [isExpanded, setIsExpanded] = useState(true)
 
   if (!planData || !planData.steps || planData.steps.length === 0) {
@@ -76,9 +77,18 @@ export function PlanViewer({ planData, className = '' }: PlanViewerProps) {
               <span className="text-purple-600 text-sm">📋</span>
             </div>
             <div className="text-left">
-              <h3 className="text-sm font-medium">Research Plan</h3>
+              <h3 className="text-sm font-medium">
+                Research Plan
+                {isStreaming && (
+                  <span className="ml-2 inline-flex items-center gap-1">
+                    <div className="w-2 h-2 bg-purple-500 rounded-full animate-pulse" />
+                    <span className="text-xs text-purple-600 dark:text-purple-400">Executing</span>
+                  </span>
+                )}
+              </h3>
               <p className="text-xs text-gray-500">
                 {completedSteps}/{totalSteps} steps completed
+                {isStreaming && <span className="ml-1">(updating)</span>}
                 {planData.iterations > 1 && (
                   <span className="ml-2">• Iteration {planData.iterations}</span>
                 )}

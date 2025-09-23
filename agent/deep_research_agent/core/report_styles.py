@@ -457,27 +457,49 @@ class ReportFormatter:
         """Format a citation according to the style guide."""
         title = citation.get('title', '')
         url = citation.get('url', '')
-        author = citation.get('author', 'Unknown')
-        date = citation.get('date', 'n.d.')
+        author = citation.get('author', '').strip()
+        date = citation.get('date', '').strip()
+        
+        # Clean up title and URL
+        title = title.strip()
+        url = url.strip()
         
         if style == ReportStyle.ACADEMIC:
             # APA format
-            return f"{author} ({date}). {title}. Retrieved from {url}"
+            if author and date:
+                return f"{author} ({date}). {title}. Retrieved from {url}"
+            elif author:
+                return f"{author}. {title}. Retrieved from {url}"
+            else:
+                return f"{title}. Retrieved from {url}"
         elif style == ReportStyle.NEWS:
-            # News attribution
-            return f'According to {author}, "{title}"'
+            # News attribution  
+            if author:
+                return f'According to {author}, "{title}"'
+            else:
+                return f'"{title}"'
         elif style == ReportStyle.SOCIAL_MEDIA:
             # Social media format
             return f"[{title}]({url})"
         elif style in [ReportStyle.PROFESSIONAL, ReportStyle.EXECUTIVE]:
             # Footnote style
-            return f"{title} ({author}, {date})"
+            if author and date:
+                return f"{title} ({author}, {date})"
+            elif author:
+                return f"{title} ({author})"
+            else:
+                return title
         elif style == ReportStyle.TECHNICAL:
             # IEEE style
-            return f"[{citation.get('number', '1')}] {author}, \"{title},\" {date}. [Online]. Available: {url}"
+            if author and date:
+                return f"[{citation.get('number', '1')}] {author}, \"{title},\" {date}. [Online]. Available: {url}"
+            elif author:
+                return f"[{citation.get('number', '1')}] {author}, \"{title}.\" [Online]. Available: {url}"
+            else:
+                return f"[{citation.get('number', '1')}] \"{title}.\" [Online]. Available: {url}"
         else:
-            # Default inline format
-            return f"{title} - {author}"
+            # Default inline format  
+            return f"{title} - {url}" if url else title
     
     @staticmethod
     def format_section_header(section: str, style: ReportStyle) -> str:

@@ -135,6 +135,15 @@ class IntermediateEventType(str, Enum):
     SYNTHESIS_STRATEGY = "synthesis_strategy"
     SECTION_GENERATION = "section_generation"
     CITATION_LINKING = "citation_linking"
+    
+    # Enhanced UI visualization events
+    PLAN_STRUCTURE_VISUALIZE = "plan_structure_visualize"
+    STEP_ACTIVATED = "step_activated" 
+    STEP_COMPLETED = "step_completed"
+    SEARCH_EXECUTED = "search_executed"
+    REASONING_SNAPSHOT = "reasoning_snapshot"
+    AGENT_STATUS_UPDATE = "agent_status_update"
+    WORKFLOW_PHASE_CHANGE = "workflow_phase_change"
 
 
 class EventCategory(str, Enum):

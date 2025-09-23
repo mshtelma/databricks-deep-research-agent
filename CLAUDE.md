@@ -22,6 +22,22 @@ This repository contains a **Databricks Deep Research Agent** - a comprehensive 
 - **Databricks integration** via MLflow ResponsesAgent interface and Unity Catalog
 - **Deployment system** for multi-environment deployment (dev/staging/prod)
 
+## ⚠️ IMPORTANT: Multi-Agent Architecture is Now the Primary System
+
+**As of September 2025, the agent has been fully migrated to the enhanced multi-agent architecture:**
+
+- **DatabricksCompatibleAgent** (the main serving endpoint) now uses **EnhancedResearchAgent** exclusively
+- The **agent_config.yaml** is the primary configuration file (contains enhanced multi-agent configuration)
+- All **5 specialized agents** (Coordinator, Planner, Researcher, Fact Checker, Reporter) are active
+- **Intermediate events and progress tracking** are fully functional through the event system
+- The legacy single-agent system (RefactoredResearchAgent) is deprecated but maintained for reference
+
+**Key Implications for Development:**
+- When making changes to agent behavior, update **EnhancedResearchAgent** and its workflow nodes
+- Configuration changes should be made in **agent_config.yaml** (the primary enhanced multi-agent configuration)
+- Event emission and streaming are handled by the multi-agent event system
+- The **DatabricksCompatibleAgent** MUST always be kept in sync with architecture changes
+
 ### UI Component (`ui/`)
 - **Modern full-stack Databricks App** with FastAPI backend and React TypeScript frontend
 - **Real-time streaming** chat interface with Server-Sent Events (SSE)
@@ -174,7 +190,7 @@ state = StateManager.add_observation(
 Multi-agent configuration supports agent-specific settings:
 
 ```yaml
-# agent_config_enhanced.yaml
+# agent_config.yaml
 agents:
   coordinator:
     enable_safety_filter: true
@@ -229,8 +245,8 @@ databricks-deep-research-agent/
 │   │   ├── workflow_nodes_enhanced.py       # Multi-agent LangGraph workflow
 │   │   ├── enhanced_research_agent.py       # Main multi-agent orchestrator
 │   │   ├── research_agent_refactored.py     # Legacy single-agent (deprecated)
-│   │   ├── agent_config.yaml               # Single-agent configuration
-│   │   └── agent_config_enhanced.yaml      # Multi-agent configuration
+│   │   ├── agent_config.yaml               # Enhanced multi-agent configuration (primary)
+│   │   └── agent_config_single.yaml.backup # Legacy single-agent configuration (deprecated)
 │   ├── docs/                                # Architecture Documentation
 │   │   ├── ARCHITECTURE.md                 # Complete system architecture
 │   │   ├── MULTI_AGENT_ARCHITECTURE.md     # Multi-agent deep dive

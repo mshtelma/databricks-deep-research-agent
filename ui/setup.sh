@@ -550,24 +550,16 @@ echo "🎭 Installing Playwright browsers..."
 if [ -f "client/package.json" ] && grep -q "@playwright/test" client/package.json; then
     echo "📋 Found Playwright in client dependencies, installing browsers..."
     cd client
-    if npx playwright install; then
+    if bunx playwright install; then
         echo "✅ Playwright browsers installed successfully!"
     else
         echo "⚠️  Failed to install Playwright browsers. You can install them later with:"
-        echo "   cd client && npx playwright install"
+        echo "   cd client && bunx playwright install"
     fi
     cd ..
-elif [ -f "package.json" ] && grep -q "@playwright/test" package.json; then
-    echo "📋 Found Playwright in root dependencies, installing browsers..."
-    if npx playwright install; then
-        echo "✅ Playwright browsers installed successfully!"
-    else
-        echo "⚠️  Failed to install Playwright browsers. You can install them later with:"
-        echo "   npx playwright install"
-    fi
 else
     echo "💡 Playwright not found in dependencies - browsers not installed"
-    echo "   If you add Playwright later, run: npx playwright install"
+    echo "   If you add Playwright later, run: cd client && bunx playwright install"
 fi
 
 echo ""

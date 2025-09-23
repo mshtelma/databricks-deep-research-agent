@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { format } from 'date-fns'
-import { User, Bot, ExternalLink, ChevronDown, ChevronUp, Copy, Check, Settings, BarChart } from 'lucide-react'
+import { User, Bot, ChevronDown, ChevronUp, Copy, Check, BarChart } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -10,6 +10,10 @@ import { MarkdownRenderer } from './MarkdownRenderer'
 import { WorkflowVisualizer } from './WorkflowVisualizer'
 import { PlanViewer } from './PlanViewer'
 import { GroundingReport } from './GroundingReport'
+import { StreamingProgress } from './StreamingProgress'
+import { SourcesPanel } from './SourcesPanel'
+import { ResearchEventsPanel } from './ResearchEventsPanel'
+import { useChatStore } from '@/stores/chatStore'
 import { cn } from '@/lib/utils'
 
 interface ChatMessageProps {
@@ -17,12 +21,13 @@ interface ChatMessageProps {
 }
 
 export function ChatMessage({ message }: ChatMessageProps) {
-  const [sourcesExpanded, setSourcesExpanded] = useState(false)
   const [multiAgentExpanded, setMultiAgentExpanded] = useState(false)
-  const [planExpanded, setPlanExpanded] = useState(false)
-  const [groundingExpanded, setGroundingExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
   const isUser = message.role === 'user'
+  
+  // Get intermediate events for inline progress display
+  const { intermediateEvents, currentStreamingId } = useChatStore()
+  const isActivelyStreaming = message.isStreaming && currentStreamingId === message.id
   
   const handleCopy = async () => {
     await navigator.clipboard.writeText(message.content)
@@ -144,100 +149,95 @@ export function ChatMessage({ message }: ChatMessageProps) {
                 />
               )}
               
-              {/* Multi-Agent Workflow Visualization */}
-              {message.metadata && !isUser && !message.isStreaming && (
+              {/* Inline Streaming Progress - Show real-time agent activities */}
+              {isActivelyStreaming && !isUser && (
+                <StreamingProgress 
+                  events={intermediateEvents}
+                  isActive={isActivelyStreaming}
+                  className="mt-3"
+                />
+              )}
+              
+              {/* Multi-Agent Workflow Visualization - Show during streaming if metadata available */}
+              {!isUser && (message.metadata?.planDetails || message.metadata?.grounding || message.metadata?.currentAgent || !message.isStreaming) && (
                 <div className="space-y-3">
-                  {/* Compact Workflow Visualizer */}
+                  {/* Compact Workflow Visualizer - Always show for assistant messages */}
                   <div className="flex items-center gap-3 p-3 bg-gray-50 dark:bg-gray-800 rounded-lg">
                     <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
                       Multi-Agent Workflow:
                     </span>
                     <WorkflowVisualizer compact />
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => setMultiAgentExpanded(!multiAgentExpanded)}
-                      className="ml-auto h-6 px-2 text-xs"
-                    >
-                      <BarChart className="w-3 h-3 mr-1" />
-                      Details
-                      {multiAgentExpanded ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />}
-                    </Button>
+                    {(message.metadata?.planDetails || message.metadata?.grounding || message.metadata?.currentAgent) && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setMultiAgentExpanded(!multiAgentExpanded)}
+                        className="ml-auto h-6 px-2 text-xs"
+                      >
+                        <BarChart className="w-3 h-3 mr-1" />
+                        Details
+                        {multiAgentExpanded ? <ChevronUp className="w-3 h-3 ml-1" /> : <ChevronDown className="w-3 h-3 ml-1" />}
+                      </Button>
+                    )}
+                    {message.isStreaming && (
+                      <div className="flex items-center gap-1 ml-2">
+                        <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+                        <span className="text-xs text-blue-600 dark:text-blue-400">
+                          Live Progress
+                        </span>
+                      </div>
+                    )}
                   </div>
 
-                  {/* Detailed Multi-Agent Info */}
-                  {multiAgentExpanded && (
+                  {/* Detailed Multi-Agent Info - Show during streaming if data available */}
+                  {(multiAgentExpanded || message.isStreaming) && (message.metadata?.planDetails || message.metadata?.grounding || message.metadata?.currentAgent) && (
                     <div className="space-y-3">
                       <WorkflowVisualizer />
                       
-                      {/* Research Plan */}
-                      {message.metadata.planDetails && (
-                        <PlanViewer planData={message.metadata.planDetails} />
+                      {/* Research Plan - Show during streaming */}
+                      {message.metadata?.planDetails && (
+                        <PlanViewer planData={message.metadata.planDetails} isStreaming={message.isStreaming} />
                       )}
                       
-                      {/* Grounding Report */}
-                      {message.metadata.grounding && (
+                      {/* Grounding Report - Show during streaming */}
+                      {message.metadata?.grounding && (
                         <GroundingReport groundingData={message.metadata.grounding} />
+                      )}
+                      
+                      {/* Basic Agent Info if no detailed metadata */}
+                      {!message.metadata?.planDetails && !message.metadata?.grounding && message.metadata?.currentAgent && (
+                        <div className="p-3 bg-blue-50 dark:bg-blue-950 rounded-lg">
+                          <div className="text-sm font-medium text-blue-700 dark:text-blue-300">
+                            Current Agent: {message.metadata.currentAgent}
+                          </div>
+                          <div className="text-xs text-blue-600 dark:text-blue-400 mt-1">
+                            {message.isStreaming ? 'Research workflow in progress...' : 'Research workflow completed successfully.'}
+                          </div>
+                        </div>
                       )}
                     </div>
                   )}
                 </div>
               )}
 
-              {/* Research Sources */}
+              {/* Sources Panel - Show during streaming if sources available */}
               {message.metadata?.sources && message.metadata.sources.length > 0 && !isUser && (
-                <Collapsible open={sourcesExpanded} onOpenChange={setSourcesExpanded}>
-                  <CollapsibleTrigger asChild>
-                    <Button 
-                      variant="ghost" 
-                      size="sm" 
-                      className="h-8 px-3 text-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
-                    >
-                      <ExternalLink className="w-3 h-3 mr-2" />
-                      <span>View Sources ({message.metadata.sources.length})</span>
-                      {sourcesExpanded ? <ChevronUp className="w-3 h-3 ml-2" /> : <ChevronDown className="w-3 h-3 ml-2" />}
-                    </Button>
-                  </CollapsibleTrigger>
-                  <CollapsibleContent className="mt-3">
-                    <div className="space-y-2 border-t border-gray-200 dark:border-gray-600 pt-3">
-                      {message.metadata.sources.map((source, index) => (
-                        <div 
-                          key={index} 
-                          className="flex items-start gap-3 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg text-sm"
-                        >
-                          <ExternalLink className="w-4 h-4 mt-0.5 flex-shrink-0 text-gray-400" />
-                          <div className="flex-1 min-w-0">
-                            <div className="font-medium text-gray-900 dark:text-gray-100 truncate">
-                              {source.title}
-                            </div>
-                            <a 
-                              href={source.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-blue-600 dark:text-blue-400 hover:underline truncate block"
-                            >
-                              {source.url}
-                            </a>
-                            {source.snippet && (
-                              <p className="mt-1 text-gray-600 dark:text-gray-300 text-xs line-clamp-2">
-                                {source.snippet}
-                              </p>
-                            )}
-                          </div>
-                          {source.relevanceScore && (
-                            <Badge variant="outline" className="text-xs flex-shrink-0">
-                              {Math.round(source.relevanceScore * 100)}%
-                            </Badge>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </CollapsibleContent>
-                </Collapsible>
+                <SourcesPanel sources={message.metadata.sources} isStreaming={message.isStreaming} />
               )}
             </div>
           </CardContent>
         </Card>
+        
+        {/* Research Events Panel - Show intermediate events for completed messages */}
+        {!isUser && !message.isStreaming && intermediateEvents.length > 0 && (
+          <ResearchEventsPanel 
+            events={intermediateEvents.filter(event => 
+              // Only show events that are related to this message
+              // You might want to add message ID correlation here
+              true
+            )}
+          />
+        )}
       </div>
       
       {/* User Avatar */}

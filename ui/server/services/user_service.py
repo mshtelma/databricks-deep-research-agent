@@ -50,14 +50,14 @@ class UserService:
                 "deployment_name": workspace_url.split("//")[1].split(".")[0] if workspace_url else None,
             },
         }
-    
+
     def get_workspace_client(self) -> WorkspaceClient:
         """Get the workspace client instance."""
         return self.client
-    
+
     def get_user_from_request(self, request: Optional[Request] = None) -> dict:
         """Extract user information from the request context or current session.
-        
+
         In Databricks Apps, the user identity is available through the SDK.
         For OAuth/service principal auth, we get the current authenticated identity.
         """
@@ -69,26 +69,26 @@ class UserService:
                 "display_name": user.display_name or "Service Principal",
                 "email": user.emails[0].value if user.emails else None,
                 "active": user.active or True,
-                "auth_type": "databricks"
+                "auth_type": "databricks",
             }
             logger.debug(f"Extracted user from Databricks SDK: {user_info['username']}")
             return user_info
         except Exception as e:
             logger.warning(f"Could not get user from Databricks SDK: {e}")
-            
+
             # Fallback: Check request headers for user info
-            if request and hasattr(request, 'headers'):
+            if request and hasattr(request, "headers"):
                 # Check for common auth headers
-                auth_header = request.headers.get('authorization', '')
-                x_user = request.headers.get('x-databricks-user-name', '')
-                
+                auth_header = request.headers.get("authorization", "")
+                x_user = request.headers.get("x-databricks-user-name", "")
+
                 if x_user:
                     return {
                         "username": x_user,
                         "display_name": x_user,
                         "email": None,
                         "active": True,
-                        "auth_type": "header"
+                        "auth_type": "header",
                     }
                 elif auth_header:
                     # Could parse JWT token here if needed
@@ -97,14 +97,14 @@ class UserService:
                         "display_name": "Authenticated User",
                         "email": None,
                         "active": True,
-                        "auth_type": "token"
+                        "auth_type": "token",
                     }
-            
+
             # Final fallback
             return {
                 "username": "unknown",
                 "display_name": "Unknown User",
                 "email": None,
                 "active": True,
-                "auth_type": "none"
+                "auth_type": "none",
             }

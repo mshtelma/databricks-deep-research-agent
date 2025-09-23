@@ -2,7 +2,6 @@
 
 import json
 import logging
-import time
 import traceback
 from typing import Dict, List, Optional
 
@@ -52,19 +51,15 @@ async def get_agent_client() -> AgentClient:
 
 
 @router.post("/send", response_model=ChatResponse)
-async def send_message(
-    request: ChatRequest, 
-    req: Request,
-    agent_client: AgentClient = Depends(get_agent_client)
-):
+async def send_message(request: ChatRequest, req: Request, agent_client: AgentClient = Depends(get_agent_client)):
     """Send message to agent (non-streaming response) with comprehensive logging."""
     # Extract user information
     user_service = UserService()
     user_info = user_service.get_user_from_request(req)
-    
+
     # Get the latest user prompt
     prompt = request.messages[-1]["content"] if request.messages else ""
-    
+
     # Create logging context
     with ChatRequestContext(chat_logger, user_info, prompt, request.messages) as ctx:
         try:
@@ -81,7 +76,7 @@ async def send_message(
 
             # Send to agent
             response = await agent_client.send_simple_message(messages, request.config)
-            
+
             # Capture response for logging
             if response and "message" in response:
                 ctx.response_content = response["message"].get("content", "")
@@ -99,19 +94,15 @@ async def send_message(
 
 
 @router.post("/stream")
-async def stream_message(
-    request: ChatRequest,
-    req: Request,
-    agent_client: AgentClient = Depends(get_agent_client)
-):
+async def stream_message(request: ChatRequest, req: Request, agent_client: AgentClient = Depends(get_agent_client)):
     """Stream message to agent (real-time responses) with comprehensive logging."""
     # Extract user information
     user_service = UserService()
     user_info = user_service.get_user_from_request(req)
-    
+
     # Get the latest user prompt
     prompt = request.messages[-1]["content"] if request.messages else ""
-    
+
     # Create logging context
     ctx = ChatRequestContext(chat_logger, user_info, prompt, request.messages)
     ctx.__enter__()  # Start logging
@@ -143,14 +134,10 @@ async def stream_message(
                 logger.debug(
                     f"Streaming event to UI: type={event.type}, has_content={bool(event.content)}, has_metadata={bool(event.metadata)}"
                 )
-                
+
                 # Track streaming events in context
-                ctx.add_stream_event(
-                    event.type,
-                    event.content or "",
-                    event.metadata.dict() if event.metadata else None
-                )
-                
+                ctx.add_stream_event(event.type, event.content or "", event.metadata.dict() if event.metadata else None)
+
                 if event.type == "research_update":
                     logger.info(
                         f"Research update: phase={event.metadata.phase if event.metadata else 'none'}, progress={event.metadata.progress_percentage if event.metadata else 0}%"
@@ -162,11 +149,20 @@ async def stream_message(
                     "content": event.content,
                     "metadata": event.metadata.dict() if event.metadata else None,
                 }
+
+                # Add optional fields if present
+                if hasattr(event, "event") and event.event:
+                    event_data["event"] = event.event
+                if hasattr(event, "events") and event.events:
+                    event_data["events"] = event.events
+                if hasattr(event, "batch_size") and event.batch_size:
+                    event_data["batch_size"] = event.batch_size
+
                 yield f"data: {json.dumps(event_data)}\n\n"
 
             # End stream
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-            
+
             # Complete logging context successfully
             ctx.__exit__(None, None, None)
 
@@ -175,7 +171,7 @@ async def stream_message(
             logger.error(f"Stream request traceback: {traceback.format_exc()}")
             error_data = {"type": "error", "error": str(e), "error_type": "server_error"}
             yield f"data: {json.dumps(error_data)}\n\n"
-            
+
             # Complete logging context with error
             ctx.__exit__(type(e), e, None)
 

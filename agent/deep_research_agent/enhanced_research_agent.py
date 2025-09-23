@@ -51,6 +51,7 @@ from deep_research_agent.agents import (
 )
 from deep_research_agent.components import create_tool_registry
 from deep_research_agent.core.exceptions import SearchToolsFailedException, PermanentWorkflowError, AuthenticationError
+from deep_research_agent.core.content_sanitizer import sanitize_agent_content
 
 
 logger = get_logger(__name__)
@@ -322,6 +323,94 @@ class EnhancedResearchAgent(ResponsesAgent):
 
         return ResponsesAgentStreamEvent(
             type="response.output_text.delta", item_id=item_id, delta=delta
+        )
+    
+    def _emit_plan_event(self, plan, item_id: str) -> ResponsesAgentStreamEvent:
+        """Emit detailed plan event with all step information."""
+        try:
+            plan_data = {
+                "type": "plan_created",
+                "steps": []
+            }
+            
+            if hasattr(plan, 'steps') and plan.steps:
+                for i, step in enumerate(plan.steps):
+                    step_data = {
+                        "id": getattr(step, 'id', f"step_{i+1}"),
+                        "index": i + 1,
+                        "description": getattr(step, 'description', str(step)),
+                        "status": "pending",
+                        "dependencies": getattr(step, 'dependencies', []),
+                    }
+                    plan_data["steps"].append(step_data)
+                    
+            plan_data["total_steps"] = len(plan_data["steps"])
+            plan_data["quality"] = getattr(plan, 'quality', None)
+            plan_data["has_enough_context"] = getattr(plan, 'has_enough_context', True)
+            
+            # Send as metadata event
+            return ResponsesAgentStreamEvent(
+                type="response.metadata",
+                item_id=item_id,
+                metadata={
+                    "planDetails": plan_data
+                }
+            )
+        except Exception as e:
+            logger.warning(f"Failed to emit plan event: {e}")
+            return None
+    
+    def _emit_step_progress_event(self, step_id: str, status: str, result: str, item_id: str) -> ResponsesAgentStreamEvent:
+        """Emit step progress update event."""
+        return ResponsesAgentStreamEvent(
+            type="response.metadata",
+            item_id=item_id,
+            metadata={
+                "stepProgress": {
+                    "id": step_id,
+                    "status": status,  # "in_progress", "completed", "failed"
+                    "result": result if result else "",
+                    "timestamp": time.time()
+                }
+            }
+        )
+    
+    def _emit_search_query_event(self, query: str, provider: str, item_id: str) -> ResponsesAgentStreamEvent:
+        """Emit search query execution event."""
+        return ResponsesAgentStreamEvent(
+            type="response.metadata",
+            item_id=item_id,
+            metadata={
+                "searchQuery": {
+                    "query": query,
+                    "provider": provider,
+                    "timestamp": time.time()
+                }
+            }
+        )
+    
+    def _emit_factuality_event(self, claim: str, verdict: str, score: float, evidence: str, item_id: str) -> ResponsesAgentStreamEvent:
+        """Emit factuality check event."""
+        return ResponsesAgentStreamEvent(
+            type="response.metadata",
+            item_id=item_id,
+            metadata={
+                "factualityCheck": {
+                    "claim": claim,
+                    "verdict": verdict,  # "supported", "contradicted", "uncertain"
+                    "score": score,
+                    "evidence": evidence,
+                    "timestamp": time.time()
+                }
+            }
+        )
+    
+    def _emit_report_chunk(self, content: str, item_id: str) -> ResponsesAgentStreamEvent:
+        """Emit report content chunk as proper content_delta."""
+        return ResponsesAgentStreamEvent(
+            type="response.output_text.delta",
+            item_id=item_id,
+            delta=content
         )
 
     def _build_graph(self) -> Any:
@@ -809,6 +898,143 @@ class EnhancedResearchAgent(ResponsesAgent):
             },
         }
 
+    def _extract_streaming_metadata(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract research metadata from final state for UI consumption."""
+        try:
+            # Extract basic research metadata
+            metadata = {
+                "searchQueries": state.get("queries", []),
+                "sources": self._format_sources_for_ui(state.get("citations", [])),
+                "researchIterations": len(state.get("completed_steps", [])),
+                "confidenceScore": state.get("confidence_score"),
+                "factualityScore": state.get("factuality_score"),
+                "currentAgent": state.get("current_agent", "reporter"),
+                "reportStyle": state.get("report_style", "professional"),
+                "verificationLevel": state.get("verification_level", "moderate"),
+            }
+
+            # Extract and format plan details
+            current_plan = state.get("current_plan")
+            if current_plan:
+                plan_metadata = self._format_plan_for_ui(current_plan, state)
+                metadata["planDetails"] = plan_metadata
+
+            # Extract grounding metadata
+            grounding_results = state.get("grounding_results", [])
+            contradictions = state.get("contradictions", [])
+            if grounding_results or contradictions:
+                grounding_metadata = self._format_grounding_for_ui(grounding_results, contradictions, state)
+                metadata["grounding"] = grounding_metadata
+
+            return metadata
+
+        except Exception as e:
+            logger.warning(f"Failed to extract streaming metadata: {e}")
+            return {
+                "searchQueries": [],
+                "sources": [],
+                "researchIterations": 0,
+                "currentAgent": "reporter",
+            }
+
+    def _format_sources_for_ui(self, citations: list) -> list:
+        """Format citations as sources for UI consumption."""
+        sources = []
+        for citation in citations[:20]:  # Limit to 20 sources for UI performance
+            if isinstance(citation, dict):
+                source = {
+                    "url": citation.get("url", ""),
+                    "title": citation.get("title", "Unknown Source"),
+                    "relevanceScore": citation.get("relevance_score"),
+                    "snippet": citation.get("snippet", "")[:200],  # Limit snippet length
+                }
+                sources.append(source)
+        return sources
+
+    def _format_plan_for_ui(self, plan, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Format plan metadata for UI visualization."""
+        try:
+            plan_steps = []
+            completed_steps = state.get("completed_steps", [])
+            completed_step_ids = {step.get("id") for step in completed_steps if isinstance(step, dict)}
+
+            # Extract steps from plan
+            if hasattr(plan, 'steps') and plan.steps:
+                for i, step in enumerate(plan.steps):
+                    step_data = {
+                        "id": getattr(step, 'id', f"step_{i}"),
+                        "description": getattr(step, 'description', str(step)),
+                        "status": "completed" if getattr(step, 'id', f"step_{i}") in completed_step_ids else "pending",
+                    }
+                    
+                    # Add completion timestamp if available
+                    for completed_step in completed_steps:
+                        if isinstance(completed_step, dict) and completed_step.get("id") == step_data["id"]:
+                            step_data["completedAt"] = completed_step.get("timestamp")
+                            step_data["result"] = completed_step.get("result", "")
+                            break
+                    
+                    plan_steps.append(step_data)
+
+            return {
+                "steps": plan_steps,
+                "quality": getattr(plan, 'quality', None),
+                "iterations": state.get("plan_iterations", getattr(plan, 'iterations', 1)),
+                "status": "completed",
+                "hasEnoughContext": getattr(plan, 'has_enough_context', True),
+            }
+
+        except Exception as e:
+            logger.warning(f"Failed to format plan for UI: {e}")
+            return {
+                "steps": [],
+                "iterations": 1,
+                "status": "completed",
+                "hasEnoughContext": True,
+            }
+
+    def _format_grounding_for_ui(self, grounding_results: list, contradictions: list, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Format grounding metadata for UI."""
+        try:
+            formatted_contradictions = []
+            for contradiction in contradictions[:10]:  # Limit for UI performance
+                if isinstance(contradiction, dict):
+                    formatted_contradictions.append({
+                        "id": contradiction.get("id", str(len(formatted_contradictions))),
+                        "claim": contradiction.get("claim", ""),
+                        "evidence": contradiction.get("evidence", ""),
+                        "severity": contradiction.get("severity", "medium"),
+                        "resolved": contradiction.get("resolved", False),
+                        "resolution": contradiction.get("resolution", ""),
+                    })
+
+            formatted_verifications = []
+            for result in grounding_results[:20]:  # Limit for UI performance
+                if isinstance(result, dict):
+                    formatted_verifications.append({
+                        "id": result.get("id", str(len(formatted_verifications))),
+                        "fact": result.get("claim", result.get("fact", "")),
+                        "verified": result.get("verified", True),
+                        "confidence": result.get("confidence", 0.8),
+                        "sources": result.get("sources", []),
+                    })
+
+            return {
+                "factualityScore": state.get("factuality_score", 0.8),
+                "contradictions": formatted_contradictions,
+                "verifications": formatted_verifications,
+                "verificationLevel": state.get("verification_level", "moderate"),
+            }
+
+        except Exception as e:
+            logger.warning(f"Failed to format grounding for UI: {e}")
+            return {
+                "factualityScore": 0.8,
+                "contradictions": [],
+                "verifications": [],
+                "verificationLevel": "moderate",
+            }
+
     def _process_stream_event(self, event: Dict[str, Any]) -> Dict[str, Any]:
         """Process a streaming event with enhanced detail tracking."""
         try:
@@ -1228,6 +1454,7 @@ class EnhancedResearchAgent(ResponsesAgent):
 
             # Stream through workflow with event capture
             collected_content = []
+            final_state = {}  # Track final state for metadata
 
             async def run_streaming():
                 # Add required config for LangGraph checkpointer
@@ -1266,6 +1493,12 @@ class EnhancedResearchAgent(ResponsesAgent):
                                     f"Node {node_name} returned None, skipping"
                                 )
                                 continue
+                            
+                            # Track state updates for final metadata
+                            if isinstance(node_data, dict):
+                                final_state.update(node_data)
+                            elif hasattr(node_data, 'update') and node_data.update:
+                                final_state.update(node_data.update)
 
                             # Emit intermediate events from event emitter
                             if self.event_emitter and hasattr(
@@ -1324,14 +1557,30 @@ class EnhancedResearchAgent(ResponsesAgent):
                                     if phase_event:
                                         yield phase_event
 
+                                    # Emit detailed plan event
+                                    plan_event = self._emit_plan_event(plan, item_id)
+                                    if plan_event:
+                                        yield plan_event
+                                    
+                                    # Also emit simple progress message
                                     steps_count = (
                                         len(plan.steps) if hasattr(plan, "steps") else 0
                                     )
                                     yield ResponsesAgentStreamEvent(
                                         type="response.output_text.delta",
                                         item_id=item_id,
-                                        delta=f"📋 Created research plan with {steps_count} steps\n",
+                                        delta=f"📋 Created research plan with {steps_count} steps:\n",
                                     )
+                                    
+                                    # Emit each step as a content delta for visibility
+                                    if hasattr(plan, 'steps') and plan.steps:
+                                        for i, step in enumerate(plan.steps, 1):
+                                            step_desc = getattr(step, 'description', str(step))
+                                            yield ResponsesAgentStreamEvent(
+                                                type="response.output_text.delta",
+                                                item_id=item_id,
+                                                delta=f"  {i}. {step_desc}\n",
+                                            )
 
                             elif node_name == "researcher":
                                 # Monitor memory after researcher (most memory-intensive node)
@@ -1347,15 +1596,44 @@ class EnhancedResearchAgent(ResponsesAgent):
                                             "researcher_cleanup"
                                         )
 
-                                observations = node_data.get("observations", [])
-                                if observations:
-                                    # Emit PHASE marker first
-                                    phase_event = self._emit_phase_marker(
-                                        node_name, item_id, start_time
+                                # Emit PHASE marker first
+                                phase_event = self._emit_phase_marker(
+                                    node_name, item_id, start_time
+                                )
+                                if phase_event:
+                                    yield phase_event
+                                
+                                # Extract and emit search queries if available
+                                queries = node_data.get("queries") or []
+                                for query in queries:
+                                    if isinstance(query, str):
+                                        yield self._emit_search_query_event(
+                                            query, "brave", item_id
+                                        )
+                                
+                                # Emit step progress events
+                                completed_steps = node_data.get("completed_steps") or []
+                                for step in completed_steps:
+                                    if isinstance(step, dict):
+                                        yield self._emit_step_progress_event(
+                                            step.get("id", "unknown"),
+                                            "completed",
+                                            step.get("result", ""),
+                                            item_id
+                                        )
+                                
+                                # Check if we're executing a specific step
+                                current_step = node_data.get("current_research_step")
+                                if current_step:
+                                    yield self._emit_step_progress_event(
+                                        current_step.get("id", "unknown") if isinstance(current_step, dict) else str(current_step),
+                                        "in_progress",
+                                        "",
+                                        item_id
                                     )
-                                    if phase_event:
-                                        yield phase_event
-
+                                    
+                                observations = node_data.get("observations") or []
+                                if observations:
                                     yield ResponsesAgentStreamEvent(
                                         type="response.output_text.delta",
                                         item_id=item_id,
@@ -1363,40 +1641,105 @@ class EnhancedResearchAgent(ResponsesAgent):
                                     )
 
                             elif node_name == "fact_checker":
+                                # Emit PHASE marker first
+                                phase_event = self._emit_phase_marker(
+                                    node_name, item_id, start_time
+                                )
+                                if phase_event:
+                                    yield phase_event
+                                
+                                # Emit factuality check details
+                                grounding_results = node_data.get("grounding_results") or []
+                                for result in grounding_results:
+                                    if isinstance(result, dict):
+                                        yield self._emit_factuality_event(
+                                            result.get("claim", ""),
+                                            result.get("verdict", "uncertain"),
+                                            result.get("confidence", 0.0),
+                                            result.get("evidence", ""),
+                                            item_id
+                                        )
+                                
                                 score = node_data.get("factuality_score", 0)
                                 if score is not None and score > 0:
-                                    # Emit PHASE marker first
-                                    phase_event = self._emit_phase_marker(
-                                        node_name, item_id, start_time
-                                    )
-                                    if phase_event:
-                                        yield phase_event
-
                                     yield ResponsesAgentStreamEvent(
                                         type="response.output_text.delta",
                                         item_id=item_id,
                                         delta=f"✅ Factuality verification complete - score: {score:.1%}\n",
                                     )
+                                    
+                                    # If there are contradictions, emit them
+                                    contradictions = node_data.get("contradictions") or []
+                                    if contradictions:
+                                        yield ResponsesAgentStreamEvent(
+                                            type="response.output_text.delta",
+                                            item_id=item_id,
+                                            delta=f"⚠️ Found {len(contradictions)} potential contradictions to review\n",
+                                        )
 
                             elif node_name == "reporter":
+                                # Emit PHASE marker first
+                                phase_event = self._emit_phase_marker(
+                                    node_name, item_id, start_time
+                                )
+                                if phase_event:
+                                    yield phase_event
+                                    
                                 # Enhanced reporter content extraction with comprehensive logging
                                 report = ""
 
                                 # Primary path: node_data is the full state dict with final_report
                                 if isinstance(node_data, dict):
-                                    report = node_data.get("final_report", "")
-                                    if not report:
+                                    raw_report = node_data.get("final_report", "")
+                                    if not raw_report:
                                         # Try alternative locations
-                                        report = node_data.get("report", "")
-                                        report = report or node_data.get("content", "")
+                                        raw_report = node_data.get("report", "")
+                                        raw_report = raw_report or node_data.get("content", "")
                                         # Log available keys for debugging
                                         logger.warning(
                                             f"No final_report in reporter output. Available keys: {list(node_data.keys())[:10]}"
                                         )
                                     else:
                                         logger.info(
-                                            f"Successfully extracted final_report: {len(report)} characters"
+                                            f"Successfully extracted final_report: {len(raw_report)} characters"
                                         )
+                                    
+                                    # Apply content sanitization to separate JSON from markdown
+                                    if raw_report:
+                                        sanitization_result = sanitize_agent_content(raw_report)
+                                        report = sanitization_result.clean_content
+                                        
+                                        # Log sanitization results
+                                        if sanitization_result.sanitization_applied:
+                                            logger.info(
+                                                f"Content sanitization applied: {len(raw_report)} -> {len(report)} chars, "
+                                                f"content_type={sanitization_result.content_type.value}, "
+                                                f"reasoning_blocks={len(sanitization_result.extracted_reasoning)}, "
+                                                f"warnings={len(sanitization_result.warnings)}"
+                                            )
+                                            
+                                            # Log warnings if any
+                                            for warning in sanitization_result.warnings:
+                                                logger.warning(f"Content sanitization warning: {warning}")
+                                            
+                                            # Emit extracted reasoning as separate metadata events if present
+                                            for reasoning_block in sanitization_result.extracted_reasoning:
+                                                reasoning_event = ResponsesAgentStreamEvent(
+                                                    type="response.metadata",
+                                                    item_id=item_id,
+                                                    metadata={
+                                                        "type": "reasoning_extracted",
+                                                        "content": reasoning_block
+                                                    }
+                                                )
+                                                yield reasoning_event
+                                        else:
+                                            logger.info(
+                                                f"Content was already clean: {len(report)} chars, "
+                                                f"content_type={sanitization_result.content_type.value}"
+                                            )
+                                    else:
+                                        report = ""
 
                                 # Defensive path: handle Command if it somehow gets through
                                 elif hasattr(node_data, "update") and node_data.update:
@@ -1420,6 +1763,12 @@ class EnhancedResearchAgent(ResponsesAgent):
                                         logger.warning(
                                             f"Report seems very short: {len(report)} chars"
                                         )
+                                    
+                                    # Check for content structure issues
+                                    if "Research Report" in report and "References" in report:
+                                        content_between = report.split("Research Report")[1].split("References")[0] if "References" in report.split("Research Report")[1] else report.split("Research Report")[1]
+                                        if len(content_between.strip()) < 50:
+                                            logger.warning("Very little content between header and references - possible content extraction issue")
 
                                     # Emit PHASE marker with content metadata
                                     phase_event = self._emit_phase_marker(
@@ -1462,10 +1811,13 @@ class EnhancedResearchAgent(ResponsesAgent):
                 # Async generator finished normally
                 pass
 
-            # Emit final done event
+            # Emit final done event with metadata
             final_content = "".join(collected_content)
             if not final_content.strip():
                 final_content = "Research completed successfully, but no final report was generated."
+
+            # Extract research metadata for UI
+            research_metadata = self._extract_streaming_metadata(final_state)
 
             yield ResponsesAgentStreamEvent(
                 type="response.output_item.done",
@@ -1475,6 +1827,7 @@ class EnhancedResearchAgent(ResponsesAgent):
                     "content": [{"type": "output_text", "text": final_content}],
                     "id": item_id,
                 },
+                metadata=research_metadata,
             )
 
             logger.info("Successfully completed predict_stream request")

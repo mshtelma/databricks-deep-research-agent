@@ -308,6 +308,22 @@ class EnhancedWorkflowNodes:
         # Debug state at coordinator entry
         self._debug_state_transition("COORDINATOR", state)
         
+        # Emit agent handoff event
+        if self.event_emitter:
+            self.event_emitter.emit(
+                event_type="agent_handoff",
+                data={
+                    "from_agent": "user",
+                    "to_agent": "coordinator",
+                    "reason": "Request received, classifying and routing",
+                    "current_phase": "coordination"
+                },
+                title="Coordinator Taking Control",
+                description="Analyzing request and determining routing strategy",
+                correlation_id=f"coordinator_{state.get('current_iteration', 0)}",
+                stage_id="coordinator"
+            )
+        
         # Convert dict to enhanced state if needed
         if not isinstance(state, dict) or "research_topic" not in state:
             # Get the original user query
@@ -456,6 +472,22 @@ class EnhancedWorkflowNodes:
         Performs preliminary search before planning to provide context.
         """
         logger.info("Executing background investigation node")
+        
+        # Emit agent handoff event
+        if self.event_emitter:
+            self.event_emitter.emit(
+                event_type="agent_handoff",
+                data={
+                    "from_agent": "coordinator",
+                    "to_agent": "background_investigator",
+                    "reason": "Gathering preliminary context before planning",
+                    "current_phase": "background_investigation"
+                },
+                title="Background Investigation Starting",
+                description="Gathering initial context to inform research planning",
+                correlation_id=f"background_{state.get('current_iteration', 0)}",
+                stage_id="background_investigation"
+            )
         
         # Check if enabled
         if not state.get("enable_background_investigation", True):
@@ -614,6 +646,22 @@ class EnhancedWorkflowNodes:
         
         # Debug state at planner entry
         self._debug_state_transition("PLANNER", state)
+        
+        # Emit agent handoff event
+        if self.event_emitter:
+            self.event_emitter.emit(
+                event_type="agent_handoff",
+                data={
+                    "from_agent": "background_investigator",
+                    "to_agent": "planner",
+                    "reason": "Creating structured research plan based on gathered context",
+                    "current_phase": "planning"
+                },
+                title="Planner Taking Control",
+                description="Analyzing context and creating structured research plan",
+                correlation_id=f"planner_{state.get('current_iteration', 0)}",
+                stage_id="planner"
+            )
         
         correlation_id = f"planner_{state.get('current_iteration', 0)}"
         research_topic = state.get("research_topic", "")
@@ -960,6 +1008,22 @@ class EnhancedWorkflowNodes:
         
         # Debug state at researcher entry
         self._debug_state_transition("RESEARCHER", state)
+        
+        # Emit agent handoff event
+        if self.event_emitter:
+            self.event_emitter.emit(
+                event_type="agent_handoff",
+                data={
+                    "from_agent": "planner",
+                    "to_agent": "researcher",
+                    "reason": "Executing research plan steps to gather information",
+                    "current_phase": "research"
+                },
+                title="Researcher Taking Control",
+                description="Beginning systematic research execution according to plan",
+                correlation_id=f"researcher_{state.get('current_iteration', 0)}",
+                stage_id="researcher"
+            )
 
         plan = state.get("current_plan") or state.get("plan")
         self._ensure_section_title_map(state, plan)
@@ -2100,6 +2164,22 @@ class EnhancedWorkflowNodes:
         # Debug state at fact checker entry
         self._debug_state_transition("FACT_CHECKER", state)
         
+        # Emit agent handoff event
+        if self.event_emitter:
+            self.event_emitter.emit(
+                event_type="agent_handoff",
+                data={
+                    "from_agent": "researcher",
+                    "to_agent": "fact_checker",
+                    "reason": "Verifying factual accuracy and grounding of research findings",
+                    "current_phase": "fact_checking"
+                },
+                title="Fact Checker Taking Control",
+                description="Validating claims and ensuring factual accuracy",
+                correlation_id=f"fact_checker_{state.get('current_iteration', 0)}",
+                stage_id="fact_checker"
+            )
+        
         # Increment step counter for every node execution
         total_steps = state.get("total_workflow_steps", 0)
         state["total_workflow_steps"] = total_steps + 1
@@ -2476,6 +2556,22 @@ class EnhancedWorkflowNodes:
         
         # Debug state at reporter entry
         self._debug_state_transition("REPORTER", state)
+        
+        # Emit agent handoff event
+        if self.event_emitter:
+            self.event_emitter.emit(
+                event_type="agent_handoff",
+                data={
+                    "from_agent": "fact_checker",
+                    "to_agent": "reporter",
+                    "reason": "Synthesizing final comprehensive report with verified findings",
+                    "current_phase": "reporting"
+                },
+                title="Reporter Taking Control",
+                description="Creating final comprehensive report from verified research",
+                correlation_id=f"reporter_{state.get('current_iteration', 0)}",
+                stage_id="reporter"
+            )
         
         correlation_id = f"reporter_{state.get('current_iteration', 0)}"
         

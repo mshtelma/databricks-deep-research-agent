@@ -110,15 +110,53 @@ export enum IntermediateEventType {
   // Reasoning/LLM events
   THOUGHT_SNAPSHOT = 'thought_snapshot',
   SYNTHESIS_PROGRESS = 'synthesis_progress',
+  REASONING_REFLECTION = 'reasoning_reflection',
+
+  // Enhanced LLM events
+  LLM_PROMPT_SENT = 'llm_prompt_sent',
+  LLM_STREAMING = 'llm_streaming',
+  LLM_RESPONSE_COMPLETE = 'llm_response_complete',
+  LLM_THINKING = 'llm_thinking',
+
+  // Enhanced agent events
+  AGENT_START = 'agent_start',
+  AGENT_COMPLETE = 'agent_complete',
+  AGENT_THINKING = 'agent_thinking',
+  AGENT_DECISION = 'agent_decision',
+
+  // Query and search events
+  QUERY_GENERATED = 'query_generated',
+  QUERY_EXECUTING = 'query_executing',
+  SEARCH_RESULTS_FOUND = 'search_results_found',
+  SEARCH_STRATEGY = 'search_strategy',
 
   // Content/citation events
   CITATION_ADDED = 'citation_added',
+  SOURCE_ANALYZED = 'source_analyzed',
+  SOURCE_EVALUATION = 'source_evaluation',
+
+  // Analysis and synthesis events
+  PARTIAL_SYNTHESIS = 'partial_synthesis',
+  HYPOTHESIS_FORMED = 'hypothesis_formed',
+  CONTRADICTION_FOUND = 'contradiction_found',
+
+  // Verification events
+  VERIFICATION_ATTEMPT = 'verification_attempt',
 
   // Multi-agent specific events
   AGENT_HANDOFF = 'agent_handoff',
   PLAN_CREATED = 'plan_created',
   PLAN_UPDATED = 'plan_updated',
   PLAN_ITERATION = 'plan_iteration',
+  
+  // Enhanced UI visualization events  
+  PLAN_STRUCTURE_VISUALIZE = 'plan_structure_visualize',
+  STEP_ACTIVATED = 'step_activated',
+  STEP_COMPLETED = 'step_completed', 
+  SEARCH_EXECUTED = 'search_executed',
+  REASONING_SNAPSHOT = 'reasoning_snapshot',
+  AGENT_STATUS_UPDATE = 'agent_status_update',
+  WORKFLOW_PHASE_CHANGE = 'workflow_phase_change',
   BACKGROUND_INVESTIGATION = 'background_investigation',
   GROUNDING_START = 'grounding_start',
   GROUNDING_COMPLETE = 'grounding_complete',

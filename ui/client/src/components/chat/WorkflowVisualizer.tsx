@@ -10,6 +10,13 @@ interface WorkflowVisualizerProps {
 export function WorkflowVisualizer({ className = '', compact = false }: WorkflowVisualizerProps) {
   const { researchProgress, intermediateEvents } = useChatStore()
 
+  // Provide default values for more robust rendering
+  const safeProgress = {
+    currentPhase: 'complete',
+    progressPercentage: 100,
+    ...researchProgress
+  } as const
+
   const agents = [
     {
       id: 'coordinator',
@@ -61,16 +68,16 @@ export function WorkflowVisualizer({ className = '', compact = false }: Workflow
     }
   ]
 
-  const currentPhase = researchProgress.currentPhase
+  const currentPhase = safeProgress.currentPhase
   const currentAgentIndex = agents.findIndex(agent => agent.id === currentPhase)
   
-  // Get recent handoffs from events
-  const recentHandoffs = intermediateEvents
+  // Get recent handoffs from events (if available)
+  const recentHandoffs = (intermediateEvents || [])
     .filter(event => event.event_type === 'agent_handoff' as any)
     .slice(-3)
 
   // Get progress percentage for animation
-  const progressPercentage = researchProgress.progressPercentage || 0
+  const progressPercentage = safeProgress.progressPercentage || 0
 
   if (compact) {
     return (
@@ -197,32 +204,32 @@ export function WorkflowVisualizer({ className = '', compact = false }: Workflow
       )}
 
       {/* Quality Metrics */}
-      {(researchProgress.factualityScore || researchProgress.researchQualityScore || researchProgress.coverageScore) && (
+      {(safeProgress.factualityScore || safeProgress.researchQualityScore || safeProgress.coverageScore) && (
         <div className="mt-4 pt-4 border-t">
           <h4 className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
             Quality Metrics
           </h4>
           <div className="grid grid-cols-3 gap-4 text-center">
-            {researchProgress.factualityScore && (
+            {safeProgress.factualityScore && (
               <div>
                 <div className="text-lg font-semibold text-blue-600">
-                  {Math.round(researchProgress.factualityScore * 100)}%
+                  {Math.round(safeProgress.factualityScore * 100)}%
                 </div>
                 <div className="text-xs text-gray-500">Factuality</div>
               </div>
             )}
-            {researchProgress.researchQualityScore && (
+            {safeProgress.researchQualityScore && (
               <div>
                 <div className="text-lg font-semibold text-green-600">
-                  {Math.round(researchProgress.researchQualityScore * 100)}%
+                  {Math.round(safeProgress.researchQualityScore * 100)}%
                 </div>
                 <div className="text-xs text-gray-500">Quality</div>
               </div>
             )}
-            {researchProgress.coverageScore && (
+            {safeProgress.coverageScore && (
               <div>
                 <div className="text-lg font-semibold text-orange-600">
-                  {Math.round(researchProgress.coverageScore * 100)}%
+                  {Math.round(safeProgress.coverageScore * 100)}%
                 </div>
                 <div className="text-xs text-gray-500">Coverage</div>
               </div>

@@ -9,6 +9,17 @@ export interface ChatState {
   researchProgress: ResearchProgress
   intermediateEvents: IntermediateEvent[]
   showThoughts: boolean
+  
+  // Event history for current message being streamed
+  currentMessageEvents: IntermediateEvent[]
+  // Complete event history for all messages
+  eventHistory: Map<string, IntermediateEvent[]>
+  // Filter settings for event feed
+  eventFilters: {
+    categories: string[]
+    searchQuery: string
+    minPriority: number
+  }
 
   // Actions
   addMessage: (message: Omit<ChatMessage, 'id' | 'timestamp'>) => string
@@ -22,6 +33,11 @@ export interface ChatState {
   clearChat: () => void
   removeMessage: (id: string) => void
   
+  // New event management actions
+  finalizeMessageEvents: (messageId: string) => void
+  getEventsForMessage: (messageId: string) => IntermediateEvent[]
+  setEventFilters: (filters: Partial<ChatState['eventFilters']>) => void
+  
   // Progress utilities
   updateProgressWithETA: (progress: Partial<ResearchProgress>) => void
 }
@@ -32,6 +48,13 @@ export const useChatStore = create<ChatState>()(
     isLoading: false,
     currentStreamingId: null,
     intermediateEvents: [],
+    currentMessageEvents: [],
+    eventHistory: new Map(),
+    eventFilters: {
+      categories: [],
+      searchQuery: '',
+      minPriority: 0
+    },
     showThoughts: false,
     researchProgress: {
       currentPhase: 'complete',
@@ -88,16 +111,21 @@ export const useChatStore = create<ChatState>()(
 
     addIntermediateEvent: (event) =>
       set(state => ({
-        intermediateEvents: [...state.intermediateEvents, event]
+        intermediateEvents: [...state.intermediateEvents, event],
+        currentMessageEvents: [...state.currentMessageEvents, event]
       })),
 
     addIntermediateEvents: (events) =>
       set(state => ({
-        intermediateEvents: [...state.intermediateEvents, ...events]
+        intermediateEvents: [...state.intermediateEvents, ...events],
+        currentMessageEvents: [...state.currentMessageEvents, ...events]
       })),
 
     clearIntermediateEvents: () =>
-      set({ intermediateEvents: [] }),
+      set({ 
+        intermediateEvents: [],
+        currentMessageEvents: []
+      }),
 
     setShowThoughts: (show) =>
       set({ showThoughts: show }),
@@ -107,6 +135,8 @@ export const useChatStore = create<ChatState>()(
       isLoading: false,
       currentStreamingId: null,
       intermediateEvents: [],
+      currentMessageEvents: [],
+      eventHistory: new Map(),
       researchProgress: {
         currentPhase: 'complete',
         queriesGenerated: 0,
@@ -132,6 +162,26 @@ export const useChatStore = create<ChatState>()(
     removeMessage: (id) =>
       set(state => ({
         messages: state.messages.filter(msg => msg.id !== id)
+      })),
+
+    finalizeMessageEvents: (messageId) =>
+      set(state => {
+        const newEventHistory = new Map(state.eventHistory)
+        newEventHistory.set(messageId, [...state.currentMessageEvents])
+        return {
+          eventHistory: newEventHistory,
+          currentMessageEvents: []
+        }
+      }),
+
+    getEventsForMessage: (messageId) => {
+      const state = get()
+      return state.eventHistory.get(messageId) || []
+    },
+
+    setEventFilters: (filters) =>
+      set(state => ({
+        eventFilters: { ...state.eventFilters, ...filters }
       })),
 
     updateProgressWithETA: (progress) => {

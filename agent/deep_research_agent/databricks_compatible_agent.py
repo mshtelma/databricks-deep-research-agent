@@ -223,7 +223,10 @@ class DatabricksCompatibleAgent(ResponsesAgent):
                 for content in message["content"]
             ]
         elif msg_type == "reasoning":
-            return [{"role": "assistant", "content": json.dumps(message["summary"])}]
+            # Skip reasoning messages from content stream - they should be handled as metadata
+            # This prevents JSON injection into the report content
+            logger.debug(f"Skipping reasoning message from content stream: {message.get('summary', 'No summary')[:100]}...")
+            return []
         elif msg_type == "function_call_output":
             return [
                 {

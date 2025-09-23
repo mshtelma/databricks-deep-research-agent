@@ -36,9 +36,9 @@ pkill -f "uvicorn server.app:app" 2>/dev/null || true
 echo "  - Killing orphaned watchmedo processes..."
 pkill -f "watchmedo auto-restart" 2>/dev/null || true
 
-# Kill any remaining npm processes that might be running dev servers
-echo "  - Killing orphaned npm/node processes..."
-pkill -f "npm run dev" 2>/dev/null || true
+# Kill any remaining bun processes that might be running dev servers
+echo "  - Killing orphaned bun/node processes..."
+pkill -f "bun run dev" 2>/dev/null || true
 
 # Force kill any processes using our ports
 echo "  - Force killing processes on ports 5173 and 8000..."
@@ -115,7 +115,7 @@ uv run python -m scripts.make_fastapi_client || echo "⚠️ Could not generate 
 
 if [ "$PROD_MODE" = true ]; then
   echo "Building frontend for production..."
-  pushd client && npm run build && popd
+  pushd client && bun run build && popd
   echo "✅ Frontend built successfully"
   
   # In production mode, only start backend (frontend served by FastAPI)
@@ -127,7 +127,7 @@ if [ "$PROD_MODE" = true ]; then
 else
   # Development mode: start both frontend and backend
   echo "🌐 Starting frontend development server..."
-  (cd client && BROWSER=none npm run dev) &
+  (cd client && BROWSER=none bun run dev) &
   FRONTEND_PID=$!
   echo "Frontend PID: $FRONTEND_PID"
 

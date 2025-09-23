@@ -288,8 +288,8 @@ const ActivityItem: React.FC<ActivityItemProps> = ({ event, showThoughts }) => {
         
         return {
             name: agent,
-            icon: agentIcons[agent] || '🤖',
-            colorClass: agentColors[agent] || 'bg-gray-100 text-gray-800'
+            icon: (agentIcons as any)[agent] || '🤖',
+            colorClass: (agentColors as any)[agent] || 'bg-gray-100 text-gray-800'
         }
     }
     

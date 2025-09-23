@@ -1088,15 +1088,26 @@ Output your plan as a JSON object with this structure:
 
             config = self.config or {}
             adaptive_config: Dict[str, Any] = {}
+            
+            # Try multiple config paths to find adaptive_structure
             direct_config = config.get("adaptive_structure")
             if isinstance(direct_config, dict):
                 adaptive_config = direct_config
+                logger.info(f"PLANNER: Found adaptive_structure in direct config: {adaptive_config}")
             elif isinstance(config.get("config"), dict):
                 nested = config["config"].get("adaptive_structure")
                 if isinstance(nested, dict):
                     adaptive_config = nested
+                    logger.info(f"PLANNER: Found adaptive_structure in nested config: {adaptive_config}")
+            else:
+                # Fallback: enable adaptive structure by default for DEFAULT style
+                logger.info("PLANNER: No adaptive_structure config found, enabling by default for comprehensive reports")
+                adaptive_config = {"enable_adaptive_structure": True}
 
-            if not adaptive_config.get("enable_adaptive_structure", False):
+            is_enabled = adaptive_config.get("enable_adaptive_structure", True)  # Default to True
+            logger.info(f"PLANNER: Adaptive structure enabled: {is_enabled}")
+            
+            if not is_enabled:
                 logger.info("PLANNER: Adaptive structure disabled in configuration")
                 return
 

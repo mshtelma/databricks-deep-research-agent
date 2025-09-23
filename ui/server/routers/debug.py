@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from server.services.agent_client import AgentClient, is_development_mode
+from server.services.agent_client import AgentClient
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -39,7 +39,6 @@ async def get_debug_config():
 
         # Authentication configuration
         auth_config = {
-            "development_mode": is_development_mode(),
             "workspace_host": os.getenv("DATABRICKS_HOST"),
             "workspace_token_configured": bool(os.getenv("DATABRICKS_TOKEN")),
             "workspace_profile": os.getenv("DATABRICKS_CONFIG_PROFILE"),
@@ -52,7 +51,6 @@ async def get_debug_config():
         agent_config = {
             "endpoint_name": os.getenv("AGENT_ENDPOINT_NAME", "deep-research-agent"),
             "endpoint_url": os.getenv("AGENT_ENDPOINT_URL"),
-            "development_mode": is_development_mode(),
         }
 
         # Test workspace connection
@@ -130,16 +128,6 @@ async def test_agent_connection():
     """Test agent endpoint reachability (without sending actual message)."""
     try:
         logger.info("Testing agent endpoint connection")
-
-        if is_development_mode():
-            return TestConnectionResponse(
-                success=True,
-                details={
-                    "mode": "development",
-                    "endpoint": "mock",
-                    "message": "Development mode - using simulated responses",
-                },
-            )
 
         # Create agent client
         client = AgentClient()
