@@ -1,0 +1,69 @@
+# Base Deployment Configuration
+# Shared settings across all deployment environments
+
+project_name: deep-research-agent
+
+# Default configurations that can be inherited
+default_command_execution:
+  timeout: 300
+  auto_start: true
+  start_timeout: 600
+
+default_endpoint:
+  workload_size: Small
+  ready_timeout: 900
+  check_interval: 30
+  validation_retry_delay: 60
+  validation_retries: 2
+
+# Environment definitions
+environments:
+  dev:
+    profile: df
+    workspace_path: /Workspace/Users/michael.shtelma@databricks.com/DeepResearch/deep-research-agent
+    command_execution:
+      cluster_id: "0909-085001-iko6td48"
+    mlflow:
+      experiment_path: /Users/michael.shtelma@databricks.com/experiments/deep_research_agent_dev_v1
+      experiment_description: Development experiments for LangGraph Research Agent
+    model:
+      catalog: main
+      schema: mshtelma
+      name: deep_research_agent_dev_v1
+    endpoint:
+      name: deep_research_agent_dev_v1
+
+  staging:
+    profile: df
+    workspace_path: /Workspace/Shared/deep-research-agent/staging
+    command_execution:
+      cluster_id: "0909-085001-iko6td48"
+      timeout: 600
+    mlflow:
+      experiment_path: /Shared/experiments/deep_research_agent_staging
+      experiment_description: Staging experiments for LangGraph Research Agent
+    model:
+      catalog: main
+      schema: shared
+      name: deep_research_agent_staging
+    endpoint:
+      name: deep_research_agent_staging
+      workload_size: Medium
+
+  prod:
+    profile: df
+    workspace_path: /Workspace/Shared/deep-research-agent/prod
+    command_execution:
+      cluster_id: "0909-085001-iko6td48"
+      timeout: 900
+    mlflow:
+      experiment_path: /Shared/experiments/deep_research_agent_prod
+      experiment_description: Production experiments for LangGraph Research Agent
+    model:
+      catalog: main
+      schema: prod
+      name: deep_research_agent
+    endpoint:
+      name: deep_research_agent_prod
+      workload_size: Large
+      ready_timeout: 1200

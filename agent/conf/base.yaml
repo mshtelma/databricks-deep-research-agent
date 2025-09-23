@@ -1,0 +1,156 @@
+# Deep Research Agent Configuration
+# This is the comprehensive base configuration for the multi-agent research system.
+# Only includes parameters that are actually used in the codebase.
+
+# Model Configuration - only the models actually used
+models:
+  default:
+    endpoint: databricks-gpt-oss-120b
+    temperature: 0.7
+    max_tokens: 16000  # Increased for complex analysis
+    
+  web_research:
+    endpoint: databricks-gpt-oss-120b
+    temperature: 0.7
+    max_tokens: 12000  # Increased for comprehensive research
+    
+  synthesis:
+    endpoint: databricks-gpt-oss-120b
+    temperature: 0.7
+    max_tokens: 20000  # Significantly increased for detailed reports and comprehensive tables
+
+# Multi-Agent System Configuration
+multi_agent:
+  enabled: true
+
+agents:
+  coordinator:
+    enabled: true
+    model: default
+    enable_safety_filter: true
+    
+  planner:
+    enabled: true
+    model: default
+    max_iterations: 2
+    quality_threshold: 0.5
+    enable_deep_thinking: false
+    
+  researcher:
+    enabled: true
+    model: web_research
+    max_steps_per_execution: 10
+    enable_reflexion: true
+    
+  fact_checker:
+    enabled: true
+    model: default
+    verification_level: strict
+    enable_contradiction_detection: true
+    
+  reporter:
+    enabled: true
+    model: synthesis
+    default_style: default
+    citation_style: APA
+    enable_grounding_markers: true
+    use_semantic_extraction: true
+
+# Search Configuration
+search:
+  providers:
+    brave:
+      enabled: true
+      # api_key loaded from BRAVE_API_KEY environment variable
+      max_results: 10
+      rate_limit: 1
+      timeout: 30
+    tavily:
+      enabled: false
+      # api_key loaded from TAVILY_API_KEY environment variable
+      max_results: 10
+      rate_limit: 1
+      timeout: 30
+  max_concurrent_searches: 3
+  batch_delay_seconds: 1.0
+  max_results_per_query: 10
+  enable_safe_search: true
+
+# Global recursion limit (mirrors workflow setting for components that read top-level key)
+recursion_limit: 300
+
+# Workflow Configuration
+workflow:
+  max_research_loops: 3  # Increased for thorough research
+  max_fact_check_loops: 3  # Increased for better verification
+  max_total_steps: 75  # Increased for complex workflows
+  max_wall_clock_seconds: 1800  # Increased to 30 minutes for complex queries
+  recursion_limit: 300  # Increased for complex adaptive structures
+  enable_background_investigation: true
+  enable_human_feedback: false
+  auto_accept_plan: false
+  enable_circuit_breakers: true
+  enable_progress_tracking: true
+
+# Rate Limiting Configuration
+rate_limiting:
+  max_parallel_requests: 2  # Allow some parallelism for performance
+  max_tokens_per_minute: 100000
+
+
+# Grounding and Factuality Configuration
+grounding:
+  enable_grounding: true
+  verification_level: strict
+  enable_contradiction_detection: true
+  factuality_threshold: 0.6
+
+# Entity Validation Configuration
+entity_validation:
+  enabled: true
+  validation_mode: strict  # strict, moderate, lenient
+  enable_synthesis_validation: true
+  enable_observation_validation: true
+  enable_section_validation: true
+  track_violations: true
+
+# Reflexion Configuration
+reflexion:
+  enable_reflexion: true
+  reflection_memory_size: 10
+
+# Streaming Configuration
+streaming:
+  enable_streaming: true
+  max_events_per_second: 20
+  batch_events: true
+  batch_size: 3
+  batch_timeout_ms: 200
+
+# Citations Configuration
+citations:
+  citation_style: APA
+  enable_citations: true
+  max_citations_per_section: 10
+
+# Report Configuration
+report:
+  default_style: default  # Enable adaptive structure by using DEFAULT style
+  enable_grounding_markers: true
+  citation_style: APA
+
+# Quality Enhancement Configuration
+quality_enhancement:
+  enabled: true
+  detect_redundancy: true
+  eliminate_redundancy: true
+  optimize_structure: true
+
+# Adaptive Structure Configuration
+adaptive_structure:
+  enable_adaptive_structure: true  # Disabled - causes section dependency issues
+  adaptive_structure_cache_ttl: 3600  # Cache structures for 1 hour
+  use_llm_for_structure: true  # Use LLM to generate creative section names
+  max_structure_sections: 8  # Maximum number of sections
+  min_structure_sections: 4  # Minimum number of sections
+

@@ -1,0 +1,65 @@
+# Test Configuration Overrides
+# Only override values that need to be different for testing
+
+# Use fallback models for testing to avoid health check failures
+models:
+  default:
+    endpoint: databricks-claude-3-7-sonnet
+    max_tokens: 1000
+    fallback_model: databricks-claude-3-5-sonnet
+  web_research:
+    endpoint: databricks-claude-3-7-sonnet
+    max_tokens: 1000
+    fallback_model: databricks-claude-3-5-sonnet
+  synthesis:
+    endpoint: databricks-claude-3-7-sonnet
+    max_tokens: 2000
+    fallback_model: databricks-claude-3-5-sonnet
+
+# Faster, simpler workflow for tests
+workflow:
+  max_research_loops: 2
+  max_total_steps: 10  # Reduced for faster tests
+  max_wall_clock_seconds: 60  # Reduced for deadlock prevention tests
+  recursion_limit: 500
+  auto_accept_plan: true  # No human feedback in tests
+  enable_background_investigation: false  # Simplified for tests
+
+# Reduced parallelism for test stability
+search:
+  max_concurrent_searches: 5
+  batch_delay_seconds: 1
+
+# Simplified agent configurations for faster tests
+agents:
+  coordinator:
+    enabled: true
+    enable_safety_filter: true
+  planner:
+    max_iterations: 1
+    quality_threshold: 0.5
+  researcher:
+    max_steps_per_execution: 2
+    enable_reflexion: false
+  fact_checker:
+    verification_level: lenient
+  reporter:
+    default_style: default
+
+# Conservative rate limiting for tests
+rate_limiting:
+  max_parallel_requests: 1
+  max_requests_per_minute: 20
+
+# Simplified streaming for tests
+streaming:
+  batch_events: false
+  max_events_per_second: 5
+
+# Adaptive Structure Configuration
+adaptive_structure:
+  enable_adaptive_structure: true  # Enable context-specific report section generation
+  adaptive_structure_cache_ttl: 3600  # Cache structures for 1 hour
+  use_llm_for_structure: true  # Use LLM to generate creative section names
+  max_structure_sections: 7  # Maximum number of sections
+  min_structure_sections: 4  # Minimum number of sections

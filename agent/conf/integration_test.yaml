@@ -1,0 +1,57 @@
+# Integration Test Configuration Overrides
+# For tests that use real services but with test-friendly settings
+
+# Use real endpoints but with reduced token limits
+models:
+  default:
+    endpoint: databricks-gpt-oss-20b  # Smaller real endpoint
+    temperature: 0.1  # Lower temperature for consistent results
+    max_tokens: 1000
+  web_research:
+    endpoint: databricks-gpt-oss-20b
+    temperature: 0.1
+    max_tokens: 1000
+  synthesis:
+    endpoint: databricks-gpt-oss-20b
+    temperature: 0.1
+    max_tokens: 2000
+
+# Faster workflow for integration tests
+workflow:
+  max_research_loops: 2
+  max_total_steps: 20
+  max_wall_clock_seconds: 120
+  auto_accept_plan: true
+
+# Search with real providers but reduced limits
+search:
+  providers:
+    brave:
+      enabled: true
+      max_results: 5
+      timeout: 10
+    tavily:
+      enabled: false  # Disable for test speed
+  max_concurrent_searches: 1
+  batch_delay_seconds: 1
+
+# Optimized agents to avoid deadlocks
+agents:
+  coordinator:
+    enabled: true
+    enable_safety_filter: true
+  planner:
+    max_iterations: 2
+    quality_threshold: 0.6
+  researcher:
+    max_steps_per_execution: 3
+    enable_reflexion: false
+  fact_checker:
+    verification_level: moderate
+  reporter:
+    default_style: default
+
+# Conservative rate limiting
+rate_limiting:
+  max_parallel_requests: 5
+  max_requests_per_minute: 30
