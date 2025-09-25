@@ -37,6 +37,7 @@ from deep_research_agent.core.observation_models import (
 from deep_research_agent.core.observation_selector import ObservationSelector
 from deep_research_agent.core.plan_models import StepStatus
 from deep_research_agent.core.response_handlers import parse_structured_response, ParsedResponse, ResponseType
+from deep_research_agent.core.table_preprocessor import TablePreprocessor
 
 
 logger = get_logger(__name__)
@@ -619,6 +620,10 @@ Generate the report section content:"""
         # SAFEGUARD: Validate final report quality
         report_with_metadata = self._validate_final_report(report_with_metadata, state)
         
+        # Apply table preprocessing to fix any malformed tables
+        table_preprocessor = TablePreprocessor()
+        report_with_metadata = table_preprocessor.preprocess_tables(report_with_metadata)
+        
         # Don't mutate state directly - let LangGraph handle updates through Command
         
         logger.info(
@@ -1072,17 +1077,46 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                         "extracted_data": section_data.get("extracted_data", {}),
                     })
         
-        # 4. Search results as fallback
+        # 4. Search results as fallback (ENHANCED)
         if not observations and "search_results" in state:
-            logger.warning("[OBSERVATION TRACKING] No observations found, converting search results")
+            logger.warning("[OBSERVATION TRACKING] No observations found, converting search results to observations")
             search_results = state.get("search_results", [])
             for result in search_results[:25]:  # Increased from 10 to 25 for more comprehensive data
+                # Create more comprehensive observation from search result
+                content = result.get("snippet", "")
+                if not content:
+                    content = result.get("title", "")
+                if content:  # Only add if we have some content
+                    observations.append({
+                        "content": content,
+                        "source": result.get("title", "Search Result"),
+                        "url": result.get("url", ""),
+                        "relevance": result.get("relevance_score", 0.5)
+                    })
+        
+        # 5. CRITICAL FALLBACK: If still no observations, create placeholder content from citations
+        if not observations and citations:
+            logger.warning("[OBSERVATION TRACKING] No observations OR search results, creating from citations")
+            for citation in citations[:15]:  # Create observations from citations
                 observations.append({
-                    "content": result.get("snippet", ""),
-                    "source": result.get("title", "Search Result"),
-                    "url": result.get("url", ""),
-                    "relevance": result.get("relevance_score", 0.5)
+                    "content": f"Source: {citation.get('title', 'Unknown')} - {citation.get('snippet', 'Research source')}",
+                    "source": citation.get("title", "Citation"),
+                    "url": citation.get("url", ""),
+                    "relevance": 0.6
                 })
+        
+        # 6. EMERGENCY FALLBACK: If absolutely no content, create a basic structure
+        if not observations:
+            logger.error("[OBSERVATION TRACKING] NO OBSERVATIONS, SEARCH RESULTS, OR CITATIONS FOUND!")
+            logger.error("This will result in a report with only references - creating emergency fallback")
+            # Create a placeholder observation to prevent completely empty reports
+            research_topic = state.get("research_topic", "the requested topic")
+            observations.append({
+                "content": f"Research was conducted on {research_topic}. Multiple sources were consulted but observations were not properly captured in the system.",
+                "source": "System Note",
+                "url": "",
+                "relevance": 0.3
+            })
         
         logger.info(f"[OBSERVATION TRACKING] Compiled {len(observations)} total observations")
         

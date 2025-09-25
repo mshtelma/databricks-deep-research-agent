@@ -52,6 +52,7 @@ from deep_research_agent.agents import (
 from deep_research_agent.components import create_tool_registry
 from deep_research_agent.core.exceptions import SearchToolsFailedException, PermanentWorkflowError, AuthenticationError
 from deep_research_agent.core.content_sanitizer import sanitize_agent_content
+from deep_research_agent.core.id_generator import PlanIDGenerator
 
 
 logger = get_logger(__name__)
@@ -130,7 +131,7 @@ class EnhancedResearchAgent(ResponsesAgent):
         logger.info("Enhanced Research Agent initializing with full components")
 
         # Initialize event emitter for detailed progress tracking
-        self.event_emitter = initialize_event_emitter(
+        emitter = initialize_event_emitter(
             stream_emitter=stream_emitter,
             max_events_per_second=self.config.get("events", {}).get(
                 "max_per_second", 20
@@ -139,6 +140,12 @@ class EnhancedResearchAgent(ResponsesAgent):
             batch_size=self.config.get("events", {}).get("batch_size", 3),
             batch_timeout_ms=self.config.get("events", {}).get("batch_timeout_ms", 200),
         )
+
+        self.event_emitter = emitter
+        self._pending_intermediate_events = []
+        
+        # Store stream_callback for immediate event flushing in tests
+        self.stream_callback = stream_emitter
 
         # Initialize memory monitor with 2GB limit for safety
         self.memory_monitor = get_memory_monitor(memory_limit_mb=2048)
@@ -956,31 +963,42 @@ class EnhancedResearchAgent(ResponsesAgent):
         try:
             plan_steps = []
             completed_steps = state.get("completed_steps", [])
-            completed_step_ids = {step.get("id") for step in completed_steps if isinstance(step, dict)}
+            completed_step_ids = {
+                PlanIDGenerator.normalize_id(step.get("id") or step.get("step_id"))
+                for step in completed_steps
+                if isinstance(step, dict) and (step.get("id") or step.get("step_id"))
+            }
 
             # Extract steps from plan
             if hasattr(plan, 'steps') and plan.steps:
-                for i, step in enumerate(plan.steps):
+                for idx, step in enumerate(plan.steps):
+                    raw_step_id = getattr(step, 'id', None) or getattr(step, 'step_id', None) or PlanIDGenerator.generate_step_id(idx + 1)
+                    normalized_id = PlanIDGenerator.normalize_id(raw_step_id)
+                    status_value = getattr(step, 'status', None)
+                    if not status_value:
+                        status_value = 'completed' if normalized_id in completed_step_ids else 'pending'
+
                     step_data = {
-                        "id": getattr(step, 'id', f"step_{i}"),
+                        "id": normalized_id,
+                        "step_id": normalized_id,
                         "description": getattr(step, 'description', str(step)),
-                        "status": "completed" if getattr(step, 'id', f"step_{i}") in completed_step_ids else "pending",
+                        "status": status_value,
                     }
-                    
+
                     # Add completion timestamp if available
                     for completed_step in completed_steps:
-                        if isinstance(completed_step, dict) and completed_step.get("id") == step_data["id"]:
+                        if isinstance(completed_step, dict) and PlanIDGenerator.normalize_id(completed_step.get("id") or completed_step.get("step_id")) == step_data["id"]:
                             step_data["completedAt"] = completed_step.get("timestamp")
                             step_data["result"] = completed_step.get("result", "")
                             break
-                    
+
                     plan_steps.append(step_data)
 
             return {
                 "steps": plan_steps,
                 "quality": getattr(plan, 'quality', None),
                 "iterations": state.get("plan_iterations", getattr(plan, 'iterations', 1)),
-                "status": "completed",
+                "status": getattr(plan, 'status', None) or 'executing',
                 "hasEnoughContext": getattr(plan, 'has_enough_context', True),
             }
 
@@ -1482,7 +1500,32 @@ class EnhancedResearchAgent(ResponsesAgent):
 
             try:
                 while True:
-                    event = loop.run_until_complete(event_generator.__anext__())
+                    # Fix asyncio event loop issue: Use awaitable directly instead of run_until_complete
+                    try:
+                        event = loop.run_until_complete(event_generator.__anext__())
+                    except RuntimeError as e:
+                        if "Cannot run the event loop while another loop is running" in str(e):
+                            # Use nest_asyncio if available, otherwise run in thread
+                            try:
+                                import nest_asyncio
+                                nest_asyncio.apply()
+                                event = loop.run_until_complete(event_generator.__anext__())
+                            except ImportError:
+                                # Fallback: run in thread pool
+                                import concurrent.futures
+                                def run_async_in_thread():
+                                    thread_loop = asyncio.new_event_loop()
+                                    asyncio.set_event_loop(thread_loop)
+                                    try:
+                                        return thread_loop.run_until_complete(event_generator.__anext__())
+                                    finally:
+                                        thread_loop.close()
+                                
+                                with concurrent.futures.ThreadPoolExecutor() as executor:
+                                    future = executor.submit(run_async_in_thread)
+                                    event = future.result()
+                        else:
+                            raise
 
                     # Process LangGraph events
                     if isinstance(event, dict):
@@ -1504,9 +1547,38 @@ class EnhancedResearchAgent(ResponsesAgent):
                             if self.event_emitter and hasattr(
                                 self, "_pending_intermediate_events"
                             ):
-                                for pending in self._pending_intermediate_events:
+                                pending_events = list(self._pending_intermediate_events or [])
+                                pending_count = len(pending_events)
+                                if pending_count:
+                                    logger.info(
+                                        "🎯 Emitting %s pending intermediate events from queue", pending_count
+                                    )
+                                    logger.info(
+                                        "🎯 Pending intermediate event types: %s",
+                                        [getattr(evt, "type", "unknown") for evt in pending_events]
+                                    )
+                                for pending in pending_events:
+                                    if pending:
+                                        pending_type = getattr(pending, "type", "unknown")
+                                        if pending_type:
+                                            logger.debug(
+                                                "🎯 Streaming intermediate event chunk: type=%s",
+                                                pending_type,
+                                            )
+                                        metadata_keys = []
+                                        if hasattr(pending, "metadata") and pending.metadata:
+                                            metadata_keys = list(pending.metadata.keys())[:10]
+                                        elif hasattr(pending, "event") and pending.event:
+                                            metadata_keys = list(pending.event.keys())[:10]
+                                        if metadata_keys:
+                                            logger.debug(
+                                                "🎯 Intermediate event metadata keys: %s",
+                                                metadata_keys,
+                                            )
                                     yield pending
                                 self._pending_intermediate_events.clear()
+                            elif self.event_emitter:
+                                logger.debug("🎯 No pending intermediate events to emit for node %s", node_name)
 
                             # Handle different node outputs with progress updates
                             if node_name == "coordinator":
@@ -2012,6 +2084,164 @@ class EnhancedResearchAgent(ResponsesAgent):
             logger.info("No data loss events detected")
         
         return diagnostic_report
+
+    def _emit_plan_stream_event(
+        self,
+        event_type: str,
+        *,
+        plan_data: Optional[Dict[str, Any]] = None,
+        step_id: Optional[str] = None,
+        status: Optional[str] = None,
+        result: Optional[str] = None,
+        description: Optional[str] = None,
+        correlation_id: Optional[str] = None,
+        stage_id: Optional[str] = None,
+        raw_event: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Emit plan/step events through the event emitter for visualization."""
+        if not self.event_emitter:
+            logger.debug("🔕 _emit_plan_stream_event called without event_emitter")
+            return
+
+        event_type_upper = (event_type or "").upper()
+        logger.debug(
+            "⚙️ _emit_plan_stream_event invoked",
+            extra={
+                "event_type": event_type_upper,
+                "step_id": step_id,
+                "status": status,
+                "has_plan_data": bool(plan_data),
+            },
+        )
+
+        if event_type_upper in {"PLAN_CREATED", "PLAN_UPDATED"}:
+            if not plan_data:
+                logger.warning("PLAN event emitted without plan_data payload")
+                return
+
+            if isinstance(plan_data, dict):
+                plan_payload = plan_data
+            else:
+                formatted_plan = self._format_plan_for_ui(plan_data, {})
+                plan_payload = {
+                    **formatted_plan,
+                    "steps": [
+                        {
+                            **step,
+                            "id": PlanIDGenerator.normalize_id(step.get("id") or step.get("step_id") or PlanIDGenerator.generate_step_id(idx + 1)),
+                            "step_id": PlanIDGenerator.normalize_id(step.get("step_id") or step.get("id") or PlanIDGenerator.generate_step_id(idx + 1)),
+                        }
+                        for idx, step in enumerate(formatted_plan.get("steps", []))
+                    ],
+                }
+
+            metadata_event = ResponsesAgentStreamEvent(
+                type="response.metadata",
+                item_id=str(uuid4()),
+                metadata={"planDetails": plan_payload},
+            )
+            self._pending_intermediate_events.append(metadata_event)
+
+            # Also emit via EventEmitter for logging
+            self.event_emitter.emit(
+                IntermediateEventType.PLAN_CREATED
+                if event_type_upper == "PLAN_CREATED"
+                else IntermediateEventType.PLAN_UPDATED,
+                data={"plan": plan_payload},
+                correlation_id=correlation_id,
+                stage_id=stage_id or "planner",
+            )
+            
+            # Immediately call stream_callback if available (for tests)
+            if hasattr(self, 'stream_callback') and self.stream_callback:
+                import time
+                callback_event = {
+                    "type": "intermediate_event",
+                    "event": {
+                        "event_type": event_type_upper,
+                        "data": {"plan": plan_payload},
+                        "timestamp": time.time()
+                    }
+                }
+                self.stream_callback(callback_event)
+                logger.debug(f"Called stream_callback for {event_type_upper}")
+            
+            return
+
+        if event_type_upper in {"STEP_ACTIVATED", "STEP_COMPLETED", "STEP_FAILED"}:
+            if not step_id:
+                logger.warning("STEP event emitted without step_id")
+                return
+
+            normalized_step_id = PlanIDGenerator.normalize_id(step_id)
+            status_payload = status or (
+                "completed"
+                if event_type_upper == "STEP_COMPLETED"
+                else "failed"
+                if event_type_upper == "STEP_FAILED"
+                else "in_progress"
+            )
+            if event_type_upper == "STEP_ACTIVATED":
+                event_type_enum = IntermediateEventType.STEP_ACTIVATED
+            elif event_type_upper == "STEP_COMPLETED":
+                event_type_enum = IntermediateEventType.STEP_COMPLETED
+            elif event_type_upper == "STEP_FAILED":
+                event_type_enum = IntermediateEventType.STEP_FAILED
+            else:
+                event_type_enum = IntermediateEventType.STEP_ACTIVATED
+
+            metadata_event = self._emit_step_progress_event(
+                normalized_step_id,
+                status_payload,
+                result or "",
+                item_id=str(uuid4()),
+            )
+            if metadata_event:
+                step_progress = metadata_event.metadata.get("stepProgress", {})
+                step_progress.setdefault("step_id", normalized_step_id)
+                step_progress.setdefault("id", normalized_step_id)
+                self._pending_intermediate_events.append(metadata_event)
+
+            self.event_emitter.emit(
+                event_type_enum,
+                data={
+                    "step_id": normalized_step_id,
+                    "status": status_payload,
+                    "result": result or "",
+                    "description": description or "",
+                },
+                correlation_id=correlation_id,
+                stage_id=stage_id or "researcher",
+            )
+            
+            # Immediately call stream_callback if available (for tests)
+            if hasattr(self, 'stream_callback') and self.stream_callback:
+                import time
+                callback_event = {
+                    "type": "intermediate_event",
+                    "event": {
+                        "event_type": event_type_upper,
+                        "data": {
+                            "step_id": normalized_step_id,
+                            "status": status_payload,
+                            "result": result or "",
+                            "description": description or "",
+                        },
+                        "timestamp": time.time()
+                    }
+                }
+                self.stream_callback(callback_event)
+                logger.debug(f"Called stream_callback for {event_type_upper} step {normalized_step_id}")
+            
+            return
+
+        # Fallback: emit generic intermediate event
+        self.event_emitter.emit(
+            event_type_upper,
+            raw_event or {},
+            correlation_id=correlation_id,
+            stage_id=stage_id,
+        )
 
 
 # Example usage

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { ChevronDown, ChevronRight, Clock, CheckCircle, AlertCircle, RotateCcw } from 'lucide-react'
+import { ChevronDown, ChevronRight, Clock, CheckCircle, AlertCircle, RotateCcw, Circle } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -36,7 +36,7 @@ export function PlanViewer({ planData, className = '', isStreaming = false }: Pl
       case 'skipped':
         return <AlertCircle className="w-4 h-4 text-yellow-600" />
       default:
-        return <Clock className="w-4 h-4 text-gray-400" />
+        return <Circle className="w-4 h-4 text-gray-400" />
     }
   }
 
@@ -69,7 +69,7 @@ export function PlanViewer({ planData, className = '', isStreaming = false }: Pl
   }
 
   return (
-    <div className={`bg-white dark:bg-gray-800 border rounded-lg ${className}`}>
+    <div className={`bg-white dark:bg-gray-800 border rounded-lg ${className}`} data-testid="plan-viewer">
       <Collapsible open={isExpanded} onOpenChange={setIsExpanded}>
         <CollapsibleTrigger className="w-full p-4 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
           <div className="flex items-center gap-3">

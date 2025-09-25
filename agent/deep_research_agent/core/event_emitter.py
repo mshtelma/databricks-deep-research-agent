@@ -23,7 +23,32 @@ logger = get_logger(__name__)
 
 class EventEmitter:
     """Emitter for intermediate agent events with batching and rate limiting."""
-    
+
+    IMPORTANT_EVENT_TYPES = {
+        IntermediateEventType.PLAN_CREATED,
+        IntermediateEventType.PLAN_UPDATED,
+        IntermediateEventType.PLAN_STRUCTURE,
+        IntermediateEventType.PLAN_STRUCTURE_VISUALIZE,
+        IntermediateEventType.STEP_ACTIVATED,
+        IntermediateEventType.STEP_COMPLETED,
+        IntermediateEventType.SEARCH_STRATEGY,
+        IntermediateEventType.REASONING_REFLECTION,
+        IntermediateEventType.VERIFICATION_ATTEMPT,
+    }
+    IMPORTANT_EVENT_VALUE_SET = {event.value for event in IMPORTANT_EVENT_TYPES}
+
+    IMPORTANT_EVENTS = {
+        IntermediateEventType.PLAN_CREATED,
+        IntermediateEventType.PLAN_UPDATED,
+        IntermediateEventType.PLAN_STRUCTURE,
+        IntermediateEventType.PLAN_STRUCTURE_VISUALIZE,
+        IntermediateEventType.STEP_ACTIVATED,
+        IntermediateEventType.STEP_COMPLETED,
+        IntermediateEventType.SEARCH_STRATEGY,
+        IntermediateEventType.REASONING_REFLECTION,
+        IntermediateEventType.VERIFICATION_ATTEMPT,
+    }
+
     def __init__(
         self,
         stream_emitter: Optional[Callable[[Dict[str, Any]], None]] = None,
@@ -117,6 +142,25 @@ class EventEmitter:
             
             # Redact sensitive information from data
             redacted_data = self.redactor.redact_event_data(data.copy())
+
+            event_type_str = (
+                event_type.value if isinstance(event_type, IntermediateEventType) else str(event_type)
+            )
+            if isinstance(event_type, IntermediateEventType):
+                important_event = event_type in self.IMPORTANT_EVENT_TYPES
+            else:
+                important_event = event_type_str in self.IMPORTANT_EVENT_VALUE_SET
+            data_keys = list(redacted_data.keys())[:10]
+            meta_keys = list((meta or {}).keys())[:10]
+            log_message = (
+                f"Preparing to emit intermediate event: type={event_type_str}, "
+                f"stage_id={stage_id}, correlation_id={correlation_id}, "
+                f"data_keys={data_keys}, meta_keys={meta_keys}, batching={self.batch_events}"
+            )
+            if important_event:
+                logger.info(log_message)
+            else:
+                logger.debug(log_message)
             
             # Create event with enhanced fields
             event = IntermediateEvent(
@@ -145,15 +189,15 @@ class EventEmitter:
             # Emit directly or batch
             if self.batch_events:
                 self._add_to_batch(event)
-                success = True  # Batching itself doesn't fail, emission happens later
+                self.stats["events_emitted"] += 1
+                return True  # Batching itself doesn't fail, emission happens later
             else:
                 success = self._emit_event(event)
-            
-            if success:
-                self.stats["events_emitted"] += 1
-                return True
-            else:
-                return False
+                if success:
+                    self.stats["events_emitted"] += 1
+                    return True
+                else:
+                    return False
             
         except Exception as e:
             logger.error(f"Failed to emit event: {e}")

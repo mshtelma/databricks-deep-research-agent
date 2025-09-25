@@ -138,8 +138,10 @@ class IntermediateEventType(str, Enum):
     
     # Enhanced UI visualization events
     PLAN_STRUCTURE_VISUALIZE = "plan_structure_visualize"
+    PLAN_STRUCTURE = "plan_structure"
     STEP_ACTIVATED = "step_activated" 
     STEP_COMPLETED = "step_completed"
+    STEP_FAILED = "step_failed"
     SEARCH_EXECUTED = "search_executed"
     REASONING_SNAPSHOT = "reasoning_snapshot"
     AGENT_STATUS_UPDATE = "agent_status_update"
@@ -155,6 +157,7 @@ class EventCategory(str, Enum):
     PLANNING = "planning"          # Strategy and approach decisions
     VERIFICATION = "verification"  # Fact-checking and validation
     COORDINATION = "coordination"  # Agent handoffs and workflow transitions
+    WORKFLOW = "workflow"          # Step execution and workflow tracking
     ERROR = "error"               # Errors and recovery attempts
 
 
@@ -280,6 +283,7 @@ class IntermediateEvent:
             IntermediateEventType.PLAN_CREATED: EventCategory.PLANNING,
             IntermediateEventType.PLAN_UPDATED: EventCategory.PLANNING,
             IntermediateEventType.STEP_GENERATED: EventCategory.PLANNING,
+            IntermediateEventType.STEP_FAILED: EventCategory.WORKFLOW,
             IntermediateEventType.PLAN_QUALITY_ASSESSMENT: EventCategory.PLANNING,
             IntermediateEventType.PLAN_REVISION: EventCategory.PLANNING,
             IntermediateEventType.INVESTIGATION_START: EventCategory.PLANNING,

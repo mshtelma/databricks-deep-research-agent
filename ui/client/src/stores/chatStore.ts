@@ -90,13 +90,52 @@ export const useChatStore = create<ChatState>()(
     },
 
     updateStreamingMessage: (id, content, metadata) => {
-      set(state => ({
-        messages: state.messages.map(msg =>
-          msg.id === id
-            ? { ...msg, content, metadata, isStreaming: !metadata }
-            : msg
-        )
-      }))
+      set(state => {
+        let didStopStreaming = false
+
+        const updatedMessages = state.messages.map(msg => {
+          if (msg.id !== id) {
+            return msg
+          }
+
+          const mergedMetadata = metadata
+            ? {
+                ...msg.metadata,
+                ...metadata,
+                planDetails: metadata.planDetails ?? msg.metadata?.planDetails,
+                grounding: metadata.grounding ?? msg.metadata?.grounding,
+                sources: metadata.sources ?? msg.metadata?.sources,
+                searchQueries: metadata.searchQueries ?? msg.metadata?.searchQueries,
+                reasoningSteps: metadata.reasoningSteps ?? msg.metadata?.reasoningSteps
+              }
+            : msg.metadata
+
+          const shouldStopStreaming = Boolean(metadata && (metadata as any).phase === 'complete')
+          const explicitStreamingFlag = metadata && Object.prototype.hasOwnProperty.call(metadata, 'isStreaming')
+          
+          const nextStreaming = explicitStreamingFlag
+            ? Boolean((metadata as any).isStreaming)
+            : shouldStopStreaming
+              ? false
+              : msg.isStreaming ?? true
+
+          if (msg.isStreaming && !nextStreaming) {
+            didStopStreaming = true
+          }
+
+          return {
+            ...msg,
+            content,
+            metadata: mergedMetadata,
+            isStreaming: nextStreaming
+          }
+        })
+        
+        return {
+          messages: updatedMessages,
+          currentStreamingId: didStopStreaming ? null : state.currentStreamingId
+        }
+      })
     },
 
     setLoading: (loading) => set({

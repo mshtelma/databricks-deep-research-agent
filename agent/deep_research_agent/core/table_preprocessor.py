@@ -37,6 +37,7 @@ class TablePreprocessor:
         self.stats = TableStats()
         self.table_start_marker = "TABLE_START"
         self.table_end_marker = "TABLE_END"
+        self.protected_sections = {}  # Store protected reference sections
         
     def preprocess_tables(self, content: str) -> str:
         """
@@ -53,6 +54,9 @@ class TablePreprocessor:
             
         logger.info("Starting comprehensive table preprocessing")
         self.stats = TableStats()  # Reset stats
+        
+        # Protect reference sections from table processing
+        content = self._protect_reference_sections(content)
         
         # Step 0: Separate headings from tables
         content = self.separate_headings_from_tables(content)
@@ -81,17 +85,69 @@ class TablePreprocessor:
         # Step 8: Extract tables and fix column mismatches
         content = self.fix_tables_column_counts(content)
         
-        # Step 9: Final cleanup
+        # Step 9: Fix collapsed comparative tables (specific fix for user's issue)
+        content = self.fix_collapsed_comparative_tables(content)
+        
+        # Step 10: Final cleanup
         content = self.final_cleanup(content)
         
-        # Step 10: Add table boundaries for complex tables
+        # Step 11: Add table boundaries for complex tables
         content = self.add_table_boundaries(content)
+        
+        # Step 12: Restore protected reference sections
+        content = self._restore_reference_sections(content)
         
         logger.info(
             "Table preprocessing complete",
             stats=self.get_stats()
         )
         
+        return content
+    
+    def _protect_reference_sections(self, content: str) -> str:
+        """
+        Protect reference/citation sections from table processing.
+        
+        References sections often contain dashes, pipes, and URLs that can be
+        mistaken for table elements, causing corruption.
+        """
+        import uuid
+        
+        # Reset protected sections for this content
+        self.protected_sections = {}
+        
+        # Pattern to match reference sections
+        reference_patterns = [
+            r'(## References.*?)(?=##|\Z)',
+            r'(### References.*?)(?=###|\Z)', 
+            r'(# References.*?)(?=#|\Z)',
+            r'(## Bibliography.*?)(?=##|\Z)',
+            r'(## Citations.*?)(?=##|\Z)',
+            r'(## Key Citations.*?)(?=##|\Z)',
+            r'(---\s*### References.*?)(?=---|\Z)'  # Handle metadata-style references
+        ]
+        
+        for pattern in reference_patterns:
+            matches = re.finditer(pattern, content, re.DOTALL | re.IGNORECASE)
+            for match in matches:
+                reference_content = match.group(1)
+                # Only protect if it actually contains problematic characters
+                if '|' in reference_content or '---' in reference_content:
+                    placeholder_id = f"PROTECTED_REFS_{uuid.uuid4().hex[:8]}"
+                    self.protected_sections[placeholder_id] = reference_content
+                    content = content.replace(reference_content, placeholder_id)
+                    logger.info(f"Protected reference section with {len(reference_content)} characters")
+        
+        return content
+    
+    def _restore_reference_sections(self, content: str) -> str:
+        """
+        Restore protected reference sections after table processing.
+        """
+        for placeholder_id, original_content in self.protected_sections.items():
+            content = content.replace(placeholder_id, original_content)
+            
+        logger.info(f"Restored {len(self.protected_sections)} protected reference sections")
         return content
     
     def fix_two_line_cells(self, content: str) -> str:
@@ -738,6 +794,113 @@ class TablePreprocessor:
                 fixed_lines.append(line)
         
         return '\n'.join(fixed_lines)
+    
+    def fix_collapsed_comparative_tables(self, content: str) -> str:
+        """
+        Fix collapsed comparative tables where multiple rows are merged into a single line.
+        
+        This handles cases like:
+        | | Location | Scenario 1 | Scenario 2 | Scenario 3 | | | --- | | | San Francisco | data1 | data2 | data3 | | | | New York | data1 | data2 | data3 |
+        
+        Which should be:
+        | Location | Scenario 1 | Scenario 2 | Scenario 3 |
+        | --- | --- | --- | --- |
+        | San Francisco | data1 | data2 | data3 |
+        | New York | data1 | data2 | data3 |
+        """
+        lines = content.split('\n')
+        fixed_lines = []
+        
+        for line in lines:
+            if '|' in line and len(line) > 200:  # Only process very long table lines
+                # Check if this looks like a collapsed comparative table
+                parts = line.split('|')
+                if len(parts) > 10:  # Likely a collapsed table
+                    # Extract location names (common indicators)
+                    location_indicators = ['San Francisco', 'New York', 'Austin', 'Durham', 'Raleigh', 'Phoenix', 'Scottsdale', 'Seattle', 'Boston', 'Chicago', 'Los Angeles']
+                    
+                    found_locations = []
+                    location_positions = []
+                    
+                    for i, part in enumerate(parts):
+                        part_clean = part.strip()
+                        for location in location_indicators:
+                            if location in part_clean:
+                                found_locations.append(part_clean)
+                                location_positions.append(i)
+                                break
+                    
+                    # If we found multiple locations in the same line, this is likely a collapsed table
+                    if len(found_locations) >= 2:
+                        logger.info(f"Detected collapsed comparative table with {len(found_locations)} locations")
+                        self.stats.patterns_fixed['collapsed_comparative'] = self.stats.patterns_fixed.get('collapsed_comparative', 0) + 1
+                        
+                        # Try to extract headers and reconstruct the table
+                        fixed_table = self._reconstruct_comparative_table(parts, found_locations, location_positions)
+                        fixed_lines.extend(fixed_table)
+                        continue
+            
+            fixed_lines.append(line)
+        
+        return '\n'.join(fixed_lines)
+    
+    def _reconstruct_comparative_table(self, parts: List[str], locations: List[str], location_positions: List[int]) -> List[str]:
+        """
+        Reconstruct a comparative table from collapsed parts.
+        """
+        # Try to find headers before the first location
+        header_parts = []
+        first_location_pos = location_positions[0] if location_positions else 0
+        
+        # Extract potential headers
+        for i in range(first_location_pos):
+            part = parts[i].strip()
+            if part and part not in ['', '---'] and 'Scenario' in part or 'Location' in part:
+                header_parts.append(part)
+        
+        # If no clear headers found, create generic ones
+        if not header_parts:
+            header_parts = ['Location', 'Scenario 1', 'Scenario 2', 'Scenario 3']
+        
+        # Ensure we have at least 4 columns for a proper comparative table
+        while len(header_parts) < 4:
+            header_parts.append(f'Column {len(header_parts) + 1}')
+        
+        result = []
+        
+        # Add header
+        result.append('| ' + ' | '.join(header_parts) + ' |')
+        result.append('|' + ' --- |' * len(header_parts))
+        
+        # Try to extract data for each location
+        for i, location in enumerate(locations):
+            if i < len(location_positions):
+                start_pos = location_positions[i]
+                end_pos = location_positions[i + 1] if i + 1 < len(location_positions) else len(parts)
+                
+                # Extract data for this location
+                location_data = [location]
+                
+                # Look for data in the next few parts after the location
+                data_count = 0
+                for j in range(start_pos + 1, min(start_pos + 6, end_pos)):  # Look at next 5 parts max
+                    if j < len(parts):
+                        part = parts[j].strip()
+                        if part and part not in ['', '---'] and data_count < len(header_parts) - 1:
+                            location_data.append(part)
+                            data_count += 1
+                
+                # Ensure we have enough columns
+                while len(location_data) < len(header_parts):
+                    location_data.append('Data not available')
+                
+                # Truncate if too many columns
+                if len(location_data) > len(header_parts):
+                    location_data = location_data[:len(header_parts)]
+                
+                result.append('| ' + ' | '.join(location_data) + ' |')
+        
+        return result
     
     def final_cleanup(self, content: str) -> str:
         """

@@ -337,10 +337,23 @@ class AgentClient:
                         try:
                             data = json.loads(raw_data)
                             logger.debug(
-                                f"Raw event received: type={data.get('type')}, has_delta={bool(data.get('delta'))}"
+                                f"🔴 [AGENT_CLIENT] Raw event received: type={data.get('type')}, has_delta={bool(data.get('delta'))}"
                             )
+                            
+                            # Extensive debug logging for events
                             if data.get("type") == "response.output_text.delta" and "[PHASE:" in data.get("delta", ""):
                                 logger.info(f"Progress marker detected in delta: {data.get('delta', '')[:100]}")
+                            
+                            # Log intermediate events
+                            if data.get("type") == "response.intermediate_event":
+                                logger.info(f"🔴 [AGENT_CLIENT] Intermediate event: {json.dumps(data, indent=2)}")
+                            
+                            # Log event batches
+                            if data.get("type") == "response.event_batch":
+                                logger.info(f"🔴 [AGENT_CLIENT] Event batch with {len(data.get('events', []))} events")
+                                for i, evt in enumerate(data.get('events', [])):
+                                    logger.info(f"🔴 [AGENT_CLIENT] Event {i}: {evt.get('event_type', 'unknown')}")
+                            
                             yield self._parse_stream_event(data)
                         except json.JSONDecodeError:
                             continue
@@ -376,22 +389,42 @@ class AgentClient:
 
         # Handle Databricks agent response format
         response_type = data.get("type", "")
+        logger.info(f"🔴 [AGENT_CLIENT] Parsing stream event type: {response_type}")
 
         # Check for enhanced intermediate events first
-        if response_type == "intermediate_event" or "event" in data:
+        if response_type == "response.intermediate_event" or response_type == "intermediate_event" or "event" in data:
+            logger.info(f"🔴 [AGENT_CLIENT] Processing intermediate event")
+            logger.debug("🔴 [AGENT_CLIENT] Intermediate event payload: %s", json.dumps(data, indent=2))
             return self._parse_intermediate_event(data)
-        elif response_type == "event_batch" or "events" in data:
+        elif response_type == "response.event_batch" or response_type == "event_batch" or "events" in data:
+            logger.info(f"🔴 [AGENT_CLIENT] Processing event batch")
+            logger.debug("🔴 [AGENT_CLIENT] Event batch payload: %s", json.dumps(data, indent=2))
             return self._parse_event_batch(data)
 
         # Streaming content delta
         elif response_type == "response.output_text.delta":
             content = data.get("delta", "")
+            logger.info(
+                "🔴 [AGENT_CLIENT] Streaming delta len=%s preview=%s",
+                len(content),
+                content[:200].replace("\n", "\\n") if isinstance(content, str) else content,
+            )
 
             # Always send content delta, even if it contains progress markers
             # The UI will handle filtering out markers from displayed content
             return StreamEvent(type="content_delta", content=content)
 
         # Complete content (for final response)
+        elif response_type == "response.metadata":
+            event_metadata = data.get("metadata", {})
+            logger.info(
+                "🔴 [AGENT_CLIENT] Metadata event keys=%s",
+                list(event_metadata.keys()) if isinstance(event_metadata, dict) else "non-dict",
+            )
+            metadata = self._convert_metadata_to_research_metadata(event_metadata)
+            logger.debug("🔴 [AGENT_CLIENT] Metadata payload: %s", json.dumps(event_metadata, indent=2))
+            return StreamEvent(type="research_update", metadata=metadata)
+
         elif response_type == "response.output_item.done":
             item = data.get("item", {})
             content_list = item.get("content", [])
@@ -400,42 +433,40 @@ class AgentClient:
             else:
                 content = ""
 
+            logger.info(
+                "🔴 [AGENT_CLIENT] Output item done len=%s preview=%s",
+                len(content),
+                content[:200].replace("\n", "\\n") if isinstance(content, str) else content,
+            )
+
             # Extract metadata from the event if present
             event_metadata = data.get("metadata", {})
             metadata = None
             if event_metadata:
                 # Convert metadata to ResearchMetadata format for UI
-                metadata = ResearchMetadata(
-                    search_queries=event_metadata.get("searchQueries", []),
-                    sources=event_metadata.get("sources", []),
-                    research_iterations=event_metadata.get("researchIterations", 0),
-                    confidence_score=event_metadata.get("confidenceScore"),
-                    reasoning_steps=[],
-                    total_sources_found=len(event_metadata.get("sources", [])),
-                    phase="complete",
-                    progress_percentage=100.0,
-                    elapsed_time=0.0,
-                    current_node="reporter",
-                    vector_results_count=0,
-                    # Pass through additional metadata for UI components
-                    plan_details=event_metadata.get("planDetails"),
-                    factuality_score=event_metadata.get("factualityScore"),
-                    report_style=event_metadata.get("reportStyle"),
-                    verification_level=event_metadata.get("verificationLevel"),
-                    grounding=event_metadata.get("grounding"),
-                    current_agent=event_metadata.get("currentAgent", "reporter"),
-                )
+                metadata = self._convert_metadata_to_research_metadata(event_metadata, default_phase="complete", default_agent="reporter")
+                logger.debug("🔴 [AGENT_CLIENT] Output item metadata payload: %s", json.dumps(event_metadata, indent=2))
 
             return StreamEvent(type="message_complete", content=content, metadata=metadata)
 
         # Legacy format support (for backward compatibility)
         elif "content" in data:
+            logger.info(
+                "🔴 [AGENT_CLIENT] Legacy content len=%s preview=%s",
+                len(data.get("content", "")),
+                str(data.get("content", ""))[:200].replace("\n", "\\n"),
+            )
             return StreamEvent(type="content_delta", content=data["content"])
         elif "metadata" in data:
-            return StreamEvent(type="research_update", metadata=self._extract_metadata(data))
+            logger.info(
+                "🔴 [AGENT_CLIENT] Legacy metadata keys=%s",
+                list(data.get("metadata", {}).keys()) if isinstance(data.get("metadata", {}), dict) else "non-dict",
+            )
+            return StreamEvent(type="research_update", metadata=self._convert_metadata_to_research_metadata(data.get("metadata", {})))
 
         # Default case
         else:
+            logger.debug("🔴 [AGENT_CLIENT] Unrecognized payload: %s", json.dumps(data, indent=2))
             return StreamEvent(type="content_delta", content="")
 
     def _parse_intermediate_event(self, data: Dict) -> StreamEvent:
@@ -567,15 +598,64 @@ class AgentClient:
             metadata=research_metadata,
         )
 
-    def _extract_metadata(self, data: Dict) -> ResearchMetadata:
-        """Extract research metadata from agent response."""
-        metadata = data.get("metadata", {})
+    def _convert_metadata_to_research_metadata(
+        self,
+        event_metadata: Dict,
+        *,
+        default_phase: Optional[str] = None,
+        default_agent: Optional[str] = None,
+    ) -> ResearchMetadata:
+        """Normalize agent metadata payload into ResearchMetadata."""
+        if not isinstance(event_metadata, dict):
+            return ResearchMetadata()
+
+        # Support both camelCase and snake_case keys
+        plan_details = (
+            event_metadata.get("planDetails")
+            or event_metadata.get("plan_details")
+            or event_metadata.get("plan")
+        )
+
         return ResearchMetadata(
-            search_queries=metadata.get("search_queries", []),
-            sources=metadata.get("sources", []),
-            research_iterations=metadata.get("iterations", 0),
-            confidence_score=metadata.get("confidence", None),
-            reasoning_steps=metadata.get("reasoning", []),
+            search_queries=event_metadata.get("searchQueries")
+            or event_metadata.get("search_queries")
+            or [],
+            sources=event_metadata.get("sources", []),
+            research_iterations=event_metadata.get("researchIterations")
+            or event_metadata.get("research_iterations")
+            or 0,
+            confidence_score=event_metadata.get("confidenceScore")
+            or event_metadata.get("confidence_score"),
+            reasoning_steps=event_metadata.get("reasoningSteps")
+            or event_metadata.get("reasoning_steps")
+            or [],
+            total_sources_found=event_metadata.get("totalSourcesFound")
+            or event_metadata.get("total_sources_found")
+            or len(event_metadata.get("sources", [])),
+            phase=event_metadata.get("phase") or default_phase or "processing",
+            progress_percentage=event_metadata.get("progressPercentage")
+            or event_metadata.get("progress_percentage")
+            or 0.0,
+            elapsed_time=event_metadata.get("elapsedTime")
+            or event_metadata.get("elapsed_time")
+            or 0.0,
+            current_node=event_metadata.get("currentNode")
+            or event_metadata.get("current_node")
+            or "",
+            vector_results_count=event_metadata.get("vectorResultsCount")
+            or event_metadata.get("vector_results_count")
+            or 0,
+            plan_details=plan_details,
+            factuality_score=event_metadata.get("factualityScore")
+            or event_metadata.get("factuality_score"),
+            report_style=event_metadata.get("reportStyle")
+            or event_metadata.get("report_style"),
+            verification_level=event_metadata.get("verificationLevel")
+            or event_metadata.get("verification_level"),
+            grounding=event_metadata.get("grounding"),
+            current_agent=event_metadata.get("currentAgent")
+            or event_metadata.get("current_agent")
+            or default_agent,
         )
 
     async def send_simple_message(self, messages: List[AgentMessage], config: Optional[Dict] = None) -> Dict:

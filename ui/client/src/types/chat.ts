@@ -151,6 +151,7 @@ export enum IntermediateEventType {
   
   // Enhanced UI visualization events  
   PLAN_STRUCTURE_VISUALIZE = 'plan_structure_visualize',
+  PLAN_STRUCTURE = 'plan_structure',
   STEP_ACTIVATED = 'step_activated',
   STEP_COMPLETED = 'step_completed', 
   SEARCH_EXECUTED = 'search_executed',

@@ -159,7 +159,10 @@ class ContentSanitizer:
             extracted_metadata.update(extracted_data.get("metadata", {}))
             sanitization_applied = True
         
-        # Step 3: Final validation and cleanup
+        # Step 3: Fix malformed table structures before final cleanup
+        clean_content = self._fix_malformed_tables(clean_content)
+        
+        # Step 4: Final validation and cleanup
         clean_content = self._final_cleanup(clean_content)
         
         # Step 4: Validation
@@ -451,6 +454,131 @@ class ContentSanitizer:
             clean_lines.append(line)
         
         return '\n'.join(clean_lines)
+    
+    def _fix_malformed_tables(self, content: str) -> str:
+        """
+        Fix malformed table structures that often cause rendering issues.
+        
+        This addresses common issues like:
+        - Excessive consecutive pipe characters
+        - Malformed reference sections treated as tables
+        - Broken table formatting
+        
+        Args:
+            content: Content that may contain malformed tables
+            
+        Returns:
+            Content with cleaned up table structures
+        """
+        if not content or '|' not in content:
+            return content
+        
+        lines = content.split('\n')
+        cleaned_lines = []
+        
+        for line in lines:
+            if '|' in line:
+                # Pre-check: Skip lines that are entirely corrupted character sequences
+                # Pattern like: "| --- | D | --- | --- | a | --- | --- | t | --- |..."
+                # But preserve lines that might contain URLs or important content
+                if (re.match(r'^[\s]*\|(\s*---\s*\|\s*[a-zA-Z0-9]\s*\|){3,}', line.strip()) and 
+                    'http' not in line.lower() and 'www' not in line.lower() and '.com' not in line.lower()):
+                    # Extract just the characters, ignoring the pipe structure
+                    characters = re.findall(r'\|\s*([a-zA-Z0-9])\s*\|', line)
+                    if characters:
+                        reconstructed = ''.join(characters)
+                        # Apply word boundary detection
+                        reconstructed = re.sub(r'([a-z])([A-Z])', r'\1 \2', reconstructed)
+                        reconstructed = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', reconstructed)
+                        reconstructed = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', reconstructed)
+                        
+                        if len(reconstructed) > 3:  # Only keep meaningful content
+                            cleaned_lines.append(f"- {reconstructed}")
+                        continue
+                # Pattern 1: Fix severely corrupted lines with character-by-character pipe patterns
+                # E.g., "| --- | --- | --- | T | --- | --- | --- | a | --- | --- | --- | x |"
+                # But be careful not to destroy lines that contain URLs
+                if ((re.search(r'\|\s*[a-zA-Z0-9]\s*\|\s*---\s*\|', line) or re.search(r'\|\s*---\s*\|\s*[a-zA-Z0-9]\s*\|', line)) and
+                    'http' not in line.lower() and 'www' not in line.lower()):
+                    # Extract all non-pipe, non-dash content
+                    content_parts = []
+                    parts = re.split(r'\|\s*---\s*\||\|\s*\||\|', line)
+                    for part in parts:
+                        cleaned_part = part.strip()
+                        if cleaned_part and cleaned_part != '---' and cleaned_part != '-' and cleaned_part != '':
+                            content_parts.append(cleaned_part)
+                    
+                    if content_parts:
+                        # Reconstruct as plain text, removing excessive spacing
+                        reconstructed = ''.join(content_parts)  # Join without spaces first
+                        # Add spaces between words (detect word boundaries) 
+                        reconstructed = re.sub(r'([a-z])([A-Z])', r'\1 \2', reconstructed)  # camelCase
+                        reconstructed = re.sub(r'([a-zA-Z])(\d)', r'\1 \2', reconstructed)  # letter-number
+                        reconstructed = re.sub(r'(\d)([a-zA-Z])', r'\1 \2', reconstructed)  # number-letter
+                        reconstructed = re.sub(r'([.,:;])([a-zA-Z])', r'\1 \2', reconstructed)  # punctuation-letter
+                        
+                        # Special handling for URLs and common patterns
+                        reconstructed = re.sub(r'h t t p s ?:', 'https:', reconstructed)
+                        reconstructed = re.sub(r'w w w\.', 'www.', reconstructed)
+                        reconstructed = re.sub(r'\.c o m', '.com', reconstructed)
+                        
+                        # If it looks like a reference, format appropriately
+                        if any(indicator in reconstructed.lower() for indicator in ['http', 'www', '.com', 'salary', 'tax', 'income']):
+                            cleaned_lines.append(f"- {reconstructed}")
+                        else:
+                            cleaned_lines.append(reconstructed)
+                        continue
+                
+                # Pattern 2: Remove lines that are just pipes and dashes/spaces mixed chaotically
+                if re.match(r'^[\s]*\|[\s\-|]+\|[\s]*$', line.strip()):
+                    # Count actual content vs separators
+                    content_chars = len(re.sub(r'[\s|\-]', '', line))
+                    if content_chars == 0:
+                        # This is just separator noise, skip it
+                        continue
+                
+                # Pattern 3: Fix reference lines corrupted with pipes
+                # E.g., "| --- | --- | --- | • Citation text"
+                pipe_prefix_match = re.match(r'^([\s]*\|[\s\-|]*\|[\s]*)(.*)', line)
+                if pipe_prefix_match and pipe_prefix_match.group(2).strip():
+                    prefix = pipe_prefix_match.group(1)
+                    actual_content = pipe_prefix_match.group(2).strip()
+                    
+                    # If the actual content looks like a reference/citation
+                    if (actual_content.startswith(('•', '-', '*', '1.', '2.', '[')) or
+                        'http' in actual_content or
+                        actual_content.endswith(('.com', '.org', '.edu'))):
+                        # Remove the pipe prefix and keep the content
+                        cleaned_lines.append(actual_content)
+                        continue
+                
+                # Pattern 4: Clean up lines with repetitive pipe patterns but preserve valid tables
+                if line.count('|') > 6:  # Likely malformed if too many pipes
+                    # Try to identify if this is a valid table row vs corrupted content
+                    pipe_sections = line.split('|')
+                    non_empty_sections = [s.strip() for s in pipe_sections if s.strip() and s.strip() != '---']
+                    
+                    if len(non_empty_sections) <= 3:  # Reasonable table column count
+                        # Clean up excessive pipes but keep table structure
+                        cleaned_line = re.sub(r'(\|\s*---\s*){3,}', '| --- | --- | --- |', line)
+                        cleaned_line = re.sub(r'(\|\s*){3,}', '| | |', cleaned_line)
+                        cleaned_lines.append(cleaned_line)
+                    else:
+                        # Too many sections, likely corrupted - extract meaningful content
+                        meaningful_content = []
+                        for section in non_empty_sections:
+                            if len(section) > 1:  # Skip single characters
+                                meaningful_content.append(section)
+                        
+                        if meaningful_content:
+                            cleaned_lines.append(' '.join(meaningful_content))
+                else:
+                    # Normal amount of pipes, keep as is
+                    cleaned_lines.append(line)
+            else:
+                cleaned_lines.append(line)
+        
+        return '\n'.join(cleaned_lines)
 
 
 # Global instance for convenient access

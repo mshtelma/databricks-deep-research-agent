@@ -1185,7 +1185,7 @@ Output your plan as a JSON object with this structure:
                 
             # Try to parse JSON with improved error handling
             structure_payload = robust_json_loads(structure_content)
-            if not structure_payload:
+            if structure_payload is None:
                 logger.warning(f"PLANNER: Failed to parse structure JSON from LLM output. Content: {structure_content[:500]}...")
                 # Try to extract JSON from the content using regex as fallback
                 import re
@@ -1200,6 +1200,13 @@ Output your plan as a JSON object with this structure:
                 else:
                     logger.error("PLANNER: No JSON-like content found in response")
                     return
+
+            if isinstance(structure_payload, list):
+                logger.warning("PLANNER: Structure JSON returned a list; expected dict with sections key")
+                structure_payload = {"sections": structure_payload}
+            elif not isinstance(structure_payload, dict):
+                logger.error(f"PLANNER: Unsupported structure payload type: {type(structure_payload)}")
+                return
 
             raw_sections = structure_payload.get("sections", [])
             if not isinstance(raw_sections, list) or not raw_sections:

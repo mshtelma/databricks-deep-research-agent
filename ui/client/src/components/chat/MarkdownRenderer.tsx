@@ -5,6 +5,7 @@ import { cn } from '@/lib/utils'
 import { preprocessMarkdownMinimal } from '@/utils/minimalTableUtils'
 import { processTablesSimplified } from '@/utils/simplifiedTableProcessor'
 import { processTableBoundaries, hasTableBoundaries } from '@/utils/tableBoundaryProcessor'
+import { TableStreamReconstructor, processStreamingWithTableReconstruction } from '@/utils/tableStreamReconstructor'
 
 interface MarkdownRendererProps {
   content: string
@@ -13,28 +14,19 @@ interface MarkdownRendererProps {
 }
 
 export function MarkdownRenderer({ content, className, isStreaming = false }: MarkdownRendererProps) {
-  // Check if content has table boundaries
-  const hasBoundaries = hasTableBoundaries(content)
-
-  // For streaming content, use minimal preprocessing (tables are buffered)
-  // For final content with boundaries, use boundary processor
-  // Otherwise use simplified processor for malformed tables
+  // Simplified table processing to prevent malformed separators
   let processed: string
 
-  if (isStreaming) {
-    processed = preprocessMarkdownMinimal(content)
-  } else if (hasBoundaries) {
-    // Process bounded tables first
-    const boundaryResult = processTableBoundaries(content)
-    processed = boundaryResult.processed
+  // Simple preprocessing to fix malformed table separators
+  processed = content
+    .replace(/\|\s*---\s*\|\s*---\s*\|\s*---\s*\|\|\|/g, '| --- | --- | --- |') // Fix broken separators
+    .replace(/(\|\s*---\s*\|.*?\|)\s*\1+/g, '$1') // Remove duplicate separator rows
+    .replace(/\|\s*---\s*\|\s*---\s*\|\s*---\s*\|\s*\|(\s*\w)/g, '| --- | --- | --- |\n$1') // Fix merged separator and content
 
-    // Log any issues found
-    if (boundaryResult.issues.length > 0) {
-      console.warn('[MarkdownRenderer] Table boundary issues:', boundaryResult.issues)
-    }
-  } else {
-    // Use simplified processor for unbounded tables
-    processed = processTablesSimplified(content)
+  // For streaming content, add minimal processing to avoid incomplete tables
+  if (isStreaming) {
+    // Just clean up obvious malformed separators without complex reconstruction
+    processed = processed.replace(/(\|.*?\|)(\s*\|\s*---.*?\|){2,}/g, '$1') // Remove duplicate separators
   }
   return (
     <div className={cn('max-w-none', className)}>

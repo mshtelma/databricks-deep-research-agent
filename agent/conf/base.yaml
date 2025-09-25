@@ -7,17 +7,17 @@ models:
   default:
     endpoint: databricks-gpt-oss-120b
     temperature: 0.7
-    max_tokens: 16000  # Increased for complex analysis
+    max_tokens: 8000  # Increased for complex analysis
     
   web_research:
     endpoint: databricks-gpt-oss-120b
     temperature: 0.7
-    max_tokens: 12000  # Increased for comprehensive research
+    max_tokens: 8000  # Increased for comprehensive research
     
   synthesis:
     endpoint: databricks-gpt-oss-120b
     temperature: 0.7
-    max_tokens: 20000  # Significantly increased for detailed reports and comprehensive tables
+    max_tokens: 10000  # Significantly increased for detailed reports and comprehensive tables
 
 # Multi-Agent System Configuration
 multi_agent:
@@ -81,8 +81,8 @@ recursion_limit: 300
 
 # Workflow Configuration
 workflow:
-  max_research_loops: 3  # Increased for thorough research
-  max_fact_check_loops: 3  # Increased for better verification
+  max_research_loops: 2  # Increased for thorough research
+  max_fact_check_loops: 2  # Increased for better verification
   max_total_steps: 75  # Increased for complex workflows
   max_wall_clock_seconds: 1800  # Increased to 30 minutes for complex queries
   recursion_limit: 300  # Increased for complex adaptive structures
@@ -124,7 +124,7 @@ streaming:
   enable_streaming: true
   max_events_per_second: 20
   batch_events: true
-  batch_size: 3
+  batch_size: 2
   batch_timeout_ms: 200
 
 # Citations Configuration

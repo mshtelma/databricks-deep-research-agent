@@ -15,6 +15,7 @@ import { SourcesPanel } from './SourcesPanel'
 import { ResearchEventsPanel } from './ResearchEventsPanel'
 import { useChatStore } from '@/stores/chatStore'
 import { cn } from '@/lib/utils'
+import { filterPlanFromMessage } from '@/utils/planContentFilter'
 
 interface ChatMessageProps {
   message: ChatMessageType
@@ -140,7 +141,7 @@ export function ChatMessage({ message }: ChatMessageProps) {
                 <p className="text-white leading-relaxed">{message.content}</p>
               ) : (
                 <MarkdownRenderer 
-                  content={message.content} 
+                  content={filterPlanFromMessage(message.content, !!message.metadata?.planDetails)} 
                   className={cn(
                     "prose-sm",
                     isUser ? "prose-invert" : "prose dark:prose-invert"
@@ -156,6 +157,17 @@ export function ChatMessage({ message }: ChatMessageProps) {
                   isActive={isActivelyStreaming}
                   className="mt-3"
                 />
+              )}
+              
+              {/* Plan Viewer - Always show when plan details exist */}
+              {!isUser && message.metadata?.planDetails && (
+                <div className="mt-3">
+                  <PlanViewer 
+                    planData={message.metadata.planDetails} 
+                    isStreaming={message.isStreaming}
+                    data-testid="plan-viewer"
+                  />
+                </div>
               )}
               
               {/* Multi-Agent Workflow Visualization - Show during streaming if metadata available */}
@@ -194,10 +206,21 @@ export function ChatMessage({ message }: ChatMessageProps) {
                     <div className="space-y-3">
                       <WorkflowVisualizer />
                       
-                      {/* Research Plan - Show during streaming */}
-                      {message.metadata?.planDetails && (
-                        <PlanViewer planData={message.metadata.planDetails} isStreaming={message.isStreaming} />
-                      )}
+                  {/* Research Plan - Show during streaming */}
+                  {message.metadata?.planDetails && (
+                    <PlanViewer planData={message.metadata.planDetails} isStreaming={message.isStreaming} />
+                  )}
+                  
+                  {/* Debug: Show if metadata exists but no planDetails */}
+                  {process.env.NODE_ENV === 'development' && message.metadata && !message.metadata.planDetails && (
+                    <div className="p-2 bg-yellow-50 border border-yellow-200 rounded text-xs">
+                      <strong>Debug:</strong> Message has metadata but no planDetails.
+                      <details className="mt-1">
+                        <summary className="cursor-pointer text-yellow-700">Show metadata keys</summary>
+                        <pre className="mt-1 text-yellow-600">{JSON.stringify(Object.keys(message.metadata), null, 2)}</pre>
+                      </details>
+                    </div>
+                  )}
                       
                       {/* Grounding Report - Show during streaming */}
                       {message.metadata?.grounding && (

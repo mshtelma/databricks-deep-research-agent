@@ -28,6 +28,8 @@ from deep_research_agent.core.state_validator import StateValidator, global_prop
 from deep_research_agent.core.validated_command import ValidatedCommand
 from deep_research_agent.core.routing_policy import track_structural_error, track_executed_step, track_step_execution
 from deep_research_agent.core.observation_models import observation_to_text
+from deep_research_agent.core.entity_validation import extract_entities_from_query
+from deep_research_agent.core.types import IntermediateEventType
 from deep_research_agent.agents import (
     CoordinatorAgent,
     PlannerAgent,
@@ -75,6 +77,12 @@ class EnhancedWorkflowNodes:
         # Initialize specialized agents with optional event emitter and embedding manager
         self.coordinator = CoordinatorAgent(llm=self.llm, config=self.agent_config, event_emitter=self.event_emitter)
         self.planner = PlannerAgent(llm=self.llm, reasoning_llm=None, config=self.agent_config, event_emitter=self.event_emitter)
+        # Set stream callback for plan visualization events  
+        self.planner.stream_callback = getattr(agent, 'stream_callback', None)
+        
+        # Store reference to agent stream callback for plan events
+        self.stream_callback = getattr(agent, 'stream_callback', None)
+        
         self.researcher = ResearcherAgent(
             llm=self.llm,
             search_tools=None,
@@ -82,6 +90,10 @@ class EnhancedWorkflowNodes:
             config=self.agent_config,
             event_emitter=self.event_emitter
         )
+        # Set references for emitting plan/step events
+        stream_callback = getattr(agent, 'stream_callback', None)
+        self.researcher.stream_callback = stream_callback
+        self.researcher.parent_agent = agent
         self.reporter = ReporterAgent(llm=self.llm, config=self.agent_config, event_emitter=self.event_emitter)
         self.fact_checker = FactCheckerAgent(
             llm=self.llm, 
@@ -89,6 +101,26 @@ class EnhancedWorkflowNodes:
             event_emitter=self.event_emitter,
             embedding_manager=self.embedding_manager
         )
+
+    def _emit_plan_creation_event(self, plan, item_id: str | None = None):
+        """Emit plan metadata (if possible) and PLAN_CREATED intermediate event."""
+        if not hasattr(self.agent, '_format_plan_for_ui'):
+            logger.warning("Agent missing _format_plan_for_ui; skipping plan event")
+            return None
+
+        plan_details = self.agent._format_plan_for_ui(plan, {})
+        if not plan_details:
+            logger.warning("Plan formatting returned empty data; skipping plan event")
+            return None
+
+        metadata_event = None
+        if item_id and hasattr(self.agent, '_emit_plan_event'):
+            metadata_event = self.agent._emit_plan_event(plan, item_id)
+
+        if hasattr(self.agent, '_emit_plan_stream_event'):
+            self.agent._emit_plan_stream_event("plan_created", plan_data=plan_details)
+
+        return metadata_event
 
     def _update_section_title_mapping(
         self,
@@ -339,6 +371,11 @@ class EnhancedWorkflowNodes:
             
             # CRITICAL: Store original user query for context in all downstream prompts
             enhanced_state["original_user_query"] = original_query
+            requested_entities = extract_entities_from_query(original_query, self.llm)
+            if requested_entities:
+                enhanced_state["requested_entities"] = requested_entities
+            else:
+                requested_entities = []
             logger.info(f"🎯 ENTITY DEBUG: Stored original user query: {original_query[:100]}...")
             logger.info(f"🎯 ENTITY DEBUG: Extracted {len(requested_entities)} entities: {requested_entities}")
         else:
@@ -348,6 +385,15 @@ class EnhancedWorkflowNodes:
                 original_query = get_last_user_message(enhanced_state.get("messages", [])) or ""
                 enhanced_state["original_user_query"] = original_query
                 logger.info(f"Captured original user query: {original_query[:100]}...")
+            requested_entities = enhanced_state.get("requested_entities")
+            if requested_entities is None:
+                original_query = enhanced_state.get("original_user_query", "")
+                requested_entities = extract_entities_from_query(original_query, self.llm)
+                if requested_entities:
+                    enhanced_state["requested_entities"] = requested_entities
+                else:
+                    requested_entities = []
+            logger.info(f"🎯 ENTITY DEBUG: Extracted {len(requested_entities)} entities: {requested_entities}")
         
         # CRITICAL FIX: Add circuit breaker to prevent infinite loops
         total_steps = enhanced_state.get("total_workflow_steps", 0)
@@ -823,6 +869,9 @@ class EnhancedWorkflowNodes:
                     # It's already a dictionary
                     plan_dict = new_plan if isinstance(new_plan, dict) else {}
                 
+                # Emit PLAN_CREATED event for UI visualization (without item_id outside stream loop)
+                self._emit_plan_creation_event(new_plan)
+                
                 quality_score = plan_dict.get("quality_score", getattr(new_plan, 'quality_score', 0.8))
                 steps = plan_dict.get("steps", getattr(new_plan, 'steps', []))
                 step_count = len(steps)
@@ -843,6 +892,9 @@ class EnhancedWorkflowNodes:
                 )
                 
                 # ENHANCED: Emit comprehensive plan structure as requested by user
+                logger.info(f"📋 Emitting PLAN_STRUCTURE event with {step_count} steps for UI visualization")
+                step_ids_debug = [getattr(step, 'step_id', step.get('step_id', f'step_{i+1:03d}')) if hasattr(step, 'step_id') or isinstance(step, dict) else f'step_{i+1:03d}' for i, step in enumerate(steps)]
+                logger.info(f"📋 DEBUG: Plan structure step IDs: {step_ids_debug}")
                 self.event_emitter.emit(
                     event_type="plan_structure",
                     data={
@@ -1091,6 +1143,23 @@ class EnhancedWorkflowNodes:
                         step_description = plan_step.get('description', '') if isinstance(plan_step, dict) else str(plan_step)
             
             if step_description:
+                # Emit step activation event for UI visualization
+                step_id = f"step_{current_step:03d}"
+                logger.info(f"🎯 Activating step {current_step}: {step_description}")
+                logger.info(f"🎯 DEBUG: Emitting step_activated event for step_id: {step_id}")
+                self.event_emitter.emit(
+                    event_type="step_activated",
+                    data={
+                        "step_id": step_id,
+                        "step_number": current_step,
+                        "description": step_description,
+                        "status": "in_progress",
+                        "timestamp": time.time()
+                    },
+                    correlation_id=correlation_id,
+                    stage_id="researcher"
+                )
+                
                 self.event_emitter.emit_hypothesis_formed(
                     hypothesis=f"Research on '{step_description}' will provide insights to address the research question",
                     confidence=0.7,
@@ -1317,6 +1386,11 @@ class EnhancedWorkflowNodes:
                             )
                             current_step = plan_managed_step
                             state["current_step"] = plan_managed_step
+                            
+                            # Emit step activation event for real-time UI updates
+                            if plan and hasattr(plan, 'mark_step_activated'):
+                                plan.mark_step_activated(plan_managed_step.step_id, event_emitter=self.event_emitter)
+                                state["current_plan"] = plan  # Update plan state
 
                     # Execute ONLY the specific step requested by router
                     logger.info(f"Executing specific step: {current_step.step_id} - {current_step.title}")
@@ -1420,7 +1494,28 @@ class EnhancedWorkflowNodes:
                                     execution_result=self._extract_synthesis_text(result),
                                     observations=observation_text,
                                     citations=self._extract_citations(result),
+                                    event_emitter=self.event_emitter,
                                 )
+                                
+                                # Emit step completion event for UI visualization
+                                step_id = f"step_{getattr(current_step, 'step_number', current_step.step_id):03d}" if hasattr(current_step, 'step_number') else current_step.step_id
+                                execution_summary = self._extract_synthesis_text(result) or "Step completed successfully"
+                                logger.info(f"✅ Completed step {current_step.step_id}: {execution_summary[:50]}...")
+                                logger.info(f"✅ DEBUG: Emitting step_completed event for step_id: {step_id}")
+                                self.event_emitter.emit(
+                                    event_type="step_completed",
+                                    data={
+                                        "step_id": step_id,
+                                        "step_number": getattr(current_step, 'step_number', None),
+                                        "description": getattr(current_step, 'description', ''),
+                                        "status": "completed",
+                                        "result": execution_summary,
+                                        "timestamp": time.time()
+                                    },
+                                    correlation_id=correlation_id,
+                                    stage_id="researcher"
+                                )
+                                
                                 # CRITICAL FIX: Update plan in state to persist step status changes
                                 state["current_plan"] = plan
 
@@ -1462,7 +1557,8 @@ class EnhancedWorkflowNodes:
                                 if plan:
                                     plan.mark_step_completed(
                                         current_step.step_id,
-                                        execution_result="Completed with degraded content due to IP restrictions"
+                                        execution_result="Completed with degraded content due to IP restrictions",
+                                        event_emitter=self.event_emitter,
                                     )
                                     state["current_plan"] = plan
                                     logger.info(f"Marked step {current_step.step_id} as completed with degraded content")
@@ -1502,7 +1598,7 @@ class EnhancedWorkflowNodes:
                                     f"[STORAGE_ERROR] Section error stored with ID={section_key}"
                                 )
                                 if plan:
-                                    plan.mark_step_failed(current_step.step_id, reason=str(e))
+                                    plan.mark_step_failed(current_step.step_id, reason=str(e), event_emitter=self.event_emitter)
                                     state["current_plan"] = plan  # CRITICAL: Persist plan state after marking failed
                                     logger.info(f"Plan state persisted after marking step {current_step.step_id} as failed")
                                 state["current_step"] = None  # Clear even on failure
@@ -1593,6 +1689,7 @@ class EnhancedWorkflowNodes:
                                         current_step.step_id,
                                         execution_result=execution_result,
                                         observations=current_step.observations,
+                                        event_emitter=self.event_emitter,
                                     )
                                     # CRITICAL FIX: Update plan in state to persist step status changes
                                     state["current_plan"] = plan
@@ -1631,7 +1728,7 @@ class EnhancedWorkflowNodes:
                                     logger.warning(f"Permanently skipping step {current_step.step_id} after max retries")
                                 
                                 if plan:
-                                    plan.mark_step_failed(current_step.step_id, reason=str(e))
+                                    plan.mark_step_failed(current_step.step_id, reason=str(e), event_emitter=self.event_emitter)
                                     state["current_plan"] = plan  # CRITICAL: Persist plan state after marking failed
                                     logger.info(f"Plan state persisted after marking step {current_step.step_id} as failed")
                                 section_results[step_key] = {
@@ -2031,7 +2128,8 @@ class EnhancedWorkflowNodes:
                                 'max_retries': max_retries,
                                 'final_error': str(e),
                                 'error_type': type(e).__name__
-                            }
+                            },
+                            event_emitter=self.event_emitter
                         )
                         state["current_plan"] = plan
                         
@@ -2059,7 +2157,8 @@ class EnhancedWorkflowNodes:
                                 'max_retries': max_retries,
                                 'last_error': str(e),
                                 'error_type': type(e).__name__
-                            }
+                            },
+                            event_emitter=self.event_emitter
                         )
                         state["current_plan"] = plan
                         logger.info(f"Step {step_id} marked for retry (attempt {retry_count}/{max_retries})")

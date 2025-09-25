@@ -1,10 +1,321 @@
 import { useCallback, useRef } from 'react'
 import { useChatStore } from '@/stores/chatStore'
-import { StreamEvent, ChatRequest, IntermediateEvent, IntermediateEventType } from '@/types/chat'
+import { StreamEvent, ChatRequest, IntermediateEventType, PlanMetadata, PlanStep, ResearchMetadata } from '@/types/chat'
 import {
   processStreamingWithTableReconstruction
 } from '@/utils/tableStreamReconstructor'
-import { filterContent, ContentType } from '@/utils/contentFilter'
+import { filterContent } from '@/utils/contentFilter'
+
+const isObjectRecord = (value: unknown): value is Record<string, any> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value)
+
+const toNumber = (value: unknown): number | undefined => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : undefined
+  }
+  return undefined
+}
+
+const normalizeStepStatus = (status?: string): PlanStep['status'] => {
+  if (!status) return 'pending'
+  const normalized = status
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/^step_/, '')
+    .replace(/\s+/g, '_')
+    .replace(/-+/g, '_')
+
+  switch (normalized) {
+    case 'completed':
+    case 'complete':
+    case 'done':
+      return 'completed'
+    case 'in_progress':
+    case 'inprogress':
+    case 'active':
+    case 'running':
+      return 'in_progress'
+    case 'skipped':
+    case 'cancelled':
+      return 'skipped'
+    case 'failed':
+    case 'error':
+      return 'skipped'
+    default:
+      return 'pending'
+  }
+}
+
+const computePlanStatus = (steps: PlanStep[]): PlanMetadata['status'] => {
+  if (!steps.length) {
+    return 'draft'
+  }
+
+  const total = steps.length
+  const completed = steps.filter(step => step.status === 'completed').length
+  const inProgress = steps.some(step => step.status === 'in_progress')
+
+  if (completed === total) {
+    return 'completed'
+  }
+
+  if (completed > 0 || inProgress) {
+    return 'executing'
+  }
+
+  return 'draft'
+}
+
+const normalizeStepIdentifier = (value: unknown): string | undefined => {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+
+  // Defensive coding: ensure value has toString method
+  if (typeof value === 'object' && !('toString' in value)) {
+    return undefined
+  }
+
+  let raw: string
+  try {
+    raw = value.toString().trim().toLowerCase()
+  } catch (e) {
+    console.warn('[useChatStream] Error converting value to string:', value, e)
+    return undefined
+  }
+
+  if (!raw) {
+    return undefined
+  }
+
+  const stepMatch = raw.match(/step[^0-9]*(\d+)/)
+  if (stepMatch) {
+    const numeric = parseInt(stepMatch[1], 10)
+    if (!Number.isNaN(numeric)) {
+      return `step_${numeric}`
+    }
+  }
+
+  return raw.replace(/[^a-z0-9]+/g, '_')
+}
+
+const canonicalizeStepId = (stepId: string | number | unknown, fallbackIndex?: number): string => {
+  // MUST convert any format to "step_XXX" with zero padding per specification
+  if (typeof stepId === 'string') {
+    const match = stepId.match(/(\d+)/)
+    if (match) {
+      return `step_${match[1].padStart(3, '0')}`
+    }
+  }
+  
+  if (typeof stepId === 'number') {
+    return `step_${stepId.toString().padStart(3, '0')}`
+  }
+  
+  // Fallback
+  const index = typeof fallbackIndex === 'number' ? fallbackIndex : 0
+  return `step_${(index + 1).toString().padStart(3, '0')}`
+}
+
+const getHigherPriorityStatus = (status1: PlanStep['status'], status2: PlanStep['status']): PlanStep['status'] => {
+  // Priority: completed > in_progress > skipped > pending
+  const priority = { completed: 4, in_progress: 3, skipped: 2, pending: 1 }
+  return priority[status1] >= priority[status2] ? status1 : status2
+}
+
+const computeOverallStatus = (steps: PlanStep[]): PlanMetadata['status'] => {
+  if (!steps.length) return 'draft'
+  
+  const total = steps.length
+  const completed = steps.filter(step => step.status === 'completed').length
+  const inProgress = steps.some(step => step.status === 'in_progress')
+  
+  if (completed === total) return 'completed'
+  if (completed > 0 || inProgress) return 'executing'
+  return 'draft'
+}
+
+const mergePlanStepStatus = (current?: PlanStep['status'], incoming?: PlanStep['status']): PlanStep['status'] => {
+  const normalizedCurrent = current ?? 'pending'
+  const normalizedIncoming = incoming ?? 'pending'
+
+  if (normalizedIncoming === 'completed' || normalizedCurrent === 'completed') {
+    return 'completed'
+  }
+
+  if (normalizedIncoming === 'in_progress' || normalizedCurrent === 'in_progress') {
+    return 'in_progress'
+  }
+
+  if (normalizedIncoming === 'skipped') {
+    return normalizedCurrent === 'pending' ? 'skipped' : normalizedCurrent
+  }
+
+  if (normalizedCurrent === 'skipped') {
+    return normalizedIncoming === 'pending' ? 'skipped' : normalizedIncoming
+  }
+
+  return normalizedIncoming
+}
+
+const buildPlanDetailsFromPayload = (plan: unknown): PlanMetadata | undefined => {
+  if (!isObjectRecord(plan)) {
+    return undefined
+  }
+
+  const planRecord = plan as Record<string, any>
+  
+  // Defensive coding: ensure steps exists and is an array
+  let rawSteps: unknown[] = []
+  try {
+    if (Array.isArray(planRecord.steps)) {
+      rawSteps = planRecord.steps
+    } else if (planRecord.steps && typeof planRecord.steps === 'object') {
+      // Try to convert object to array if it has numeric keys
+      const keys = Object.keys(planRecord.steps)
+      const numericKeys = keys.filter(k => /^\d+$/.test(k)).sort((a, b) => Number(a) - Number(b))
+      if (numericKeys.length > 0) {
+        rawSteps = numericKeys.map(k => planRecord.steps[k])
+      }
+    }
+  } catch (e) {
+    console.warn('[useChatStream] Error processing plan steps:', e)
+    return undefined
+  }
+
+  if (!rawSteps.length) {
+    return undefined
+  }
+
+  const seenCanonicalIds = new Set<string>()
+
+  const steps: PlanStep[] = rawSteps.map((rawStep, index) => {
+    const step = isObjectRecord(rawStep) ? rawStep : {}
+    // CRITICAL: Handle step_id field correctly per specification
+    const idCandidates = [step.step_id, step.id, step.stepId]
+    let id = canonicalizeStepId(idCandidates.find(value => typeof value === 'string' && value.trim().length > 0), index)
+
+    while (seenCanonicalIds.has(id)) {
+      id = canonicalizeStepId(`${id}_${index}`, index)
+    }
+    seenCanonicalIds.add(id)
+
+    const descriptionCandidates = [step.description, step.title, step.content, step.summary]
+    const description = descriptionCandidates.find(value => typeof value === 'string' && value.trim().length > 0)
+      || `Step ${index + 1}`
+
+    const result = typeof step.result === 'string' ? step.result
+      : typeof step.summary === 'string' ? step.summary
+      : undefined
+
+    const completedAt = typeof step.completedAt === 'number' ? step.completedAt
+      : typeof step.completed_at === 'number' ? step.completed_at
+      : undefined
+
+    const statusSource = typeof step.status === 'string'
+      ? step.status
+      : typeof step.state === 'string'
+        ? step.state
+        : typeof step.step_status === 'string'
+          ? step.step_status
+          : undefined
+
+    return {
+      id,
+      description,
+      status: normalizeStepStatus(statusSource),
+      result,
+      completedAt
+    }
+  })
+
+  const canonicalSteps = steps.map((step, index) => ({
+    ...step,
+    id: canonicalizeStepId(step.id, index)
+  }))
+
+  const iterationsRaw = planRecord.iterations ?? planRecord.iteration ?? 1
+  const iterations = toNumber(iterationsRaw) ?? 1
+
+  const qualityCandidates = [
+    planRecord.quality_assessment?.overall_score,
+    planRecord.qualityAssessment?.overallScore,
+    planRecord.quality,
+    planRecord.confidence,
+    planRecord.score
+  ]
+  const quality = qualityCandidates.find(value => typeof value === 'number' && Number.isFinite(value))
+
+  const hasEnoughContext = Boolean(
+    planRecord.hasEnoughContext ??
+    planRecord.has_enough_context ??
+    planRecord.enoughContext ??
+    planRecord.context_ready
+  )
+
+  return {
+    steps: canonicalSteps,
+    iterations: iterations > 0 ? iterations : 1,
+    quality: typeof quality === 'number' ? quality : undefined,
+    status: computePlanStatus(canonicalSteps),
+    hasEnoughContext
+  }
+}
+
+const mergePlanDetails = (existing?: PlanMetadata, incoming?: PlanMetadata): PlanMetadata => {
+  // MUST preserve progress when merging plan updates per specification
+  if (!existing) return incoming || { steps: [], status: 'draft', iterations: 1, hasEnoughContext: true }
+  if (!incoming) return existing
+  
+  const existingSteps = new Map(existing.steps.map(step => [step.id, step]))
+  
+  const mergedSteps = incoming.steps.map(incomingStep => {
+    const canonicalId = canonicalizeStepId(incomingStep.id)
+    const existingStep = existingSteps.get(canonicalId)
+    
+    if (existingStep) {
+      // Preserve higher-priority status (completed > in_progress > pending)
+      const mergedStatus = getHigherPriorityStatus(existingStep.status, incomingStep.status)
+      return {
+        ...existingStep,
+        ...incomingStep,
+        id: canonicalId,
+        status: mergedStatus,
+        completedAt: incomingStep.completedAt || existingStep.completedAt
+      }
+    }
+    
+    return { ...incomingStep, id: canonicalId }
+  })
+  
+  return {
+    ...existing,
+    ...incoming,
+    steps: mergedSteps,
+    status: computeOverallStatus(mergedSteps)
+  }
+}
+
+const normalizeMetadataPayload = (metadata?: ResearchMetadata | Record<string, any>): Partial<ResearchMetadata> | undefined => {
+  if (!isObjectRecord(metadata)) {
+    return undefined
+  }
+
+  const normalized: Partial<ResearchMetadata> = {}
+
+  const planPayload = metadata.planDetails ?? metadata.plan_details ?? metadata.plan
+  const planDetails = buildPlanDetailsFromPayload(planPayload)
+  if (planDetails) {
+    normalized.planDetails = planDetails
+  }
+
+  return Object.keys(normalized).length > 0 ? normalized : undefined
+}
 
 export function useChatStream() {
   const {
@@ -135,7 +446,30 @@ export function useChatStream() {
   }, [addMessage, updateStreamingMessage, setLoading, updateProgressWithETA])
 
   const handleStreamEvent = async (data: StreamEvent, messageId: string, currentContent: string): Promise<string> => {
-    console.log('Stream event:', data.type, data) // Debug logging
+    // === EXTENSIVE LOGGING FOR DEBUGGING ===
+    console.log(`🔵 [EVENT RAW] Type: "${data.type}", Full event:`, JSON.stringify(data, null, 2))
+    
+    // Log specific fields we care about
+    if (data.event) {
+      console.log(`🔵 [EVENT NESTED] event.event_type: "${data.event.event_type}"`)
+      console.log(`🔵 [EVENT NESTED] event data:`, data.event)
+    }
+    if (data.events) {
+      console.log(`🔵 [EVENT BATCH] Found ${data.events.length} events`)
+      data.events.forEach((evt: any, idx: number) => {
+        console.log(`🔵 [EVENT BATCH ${idx}] Type: "${evt.event_type}", Data:`, evt)
+      })
+    }
+    
+    // Log events with consistent JSON payload to aid test parsing
+    let serializedPayload = '{}'
+    try {
+      serializedPayload = JSON.stringify(data)
+    } catch (error) {
+      serializedPayload = JSON.stringify({ parse_error: true })
+    }
+    console.log(`🔵 [EVENT STREAM] Type: ${data.type} Payload: ${serializedPayload}`)
+    
     switch (data.type) {
       case 'stream_start':
         setResearchProgress({ currentPhase: 'querying' })
@@ -143,86 +477,38 @@ export function useChatStream() {
 
       case 'content_delta':
         if (data.content) {
-          // Check if content contains plan creation markers
-          if (data.content.includes('📋 Created research plan with') || 
-              data.content.includes('Created research plan') ||
-              data.content.includes('Research plan:')) {
-            // Extract plan steps count from the content
-            const stepsMatch = data.content.match(/with (\d+) steps/)
-            const stepsCount = stepsMatch ? parseInt(stepsMatch[1]) : 5
-            
-            // Create placeholder plan metadata
-            const planMetadata = {
-              planDetails: {
-                steps: Array.from({ length: stepsCount }, (_, i) => ({
-                  id: `step-${i + 1}`,
-                  description: `Step ${i + 1}`,
-                  status: 'pending' as const
-                })),
-                quality: 0.8,
-                iterations: 1,
-                status: 'executing' as const,
-                hasEnoughContext: true
-              }
-            }
-            
-            // Update the message metadata with plan details
-            const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
-            if (currentMessage) {
-              const updatedMetadata = {
-                ...currentMessage.metadata,
-                ...planMetadata
-              }
-              updateStreamingMessage(messageId, currentMessage.content, updatedMetadata as any)
-            }
-          }
-          
-          // Apply content filtering to incoming content to prevent JSON contamination
           const filterResult = filterContent(data.content)
-          
-          // Log filtering activity for debugging
-          if (filterResult.filteringApplied) {
-            console.warn(`[ContentFilter] Applied filtering to content_delta:`, {
-              originalLength: filterResult.originalLength,
-              cleanLength: filterResult.cleanLength,
-              contentType: filterResult.contentType,
-              extractedData: filterResult.extractedData.length,
-              warnings: filterResult.warnings
-            })
-            
-            // Log any warnings
-            filterResult.warnings.forEach(warning => {
-              console.warn(`[ContentFilter] Warning: ${warning}`)
-            })
-          }
-          
-          // Use the filtered content for accumulation
           const filteredContent = filterResult.cleanContent
           const newContent = currentContent + filteredContent
-
-          // Process streaming content - returns both display and raw versions
           const processed = processStreamingWithTableReconstruction(newContent)
 
-          // Debug logging to verify table handling
-          if (newContent.includes('|') && newContent.includes('---')) {
-            console.log('[TABLE DEBUG] Streaming content with potential table:', {
-              hasTable: newContent.includes('|') && newContent.includes('---'),
-              rawLength: processed.raw.length,
-              displayLength: processed.display.length,
-              hasPlaceholders: processed.display.includes('📊')
-            })
-          }
-
-          // Show display version with placeholders during streaming
           updateStreamingMessage(messageId, processed.display)
-
-          // Return the raw content for tracking
           return processed.raw
         }
         break
 
       case 'research_update':
         if (data.metadata) {
+          const normalizedMetadata = normalizeMetadataPayload(data.metadata)
+          const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
+          if (currentMessage) {
+          // MUST merge planDetails without losing progress per specification
+          const mergedPlan = mergePlanDetails(currentMessage.metadata?.planDetails, normalizedMetadata?.planDetails)
+          
+          if (normalizedMetadata?.planDetails) {
+            console.log('📊 research_update with planDetails:', normalizedMetadata.planDetails)
+          }
+          if (mergedPlan) {
+            console.log('🔀 Merged plan in research_update:', mergedPlan)
+          }
+
+          updateStreamingMessage(messageId, currentMessage.content, {
+            ...currentMessage.metadata,
+            ...data.metadata,
+            ...normalizedMetadata,
+            planDetails: mergedPlan
+          } as any)
+          }
           console.log('Research update received:', {
             phase: data.metadata.phase,
             progress: data.metadata.progressPercentage,
@@ -259,45 +545,25 @@ export function useChatStream() {
 
       case 'message_complete':
         {
-          // Use the raw content that was being tracked
           let finalContent = data.content && data.content.length > 0 ? data.content : currentContent
-
-          // Apply content filtering to final content to remove any JSON elements
           const filterResult = filterContent(finalContent)
-          
-          // Log filtering activity for final content
-          if (filterResult.filteringApplied) {
-            console.warn(`[ContentFilter] Applied filtering to final report:`, {
-              originalLength: filterResult.originalLength,
-              cleanLength: filterResult.cleanLength,
-              contentType: filterResult.contentType,
-              extractedData: filterResult.extractedData.length,
-              warnings: filterResult.warnings
-            })
-            
-            // Log any warnings
-            filterResult.warnings.forEach(warning => {
-              console.warn(`[ContentFilter] Warning: ${warning}`)
-            })
-          }
-          
-          // Use the filtered content
           finalContent = filterResult.cleanContent
 
-          // Debug logging for final content
-          if (finalContent.includes('|') && finalContent.includes('---')) {
-            console.log('[TABLE DEBUG] Final content with tables:', {
-              hasTable: true,
-              contentLength: finalContent.length,
-              hasPlaceholders: finalContent.includes('📊'),
-              sample: finalContent.substring(0, 200) + '...'
-            })
+          const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
+          if (currentMessage) {
+            const normalizedMetadata = normalizeMetadataPayload(data.metadata)
+            // MUST merge planDetails without losing progress per specification
+            const mergedPlan = mergePlanDetails(currentMessage.metadata?.planDetails, normalizedMetadata?.planDetails)
+
+            updateStreamingMessage(messageId, finalContent, {
+              ...currentMessage.metadata,
+              ...normalizedMetadata,
+              planDetails: mergedPlan
+            } as any)
+          } else {
+            updateStreamingMessage(messageId, finalContent, data.metadata)
           }
 
-          // The content should already be raw (no placeholders), but ensure it's clean
-          // The MarkdownRenderer will handle table reconstruction for the final display
-
-          updateStreamingMessage(messageId, finalContent, data.metadata)
           setResearchProgress({ currentPhase: 'complete' })
           return finalContent
         }
@@ -332,69 +598,104 @@ export function useChatStream() {
       case 'intermediate_event':
         // Handle single intermediate event with enhanced processing
         if (data.event) {
-          console.log('Adding intermediate event:', data.event.event_type, data.event)
+          const receivedAt = new Date().toISOString()
+          const eventTypeRaw = data.event.event_type
+          const payloadKeys = Object.keys(data.event)
+          const dataKeys = Object.keys(data.event.data ?? {})
+          const metaKeys = Object.keys(data.event.meta ?? {})
+          console.log('🔵 [INTERMEDIATE_EVENT] Raw payload received:', data.event)
+          console.log(
+            '🔵 [INTERMEDIATE_EVENT] Received event @',
+            receivedAt,
+            {
+              eventType: eventTypeRaw,
+              payloadKeys,
+              dataPreview: dataKeys.slice(0, 5),
+              metaPreview: metaKeys.slice(0, 5),
+              hasTimestamp: Boolean(data.event.timestamp),
+              correlationId: data.event.correlation_id ?? data.event.correlationId ?? null
+            },
+            data.event
+          )
           
-          // Check if this is a plan-related event and update metadata accordingly
-          if (data.event.event_type === IntermediateEventType.PLAN_CREATED || 
-              data.event.event_type === IntermediateEventType.PLAN_UPDATED ||
-              data.event.event_type === IntermediateEventType.PLAN_STRUCTURE_VISUALIZE) {
-            
-            // Extract plan details from the event
-            const planData = data.event.data?.plan || data.event.data
-            
-            if (planData && planData.steps) {
-              // Convert the plan to the expected format
-              const planMetadata = {
-                planDetails: {
-                  steps: planData.steps.map((step: any, index: number) => ({
-                    id: step.id || `step-${index + 1}`,
-                    description: step.description || step.content || '',
-                    status: step.status || 'pending',
-                    result: step.result,
-                    completedAt: step.completedAt
-                  })),
-                  quality: planData.quality || planData.confidence || 0,
-                  iterations: planData.iterations || 1,
-                  status: planData.status || 'executing',
-                  hasEnoughContext: planData.hasEnoughContext || false
+          // MUST handle plan creation events per specification
+          const eventType = eventTypeRaw
+          console.log(`🔵 [INTERMEDIATE_EVENT] Event type check: "${eventType}" (exact match)`) 
+          
+          if (eventType === 'PLAN_CREATED' || eventType === 'plan_created') {
+            console.log('🎯 [PLAN_CREATED] event detected:', data.event)
+            const planData = data.event.data?.plan
+            if (planData) {
+              console.log('📋 [PLAN_CREATED] Plan data found:', planData)
+              const planDetails = buildPlanDetailsFromPayload(planData)
+              if (planDetails) {
+                console.log('✅ [PLAN_CREATED] Plan details built summary:', {
+                  keys: Object.keys(planDetails),
+                  stepCount: Array.isArray(planDetails.steps) ? planDetails.steps.length : 0,
+                  status: planDetails.status,
+                  iterations: planDetails.iterations
+                })
+                const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
+                if (currentMessage) {
+                  const mergedPlan = mergePlanDetails(currentMessage.metadata?.planDetails, planDetails)
+                  console.log('🔀 [PLAN_CREATED] Merged plan summary:', {
+                    stepCount: Array.isArray(mergedPlan?.steps) ? mergedPlan.steps.length : 0,
+                    status: mergedPlan?.status,
+                    iterations: mergedPlan?.iterations,
+                    hasEnoughContext: mergedPlan?.hasEnoughContext
+                  })
+                  updateStreamingMessage(messageId, currentMessage.content, {
+                    ...currentMessage.metadata,
+                    planDetails: mergedPlan
+                  } as any)
+                  console.log('💾 [PLAN_CREATED] Updated message metadata plan steps:', mergedPlan?.steps?.map((step: any) => ({ id: step.id, status: step.status })))
+                  console.log('💾 [PLAN_CREATED] Updated message with plan details')
                 }
+              } else {
+                console.log('❌ [PLAN_CREATED] Failed to build plan details from payload')
               }
-              
-              // Update the message metadata with plan details
-              const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
-              if (currentMessage) {
-                const updatedMetadata = {
-                  ...currentMessage.metadata,
-                  ...planMetadata
-                }
-                updateStreamingMessage(messageId, currentMessage.content, updatedMetadata as any)
-              }
+            } else {
+              console.log('❌ [PLAN_CREATED] No plan data in event')
             }
+          } else {
+            console.log(`🔵 [INTERMEDIATE_EVENT] Event "${eventType}" is not a plan creation event`)
           }
           
-          // Check for step activation/completion events
-          if (data.event.event_type === IntermediateEventType.STEP_ACTIVATED ||
-              data.event.event_type === IntermediateEventType.STEP_COMPLETED) {
-            
-            const stepId = data.event.data?.step_id
-            const newStatus = data.event.event_type === IntermediateEventType.STEP_COMPLETED ? 'completed' : 'in_progress'
+          // MUST handle step progress events per specification (lowercase)
+          const lowerEventType = eventTypeRaw?.toLowerCase()
+          console.log(`🔵 [STEP_EVENT] Checking step event: "${lowerEventType}"`)
+          if (lowerEventType === 'step_activated' || lowerEventType === 'step_completed' || lowerEventType === 'step_failed') {
+            console.log(`🎯 [STEP_EVENT] Step event detected: "${lowerEventType}"`)
+            const stepIdRaw = data.event.data?.step_id
+            const stepId = stepIdRaw ? canonicalizeStepId(stepIdRaw) : undefined
+            console.log(`🔵 [STEP_EVENT] Step ID: ${stepId}, raw: ${stepIdRaw}`)
+            const newStatus: PlanStep['status'] = lowerEventType === 'step_completed'
+              ? 'completed'
+              : lowerEventType === 'step_failed'
+                ? 'skipped'
+                : 'in_progress'
+            console.log(`🔵 [STEP_EVENT] New status: ${newStatus}`)
             
             // Update the specific step in the plan
             const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
-            if (currentMessage?.metadata?.planDetails?.steps) {
+            if (stepId && currentMessage?.metadata?.planDetails?.steps) {
               const updatedSteps = currentMessage.metadata.planDetails.steps.map((step: any) => 
-                step.id === stepId ? { ...step, status: newStatus, completedAt: newStatus === 'completed' ? Date.now() : step.completedAt } : step
+                canonicalizeStepId(step.id) === stepId ? { 
+                  ...step, 
+                  status: newStatus, 
+                  completedAt: newStatus === 'completed' ? Date.now() : step.completedAt 
+                } : step
               )
               
-              const updatedMetadata = {
+              updateStreamingMessage(messageId, currentMessage.content, {
                 ...currentMessage.metadata,
                 planDetails: {
                   ...currentMessage.metadata.planDetails,
-                  steps: updatedSteps
+                  steps: updatedSteps,
+                  status: computeOverallStatus(updatedSteps)
                 }
-              }
-              
-              updateStreamingMessage(messageId, currentMessage.content, updatedMetadata as any)
+              } as any)
+              console.log('🛠️ [STEP_EVENT] Updated steps summary:', updatedSteps.map((step: any) => ({ id: step.id, status: step.status })))
             }
           }
           
@@ -416,6 +717,12 @@ export function useChatStream() {
           }
           
           addIntermediateEvent(processedEvent)
+          console.log('📥 [INTERMEDIATE_EVENT] Stored processed event summary:', {
+            eventType: processedEvent.event_type,
+            metaTitle: processedEvent.meta?.title,
+            hasMeta: Boolean(processedEvent.meta),
+            hasData: Boolean(processedEvent.data)
+          })
         }
         break
 
@@ -423,66 +730,101 @@ export function useChatStream() {
         // Handle batch of intermediate events with enhanced processing
         if (data.events && Array.isArray(data.events)) {
           console.log('Adding batch of events:', data.events.length, data.events)
+          const batchSummary = data.events.reduce(
+            (acc, event, index) => {
+              const eventType = event?.event_type ?? 'unknown'
+              const normalizedType = eventType?.toLowerCase?.() ?? 'unknown'
+              acc.types.push(eventType)
+              if (normalizedType.includes('plan')) acc.planEvents += 1
+              if (normalizedType.includes('step')) acc.stepEvents += 1
+              if (!event || typeof event !== 'object') acc.invalidIndices.push(index)
+              return acc
+            },
+            { types: [] as string[], planEvents: 0, stepEvents: 0, invalidIndices: [] as number[] }
+          )
+          console.log('🔵 [EVENT_BATCH] Summary:', batchSummary)
           
-          // Check for plan events in the batch
-          data.events.forEach(event => {
-            if (event.event_type === IntermediateEventType.PLAN_CREATED || 
-                event.event_type === IntermediateEventType.PLAN_UPDATED ||
-                event.event_type === IntermediateEventType.PLAN_STRUCTURE_VISUALIZE) {
-              
-              const planData = event.data?.plan || event.data
-              
-              if (planData && planData.steps) {
-                const planMetadata = {
-                  planDetails: {
-                    steps: planData.steps.map((step: any, index: number) => ({
-                      id: step.id || `step-${index + 1}`,
-                      description: step.description || step.content || '',
-                      status: step.status || 'pending',
-                      result: step.result,
-                      completedAt: step.completedAt
-                    })),
-                    quality: planData.quality || planData.confidence || 0,
-                    iterations: planData.iterations || 1,
-                    status: planData.status || 'executing',
-                    hasEnoughContext: planData.hasEnoughContext || false
+          // Check for plan events in the batch with defensive coding
+          data.events.forEach((event, eventIndex) => {
+            try {
+              console.log('🔵 [EVENT_BATCH] Processing index', eventIndex, 'event_type=', event?.event_type)
+              if (!event || typeof event !== 'object') {
+                console.warn(`[useChatStream] Invalid event at index ${eventIndex}:`, event)
+                return
+              }
+
+              if (event.event_type === IntermediateEventType.PLAN_CREATED || 
+                  event.event_type === IntermediateEventType.PLAN_UPDATED ||
+                  event.event_type === IntermediateEventType.PLAN_STRUCTURE_VISUALIZE ||
+                  event.event_type === 'plan_structure') {
+
+                const planData = event.data?.plan || event.data
+                const planDetails = buildPlanDetailsFromPayload(planData)
+
+                if (planDetails) {
+                  console.log('🧾 [EVENT_BATCH] Plan event summary:', {
+                    keys: Object.keys(planDetails),
+                    stepCount: Array.isArray(planDetails.steps) ? planDetails.steps.length : 0,
+                    status: planDetails.status,
+                    iterations: planDetails.iterations
+                  })
+                  const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
+                  if (currentMessage) {
+                    const mergedPlan = mergePlanDetails(currentMessage.metadata?.planDetails, planDetails)
+                    updateStreamingMessage(messageId, currentMessage.content, {
+                      ...currentMessage.metadata,
+                      planDetails: mergedPlan ?? planDetails
+                    } as any)
+                    console.log('🔀 [EVENT_BATCH] Plan merged total steps:', mergedPlan?.steps?.length ?? 0)
                   }
                 }
-                
+              }
+
+              const eventType = event.event_type?.toLowerCase()
+              if (eventType === 'step_activated' ||
+                  eventType === 'step_completed' ||
+                  eventType === 'step_in_progress') {
+
+                const stepIdRaw = event.data?.step_id ?? event.data?.id
+                const stepId = stepIdRaw ? canonicalizeStepId(stepIdRaw) : undefined
+                const newStatus = eventType === 'step_completed' ? 'completed' : 'in_progress'
+
                 const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
-                if (currentMessage) {
-                  const updatedMetadata = {
-                    ...currentMessage.metadata,
-                    ...planMetadata
+                if (stepId && currentMessage?.metadata?.planDetails?.steps && Array.isArray(currentMessage.metadata.planDetails.steps)) {
+                  try {
+                    const updatedSteps = currentMessage.metadata.planDetails.steps.map((step: any, index: number) => {
+                      if (!step || typeof step !== 'object') return step
+                      return canonicalizeStepId(step.id, index) === stepId
+                        ? { ...step, status: newStatus, completedAt: newStatus === 'completed' ? Date.now() : step.completedAt }
+                        : step
+                    })
+
+                    const mergedPlan = {
+                      ...currentMessage.metadata.planDetails,
+                      steps: updatedSteps.map((step, index) => ({
+                        ...step,
+                        id: canonicalizeStepId(step.id, index),
+                        status: normalizeStepStatus(step.status)
+                      })),
+                      status: computePlanStatus(updatedSteps)
+                    }
+
+                    updateStreamingMessage(messageId, currentMessage.content, {
+                      ...currentMessage.metadata,
+                      planDetails: mergedPlan
+                    } as any)
+                    console.log('🛠️ [EVENT_BATCH] Step update summary:', {
+                      stepId,
+                      newStatus,
+                      statuses: mergedPlan.steps?.map((step: any) => ({ id: step.id, status: step.status }))
+                    })
+                  } catch (stepUpdateError) {
+                    console.warn(`[useChatStream] Error updating step in batch at index ${eventIndex}:`, stepUpdateError)
                   }
-                  updateStreamingMessage(messageId, currentMessage.content, updatedMetadata as any)
                 }
               }
-            }
-            
-            // Check for step updates
-            if (event.event_type === IntermediateEventType.STEP_ACTIVATED ||
-                event.event_type === IntermediateEventType.STEP_COMPLETED) {
-              
-              const stepId = event.data?.step_id
-              const newStatus = event.event_type === IntermediateEventType.STEP_COMPLETED ? 'completed' : 'in_progress'
-              
-              const currentMessage = useChatStore.getState().messages.find(m => m.id === messageId)
-              if (currentMessage?.metadata?.planDetails?.steps) {
-                const updatedSteps = currentMessage.metadata.planDetails.steps.map((step: any) => 
-                  step.id === stepId ? { ...step, status: newStatus, completedAt: newStatus === 'completed' ? Date.now() : step.completedAt } : step
-                )
-                
-                const updatedMetadata = {
-                  ...currentMessage.metadata,
-                  planDetails: {
-                    ...currentMessage.metadata.planDetails,
-                    steps: updatedSteps
-                  }
-                }
-                
-                updateStreamingMessage(messageId, currentMessage.content, updatedMetadata as any)
-              }
+            } catch (eventProcessingError) {
+              console.warn(`[useChatStream] Error processing event at index ${eventIndex}:`, eventProcessingError, event)
             }
           })
           
@@ -501,8 +843,10 @@ export function useChatStream() {
               reasoning: event.meta?.reasoning
             }
           }))
+          console.log('📥 [EVENT_BATCH] Prepared processed events count:', processedEvents.length)
           
           addIntermediateEvents(processedEvents)
+          console.log('📥 [EVENT_BATCH] Stored processed events count:', processedEvents.length)
         }
         break
         
@@ -568,4 +912,67 @@ export function useChatStream() {
   }, [setLoading, updateProgressWithETA])
 
   return { sendMessage, stopStream }
+}
+
+export const __testables__ = {
+  canonicalizeStepId,
+  mergePlanDetails,
+  buildPlanDetailsFromPayload,
+  handleIntermediateEventForTest: (
+    currentMessage: any,
+    event: { event_type: string; data: any }
+  ) => {
+    if (!currentMessage) return undefined
+
+    if (event.event_type === 'PLAN_CREATED') {
+      const planData = event.data?.plan
+      const planDetails = buildPlanDetailsFromPayload(planData)
+      if (!planDetails) return currentMessage
+
+      return {
+        ...currentMessage,
+        metadata: {
+          ...currentMessage.metadata,
+          planDetails: mergePlanDetails(currentMessage.metadata?.planDetails, planDetails)
+        }
+      }
+    }
+
+    const eventType = event.event_type?.toLowerCase()
+    if (eventType === 'step_activated' || eventType === 'step_completed' || eventType === 'step_failed') {
+      const stepIdRaw = event.data?.step_id
+      const stepId = stepIdRaw ? canonicalizeStepId(stepIdRaw) : undefined
+      const newStatus: PlanStep['status'] = eventType === 'step_completed'
+        ? 'completed'
+        : eventType === 'step_failed'
+          ? 'skipped'
+          : 'in_progress'
+
+      if (stepId && currentMessage?.metadata?.planDetails?.steps) {
+        const updatedSteps = currentMessage.metadata.planDetails.steps.map((step: any, index: number) =>
+          canonicalizeStepId(step.id, index) === stepId
+            ? {
+                ...step,
+                status: newStatus,
+                completedAt: newStatus === 'completed' ? Date.now() : step.completedAt
+              }
+            : step
+        )
+
+        return {
+          ...currentMessage,
+          metadata: {
+            ...currentMessage.metadata,
+            planDetails: {
+              ...currentMessage.metadata.planDetails,
+              steps: updatedSteps,
+              status: computeOverallStatus(updatedSteps)
+            }
+          }
+        }
+      }
+    }
+
+    return currentMessage
+  }
 }

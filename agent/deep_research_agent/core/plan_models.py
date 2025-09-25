@@ -237,6 +237,7 @@ class Plan(BaseModel):
         execution_result: Optional[str] = None,
         observations: Optional[Iterable[str]] = None,
         citations: Optional[Iterable[Any]] = None,
+        event_emitter: Optional[Any] = None,
     ) -> Step:
         """Mark the specified step as completed and update execution metadata."""
 
@@ -263,16 +264,47 @@ class Plan(BaseModel):
             ]
 
         self._refresh_step_counters()
+        
+        # Emit STEP_COMPLETED event for real-time UI updates
+        if event_emitter and hasattr(event_emitter, 'emit_event'):
+            try:
+                event_emitter.emit_event(
+                    event_type="STEP_COMPLETED",
+                    data={
+                        "step_id": step_id,
+                        "step": {
+                            "id": step.step_id,
+                            "title": step.title,
+                            "description": step.description,
+                            "status": step.status,
+                            "execution_result": step.execution_result,
+                            "started_at": step.started_at.isoformat() if step.started_at else None,
+                            "completed_at": step.completed_at.isoformat() if step.completed_at else None,
+                            "duration_seconds": (step.completed_at - step.started_at).total_seconds() if step.started_at and step.completed_at else None
+                        },
+                        "plan_id": self.plan_id,
+                        "progress": {
+                            "completed": self.completed_count,
+                            "total": len(self.steps),
+                            "percentage": (self.completed_count / len(self.steps)) * 100 if self.steps else 0
+                        }
+                    }
+                )
+                logger.info(f"Emitted STEP_COMPLETED event for step {step_id}")
+            except Exception as e:
+                logger.warning(f"Failed to emit STEP_COMPLETED event for step {step_id}: {e}")
+        
         return step
 
     def mark_step_failed(self, step_id: str, *, reason: Optional[str] = None,
-                         metadata: Optional[Dict[str, Any]] = None) -> Step:
+                         metadata: Optional[Dict[str, Any]] = None, event_emitter: Optional[Any] = None) -> Step:
         """Mark the specified step as failed with optional metadata.
         
         Args:
             step_id: ID of the step to mark as failed
             reason: Optional failure reason
             metadata: Optional metadata including retry info and permanent_failure flag
+            event_emitter: Optional event emitter for real-time UI updates
         """
 
         step = self.get_step_by_id(step_id)
@@ -302,6 +334,79 @@ class Plan(BaseModel):
                 logger.info(f"Step {step_id} retry count: {metadata['retry_count']}")
 
         self._refresh_step_counters()
+        
+        # Emit STEP_FAILED event for real-time UI updates
+        if event_emitter and hasattr(event_emitter, 'emit_event'):
+            try:
+                event_emitter.emit_event(
+                    event_type="STEP_FAILED",
+                    data={
+                        "step_id": step_id,
+                        "step": {
+                            "id": step.step_id,
+                            "title": step.title,
+                            "description": step.description,
+                            "status": step.status,
+                            "execution_result": step.execution_result,
+                            "started_at": step.started_at.isoformat() if step.started_at else None,
+                            "completed_at": step.completed_at.isoformat() if step.completed_at else None,
+                        },
+                        "reason": reason,
+                        "metadata": metadata or {},
+                        "plan_id": self.plan_id,
+                        "progress": {
+                            "completed": self.completed_count,
+                            "failed": self.failed_count,
+                            "total": len(self.steps),
+                            "percentage": (self.completed_count / len(self.steps)) * 100 if self.steps else 0
+                        }
+                    }
+                )
+                logger.info(f"Emitted STEP_FAILED event for step {step_id}")
+            except Exception as e:
+                logger.warning(f"Failed to emit STEP_FAILED event for step {step_id}: {e}")
+        
+        return step
+
+    def mark_step_activated(self, step_id: str, *, event_emitter: Optional[Any] = None) -> Step:
+        """Mark the specified step as activated (in progress) and emit event for real-time UI updates."""
+        
+        step = self.get_step_by_id(step_id)
+        if step is None:
+            raise ValueError(f"Step '{step_id}' not found in plan {self.plan_id}")
+
+        # Only update if not already in progress or completed
+        if step.status == StepStatus.PENDING:
+            step.status = StepStatus.IN_PROGRESS
+            step.started_at = datetime.now()
+            
+            # Emit STEP_ACTIVATED event for real-time UI updates
+            if event_emitter and hasattr(event_emitter, 'emit_event'):
+                try:
+                    event_emitter.emit_event(
+                        event_type="STEP_ACTIVATED",
+                        data={
+                            "step_id": step_id,
+                            "step": {
+                                "id": step.step_id,
+                                "title": step.title,
+                                "description": step.description,
+                                "status": step.status,
+                                "started_at": step.started_at.isoformat() if step.started_at else None,
+                            },
+                            "plan_id": self.plan_id,
+                            "progress": {
+                                "completed": self.completed_count,
+                                "in_progress": len([s for s in self.steps if s.status == StepStatus.IN_PROGRESS]),
+                                "total": len(self.steps),
+                                "percentage": (self.completed_count / len(self.steps)) * 100 if self.steps else 0
+                            }
+                        }
+                    )
+                    logger.info(f"Emitted STEP_ACTIVATED event for step {step_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to emit STEP_ACTIVATED event for step {step_id}: {e}")
+        
         return step
 
     _METADATA_ID_LIST_KEYS: Set[str] = {

@@ -43,18 +43,21 @@ class PlanIDGenerator:
         return None, None
     
     @staticmethod
-    def normalize_id(raw_id: str) -> str:
-        """Convert any format to canonical step_XXX format."""
-        id_type, number = PlanIDGenerator.parse_id(raw_id)
-        
+    def normalize_id(raw_id: Optional[str]) -> str:
+        if raw_id is None:
+            return PlanIDGenerator.generate_step_id(1)
+
+        raw = str(raw_id).strip()
+        if not raw:
+            return PlanIDGenerator.generate_step_id(1)
+
+        id_type, number = PlanIDGenerator.parse_id(raw)
+        if id_type in {"step", "section", "req"} and number is not None:
+            return PlanIDGenerator.generate_step_id(number)
         if number is not None:
-            return f"step_{number:03d}"
-        
-        # If we can't parse it, return as-is and log warning
-        from deep_research_agent.core import get_logger
-        logger = get_logger(__name__)
-        logger.warning(f"Could not normalize ID: {raw_id}")
-        return raw_id
+            return PlanIDGenerator.generate_step_id(number)
+
+        return raw
     
     @staticmethod
     def extract_index_from_title(title: str) -> Optional[int]:

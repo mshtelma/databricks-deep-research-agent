@@ -60,6 +60,7 @@ class StructuredFormatter(logging.Formatter):
 
 class AgentLogger:
     """Enhanced logger for the research agent."""
+    _SPECIAL_LOGGING_KWARGS = {"exc_info", "stack_info", "stacklevel"}
     
     def __init__(self, name: str, level: int = logging.INFO):
         """
@@ -84,28 +85,55 @@ class AgentLogger:
         console_handler.setFormatter(StructuredFormatter())
         self.logger.addHandler(console_handler)
     
-    def info(self, message: str, **kwargs):
-        """Log info message with optional extra data."""
-        self.logger.info(message, extra=kwargs)
+    def _prepare_log_kwargs(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Split kwargs into logging kwargs and structured extras."""
+        logging_kwargs: Dict[str, Any] = {}
+        extra_fields: Dict[str, Any] = {}
+        extra_value = kwargs.get("extra")
+
+        for key, value in kwargs.items():
+            if key in self._SPECIAL_LOGGING_KWARGS:
+                logging_kwargs[key] = value
+            elif key != "extra":
+                extra_fields[key] = value
+
+        if extra_value is not None:
+            if isinstance(extra_value, dict):
+                merged_extra = {**extra_value, **extra_fields}
+            else:
+                merged_extra = {"provided_extra": extra_value, **extra_fields}
+            logging_kwargs["extra"] = merged_extra
+        elif extra_fields:
+            logging_kwargs["extra"] = extra_fields
+
+        return logging_kwargs
     
-    def warning(self, message: str, **kwargs):
-        """Log warning message with optional extra data."""
-        self.logger.warning(message, extra=kwargs)
+    def info(self, message: str, *args: Any, **kwargs: Any):
+        """Log info message with optional formatting and extra data."""
+        log_kwargs = self._prepare_log_kwargs(kwargs)
+        self.logger.info(message, *args, **log_kwargs)
     
-    def error(self, message: str, error: Optional[Exception] = None, **kwargs):
+    def warning(self, message: str, *args: Any, **kwargs: Any):
+        """Log warning message with optional formatting and extra data."""
+        log_kwargs = self._prepare_log_kwargs(kwargs)
+        self.logger.warning(message, *args, **log_kwargs)
+    
+    def error(self, message: str, *args: Any, error: Optional[Exception] = None, **kwargs: Any):
         """Log error message with optional exception."""
-        if error:
-            self.logger.error(message, exc_info=error, extra=kwargs)
-        else:
-            self.logger.error(message, extra=kwargs)
+        log_kwargs = self._prepare_log_kwargs(kwargs)
+        if error is not None:
+            log_kwargs["exc_info"] = error
+        self.logger.error(message, *args, **log_kwargs)
     
-    def debug(self, message: str, **kwargs):
-        """Log debug message with optional extra data."""
-        self.logger.debug(message, extra=kwargs)
+    def debug(self, message: str, *args: Any, **kwargs: Any):
+        """Log debug message with optional formatting and extra data."""
+        log_kwargs = self._prepare_log_kwargs(kwargs)
+        self.logger.debug(message, *args, **log_kwargs)
     
-    def exception(self, message: str, **kwargs):
+    def exception(self, message: str, *args: Any, **kwargs: Any):
         """Log exception with traceback."""
-        self.logger.exception(message, extra=kwargs)
+        log_kwargs = self._prepare_log_kwargs(kwargs)
+        self.logger.exception(message, *args, **log_kwargs)
     
     def workflow_step(self, step_name: str, status: str, **kwargs):
         """Log workflow step with consistent formatting."""
