@@ -1,9 +1,0 @@
-command:
-  - "uvicorn"
-  - "server.app:app"
-
-env:
-  - name: MODEL_SERVING_ENDPOINT
-    value: agents_main-msh-langgraph_research_agent_dev
-  - name: AGENT_ENDPOINT_NAME
-    value: agents_main-msh-langgraph_research_agent_dev

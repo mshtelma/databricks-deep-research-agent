@@ -29,41 +29,7 @@ environments:
     model:
       catalog: main
       schema: mshtelma
-      name: deep_research_agent_dev_v1
+      name: deep_research_agent_dev_v2
     endpoint:
-      name: deep_research_agent_dev_v1
+      name: deep_research_agent_dev_v2
 
-  staging:
-    profile: df
-    workspace_path: /Workspace/Shared/deep-research-agent/staging
-    command_execution:
-      cluster_id: "0909-085001-iko6td48"
-      timeout: 600
-    mlflow:
-      experiment_path: /Shared/experiments/deep_research_agent_staging
-      experiment_description: Staging experiments for LangGraph Research Agent
-    model:
-      catalog: main
-      schema: shared
-      name: deep_research_agent_staging
-    endpoint:
-      name: deep_research_agent_staging
-      workload_size: Medium
-
-  prod:
-    profile: df
-    workspace_path: /Workspace/Shared/deep-research-agent/prod
-    command_execution:
-      cluster_id: "0909-085001-iko6td48"
-      timeout: 900
-    mlflow:
-      experiment_path: /Shared/experiments/deep_research_agent_prod
-      experiment_description: Production experiments for LangGraph Research Agent
-    model:
-      catalog: main
-      schema: prod
-      name: deep_research_agent
-    endpoint:
-      name: deep_research_agent_prod
-      workload_size: Large
-      ready_timeout: 1200

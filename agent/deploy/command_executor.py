@@ -243,7 +243,66 @@ class CommandExecutor:
         
         return self.context_id
     
-    def execute_python(self, code: str, description: str = "", timeout: int = 300) -> ExecutionResult:
+    def _capture_full_output(self, status, description: str = "") -> str:
+        """
+        Capture ALL available output fields from CommandStatus response.
+        
+        Args:
+            status: CommandStatus response from Databricks API
+            description: Description for debugging
+            
+        Returns:
+            Combined output from all available fields
+        """
+        output_parts = []
+        
+        # Capture all possible output fields
+        if hasattr(status, 'results') and status.results:
+            # Main data field (usually the final output)
+            if hasattr(status.results, 'data') and status.results.data:
+                console.print(f"[dim]📄 Main output data ({len(str(status.results.data))} chars)")
+                output_parts.append(f"=== MAIN OUTPUT ===\n{status.results.data}")
+            
+            # Standard output stream
+            if hasattr(status.results, 'stdout') and status.results.stdout:
+                console.print(f"[dim]📤 stdout ({len(status.results.stdout)} chars)")
+                output_parts.append(f"=== STDOUT ===\n{status.results.stdout}")
+                
+            # Standard error stream
+            if hasattr(status.results, 'stderr') and status.results.stderr:
+                console.print(f"[dim]📤 stderr ({len(status.results.stderr)} chars)")
+                output_parts.append(f"=== STDERR ===\n{status.results.stderr}")
+                
+            # Any logs field
+            if hasattr(status.results, 'logs') and status.results.logs:
+                console.print(f"[dim]📋 logs ({len(str(status.results.logs))} chars)")
+                output_parts.append(f"=== LOGS ===\n{status.results.logs}")
+                
+            # Output field (alternative to data)
+            if hasattr(status.results, 'output') and status.results.output:
+                console.print(f"[dim]📄 output field ({len(str(status.results.output))} chars)")
+                output_parts.append(f"=== OUTPUT ===\n{status.results.output}")
+                
+            # Error message field
+            if hasattr(status.results, 'error') and status.results.error:
+                console.print(f"[red]❌ error field ({len(str(status.results.error))} chars)")
+                output_parts.append(f"=== ERROR ===\n{status.results.error}")
+                
+            # Check for any other attributes that might contain output
+            if hasattr(status.results, '__dict__'):
+                for attr_name, attr_value in status.results.__dict__.items():
+                    if attr_name not in ['data', 'stdout', 'stderr', 'logs', 'output', 'error'] and attr_value:
+                        console.print(f"[dim]📝 Additional field '{attr_name}' ({len(str(attr_value))} chars)")
+                        output_parts.append(f"=== {attr_name.upper()} ===\n{attr_value}")
+        
+        # Debug: Print status object structure for investigation
+        console.print(f"[dim]🔍 Status object structure: {dir(status)}")
+        if hasattr(status, 'results') and status.results:
+            console.print(f"[dim]🔍 Results object structure: {dir(status.results)}")
+        
+        return "\n\n".join(output_parts) if output_parts else ""
+
+    def execute_python(self, code: str, description: str = "", timeout: int = 300, verbose: bool = True) -> ExecutionResult:
         """
         Execute Python code on the Databricks cluster.
         
@@ -251,6 +310,7 @@ class CommandExecutor:
             code: Python code to execute
             description: Description for logging
             timeout: Timeout in seconds
+            verbose: Enable verbose logging to capture ALL output
             
         Returns:
             ExecutionResult with success status, output, and error info
@@ -261,6 +321,14 @@ class CommandExecutor:
         if description:
             console.print(f"[blue]🔧 {description}")
             logger.info(f"Executing: {description}")
+        
+        if verbose:
+            console.print(f"[dim]🔍 Verbose logging enabled - will capture ALL output fields")
+            if len(code) > 200:
+                console.print(f"[dim]📝 Code length: {len(code)} characters")
+                console.print(f"[dim]📝 Code preview: {code[:200]}...")
+            else:
+                console.print(f"[dim]📝 Full code: {code}")
         
         try:
             # Execute command
@@ -274,7 +342,7 @@ class CommandExecutor:
             
             # Wait for completion and get result
             command_id = command_result.id
-            result = self._wait_for_completion(command_id, timeout, description)
+            result = self._wait_for_completion(command_id, timeout, description, verbose)
             result.duration = time.time() - start_time
             
             if result.success and description:
@@ -298,7 +366,7 @@ class CommandExecutor:
                 duration=duration
             )
     
-    def _wait_for_completion(self, command_id: str, timeout: int, description: str = "") -> ExecutionResult:
+    def _wait_for_completion(self, command_id: str, timeout: int, description: str = "", verbose: bool = True) -> ExecutionResult:
         """Wait for command to complete and return results with Rich progress."""
         start_time = time.time()
         
@@ -319,27 +387,55 @@ class CommandExecutor:
                     )
                     
                     if status.status == compute.CommandStatus.FINISHED:
-                        # Command completed successfully
-                        output = ""
-                        error = None
+                        # Command completed successfully - capture ALL output
+                        comprehensive_output = self._capture_full_output(status, description)
                         
-                        if status.results and status.results.data:
-                            output = status.results.data
+                        # If verbose mode and we have comprehensive output, display it immediately
+                        if verbose and comprehensive_output:
+                            console.print(f"\n[green]📋 COMPREHENSIVE OUTPUT CAPTURED:")
+                            console.print(f"[dim]{'-'*80}")
+                            # Display the output with proper formatting
+                            lines = comprehensive_output.split('\n')
+                            for line in lines[:100]:  # Limit display to first 100 lines
+                                console.print(line)
+                            if len(lines) > 100:
+                                console.print(f"[dim]... ({len(lines)-100} more lines truncated from display)")
+                            console.print(f"[dim]{'-'*80}")
+                        
+                        # Use comprehensive output if available, fallback to data field
+                        final_output = comprehensive_output if comprehensive_output else (
+                            status.results.data if status.results and status.results.data else ""
+                        )
                         
                         progress.update(task, description=f"[green]✅ Completed: {description or 'command'}")
                         return ExecutionResult(
                             success=True,
-                            output=output,
-                            error=error,
+                            output=final_output,
+                            error=None,
                             command_id=command_id,
                             status="FINISHED"
                         )
                     
                     elif status.status == compute.CommandStatus.ERROR:
-                        # Command failed
-                        error_msg = "Command execution error"
-                        if status.results and status.results.data:
-                            error_msg = status.results.data
+                        # Command failed - capture ALL error information
+                        comprehensive_output = self._capture_full_output(status, description)
+                        
+                        # If verbose mode and we have comprehensive output, display it immediately
+                        if verbose and comprehensive_output:
+                            console.print(f"\n[red]❌ ERROR OUTPUT CAPTURED:")
+                            console.print(f"[dim]{'-'*80}")
+                            # Display the error output with proper formatting
+                            lines = comprehensive_output.split('\n')
+                            for line in lines[:50]:  # Limit error display to first 50 lines
+                                console.print(f"[red]{line}")
+                            if len(lines) > 50:
+                                console.print(f"[dim]... ({len(lines)-50} more error lines truncated from display)")
+                            console.print(f"[dim]{'-'*80}")
+                        
+                        # Use comprehensive output for error, fallback to data field
+                        error_msg = comprehensive_output if comprehensive_output else (
+                            status.results.data if status.results and status.results.data else "Command execution error"
+                        )
                         
                         progress.update(task, description=f"[red]❌ Failed: {description or 'command'}")
                         return ExecutionResult(
