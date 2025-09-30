@@ -269,9 +269,15 @@ class StyleTemplate:
     def get_style_prompt(style: ReportStyle) -> str:
         """Get the prompt template for a specific style."""
         config = STYLE_CONFIGS[style]
-        
+
         return f"""
 You are writing a {config.style.value.replace('_', ' ')} style report.
+
+CRITICAL OUTPUT INSTRUCTIONS:
+- Generate the ACTUAL REPORT CONTENT, not reasoning about what to write
+- Write the report directly - present facts, findings, and analysis
+- DO NOT write "We need to...", "I need to...", "Let me...", or "The report should contain..."
+- INSTEAD, write actual content: "The analysis shows...", "Key findings include...", "According to the data..."
 
 TONE: {config.tone}
 
@@ -287,11 +293,14 @@ KEY FEATURES TO INCLUDE:
 {chr(10).join(f"- {feature}" for feature in config.key_features)}
 
 Remember to:
-1. Maintain the appropriate tone throughout
-2. Follow the expected structure
-3. Use citations in the specified format
-4. Keep within the length guidelines
-5. Match the language complexity to the target audience
+1. Write the actual report content, not meta-discussion about it
+2. Maintain the appropriate tone throughout
+3. Follow the expected structure
+4. Use citations in the specified format
+5. Keep within the length guidelines
+6. Match the language complexity to the target audience
+
+START WRITING THE ACTUAL REPORT CONTENT NOW:
 """
 
     @staticmethod
@@ -505,13 +514,13 @@ class ReportFormatter:
     def format_section_header(section: str, style: ReportStyle) -> str:
         """Format a section header according to style."""
         if style == ReportStyle.ACADEMIC:
-            return f"\n## {section}\n"
+            return f"\n\n## {section}\n\n"
         elif style == ReportStyle.SOCIAL_MEDIA:
-            return f"\n🔹 {section.upper()}\n"
+            return f"\n\n🔹 {section.upper()}\n\n"
         elif style == ReportStyle.NEWS:
-            return f"\n**{section}**\n"
+            return f"\n\n**{section}**\n\n"
         else:
-            return f"\n### {section}\n"
+            return f"\n\n### {section}\n\n"
     
     @staticmethod
     def apply_style_formatting(content: str, style: ReportStyle) -> str:

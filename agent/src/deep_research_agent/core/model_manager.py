@@ -9,6 +9,7 @@ while maintaining backward compatibility.
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional
 from enum import Enum
+import os
 
 try:
     from databricks_langchain import ChatDatabricks
@@ -26,12 +27,18 @@ logger = get_logger(__name__)
 
 class ModelRole(str, Enum):
     """Roles that models can play in the workflow."""
+    # Original roles (kept for backward compatibility)
     QUERY_GENERATION = "query_generation"
     WEB_RESEARCH = "web_research"
     REFLECTION = "reflection"
     SYNTHESIS = "synthesis"
     EMBEDDING = "embedding"
     DEFAULT = "default"
+
+    # New complexity-based roles
+    SIMPLE = "simple"           # Quick tasks: classification, query generation, extraction
+    ANALYTICAL = "analytical"   # Medium tasks: research, fact-checking, planning
+    COMPLEX = "complex"         # Heavy tasks: final synthesis, deep analysis
 
 
 @dataclass
@@ -42,6 +49,9 @@ class ModelConfig:
     max_tokens: int = 4000
     timeout_seconds: int = 30
     max_retries: int = 3
+    # Reasoning-specific configuration
+    reasoning_effort: Optional[str] = None  # "low", "medium", "high" for GPT-OSS models
+    reasoning_budget: Optional[int] = None  # Token budget for reasoning (for hybrid models like Claude)
 
 @dataclass 
 class NodeModelConfiguration:
@@ -83,13 +93,23 @@ class NodeModelConfiguration:
     def get_model_for_role(self, role: ModelRole) -> ModelConfig:
         """
         Get the model configuration for a specific role.
-        
+
         Args:
             role: The model role
-            
+
         Returns:
             ModelConfig to use for this role
         """
+        # First check if we have directly configured models from _all_models
+        if hasattr(self, '_all_models'):
+            # Check for direct role mapping in config
+            if role == ModelRole.SIMPLE and 'simple' in self._all_models:
+                return self._all_models['simple']
+            elif role == ModelRole.ANALYTICAL and 'analytical' in self._all_models:
+                return self._all_models['analytical']
+            elif role == ModelRole.COMPLEX and 'complex' in self._all_models:
+                return self._all_models['complex']
+
         role_models = {
             ModelRole.QUERY_GENERATION: self.query_generation_model,
             ModelRole.WEB_RESEARCH: self.web_research_model,
@@ -97,16 +117,24 @@ class NodeModelConfiguration:
             ModelRole.SYNTHESIS: self.synthesis_model,
             ModelRole.EMBEDDING: self.embedding_model,
             ModelRole.DEFAULT: self.default_model,
+
+            # Map complexity-based roles to specific models
+            # SIMPLE uses query_generation model (or web_research as fallback)
+            ModelRole.SIMPLE: self.query_generation_model or self.web_research_model,
+            # ANALYTICAL uses web_research model (or default as fallback)
+            ModelRole.ANALYTICAL: self.web_research_model or self.default_model,
+            # COMPLEX uses synthesis model (or default as fallback)
+            ModelRole.COMPLEX: self.synthesis_model or self.default_model,
         }
-        
+
         specific_model = role_models.get(role)
         if specific_model is not None:
             return specific_model
-        
+
         # For non-embedding roles, fall back to default
         if role != ModelRole.EMBEDDING:
             return self.default_model
-        
+
         return self.embedding_model
     
     def validate(self) -> None:
@@ -148,19 +176,25 @@ class ModelManager:
     def __init__(self, config: Optional[NodeModelConfiguration] = None):
         """
         Initialize the model manager.
-        
+
         Args:
             config: Model configuration (uses defaults if None)
         """
         self.config = config or NodeModelConfiguration()
         self.config.validate()
-        
+
+        # Store all model configs if available for dynamic role lookup
+        if hasattr(config, '_all_models'):
+            self._all_models = config._all_models
+        else:
+            self._all_models = {}
+
         # Cache for model instances
         self._model_cache: Dict[str, ChatDatabricks] = {}
-        
+
         # Usage tracking
         self._usage_stats: Dict[str, int] = {}
-        
+
         # Health status
         self._model_health: Dict[str, bool] = {}
         
@@ -209,13 +243,13 @@ class ModelManager:
     def get_chat_model(self, model_name: str = "default") -> ChatDatabricks:
         """
         Get a chat model instance by name.
-        
+
         Args:
             model_name: Name of the model ("default", "synthesis", etc.)
-            
+
         Returns:
             ChatDatabricks instance
-            
+
         Raises:
             LLMEndpointError: If model initialization fails
         """
@@ -226,8 +260,12 @@ class ModelManager:
             "web_research": ModelRole.WEB_RESEARCH,
             "query_generation": ModelRole.QUERY_GENERATION,
             "reflection": ModelRole.REFLECTION,
+            # New complexity-based mappings
+            "simple": ModelRole.SIMPLE,
+            "analytical": ModelRole.ANALYTICAL,
+            "complex": ModelRole.COMPLEX,
         }
-        
+
         role = role_mapping.get(model_name.lower(), ModelRole.DEFAULT)
         return self.get_llm_for_role(role)
     
@@ -253,19 +291,40 @@ class ModelManager:
         # Create new model instance
         try:
             model = self._create_model_instance(model_config)
-            
-            # Test the model with a simple call
+
+            # Skip health check if we've already validated this endpoint recently
+            # or if health checks are disabled (for performance)
+            skip_health_check = (
+                model_endpoint in self._model_health or
+                os.environ.get("SKIP_MODEL_HEALTH_CHECKS", "false").lower() == "true"
+            )
+
+            if skip_health_check:
+                # Trust the model is healthy if we've seen it before or checks are disabled
+                self._model_cache[model_endpoint] = model
+                self._model_health[model_endpoint] = True
+                self._usage_stats[model_endpoint] = 1
+
+                logger.info(
+                    "Created and cached model instance (health check skipped)",
+                    model=model_endpoint,
+                    context=str(context)
+                )
+
+                return model
+
+            # Test the model with a simple call (only for new endpoints)
             if self._test_model_health(model):
                 self._model_cache[model_endpoint] = model
                 self._model_health[model_endpoint] = True
                 self._usage_stats[model_endpoint] = 1
-                
+
                 logger.info(
-                    "Created and cached model instance",
+                    "Created and cached model instance (health check passed)",
                     model=model_endpoint,
                     context=str(context)
                 )
-                
+
                 return model
             else:
                 # Model failed health check
@@ -304,11 +363,63 @@ class ModelManager:
     
     def _create_model_instance(self, model_config: ModelConfig) -> ChatDatabricks:
         """Create a new ChatDatabricks instance from a ModelConfig."""
+        # Determine if this is a reasoning model that needs special configuration
+        endpoint_name = model_config.endpoint.lower()
+        is_reasoning_model = 'gpt-oss' in endpoint_name
+        is_claude_model = 'claude' in endpoint_name
+
+        # Configure extra_params based on model type and config
+        extra_params = {}
+
+        # Use configuration values if provided
+        if model_config.reasoning_effort:
+            extra_params["reasoning_effort"] = model_config.reasoning_effort
+            logger.info(
+                f"Using configured reasoning_effort={model_config.reasoning_effort} "
+                f"for model: {model_config.endpoint}"
+            )
+        elif is_reasoning_model:
+            # Smart default based on model size and usage context
+            # 20b models default to low, 120b models default to medium
+            # This provides a good balance between speed and quality
+            if '20b' in endpoint_name:
+                default_effort = "low"
+            elif '120b' in endpoint_name:
+                default_effort = "medium"  # Better default for larger models
+            else:
+                default_effort = "low"  # Conservative default
+
+            extra_params["reasoning_effort"] = default_effort
+            logger.info(
+                f"Using default reasoning_effort={default_effort} for GPT-OSS model: {model_config.endpoint}"
+            )
+
+        # For models that support reasoning budget (future enhancement for Claude)
+        if model_config.reasoning_budget:
+            if is_claude_model:
+                # Claude uses thinking configuration with budget_tokens
+                extra_params["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": model_config.reasoning_budget
+                }
+                logger.info(
+                    f"Using configured reasoning_budget={model_config.reasoning_budget} "
+                    f"for Claude model: {model_config.endpoint}"
+                )
+            else:
+                # For other models, could add as a parameter if supported
+                logger.debug(
+                    f"reasoning_budget configured but not applied for {model_config.endpoint} "
+                    f"(not a Claude model)"
+                )
+
+        # Create the ChatDatabricks instance with optional extra_params
         return ChatDatabricks(
             endpoint=model_config.endpoint,
             temperature=getattr(model_config, 'temperature', 0.7),
             max_tokens=getattr(model_config, 'max_tokens', 4000),
-            max_retries=getattr(model_config, 'max_retries', 3)
+            max_retries=getattr(model_config, 'max_retries', 3),
+            extra_params=extra_params if extra_params else None
         )
     
     def _test_model_health(self, model: ChatDatabricks, timeout_seconds: int = 10) -> bool:

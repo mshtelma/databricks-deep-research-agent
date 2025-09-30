@@ -9,25 +9,48 @@ from typing import Dict, Any
 
 class MemoryOptimizedConfig:
     """Memory optimization settings for 4GB RAM limit serving endpoints."""
-    
+
     # Cache memory limits (reduced from defaults)
     CACHE_MAX_MEMORY_MB = 150        # Down from 500MB
     CACHE_MAX_SIZE = 2000            # Down from 10000 entries
-    
+
     # Content truncation limits
     MAX_SEARCH_CONTENT_LENGTH = 8000     # ~8KB per search result
     MAX_CITATION_SNIPPET_LENGTH = 500    # ~500 chars per citation
-    
-    # State list size limits (from multi_agent_state.py merge_lists)
-    MAX_OBSERVATIONS = 50            # Most recent observations
-    MAX_SEARCH_RESULTS = 500         # Most relevant search results (increased from 100)
+
+    # State list size limits - These are now configurable via base.yaml
+    # Defaults maintained for backward compatibility
+    MAX_OBSERVATIONS = 50            # Default - overridden by config.memory.max_observations
+    MAX_SEARCH_RESULTS = 500         # Default - overridden by config.memory.max_search_results
     MAX_CITATIONS = 200              # Citations are smaller, allow more
     MAX_REFLECTIONS = 30             # Limit reflection history
     MAX_AGENT_HANDOFFS = 20          # Limit handoff history
     MAX_GENERAL_LIST_SIZE = 100      # Default for other lists
-    
+    MAX_OBSERVATIONS_PER_STEP = 10   # Default - overridden by config.memory.max_observations_per_step
+
     # Memory pruning limits (for prune_state_for_memory)
     MAX_PRUNED_SEARCH_RESULTS = 200  # Target size after intelligent pruning (was 20)
+
+    @classmethod
+    def get_observations_limit(cls, config=None):
+        """Get max observations limit from config or default."""
+        if config and "memory" in config:
+            return config["memory"].get("max_observations", cls.MAX_OBSERVATIONS)
+        return cls.MAX_OBSERVATIONS
+
+    @classmethod
+    def get_observations_per_step_limit(cls, config=None):
+        """Get max observations per step limit from config or default."""
+        if config and "memory" in config:
+            return config["memory"].get("max_observations_per_step", cls.MAX_OBSERVATIONS_PER_STEP)
+        return cls.MAX_OBSERVATIONS_PER_STEP
+
+    @classmethod
+    def get_search_results_limit(cls, config=None):
+        """Get max search results limit from config or default."""
+        if config and "memory" in config:
+            return config["memory"].get("max_search_results", cls.MAX_SEARCH_RESULTS)
+        return cls.MAX_SEARCH_RESULTS
     
     # Memory monitoring
     MEMORY_LIMIT_MB = 3500           # 3.5GB limit (500MB headroom)

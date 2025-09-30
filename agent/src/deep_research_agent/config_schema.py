@@ -33,6 +33,24 @@ class ModelConfig(BaseSettings):
     endpoint: str = Field(default="databricks-gpt-oss-120b")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4000, gt=0, le=32000)
+    # Reasoning-specific configuration for models like GPT-OSS and Claude
+    reasoning_effort: Optional[str] = Field(
+        default=None,
+        description="Reasoning effort level for models that support it (low, medium, high)"
+    )
+    reasoning_budget: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=100000,
+        description="Token budget for reasoning in hybrid models like Claude"
+    )
+
+    @validator('reasoning_effort')
+    def validate_reasoning_effort(cls, v):
+        """Validate reasoning effort is one of the allowed values"""
+        if v is not None and v not in ['low', 'medium', 'high']:
+            raise ValueError(f"reasoning_effort must be 'low', 'medium', or 'high', got {v}")
+        return v
 
 class CoordinatorConfig(BaseSettings):
     """Coordinator agent configuration"""
@@ -163,9 +181,15 @@ class EntityValidationConfig(BaseSettings):
     enabled: bool = True
     validation_mode: str = "strict"  # strict, moderate, lenient
     enable_synthesis_validation: bool = True
-    enable_observation_validation: bool = True 
+    enable_observation_validation: bool = True
     enable_section_validation: bool = True
     track_violations: bool = True
+
+class MemoryConfig(BaseSettings):
+    """Memory and state management configuration"""
+    max_observations: int = Field(default=50, ge=10, le=1000, description="Maximum observations to keep in state")
+    max_observations_per_step: int = Field(default=10, ge=5, le=100, description="Maximum observations per research step")
+    max_search_results: int = Field(default=100, ge=10, le=1000, description="Maximum search results to accumulate")
 
 class ResearchConfig(BaseSettings):
     """Main research agent configuration"""
@@ -205,7 +229,8 @@ class ResearchConfig(BaseSettings):
     quality_enhancement: QualityEnhancementConfig = Field(default_factory=QualityEnhancementConfig)
     adaptive_structure: AdaptiveStructureConfig = Field(default_factory=AdaptiveStructureConfig)
     entity_validation: EntityValidationConfig = Field(default_factory=EntityValidationConfig)
-    
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
+
     # System settings
     recursion_limit: int = Field(default=100, ge=10)
     

@@ -7,10 +7,11 @@ Executes research steps, accumulates observations, and manages citations.
 import asyncio
 from dataclasses import dataclass, asdict
 from enum import Enum
-from typing import Dict, Any, Optional, List, Literal
+from typing import Dict, Any, Optional, List, Literal, Tuple
 from datetime import datetime
 import json
 import os
+import re
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.types import Command
@@ -22,6 +23,7 @@ from ..core import (
     SearchResultType,
     SectionResearchResult,
 )
+from ..core.model_manager import ModelRole
 from ..core import id_generator as id_gen
 from ..core.entity_validation import EntityExtractor
 from ..core.multi_agent_state import EnhancedResearchState, StateManager
@@ -98,7 +100,30 @@ class ResearcherAgent:
         search_config = self.config.get('search', {})
         self.max_results_per_query = search_config.get('max_results_per_query', 5)
         self.enable_parallel_search = search_config.get('enable_parallel_search', True)
-    
+
+        # Store model manager if available for dynamic model selection
+        self.model_manager = getattr(llm, '__model_manager__', None)
+
+    def _get_llm_for_complexity(self, complexity: str = "default"):
+        """
+        Get the appropriate LLM based on task complexity.
+
+        Args:
+            complexity: "simple", "analytical", or "complex"
+
+        Returns:
+            The appropriate LLM instance
+        """
+        # If we have a model manager, use it for dynamic selection
+        if self.model_manager:
+            try:
+                return self.model_manager.get_chat_model(complexity)
+            except Exception as e:
+                logger.debug(f"Failed to get {complexity} model, using default: {e}")
+
+        # Fallback to the default LLM
+        return self.llm
+
     def _emit_step_event(self, event_type: str, step_id: str, status: str, result: Optional[str] = None):
         """Emit step events for UI visualization."""
         try:
@@ -220,17 +245,26 @@ class ResearcherAgent:
                     step_index = i
                     break
 
+        # Emit BOTH step_started and step_activated events for UI compatibility
+        step_started_event = databricks_response_builder.emit_step_started_event(
+            step_id=current_step.step_id,
+            step_index=step_index,
+            step_name=current_step.title,
+            step_type=getattr(current_step.step_type, 'value', 'research')
+        )
         step_activated_event = databricks_response_builder.emit_step_activated_event(
             step_id=current_step.step_id,
             step_index=step_index,
             step_name=current_step.title,
             step_type=getattr(current_step.step_type, 'value', 'research')
         )
-        
-        # Add the event to intermediate_events so it appears in the streaming response
+
+        # Add BOTH events to intermediate_events so they appear in the streaming response
         if "intermediate_events" not in state:
             state["intermediate_events"] = []
+        state["intermediate_events"].append(step_started_event)
         state["intermediate_events"].append(step_activated_event)
+        logger.info("🎯 Added both step_started and step_activated events for step: %s", current_step.step_id)
         
         # Keep the original event_emitter call for backward compatibility
         self._emit_step_event(
@@ -365,7 +399,7 @@ class ResearcherAgent:
                         validation_result = None
                     
                     # Always add the observation regardless of validation result
-                    state = StateManager.add_observation(state, observation, current_step)
+                    state = StateManager.add_observation(state, observation, current_step, self.config)
                     logger.info(f"Added observation to state: {observation_text[:100]}...")
                     
                     # Track validation info for debugging but don't block observation
@@ -419,13 +453,20 @@ class ResearcherAgent:
                         results["search_results"], 
                         state.get("requested_entities", [])
                     )
-                    state = StateManager.add_search_results(state, filtered_results)
+                    state = StateManager.add_search_results(state, filtered_results, self.config)
                 
+                # CRITICAL FIX: Mark step as COMPLETED to prevent infinite loop
+                current_step.status = StepStatus.COMPLETED
+
                 # Add to completed steps
                 state["completed_steps"].append(current_step)
-                
+
                 # Update plan metrics
                 plan.completed_steps += 1
+
+                # CRITICAL FIX: Update plan in state to persist step status changes
+                state["current_plan"] = plan
+                logger.info(f"✅ INFINITE_LOOP_FIX: Updated plan in state after marking step {current_step.step_id} as completed")
                 
                 # Update quality metrics progressively
                 updates = {}
@@ -464,6 +505,10 @@ class ResearcherAgent:
                     else:
                         # Convert other types to string then to list
                         state["research_observations"] = existing_rich_obs + [str(rich_observations)]
+
+                    # CRITICAL: Sync observations field to prevent data loss in reporter
+                    # The reporter checks both fields, but they need to be in sync
+                    state["observations"] = state["research_observations"].copy()
             else:
                 current_step.status = StepStatus.FAILED
                 plan.failed_steps += 1
@@ -716,68 +761,58 @@ class ResearcherAgent:
             logger.warning("Synthesis returned empty or None result")
             return None
         
-        # Attempt to parse JSON from LLM synthesis to extract structured fields
-        parsed_observations: Optional[List[str]] = None
-        parsed_citations: Optional[List[Citation]] = None
-        research_quality_score: Optional[float] = None
-        extracted_data: Dict[str, Any] = {}
-        parsed: Optional[Dict[str, Any]] = None
+        # Parse synthesis from structured output
         try:
-            if isinstance(synthesis, str) and synthesis.strip().startswith('{'):
-                logger.info("Attempting to parse synthesis as JSON")
-                parsed = json.loads(synthesis)
-                # Observations
-                if isinstance(parsed.get("observations"), list):
-                    from ..core.observation_models import ensure_structured_observation
-                    parsed_observations = [ensure_structured_observation(o) for o in parsed["observations"]]
-                    logger.info(f"Parsed {len(parsed_observations)} observations from JSON")
-                # Citations (optional)
-                if isinstance(parsed.get("citations"), list):
-                    parsed_citations = []
-                    for c in parsed["citations"]:
-                        if isinstance(c, dict):
-                            parsed_citations.append(
-                                Citation(
-                                    source=c.get("source") or c.get("url"),
-                                    title=c.get("title"),
-                                    url=c.get("url") or c.get("source"),
-                                    snippet=c.get("snippet"),
-                                    relevance_score=float(c.get("relevance_score", 0.0))
-                                )
-                            )
-                    logger.info(f"Parsed {len(parsed_citations)} citations from JSON")
-                # Quality metrics
-                qm = parsed.get("quality_metrics")
-                if isinstance(qm, dict):
-                    # Average available metrics
-                    metric_values = [
-                        float(v) for k, v in qm.items()
-                        if isinstance(v, (int, float))
-                    ]
-                    if metric_values:
-                        research_quality_score = sum(metric_values) / len(metric_values)
-                if isinstance(parsed.get("extracted_data"), dict):
-                    extracted_data = parsed["extracted_data"]
-            else:
-                logger.info("Synthesis is not JSON format, using heuristic extraction")
-        except Exception as e:
-            # If parsing fails, continue with heuristic extraction
-            logger.warning(f"JSON parsing failed: {e}, falling back to heuristic extraction")
-            parsed_observations = None
-            parsed_citations = None
-            research_quality_score = None
+            parsed = json.loads(synthesis)
+            observations = parsed.get("observations", [])
+            synthesis_text = parsed.get("synthesis", "")
+            extracted_data = parsed.get("extracted_data", {})
+            parsed_citations = parsed.get("citations", [])
+
+            # Convert to structured observations
+            from ..core.observation_models import ensure_structured_observation
+            structured_observations = [
+                ensure_structured_observation(obs)
+                for obs in observations
+            ]
+
+            # Log success
+            logger.info(f"✅ Structured synthesis produced {len(structured_observations)} observations")
+
+            # Convert citations to Citation objects if needed
+            if parsed_citations and isinstance(parsed_citations[0], dict):
+                citation_objects = []
+                for c in parsed_citations:
+                    if isinstance(c, dict):
+                        citation_objects.append(Citation(
+                            source=c.get("source") or c.get("url", ""),
+                            title=c.get("title", ""),
+                            url=c.get("url") or c.get("source", ""),
+                            snippet=c.get("snippet"),
+                            relevance_score=float(c.get("relevance_score", 0.8))
+                        ))
+                parsed_citations = citation_objects
+
+        except (json.JSONDecodeError, KeyError) as e:
+            # Should rarely happen with structured output
+            logger.error(f"CRITICAL: Structured output produced invalid format: {e}")
+
+            # Emergency extraction from search result titles
+            observations = [
+                f"Source: {r.get('title', 'Unknown') if isinstance(r, dict) else getattr(r, 'title', 'Unknown')}"
+                for r in all_results[:5]
+            ]
+            from ..core.observation_models import ensure_structured_observation
+            structured_observations = [
+                ensure_structured_observation(obs)
+                for obs in observations
+            ]
+            synthesis_text = f"Research on {step.description}"
             extracted_data = {}
-        
+            parsed_citations = None
+
+        # Normalize search results for later use
         normalized_results = tuple(self._normalize_search_result(result) for result in all_results)
-
-        # Create observations (always execute this, whether JSON parsing succeeded or not)
-        observations = parsed_observations or self._extract_key_findings(synthesis, list(normalized_results))
-
-        # Convert to structured observations if enabled
-        structured_observations = self._create_structured_observations(
-            observations, step, synthesis, list(normalized_results)
-        )
-        logger.info(f"Generated {len(structured_observations)} observations from synthesis")
 
         # Use parsed citations if provided, otherwise convert results
         citations_list: List[Citation] = parsed_citations or []
@@ -788,6 +823,13 @@ class ResearcherAgent:
         logger.info(f"Generated {len(citations_list)} citations from search results")
         
         confidence = self._calculate_confidence(list(normalized_results))
+
+        # Calculate research quality score
+        research_quality_score = None
+        try:
+            research_quality_score = self._calculate_research_quality_score(state)
+        except Exception as e:
+            logger.warning(f"Failed to calculate research quality score: {e}")
 
         metadata: Dict[str, Any] = {
             "section_id": step.step_id,
@@ -1111,7 +1153,7 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
         return [entity for entity, _ in entity_counts.most_common(5)]
     
     def _generate_search_queries(self, text: str, max_queries: int = 5, state: Dict[str, Any] = None) -> List[str]:
-        """Generate focused search queries using abstract decomposition patterns with entity awareness and incremental loop intelligence."""
+        """Generate focused search queries using LLM for proper understanding."""
 
         # Get entity context if available
         requested_entities = []
@@ -1128,133 +1170,77 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
             logger.info(f"[INCREMENTAL QUERIES] Generating queries for research loop {research_loops + 1}")
             return self._generate_incremental_queries(text, max_queries, incremental_context, requested_entities, state)
 
-        # Standard first-loop query generation
-        # Try linguistic patterns first with entity context
-        queries = self._decompose_by_patterns(text, max_queries, requested_entities)
+        # Use LLM to generate search queries
+        try:
+            # Get the analytical model for query generation
+            llm = self.model_manager.get_llm_for_role(ModelRole.SIMPLE)
 
-        if not queries or len(queries) < 2:
-            # Fall back to semantic chunking with entities
-            semantic_queries = self._semantic_chunking(text, max_queries, requested_entities)
-            queries.extend(semantic_queries)
+            # Build entity context if available
+            entity_context = ""
+            if requested_entities:
+                entity_context = f"\nImportant entities to focus on: {', '.join(requested_entities)}"
 
-        if not queries:
-            # Last resort: safe truncation with entities
-            queries = [self._safe_truncate_with_entities(text, requested_entities)]
+            # Build the system prompt for query generation
+            system_prompt = """You are a search query generator for a research agent.
+Given a research task or question, generate specific, focused search queries that will find relevant information.
 
-        # Clean and deduplicate
-        return self._clean_queries(queries, max_queries)
+Guidelines:
+- Generate diverse queries that cover different aspects of the topic
+- Make queries specific and searchable (not too broad or vague)
+- Include entity names and specific terms when relevant
+- Each query should be 3-10 words, optimized for web search
+- Avoid redundant or overly similar queries
+
+Output ONLY the search queries, one per line, with no additional text or formatting."""
+
+            user_prompt = f"""Generate {max_queries} specific search queries for this research task:
+
+{text}{entity_context}
+
+Search queries:"""
+
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt)
+            ]
+
+            response = llm.invoke(messages)
+
+            # Extract content from response (handle both string and structured content)
+            content = response.content
+            if isinstance(content, list):
+                # Handle structured content from reasoning models
+                for item in content:
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        content = item.get('text', '')
+                        break
+                else:
+                    # If no text type found, try to extract any string content
+                    content = str(content)
+
+            # Parse the response to extract queries
+            queries = []
+            for line in content.strip().split('\n'):
+                query = line.strip()
+                # Remove any numbering or bullet points
+                query = re.sub(r'^[\d\-•*]+[\.\)]\s*', '', query)
+                # Skip empty lines or very short queries
+                if query and len(query) > 3:
+                    queries.append(query)
+
+            # Ensure we have at least one query
+            if not queries:
+                # Fallback to a simple truncation of the original text
+                queries = [self._safe_truncate(text, 80)]
+
+            # Limit to max_queries
+            return queries[:max_queries]
+
+        except Exception as e:
+            logger.error(f"LLM query generation failed: {e}")
+            # Ultimate fallback: use a simple truncation
+            return [self._safe_truncate(text, 80)]
     
-    def _decompose_by_patterns(self, text: str, max_queries: int = 5, requested_entities: List[str] = None) -> List[str]:
-        """Decompose query using linguistic patterns - no domain knowledge."""
-        import re
-        
-        # Clean the text
-        clean_text = ' '.join(text.split())
-        
-        queries = []
-        
-        # 1. Split by comparison indicators
-        comparison_patterns = r'\b(vs\.?|versus|compared? to|against|or|and)\b'
-        parts = re.split(comparison_patterns, clean_text, flags=re.I)
-        
-        # Process parts that might be entities
-        for part in parts:
-            part = part.strip()
-            if 10 < len(part) < 100 and not part.lower() in ['vs', 'versus', 'compared', 'to', 'against', 'or', 'and']:
-                queries.append(part)
-        
-        # 2. Extract quoted phrases (often important)
-        quoted = re.findall(r'"([^"]+)"', clean_text)
-        for quote in quoted[:2]:
-            if 5 < len(quote) < 100:
-                queries.append(quote)
-        
-        # 3. Split by punctuation boundaries
-        sentences = re.split(r'[.!?;]', clean_text)
-        for sentence in sentences[:3]:
-            sentence = sentence.strip()
-            if 20 < len(sentence) < 100:
-                queries.append(sentence)
-        
-        # 4. Extract parenthetical content (often contains specifics)
-        parens = re.findall(r'\(([^)]+)\)', clean_text)
-        for paren in parens[:2]:
-            if 5 < len(paren) < 100:
-                queries.append(paren)
-        
-        # 5. Extract capitalized phrases (likely proper nouns/entities)
-        noun_phrases = re.findall(r'\b(?:[A-Z][a-z]+\s+){1,3}[A-Z][a-z]+\b', clean_text)
-        for phrase in noun_phrases[:3]:
-            if 5 < len(phrase) < 100:
-                queries.append(phrase)
-        
-        # 6. CRITICAL: Add entity-aware queries if entities are specified
-        if requested_entities:
-            entities_str = ' '.join(requested_entities)
-            # Add entity-specific versions of existing queries
-            entity_queries = []
-            for query in queries[:2]:  # Take top 2 queries
-                # Add entities to make query more specific
-                entity_query = f"{query} {entities_str}"
-                entity_queries.append(entity_query)
-            
-            # Add direct entity-based query
-            if text and len(text) > 10:
-                # Extract the main topic without entities
-                topic_words = [word for word in text.split() 
-                             if word.lower() not in [entity.lower() for entity in requested_entities]]
-                if topic_words:
-                    main_topic = ' '.join(topic_words[:5])  # First 5 non-entity words
-                    entity_queries.append(f"{main_topic} {entities_str}")
-            
-            queries.extend(entity_queries)
-        
-        return queries[:max_queries]
-    
-    def _semantic_chunking(self, text: str, max_queries: int = 3, requested_entities: List[str] = None) -> List[str]:
-        """Break text into semantic chunks without domain knowledge."""
-        import re
-        
-        clean_text = ' '.join(text.split())
-        queries = []
-        
-        # Strategy 1: Question decomposition
-        if '?' in clean_text:
-            questions = clean_text.split('?')
-            for q in questions:
-                q = q.strip()
-                if 10 < len(q) < 100:
-                    queries.append(q + '?')
-        
-        # Strategy 2: List item extraction (1), 2), a), b), -)
-        list_items = re.findall(r'(?:^\s*|\s)[\d\-•]\)?\s*(.+?)(?=\s[\d\-•]|\Z)', clean_text, re.M)
-        for item in list_items:
-            item = item.strip()
-            if 10 < len(item) < 100:
-                queries.append(item)
-        
-        # Strategy 3: Conjunction splitting
-        conjunctions = ['and', 'or', 'but', 'however', 'moreover', 'furthermore', 'including', 'such as']
-        for conj in conjunctions:
-            pattern = r'\b' + re.escape(conj) + r'\b'
-            if re.search(pattern, clean_text, re.I):
-                parts = re.split(pattern, clean_text, flags=re.I)
-                for part in parts[:2]:
-                    part = part.strip()
-                    if 15 < len(part) < 100:
-                        queries.append(part)
-                break  # Only split on first conjunction found
-        
-        # Strategy 4: Smart truncation at clause boundaries  
-        if len(clean_text) > 100:
-            # Find natural break points
-            for break_point in [', ', ' for ', ' with ', ' including ', ' such as ']:
-                break_idx = clean_text.find(break_point, 20, 100)  # Look between chars 20-100
-                if break_idx > 0:
-                    queries.append(clean_text[:break_idx].strip())
-                    break
-        
-        return queries[:max_queries]
     
     def _safe_truncate(self, text: str, max_len: int = 80) -> str:
         """Safely truncate text at word boundaries, removing newlines."""
@@ -1272,57 +1258,6 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
             return truncated[:last_space] + '...'
         
         return truncated + '...'
-    
-    def _safe_truncate_with_entities(self, text: str, requested_entities: List[str] = None, max_len: int = 80) -> str:
-        """Safely truncate text and add entity context if available."""
-        clean = ' '.join(text.split())  # Remove newlines and normalize whitespace
-        
-        # If we have entities, try to incorporate them
-        if requested_entities:
-            entities_str = ' '.join(requested_entities)
-            # Try to fit main topic + entities
-            available_space = max_len - len(entities_str) - 3  # Leave space for entities and punctuation
-            if available_space > 10:
-                if len(clean) > available_space:
-                    # Find last word boundary
-                    break_idx = clean.rfind(' ', 0, available_space)
-                    if break_idx > 10:
-                        truncated_topic = clean[:break_idx]
-                    else:
-                        truncated_topic = clean[:available_space]
-                else:
-                    truncated_topic = clean
-                
-                return f"{truncated_topic} {entities_str}"
-        
-        # Fall back to regular truncation
-        return self._safe_truncate(text, max_len)
-    
-    def _clean_queries(self, queries: List[str], max_queries: int) -> List[str]:
-        """Clean, deduplicate, and limit queries."""
-        cleaned = []
-        seen = set()
-        
-        for query in queries:
-            # Clean the query
-            clean_query = ' '.join(query.split())  # Remove extra whitespace/newlines
-            clean_query = clean_query.strip(' .,!?;:')  # Remove trailing punctuation
-            
-            # Skip if too short, too long, or duplicate
-            if len(clean_query) < 5 or len(clean_query) > 200:
-                continue
-            
-            # Normalize for duplicate detection
-            normalized = clean_query.lower()
-            if normalized not in seen:
-                seen.add(normalized)
-                cleaned.append(clean_query)
-                
-            if len(cleaned) >= max_queries:
-                break
-        
-        return cleaned
-    
     def _execute_search(
         self,
         query: str,
@@ -1550,85 +1485,124 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
         results: List[SearchResult],
         context: str
     ) -> str:
-        """Synthesize multiple search results into a summary."""
+        """Synthesize search results using structured output with model escalation."""
+
         if not results:
-            return "No results to synthesize."
-        
-        # Combine content
-        combined = f"Context: {context}\n\n"
+            # Create minimal valid structure even with no results
+            return json.dumps({
+                "observations": [f"No search results found for: {context}"],
+                "synthesis": f"Unable to find information about {context}",
+                "extracted_data": {},
+                "citations": []
+            })
+
+        # Prepare search context for LLM
+        combined = self._prepare_search_context(results, context)
+
+        if not self.llm:
+            logger.error("No LLM available for synthesis")
+            return self._create_minimal_synthesis(results, context)
+
+        # Import the structured model
+        from ..core.synthesis_models import ResearchSynthesis
+
+        # Create messages without confusing JSON instructions
+        messages = [
+            SystemMessage(content="""You are a research analyst extracting insights from search results.
+Focus on identifying specific facts, data points, and key findings.
+Be comprehensive and factual in your analysis."""),
+            HumanMessage(content=f"""{combined}
+
+Based on these search results, provide:
+1. A list of specific observations (facts, metrics, findings)
+2. A comprehensive synthesis paragraph
+3. Extracted structured data organized by categories
+4. Quality metrics for the research
+
+Focus on the actual content and data from the sources.""")
+            ]
+
+        # Try with default model using structured output
+        try:
+            structured_llm = self.llm.with_structured_output(
+                ResearchSynthesis,
+                method="json_mode"
+            )
+
+            result = structured_llm.invoke(messages)
+
+            if isinstance(result, ResearchSynthesis):
+                logger.info(f"✅ Structured synthesis succeeded with {len(result.observations)} observations")
+                return json.dumps(result.dict())
+            elif isinstance(result, dict):
+                # Validate through Pydantic and return
+                validated = ResearchSynthesis(**result)
+                logger.info(f"✅ Structured synthesis validated with {len(validated.observations)} observations")
+                return json.dumps(validated.dict())
+
+        except Exception as e:
+            logger.warning(f"Default model structured output failed: {e}")
+
+            # Escalate to complex model if available
+            if self.model_manager:
+                try:
+                    logger.info("🔄 Escalating to complex model for synthesis")
+                    complex_llm = self.model_manager.get_chat_model("complex")
+
+                    structured_complex = complex_llm.with_structured_output(
+                        ResearchSynthesis,
+                        method="json_mode"
+                    )
+
+                    result = structured_complex.invoke(messages)
+
+                    if isinstance(result, ResearchSynthesis):
+                        logger.info(f"✅ Complex model succeeded with {len(result.observations)} observations")
+                        return json.dumps(result.dict())
+                    elif isinstance(result, dict):
+                        validated = ResearchSynthesis(**result)
+                        logger.info(f"✅ Complex model validated with {len(validated.observations)} observations")
+                        return json.dumps(validated.dict())
+
+                except Exception as complex_error:
+                    logger.error(f"Complex model also failed: {complex_error}")
+
+        # Should rarely reach here with structured output, but safety net
+        logger.error("All synthesis attempts failed, creating minimal response")
+        return self._create_minimal_synthesis(results, context)
+
+    def _prepare_search_context(self, results: List[SearchResult], context: str) -> str:
+        """Prepare search results for LLM input."""
+        combined = f"Research Context: {context}\n\n"
+
         for i, result in enumerate(results[:5], 1):
-            # Handle both dictionary and object formats
             if isinstance(result, dict):
                 title = result.get("title", "")
                 content = result.get("content", "")
             else:
                 title = getattr(result, "title", "")
                 content = getattr(result, "content", "")
-            
-            combined += f"Source {i}: {title}\n{content[:500]}\n\n"
-        
-        if self.llm:
-            messages = [
-                SystemMessage(content="Synthesize the search results into a clear summary."),
-                HumanMessage(content=combined)
-            ]
-            
-            response = self.llm.invoke(messages)
-            
-            # CRITICAL FIX: Handle structured responses properly using centralized parser
-            from ..core.llm_response_parser import extract_text_from_response
-            synthesis_content = extract_text_from_response(response)
-            
-            # CRITICAL FIX: Disable overly restrictive entity validation in synthesis
-            # The entity validation was causing valid synthesis content to be rejected
-            # This was contributing to empty reports with only references
-            from ..core.entity_validation import validate_content_global
-            
-            try:
-                validation_result = validate_content_global(synthesis_content, context="synthesis_validation")
-                logger.debug(f"Synthesis validation result: valid={validation_result.is_valid}, violations={validation_result.violations}")
-                
-                # Log validation issues but don't reject the synthesis
-                if not validation_result.is_valid:
-                    logger.debug(f"Note: Synthesis had entity violations but proceeding anyway: {validation_result.violations}")
-            except Exception as e:
-                logger.warning(f"Entity validation failed during synthesis but proceeding: {e}")
-            
-            # Always return the synthesis content - entity validation was too restrictive
-            return synthesis_content
-        
-        # Better fallback synthesis when LLM is not available
-        if not results:
-            return "No search results available for this query."
-        
-        # Create a basic summary from result titles and content
-        summary_parts = []
-        for i, result in enumerate(results[:3], 1):  # Limit to top 3 results
-            title = getattr(result, 'title', '')
-            content = getattr(result, 'content', '')
-            
-            # Skip empty results
-            if not title and not content:
-                continue
-                
-            # Use title or generate one
-            display_title = title if title else f'Source {i}'
-            
-            # Only add if there's actual content
-            if content:
-                snippet = content[:200] + "..." if len(content) > 200 else content
-                summary_parts.append(f"**{display_title}**: {snippet}")
-        
-        # Only create summary if we have actual content
-        if summary_parts:
-            summary = f"Summary from {len(results)} search results:\n\n" + "\n\n".join(summary_parts)
-            
-            if len(results) > 3:
-                summary += f"\n\n*(Additional sources consulted)*"
-        else:
-            summary = "Search completed but no detailed content available."
-            
-        return summary
+
+            if title or content:
+                combined += f"Source {i}: {title}\n{content[:500]}\n\n"
+
+        return combined
+
+    def _create_minimal_synthesis(self, results: List[SearchResult], context: str) -> str:
+        """Create minimal valid synthesis structure as last resort."""
+        # Extract titles as observations
+        observations = []
+        for r in results[:5]:
+            title = r.get("title", "") if isinstance(r, dict) else getattr(r, "title", "")
+            if title:
+                observations.append(f"Found source: {title}")
+
+        return json.dumps({
+            "observations": observations or [f"Research conducted on: {context}"],
+            "synthesis": f"Found {len(results)} sources about {context}",
+            "extracted_data": {},
+            "citations": []
+        })
     
     def _create_safe_summary_from_search_results(self, results: List[SearchResult]) -> str:
         """Create a safe summary from search results without LLM synthesis to avoid entity hallucination."""
@@ -1689,39 +1663,49 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
         synthesis: str,
         results: List[SearchResult]
     ) -> List[str]:
-        """Extract key findings from synthesis."""
+        """Extract key findings from synthesis with robust fallbacks."""
         findings = []
-        
+
         # Ensure synthesis is a string
         if isinstance(synthesis, list):
             synthesis = " ".join(str(item) for item in synthesis)
         elif not isinstance(synthesis, str):
             synthesis = str(synthesis)
-        
-        # Split synthesis into sentences
-        sentences = synthesis.split(". ")
-        
-        # Take first few sentences as key findings
-        for sentence in sentences[:5]:
-            if len(sentence) > 20:  # Filter out very short sentences
-                findings.append(sentence.strip())
-        
-        # Add any highly relevant result titles
-        for result in results:
-            # Handle both dictionary and object formats
+
+        # Only try to split if synthesis has content
+        if synthesis and len(synthesis) > 20:
+            # Split synthesis into sentences
+            sentences = synthesis.split(". ")
+
+            # Take first few sentences as key findings
+            for sentence in sentences[:7]:  # Increased from 5
+                if len(sentence) > 20:
+                    findings.append(sentence.strip())
+
+        # Add high-relevance results (lower threshold from 0.9 to 0.7)
+        for result in results[:10]:  # Check more results
             if isinstance(result, dict):
-                # Brave API returns "score", some objects might have "relevance_score"
                 relevance_score = result.get("score", result.get("relevance_score", 0.0))
                 title = result.get("title", "")
+                content = result.get("content", "")
             else:
                 relevance_score = getattr(result, "relevance_score", 0.0)
                 title = getattr(result, "title", "")
-            
-            if relevance_score > 0.9:
-                findings.append(f"High relevance source: {title}")
-        
-        return findings[:7]  # Limit to 7 findings
-    
+                content = getattr(result, "content", "")
+
+            # Add high relevance sources
+            if relevance_score > 0.7 and title:
+                findings.append(f"High relevance: {title}")
+
+            # If we still need findings, extract from content
+            if len(findings) < 3 and content:
+                first_sentence = content.split('.')[0]
+                if len(first_sentence) > 30:
+                    findings.append(f"Finding: {first_sentence}")
+
+        return findings[:10]  # Return up to 10 findings
+
+
     def _extract_insights(self, synthesis: str) -> List[str]:
         """Extract insights from synthesis."""
         insights = []
@@ -1923,7 +1907,9 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
         Output as JSON array of strings.
         """
         
-        response = self.llm.invoke([
+        # Use simpler model for query generation
+        llm = self._get_llm_for_complexity("simple")
+        response = llm.invoke([
             SystemMessage(content="Generate search queries."),
             HumanMessage(content=query_prompt)
         ])

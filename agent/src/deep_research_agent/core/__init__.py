@@ -20,14 +20,7 @@ from .config import ConfigManager, get_default_config, get_config_from_dict, val
 from .unified_config import get_config_manager as UnifiedConfigManager
 from .unified_config import ToolConfigSchema
 
-# Provide compatibility aliases
-def create_config_manager(*args, **kwargs):
-    """Compatibility function that creates unified config manager."""
-    import warnings
-    warnings.warn("ConfigManager is deprecated, use get_config_manager() instead", DeprecationWarning, stacklevel=2)
-    if args or kwargs:
-        return UnifiedConfigManager(override_config=args[0] if args else None, yaml_path=kwargs.get('yaml_path'))
-    return UnifiedConfigManager()
+# Compatibility aliases removed - deprecated create_config_manager function eliminated
 from .exceptions import (
     ResearchAgentError,
     ConfigurationError,

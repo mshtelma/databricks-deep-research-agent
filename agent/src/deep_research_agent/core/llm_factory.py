@@ -39,18 +39,19 @@ class ProductionLLMFactory(LLMFactory):
     
     def create_llm(self, config: Dict[str, Any]) -> LLMProvider:
         """Create a real LLM instance."""
-        from .model_manager import ModelManager
-        
+        from .model_config_loader import create_model_manager_from_config
+
         try:
-            model_manager = ModelManager()
+            # Create ModelManager with configuration from base.yaml
+            model_manager = create_model_manager_from_config()
             llm = model_manager.get_chat_model("default")
-            
+
             if llm is None:
                 raise ValueError("ModelManager returned None for default LLM")
-                
-            logger.info("Successfully created production LLM")
+
+            logger.info("Successfully created production LLM with config from base.yaml")
             return llm
-            
+
         except Exception as e:
             error_msg = f"Failed to initialize production LLM: {e}"
             logger.error(error_msg)

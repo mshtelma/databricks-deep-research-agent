@@ -10,14 +10,14 @@ import {
   PlayCircle
 } from 'lucide-react'
 import { cn } from '../utils/cn'
-import { formatTime } from '../utils/formatters'
+// import { formatTime } from '../utils/formatters' // Removed since showTimestamps prop removed
 import { ProgressItem, StructuredProgress } from '../types/progress'
 
 interface ResearchProgressProps {
   structuredProgress: StructuredProgress
   isStreaming?: boolean
   className?: string
-  showTimestamps?: boolean
+  // showTimestamps?: boolean // Removed since not used in nested display
   autoScroll?: boolean
   collapsible?: boolean
 }
@@ -26,7 +26,7 @@ export function ResearchProgress({
   structuredProgress,
   isStreaming = false,
   className = '',
-  showTimestamps = true,
+  // showTimestamps = true, // Removed since not used in nested display
   autoScroll = true,
   collapsible = false
 }: ResearchProgressProps) {
@@ -164,99 +164,86 @@ export function ResearchProgress({
               <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Agent Progress</h4>
               <div className="space-y-2">
                 {workflowPhases.map((item) => (
-                  <div
-                    key={item.id}
-                    ref={item.status === 'active' ? activeItemRef : null}
-                    className={cn(
-                      "flex items-center gap-3 p-2 rounded-lg border transition-all duration-200",
-                      getStatusStyles(item.status),
-                      item.status === 'active' && "animate-pulse"
+                  <div key={item.id}>
+                    <div
+                      ref={item.status === 'active' ? activeItemRef : null}
+                      className={cn(
+                        "flex items-center gap-3 p-2 rounded-lg border transition-all duration-200",
+                        getStatusStyles(item.status),
+                        item.status === 'active' && "animate-pulse"
+                      )}
+                    >
+                      <div className="flex-shrink-0">
+                        {getStatusIcon(item.status)}
+                      </div>
+                      <div className="flex-grow min-w-0">
+                        <p className={cn(
+                          "text-sm font-medium",
+                          item.status === 'completed' && "line-through opacity-70"
+                        )}>
+                          {item.label}
+                        </p>
+                      </div>
+                      <div className="flex-shrink-0">
+                        {getStatusBadge(item.status)}
+                      </div>
+                    </div>
+
+
+                    {/* Show plan steps ONLY under Gathering Information (research) phase */}
+                    {planSteps.length > 0 && item.id === 'research' && (
+                      <div className="ml-6 mt-2 space-y-1">
+                        <div className="text-xs text-gray-500 mb-1 font-medium">Research Plan:</div>
+                        {planSteps.map((step, stepIndex) => (
+                          <div
+                            key={step.id}
+                            className={cn(
+                              "flex items-center gap-2 p-2 text-sm border-l-2 border-gray-200 transition-all duration-200",
+                              step.status === 'active' && "border-databricks-blue bg-blue-50",
+                              step.status === 'completed' && "border-green-300 bg-green-50",
+                              step.status === 'pending' && "border-gray-200 bg-gray-50"
+                            )}
+                          >
+                            <div className="flex-shrink-0">
+                              {step.status === 'completed' ? (
+                                <div className="w-2 h-2 bg-green-500 rounded-full" />
+                              ) : step.status === 'active' ? (
+                                <div className="w-2 h-2 bg-databricks-blue rounded-full animate-pulse" />
+                              ) : (
+                                <div className="w-2 h-2 bg-gray-300 rounded-full" />
+                              )}
+                            </div>
+                            <div className="flex-grow min-w-0">
+                              <span className={cn(
+                                "text-xs text-gray-600",
+                                step.status === 'completed' && "line-through opacity-70"
+                              )}>
+                                Step {stepIndex + 1}: {step.label}
+                              </span>
+                              {step.result && (
+                                <div className="text-xs text-gray-500 mt-1 truncate">
+                                  {step.result}
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex-shrink-0">
+                              {step.status === 'completed' && (
+                                <span className="text-xs text-green-600">✓</span>
+                              )}
+                              {step.status === 'active' && (
+                                <span className="text-xs text-databricks-blue">●</span>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
                     )}
-                  >
-                    <div className="flex-shrink-0">
-                      {getStatusIcon(item.status)}
-                    </div>
-                    <div className="flex-grow min-w-0">
-                      <p className={cn(
-                        "text-sm font-medium",
-                        item.status === 'completed' && "line-through opacity-70"
-                      )}>
-                        {item.label}
-                      </p>
-                    </div>
-                    <div className="flex-shrink-0">
-                      {getStatusBadge(item.status)}
-                    </div>
                   </div>
                 ))}
               </div>
             </div>
           )}
 
-          {/* Research Steps Section */}
-          {planSteps.length > 0 && (
-            <div className="space-y-2">
-              <h4 className="text-xs font-semibold text-gray-600 uppercase tracking-wide">Research Steps</h4>
-              <div className="space-y-2">
-                {planSteps.map((item) => (
-                  <div
-                    key={item.id}
-                    ref={item.status === 'active' ? activeItemRef : null}
-                    className={cn(
-                      "flex items-start gap-3 p-3 rounded-lg border transition-all duration-200",
-                      getStatusStyles(item.status),
-                      item.status === 'active' && "animate-pulse"
-                    )}
-                  >
-                    <div className="flex-shrink-0 mt-0.5">
-                      {getStatusIcon(item.status)}
-                    </div>
-                    <div className="flex-grow min-w-0">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex-grow">
-                          <div className="flex items-center gap-2 mb-1">
-                            {item.stepNumber && (
-                              <span className="text-xs font-medium opacity-60">
-                                Step {item.stepNumber}
-                              </span>
-                            )}
-                            {item.status === 'active' && (
-                              <div className="flex space-x-1">
-                                <div className="w-1 h-1 bg-current rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                                <div className="w-1 h-1 bg-current rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                                <div className="w-1 h-1 bg-current rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                              </div>
-                            )}
-                          </div>
-                          <p className={cn(
-                            "text-sm font-medium",
-                            item.status === 'completed' && "line-through opacity-70"
-                          )}>
-                            {item.label}
-                          </p>
-                          {item.result && (
-                            <p className="text-xs mt-2 p-2 bg-white bg-opacity-50 rounded border">
-                              <span className="font-medium">Result: </span>
-                              {item.result}
-                            </p>
-                          )}
-                          {showTimestamps && item.timestamp && (
-                            <p className="text-xs opacity-60 mt-1">
-                              {item.status === 'completed' ? 'Completed' : 'Started'} at {formatTime(item.timestamp)}
-                              {item.duration && ` (${item.duration}s)`}
-                            </p>
-                          )}
-                        </div>
-                        <div className="flex-shrink-0">
-                          {getStatusBadge(item.status)}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
 
           {/* Overall Status */}
           {structuredProgress.elapsedTime && (

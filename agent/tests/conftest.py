@@ -12,14 +12,146 @@ Legacy mock fixtures are maintained for backward compatibility but new tests
 should use the integration_config fixtures for real service testing.
 """
 
-import pytest
+# CRITICAL: Disable OpenTelemetry BEFORE any imports to prevent context errors
 import os
+os.environ["OTEL_SDK_DISABLED"] = "true"
+os.environ["OTEL_PYTHON_DISABLED_INSTRUMENTATIONS"] = "asyncio,requests,mlflow,databricks"
+os.environ["OTEL_TRACES_EXPORTER"] = "none"
+os.environ["OTEL_METRICS_EXPORTER"] = "none"
+os.environ["OTEL_LOGS_EXPORTER"] = "none"
+
+import pytest
 import sys
 import yaml
 import warnings
+import logging
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock, AsyncMock
 from typing import Dict, Any, Optional, Union
+
+# Suppress OpenTelemetry context warnings
+warnings.filterwarnings("ignore", message=".*Token.*was created in a different Context.*")
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="opentelemetry.*")
+logging.getLogger("opentelemetry.context").setLevel(logging.ERROR)
+logging.getLogger("opentelemetry").setLevel(logging.ERROR)
+
+# Load environment variables from .env.local file if it exists
+from dotenv import load_dotenv
+
+# Disable MLflow tracing after imports
+try:
+    import mlflow
+    mlflow.tracing.disable()
+except Exception:
+    # MLflow might not be installed or might not have tracing module
+    pass
+
+# Patch OpenTelemetry context.detach to ignore context mismatch errors
+@pytest.fixture(scope="session", autouse=True)
+def patch_opentelemetry_context():
+    """
+    Patch OpenTelemetry context.detach to ignore context mismatch errors.
+
+    This is a known issue with OpenTelemetry in async/parallel Python code.
+    The errors don't affect functionality, so we safely ignore them.
+    """
+    try:
+        import opentelemetry.context as otel_context
+
+        # Also patch the _RUNTIME_CONTEXT which is what actually raises the error
+        if hasattr(otel_context, '_RUNTIME_CONTEXT'):
+            runtime_context = otel_context._RUNTIME_CONTEXT
+            original_runtime_detach = runtime_context.detach
+
+            def safe_runtime_detach(token):
+                """Detach context from runtime, ignoring cross-context errors."""
+                try:
+                    return original_runtime_detach(token)
+                except ValueError as e:
+                    if "was created in a different Context" in str(e):
+                        return None
+                    raise
+
+            runtime_context.detach = safe_runtime_detach
+
+        # Save original detach method
+        original_detach = otel_context.detach
+
+        def safe_detach(token):
+            """Detach context, ignoring cross-context errors."""
+            try:
+                return original_detach(token)
+            except ValueError as e:
+                if "was created in a different Context" in str(e):
+                    # Silently ignore context mismatch errors
+                    # This is expected in async/parallel operations
+                    return None
+                raise
+
+        # Replace with safe version
+        otel_context.detach = safe_detach
+
+        # Also suppress the logger that reports these errors
+        import logging
+        otel_logger = logging.getLogger("opentelemetry.context")
+        otel_logger.setLevel(logging.CRITICAL)
+
+    except ImportError:
+        # OpenTelemetry not installed
+        pass
+
+    yield
+
+    # Restore original method if it was patched
+    try:
+        import opentelemetry.context as otel_context
+        if 'original_detach' in locals():
+            otel_context.detach = original_detach
+        if hasattr(otel_context, '_RUNTIME_CONTEXT') and 'original_runtime_detach' in locals():
+            otel_context._RUNTIME_CONTEXT.detach = original_runtime_detach
+    except:
+        pass
+
+# Force NoOp tracer provider for tests
+@pytest.fixture(scope="session", autouse=True)
+def force_noop_tracer():
+    """Force OpenTelemetry to use NoOp tracer provider."""
+    try:
+        from opentelemetry import trace
+        from opentelemetry.trace import NoOpTracerProvider
+
+        # Set NoOp provider
+        trace.set_tracer_provider(NoOpTracerProvider())
+
+    except ImportError:
+        pass
+
+    yield
+
+# Keep the original fixture for backward compatibility
+@pytest.fixture(scope="session", autouse=True)
+def disable_opentelemetry():
+    """Legacy fixture kept for backward compatibility."""
+    yield
+
+# Try multiple locations for .env.local
+env_locations = [
+    Path(__file__).parent / '.env.local',  # tests/.env.local
+    Path(__file__).parent.parent / '.env.local',  # agent/.env.local
+    Path(__file__).parent.parent.parent / '.env.local',  # project root/.env.local
+]
+
+for env_path in env_locations:
+    if env_path.exists():
+        load_dotenv(env_path, override=True)
+        print(f"Loaded environment from: {env_path}")
+        break
+else:
+    # Optionally load from standard .env if no .env.local found
+    standard_env = Path(__file__).parent.parent / '.env'
+    if standard_env.exists():
+        load_dotenv(standard_env)
+        print(f"Loaded environment from: {standard_env}")
 
 # Add parent directory to path for imports  
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -32,6 +164,55 @@ if deep_research_agent_dir not in sys.path:
 
 # No longer set TEST_MODE - agents now use dependency injection for testing
 # Tests provide configuration overrides instead of environment flags
+
+@pytest.fixture(scope="session", autouse=True)
+def load_env():
+    """
+    Automatically load environment variables at the start of test session.
+    This fixture runs automatically for all tests.
+    """
+    # Environment loading already done above, but we can verify here
+    required_vars = []
+
+    # Check for critical environment variables based on test type
+    # Note: pytest.config is deprecated, using request fixture instead would be better
+    # For now, just skip this check
+
+    missing_vars = [var for var in required_vars if not os.getenv(var)]
+    if missing_vars:
+        warnings.warn(f"Missing environment variables: {missing_vars}")
+
+    # Return environment info for tests that need it
+    return {
+        "loaded_from": str(env_path) if 'env_path' in locals() else "none",
+        "has_databricks": bool(os.getenv("DATABRICKS_HOST")),
+        "has_brave_key": bool(os.getenv("BRAVE_API_KEY")),
+        "has_tavily_key": bool(os.getenv("TAVILY_API_KEY"))
+    }
+
+@pytest.fixture
+def env_vars():
+    """
+    Fixture that provides access to environment variables.
+    Tests can use this to check if required vars are set.
+
+    Usage:
+        def test_something(env_vars):
+            if not env_vars['has_brave_key']:
+                pytest.skip("Brave API key not configured")
+    """
+    return {
+        "databricks_host": os.getenv("DATABRICKS_HOST"),
+        "databricks_token": os.getenv("DATABRICKS_TOKEN"),
+        "brave_api_key": os.getenv("BRAVE_API_KEY"),
+        "tavily_api_key": os.getenv("TAVILY_API_KEY"),
+        "agent_endpoint_url": os.getenv("AGENT_ENDPOINT_URL"),
+        "agent_endpoint_token": os.getenv("AGENT_ENDPOINT_TOKEN"),
+        "has_databricks": bool(os.getenv("DATABRICKS_HOST") and os.getenv("DATABRICKS_TOKEN")),
+        "has_brave_key": bool(os.getenv("BRAVE_API_KEY")),
+        "has_tavily_key": bool(os.getenv("TAVILY_API_KEY")),
+        "has_agent_endpoint": bool(os.getenv("AGENT_ENDPOINT_URL"))
+    }
 
 from deep_research_agent.core import (
     AgentConfiguration,
@@ -56,7 +237,7 @@ from tests.integration_config.test_fixtures import (
 try:
     from deep_research_agent.enhanced_research_agent import EnhancedResearchAgent
     from deep_research_agent.databricks_compatible_agent import DatabricksCompatibleAgent
-    from deep_research_agent.databricks_helper import get_workspace_client, create_mock_workspace_client
+    from tests.utils.databricks_helper import get_workspace_client, create_mock_workspace_client
     MODERN_AGENTS_AVAILABLE = True
 except ImportError as e:
     warnings.warn(f"Modern agents not available: {e}")

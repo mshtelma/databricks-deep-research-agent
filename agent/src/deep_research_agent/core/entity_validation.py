@@ -324,7 +324,7 @@ def _extract_entities_with_llm(query: str, llm) -> List[str]:
     """Extract entities using LLM for maximum flexibility"""
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
-        
+
         system_prompt = """You are an expert entity extractor. Extract all specific entities (countries, companies, cities, products, people, etc.) mentioned in the user's query.
 
 Rules:
@@ -336,7 +336,7 @@ Rules:
 
 Examples:
 - "Spain, France, and UK" → ["Spain", "France", "United Kingdom"]
-- "compare Apple vs Microsoft" → ["Apple", "Microsoft"] 
+- "compare Apple vs Microsoft" → ["Apple", "Microsoft"]
 - "New York vs Los Angeles housing" → ["New York", "Los Angeles"]
 - "tax rates in 2024" → []"""
 
@@ -344,31 +344,64 @@ Examples:
             SystemMessage(content=system_prompt),
             HumanMessage(content=f"Extract entities from: {query}")
         ]
-        
+
         # Log the prompt being sent
         logger.info(f"🔍 LLM_PROMPT [entity_extraction]: {messages[1].content[:300]}...")
-        
+
         response = llm.invoke(messages)
-        
-        # Handle structured responses properly
-        from .llm_response_parser import extract_text_from_response
-        result = extract_text_from_response(response).strip()
-        
+
+        # CRITICAL FIX: Handle structured responses properly
+        # Don't use extract_text_from_response because it might return raw dicts
+        # Instead, directly handle the response structure
+        result_text = ""
+        if hasattr(response, 'content'):
+            content = response.content
+            if isinstance(content, list):
+                # Databricks structured format: [{"type": "reasoning", ...}, {"type": "text", ...}]
+                for item in content:
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        result_text = item.get('text', '')
+                        break
+            elif isinstance(content, str):
+                result_text = content
+            else:
+                result_text = str(content)
+        else:
+            result_text = str(response)
+
+        result = result_text.strip()
+
         # Log the response received
         logger.info(f"🔍 LLM_RESPONSE [entity_extraction]: {result[:300]}...")
-        
+
+        # DEFENSIVE: If result is still a dict/object string representation, return empty
+        if result.startswith("{") or result.startswith("{'"):
+            logger.warning(f"🚨 ENTITY_EXTRACTION: Got raw dict response, returning empty list")
+            return []
+
         # Parse JSON response
         if result.startswith('[') and result.endswith(']'):
             import json
             entities = json.loads(result)
-            parsed_entities = [str(e).strip() for e in entities if e and str(e).strip()]
+            # DEFENSIVE: Ensure all entities are strings, not dicts
+            parsed_entities = []
+            for e in entities:
+                if isinstance(e, str) and e.strip():
+                    parsed_entities.append(e.strip())
+                elif isinstance(e, dict):
+                    logger.warning(f"🚨 ENTITY_EXTRACTION: Skipping dict entity: {e}")
+                elif e:
+                    parsed_entities.append(str(e).strip())
+
             logger.info(f"🔍 ENTITY_EXTRACTION: Parsed {len(parsed_entities)} entities: {parsed_entities}")
             return parsed_entities
-        
+
         return []
-        
+
     except Exception as e:
         logger.warning(f"LLM entity extraction failed: {e}")
+        import traceback
+        logger.warning(f"Traceback: {traceback.format_exc()}")
         return []
 
 

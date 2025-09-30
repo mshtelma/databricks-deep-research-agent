@@ -45,37 +45,37 @@ export interface StructuredProgress {
 export const WORKFLOW_PHASES: WorkflowPhase[] = [
   {
     id: 'initiate',
-    name: 'Initiating research',
+    name: 'Understanding Your Request',
     agent: 'coordinator',
-    description: 'Analyzing request and routing to appropriate agents',
+    description: 'Analyzing your question to plan the best approach',
     order: 1
   },
   {
     id: 'planning',
-    name: 'Planning research approach',
+    name: 'Creating Research Plan',
     agent: 'planner',
-    description: 'Creating structured research plan with quality assessment',
+    description: 'Designing a structured approach to answer your question',
     order: 2
   },
   {
     id: 'research',
-    name: 'Executing research steps',
+    name: 'Gathering Information',
     agent: 'researcher',
-    description: 'Conducting research according to the plan',
+    description: 'Searching and collecting relevant information from multiple sources',
     order: 3
   },
   {
     id: 'fact_checking',
-    name: 'Fact checking and verification',
+    name: 'Verifying Information',
     agent: 'fact_checker',
-    description: 'Verifying claims and ensuring factual accuracy',
+    description: 'Checking accuracy and reliability of collected information',
     order: 4
   },
   {
     id: 'synthesizing',
-    name: 'Synthesizing final report',
+    name: 'Preparing Your Report',
     agent: 'reporter',
-    description: 'Compiling findings into comprehensive report',
+    description: 'Organizing findings into a comprehensive answer',
     order: 5
   }
 ]

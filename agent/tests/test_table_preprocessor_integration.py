@@ -60,18 +60,56 @@ National tax authority tables, OECD "Tax‑Benefit Models", and government‑pub
         
         preprocessor = TablePreprocessor()
         result = preprocessor.preprocess_tables(input_text)
-        
+
         # Should have separated heading from table
         assert "**Microsoft (MSFT) – Sentiment Overview**" in result
         assert result.index("**Microsoft (MSFT)") < result.index("| Sentiment Driver")
-        
+
         # Table should be properly structured
         assert "| Sentiment Driver | Indicator | Tone | Key Points |" in result
         assert "| --- | --- | --- | --- |" in result
-        
+
         # Data should not be mixed with separators
         assert "| --- | --- | --- | --- | Quarterly earnings" not in result
-        
+
+    def test_collapsed_energy_capex_table(self):
+        """Ensure collapsed investment tables are reconstructed correctly."""
+        input_text = """Capital Expenditure & LCOE Sensitivities
+| Technology | CAPEX per MW | LCOE (USD/MWh) | Sensitivity to CAPEX | Sensitivity to O&M | | Solar PV | 0.8‑1.2 M | 30‑40 | ±15 % | ±5 % | | On‑shore Wind | 0.7‑0.9 M | 25‑35 | ±10 % | ±5 % | | Offshore Wind | 1.8‑2.5 M | 40‑50 | ±20 % | ±8 % | | Hydropower | 0.5‑0.8 M | 20‑30 | ±8 % | ±4 % | | Biomass | 1.2‑1.8 M | 70‑90 | ±25 % | ±10 % | | Geothermal | 1.5‑2.0 M | 70‑90 | ±20 % | ±6 % | | Green Hydrogen | 3.0‑4.0"""
+
+        preprocessor = TablePreprocessor()
+        result = preprocessor.preprocess_tables(input_text)
+
+        # Heading should remain intact
+        assert "Capital Expenditure & LCOE Sensitivities" in result
+
+        # Table should be reconstructed with proper structure
+        assert "| Technology | CAPEX per MW | LCOE (USD/MWh) | Sensitivity to CAPEX | Sensitivity to O&M |" in result
+        assert "| --- | --- | --- | --- | --- |" in result
+        assert "| Solar PV | 0.8‑1.2 M | 30‑40 | ±15 % | ±5 % |" in result
+        assert "| On‑shore Wind | 0.7‑0.9 M | 25‑35 | ±10 % | ±5 % |" in result
+        assert "| Green Hydrogen | 3.0‑4.0 |  |  |  |" in result
+
+    def test_bold_header_plain_table_marking(self):
+        """Detect bold header tables without pipes and add explicit markers."""
+        input_text = """## Section 1 – Comparative Analysis
+**Technology** **Capacity Factor** **LCOE (2023-24)** **Installed Capacity (2024)** **Annual Growth** **Resource Potential** **Key Scalability Drivers**
+Utility‑scale PV 21‑34 % $0.05‑$0.07 /kWh 1.4 TW 15 % 30 TW (global) Falling module prices, modularity, widespread site availability
+CSP 40‑45 % <$0.12 /kWh 0.1 GW 3 % 4 GW (global) Cost decline, thermal storage, high-radiation sites
+On‑shore Wind 35‑45 % $0.04‑$0.06 /kWh 0.5 TW 5 % 10 GW (US) / 15 GW (global) Mature supply chain, high-wind corridors
+Offshore Wind 45‑55 % $0.06‑$0.08 /kWh 0.2 TW 9 % 6 GW (US) / 9 GW (global) Deep-water sites, high capacity factors
+"""
+
+        preprocessor = TablePreprocessor()
+        result = preprocessor.preprocess_tables(input_text)
+
+        assert result.count("TABLE_START") >= 1
+        assert "TABLE_HEADER_START" in result
+        assert "TABLE_HEADER_END" in result
+        assert "**Technology** **Capacity Factor**" in result
+        assert "Utility‑scale PV 21‑34 % $0.05‑$0.07 /kWh" in result
+        assert "CSP 40‑45 % <$0.12 /kWh" in result
+
     def test_country_comparison_with_excessive_separators(self):
         """Test country comparison table with excessive separators."""
         input_text = """| Country | Gross Income | Tax | Net |

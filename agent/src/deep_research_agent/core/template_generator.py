@@ -37,7 +37,10 @@ class DynamicSection:
             guidance.append(self.purpose)
 
         if self.content_type == SectionContentType.COMPARISON:
-            guidance.append("Use a well-structured markdown table to compare the entities.")
+            guidance.append(
+                "Use properly formatted markdown tables with pipe delimiters and separator row. "
+                "Example format: | Column 1 | Column 2 |\\n| --- | --- |\\n| Data 1 | Data 2 |"
+            )
         elif self.content_type == SectionContentType.TIMELINE:
             guidance.append("Lay out events chronologically, highlighting inflection points.")
         elif self.content_type == SectionContentType.BULLET_LIST:

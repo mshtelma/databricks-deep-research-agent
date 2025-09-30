@@ -10,6 +10,7 @@ import { SourcesPanel } from './SourcesPanel'
 import { StreamingProgress } from './StreamingProgress'
 import { ResearchProgress } from './ResearchProgress'
 import { StructuredProgress } from '../types/progress'
+import { normalizeTableMarkers } from '../utils/tableParser'
 
 interface ChatMessageProps {
   message: ChatMessageType
@@ -32,6 +33,8 @@ export function ChatMessage({ message, intermediateEvents = [], isActivelyStream
       console.error('Failed to copy text:', err)
     }
   }
+
+  const renderedContent = normalizeTableMarkers(message.content)
 
   return (
     <div className={cn("flex gap-3 mb-6", isUser ? "justify-end" : "justify-start")}>
@@ -179,7 +182,7 @@ export function ChatMessage({ message, intermediateEvents = [], isActivelyStream
                         ),
                       }}
                     >
-                      {message.content}
+                      {renderedContent}
                     </ReactMarkdown>
                   </div>
                   {message.isStreaming && (
@@ -194,7 +197,6 @@ export function ChatMessage({ message, intermediateEvents = [], isActivelyStream
                   structuredProgress={researchProgress}
                   isStreaming={message.isStreaming}
                   className="mt-4"
-                  showTimestamps={true}
                   autoScroll={isActivelyStreaming}
                   collapsible={!isActivelyStreaming}
                 />

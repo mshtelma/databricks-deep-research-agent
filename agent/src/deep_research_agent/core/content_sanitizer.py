@@ -71,18 +71,26 @@ class ContentSanitizer:
         # Compile regex patterns for performance
         self._json_patterns = [
             # Array patterns - detect JSON arrays like [{"type": "reasoning", ...}]
-            re.compile(r'\[\s*\{\s*["\']type["\']\s*:\s*["\'](?:reasoning|summary|metadata)["\'].*?\}\s*\]', 
+            re.compile(r'\[\s*\{\s*["\']type["\']\s*:\s*["\'](?:reasoning|summary|metadata)["\'].*?\}\s*\]',
                       re.DOTALL | re.IGNORECASE),
-            
+
             # Object patterns - detect JSON objects like {"type": "reasoning", ...}
-            re.compile(r'\{\s*["\']type["\']\s*:\s*["\'](?:reasoning|summary|metadata)["\'].*?\}', 
+            re.compile(r'\{\s*["\']type["\']\s*:\s*["\'](?:reasoning|summary|metadata)["\'].*?\}',
                       re.DOTALL | re.IGNORECASE),
-            
+
             # Generic JSON array detection
             re.compile(r'\[\s*\{.*?\}\s*\]', re.DOTALL),
-            
+
             # Generic JSON object detection (more conservative)
             re.compile(r'\{\s*["\'][^"\']+["\']\s*:\s*["\'][^"\']*["\'].*?\}', re.DOTALL)
+        ]
+
+        # Reasoning tag patterns (for o1/Claude-style reasoning blocks)
+        self._reasoning_patterns = [
+            re.compile(r'<reasoning>.*?</reasoning>', re.DOTALL | re.IGNORECASE),
+            re.compile(r'<thinking>.*?</thinking>', re.DOTALL | re.IGNORECASE),
+            re.compile(r'<reflection>.*?</reflection>', re.DOTALL | re.IGNORECASE),
+            re.compile(r'<analysis>.*?</analysis>', re.DOTALL | re.IGNORECASE),
         ]
         
         # Markdown table patterns
@@ -128,9 +136,17 @@ class ContentSanitizer:
         
         # Step 2: Handle different content types
         if content_type == ContentType.PURE_MARKDOWN:
-            # Already clean, minimal processing needed
-            clean_content = self._normalize_markdown(content)
-            sanitization_applied = False
+            # Check for reasoning tags even in markdown
+            if any(pattern.search(content) for pattern in self._reasoning_patterns):
+                # Has reasoning tags, process them
+                clean_content, extracted_data = self._separate_mixed_content(content)
+                extracted_reasoning.extend(extracted_data.get("reasoning", []))
+                extracted_metadata.update(extracted_data.get("metadata", {}))
+                sanitization_applied = True
+            else:
+                # Already clean, minimal processing needed
+                clean_content = self._normalize_markdown(content)
+                sanitization_applied = False
             
         elif content_type == ContentType.PURE_JSON:
             # Extract all content as structured data
@@ -244,6 +260,21 @@ class ContentSanitizer:
         """Separate JSON structures from markdown content."""
         clean_content = content
         extracted_data = {"reasoning": [], "metadata": {}}
+
+        # First remove reasoning tags (o1/Claude style)
+        for pattern in self._reasoning_patterns:
+            matches = pattern.finditer(content)
+            for match in matches:
+                reasoning_text = match.group(0)
+                # Extract the content between tags if needed
+                if self.preserve_metadata:
+                    inner_content = re.sub(r'<[^>]+>', '', reasoning_text)
+                    extracted_data["reasoning"].append({
+                        "type": "reasoning",
+                        "content": inner_content.strip()
+                    })
+                # Remove from clean content
+                clean_content = clean_content.replace(reasoning_text, "")
         
         # Process each JSON pattern
         for pattern in self._json_patterns:

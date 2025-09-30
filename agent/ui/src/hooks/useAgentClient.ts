@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from 'react'
 import { IntermediateEvent, PlanMetadata, PlanStep, ResearchMetadata } from '../types/agents'
 import { ProgressItem, StructuredProgress, WORKFLOW_PHASES, AGENT_PHASE_MAP } from '../types/progress'
 import { filterContent, extractPhaseInfo } from '../utils/contentFilter'
+import { evaluatePhaseStatus } from '../config/phaseTransitionRules'
 
 // ResponsesAgent types following MLflow specifications
 export interface ResponsesAgentRequest {
@@ -61,15 +62,9 @@ export interface ChatMessage {
 
 type StepStatus = PlanStep['status']
 
-const PLAN_GENERATION_STEP_ID = 'step_plan_generation'
-
+// Removed PLAN_GENERATION_STEP_ID since plan generation is a phase, not a step
 const STEP_ID_ALIASES: Record<string, string> = {
-  step_plan: PLAN_GENERATION_STEP_ID,
-  step_plan_created: PLAN_GENERATION_STEP_ID,
-  step_plan_generation: PLAN_GENERATION_STEP_ID,
-  step_planner: PLAN_GENERATION_STEP_ID,
-  step_planning: PLAN_GENERATION_STEP_ID,
-  step_background_investigation: PLAN_GENERATION_STEP_ID,
+  // Plan-related aliases removed - plan generation is handled as workflow phase
 }
 
 const STEP_STATUS_PRIORITY: Record<StepStatus, number> = {
@@ -102,7 +97,8 @@ const PLAN_EVENT_TYPES = new Set([
   'plan_created',
   'plan_updated',
   'plan_structure',
-  'plan_structure_visualize'
+  'plan_structure_visualize',
+  'plan_ready'
 ])
 
 const PLAN_LIFECYCLE_EVENT_TYPES = new Map([
@@ -122,11 +118,7 @@ const STEP_EVENT_TYPES = new Set([
   'step_failed'
 ])
 
-const PLAN_LIFECYCLE_STEP_IDS: Record<string, string> = {
-  plan_started: PLAN_GENERATION_STEP_ID,
-  plan_completed: PLAN_GENERATION_STEP_ID,
-  plan_failed: PLAN_GENERATION_STEP_ID
-}
+// Removed PLAN_LIFECYCLE_STEP_IDS since plan generation is a phase, not a step
 
 function canonicalizeStepId(value: unknown, fallbackIndex?: number): string {
   if (typeof value === 'string') {
@@ -155,7 +147,7 @@ function canonicalizeStepId(value: unknown, fallbackIndex?: number): string {
     return STEP_ID_ALIASES[fallbackId] ?? fallbackId
   }
 
-  return PLAN_GENERATION_STEP_ID
+  return `step_001` // Default fallback
 }
 
 function normalizeStepStatus(status?: string | null): StepStatus {
@@ -193,24 +185,21 @@ function mergeStepStatus(current?: StepStatus, incoming?: StepStatus): StepStatu
   return STEP_STATUS_PRIORITY[incoming] >= STEP_STATUS_PRIORITY[current] ? incoming : current
 }
 
-function createStaticStep(id: string, description: string, status: StepStatus = 'pending'): PlanStep {
-  return {
-    id,
-    description,
-    status
-  }
-}
+// function createStaticStep(id: string, description: string, status: StepStatus = 'pending'): PlanStep {
+//   return {
+//     id,
+//     description,
+//     status
+//   }
+// }
 
-const SPECIAL_STEP_IDS = new Set([PLAN_GENERATION_STEP_ID])
+// Removed SPECIAL_STEP_IDS since we no longer have special static steps
 
-const INITIAL_PLACEHOLDER_STEPS: PlanStep[] = [
-  createStaticStep(PLAN_GENERATION_STEP_ID, 'Generating detailed research plan', 'in_progress')
-]
+// Remove static plan generation step - this is a phase, not a step
+const INITIAL_PLACEHOLDER_STEPS: PlanStep[] = []
 
 
-const STEP_DESCRIPTION_ALIASES: Record<string, string> = {
-  [PLAN_GENERATION_STEP_ID]: 'Generating detailed research plan'
-}
+// Removed STEP_DESCRIPTION_ALIASES since we no longer have static steps
 
 
 function clonePlanStep(step: PlanStep): PlanStep {
@@ -223,7 +212,11 @@ function clonePlanStep(step: PlanStep): PlanStep {
   }
 }
 
-function createInitialPlanDetails(): PlanMetadata {
+function createInitialPlanDetails(): PlanMetadata | undefined {
+  // Don't create empty plan with placeholder steps
+  if (INITIAL_PLACEHOLDER_STEPS.length === 0) {
+    return undefined
+  }
   return {
     steps: [
       ...INITIAL_PLACEHOLDER_STEPS.map(clonePlanStep)
@@ -324,20 +317,12 @@ function buildPlanDetailsFromPayload(planPayload: any, existing?: PlanMetadata):
       }
     })
 
-  const planGenerationExisting = existingMap.get(PLAN_GENERATION_STEP_ID) ?? INITIAL_PLACEHOLDER_STEPS[0]
-  const planGenerationStep: PlanStep = {
-    ...clonePlanStep(planGenerationExisting),
-    status: 'completed',
-    completedAt: planGenerationExisting.completedAt ?? Date.now()
-  }
-
   const mergedDynamicSteps = mergeDynamicSteps(
-    existingSteps.filter(step => !SPECIAL_STEP_IDS.has(step.id)),
+    existingSteps, // No need to filter since we don't have special steps anymore
     dynamicSteps
   )
 
   const combined: PlanStep[] = [
-    planGenerationStep,
     ...mergedDynamicSteps
   ]
 
@@ -446,7 +431,7 @@ function updateStepStatusInPlan(
       ...updatedSteps,
       {
         id: canonicalId,
-        description: STEP_DESCRIPTION_ALIASES[canonicalId] || `Step ${updatedSteps.length + 1}`,
+        description: `Step ${updatedSteps.length + 1}`,
         status,
         result: undefined,
         completedAt: status === 'completed' ? Date.now() : undefined
@@ -472,60 +457,9 @@ function updateStepStatusInPlan(
   }
 }
 
-function applyAgentPhaseToPlan(
-  planDetails: PlanMetadata | undefined,
-  agent?: string
-): PlanMetadata | undefined {
-  if (!planDetails || !agent) return planDetails
+// Removed applyAgentPhaseToPlan since plan generation is handled as a workflow phase
 
-  const normalizedAgent = agent.toLowerCase()
-  let updatedPlan = planDetails
-
-  const applyStatus = (id: string, status: StepStatus) => {
-    const nextPlan = updateStepStatusInPlan(updatedPlan, id, status)
-    if (nextPlan) {
-      updatedPlan = nextPlan
-    }
-  }
-
-  if (normalizedAgent.includes('planner')) {
-    applyStatus(PLAN_GENERATION_STEP_ID, 'in_progress')
-  }
-
-  if (normalizedAgent.includes('research')) {
-    applyStatus(PLAN_GENERATION_STEP_ID, 'completed')
-  }
-
-  if (normalizedAgent.includes('fact')) {
-    applyStatus(PLAN_GENERATION_STEP_ID, 'completed')
-  }
-
-  if (normalizedAgent.includes('report')) {
-    applyStatus(PLAN_GENERATION_STEP_ID, 'completed')
-  }
-
-  debugPlanSnapshot(`applyAgentPhase(${agent})`, updatedPlan)
-
-  return updatedPlan
-}
-
-function finalizeStaticSteps(planDetails: PlanMetadata | undefined): PlanMetadata | undefined {
-  if (!planDetails) return planDetails
-
-  let updated = planDetails
-  const finalize = (id: string) => {
-    const next = updateStepStatusInPlan(updated, id, 'completed')
-    if (next) {
-      updated = next
-    }
-  }
-
-  finalize(PLAN_GENERATION_STEP_ID)
-
-  debugPlanSnapshot('finalizeStaticSteps', updated)
-
-  return updated
-}
+// Removed finalizeStaticSteps since we no longer have static steps
 
 class AgentApiClient {
   private baseUrl: string
@@ -679,6 +613,14 @@ function determinePhaseStatus(
   currentAgent?: string,
   planDetails?: any
 ): ProgressItem['status'] {
+  // Check for explicit phase completion events first
+  const phaseCompletionEvents = events.filter(e =>
+    e.event_type === 'phase_completed' && e.data && 'phase' in e.data && e.data.phase === phaseId
+  )
+  if (phaseCompletionEvents.length > 0) {
+    return 'completed'
+  }
+
   // Check if this phase is currently active
   if (currentAgent && AGENT_PHASE_MAP[currentAgent] === phaseId) {
     return 'active'
@@ -698,49 +640,33 @@ function determinePhaseStatus(
     return 'active'
   }
 
-  // Special logic for different phases
-  switch (phaseId) {
-    case 'initiate':
-      // Look for coordinator handoff events or phase completion
-      const coordinatorEvents = events.filter(e => {
-        const agent = e.data.agent || e.data.current_agent || e.data.from_agent
-        return agent === 'coordinator' || e.event_type.includes('handoff')
+  // Debug logging for phase transitions
+  if (phaseId === 'initiate') {
+    console.group(`🔍 [PHASE DEBUG] ${phaseId}`)
+    console.log('Total Events:', events.length)
+    console.log('Current Agent:', currentAgent)
+
+    // Log agent_handoff events specifically
+    const handoffEvents = events.filter(e => e.event_type === 'agent_handoff')
+    console.log('Agent Handoff Events:', handoffEvents.length)
+    handoffEvents.forEach((e, i) => {
+      console.log(`  Handoff ${i + 1}:`, {
+        from: e.data?.from_agent,
+        to: (e.data as any)?.to_agent,
+        reason: (e.data as any)?.reason
       })
+    })
 
-      // If coordinator handed off to another agent, initiate is complete
-      const handoffEvents = events.filter(e =>
-        e.event_type.includes('handoff') &&
-        e.data.from_agent === 'coordinator'
-      )
-
-      if (handoffEvents.length > 0) {
-        return 'completed'
-      }
-
-      // If we have coordinator events but no handoff yet, it's active
-      if (coordinatorEvents.length > 0) {
-        return currentAgent === 'coordinator' ? 'active' : 'completed'
-      }
-
-      // If no events yet, it's pending
-      return 'pending'
-
-    case 'planning':
-      return planDetails ? 'completed' : 'pending'
-
-    case 'fact_checking':
-      // Active if research is done but not synthesizing yet
-      if (planDetails?.status === 'completed' && currentAgent !== 'reporter') {
-        return 'active'
-      }
-      return planDetails?.status === 'completed' ? 'completed' : 'pending'
-
-    case 'synthesizing':
-      return currentAgent === 'reporter' ? 'active' : 'pending'
-
-    default:
-      return 'pending'
+    // Log last 5 events for context
+    console.log('Last 5 Events:')
+    events.slice(-5).forEach(e => {
+      console.log(`  - ${e.event_type}:`, e.data)
+    })
+    console.groupEnd()
   }
+
+  // Use the abstract phase transition evaluation from config
+  return evaluatePhaseStatus(phaseId, events, currentAgent, planDetails)
 }
 
 function mapPlanStepStatus(stepStatus?: string): ProgressItem['status'] {
@@ -865,14 +791,7 @@ export function useAgentClient() {
         planDetails: createInitialPlanDetails()
       }
 
-      debugPlanSnapshot('initial-placeholders', currentMetadata.planDetails)
-
-      currentMetadata = {
-        ...currentMetadata,
-        planDetails: applyAgentPhaseToPlan(currentMetadata.planDetails, 'planner')
-      }
-
-      debugPlanSnapshot('after-initial-phase', currentMetadata.planDetails)
+      debugPlanSnapshot('initial-setup', currentMetadata.planDetails)
 
       updateMessage(assistantMessageId, {
         content: fullContent,
@@ -880,7 +799,8 @@ export function useAgentClient() {
         metadata: currentMetadata
       })
 
-      updateResearchProgress('planner', currentMetadata.planDetails)
+      // Start with coordinator agent for progress tracking
+      updateResearchProgress('coordinator', currentMetadata.planDetails)
 
       const streamGenerator = clientRef.current.streamMessage(request)
 
@@ -917,23 +837,11 @@ export function useAgentClient() {
                   node: phaseInfo.node,
                   agent: currentAgent,
                 })
-                const adjustedPlan = applyAgentPhaseToPlan(currentMetadata.planDetails, currentAgent)
-                if (adjustedPlan && adjustedPlan !== currentMetadata.planDetails) {
-                  currentMetadata = {
-                    ...currentMetadata,
-                    planDetails: adjustedPlan
-                  }
-                  updateMessage(assistantMessageId, {
-                    content: displayContent,
-                    isStreaming: true,
-                    metadata: currentMetadata
-                  })
-                } else {
-                  updateMessage(assistantMessageId, {
-                    content: displayContent,
-                    isStreaming: true
-                  })
-                }
+                // Update message with filtered content
+                updateMessage(assistantMessageId, {
+                  content: displayContent,
+                  isStreaming: true
+                })
                 updateResearchProgress(currentAgent, currentMetadata.planDetails)
               } else {
                 updateMessage(assistantMessageId, {
@@ -962,16 +870,8 @@ export function useAgentClient() {
                 console.log('🗑️ Removed markers:', filterResult.removedMarkers.length)
               }
 
-              const finalizedPlan = finalizeStaticSteps(currentMetadata.planDetails)
-              if (finalizedPlan) {
-                currentMetadata = {
-                  ...currentMetadata,
-                  planDetails: finalizedPlan
-                }
-                updateResearchProgress('reporter', finalizedPlan)
-              } else {
-                updateResearchProgress('reporter', currentMetadata.planDetails)
-              }
+              // Final research progress update with reporter agent
+              updateResearchProgress('reporter', currentMetadata.planDetails)
 
               updateMessage(assistantMessageId, {
                 content: cleanFinalContent,
@@ -983,6 +883,13 @@ export function useAgentClient() {
 
           case 'intermediate_event':
             if (event.intermediate_event) {
+              // Debug log all intermediate events
+              console.group('📊 [EVENT DEBUG]', event.intermediate_event.event_type)
+              console.log('Type:', event.intermediate_event.event_type)
+              console.log('Data:', event.intermediate_event.data)
+              console.log('Meta:', event.intermediate_event.meta)
+              console.groupEnd()
+
               // Add to intermediate events for live tracking
               const intermediateEvent: IntermediateEvent = {
                 id: crypto.randomUUID(),
@@ -1027,6 +934,7 @@ export function useAgentClient() {
                 const shouldRebuildPlan = !planDetailsWorking ||
                   normalizedEventType === 'plan_created' ||
                   normalizedEventType === 'plan_updated' ||
+                  normalizedEventType === 'plan_ready' ||
                   (planPayload.steps && planPayload.steps.length !== planDetailsWorking.steps.length)
 
                 if (shouldRebuildPlan) {
@@ -1034,8 +942,22 @@ export function useAgentClient() {
                   if (mergedPlan) {
                     planDetailsWorking = mergedPlan
                     planChanged = true
-                    progressAgent = 'planner'
-                    debugPlanSnapshot('plan-event merge (rebuilt)', mergedPlan)
+
+                    // IMMEDIATELY update UI with plan
+                    currentMetadata.planDetails = planDetailsWorking
+                    updateMessage(assistantMessageId, {
+                      content: fullContent,
+                      isStreaming: true,
+                      metadata: currentMetadata
+                    })
+
+                    // For plan_ready events, the researcher should now be active
+                    progressAgent = normalizedEventType === 'plan_ready' ? 'researcher' : 'planner'
+
+                    // Force progress update to show plan immediately
+                    updateResearchProgress(progressAgent, planDetailsWorking)
+
+                    debugPlanSnapshot('plan-event merge (rebuilt with immediate display)', mergedPlan)
                   }
                 } else {
                   debugPlanSnapshot('plan-event skipped (no rebuild needed)', planDetailsWorking)
@@ -1043,33 +965,8 @@ export function useAgentClient() {
               } else {
                 const lifecycleStatus = PLAN_LIFECYCLE_EVENT_TYPES.get(normalizedEventType)
                 if (lifecycleStatus) {
-                  const lifecycleStepId = PLAN_LIFECYCLE_STEP_IDS[normalizedEventType]
-                  if (lifecycleStepId) {
-                    const lifecycleStepStatus: StepStatus = lifecycleStatus as StepStatus
-                    const adjustedPlan = updateStepStatusInPlan(planDetailsWorking, lifecycleStepId, lifecycleStepStatus)
-                    if (adjustedPlan) {
-                      planDetailsWorking = adjustedPlan
-                      planChanged = true
-                    }
-                  }
-
                   progressAgent = PLAN_LIFECYCLE_PROGRESS_AGENT[normalizedEventType] || progressAgent
-
-                  if (normalizedEventType === 'plan_started') {
-                    const placeholdersUpdated = updateStepStatusInPlan(planDetailsWorking, PLAN_GENERATION_STEP_ID, 'in_progress')
-                    if (placeholdersUpdated) {
-                      planDetailsWorking = placeholdersUpdated
-                      planChanged = true
-                    }
-                  }
-
-                  if (normalizedEventType === 'plan_completed') {
-                    const finalizedPlaceholders = finalizeStaticSteps(planDetailsWorking)
-                    if (finalizedPlaceholders) {
-                      planDetailsWorking = finalizedPlaceholders
-                      planChanged = true
-                    }
-                  }
+                  // Plan lifecycle events are now handled as workflow phases, not individual steps
                 }
               }
 
@@ -1106,13 +1003,41 @@ export function useAgentClient() {
                 }
               }
 
-              if (eventAgent) {
-                const phaseAdjusted = applyAgentPhaseToPlan(planDetailsWorking, eventAgent)
-                if (phaseAdjusted && phaseAdjusted !== planDetailsWorking) {
-                  planDetailsWorking = phaseAdjusted
+              // CRITICAL FIX: Handle step_added events to show dynamic plan items immediately
+              if (normalizedEventType === 'step_added') {
+                const stepData = event.intermediate_event.data
+                console.log('📍 Step added event received:', stepData)
+                
+                if (stepData?.step_id && stepData?.step_title && planDetailsWorking) {
+                  const newStep: PlanStep = {
+                    id: stepData.step_id,
+                    description: stepData.step_title,
+                    status: 'pending',
+                    result: undefined,
+                    completedAt: undefined
+                  }
+                  
+                  // Insert the new step at the specified index or at the end
+                  const insertIndex = stepData.index !== undefined ? stepData.index : planDetailsWorking.steps.length
+                  const updatedSteps: PlanStep[] = [...planDetailsWorking.steps]
+                  updatedSteps.splice(insertIndex, 0, newStep)
+                  
+                  planDetailsWorking = {
+                    ...planDetailsWorking,
+                    steps: updatedSteps
+                  }
                   planChanged = true
+                  
+                  console.log('✅ Dynamic step added to plan:', stepData.step_title, 'at index:', insertIndex)
+                  
+                  // Force immediate progress update
+                  if (!progressAgent) {
+                    progressAgent = 'researcher'
+                  }
                 }
               }
+
+              // Agent phase transitions are now handled by workflow phase status tracking
 
               if (planChanged && planDetailsWorking) {
                 currentMetadata = {
@@ -1159,14 +1084,6 @@ export function useAgentClient() {
               debugPlanSnapshot('metadata-update', planDetailsWorking)
 
               if (metadataAgent) {
-                const adjusted = applyAgentPhaseToPlan(currentMetadata.planDetails, metadataAgent)
-                if (adjusted && adjusted !== currentMetadata.planDetails) {
-                  currentMetadata = {
-                    ...currentMetadata,
-                    planDetails: adjusted
-                  }
-                  planDetailsWorking = adjusted
-                }
                 updateResearchProgress(metadataAgent, planDetailsWorking)
               } else {
                 updateResearchProgress(undefined, planDetailsWorking)

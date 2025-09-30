@@ -112,7 +112,34 @@ class DatabricksResponseParser:
             response_type = ResponseType.TEXT
             metadata['content_source'] = 'text_block'
             logger.debug("Using actual text content")
-        elif reasoning_text and reasoning_text.strip():
+
+            # Return early to prevent reasoning fallback from overwriting valid content
+            return ParsedResponse(
+                content=final_content.strip(),
+                reasoning=reasoning_text.strip() if reasoning_text else None,
+                response_type=response_type,
+                metadata=metadata
+            )
+        elif not actual_content or len(actual_content.strip()) < 50:
+            # Text block is missing or too short - this is a problem for reasoning models
+            logger.warning(
+                f"DatabricksResponseParser: Text block missing or too short "
+                f"(actual_content: {len(actual_content) if actual_content else 0} chars, "
+                f"reasoning: {len(reasoning_text) if reasoning_text else 0} chars). "
+                f"The model may not have generated proper text output. "
+                f"This often indicates the model needs explicit prompting to generate text output."
+            )
+            # Check if this looks like a reasoning model response
+            if hasattr(response, 'content') and isinstance(response.content, list):
+                has_reasoning_block = any(item.get('type') == 'reasoning' for item in response.content if isinstance(item, dict))
+                has_text_block = any(item.get('type') == 'text' for item in response.content if isinstance(item, dict))
+                logger.error(
+                    f"Response structure analysis - has_reasoning: {has_reasoning_block}, "
+                    f"has_text: {has_text_block}. If reasoning=True and text=False, "
+                    f"the model is not generating the required text output block."
+                )
+
+        if reasoning_text and reasoning_text.strip():
             # Only fall back to reasoning if it's substantial enough and likely not reasoning
             reasoning_stripped = reasoning_text.strip()
             

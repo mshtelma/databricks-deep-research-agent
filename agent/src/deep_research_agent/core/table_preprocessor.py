@@ -6,7 +6,7 @@ is streamed to the UI, ensuring consistent and properly formatted tables.
 """
 
 import re
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 from dataclasses import dataclass
 from ..core import get_logger
 
@@ -37,7 +37,17 @@ class TablePreprocessor:
         self.stats = TableStats()
         self.table_start_marker = "TABLE_START"
         self.table_end_marker = "TABLE_END"
+        self.table_header_start_marker = "TABLE_HEADER_START"
+        self.table_header_end_marker = "TABLE_HEADER_END"
+        # Enhanced markers for better structure tracking
+        self.header_row_marker = "§§HEADER_ROW§§"
+        self.separator_marker = "§§SEPARATOR§§"
+        self.data_start_marker = "§§DATA_START§§"
+        self.data_end_marker = "§§DATA_END§§"
+        self.footnotes_marker = "§§FOOTNOTES§§"
         self.protected_sections = {}  # Store protected reference sections
+        self.footnote_placeholders = {}  # Store footnote markers during processing
+        self.table_counter = 0  # For generating unique table IDs
         
     def preprocess_tables(self, content: str) -> str:
         """
@@ -49,61 +59,453 @@ class TablePreprocessor:
         Returns:
             Content with properly formatted tables
         """
-        if not content or '|' not in content:
+        try:
+            if not content or ('|' not in content and '**' not in content):
+                logger.debug("No table content detected, skipping preprocessing")
+                return content
+                
+            logger.info("Starting comprehensive table preprocessing", 
+                       content_length=len(content), 
+                       pipe_count=content.count('|'))
+            self.stats = TableStats()  # Reset stats
+            
+            original_content = content  # Keep for error recovery
+
+            try:
+                # PHASE 0: Protect special content BEFORE any table processing
+                # This is critical - protect footnotes and references FIRST
+                logger.debug("Phase 0: Protecting footnote markers")
+                content = self._protect_footnote_markers(content)
+
+                # PHASE 0.5: Convert space-delimited tables to markdown format
+                # LLMs often generate tables with spaces instead of pipes
+                logger.debug("Phase 0.5: Converting space-delimited tables to markdown")
+                content = self._detect_and_convert_space_delimited_tables(content)
+
+                # Step 0: Protect reference sections from table processing
+                logger.debug("Step 0: Protecting reference sections")
+                content = self._protect_reference_sections(content)
+                
+                # Step 1: Separate headings from tables
+                logger.debug("Step 1: Separating headings from tables")
+                content = self.separate_headings_from_tables(content)
+                
+                # Step 2: Fix two-line cell patterns (Item    Description format)
+                logger.debug("Step 2: Fixing two-line cell patterns")
+                content = self.fix_two_line_cells(content)
+                
+                # Step 3: Fix merged table components
+                logger.debug("Step 3: Fixing merged table components")
+                content = self.fix_merged_table_components(content)
+                
+                # Step 4: Remove trailing separators first (before mixed content processing)
+                logger.debug("Step 4: Removing trailing separators")
+                content = self.remove_trailing_separators(content)
+                
+                # Step 5: Fix mixed content-separator patterns
+                logger.debug("Step 5: Fixing mixed content-separator patterns")
+                content = self.fix_mixed_content_separators(content)
+                
+                # Step 6: Normalize separators
+                logger.debug("Step 6: Normalizing separators")
+                content = self.normalize_separators(content)
+                
+                # Step 7: Consolidate orphaned separators with adjacent data
+                logger.debug("Step 7: Consolidating orphaned separators")
+                content = self.consolidate_orphaned_separators(content)
+                
+                # Step 8: Consolidate adjacent table fragments
+                logger.debug("Step 8: Consolidating table fragments")
+                content = self.consolidate_table_fragments(content)
+                
+                # Step 9: Extract tables and fix column mismatches
+                logger.debug("Step 9: Fixing table column counts")
+                content = self.fix_tables_column_counts(content)
+                
+                # Step 10: Fix collapsed comparative tables (specific fix for user's issue)
+                logger.debug("Step 10: Fixing collapsed comparative tables")
+                content = self.fix_collapsed_comparative_tables(content)
+                
+                # Step 11: Final cleanup
+                logger.debug("Step 11: Final cleanup")
+                content = self.final_cleanup(content)
+                
+                # Step 12: Add table boundaries for ALL tables to ensure proper markers
+                logger.debug("Step 12: Adding table boundaries for all tables")
+                content = self.add_table_boundaries(content)
+                
+                # Step 13: Restore protected reference sections
+                logger.debug("Step 13: Restoring protected reference sections")
+                content = self._restore_reference_sections(content)
+
+                # FINAL STEP: Restore footnote markers (critical - do this LAST)
+                logger.debug("Final step: Restoring footnote markers")
+                content = self._restore_footnote_markers(content)
+
+            except Exception as step_error:
+                logger.error("Error during table preprocessing step", 
+                           error=str(step_error), 
+                           error_type=type(step_error).__name__,
+                           exc_info=True)
+                # Return original content if any step fails
+                content = original_content
+                logger.warning("Returning original content due to preprocessing error")
+            
+            # Safety check - make sure we haven't accidentally removed major content sections
+            length_before = len(original_content)
+            length_after = len(content)
+            reduction_ratio = (length_before - length_after) / length_before if length_before > 0 else 0
+            
+            if reduction_ratio > 0.7:  # If we've removed more than 70% of content
+                logger.error(f"Table preprocessing removed {reduction_ratio*100:.1f}% of content ({length_before} -> {length_after} chars) - this is likely an error")
+                logger.error("Returning original content to prevent data loss")
+                content = original_content
+            elif reduction_ratio > 0.3:  # If we've removed more than 30% of content  
+                logger.warning(f"Table preprocessing removed {reduction_ratio*100:.1f}% of content ({length_before} -> {length_after} chars) - please verify this is expected")
+            
+            logger.info("Table preprocessing complete", 
+                       stats=self.get_stats(),
+                       content_length_before=length_before,
+                       content_length_after=len(content),
+                       reduction_ratio=f"{reduction_ratio*100:.1f}%" if reduction_ratio > 0 else "0%")
+            
             return content
             
-        logger.info("Starting comprehensive table preprocessing")
-        self.stats = TableStats()  # Reset stats
-        
-        # Protect reference sections from table processing
-        content = self._protect_reference_sections(content)
-        
-        # Step 0: Separate headings from tables
-        content = self.separate_headings_from_tables(content)
-        
-        # Step 1: Fix two-line cell patterns (Item    Description format)
-        content = self.fix_two_line_cells(content)
-        
-        # Step 2: Fix merged table components
-        content = self.fix_merged_table_components(content)
-        
-        # Step 3: Remove trailing separators first (before mixed content processing)
-        content = self.remove_trailing_separators(content)
-        
-        # Step 4: Fix mixed content-separator patterns
-        content = self.fix_mixed_content_separators(content)
-        
-        # Step 5: Normalize separators
-        content = self.normalize_separators(content)
-        
-        # Step 6: Consolidate orphaned separators with adjacent data
-        content = self.consolidate_orphaned_separators(content)
-        
-        # Step 7: Consolidate adjacent table fragments
-        content = self.consolidate_table_fragments(content)
-        
-        # Step 8: Extract tables and fix column mismatches
-        content = self.fix_tables_column_counts(content)
-        
-        # Step 9: Fix collapsed comparative tables (specific fix for user's issue)
-        content = self.fix_collapsed_comparative_tables(content)
-        
-        # Step 10: Final cleanup
-        content = self.final_cleanup(content)
-        
-        # Step 11: Add table boundaries for complex tables
-        content = self.add_table_boundaries(content)
-        
-        # Step 12: Restore protected reference sections
-        content = self._restore_reference_sections(content)
-        
-        logger.info(
-            "Table preprocessing complete",
-            stats=self.get_stats()
-        )
-        
+        except Exception as e:
+            logger.error("Critical error in table preprocessing", 
+                        error=str(e), 
+                        error_type=type(e).__name__,
+                        exc_info=True)
+            # Return original content if everything fails
+            return content if 'content' in locals() else ""
+
+    def _detect_and_convert_space_delimited_tables(self, content: str) -> str:
+        """
+        Detect tables that are formatted with spaces instead of pipes and convert them.
+
+        This handles the common LLM pattern where tables are generated like:
+        Country (Region) Scenario Net take‑home Effective tax %
+        **Spain** Single €212,000 23.0 %
+
+        Instead of proper markdown:
+        | Country | Scenario | Net take‑home | Effective tax % |
+        | --- | --- | --- | --- |
+        | Spain | Single | €212,000 | 23.0 % |
+        """
+        lines = content.split('\n')
+        result_lines = []
+        i = 0
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Detect potential table header (multiple column-like words, no pipes)
+            if self._looks_like_space_delimited_header(line) and '|' not in line:
+                logger.info(f"Detected space-delimited table header at line {i}: {line[:80]}")
+
+                # Try to convert this table
+                table_lines, next_i = self._extract_space_delimited_table(lines, i)
+
+                if len(table_lines) >= 2:  # At least header + one data row
+                    # Convert to markdown table
+                    markdown_table = self._convert_space_table_to_markdown(table_lines)
+                    if markdown_table:
+                        result_lines.extend(markdown_table)
+                        self.stats.patterns_fixed['space_table_converted'] = \
+                            self.stats.patterns_fixed.get('space_table_converted', 0) + 1
+                        i = next_i
+                        continue
+
+            result_lines.append(lines[i])
+            i += 1
+
+        return '\n'.join(result_lines)
+
+    def _looks_like_space_delimited_header(self, line: str) -> bool:
+        """
+        Check if a line looks like a table header without pipes.
+
+        Characteristics:
+        - Multiple "words" that look like column headers
+        - Contains capitals (Country, Scenario, etc.)
+        - Has 3+ potential columns
+        - Not a regular sentence
+        """
+        if not line or len(line) < 20:
+            return False
+
+        # Skip if it's clearly not a header
+        if line.startswith('#') or line.startswith('-') or line.startswith('*'):
+            return False
+
+        # Skip numbered lists (references, citations)
+        if re.match(r'^\d+\.\s+', line):
+            return False
+
+        # Skip if it contains URLs (likely a reference, not a table)
+        if 'http://' in line or 'https://' in line:
+            return False
+
+        # Count capitalized words (potential column headers)
+        words = line.split()
+        capitalized_words = [w for w in words if w and w[0].isupper() and len(w) > 2]
+
+        # Need at least 3 column headers
+        if len(capitalized_words) < 3:
+            return False
+
+        # Check if it has financial/data keywords that suggest table headers
+        table_keywords = ['country', 'scenario', 'income', 'tax', 'rent', 'cost',
+                         'benefit', 'rate', 'net', 'gross', 'total', 'annual',
+                         'disposable', 'take-home', 'effective', 'daycare']
+
+        line_lower = line.lower()
+        has_table_keyword = any(keyword in line_lower for keyword in table_keywords)
+
+        return has_table_keyword and len(capitalized_words) >= 3
+
+    def _extract_space_delimited_table(self, lines: List[str], start_idx: int) -> tuple:
+        """
+        Extract all lines that belong to a space-delimited table.
+
+        Returns: (table_lines, next_index)
+        """
+        table_lines = [lines[start_idx]]  # Start with header
+        i = start_idx + 1
+
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Empty line or section break - end of table
+            if not line or line.startswith('##') or line.startswith('==='):
+                break
+
+            # If line has pipes, it's not part of this space-delimited table
+            if '|' in line and line.count('|') >= 3:
+                break
+
+            # Check if this looks like a table row
+            # (has country/data pattern or starts with bold country name)
+            if (self._looks_like_table_data_row(line, table_lines[0]) or
+                line.startswith('**')):
+                table_lines.append(line)
+                i += 1
+            else:
+                # Not a table row anymore
+                break
+
+        return table_lines, i
+
+    def _looks_like_table_data_row(self, line: str, header: str) -> bool:
+        """Check if a line looks like data corresponding to the header."""
+        # Has currency symbols, numbers, percentages - typical table data
+        has_data = any(symbol in line for symbol in ['€', '$', '£', '%', ',000'])
+
+        # Or starts with a country/region name
+        common_entities = ['spain', 'france', 'uk', 'united kingdom', 'switzerland',
+                          'germany', 'poland', 'bulgaria', 'single', 'married']
+        has_entity = any(entity in line.lower() for entity in common_entities)
+
+        return has_data or has_entity
+
+    def _convert_space_table_to_markdown(self, table_lines: List[str]) -> Optional[List[str]]:
+        """
+        Convert space-delimited table to markdown format.
+
+        Strategy:
+        1. Parse header to identify columns
+        2. For each data row, align content to columns
+        3. Generate proper markdown with pipes
+        """
+        if len(table_lines) < 2:
+            return None
+
+        try:
+            # Parse header to get column boundaries
+            header = table_lines[0]
+            columns = self._parse_space_delimited_columns(header)
+
+            if len(columns) < 2:
+                return None
+
+            logger.info(f"Converting space table with {len(columns)} columns and {len(table_lines)} rows")
+
+            # Build markdown table
+            markdown_lines = []
+
+            # Header row
+            header_cells = [col['text'] for col in columns]
+            markdown_lines.append('| ' + ' | '.join(header_cells) + ' |')
+
+            # Separator
+            markdown_lines.append('| ' + ' | '.join(['---'] * len(columns)) + ' |')
+
+            # Data rows
+            for line in table_lines[1:]:
+                if not line.strip():
+                    continue
+
+                # Extract data based on column positions
+                cells = self._extract_cells_from_line(line, columns)
+                markdown_lines.append('| ' + ' | '.join(cells) + ' |')
+
+            return markdown_lines
+
+        except Exception as e:
+            logger.error(f"Error converting space table: {e}", exc_info=True)
+            return None
+
+    def _parse_space_delimited_columns(self, header: str) -> List[Dict]:
+        """
+        Parse space-delimited header to identify column boundaries.
+
+        Returns list of dicts: [{'text': 'Country', 'start': 0, 'end': 10}, ...]
+        """
+        # Find capitalized words that are likely column headers
+        columns = []
+        words = []
+        current_pos = 0
+
+        # Split but track positions
+        for match in re.finditer(r'\S+', header):
+            word = match.group()
+            start = match.start()
+            end = match.end()
+            words.append({'text': word, 'start': start, 'end': end})
+
+        # Group consecutive capitalized words as column headers
+        i = 0
+        while i < len(words):
+            word = words[i]
+
+            if word['text'][0].isupper() or word['text'].startswith('('):
+                # Start of a column header
+                col_words = [word['text']]
+                col_start = word['start']
+                col_end = word['end']
+
+                # Include following words that are part of this column
+                j = i + 1
+                while j < len(words):
+                    next_word = words[j]
+                    # Continue if lowercase or parentheses (e.g., "tax %" or "(Region)")
+                    if (next_word['text'][0].islower() or
+                        next_word['text'] in ['%', '(yr)'] or
+                        next_word['text'].startswith('(')):
+                        col_words.append(next_word['text'])
+                        col_end = next_word['end']
+                        j += 1
+                    else:
+                        break
+
+                columns.append({
+                    'text': ' '.join(col_words),
+                    'start': col_start,
+                    'end': col_end
+                })
+
+                i = j
+            else:
+                i += 1
+
+        return columns
+
+    def _extract_cells_from_line(self, line: str, columns: List[Dict]) -> List[str]:
+        """
+        Extract cell content from a data line based on column positions.
+        """
+        cells = []
+
+        # For each column, extract the corresponding content
+        for i, col in enumerate(columns):
+            if i == len(columns) - 1:
+                # Last column - take everything after previous column's end
+                start_pos = col['start'] if i == 0 else columns[i-1]['end']
+                cell_content = line[start_pos:].strip()
+            else:
+                # Take content up to next column's start
+                start_pos = col['start'] if i == 0 else columns[i-1]['end']
+                end_pos = columns[i+1]['start']
+                cell_content = line[start_pos:end_pos].strip()
+
+            # Clean up cell content
+            cell_content = re.sub(r'\s{2,}', ' ', cell_content)
+            cells.append(cell_content)
+
+        # Ensure we have the right number of cells
+        while len(cells) < len(columns):
+            cells.append('')
+
+        return cells[:len(columns)]
+
+    def _protect_footnote_markers(self, content: str) -> str:
+        """
+        Protect footnote markers like *¹, *², *³, *⁴, *⁵, *⁶ from being
+        treated as markdown emphasis or being stripped.
+
+        Handles both Unicode superscripts (¹²³) and regular numbers (*1, *2, *3).
+        """
+        import uuid
+
+        # Reset footnote placeholders for this content
+        self.footnote_placeholders = {}
+
+        # Pattern for Unicode superscript footnotes: *¹, *², *³, etc.
+        unicode_footnote_pattern = r'\*([¹²³⁴⁵⁶⁷⁸⁹⁰]+)'
+
+        # Pattern for regular number footnotes: *1, *2, *3, etc.
+        numeric_footnote_pattern = r'\*(\d+)'
+
+        # Also protect double asterisk footnotes: **1, **2
+        double_asterisk_pattern = r'\*\*(\d+)'
+
+        footnote_count = 0
+
+        # Process Unicode superscript footnotes
+        for match in re.finditer(unicode_footnote_pattern, content):
+            footnote = match.group(0)  # Full match including *
+            placeholder_id = f"FN_UNICODE_{uuid.uuid4().hex[:8]}"
+            self.footnote_placeholders[placeholder_id] = footnote
+            content = content.replace(footnote, placeholder_id, 1)  # Replace only first occurrence
+            footnote_count += 1
+
+        # Process numeric footnotes (but only if they look like footnotes, not emphasis)
+        # Only process if:
+        # 1. After a word/number (no space before *)
+        # 2. Before punctuation, space, or pipe
+        for match in re.finditer(r'(\w)\*(\d{1,2})([,\.\s\|]|$)', content):
+            before_char = match.group(1)
+            footnote_num = match.group(2)
+            after_char = match.group(3)
+            full_match = f"{before_char}*{footnote_num}{after_char}"
+
+            placeholder_id = f"FN_NUM_{uuid.uuid4().hex[:8]}"
+            self.footnote_placeholders[placeholder_id] = f"*{footnote_num}"
+
+            # Replace with placeholder while preserving surrounding chars
+            replacement = f"{before_char}{placeholder_id}{after_char}"
+            content = content.replace(full_match, replacement, 1)
+            footnote_count += 1
+
+        if footnote_count > 0:
+            logger.info(f"Protected {footnote_count} footnote markers from processing")
+            self.stats.patterns_fixed['protected_footnotes'] = footnote_count
+
         return content
-    
+
+    def _restore_footnote_markers(self, content: str) -> str:
+        """
+        Restore protected footnote markers after all processing is complete.
+        """
+        for placeholder_id, original_footnote in self.footnote_placeholders.items():
+            content = content.replace(placeholder_id, original_footnote)
+
+        restored_count = len(self.footnote_placeholders)
+        if restored_count > 0:
+            logger.info(f"Restored {restored_count} footnote markers")
+
+        return content
+
     def _protect_reference_sections(self, content: str) -> str:
         """
         Protect reference/citation sections from table processing.
@@ -116,15 +518,18 @@ class TablePreprocessor:
         # Reset protected sections for this content
         self.protected_sections = {}
         
-        # Pattern to match reference sections
+        # Enhanced patterns to match reference sections
+        # These catch both heading-based and plain text reference sections
         reference_patterns = [
             r'(## References.*?)(?=##|\Z)',
-            r'(### References.*?)(?=###|\Z)', 
+            r'(### References.*?)(?=###|\Z)',
             r'(# References.*?)(?=#|\Z)',
             r'(## Bibliography.*?)(?=##|\Z)',
             r'(## Citations.*?)(?=##|\Z)',
-            r'(## Key Citations.*?)(?=##|\Z)',
-            r'(---\s*### References.*?)(?=---|\Z)'  # Handle metadata-style references
+            r'(## Key Citations.*?)(?=##|\Z)',           # NEW - Key Citations heading
+            r'(---\s*### References.*?)(?=---|\Z)',      # Handle metadata-style references
+            r'(References:.*?)(?=##|\Z)',                 # NEW - Plain "References:" without ##
+            r'(\n\d+\.\s+.*?https?://.*?)(?=\n(?:\d+\.|##)|\Z)',  # NEW - Numbered references with URLs
         ]
         
         for pattern in reference_patterns:
@@ -446,9 +851,9 @@ class TablePreprocessor:
                             not re.match(r'^\|(\s*:?-+:?\s*\|)+\s*$', prev_line)):
                             # This separator has a valid header line above it
                             has_valid_header = True
-                            logger.debug(f"  -> Has valid header")
+                            logger.debug("  -> Has valid header")
                         else:
-                            logger.debug(f"  -> Not a valid header")
+                            logger.debug("  -> Not a valid header")
                         break
                 
                 if not has_valid_header:
@@ -628,12 +1033,10 @@ class TablePreprocessor:
         
         # Check if there's already a separator
         has_separator = False
-        separator_idx = -1
         
-        for i, line in enumerate(table_lines):
+        for line in table_lines:
             if re.match(r'^\|[\s\-:|]+\|$', line.strip()):
                 has_separator = True
-                separator_idx = i
                 break
         
         if not has_separator and len(table_lines) >= 1:
@@ -666,13 +1069,11 @@ class TablePreprocessor:
         
         # Find the target column count (usually from header or most common)
         column_counts = []
-        separator_line_idx = -1
         
-        for i, line in enumerate(table_lines):
+        for line in table_lines:
             if '|' in line:
                 # Check if it's a separator line
                 if re.match(r'^\|[\s\-:|]+\|$', line.strip()):
-                    separator_line_idx = i
                     # Count separators
                     parts = line.split('|')
                     count = len([p.strip() for p in parts if p.strip() and re.match(r'^:?-+:?$', p.strip())])
@@ -800,7 +1201,8 @@ class TablePreprocessor:
         Fix collapsed comparative tables where multiple rows are merged into a single line.
         
         This handles cases like:
-        | | Location | Scenario 1 | Scenario 2 | Scenario 3 | | | --- | | | San Francisco | data1 | data2 | data3 | | | | New York | data1 | data2 | data3 |
+        - | | Location | Scenario 1 | Scenario 2 | Scenario 3 | | | --- | | | San Francisco | data1 | data2 | data3 | | | | New York | data1 | data2 | data3 |
+        - Performance characteristics...: | Technology | Typical Capacity Factor | Efficiency | | Solar PV | 21%-34% | 20%-22% |
         
         Which should be:
         | Location | Scenario 1 | Scenario 2 | Scenario 3 |
@@ -808,133 +1210,398 @@ class TablePreprocessor:
         | San Francisco | data1 | data2 | data3 |
         | New York | data1 | data2 | data3 |
         """
-        lines = content.split('\n')
-        fixed_lines = []
-        
-        for line in lines:
-            if '|' in line and len(line) > 200:  # Only process very long table lines
-                # Check if this looks like a collapsed comparative table
-                parts = line.split('|')
-                if len(parts) > 10:  # Likely a collapsed table
-                    # Extract location names (common indicators)
-                    location_indicators = ['San Francisco', 'New York', 'Austin', 'Durham', 'Raleigh', 'Phoenix', 'Scottsdale', 'Seattle', 'Boston', 'Chicago', 'Los Angeles']
-                    
-                    found_locations = []
-                    location_positions = []
-                    
-                    for i, part in enumerate(parts):
-                        part_clean = part.strip()
-                        for location in location_indicators:
-                            if location in part_clean:
-                                found_locations.append(part_clean)
-                                location_positions.append(i)
-                                break
-                    
-                    # If we found multiple locations in the same line, this is likely a collapsed table
-                    if len(found_locations) >= 2:
-                        logger.info(f"Detected collapsed comparative table with {len(found_locations)} locations")
-                        self.stats.patterns_fixed['collapsed_comparative'] = self.stats.patterns_fixed.get('collapsed_comparative', 0) + 1
-                        
-                        # Try to extract headers and reconstruct the table
-                        fixed_table = self._reconstruct_comparative_table(parts, found_locations, location_positions)
-                        fixed_lines.extend(fixed_table)
-                        continue
+        try:
+            lines = content.split('\n')
+            fixed_lines = []
+            processed_count = 0
             
-            fixed_lines.append(line)
-        
-        return '\n'.join(fixed_lines)
-    
-    def _reconstruct_comparative_table(self, parts: List[str], locations: List[str], location_positions: List[int]) -> List[str]:
+            logger.debug(f"Processing {len(lines)} lines for collapsed tables")
+            
+            for line_idx, line in enumerate(lines):
+                try:
+                    if '|' in line and len(line) > 120:  # Only process long table-like lines
+                        logger.debug(f"Processing potential collapsed table at line {line_idx}, length: {len(line)}")
+                        
+                        # Extract potential table content from mixed content lines
+                        table_content = self._extract_table_from_mixed_content(line)
+                        if table_content and table_content != line:
+                            logger.debug(f"Extracted table content: {table_content[:100]}...")
+                            
+                            # Process the extracted table content
+                            generic_table = self._reconstruct_generic_collapsed_table(table_content)
+                            if generic_table:
+                                # Add any descriptive text before the table
+                                descriptive_text = line[:len(line) - len(table_content)].strip()
+                                if descriptive_text and not descriptive_text.endswith(':'):
+                                    fixed_lines.append(descriptive_text)
+                                elif descriptive_text.endswith(':'):
+                                    fixed_lines.append(descriptive_text[:-1].strip())
+                                
+                                fixed_lines.extend(generic_table)
+                                self.stats.patterns_fixed['collapsed_mixed_content'] = \
+                                    self.stats.patterns_fixed.get('collapsed_mixed_content', 0) + 1
+                                self.stats.tables_fixed += 1
+                                processed_count += 1
+                                
+                                column_estimate = len([
+                                    segment for segment in generic_table[0].split('|')
+                                    if segment.strip()
+                                ]) if generic_table else 0
+                                logger.info(
+                                    "Detected collapsed table with mixed content: %d rows and %d columns",
+                                    max(len(generic_table) - 2, 0),
+                                    column_estimate
+                                )
+                                continue
+                        
+                        # First try a generic reconstruction that works for any entity list
+                        generic_table = self._reconstruct_generic_collapsed_table(line)
+                        if generic_table:
+                            fixed_lines.extend(generic_table)
+                            self.stats.patterns_fixed['collapsed_generic'] = \
+                                self.stats.patterns_fixed.get('collapsed_generic', 0) + 1
+                            self.stats.tables_fixed += 1
+                            processed_count += 1
+                            
+                            column_estimate = len([
+                                segment for segment in generic_table[0].split('|')
+                                if segment.strip()
+                            ]) if generic_table else 0
+                            logger.info(
+                                "Detected collapsed table with %d rows and %d columns",
+                                max(len(generic_table) - 2, 0),
+                                column_estimate
+                            )
+                            continue
+
+                    fixed_lines.append(line)
+                    
+                except Exception as line_error:
+                    logger.warning(f"Error processing line {line_idx} in collapsed table detection", 
+                                 error=str(line_error), 
+                                 line_preview=line[:100] if line else "empty",
+                                 exc_info=True)
+                    # Continue with the original line if processing fails
+                    fixed_lines.append(line)
+
+            logger.debug(f"Collapsed table processing complete: {processed_count} tables processed")
+            return '\n'.join(fixed_lines)
+            
+        except Exception as e:
+            logger.error("Critical error in fix_collapsed_comparative_tables", 
+                        error=str(e), 
+                        error_type=type(e).__name__,
+                        exc_info=True)
+            return content  # Return original content on critical error
+
+
+    def _extract_table_from_mixed_content(self, line: str) -> Optional[str]:
         """
-        Reconstruct a comparative table from collapsed parts.
+        Extract table content from lines that contain both descriptive text and table data.
+        
+        Handles patterns like:
+        - "Performance characteristics...: | Technology | data |"
+        - "The following table shows: | Header1 | Header2 | | Row1 | Row2 |"
+        
+        Returns:
+            The extracted table content or None if no clear separation found
         """
-        # Try to find headers before the first location
-        header_parts = []
-        first_location_pos = location_positions[0] if location_positions else 0
+        try:
+            logger.debug(f"Extracting table from mixed content: {line[:150]}...")
+            
+            # Look for common separators between descriptive text and table content
+            separators = [': |', ':| ', ': ',':|']
+            
+            for separator in separators:
+                if separator in line:
+                    logger.debug(f"Found separator: '{separator}'")
+                    parts = line.split(separator, 1)  # Split only on first occurrence
+                    if len(parts) == 2:
+                        text_part, table_part = parts
+                        logger.debug(f"Text part: {text_part[:50]}...")
+                        logger.debug(f"Table part: {table_part[:100]}...")
+                        
+                        # Ensure the table part looks like table data (has pipes and reasonable length)
+                        if table_part.count('|') >= 4 and len(table_part) > 50:
+                            # Add the leading pipe if missing
+                            if not table_part.startswith('|'):
+                                table_part = '|' + table_part
+                            # Add trailing pipe if missing
+                            if not table_part.strip().endswith('|'):
+                                table_part = table_part.strip() + ' |'
+                            
+                            logger.debug(f"Extracted table content successfully: {len(table_part)} chars")
+                            return table_part
+            
+            # Try pattern where table starts after a colon and space
+            colon_pattern = re.search(r'^([^|]*?):\s*(\|.+)$', line)
+            if colon_pattern:
+                logger.debug("Found colon pattern match")
+                table_part = colon_pattern.group(2)
+                if table_part.count('|') >= 4 and len(table_part) > 50:
+                    logger.debug(f"Colon pattern extraction successful: {len(table_part)} chars")
+                    return table_part
+            
+            # Try pattern where table content appears after common phrases
+            table_intro_patterns = [
+                r'^.*(following table|table shows|characteristics|metrics|performance data).*?(\|.+)$',
+                r'^.*(as follows|shown below|presented below).*?(\|.+)$'
+            ]
+            
+            for pattern in table_intro_patterns:
+                match = re.search(pattern, line, re.IGNORECASE)
+                if match:
+                    logger.debug(f"Found intro pattern match: {match.group(1)}")
+                    table_part = match.group(2)
+                    if table_part.count('|') >= 4 and len(table_part) > 50:
+                        logger.debug(f"Intro pattern extraction successful: {len(table_part)} chars")
+                        return table_part
+            
+            logger.debug("No table content extracted from mixed content line")
+            return None
+            
+        except Exception as e:
+            logger.error("Error in _extract_table_from_mixed_content", 
+                        error=str(e), 
+                        error_type=type(e).__name__,
+                        line_preview=line[:100] if line else "empty",
+                        exc_info=True)
+            return None
+
+    def _reconstruct_generic_collapsed_table(self, line: str) -> Optional[List[str]]:
+        """
+        Attempt to rebuild a collapsed table without relying on specific entity names.
         
-        # Extract potential headers
-        for i in range(first_location_pos):
-            part = parts[i].strip()
-            if part and part not in ['', '---'] and 'Scenario' in part or 'Location' in part:
-                header_parts.append(part)
-        
-        # If no clear headers found, create generic ones
-        if not header_parts:
-            header_parts = ['Location', 'Scenario 1', 'Scenario 2', 'Scenario 3']
-        
-        # Ensure we have at least 4 columns for a proper comparative table
-        while len(header_parts) < 4:
-            header_parts.append(f'Column {len(header_parts) + 1}')
-        
-        result = []
-        
-        # Add header
-        result.append('| ' + ' | '.join(header_parts) + ' |')
-        result.append('|' + ' --- |' * len(header_parts))
-        
-        # Try to extract data for each location
-        for i, location in enumerate(locations):
-            if i < len(location_positions):
-                start_pos = location_positions[i]
-                end_pos = location_positions[i + 1] if i + 1 < len(location_positions) else len(parts)
+        Improved version that handles:
+        - Empty cells (multiple consecutive pipes)
+        - Complex cell content with spaces and special characters
+        - Variable column counts across rows
+        - Better row boundary detection
+        """
+        try:
+            logger.debug(f"Attempting to reconstruct collapsed table from line: {line[:200]}...")
+            
+            if line.count('|') < 8:  # Reduced threshold for better detection
+                logger.debug(f"Line has too few pipes ({line.count('|')}), skipping")
+                return None
+
+            # Clean the line and normalize pipe patterns
+            clean_line = re.sub(r'\s*\|\s*', '|', line.strip())
+            logger.debug(f"Cleaned line: {clean_line[:100]}...")
+            
+            # Split on pipes, keeping empty strings to preserve structure
+            parts = clean_line.split('|')
+            logger.debug(f"Split into {len(parts)} parts")
+            
+            # Remove leading/trailing empty parts
+            while parts and not parts[0].strip():
+                parts.pop(0)
+            while parts and not parts[-1].strip():
+                parts.pop()
                 
-                # Extract data for this location
-                location_data = [location]
+            if len(parts) < 8:  # Need at least some content
+                logger.debug(f"Too few content parts after cleanup ({len(parts)}), skipping")
+                return None
+
+            rows: List[List[str]] = []
+            current_row: List[str] = []
+            
+            i = 0
+            while i < len(parts):
+                part = parts[i].strip()
                 
-                # Look for data in the next few parts after the location
-                data_count = 0
-                for j in range(start_pos + 1, min(start_pos + 6, end_pos)):  # Look at next 5 parts max
-                    if j < len(parts):
-                        part = parts[j].strip()
-                        if part and part not in ['', '---'] and data_count < len(header_parts) - 1:
-                            location_data.append(part)
-                            data_count += 1
+                # Detect potential row boundaries by looking for patterns that indicate new rows
+                # This includes technology names, location names, or typical table row starters
+                is_row_boundary = (
+                    current_row and  # We already have some content
+                    part and  # Current part is not empty
+                    (
+                        # Check for common table row starters (entities/technologies)
+                        any(keyword in part.lower() for keyword in [
+                            'solar', 'wind', 'hydro', 'battery', 'nuclear', 'coal', 'gas',
+                            'onshore', 'offshore', 'bioenergy', 'hydrogen', 'geothermal',
+                            'pump', 'storage', 'pv', 'photovoltaic', 'heat pump'
+                        ]) or
+                        # Check for location/entity patterns (capitalized words)
+                        (re.match(r'^[A-Z][a-z]+(\s+[A-Z][a-z]*)*$', part) and len(part) > 2 and 
+                         not any(header_word in part.lower() for header_word in [
+                             'technology', 'capacity', 'efficiency', 'utilisation', 'constraints',
+                             'factor', 'electrical', 'resource', 'scalability', 'primary'
+                         ])) or
+                        # Check if this looks like a new row start (multiple words, first capitalized)
+                        # but avoid common header words
+                        (len(part.split()) >= 2 and part[0].isupper() and 
+                         not any(header_word in part.lower() for header_word in [
+                             'technology', 'capacity', 'efficiency', 'utilisation', 'constraints',
+                             'factor', 'electrical', 'resource', 'scalability', 'primary'
+                         ]))
+                    )
+                )
                 
-                # Ensure we have enough columns
-                while len(location_data) < len(header_parts):
-                    location_data.append('Data not available')
+                if is_row_boundary:
+                    # Complete current row and start new one
+                    if current_row:
+                        rows.append(current_row)
+                        logger.debug(f"Completed row: {current_row[:3]}...")
+                    current_row = [part]
+                else:
+                    # Add to current row
+                    current_row.append(part)
                 
-                # Truncate if too many columns
-                if len(location_data) > len(header_parts):
-                    location_data = location_data[:len(header_parts)]
+                i += 1
+            
+            # Add the last row
+            if current_row:
+                rows.append(current_row)
+                logger.debug(f"Final row: {current_row[:3]}...")
+            
+            logger.debug(f"Found {len(rows)} total rows")
+            
+            # Filter out rows that are too short or seem invalid
+            valid_rows = []
+            for row_idx, row in enumerate(rows):
+                # Remove empty cells at the end
+                while row and not row[-1].strip():
+                    row.pop()
+                # Keep rows with at least 2 non-empty cells
+                non_empty_cells = [cell for cell in row if cell.strip()]
+                if len(non_empty_cells) >= 2:
+                    valid_rows.append(row)
+                    logger.debug(f"Valid row {row_idx}: {len(row)} cells, {len(non_empty_cells)} non-empty")
+                else:
+                    logger.debug(f"Skipping invalid row {row_idx}: {len(non_empty_cells)} non-empty cells")
+            
+            if len(valid_rows) < 2:
+                logger.debug(f"Too few valid rows ({len(valid_rows)}), table reconstruction failed")
+                return None
+
+            # Determine target column count from the longest row
+            target_columns = max(len(row) for row in valid_rows)
+            if target_columns < 2:
+                logger.debug(f"Target column count too low ({target_columns})")
+                return None
                 
-                result.append('| ' + ' | '.join(location_data) + ' |')
-        
-        return result
+            logger.debug(f"Target columns: {target_columns}")
+                
+            # Assume first row is header
+            header = valid_rows[0]
+            data_rows = valid_rows[1:]
+
+            def normalize_row(row: List[str]) -> List[str]:
+                # Pad short rows
+                if len(row) < target_columns:
+                    return row + [''] * (target_columns - len(row))
+                # Merge overflow into last column
+                if len(row) > target_columns:
+                    overflow = ' '.join(row[target_columns - 1:])
+                    return row[:target_columns - 1] + [overflow]
+                return row
+
+            # Normalize all rows
+            normalized_header = normalize_row(header)
+            normalized_data_rows = [normalize_row(row) for row in data_rows]
+            
+            # Build the markdown table
+            table_lines = []
+            
+            # Header row
+            table_lines.append('| ' + ' | '.join(cell.strip() for cell in normalized_header) + ' |')
+            
+            # Separator row
+            table_lines.append('|' + ' --- |' * target_columns)
+            
+            # Data rows
+            for row in normalized_data_rows:
+                table_lines.append('| ' + ' | '.join(cell.strip() for cell in row) + ' |')
+            
+            # Final validation - make sure we have a proper table
+            if len(table_lines) < 3:  # Header + separator + at least one data row
+                logger.debug(f"Final table too short ({len(table_lines)} lines)")
+                return None
+                
+            logger.debug(f"Successfully reconstructed table with {len(table_lines)} lines")
+            return table_lines
+            
+        except Exception as e:
+            logger.error("Error in _reconstruct_generic_collapsed_table", 
+                        error=str(e), 
+                        error_type=type(e).__name__,
+                        line_preview=line[:100] if line else "empty",
+                        exc_info=True)
+            return None
     
     def final_cleanup(self, content: str) -> str:
         """
         Final cleanup pass for any remaining issues.
+        Be careful not to remove legitimate report formatting.
         """
         # Remove any remaining double pipes
         content = re.sub(r'\|\|+', '|', content)
         
-        # Remove standalone pipe lines
+        # Remove standalone pipe lines and ONLY very specific orphaned separators
         lines = content.split('\n')
         fixed_lines = []
         
-        for line in lines:
+        for line_idx, line in enumerate(lines):
             stripped = line.strip()
-            # Skip empty pipe rows and standalone pipes
+            
+            # Skip empty pipe rows and standalone pipes (table-related only)
             if stripped in ['|', '||'] or re.match(r'^\|\s*(\|\s*)*$', stripped):
                 self.stats.patterns_fixed['empty_pipes'] = self.stats.patterns_fixed.get('empty_pipes', 0) + 1
+                logger.debug(f"Removing empty pipe line: '{stripped}'")
                 continue
-            # Skip orphaned separator patterns
-            if stripped == '---' or re.match(r'^-{3,}$', stripped):
-                self.stats.patterns_fixed['orphaned_separators'] = self.stats.patterns_fixed.get('orphaned_separators', 0) + 1
-                continue
+                
+            # ONLY skip very specific orphaned table separators, NOT report formatting
+            # Only remove standalone "---" (exactly 3 dashes) that are clearly orphaned table separators
+            # Do NOT remove longer separator lines like ======= which are report formatting
+            if stripped == '---':  # Only exactly 3 dashes, not more
+                # Check context - is this actually an orphaned table separator?
+                # Don't remove it if it's part of a larger formatting pattern
+                is_orphaned_table_sep = True
+                
+                # Get surrounding context
+                context_lines = []
+                for offset in [-2, -1, 1, 2]:
+                    idx = line_idx + offset
+                    if 0 <= idx < len(lines):
+                        context_lines.append(lines[idx].strip())
+                
+                # If surrounded by non-table content, this might be legitimate formatting
+                table_like_context = any('|' in ctx and len(ctx) > 5 for ctx in context_lines)
+                
+                if not table_like_context:
+                    is_orphaned_table_sep = False
+                    logger.debug("Preserving '---' line as it appears to be report formatting, not orphaned table separator")
+                
+                if is_orphaned_table_sep:
+                    self.stats.patterns_fixed['orphaned_separators'] = self.stats.patterns_fixed.get('orphaned_separators', 0) + 1
+                    logger.debug("Removing orphaned table separator: '---'")
+                    continue
+                    
             fixed_lines.append(line)
         
         content = '\n'.join(fixed_lines)
         
-        # Remove excessive blank lines
-        content = re.sub(r'\n{3,}', '\n\n', content)
+        # Remove excessive blank lines (but preserve intentional spacing)
+        content = re.sub(r'\n{4,}', '\n\n\n', content)  # Allow up to 3 line breaks
+        
+        # Safety check - if we've removed too much content, something went wrong
+        original_lines = len(lines)
+        final_lines = len(content.split('\n'))
+        removed_lines = original_lines - final_lines
+        
+        if removed_lines > 0:
+            logger.debug(f"Final cleanup removed {removed_lines} lines out of {original_lines}")
+            
+            # If we've removed more than 50% of the content, that's suspicious
+            if removed_lines > original_lines * 0.5:
+                logger.warning(f"Final cleanup removed {removed_lines}/{original_lines} lines ({removed_lines/original_lines*100:.1f}%) - this seems excessive")
         
         return content
     
     def add_table_boundaries(self, content: str) -> str:
         """
-        Add TABLE_START/TABLE_END markers for complex tables.
+        Add TABLE_START/TABLE_END markers for ALL tables.
         This helps the UI know when a complete table has been received.
         """
         lines = content.split('\n')
@@ -943,70 +1610,106 @@ class TablePreprocessor:
         table_lines = []
         has_separator = False
         has_content = False
-        
-        for i, line in enumerate(lines):
-            if '|' in line.strip():
-                # Skip orphaned separators (lone separator lines not part of a table)
-                if re.match(r'^\|[\s\-:|]+\|$', line.strip()) and not in_table:
-                    # Look ahead to see if next line is table content
-                    next_is_table = False
-                    if i + 1 < len(lines) and '|' in lines[i + 1]:
-                        next_line = lines[i + 1].strip()
-                        if not re.match(r'^\|[\s\-:|]+\|$', next_line):
-                            next_is_table = True
-                    
-                    if not next_is_table:
-                        # This is an orphaned separator, don't start a table
-                        marked_lines.append(line)
-                        continue
-                
-                if not in_table:
-                    in_table = True
-                    table_lines = [line]
-                    # Check if this is a separator
-                    if re.match(r'^\|[\s\-:|]+\|$', line.strip()):
-                        has_separator = True
-                    else:
-                        has_content = True
-                else:
-                    table_lines.append(line)
-                    # Track if we have both separator and content
-                    if re.match(r'^\|[\s\-:|]+\|$', line.strip()):
-                        has_separator = True
-                    else:
-                        has_content = True
-            else:
-                if in_table:
-                    # End of table - check if it's a valid table
-                    # Valid table must have both content and separator (or be large enough)
-                    is_valid_table = (has_separator and has_content) or len(table_lines) >= 3
-                    
-                    if is_valid_table:
-                        # This is a substantial table, add markers
-                        marked_lines.append(self.table_start_marker)
-                        marked_lines.extend(table_lines)
-                        marked_lines.append(self.table_end_marker)
-                    else:
-                        # Not a valid table structure, don't mark
-                        marked_lines.extend(table_lines)
-                    
-                    in_table = False
-                    table_lines = []
-                    has_separator = False
-                    has_content = False
-                    
-                marked_lines.append(line)
-        
-        # Handle table at end of content
-        if in_table and table_lines:
-            is_valid_table = (has_separator and has_content) or len(table_lines) >= 3
+
+        def flush_pipe_table():
+            nonlocal in_table, table_lines, has_separator, has_content
+            if not in_table:
+                return
+            # Mark ALL tables, even simple ones, to ensure consistent UI handling
+            is_valid_table = (has_separator and has_content) or len(table_lines) >= 2
             if is_valid_table:
                 marked_lines.append(self.table_start_marker)
                 marked_lines.extend(table_lines)
                 marked_lines.append(self.table_end_marker)
             else:
                 marked_lines.extend(table_lines)
-        
+            in_table = False
+            table_lines = []
+            has_separator = False
+            has_content = False
+
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            # If we were in a pipe table and hit a non-table line, flush it first
+            if in_table and '|' not in stripped:
+                flush_pipe_table()
+                # Re-evaluate current line after flushing
+                continue
+
+            # Detect bold-header tables lacking pipe delimiters
+            bold_cells = re.findall(r'\*\*(.+?)\*\*', line)
+            if (
+                len(bold_cells) >= 3
+                and not stripped.startswith(('- ', '* ', '> '))
+                and not stripped.startswith('#')
+            ):
+                data_lines = []
+                j = i + 1
+                while j < len(lines):
+                    candidate = lines[j]
+                    candidate_stripped = candidate.strip()
+                    if not candidate_stripped:
+                        break
+                    if candidate_stripped.startswith(('#', '##', '###', '####', '---')):
+                        break
+                    if candidate_stripped.startswith(('- ', '* ', '> ')):
+                        break
+                    if candidate_stripped.startswith(self.table_start_marker) or candidate_stripped.startswith(self.table_end_marker):
+                        break
+                    if re.findall(r'\*\*(.+?)\*\*', candidate_stripped):
+                        break
+                    data_lines.append(candidate)
+                    j += 1
+
+                if len(data_lines) >= 2:
+                    marked_lines.append(self.table_start_marker)
+                    marked_lines.append(self.table_header_start_marker)
+                    marked_lines.append(line)
+                    marked_lines.append(self.table_header_end_marker)
+                    marked_lines.extend(data_lines)
+                    marked_lines.append(self.table_end_marker)
+                    i = j
+                    continue
+
+            if '|' in stripped:
+                # Skip orphaned separators (lone separator lines not part of a table)
+                if re.match(r'^\|[\s\-:|]+\|$', stripped) and not in_table:
+                    next_is_table = False
+                    if i + 1 < len(lines) and '|' in lines[i + 1]:
+                        next_line = lines[i + 1].strip()
+                        if not re.match(r'^\|[\s\-:|]+\|$', next_line):
+                            next_is_table = True
+                    if not next_is_table:
+                        marked_lines.append(line)
+                        i += 1
+                        continue
+
+                if not in_table:
+                    in_table = True
+                    table_lines = [line]
+                    if re.match(r'^\|[\s\-:|]+\|$', stripped):
+                        has_separator = True
+                    else:
+                        has_content = True
+                else:
+                    table_lines.append(line)
+                    if re.match(r'^\|[\s\-:|]+\|$', stripped):
+                        has_separator = True
+                    else:
+                        has_content = True
+                i += 1
+                continue
+
+            # Regular line (not part of any table pattern)
+            marked_lines.append(line)
+            i += 1
+
+        # Flush trailing pipe table if present
+        flush_pipe_table()
+
         return '\n'.join(marked_lines)
     
     def get_stats(self) -> Dict[str, any]:

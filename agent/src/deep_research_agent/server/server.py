@@ -4,6 +4,7 @@ import json
 import logging
 import time
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Type
 
@@ -24,6 +25,19 @@ from pydantic import BaseModel
 _invoke_function: Optional[Callable] = None
 _stream_function: Optional[Callable] = None
 AgentType = Literal["agent/v1/responses", "agent/v1/chat", "agent/v2/chat"]
+
+
+class DatetimeEncoder(json.JSONEncoder):
+    """
+    Custom JSON encoder that handles datetime objects by converting them to Unix timestamps.
+
+    This ensures that any datetime objects that slip through validation are properly
+    serialized instead of causing "Object of type datetime is not JSON serializable" errors.
+    """
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.timestamp()
+        return super().default(obj)
 
 
 def invoke() -> Callable:
@@ -300,12 +314,12 @@ class AgentServer:
                         async for chunk in func(data):
                             chunk = self.validator.validate_and_convert_result(chunk, stream=True)
                             all_chunks.append(chunk)
-                            yield f"data: {json.dumps(chunk)}\n\n"
+                            yield f"data: {json.dumps(chunk, cls=DatetimeEncoder)}\n\n"
                     else:
                         for chunk in func(data):
                             chunk = self.validator.validate_and_convert_result(chunk, stream=True)
                             all_chunks.append(chunk)
-                            yield f"data: {json.dumps(chunk)}\n\n"
+                            yield f"data: {json.dumps(chunk, cls=DatetimeEncoder)}\n\n"
 
                     duration = round(time.time() - start_time, 2)
                     span.set_attribute("duration_ms", duration)
@@ -315,7 +329,7 @@ class AgentServer:
 
                     if return_trace:
                         databricks_output = self._get_databricks_output(span.trace_id)
-                        yield f"data: {json.dumps({'databricks_output': databricks_output})}\n\n"
+                        yield f"data: {json.dumps({'databricks_output': databricks_output}, cls=DatetimeEncoder)}\n\n"
 
                     yield "data: [DONE]\n\n"
 
@@ -347,7 +361,7 @@ class AgentServer:
                     },
                 )
 
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                yield f"data: {json.dumps({'error': str(e)}, cls=DatetimeEncoder)}\n\n"
                 yield "data: [DONE]\n\n"
 
         return StreamingResponse(generate(), media_type="text/event-stream")

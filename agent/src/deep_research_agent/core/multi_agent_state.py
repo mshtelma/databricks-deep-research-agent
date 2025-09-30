@@ -456,47 +456,59 @@ class StateManager:
     def add_observation(
         state: EnhancedResearchState,
         observation: Union[str, Any],
-        step: Optional[Step] = None
+        step: Optional[Step] = None,
+        config: Optional[Dict[str, Any]] = None
     ) -> EnhancedResearchState:
-        """Add an observation to the state with memory limits, normalizing to StructuredObservation."""
+        """Add an observation to the state with configurable memory limits, normalizing to StructuredObservation."""
         from .observation_models import ensure_structured_observation
-        
+        from .memory_config import MemoryOptimizedConfig
+
         # Normalize observation to StructuredObservation
         structured_obs = ensure_structured_observation(observation)
-        
+
         # Add to global observations with size limit
         state["observations"].append(structured_obs)
-        
-        # Keep only the last 20 observations to prevent unbounded growth
-        max_observations = 20
+
+        # Use configurable observation limit (defaults to 50, can be overridden in base.yaml)
+        max_observations = MemoryOptimizedConfig.get_observations_limit(config)
         if len(state["observations"]) > max_observations:
             state["observations"] = state["observations"][-max_observations:]
-        
+
+        # CRITICAL: Sync both observation fields to prevent data loss
+        # Ensure research_observations stays in sync with observations
+        if "research_observations" not in state:
+            state["research_observations"] = []
+        state["research_observations"] = state["observations"].copy()
+
         if step:
             if not step.observations:
                 step.observations = []
             step.observations.append(structured_obs)
-            
-            # Also limit step observations
-            if len(step.observations) > 10:  # Smaller limit per step
-                step.observations = step.observations[-10:]
-        
+
+            # Use configurable per-step observation limit
+            max_observations_per_step = MemoryOptimizedConfig.get_observations_per_step_limit(config)
+            if len(step.observations) > max_observations_per_step:
+                step.observations = step.observations[-max_observations_per_step:]
+
         return state
     
     @staticmethod
     def add_search_results(
         state: EnhancedResearchState,
-        search_results: List[Any]
+        search_results: List[Any],
+        config: Optional[Dict[str, Any]] = None
     ) -> EnhancedResearchState:
-        """Add search results to the state with memory limits."""
+        """Add search results to the state with configurable memory limits."""
+        from .memory_config import MemoryOptimizedConfig
+
         # Add new search results
         state["search_results"].extend(search_results)
-        
-        # Keep only the last 50 search results to prevent unbounded growth
-        max_search_results = 50
+
+        # Use configurable search results limit (defaults to 500, can be overridden in base.yaml)
+        max_search_results = MemoryOptimizedConfig.get_search_results_limit(config)
         if len(state["search_results"]) > max_search_results:
             state["search_results"] = state["search_results"][-max_search_results:]
-        
+
         return state
     
     @staticmethod

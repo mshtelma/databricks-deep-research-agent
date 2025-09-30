@@ -196,7 +196,7 @@ class Plan(BaseModel):
                 # Otherwise, retry the failed step if not at max retries yet
                 # This allows retrying failed steps up to the circuit breaker limit
                 
-            if step.status in (StepStatus.PENDING, StepStatus.FAILED):
+            if step.status == StepStatus.PENDING:
                 # Check if dependencies are met using proper title-to-ID mapping
                 if hasattr(step, 'depends_on') and step.depends_on:
                     deps_met = True
@@ -653,15 +653,17 @@ class Plan(BaseModel):
 
             logger.info(f"[DYNAMIC PLAN] Added new step '{new_step.title}' at index {index}")
 
-            # Emit step addition event
+            # Emit step addition event with proper enum type
             if event_emitter:
+                from .event_emitter import IntermediateEventType
                 event_emitter.emit(
-                    event_type="step_added",
+                    event_type=IntermediateEventType.STEP_ADDED,
                     data={
                         "step_id": new_step.step_id,
                         "step_title": new_step.title,
                         "index": index,
-                        "reason": "incremental_research_loop"
+                        "reason": "incremental_research_loop",
+                        "description": new_step.description
                     },
                     reasoning=f"Added new step for deeper investigation: {new_step.title}",
                     stage_id="planner"

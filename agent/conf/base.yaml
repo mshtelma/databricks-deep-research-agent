@@ -8,16 +8,41 @@ models:
     endpoint: databricks-gpt-oss-120b
     temperature: 0.9
     max_tokens: 16000  # Increased for complex analysis
-    
-  web_research:
+    reasoning_effort: low
+
+  # Complexity-based model tiers for performance optimization
+  simple:  # For quick tasks: classification, query generation
+    endpoint: databricks-gpt-oss-20b
+    temperature: 0.7
+    max_tokens: 4000
+    reasoning_effort: low
+
+  analytical:  # For medium tasks: research, fact-checking, planning
+    endpoint: databricks-gpt-oss-20b
+    temperature: 0.9
+    max_tokens: 8000
+    reasoning_effort: medium  # Medium effort for better quality
+
+  complex:  # For heavy tasks: final synthesis, deep analysis
     endpoint: databricks-gpt-oss-120b
+    temperature: 0.2  # Low temperature for structured JSON generation (was 0.9 - too high!)
+    max_tokens: 24000
+    reasoning_effort: high  # HIGH effort required for complex synthesis!
+    reasoning_budget: 8000  # For future Claude-style models
+
+  # Legacy model names (kept for backward compatibility)
+  web_research:
+    endpoint: databricks-gpt-oss-20b
     temperature: 0.9
     max_tokens: 16000  # Increased for comprehensive research
-    
+    reasoning_effort: low
+
   synthesis:
     endpoint: databricks-gpt-oss-120b
-    temperature: 0.9
-    max_tokens: 32000  # Significantly increased for detailed reports and comprehensive tables
+    temperature: 0.2  # Low temperature for structured JSON generation (was 0.9 - too high!)
+    max_tokens: 24000  # Total tokens
+    reasoning_budget: 8000  # Reserve half for reasoning
+    reasoning_effort: high  # HIGH effort required for report synthesis
 
 # Multi-Agent System Configuration
 multi_agent:
@@ -26,35 +51,41 @@ multi_agent:
 agents:
   coordinator:
     enabled: true
-    model: default
+    model: simple  # Use simple model for classification
     enable_safety_filter: true
-    
+
   planner:
     enabled: true
-    model: default
+    model: analytical  # Use analytical model for planning
     max_iterations: 2
     quality_threshold: 0.5
     enable_deep_thinking: false
-    
+
   researcher:
     enabled: true
-    model: web_research
+    model: analytical  # Use analytical model for research
     max_steps_per_execution: 10
     enable_reflexion: true
-    
+
   fact_checker:
     enabled: true
-    model: default
+    model: analytical  # Use analytical model for fact checking
     verification_level: strict
     enable_contradiction_detection: true
-    
+
   reporter:
     enabled: true
-    model: synthesis
+    model: complex  # Use complex model for final synthesis
     default_style: default
     citation_style: APA
     enable_grounding_markers: true
     use_semantic_extraction: true
+    # Structured generation (NEW - guarantees JSON structure, not markdown syntax!)
+    enable_structured_generation: true  # Use Pydantic models + programmatic rendering
+    # Table validation MUST stay enabled - structured generation doesn't validate markdown!
+    enable_table_validation: true  # POST-PROCESS to fix missing separator rows
+    enable_llm_self_correction: false  # LLM correction is overkill, validation is enough
+    max_correction_retries: 1
 
 # Search Configuration
 search:
@@ -153,4 +184,10 @@ adaptive_structure:
   use_llm_for_structure: true  # Use LLM to generate creative section names
   max_structure_sections: 8  # Maximum number of sections
   min_structure_sections: 4  # Minimum number of sections
+
+# Memory and State Management Configuration
+memory:
+  max_observations: 100  # Increased for comprehensive research (was hardcoded to 20)
+  max_observations_per_step: 50  # Per-step observation limit (was hardcoded to 10)
+  max_search_results: 100  # Search result accumulation limit (was hardcoded to 50)
 

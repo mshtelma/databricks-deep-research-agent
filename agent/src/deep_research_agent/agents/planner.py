@@ -210,7 +210,31 @@ class PlannerAgent:
             
             # ENTITY VALIDATION: Check for hallucinated entities in LLM response
             original_query = state.get("original_user_query") or get_last_user_message(state.get("messages", []))
-            requested_entities = extract_entities_from_query(original_query, self.llm)
+
+            # NEW: Use abstract constraint system for comprehensive extraction
+            from ..core.constraint_system import (
+                ConstraintExtractor,
+                set_global_constraints,
+                QueryConstraints
+            )
+
+            try:
+                constraint_extractor = ConstraintExtractor(self.llm)
+                constraints = constraint_extractor.extract_constraints(original_query, state)
+                set_global_constraints(constraints)
+
+                # Store in state for downstream components
+                state["query_constraints"] = constraints
+                state["requested_entities"] = constraints.entities
+
+                logger.info(f"🎯 PLANNER: Extracted constraints - Entities: {constraints.entities}, "
+                           f"Metrics: {constraints.metrics}, Format: {constraints.data_format}")
+
+                # Use entities from constraints for validation
+                requested_entities = constraints.entities
+            except Exception as e:
+                logger.error(f"Constraint extraction failed: {e}, falling back to entity extraction")
+                requested_entities = extract_entities_from_query(original_query, self.llm)
             
             # Handle structured responses using centralized parser
             from ..core.llm_response_parser import extract_text_from_response
@@ -643,9 +667,18 @@ Output your plan as a JSON object with this structure:
                 normalized_dependencies,
             )
 
+            # Clean the title to remove unnecessary prefixes
+            raw_title = step_dict.get("title", "Research Step")
+            # Remove "Section X -", "Section X:", "Step X:", etc.
+            import re
+            cleaned_title = re.sub(r'^(Section|Step)\s+\d+\s*[-–:]\s*', '', raw_title)
+            # Also remove just numbers followed by dot/dash
+            cleaned_title = re.sub(r'^\d+\s*[.-]\s*', '', cleaned_title)
+            cleaned_title = cleaned_title.strip()
+
             step = Step(
                 step_id=normalized_step_id,
-                title=step_dict.get("title", "Research Step"),
+                title=cleaned_title or "Research Step",
                 description=step_dict.get("description", ""),
                 step_type=StepType(step_dict.get("step_type", "research")),
                 need_search=step_dict.get("need_search", True),

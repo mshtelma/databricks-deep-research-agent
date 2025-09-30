@@ -341,18 +341,24 @@ def validate_section_research_state(state: Dict[str, Any], checkpoint_name: str)
     
     # Validate each section has required fields
     for section_id, section_data in section_research.items():
-        if not isinstance(section_data, dict):
-            logger.error(f"[CHECKPOINT:{checkpoint_name}] Section {section_id} data is not a dict: {type(section_data)}")
+        # Convert SectionResearchResult objects to dicts if needed
+        if hasattr(section_data, 'to_dict'):
+            section_dict = section_data.to_dict()
+        elif isinstance(section_data, dict):
+            section_dict = section_data
+        else:
+            logger.error(f"[CHECKPOINT:{checkpoint_name}] Section {section_id} data is neither dict nor SectionResearchResult: {type(section_data)}")
             continue
-            
-        if not section_data.get("research"):
-            logger.warning(f"[CHECKPOINT:{checkpoint_name}] Section {section_id} has no research data")
-        
-        if not section_data.get("id"):
-            logger.error(f"[CHECKPOINT:{checkpoint_name}] Section {section_id} has no ID field")
-            
-        if not section_data.get("title"):
-            logger.warning(f"[CHECKPOINT:{checkpoint_name}] Section {section_id} has no title")
+
+        # Validate section structure (legacy format)
+        if not section_dict.get("research") and not section_dict.get("synthesis"):
+            logger.warning(f"[CHECKPOINT:{checkpoint_name}] Section {section_id} has no research/synthesis data")
+
+        if not section_dict.get("id") and section_id:
+            logger.debug(f"[CHECKPOINT:{checkpoint_name}] Section {section_id} uses key as ID (no separate ID field)")
+
+        if not section_dict.get("title"):
+            logger.debug(f"[CHECKPOINT:{checkpoint_name}] Section {section_id} has no title")
 
 
 def log_state_transition(state: Dict[str, Any], from_node: str, to_node: str) -> None:

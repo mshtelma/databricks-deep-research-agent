@@ -75,17 +75,45 @@ class EnhancedWorkflowNodes:
         search_config = self.agent_config.get('search', {})
         self.max_results_per_query = search_config.get('max_results_per_query', 10)  # Default to 10 as per SearchConfig
         
-        # Initialize specialized agents with optional event emitter and embedding manager
-        self.coordinator = CoordinatorAgent(llm=self.llm, config=self.agent_config, event_emitter=self.event_emitter)
-        self.planner = PlannerAgent(llm=self.llm, reasoning_llm=None, config=self.agent_config, event_emitter=self.event_emitter)
+        # Initialize model manager if available
+        self.model_manager = getattr(agent, 'model_manager', None)
+
+        # Create specialized LLMs for different agents based on complexity
+        if self.model_manager:
+            # Use simple model for coordinator (pattern matching mostly)
+            coordinator_llm = self.model_manager.get_chat_model("simple")
+            # Use analytical model for planner
+            planner_llm = self.model_manager.get_chat_model("analytical")
+        else:
+            # Fallback to shared LLM if no model manager
+            coordinator_llm = self.llm
+            planner_llm = self.llm
+
+        # Initialize specialized agents with complexity-appropriate LLMs
+        self.coordinator = CoordinatorAgent(llm=coordinator_llm, config=self.agent_config, event_emitter=self.event_emitter)
+        self.planner = PlannerAgent(llm=planner_llm, reasoning_llm=None, config=self.agent_config, event_emitter=self.event_emitter)
         # Set stream callback for plan visualization events  
         self.planner.stream_callback = getattr(agent, 'stream_callback', None)
         
         # Store reference to agent stream callback for plan events
         self.stream_callback = getattr(agent, 'stream_callback', None)
         
+        # Create specialized LLMs for remaining agents
+        if self.model_manager:
+            # Use analytical model for researcher (medium complexity)
+            researcher_llm = self.model_manager.get_chat_model("analytical")
+            # Use complex model for reporter (final synthesis)
+            reporter_llm = self.model_manager.get_chat_model("complex")
+            # Use analytical model for fact checker
+            fact_checker_llm = self.model_manager.get_chat_model("analytical")
+        else:
+            # Fallback to shared LLM if no model manager
+            researcher_llm = self.llm
+            reporter_llm = self.llm
+            fact_checker_llm = self.llm
+
         self.researcher = ResearcherAgent(
-            llm=self.llm,
+            llm=researcher_llm,
             search_tools=None,
             tool_registry=self.tool_registry,
             config=self.agent_config,
@@ -95,9 +123,9 @@ class EnhancedWorkflowNodes:
         stream_callback = getattr(agent, 'stream_callback', None)
         self.researcher.stream_callback = stream_callback
         self.researcher.parent_agent = agent
-        self.reporter = ReporterAgent(llm=self.llm, config=self.agent_config, event_emitter=self.event_emitter)
+        self.reporter = ReporterAgent(llm=reporter_llm, config=self.agent_config, event_emitter=self.event_emitter)
         self.fact_checker = FactCheckerAgent(
-            llm=self.llm, 
+            llm=fact_checker_llm, 
             config=self.agent_config,
             event_emitter=self.event_emitter,
             embedding_manager=self.embedding_manager
@@ -128,6 +156,8 @@ class EnhancedWorkflowNodes:
         logger.info(f"[WORKFLOW] Agent handoff: {from_agent} → {to_agent} (phase={phase})")
         
         if self.event_emitter:
+            from .core.types import IntermediateEventType
+            
             event_data = {
                 "from_agent": from_agent,
                 "to_agent": to_agent,
@@ -148,10 +178,12 @@ class EnhancedWorkflowNodes:
                 pass
                 
             self.event_emitter.emit(
-                event_type="agent_handoff",
+                event_type=IntermediateEventType.AGENT_HANDOFF,
                 data=event_data,
                 correlation_id=f"handoff_{from_agent}_{to_agent}"
             )
+            
+            logger.info(f"✅ [WORKFLOW] Emitted AGENT_HANDOFF event: {from_agent} → {to_agent}")
 
     def _emit_plan_creation_event(self, plan, item_id: str | None = None):
         """Emit plan metadata (if possible) and PLAN_CREATED intermediate event."""
@@ -310,8 +342,7 @@ class EnhancedWorkflowNodes:
             )
             
             logger.info(
-                "Initialized EmbeddingManager with DatabricksEmbeddings",
-                endpoint=embedding_endpoint
+                f"Initialized EmbeddingManager with DatabricksEmbeddings for endpoint: {embedding_endpoint}"
             )
             
             return embedding_manager
@@ -387,8 +418,20 @@ class EnhancedWorkflowNodes:
         Classifies and routes incoming requests to appropriate agents.
         """
         logger.info("🎯 [WORKFLOW] Executing coordinator node")
-        
-        # Emit agent handoff event for workflow visualization  
+
+        # CRITICAL: Add state validation and debugging
+        logger.info(f"[STATE DEBUG] Coordinator received state with {len(state)} keys")
+        logger.info(f"[STATE DEBUG] State keys: {list(state.keys())[:20]}")  # First 20 keys
+        logger.info(f"[STATE DEBUG] Research topic: {state.get('research_topic', 'MISSING')[:100] if state.get('research_topic') else 'MISSING'}")
+        logger.info(f"[STATE DEBUG] Messages count: {len(state.get('messages', []))}")
+
+        # Validate critical fields
+        required_fields = ['research_topic', 'messages']
+        missing_fields = [f for f in required_fields if f not in state or not state[f]]
+        if missing_fields:
+            logger.warning(f"[STATE VALIDATION] Missing or empty required fields: {missing_fields}")
+
+        # Emit agent handoff event for workflow visualization
         self._emit_agent_handoff(
             from_agent="system", 
             to_agent="coordinator", 
@@ -510,6 +553,17 @@ class EnhancedWorkflowNodes:
             # CRITICAL FIX: Mark coordinator as visited to prevent infinite loops
             updated_state["coordinator_visited"] = True
             
+            # CRITICAL FIX: Emit proper handoff event to mark "Understanding Your Request" as completed
+            next_agent = updated_state.get("current_agent", "planner")
+            self._emit_agent_handoff(
+                from_agent="coordinator", 
+                to_agent=next_agent, 
+                phase="coordination_complete", 
+                reason=f"Request classification complete, routing to {next_agent}"
+            )
+            
+            logger.info(f"🎯 [COORDINATOR] Handoff complete: coordinator → {next_agent}")
+            
             # Emit workflow phase event - coordinator completed
             self._emit_workflow_event("classification", "coordinator", "completed", {
                 "message": "Request classification and routing completed",
@@ -596,6 +650,32 @@ class EnhancedWorkflowNodes:
             "workflow_step": "background_research"
         })
         
+        # Emit phase completion for coordinator (initiate phase)
+        if self.event_emitter:
+            phase_event_data = {
+                "phase": "initiate",
+                "agent": "coordinator",
+                "timestamp": time.time(),
+                "status": "completed"
+            }
+            self.event_emitter.emit(
+                event_type="phase_completed",
+                data=phase_event_data,
+                title="Initiating research completed",
+                correlation_id="initiate_phase_complete"
+            )
+
+            # CRITICAL: Add phase_completed event to state for streaming
+            if "intermediate_events" not in state:
+                state["intermediate_events"] = []
+            phase_event = {
+                "event_type": "phase_completed",
+                "data": phase_event_data,
+                "timestamp": time.time()
+            }
+            state["intermediate_events"].append(phase_event)
+            logger.info("✅ Added phase_completed event for 'initiate' to intermediate_events")
+
         # Emit agent handoff event
         if self.event_emitter:
             self.event_emitter.emit(
@@ -742,7 +822,7 @@ class EnhancedWorkflowNodes:
             if "search_results" not in state:
                 state["search_results"] = []
             from .core.multi_agent_state import StateManager
-            state = StateManager.add_search_results(state, search_results)
+            state = StateManager.add_search_results(state, search_results, self.agent_config)
             
             # Enrich search results with embeddings for later use in grounding
             state = self._enrich_search_results_with_embeddings(state)
@@ -1160,6 +1240,53 @@ class EnhancedWorkflowNodes:
                 updated_state = StateManager.prune_state_for_memory(updated_state)
                 # CRITICAL: Immediately truncate LLM messages to prevent accumulation
                 updated_state = self._truncate_large_messages(updated_state)
+
+                # Emit phase completion for planner (planning phase)
+                if self.event_emitter:
+                    plan = updated_state.get("current_plan")
+                    plan_data = {}
+                    if plan:
+                        if hasattr(plan, 'model_dump'):
+                            plan_data = plan.model_dump()
+                        elif hasattr(plan, 'dict'):
+                            plan_data = plan.dict()
+                        elif isinstance(plan, dict):
+                            plan_data = plan
+
+                    planning_phase_data = {
+                        "phase": "planning",
+                        "agent": "planner",
+                        "timestamp": time.time(),
+                        "status": "completed",
+                        "plan": plan_data
+                    }
+                    self.event_emitter.emit(
+                        event_type="phase_completed",
+                        data=planning_phase_data
+                    )
+
+                    # CRITICAL: Add phase_completed event to state for streaming
+                    if "intermediate_events" not in state:
+                        state["intermediate_events"] = []
+                    phase_event = {
+                        "event_type": "phase_completed",
+                        "data": planning_phase_data,
+                        "timestamp": time.time()
+                    }
+                    state["intermediate_events"].append(phase_event)
+                    logger.info("✅ Added phase_completed event for 'planning' to intermediate_events")
+
+                    # Emit plan_ready event to signal steps should move to research phase
+                    if plan_data:
+                        self.event_emitter.emit(
+                            event_type="plan_ready",
+                            data={
+                                "plan": plan_data,
+                                "timestamp": time.time(),
+                                "ready_for_research": True
+                            }
+                        )
+
                 return updated_state
                 
             except Exception as e:
@@ -1211,7 +1338,12 @@ class EnhancedWorkflowNodes:
         Gathers information and accumulates observations.
         """
         logger.info("Executing researcher node")
-        
+
+        # CRITICAL: Add observation tracking debug
+        logger.info(f"[RESEARCHER DEBUG] Current observations count: {len(state.get('observations', []))}")
+        logger.info(f"[RESEARCHER DEBUG] Search results count: {len(state.get('search_results', []))}")
+        logger.info(f"[RESEARCHER DEBUG] Completed steps: {len(state.get('completed_steps', []))}")
+
         # Debug state at researcher entry
         self._debug_state_transition("RESEARCHER", state)
         
@@ -1229,6 +1361,17 @@ class EnhancedWorkflowNodes:
                 description="Beginning systematic research execution according to plan",
                 correlation_id=f"researcher_{state.get('current_iteration', 0)}",
                 stage_id="researcher"
+            )
+
+            # Emit phase started event for research phase
+            self.event_emitter.emit(
+                event_type="phase_started",
+                data={
+                    "phase": "research",
+                    "agent": "researcher",
+                    "timestamp": time.time(),
+                    "status": "active"
+                }
             )
 
         plan = state.get("current_plan") or state.get("plan")
@@ -2092,6 +2235,11 @@ class EnhancedWorkflowNodes:
                 existing_observations = state.get("observations", [])
                 # Add new observations to the list
                 state["observations"] = existing_observations + new_observations
+
+                # CRITICAL: Sync research_observations field to prevent data loss
+                # Ensure both observation fields stay synchronized
+                state["research_observations"] = state["observations"].copy()
+
                 logger.info(f"Accumulated {len(new_observations)} new observations, total: {len(state['observations'])}")
             
             if new_observations:
@@ -2410,6 +2558,30 @@ class EnhancedWorkflowNodes:
                 # Update plan in state
                 state["current_plan"] = plan
             
+            # Emit phase completion for researcher (research phase)
+            if self.event_emitter:
+                research_phase_data = {
+                    "phase": "research",
+                    "agent": "researcher",
+                    "timestamp": time.time(),
+                    "status": "completed"
+                }
+                self.event_emitter.emit(
+                    event_type="phase_completed",
+                    data=research_phase_data
+                )
+
+                # CRITICAL: Add phase_completed event to state for streaming
+                if "intermediate_events" not in state:
+                    state["intermediate_events"] = []
+                phase_event = {
+                    "event_type": "phase_completed",
+                    "data": research_phase_data,
+                    "timestamp": time.time()
+                }
+                state["intermediate_events"].append(phase_event)
+                logger.info("✅ Added phase_completed event for 'research' to intermediate_events")
+
             # FIX: Always return state, never lose data
             # Continue to next step or fact checker with preserved state
             return state
@@ -2874,7 +3046,18 @@ class EnhancedWorkflowNodes:
         Creates styled reports with citations.
         """
         logger.info("Executing reporter node")
-        
+
+        # CRITICAL: Debug what reporter is receiving
+        logger.info(f"[REPORTER DEBUG] Received observations: {len(state.get('observations', []))}")
+        logger.info(f"[REPORTER DEBUG] Search results: {len(state.get('search_results', []))}")
+        logger.info(f"[REPORTER DEBUG] Citations: {len(state.get('citations', []))}")
+        logger.info(f"[REPORTER DEBUG] Factuality score: {state.get('factuality_score', 'N/A')}")
+        logger.info(f"[REPORTER DEBUG] Research topic: {state.get('research_topic', 'MISSING')[:100] if state.get('research_topic') else 'MISSING'}")
+
+        # Check if we have actual content to report
+        if not state.get('observations') and not state.get('search_results'):
+            logger.warning("[REPORTER WARNING] No observations or search results to synthesize!")
+
         # Debug state at reporter entry
         self._debug_state_transition("REPORTER", state)
         

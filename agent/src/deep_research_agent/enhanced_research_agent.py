@@ -10,6 +10,7 @@ import os
 import time
 import yaml
 import threading
+from datetime import datetime
 from typing import Dict, Any, Optional, AsyncIterator, Callable, Generator, List
 from pathlib import Path
 from uuid import uuid4
@@ -17,7 +18,9 @@ from uuid import uuid4
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
-from .core.noop_checkpointer import NoOpCheckpointSaver
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langchain_core.runnables import RunnableConfig
+from typing import Iterator, Optional, Dict, Any, Sequence, Tuple
 from mlflow.pyfunc import ResponsesAgent
 from mlflow.types.responses import (
     ResponsesAgentRequest,
@@ -63,6 +66,46 @@ from .core.id_generator import PlanIDGenerator
 
 
 logger = get_logger(__name__)
+
+
+# Simplified inline NoOpCheckpointSaver (replaces 175-line external file)
+class NoOpCheckpointSaver(BaseCheckpointSaver):
+    """Memory-optimized no-op checkpointer that doesn't store any data."""
+    
+    def put(self, config: RunnableConfig, checkpoint, metadata, new_versions=None) -> RunnableConfig:
+        return config
+    
+    def get(self, config: RunnableConfig):
+        return None
+    
+    def get_tuple(self, config: RunnableConfig):
+        return None
+    
+    def list(self, config=None, *, filter=None, before=None, limit=None) -> Iterator:
+        return iter([])
+    
+    def put_writes(self, config: RunnableConfig, writes: Sequence[Tuple[str, Any]], task_id: str, task_path: str = ""):
+        pass
+    
+    # Async versions (required by LangGraph)
+    async def aput(self, config: RunnableConfig, checkpoint, metadata, new_versions=None) -> RunnableConfig:
+        return config
+    
+    async def aget(self, config: RunnableConfig):
+        return None
+    
+    async def aget_tuple(self, config: RunnableConfig):
+        return None
+    
+    async def alist(self, config=None, *, filter=None, before=None, limit=None) -> Iterator:
+        return iter([])
+    
+    async def aput_writes(self, config: RunnableConfig, writes: Sequence[Tuple[str, Any]], task_id: str, task_path: str = ""):
+        pass
+    
+    @property
+    def config_specs(self) -> list:
+        return []
 
 
 # Phase mapping for UI-compatible PHASE markers
@@ -152,6 +195,7 @@ class EnhancedResearchAgent(ResponsesAgent):
         self._pending_intermediate_events = []
 
         # Store stream_callback for immediate event flushing in tests
+        self.stream_emitter = stream_emitter  # CRITICAL FIX: Enable event streaming
         self.stream_callback = stream_emitter
 
         # Initialize memory monitor with 2GB limit for safety
@@ -185,19 +229,22 @@ class EnhancedResearchAgent(ResponsesAgent):
         else:
             self.tool_registry = create_tool_registry(self.config_manager)
 
-        # Initialize LLM - use provided or create new
+        # Initialize LLM and model manager - use provided or create new
+        self.model_manager = None
         if llm:
             self.llm = llm
         else:
-            # Initialize LLM using factory pattern for clean dependency injection
-            from .core.llm_factory import create_llm
+            # Initialize LLM and model manager using factory pattern
+            from .core.model_config_loader import create_model_manager_from_config
 
             try:
-                # Use factory to create LLM, allowing test injection via registry
-                self.llm = create_llm(self.config)
+                # Create model manager for multi-model support
+                self.model_manager = create_model_manager_from_config()
+                # Get default LLM from model manager
+                self.llm = self.model_manager.get_chat_model("default")
                 if self.llm is None:
-                    raise ValueError("LLM factory returned None")
-                logger.info("Successfully initialized LLM via factory")
+                    raise ValueError("ModelManager returned None for default LLM")
+                logger.info("Successfully initialized LLM and ModelManager via factory")
             except Exception as e:
                 logger.error(f"Failed to initialize LLM via factory: {e}")
                 # Fail fast rather than continuing with None
@@ -211,64 +258,63 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Create workflow nodes (after config_manager, tool_registry and semaphore are set)
         self.workflow_nodes = EnhancedWorkflowNodes(self)
 
-        # Store graph builder for thread-local compilation instead of shared instance
+        # Store compiled graph directly (removed thread-local for simplicity)
+        # Thread-local was causing issues with async execution
+        self._compiled_graph = None
         self._graph_builder = self._build_graph
-        self._thread_local = threading.local()
-        # Note: self.graph is now a property that returns thread-local instances
 
         logger.info("Enhanced Research Agent initialized with full components")
 
     def _flush_pending_intermediate_events(self) -> None:
         """Immediately stream any queued intermediate events."""
+        # Check both instance-level pending events and state-level intermediate_events
         pending = getattr(self, "_pending_intermediate_events", None)
-        if not pending:
-            return
-
         stream_emitter = getattr(self, "stream_emitter", None)
+
         if not stream_emitter:
-            pending.clear()
+            if pending:
+                pending.clear()
             return
 
-        for event in list(pending):
-            if not event:
-                continue
-            try:
-                stream_emitter(event)
-            except Exception as exc:
-                logger.warning(
-                    "Failed to stream pending intermediate event", exc_info=exc
-                )
-        pending.clear()
+        # First flush instance-level pending events
+        if pending:
+            for event in list(pending):
+                if not event:
+                    continue
+                try:
+                    stream_emitter(event)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to stream pending intermediate event", exc_info=exc
+                    )
+            pending.clear()
+
+        # NEW: Also flush any intermediate_events from the state
+        # This is critical for step events that are added directly to state
+        # Note: State access during execution is handled differently now without thread-local
 
     @property
     def graph(self):
-        """Get or create thread-local graph instance for thread safety."""
-        # Ensure _thread_local exists (for MLflow deserialization compatibility)
-        if not hasattr(self, '_thread_local'):
-            logger.warning("_thread_local missing, initializing threading.local()")
-            self._thread_local = threading.local()
-        
-        if not hasattr(self._thread_local, "graph"):
-            logger.debug(
-                f"Creating new graph instance for thread {threading.current_thread().name}"
-            )
+        """Get or create graph instance (simplified from thread-local)."""
+        # Initialize graph if not yet created
+        if self._compiled_graph is None:
+            logger.info("Compiling workflow graph for first use")
             # Ensure _graph_builder exists (for MLflow deserialization compatibility)
             if not hasattr(self, '_graph_builder'):
                 logger.warning("_graph_builder missing, initializing from _build_graph method")
                 self._graph_builder = self._build_graph
-            self._thread_local.graph = self._graph_builder()
-        return self._thread_local.graph
+            self._compiled_graph = self._graph_builder()
+        return self._compiled_graph
 
     @graph.setter
     def graph(self, value):
         """Set the workflow graph (for test compatibility)."""
-        self._thread_local.graph = value
+        self._compiled_graph = value
 
     @graph.deleter
     def graph(self):
         """Delete the workflow graph (for test cleanup)."""
-        if hasattr(self._thread_local, "graph"):
-            delattr(self._thread_local, "graph")
+        self._compiled_graph = None
 
     def _load_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
         """Load configuration using the new ConfigLoader."""
@@ -526,6 +572,7 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Add conditional edges for coordinator
         def coordinator_router(state):
             """Route from coordinator based on state."""
+            global logger
             total_steps = state.get("total_workflow_steps", 0)
             logger.info(
                 f"[ROUTER] coordinator_router - step {total_steps}, research_loops={state.get('research_loops', 0)}, fact_check_loops={state.get('fact_check_loops', 0)}"
@@ -560,6 +607,7 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Add conditional edges for planner
         def planner_router(state):
             """Route from planner based on plan and settings."""
+            global logger
             plan = state.get("current_plan")
             if not plan:
                 return END
@@ -598,6 +646,7 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Researcher routing
         def researcher_router(state):
             """Route from researcher based on step completion."""
+            global logger
 
             # SAFETY CHECK: Check for permanent error flags in state
             if state.get("permanent_failure"):
@@ -788,6 +837,16 @@ class EnhancedResearchAgent(ResponsesAgent):
                             if state.get("enable_grounding", True)
                             else "reporter"
                         )
+                    else:
+                        # No section results and error occurred - complete research phase
+                        logger.warning(
+                            "[ROUTER] Error in step checking and no section results - completing research phase"
+                        )
+                        return (
+                            "fact_checker"
+                            if state.get("enable_grounding", True)
+                            else "reporter"
+                        )
             else:
                 # No plan - should not happen but handle gracefully
                 logger.warning("[ROUTER] No plan found - assuming complete")
@@ -821,6 +880,7 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Fact checker routing - now bulletproof with centralized policy
         def fact_checker_router(state):
             """Route from fact checker using centralized routing policy."""
+            global logger
             total_steps = state.get("total_workflow_steps", 0)
             fact_check_loops = state.get("fact_check_loops", 0)
             max_fact_check_loops = state.get("max_fact_check_loops", 2)
@@ -927,17 +987,20 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Use NoOpCheckpointSaver to reduce memory usage by default in production
         # Always use NoOpCheckpointer in production (Databricks runtime) for memory optimization
         is_databricks_runtime = os.getenv("DATABRICKS_RUNTIME_VERSION") is not None
+        # CRITICAL FIX: Use MemorySaver by default for proper state persistence
+        # NoOpCheckpointSaver was causing state loss between nodes
         use_noop_checkpointer = (
-            os.getenv("DISABLE_CHECKPOINTER", "true").lower() == "true"
-            or is_databricks_runtime  # Always use NoOpCheckpointer in Databricks runtime
+            os.getenv("DISABLE_CHECKPOINTER", "false").lower() == "true"  # Changed default to false
+            # Don't force NoOpCheckpointer in Databricks runtime anymore
+            # State persistence is critical for multi-agent workflow
         )
 
         if use_noop_checkpointer:
             checkpointer = NoOpCheckpointSaver()
-            logger.info("Using NoOpCheckpointSaver - memory usage will be reduced")
+            logger.warning("Using NoOpCheckpointSaver - state may not persist between nodes!")
         else:
             checkpointer = MemorySaver()
-            logger.info("Using MemorySaver for full checkpoint functionality")
+            logger.info("Using MemorySaver for proper state persistence between workflow nodes")
 
         return workflow.compile(checkpointer=checkpointer)
 
@@ -1087,6 +1150,40 @@ class EnhancedResearchAgent(ResponsesAgent):
                 },
             }
 
+    def _sanitize_for_json(self, obj: Any) -> Any:
+        """
+        Recursively sanitize object for JSON serialization.
+
+        Converts datetime objects to Unix timestamps and handles Pydantic models.
+        This ensures all data passed to ResponsesAgentStreamEvent can be JSON-serialized.
+
+        Args:
+            obj: Any Python object that may contain non-JSON-serializable types
+
+        Returns:
+            JSON-serializable version of the object
+        """
+        if obj is None:
+            return None
+        elif isinstance(obj, datetime):
+            return obj.timestamp()
+        elif isinstance(obj, dict):
+            return {k: self._sanitize_for_json(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [self._sanitize_for_json(item) for item in obj]
+        elif hasattr(obj, 'to_dict') and callable(obj.to_dict):
+            # Pydantic models with custom to_dict() method
+            return obj.to_dict()
+        elif hasattr(obj, 'model_dump') and callable(obj.model_dump):
+            # Pydantic v2 models
+            return self._sanitize_for_json(obj.model_dump())
+        elif hasattr(obj, 'dict') and callable(obj.dict):
+            # Pydantic v1 models
+            return self._sanitize_for_json(obj.dict())
+        else:
+            # Return primitive types as-is (str, int, float, bool, None)
+            return obj
+
     def _extract_results(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Extract final results from state."""
         return {
@@ -1152,6 +1249,8 @@ class EnhancedResearchAgent(ResponsesAgent):
                 )
                 metadata["grounding"] = grounding_metadata
 
+            # Sanitize all metadata to ensure JSON serialization works
+            metadata = self._sanitize_for_json(metadata)
             return metadata
 
         except Exception as e:
@@ -1224,7 +1323,12 @@ class EnhancedResearchAgent(ResponsesAgent):
                             )
                             == step_data["id"]
                         ):
-                            step_data["completedAt"] = completed_step.get("timestamp")
+                            # Sanitize timestamp to prevent datetime serialization error
+                            timestamp = completed_step.get("timestamp")
+                            if isinstance(timestamp, datetime):
+                                step_data["completedAt"] = timestamp.timestamp()
+                            elif timestamp is not None:
+                                step_data["completedAt"] = timestamp
                             step_data["result"] = completed_step.get("result", "")
                             break
 
@@ -1678,9 +1782,18 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Import workflow limit initializer
         from .core.routing_policy import initialize_workflow_limits
 
-        # Create async loop for streaming
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Handle async event loop properly to avoid deadlocks
+        try:
+            # Check if there's already a running event loop
+            loop = asyncio.get_running_loop()
+            use_existing_loop = True
+            logger.info("Using existing event loop for workflow execution")
+        except RuntimeError:
+            # No existing loop, create a new one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            use_existing_loop = False
+            logger.info("Created new event loop for workflow execution")
 
         try:
             # Initialize state
@@ -1752,41 +1865,68 @@ class EnhancedResearchAgent(ResponsesAgent):
             # Process events from async generator
             event_generator = run_streaming()
 
+            # Setup for dedicated thread if using existing loop
+            dedicated_thread_loop = None
+            event_queue = None
+            dedicated_thread = None
+
+            if use_existing_loop:
+                # Create dedicated thread with persistent loop for entire streaming session
+                # This avoids creating/closing a loop per event, which breaks LangGraph
+                import threading
+                import queue
+
+                event_queue = queue.Queue()
+
+                def run_dedicated_event_thread():
+                    """Dedicated thread that consumes async generator with one persistent loop."""
+                    nonlocal dedicated_thread_loop
+                    dedicated_thread_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(dedicated_thread_loop)
+                    try:
+                        while True:
+                            try:
+                                event = dedicated_thread_loop.run_until_complete(event_generator.__anext__())
+                                event_queue.put(('event', event))
+                            except StopAsyncIteration:
+                                event_queue.put(('done', None))
+                                break
+                            except Exception as e:
+                                event_queue.put(('error', e))
+                                break
+                    finally:
+                        # Only close loop when completely done with all events
+                        logger.debug("Closing dedicated thread loop after consuming all events")
+                        dedicated_thread_loop.close()
+
+                dedicated_thread = threading.Thread(target=run_dedicated_event_thread, daemon=True)
+                dedicated_thread.start()
+                logger.debug("Started dedicated thread with persistent loop for event streaming")
+
             try:
                 while True:
-                    # Fix asyncio event loop issue: Use awaitable directly instead of run_until_complete
+                    # Handle async execution based on whether we have an existing loop
                     try:
-                        event = loop.run_until_complete(event_generator.__anext__())
+                        if use_existing_loop:
+                            # Get event from dedicated thread via queue
+                            msg_type, data = event_queue.get(timeout=300)
+                            if msg_type == 'done':
+                                break
+                            elif msg_type == 'error':
+                                raise data
+                            event = data
+                        else:
+                            # We created our own loop, so we can use run_until_complete
+                            event = loop.run_until_complete(event_generator.__anext__())
                     except RuntimeError as e:
-                        if (
-                            "Cannot run the event loop while another loop is running"
-                            in str(e)
-                        ):
-                            # Use nest_asyncio if available, otherwise run in thread
-                            try:
-                                import nest_asyncio
-
-                                nest_asyncio.apply()
-                                event = loop.run_until_complete(
-                                    event_generator.__anext__()
-                                )
-                            except ImportError:
-                                # Fallback: run in thread pool
-                                import concurrent.futures
-
-                                def run_async_in_thread():
-                                    thread_loop = asyncio.new_event_loop()
-                                    asyncio.set_event_loop(thread_loop)
-                                    try:
-                                        return thread_loop.run_until_complete(
-                                            event_generator.__anext__()
-                                        )
-                                    finally:
-                                        thread_loop.close()
-
-                                with concurrent.futures.ThreadPoolExecutor() as executor:
-                                    future = executor.submit(run_async_in_thread)
-                                    event = future.result()
+                        if "Cannot run the event loop while another loop is running" in str(e):
+                            # This should never happen with our new logic - log error and re-raise
+                            logger.error(
+                                f"Unexpected event loop conflict: {e}. "
+                                f"use_existing_loop={use_existing_loop}. "
+                                "This indicates a logic error in event loop management."
+                            )
+                            raise
                         else:
                             raise
 
@@ -1817,7 +1957,7 @@ class EnhancedResearchAgent(ResponsesAgent):
                                     for event in events_to_add:
                                         # Convert event dict to ResponsesAgentStreamEvent if needed
                                         if isinstance(event, dict):
-                                            from mlflow.types.responses import ResponsesAgentStreamEvent
+                                            # ResponsesAgentStreamEvent already imported at module level
                                             from uuid import uuid4
                                             
                                             # Create proper streaming event format
@@ -1896,7 +2036,7 @@ class EnhancedResearchAgent(ResponsesAgent):
                             # Handle different node outputs with progress updates
                             if node_name == "coordinator":
                                 # Import locally to avoid scoping issues
-                                from mlflow.types.responses import ResponsesAgentStreamEvent
+                                # ResponsesAgentStreamEvent already imported at module level
                                 
                                 # Monitor memory after coordinator
                                 if hasattr(self, "memory_monitor"):
@@ -1920,7 +2060,7 @@ class EnhancedResearchAgent(ResponsesAgent):
 
                             elif node_name == "background_investigation":
                                 # Import locally to avoid scoping issues
-                                from mlflow.types.responses import ResponsesAgentStreamEvent
+                                # ResponsesAgentStreamEvent already imported at module level
                                 
                                 investigations = node_data.get(
                                     "background_investigation_results", ""
@@ -1942,7 +2082,7 @@ class EnhancedResearchAgent(ResponsesAgent):
 
                             elif node_name == "planner":
                                 # Import locally to avoid scoping issues
-                                from mlflow.types.responses import ResponsesAgentStreamEvent
+                                # ResponsesAgentStreamEvent already imported at module level
                                 
                                 plan = node_data.get("current_plan")
                                 if plan:
@@ -2282,7 +2422,20 @@ class EnhancedResearchAgent(ResponsesAgent):
                 },
             )
         finally:
-            loop.close()
+            # Clean up dedicated thread if it was used
+            if dedicated_thread is not None and dedicated_thread.is_alive():
+                logger.debug("Waiting for dedicated event thread to complete")
+                dedicated_thread.join(timeout=5.0)
+                if dedicated_thread.is_alive():
+                    logger.warning("Dedicated thread did not terminate within timeout")
+
+            # Only close the loop if we created it
+            # If we're using an existing loop (FastAPI/uvicorn), don't close it
+            if not use_existing_loop:
+                logger.debug("Closing event loop (we created it)")
+                loop.close()
+            else:
+                logger.debug("Not closing event loop (using existing loop from runtime)")
 
     def _smart_chunk_report(
         self, report: str, base_chunk_size: int = 1500
