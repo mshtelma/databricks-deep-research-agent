@@ -250,7 +250,8 @@ class EntityValidator:
                         },
                         confidence=obs.confidence,
                         source_id=obs.source_id,
-                        extraction_method=obs.extraction_method
+                        extraction_method=obs.extraction_method,
+                        step_id=obs.step_id  # CRITICAL: Preserve step_id for section-specific filtering
                     )
                     filtered.append(new_obs)
                 else:

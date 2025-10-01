@@ -466,6 +466,10 @@ class StateManager:
         # Normalize observation to StructuredObservation
         structured_obs = ensure_structured_observation(observation)
 
+        # CRITICAL: Set step_id for section-specific filtering in reporter
+        if step:
+            structured_obs.step_id = step.step_id
+
         # Add to global observations with size limit
         state["observations"].append(structured_obs)
 

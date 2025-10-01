@@ -6,6 +6,7 @@ linear approach that always returns a valid dictionary.
 """
 
 import logging
+import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 import json
@@ -38,27 +39,34 @@ class FactCheckerAgent:
     - Clear error handling
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None, llm=None, event_emitter=None, embedding_manager=None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, llm=None, rate_limited_llm=None, event_emitter=None, embedding_manager=None):
         """Initialize the fact checker with configuration."""
         self.config = config or {}
         self.event_emitter = event_emitter
         self.embedding_manager = embedding_manager
-        
+
+        # Rate limiting support
+        self.rate_limited_llm = rate_limited_llm
+        self.use_rate_limiting = (
+            rate_limited_llm is not None and
+            self.config.get('rate_limiting', {}).get('enabled', True)
+        )
+
         # Model configuration
         model_config = self.config.get('models', {}).get('default', {})
         self.model_endpoint = model_config.get('endpoint', 'databricks-gpt-oss-120b')
         self.temperature = model_config.get('temperature', 0.3)  # Lower for fact checking
         self.max_tokens = model_config.get('max_tokens', 2000)
-        
+
         # Fact checker configuration
         agent_config = self.config.get('agents', {}).get('fact_checker', {})
         self.verification_level = agent_config.get('verification_level', 'moderate')
         self.enable_contradiction_detection = agent_config.get('enable_contradiction_detection', True)
-        
+
         # Grounding configuration
         grounding_config = self.config.get('grounding', {})
         self.factuality_threshold = grounding_config.get('factuality_threshold', 0.6)
-        
+
         # Use provided LLM or initialize new one
         if llm:
             self.llm = llm
@@ -390,12 +398,28 @@ Content:
 
 Claims:"""
             
-            messages = [
-                SystemMessage(content="You are a fact extraction specialist."),
-                HumanMessage(content=prompt)
-            ]
-            
-            response = self.llm.invoke(messages)
+            if self.use_rate_limiting and self.rate_limited_llm:
+                # NEW: Use Tier 2 (simple) for claim extraction (moves from Tier 3 to reduce 429s)
+                messages_dict = [
+                    {"role": "system", "content": "You are a fact extraction specialist."},
+                    {"role": "user", "content": prompt}
+                ]
+
+                response = asyncio.run(self.rate_limited_llm.ainvoke(
+                    tier="simple",
+                    operation="claim_extraction",
+                    messages=messages_dict
+                ))
+            elif self.llm:
+                # LEGACY: Direct LLM invocation for backward compatibility
+                messages = [
+                    SystemMessage(content="You are a fact extraction specialist."),
+                    HumanMessage(content=prompt)
+                ]
+
+                response = self.llm.invoke(messages)
+            else:
+                response = None
             
             # Handle structured responses properly
             from ..core.llm_response_parser import extract_text_from_response

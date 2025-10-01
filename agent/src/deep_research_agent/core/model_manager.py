@@ -173,15 +173,23 @@ class ModelManager:
     for model endpoints used throughout the research workflow.
     """
     
-    def __init__(self, config: Optional[NodeModelConfiguration] = None):
+    def __init__(
+        self,
+        config: Optional[NodeModelConfiguration] = None,
+        model_selector: Optional['ModelSelector'] = None
+    ):
         """
         Initialize the model manager.
 
         Args:
             config: Model configuration (uses defaults if None)
+            model_selector: Optional ModelSelector for rate limiting
         """
         self.config = config or NodeModelConfiguration()
         self.config.validate()
+
+        # Store model selector for rate limiting
+        self.model_selector = model_selector
 
         # Store all model configs if available for dynamic role lookup
         if hasattr(config, '_all_models'):
@@ -197,6 +205,12 @@ class ModelManager:
 
         # Health status
         self._model_health: Dict[str, bool] = {}
+
+        # Log initialization
+        logger.info(
+            f"ModelManager initialized | "
+            f"Rate limiting: {'ENABLED' if model_selector else 'DISABLED'}"
+        )
         
         if not DATABRICKS_AVAILABLE:
             raise LLMEndpointError("databricks_langchain not available")
@@ -240,34 +254,80 @@ class ModelManager:
         model_config = self.config.get_model_for_role(role)
         return self._get_or_create_model(model_config, role)
     
-    def get_chat_model(self, model_name: str = "default") -> ChatDatabricks:
+    def get_chat_model(self, model_name: str = "default"):
         """
-        Get a chat model instance by name.
+        Get chat model with standardized tier-based naming.
+
+        Tier Names (NEW STANDARD):
+        - "simple": Lightweight (query gen, validation)
+        - "analytical": Medium (planning, research, fact checking)
+        - "complex": Heavy (report generation, tables)
+        - "default": Alias for analytical
+
+        Legacy Names (DEPRECATED):
+        - "synthesis" → use "complex"
+        - "web_research" → use "analytical"
+        - "query_generation" → use "simple"
+        - "reflection" → use "analytical"
 
         Args:
-            model_name: Name of the model ("default", "synthesis", etc.)
+            model_name: Model/tier name
 
         Returns:
-            ChatDatabricks instance
-
-        Raises:
-            LLMEndpointError: If model initialization fails
+            Rate-limited chat model if ModelSelector available, else ChatDatabricks
         """
-        # Map string names to model roles
-        role_mapping = {
-            "default": ModelRole.DEFAULT,
-            "synthesis": ModelRole.SYNTHESIS,
-            "web_research": ModelRole.WEB_RESEARCH,
-            "query_generation": ModelRole.QUERY_GENERATION,
-            "reflection": ModelRole.REFLECTION,
-            # New complexity-based mappings
-            "simple": ModelRole.SIMPLE,
-            "analytical": ModelRole.ANALYTICAL,
-            "complex": ModelRole.COMPLEX,
+        # DEPRECATION: Map old functional names to new tier names
+        DEPRECATED_ALIASES = {
+            "synthesis": "complex",
+            "web_research": "analytical",
+            "query_generation": "simple",
+            "reflection": "analytical",
+            "default": "analytical",  # Safe default
         }
 
-        role = role_mapping.get(model_name.lower(), ModelRole.DEFAULT)
-        return self.get_llm_for_role(role)
+        original_name = model_name
+        if model_name.lower() in DEPRECATED_ALIASES:
+            model_name = DEPRECATED_ALIASES[model_name.lower()]
+            if original_name != model_name:
+                logger.warning(
+                    f"⚠️ DEPRECATED: '{original_name}' → use '{model_name}' "
+                    f"(tier-based naming)"
+                )
+
+        # Validate tier name
+        valid_tiers = ["simple", "analytical", "complex"]
+        if model_name not in valid_tiers:
+            logger.error(f"❌ Invalid tier: {model_name}, using 'analytical'")
+            model_name = "analytical"
+
+        # Return rate-limited or plain model
+        if self.model_selector:
+            from .rate_limited_chat_model import RateLimitedChatModel
+
+            logger.info(
+                f"📦 Creating rate-limited model | "
+                f"Tier: {model_name} | "
+                f"Original name: {original_name}"
+            )
+
+            return RateLimitedChatModel(
+                tier=model_name,
+                model_selector=self.model_selector,
+                operation=original_name  # Use original for operation tracking
+            )
+        else:
+            logger.warning(
+                f"⚠️ No ModelSelector available | "
+                f"Returning plain ChatDatabricks (no rate limiting)"
+            )
+            # Fallback to legacy behavior
+            role_mapping = {
+                "simple": ModelRole.SIMPLE,
+                "analytical": ModelRole.ANALYTICAL,
+                "complex": ModelRole.COMPLEX,
+            }
+            role = role_mapping.get(model_name, ModelRole.DEFAULT)
+            return self.get_llm_for_role(role)
     
     def _get_or_create_model(self, model_config: ModelConfig, context: Any = None) -> ChatDatabricks:
         """
@@ -414,11 +474,13 @@ class ModelManager:
                 )
 
         # Create the ChatDatabricks instance with optional extra_params
+        # IMPORTANT: Set max_retries=0 to disable OpenAI SDK's built-in retry logic (which uses too-short delays like 0.5s, 1s, 2s)
+        # Instead, we rely on ModelSelector's invoke_with_fallback which uses our configured delays (15s, 30s, 60s, etc.) from rate_limiting config
         return ChatDatabricks(
             endpoint=model_config.endpoint,
             temperature=getattr(model_config, 'temperature', 0.7),
             max_tokens=getattr(model_config, 'max_tokens', 4000),
-            max_retries=getattr(model_config, 'max_retries', 3),
+            max_retries=0,  # CHANGED: Disable SDK retries (was: getattr(model_config, 'max_retries', 3)) - ModelSelector handles retries with proper delays
             extra_params=extra_params if extra_params else None
         )
     

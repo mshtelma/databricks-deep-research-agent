@@ -75,18 +75,20 @@ class ResearcherAgent:
     - Pass context between steps
     """
     
-    def __init__(self, llm=None, search_tools=None, tool_registry=None, config=None, event_emitter=None):
+    def __init__(self, llm=None, rate_limited_llm=None, search_tools=None, tool_registry=None, config=None, event_emitter=None):
         """
         Initialize the researcher agent.
-        
+
         Args:
-            llm: Language model for synthesis
+            llm: Language model for synthesis (legacy, for backward compatibility)
+            rate_limited_llm: Rate-limited LLM wrapper for tier-based model selection
             search_tools: Available search tools
             tool_registry: Registry of available tools
             config: Configuration dictionary
             event_emitter: Optional event emitter for detailed progress tracking
         """
         self.llm = llm
+        self.rate_limited_llm = rate_limited_llm
         self.search_tools = search_tools or []
         self.tool_registry = tool_registry
         self.config = config or {}
@@ -95,7 +97,13 @@ class ResearcherAgent:
         self.search_tool = None  # For async methods
         # Back-reference to parent agent for emitting structured events
         self.parent_agent = getattr(self, 'parent_agent', None)
-        
+
+        # Determine if we should use rate limiting
+        self.use_rate_limiting = (
+            rate_limited_llm is not None and
+            self.config.get('rate_limiting', {}).get('enabled', True)
+        )
+
         # Extract search configuration
         search_config = self.config.get('search', {})
         self.max_results_per_query = search_config.get('max_results_per_query', 5)
@@ -952,25 +960,43 @@ Observations:
 Provide a clear, analytical response focused ONLY on the requested entities.
 """
         
-        if self.llm:
+        if self.use_rate_limiting and self.rate_limited_llm:
+            # NEW: Use Tier 2 (simple) for validation/processing (moves from Tier 3 to reduce 429s)
+            messages_dict = [
+                {"role": "system", "content": "You are a research analyst processing gathered information."},
+                {"role": "user", "content": processing_prompt}
+            ]
+
+            logger.info(f"🔍 LLM_PROMPT [researcher_processing/Tier2]: {processing_prompt[:500]}...")
+
+            response = asyncio.run(self.rate_limited_llm.ainvoke(
+                tier="simple",
+                operation="step_validation",
+                messages=messages_dict
+            ))
+        elif self.llm:
+            # LEGACY: Direct LLM invocation for backward compatibility
             messages = [
                 SystemMessage(content="You are a research analyst processing gathered information."),
                 HumanMessage(content=processing_prompt)
             ]
-            
-            # Log the prompt being sent to LLM
+
             logger.info(f"🔍 LLM_PROMPT [researcher_processing]: {processing_prompt[:500]}...")
-            
+
             response = self.llm.invoke(messages)
-            
+        else:
+            response = None
+
+        # Process response if available
+        if response:
             # CRITICAL FIX: Handle structured responses properly using centralized parser
             from ..core.llm_response_parser import extract_text_from_response
             analysis = extract_text_from_response(response)
             analysis_text = analysis
-            
+
             # Log the response received from LLM
             logger.info(f"🔍 LLM_RESPONSE [researcher_processing]: {analysis[:500]}...")
-            
+
             # ENTITY VALIDATION: Check for hallucinated entities in LLM response
             if requested_entities:
                 from ..core.entity_validation import EntityExtractor
@@ -1047,24 +1073,42 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
 4. Draws meaningful conclusions
 """
         
-        if self.llm:
+        if self.use_rate_limiting and self.rate_limited_llm:
+            # NEW: Use Tier 3 (analytical) for core research synthesis (stays at Tier 3)
+            messages_dict = [
+                {"role": "system", "content": "You are a research synthesizer creating comprehensive summaries."},
+                {"role": "user", "content": synthesis_prompt}
+            ]
+
+            logger.info(f"🔍 LLM_PROMPT [researcher_synthesis/Tier3]: {synthesis_prompt[:500]}...")
+
+            response = asyncio.run(self.rate_limited_llm.ainvoke(
+                tier="analytical",
+                operation="step_synthesis",
+                messages=messages_dict
+            ))
+        elif self.llm:
+            # LEGACY: Direct LLM invocation for backward compatibility
             messages = [
                 SystemMessage(content="You are a research synthesizer creating comprehensive summaries."),
                 HumanMessage(content=synthesis_prompt)
             ]
-            
-            # Log the prompt being sent to LLM
+
             logger.info(f"🔍 LLM_PROMPT [researcher_synthesis]: {synthesis_prompt[:500]}...")
-            
+
             response = self.llm.invoke(messages)
-            
+        else:
+            response = None
+
+        # Process response if available
+        if response:
             # CRITICAL FIX: Handle structured responses properly
             from ..core.llm_response_parser import extract_text_from_response
             synthesis = extract_text_from_response(response)
-            
+
             # Log the response received from LLM
             logger.info(f"🔍 LLM_RESPONSE [researcher_synthesis]: {synthesis[:500]}...")
-            
+
             # ENTITY VALIDATION: Check for hallucinated entities in LLM response
             if requested_entities:
                 from ..core.entity_validation import EntityExtractor
@@ -2315,7 +2359,8 @@ Focus on the actual content and data from the sources.""")
                 metric_values=metric_values,
                 confidence=confidence,
                 source_id=f"step_{step.step_id}_obs_{i}",
-                extraction_method=ExtractionMethod.LLM
+                extraction_method=ExtractionMethod.LLM,
+                step_id=step.step_id  # CRITICAL: Enables filtering observations by step for section-specific content
             )
             
             structured_obs.append(structured_observation)

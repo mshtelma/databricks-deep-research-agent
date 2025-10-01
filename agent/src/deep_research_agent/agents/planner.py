@@ -1303,6 +1303,9 @@ Output your plan as a JSON object with this structure:
             # Store the lightweight dynamic sections for downstream template usage
             plan.dynamic_sections = dynamic_sections
 
+            # CRITICAL: Map steps to sections for proper observation filtering
+            self._map_steps_to_sections(plan)
+
             generator = ReportTemplateGenerator()
             include_appendix = bool(structure_payload.get("include_appendix", False))
             plan.report_template = generator.build_template(
@@ -1917,3 +1920,92 @@ Output your plan as a JSON object with this structure:
             steps=steps,
             iteration=0
         )
+
+    def _map_steps_to_sections(self, plan: Plan) -> None:
+        """
+        Create one-to-one mapping between plan steps and dynamic sections.
+
+        Each step is assigned to exactly one section based on semantic similarity
+        between the step's purpose and the section's purpose.
+
+        Args:
+            plan: The plan object with steps and dynamic_sections to map
+        """
+        if not plan.steps or not plan.dynamic_sections:
+            logger.warning("PLANNER: Cannot map steps to sections - missing steps or sections")
+            return
+
+        logger.info(f"PLANNER: Mapping {len(plan.steps)} steps to {len(plan.dynamic_sections)} sections")
+
+        # Track which sections have been assigned steps
+        section_usage = {section.title: 0 for section in plan.dynamic_sections}
+
+        # For each step, find the best matching section
+        for step in plan.steps:
+            best_section = self._find_best_section_for_step(step, plan.dynamic_sections)
+            if best_section:
+                step.template_section_title = best_section.title
+                section_usage[best_section.title] += 1
+                logger.info(f"PLANNER: Mapped step '{step.step_id}' → section '{best_section.title}'")
+            else:
+                # Fallback to first section if no good match found
+                step.template_section_title = plan.dynamic_sections[0].title
+                section_usage[plan.dynamic_sections[0].title] += 1
+                logger.warning(f"PLANNER: No good match for step '{step.step_id}', using first section")
+
+        # Log mapping summary
+        unmapped_sections = [title for title, count in section_usage.items() if count == 0]
+        if unmapped_sections:
+            logger.warning(f"PLANNER: Sections with no mapped steps: {unmapped_sections}")
+
+        logger.info(f"PLANNER: Section usage: {section_usage}")
+
+    def _find_best_section_for_step(self, step: Step, sections: List) -> Optional[Any]:
+        """
+        Find the best matching section for a given step.
+
+        Uses keyword matching between step description/queries and section title/purpose.
+
+        Args:
+            step: The step to find a section for
+            sections: List of DynamicSection objects
+
+        Returns:
+            The best matching DynamicSection, or None if no good match
+        """
+        # Combine step information for matching
+        step_text = (step.title + " " + step.description + " " +
+                    " ".join(step.search_queries or [])).lower()
+
+        best_section = None
+        best_score = 0.0
+
+        for section in sections:
+            # Combine section information for matching
+            section_text = (section.title + " " + (section.purpose or "")).lower()
+
+            # Simple keyword matching score
+            score = 0.0
+
+            # Extract key terms from both texts
+            step_words = set(w for w in step_text.split() if len(w) > 3)
+            section_words = set(w for w in section_text.split() if len(w) > 3)
+
+            # Calculate overlap
+            common_words = step_words & section_words
+            if step_words:
+                score = len(common_words) / len(step_words)
+
+            # Boost score for exact word matches in title
+            section_title_words = set(section.title.lower().split())
+            step_title_words = set(step.title.lower().split())
+            title_overlap = section_title_words & step_title_words
+            if title_overlap:
+                score += 0.3  # Bonus for title word matches
+
+            if score > best_score:
+                best_score = score
+                best_section = section
+
+        # Return best section only if score is above threshold
+        return best_section if best_score > 0.1 else None

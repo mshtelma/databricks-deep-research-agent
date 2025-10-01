@@ -341,24 +341,32 @@ Generate the report section content:"""
                     logger.error(f"Max retries ({max_attempts}) exceeded for {section_name}")
                     raise
                 
-                # Calculate wait time
+                # Check if this is a 429 error - if so, ModelSelector already tried all endpoints
+                if "429" in error_str:
+                    logger.error(
+                        f"All endpoints exhausted for {section_name} (429 errors). "
+                        "Not retrying - ModelSelector already tried all available endpoints."
+                    )
+                    raise  # Fail fast - no point retrying
+
+                # Calculate wait time for non-429 transient errors
                 if suggested_wait:
-                    # Use suggested wait time from error
-                    wait_time = min(suggested_wait, 120)  # Cap at 2 minutes
+                    # Use suggested wait time from error (e.g., 503 with Retry-After)
+                    wait_time = min(suggested_wait, 30)  # Cap at 30s
                 else:
-                    # Exponential backoff: 10, 15, 22.5, 33.75, 50.6 seconds
-                    wait_time = min(10 * (1.5 ** (attempt - 1)), 60)
-                
+                    # Exponential backoff: 5, 10, 20, 30 seconds (changed from 10, 15, 22.5...)
+                    wait_time = min(5 * (2 ** (attempt - 1)), 30)
+
                 # Add jitter to prevent thundering herd (up to 10% of wait time)
-                jitter = random.uniform(0, min(5, wait_time * 0.1))
+                jitter = random.uniform(0, wait_time * 0.1)
                 wait_time += jitter
-                
+
                 logger.warning(
                     f"Transient error in {section_name} generation "
                     f"(attempt {attempt}/{max_attempts}), "
                     f"retrying in {wait_time:.1f}s: {error_str[:100]}"
                 )
-                
+
                 time.sleep(wait_time)
         
         # Should never reach here
@@ -481,6 +489,24 @@ Generate the report section content:"""
             section_titles = [getattr(s, 'title', str(s)) for s in dynamic_sections]
             logger.info(f"REPORTER: Dynamic section titles: {section_titles}")
 
+        # 🔍 CRITICAL: Check if structured generation is enabled BEFORE using template
+        # Structured generation uses section-by-section approach with Pydantic models
+        # Template generation uses one-shot markdown generation (error-prone for tables)
+        reporter_config = self.config.get('agents', {}).get('reporter', {})
+        use_structured_generation = reporter_config.get('enable_structured_generation', False)
+
+        logger.info(f"REPORTER: Structured generation config: {use_structured_generation}")
+        logger.info(f"REPORTER: Routing decision: template={template is not None}, "
+                   f"dynamic_sections={dynamic_sections is not None}, "
+                   f"use_structured={use_structured_generation}")
+
+        # Route to section-based generation if structured generation is enabled AND we have dynamic sections
+        # This ensures tables are rendered programmatically with guaranteed valid markdown
+        if use_structured_generation and dynamic_sections:
+            logger.info("✅ REPORTER: Routing to SECTION-BASED generation (structured output enabled)")
+            # Skip template path and go to section-based generation below
+            template = None  # Force section-based path
+
         if template:
             report_body, template_metadata = self._render_template_report(
                 template=template,
@@ -559,14 +585,18 @@ Generate the report section content:"""
                 table_section=None,
                 table_metadata={}
             )
-            
-            # Build final report from sections
-            final_report = self.formatter.format_final_report(
-                report_sections,
-                state.get("citations", []),
-                report_style
-            )
-            
+
+            # Build final report from sections (report_sections is a dict of {section_name: section_content})
+            # Simply join the section content values with double newlines
+            final_report = "\n\n".join(report_sections.values()) if report_sections else ""
+
+            # Add title if needed
+            research_topic = state.get("research_topic", "Research Report")
+            if final_report and not final_report.startswith("#"):
+                final_report = f"# {research_topic}\n\n{final_report}"
+            elif not final_report:
+                final_report = f"# {research_topic}\n\nNo content generated."
+
             final_report = self._add_citations_and_references(
                 final_report,
                 state.get("citations", []),
@@ -1238,7 +1268,108 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                 logger.info(f"[DEBUG] First observation content: {content[:200] if content else 'EMPTY CONTENT'}")
         
         return compiled
-    
+
+    def _filter_observations_for_section(
+        self,
+        section_name: str,
+        all_observations: List[Dict[str, Any]],
+        state: EnhancedResearchState
+    ) -> List[Dict[str, Any]]:
+        """
+        Filter observations to only include those from steps mapped to this section.
+
+        This is the KEY FIX: Instead of giving ALL observations to EVERY section,
+        we filter by step.template_section_title mapping.
+
+        Args:
+            section_name: The section we're generating
+            all_observations: All observations from research
+            state: Current research state with plan
+
+        Returns:
+            Filtered list of observations relevant to this section
+        """
+        plan = state.get("current_plan")
+
+        if not plan:
+            logger.warning(f"No plan found in state, using first 20 observations as fallback")
+            return all_observations[:20]
+
+        # Get steps that contribute to this section
+        relevant_steps = [
+            step for step in plan.steps
+            if step.template_section_title == section_name
+            and str(step.status).lower() == "completed"
+        ]
+
+        logger.info(f"🔍 Section '{section_name}': found {len(relevant_steps)} mapped steps")
+
+        if not relevant_steps:
+            # No steps explicitly mapped to this section
+            # Fallback 1: Try keyword matching in step title
+            section_keywords = section_name.lower().split()
+            keyword_matched_steps = [
+                step for step in plan.steps
+                if any(kw in step.title.lower() for kw in section_keywords)
+                and str(step.status).lower() == "completed"
+            ]
+
+            if keyword_matched_steps:
+                logger.info(f"  ✓ No explicit mapping, but found {len(keyword_matched_steps)} steps via keyword matching")
+                relevant_steps = keyword_matched_steps
+            else:
+                # Fallback 2: Use first 20 observations (current behavior)
+                logger.warning(f"  ⚠️ No steps mapped to '{section_name}', using first 20 observations")
+                return all_observations[:20]
+
+        # Build set of relevant step IDs
+        relevant_step_ids = {step.step_id for step in relevant_steps}
+        logger.info(f"  📋 Step IDs: {relevant_step_ids}")
+
+        # Filter observations by step_id
+        filtered_observations = []
+        observations_without_step_id = 0
+
+        for obs in all_observations:
+            # Observations are StructuredObservation objects with step_id field
+            # Also support dict format for backward compatibility
+            if isinstance(obs, dict):
+                obs_step_id = obs.get("step_id") or obs.get("source_step") or obs.get("from_step")
+            else:
+                # StructuredObservation object
+                obs_step_id = getattr(obs, "step_id", None)
+
+            if obs_step_id:
+                if obs_step_id in relevant_step_ids:
+                    filtered_observations.append(obs)
+            else:
+                observations_without_step_id += 1
+
+        if observations_without_step_id > 0:
+            logger.warning(f"  ⚠️ {observations_without_step_id} observations missing step_id (cannot filter)")
+
+        # If no observations after filtering, include observations without step_id as fallback
+        if not filtered_observations and observations_without_step_id > 0:
+            logger.warning(f"  ⚠️ No observations matched step IDs, including observations without step_id")
+            filtered_observations = [
+                obs for obs in all_observations
+                if not (obs.get("step_id") if isinstance(obs, dict) else getattr(obs, "step_id", None))
+            ][:20]
+
+        logger.info(f"  ✅ Filtered: {len(filtered_observations)}/{len(all_observations)} observations")
+
+        # Log first few observation contents for debugging
+        if filtered_observations:
+            first_obs = filtered_observations[0]
+            # Handle both dict and StructuredObservation
+            if isinstance(first_obs, dict):
+                content_preview = str(first_obs.get("content", ""))[:100]
+            else:
+                content_preview = str(getattr(first_obs, "content", ""))[:100]
+            logger.info(f"  📝 First observation: {content_preview}...")
+
+        return filtered_observations
+
     def _generate_report_sections(
         self,
         findings: Dict[str, Any],
@@ -1296,7 +1427,8 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                 section_name,
                 findings,
                 section_template,
-                style_config.style
+                style_config.style,
+                state
             )
             
             # Embed table if this is the designated section
@@ -1344,6 +1476,7 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                 findings,
                 template,
                 style_config.style,
+                state
             )
 
             if embedded_table and section_name == table_section:
@@ -1360,34 +1493,108 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         section_name: str,
         findings: Dict[str, Any],
         template: str,
-        style: ReportStyle
+        style: ReportStyle,
+        state: EnhancedResearchState
     ) -> str:
-        """Generate content for a specific report section."""
-        
+        """
+        Generate content for a specific report section.
+
+        This method now supports TWO approaches:
+        1. Structured generation (NEW): LLM generates structured data, we render markdown
+        2. Template generation (EXISTING): LLM generates markdown directly
+
+        The structured approach is preferred when enabled, as it guarantees
+        correct table formatting through programmatic rendering.
+        """
+
         # CRITICAL: Don't generate content if this is an error report
         if findings.get("error_report", False):
             return f"## {section_name}\n\n{findings['observations'][0] if findings['observations'] else 'Research failed - no data available.'}"
-        
+
         # CRITICAL: Check if we have actual research data
         observations = findings.get("observations", [])
         if not observations or len(observations) == 0:
             logger.warning(f"REPORTER: No observations available for section '{section_name}' - preventing LLM hallucination")
             return f"## {section_name}\n\nNo research data available for this section due to search tool failures."
-        
+
+        # FILTER OBSERVATIONS BY SECTION MAPPING
+        # This is the key fix: only use observations from steps mapped to this section
+        filtered_observations = self._filter_observations_for_section(
+            section_name,
+            observations,
+            state
+        )
+
+        # Update findings with filtered observations for this section
+        section_findings = findings.copy()
+        section_findings["observations"] = filtered_observations
+
+        logger.info(f"📊 Section '{section_name}': using {len(filtered_observations)}/{len(observations)} observations")
+
+        # Check if structured generation is enabled
+        reporter_config = self.config.get('agents', {}).get('reporter', {})
+        enable_structured = reporter_config.get('enable_structured_generation', False)
+        enable_fallback = reporter_config.get('structured_generation_fallback', False)
+
+        # DEBUG: Log configuration status
+        logger.info(f"🔍 DEBUG: Structured generation check for section '{section_name}'")
+        logger.info(f"  - enable_structured: {enable_structured}")
+        logger.info(f"  - enable_fallback: {enable_fallback}")
+        logger.info(f"  - self.llm is None: {self.llm is None}")
+        logger.info(f"  - reporter_config keys: {list(reporter_config.keys())}")
+
+        if enable_structured and self.llm:
+            # NEW PATH: Try structured generation first
+            logger.info(f"🎯 Attempting structured generation for section: {section_name}")
+
+            try:
+                structured_content = self._generate_section_content_structured(
+                    section_name,
+                    section_findings,
+                    template,
+                    style,
+                    state
+                )
+
+                if structured_content:
+                    logger.info(f"✅ Structured generation succeeded for: {section_name}")
+                    return structured_content
+                else:
+                    error_msg = f"Structured generation returned empty for {section_name}"
+                    if enable_fallback:
+                        logger.warning(f"⚠️ {error_msg}, falling back to template")
+                    else:
+                        logger.error(f"❌ {error_msg}, fallback disabled - returning error placeholder")
+                        return f"## {section_name}\n\nError: Structured generation failed to produce content. Please check logs."
+
+            except Exception as e:
+                error_msg = f"Structured generation failed for {section_name}: {e}"
+                if enable_fallback:
+                    logger.warning(f"⚠️ {error_msg}, falling back to template approach")
+                else:
+                    logger.error(f"❌ {error_msg}, fallback disabled - returning error placeholder")
+                    return f"## {section_name}\n\nError: Structured generation exception: {str(e)[:100]}. Please check logs."
+
+        # EXISTING PATH: Template-based generation (fallback or default)
+        if enable_structured and not enable_fallback:
+            logger.info(f"Structured generation was attempted but did not return content, and fallback is disabled")
+        else:
+            logger.info(f"Using template-based generation for section: {section_name}")
+
         # Build prompt for section generation
         prompt = self._build_section_prompt(
             section_name,
-            findings,
+            section_findings,
             template,
             style
         )
-        
+
         if self.llm:
             messages = [
                 SystemMessage(content=StyleTemplate.get_style_prompt(style)),
                 HumanMessage(content=prompt)
             ]
-            
+
             # Use smart retry for transient error handling
             content = self._invoke_llm_with_smart_retry(messages, section_name)
         else:
@@ -1397,9 +1604,355 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                 findings,
                 style
             )
-        
+
         return content
-    
+
+    def _generate_section_content_structured(
+        self,
+        section_name: str,
+        findings: Dict[str, Any],
+        template: str,
+        style: ReportStyle,
+        state: EnhancedResearchState
+    ) -> Optional[str]:
+        """
+        Generate section content using MULTI-CALL structured generation.
+
+        Instead of generating entire sections at once, this:
+        1. Determines what blocks are needed (paragraphs, tables)
+        2. Generates each block separately with focused LLM calls
+        3. Passes context between blocks for coherence
+        4. Programmatically renders tables (guaranteed separator rows!)
+
+        This approach avoids validation issues with complex nested defaults.
+
+        Args:
+            section_name: Name of the section to generate
+            findings: Research findings data
+            template: Section template (for guidance, not currently used)
+            style: Report style
+            state: Current research state (for event emission and logging)
+
+        Returns:
+            Markdown string with programmatically rendered tables, or None if failed
+        """
+        from ..core.report_models_structured import ParagraphBlock, TableBlock
+
+        try:
+            # Step 1: Determine block structure
+            block_sequence = self._determine_section_structure(section_name, findings)
+            total_blocks = len(block_sequence)
+
+            logger.info(
+                f"Generating '{section_name}' with {total_blocks} blocks: {' → '.join(block_sequence)}"
+            )
+
+            # Step 2: Generate each block separately
+            markdown_parts = []
+            previous_content = ""  # Accumulate context for subsequent blocks
+
+            for i, block_type in enumerate(block_sequence):
+                context = self._get_block_context(block_type, i, total_blocks)
+
+                logger.info(f"  Block {i+1}/{total_blocks}: {block_type} ({context})")
+
+                if block_type == "paragraph":
+                    block = self._generate_paragraph_block(
+                        section_name, findings, context, style, previous_content
+                    )
+                    rendered = block.text
+
+                elif block_type == "table":
+                    block = self._generate_table_block(
+                        section_name, findings, context, style, previous_content
+                    )
+                    rendered = block.render_markdown()  # Programmatic rendering!
+
+                else:
+                    logger.warning(f"Unknown block type '{block_type}', skipping")
+                    continue
+
+                # Add to output
+                if rendered.strip():
+                    markdown_parts.append(rendered)
+                    previous_content += "\n\n" + rendered  # Build context
+
+            # Step 3: Join all blocks
+            content = "\n\n".join(markdown_parts)
+
+            if not content.strip():
+                logger.warning(f"Multi-call generation for '{section_name}' returned empty content")
+                return None
+
+            logger.info(
+                f"✅ Multi-call section generated: {section_name}, "
+                f"{len(content)} chars, {len(markdown_parts)} blocks"
+            )
+
+            return content
+
+        except Exception as e:
+            logger.warning(f"Multi-call generation failed for {section_name}: {e}")
+            return None
+
+    def _build_structured_section_prompt(
+        self,
+        section_name: str,
+        findings: Dict[str, Any],
+        template: str,
+        style: ReportStyle
+    ) -> str:
+        """
+        Build prompt for structured section generation.
+
+        This prompt explicitly instructs the LLM to generate STRUCTURED DATA
+        (headers, rows, cells) not markdown strings.
+        """
+        observations = findings.get("observations", [])
+        observation_text = "\n\n".join(
+            f"- {obs}" if isinstance(obs, str) else f"- {getattr(obs, 'content', str(obs))}"
+            for obs in observations[:15]  # Limit to prevent context explosion
+        )
+
+        research_topic = findings.get("research_topic", "the research topic")
+
+        prompt = f"""Generate content for the '{section_name}' section of a research report.
+
+**Research Topic**: {research_topic}
+
+**Report Style**: {style.value}
+
+**Research Findings**:
+{observation_text}
+
+**Section Guidance**: {template}
+
+**CRITICAL INSTRUCTIONS FOR STRUCTURED OUTPUT**:
+
+1. **For Text Content**: Use content_blocks with type="paragraph"
+   Example: {{"type": "paragraph", "paragraph": {{"text": "Your analysis here..."}}}}
+
+2. **For Tables**: Use content_blocks with type="table" and STRUCTURED DATA
+   - **DO NOT** generate markdown table strings!
+   - **DO** generate structured data: headers array, rows array with cells
+
+   Example for a comparison table:
+   {{
+     "type": "table",
+     "table": {{
+       "headers": ["Country", "Tax Rate", "Take-Home Pay"],
+       "rows": [
+         {{"cells": [{{"value": "Spain"}}, {{"value": "31.2%"}}, {{"value": "€170,000"}}]}},
+         {{"value": "France"}}, {{"value": "35.8%"}}, {{"value": "€160,000"}}]}}
+       ],
+       "caption": "Tax comparison across countries 2025"
+     }}
+   }}
+
+3. **Content Organization**:
+   - Start with paragraph(s) introducing the section
+   - Add table(s) for comparative data
+   - End with paragraph(s) analyzing the data
+
+4. **Quality Standards**:
+   - Use actual data from research findings (no hallucination!)
+   - For tables: ensure all rows have same number of cells as headers
+   - Use clear, descriptive captions for tables
+   - Keep paragraphs focused and well-structured
+
+**Return a JSON object with a "content_blocks" array following the structure above.**
+"""
+        return prompt
+
+    def _get_structured_system_prompt(self, style: ReportStyle) -> str:
+        """Get system prompt for structured generation."""
+        return f"""You are a research report writer generating STRUCTURED DATA for reports.
+
+Your role: Generate structured content (NOT markdown strings) that will be rendered programmatically.
+
+For {style.value} style reports:
+- {StyleTemplate.get_style_prompt(style)}
+
+**CRITICAL**:
+- For tables, provide structured data: arrays of headers, rows with cells
+- Do NOT write markdown table strings (no "| Header |" strings!)
+- Python code will render the perfect markdown from your structured data
+- This guarantees correct table formatting with separator rows"""
+
+    # ===== MULTI-CALL STRUCTURED GENERATION HELPERS =====
+    # These methods support generating sections with multiple focused LLM calls
+
+    def _determine_section_structure(
+        self,
+        section_name: str,
+        findings: Dict[str, Any]
+    ) -> List[str]:
+        """
+        Determine what blocks this section needs.
+
+        Returns list like: ["paragraph", "table", "paragraph"]
+
+        Strategy: Heuristic-based (can be enhanced with LLM classification if needed)
+        - Sections with "comparison", "data", "overview", "analysis" usually need tables
+        - Others are typically just paragraphs
+        """
+        section_lower = section_name.lower()
+
+        # Keywords that suggest tables are needed
+        table_keywords = [
+            "comparison", "compare", "data", "overview",
+            "summary", "results", "findings", "analysis",
+            "rates", "costs", "prices", "metrics"
+        ]
+
+        needs_table = any(keyword in section_lower for keyword in table_keywords)
+
+        if needs_table:
+            # Pattern: Intro text → Table → Analysis text
+            return ["paragraph", "table", "paragraph"]
+        else:
+            # Pattern: Just text content
+            return ["paragraph"]
+
+    def _get_block_context(self, block_type: str, index: int, total: int) -> str:
+        """Get context description for this block's role in the section."""
+        if index == 0:
+            return "introduction"
+        elif index == total - 1:
+            return "conclusion/analysis"
+        elif block_type == "table":
+            return "data comparison"
+        else:
+            return "supporting analysis"
+
+    def _generate_paragraph_block(
+        self,
+        section_name: str,
+        findings: Dict[str, Any],
+        context: str,
+        style: ReportStyle,
+        previous_content: str = ""
+    ) -> "ParagraphBlock":
+        """
+        Generate text paragraph block (standard LLM generation, no structured output).
+
+        Args:
+            section_name: Name of section
+            findings: Research findings
+            context: Role description (introduction, analysis, etc.)
+            style: Report style
+            previous_content: Markdown of blocks generated so far in THIS section
+
+        Returns:
+            ParagraphBlock with text content
+        """
+        from ..core.report_models_structured import ParagraphBlock
+
+        observations = findings.get("observations", [])
+        observation_text = "\n".join(
+            f"- {obs}" if isinstance(obs, str) else f"- {getattr(obs, 'content', str(obs))}"
+            for obs in observations[:10]
+        )
+
+        research_topic = findings.get("research_topic", "the research topic")
+
+        prompt = f"""Generate {context} paragraph for the '{section_name}' section.
+
+**Research Topic**: {research_topic}
+**Report Style**: {style.value}
+
+**Research Findings**:
+{observation_text}
+
+**PREVIOUS CONTENT IN THIS SECTION**:
+{previous_content if previous_content else "[This is the first block - set the stage]"}
+
+**Instructions**:
+- Write a cohesive {context} paragraph
+- Build on previous content (don't repeat what was already said)
+- {StyleTemplate.get_style_prompt(style)}
+- Use markdown formatting (bold, italic, etc.) appropriately
+
+Generate the paragraph now:"""
+
+        messages = [
+            SystemMessage(content=f"You are a {style.value} report writer."),
+            HumanMessage(content=prompt)
+        ]
+
+        response = self._invoke_llm_with_smart_retry(messages, f"paragraph_{section_name}")
+
+        return ParagraphBlock(text=response)
+
+    def _generate_table_block(
+        self,
+        section_name: str,
+        findings: Dict[str, Any],
+        context: str,
+        style: ReportStyle,
+        previous_content: str = ""
+    ) -> "TableBlock":
+        """
+        Generate table block with structured output (GUARANTEED separator rows).
+
+        Args:
+            section_name: Name of section
+            findings: Research findings
+            context: Role description
+            style: Report style
+            previous_content: Markdown of blocks generated so far
+
+        Returns:
+            TableBlock with headers and rows
+        """
+        from ..core.report_models_structured import TableBlock, get_databricks_schema
+
+        observations = findings.get("observations", [])
+        observation_text = "\n".join(
+            f"- {obs}" if isinstance(obs, str) else f"- {getattr(obs, 'content', str(obs))}"
+            for obs in observations[:15]
+        )
+
+        research_topic = findings.get("research_topic", "the research topic")
+
+        prompt = f"""Generate a comparison table for the '{section_name}' section.
+
+**Research Topic**: {research_topic}
+
+**Research Findings**:
+{observation_text}
+
+**PREVIOUS CONTENT IN THIS SECTION**:
+{previous_content if previous_content else "[This is the first block]"}
+
+**Instructions**:
+- Create a structured comparison table
+- Table should complement the introduction above (if present)
+- Extract key data points from research findings
+- Return JSON with this exact structure:
+{{
+  "type": "table",
+  "headers": ["Column1", "Column2", "Column3"],
+  "rows": [
+    ["Value1", "Value2", "Value3"],
+    ["Value4", "Value5", "Value6"]
+  ],
+  "caption": "Brief table description"
+}}
+
+Generate the table data now:"""
+
+        messages = [
+            SystemMessage(content="You generate structured table data (NOT markdown strings)."),
+            HumanMessage(content=prompt)
+        ]
+
+        # Use structured output to guarantee valid structure
+        structured_llm = self.llm.with_structured_output(TableBlock, method="json_mode")
+        table_block = structured_llm.invoke(messages)
+
+        return table_block
+
     def _should_enhance_quality(self, state: EnhancedResearchState) -> bool:
         """
         Check if quality enhancement should be applied based on config and memory constraints.

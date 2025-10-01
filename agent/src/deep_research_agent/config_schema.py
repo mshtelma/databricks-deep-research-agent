@@ -29,11 +29,19 @@ class ReportStyle(str, Enum):
     DEFAULT = "default"  # Adaptive structure based on query context
 
 class ModelConfig(BaseSettings):
-    """Model endpoint configuration"""
-    endpoint: str = Field(default="databricks-gpt-oss-120b")
+    """Model endpoint configuration - supports both single-endpoint and multi-endpoint tier configs"""
+    # Single-endpoint mode (legacy - for agents that don't use rate limiting)
+    endpoint: Optional[str] = Field(default=None, description="Single model endpoint")
+
+    # Multi-endpoint tier mode (new - for rate limiting tiers)
+    endpoints: Optional[List[str]] = Field(default=None, description="List of endpoints for tier")
+    tokens_per_minute: Optional[int] = Field(default=None, ge=1000, description="Token budget per minute")
+    rotation_strategy: Optional[str] = Field(default=None, description="Endpoint rotation strategy")
+    fallback_on_429: Optional[bool] = Field(default=None, description="Fallback to next endpoint on 429")
+
+    # Common fields (existing)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4000, gt=0, le=32000)
-    # Reasoning-specific configuration for models like GPT-OSS and Claude
     reasoning_effort: Optional[str] = Field(
         default=None,
         description="Reasoning effort level for models that support it (low, medium, high)"
@@ -51,6 +59,42 @@ class ModelConfig(BaseSettings):
         if v is not None and v not in ['low', 'medium', 'high']:
             raise ValueError(f"reasoning_effort must be 'low', 'medium', or 'high', got {v}")
         return v
+
+    @validator('rotation_strategy')
+    def validate_rotation_strategy(cls, v):
+        """Validate rotation strategy is one of the allowed values"""
+        if v and v not in ['round_robin', 'lru', 'random', 'priority']:
+            raise ValueError(f"rotation_strategy must be one of: round_robin, lru, random, priority")
+        return v
+
+class RetryConfig(BaseSettings):
+    """Retry configuration for rate limiting"""
+    base_delay_seconds: float = Field(default=2.0, ge=0.1, description="Base delay between retries")
+    max_delay_seconds: float = Field(default=60.0, ge=1.0, description="Maximum delay between retries")
+    max_retries: int = Field(default=5, ge=1, le=10, description="Maximum number of retries")
+    jitter: float = Field(default=0.3, ge=0.0, le=1.0, description="Jitter factor for retry delays")
+
+class CoordinationConfig(BaseSettings):
+    """Request coordination configuration"""
+    max_concurrent_per_endpoint: int = Field(default=2, ge=1, le=10, description="Max concurrent requests per endpoint")
+
+class CooldownConfig(BaseSettings):
+    """Cooldown configuration for 429 handling"""
+    default_cooldown_seconds: float = Field(default=60.0, ge=1.0, description="Default cooldown after 429")
+    max_cooldown_seconds: float = Field(default=300.0, ge=60.0, description="Maximum cooldown duration")
+    respect_retry_after_header: bool = Field(default=True, description="Respect Retry-After header from 429 responses")
+
+class TokenTrackingConfig(BaseSettings):
+    """Token budget tracking configuration"""
+    enable_sliding_window: bool = Field(default=True, description="Use sliding window for token tracking")
+    window_seconds: int = Field(default=60, ge=10, le=300, description="Sliding window duration")
+    safety_margin: float = Field(default=0.9, ge=0.5, le=1.0, description="Safety margin for token budgets (90% = use 90% of limit)")
+
+class PhaseDelaysConfig(BaseSettings):
+    """Phase delay configuration to prevent traffic bursts"""
+    after_research_before_fact_check: float = Field(default=3.0, ge=0.0, description="Delay after research phase")
+    after_fact_check_before_report: float = Field(default=5.0, ge=0.0, description="Delay after fact checking")
+    between_section_generations: float = Field(default=2.0, ge=0.0, description="Delay between report sections")
 
 class CoordinatorConfig(BaseSettings):
     """Coordinator agent configuration"""
@@ -123,10 +167,19 @@ class WorkflowConfig(BaseSettings):
     enable_progress_tracking: bool = True
 
 class RateLimitingConfig(BaseSettings):
-    """Rate limiting configuration"""
+    """Rate limiting configuration - supports both legacy and enhanced modes"""
+    # Legacy fields (kept for backward compatibility)
     max_parallel_requests: int = Field(default=10, ge=1)
     max_requests_per_minute: int = Field(default=60, ge=1)
     max_tokens_per_minute: int = Field(default=100000, ge=1000)
+
+    # Enhanced rate limiting (new - optional, comes from YAML)
+    enabled: bool = Field(default=False, description="Enable advanced rate limiting system")
+    retry: Optional[RetryConfig] = Field(default=None, description="Retry configuration")
+    coordination: Optional[CoordinationConfig] = Field(default=None, description="Request coordination")
+    cooldown: Optional[CooldownConfig] = Field(default=None, description="Cooldown configuration")
+    token_tracking: Optional[TokenTrackingConfig] = Field(default=None, description="Token tracking")
+    phase_delays: Optional[PhaseDelaysConfig] = Field(default=None, description="Phase delays")
 
 class GroundingConfig(BaseSettings):
     """Grounding and factuality configuration"""
@@ -191,6 +244,19 @@ class MemoryConfig(BaseSettings):
     max_observations_per_step: int = Field(default=10, ge=5, le=100, description="Maximum observations per research step")
     max_search_results: int = Field(default=100, ge=10, le=1000, description="Maximum search results to accumulate")
 
+class TierFallbackConfig(BaseSettings):
+    """Tier fallback configuration for cross-tier degradation"""
+    enable_cross_tier_fallback: bool = Field(default=True, description="Enable cross-tier fallback on rate limits")
+    fallback_chain: Dict[str, Optional[str]] = Field(
+        default_factory=lambda: {
+            "complex": "analytical",
+            "analytical": "simple",
+            "simple": "micro",
+            "micro": None
+        },
+        description="Tier fallback chain mapping"
+    )
+
 class ResearchConfig(BaseSettings):
     """Main research agent configuration"""
     
@@ -230,6 +296,7 @@ class ResearchConfig(BaseSettings):
     adaptive_structure: AdaptiveStructureConfig = Field(default_factory=AdaptiveStructureConfig)
     entity_validation: EntityValidationConfig = Field(default_factory=EntityValidationConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    tier_fallback: TierFallbackConfig = Field(default_factory=TierFallbackConfig)
 
     # System settings
     recursion_limit: int = Field(default=100, ge=10)

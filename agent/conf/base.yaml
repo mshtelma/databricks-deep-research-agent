@@ -2,47 +2,70 @@
 # This is the comprehensive base configuration for the multi-agent research system.
 # Only includes parameters that are actually used in the codebase.
 
-# Model Configuration - only the models actually used
+# Model Configuration - 4-Tier System with Rate Limiting
 models:
   default:
-    endpoint: databricks-gpt-oss-120b
-    temperature: 0.9
-    max_tokens: 16000  # Increased for complex analysis
-    reasoning_effort: low
-
-  # Complexity-based model tiers for performance optimization
-  simple:  # For quick tasks: classification, query generation
-    endpoint: databricks-gpt-oss-20b
+    endpoint: gpt-oss-20b
     temperature: 0.7
+    max_tokens: 16000
+    reasoning_effort: low
+
+  # TIER 1: MICRO - Ultra-lightweight (pattern matching, entity extraction)
+  micro:
+    endpoints:
+      - gpt-oss-20b  # Highest priority (most throughput)
+      - databricks-gemma-3-12b
+      - databricks-meta-llama-3-1-8b-instruct
+    temperature: 0.5
     max_tokens: 4000
-    reasoning_effort: low
+    tokens_per_minute: 800000  # Higher limit for lightweight model
+    rotation_strategy: priority  # CHANGED: Priority-based (config order = priority order)
+    fallback_on_429: true  # Single endpoint
 
-  analytical:  # For medium tasks: research, fact-checking, planning
-    endpoint: databricks-gpt-oss-20b
-    temperature: 0.9
+  # TIER 2: SIMPLE - Lightweight (query gen, claim extraction, validation)
+  simple:
+    endpoints:
+      - gpt-oss-20b  # Highest priority (most throughput)
+      - databricks-gpt-oss-20b
+      - databricks-llama-4-maverick
+      - databricks-meta-llama-3-3-70b-instruct
+    temperature: 0.5
     max_tokens: 8000
-    reasoning_effort: medium  # Medium effort for better quality
-
-  complex:  # For heavy tasks: final synthesis, deep analysis
-    endpoint: databricks-gpt-oss-120b
-    temperature: 0.2  # Low temperature for structured JSON generation (was 0.9 - too high!)
-    max_tokens: 24000
-    reasoning_effort: high  # HIGH effort required for complex synthesis!
-    reasoning_budget: 8000  # For future Claude-style models
-
-  # Legacy model names (kept for backward compatibility)
-  web_research:
-    endpoint: databricks-gpt-oss-20b
-    temperature: 0.9
-    max_tokens: 16000  # Increased for comprehensive research
     reasoning_effort: low
+    tokens_per_minute: 50000  # Medium rate limit
+    rotation_strategy: priority  # CHANGED: Priority-based (config order = priority order)
+    fallback_on_429: true  # Single endpoint
 
-  synthesis:
-    endpoint: databricks-gpt-oss-120b
-    temperature: 0.2  # Low temperature for structured JSON generation (was 0.9 - too high!)
-    max_tokens: 24000  # Total tokens
-    reasoning_budget: 8000  # Reserve half for reasoning
-    reasoning_effort: high  # HIGH effort required for report synthesis
+  # TIER 3: ANALYTICAL - Medium (research synthesis, fact checking, planning)
+  analytical:
+    endpoints:
+      - gpt-oss-120b  # Highest priority (most throughput)
+      - databricks-gpt-oss-120b
+      - databricks-llama-4-maverick
+      - databricks-meta-llama-3-3-70b-instruct
+    temperature: 0.7
+    max_tokens: 12000
+    reasoning_effort: medium
+    tokens_per_minute: 100000  # Provisioned throughput limit
+    rotation_strategy: priority  # CHANGED: Priority-based (config order = priority order)
+    fallback_on_429: true  # Enable fallback to second endpoint
+
+  # TIER 4: COMPLEX - Heavy (report generation, complex tables, synthesis)
+  complex:
+    endpoints:
+      - gpt-oss-120b  # Highest priority (most throughput)
+      - databricks-gpt-oss-120b
+      - databricks-claude-sonnet-4
+      - databricks-claude-3-7-sonnet
+    temperature: 0.7
+    max_tokens: 32000
+    reasoning_effort: high
+    reasoning_budget: 8000
+    tokens_per_minute: 100000  # Higher PT limit for powerful model
+    rotation_strategy: priority  # CHANGED: Priority-based (config order = priority order)
+    fallback_on_429: true  # Single powerful endpoint
+
+
 
 # Multi-Agent System Configuration
 multi_agent:
@@ -64,7 +87,7 @@ agents:
   researcher:
     enabled: true
     model: analytical  # Use analytical model for research
-    max_steps_per_execution: 10
+    max_steps_per_execution: 20  # Increased for complex multi-country comparisons
     enable_reflexion: true
 
   fact_checker:
@@ -82,10 +105,11 @@ agents:
     use_semantic_extraction: true
     # Structured generation (NEW - guarantees JSON structure, not markdown syntax!)
     enable_structured_generation: true  # Use Pydantic models + programmatic rendering
+    structured_generation_fallback: false  # CHANGED: Enable fallback to prevent "Error: Structured generation failed" messages when rate limited
     # Table validation MUST stay enabled - structured generation doesn't validate markdown!
     enable_table_validation: true  # POST-PROCESS to fix missing separator rows
     enable_llm_self_correction: false  # LLM correction is overkill, validation is enough
-    max_correction_retries: 1
+    max_correction_retries: 3  # CHANGED: More retry attempts before falling back (was 1)
 
 # Search Configuration
 search:
@@ -108,25 +132,61 @@ search:
   enable_safe_search: true
 
 # Global recursion limit (mirrors workflow setting for components that read top-level key)
-recursion_limit: 300
+recursion_limit: 400
 
 # Workflow Configuration
 workflow:
-  max_research_loops: 2  # Increased for thorough research
-  max_fact_check_loops: 3  # Increased for better verification
-  max_total_steps: 75  # Increased for complex workflows
-  max_wall_clock_seconds: 1800  # Increased to 30 minutes for complex queries
-  recursion_limit: 300  # Increased for complex adaptive structures
+  max_research_loops: 1  # Increased for very complex multi-country research
+  max_fact_check_loops: 1  # Increased for better verification
+  max_total_steps: 150  # Increased for complex multi-country workflows
+  max_wall_clock_seconds: 2400  # Increased to 40 minutes for very complex queries
+  recursion_limit: 400  # Increased for complex adaptive structures
   enable_background_investigation: true
   enable_human_feedback: false
   auto_accept_plan: false
   enable_circuit_breakers: true
   enable_progress_tracking: true
 
-# Rate Limiting Configuration
+# Rate Limiting Configuration - Comprehensive System
 rate_limiting:
-  max_parallel_requests: 2  # Allow some parallelism for performance
-  max_tokens_per_minute: 100000
+  enabled: true  # Master switch for entire rate limiting system
+
+  # Retry Strategy (exponential backoff with jitter) - TUNED FOR 429 ERRORS
+  retry:
+    base_delay_seconds: 15.0  # CHANGED: Start with 15s delay (was 5.0) - respect 429 cooldowns
+    max_delay_seconds: 120.0  # CHANGED: Cap at 120s (was 30.0) - allow longer exponential backoff
+    max_retries: 8  # CHANGED: Up to 8 retry attempts (was 5) - more patience
+    jitter: 0.5  # CHANGED: ±50% randomization (was 0.3) - prevent synchronized retries
+
+  # Request Coordination (prevent bursts) - SERIALIZE TO PREVENT 429s
+  coordination:
+    max_concurrent_per_endpoint: 1  # CHANGED: Max 1 request per endpoint (was 2) - serialize to prevent bursts
+
+  # Cooldown After 429 Errors - LONGER WAITS
+  cooldown:
+    default_cooldown_seconds: 30  # CHANGED: 30s cooldown after 429 (was 10s) - respect provisioned throughput limits
+    respect_retry_after_header: true  # Use Retry-After header if present
+
+  # Token Budget Tracking
+  token_tracking:
+    enable_sliding_window: true  # Use sliding window for token counting
+    window_seconds: 60  # Track tokens over 60s window
+    safety_margin: 0.9  # Use only 90% of declared limit
+
+  # Phase Delays (strategic pauses between pipeline stages) - MORE SPACING
+  phase_delays:
+    after_research_before_fact_check: 8.0  # CHANGED: 8s pause after research (was 3.0)
+    after_fact_check_before_report: 12.0  # CHANGED: 12s pause before reporting (was 5.0)
+    between_section_generations: 5.0  # CHANGED: 5s between each report section (was 2.0) - CRITICAL for preventing 429s during report generation
+
+# Tier Fallback Configuration
+tier_fallback:
+  enable_cross_tier_fallback: true  # Allow falling back to lower tiers when rate limited
+  fallback_chain:
+    complex: analytical      # Complex can fall back to analytical
+    analytical: simple       # Analytical can fall back to simple
+    simple: micro           # Simple can fall back to micro
+    micro: null             # Micro has no fallback (last resort)
 
 
 # Grounding and Factuality Configuration

@@ -22,7 +22,7 @@ class ExtractionMethod(str, Enum):
 class StructuredObservation:
     """
     Enhanced observation with structured metadata for table population.
-    
+
     This replaces simple string observations with structured data that can
     be easily extracted for table generation.
     """
@@ -32,6 +32,7 @@ class StructuredObservation:
     confidence: float = 1.0
     source_id: Optional[str] = None
     extraction_method: ExtractionMethod = ExtractionMethod.LLM
+    step_id: Optional[str] = None  # CRITICAL: Enables filtering observations by step for section-specific content
     
     def __str__(self) -> str:
         """Backward compatibility with string observations."""

@@ -33,3 +33,5 @@ unitycatalog-ai[databricks]
 unitycatalog-langchain[databricks]
 tavily-python>=0.3.0
 requests>=2.31.0
+nest-asyncio>=1.5.8
+pytest-timeout>=2.3.1

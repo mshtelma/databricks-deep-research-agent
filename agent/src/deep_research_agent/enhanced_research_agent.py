@@ -236,10 +236,22 @@ class EnhancedResearchAgent(ResponsesAgent):
         else:
             # Initialize LLM and model manager using factory pattern
             from .core.model_config_loader import create_model_manager_from_config
+            from .core.model_selector import ModelSelector
 
             try:
-                # Create model manager for multi-model support
-                self.model_manager = create_model_manager_from_config()
+                # CRITICAL: Create ModelSelector for rate limiting BEFORE ModelManager
+                # Without this, ModelManager has no rate limiting and uses OpenAI SDK's
+                # fast retry logic (0.4s) which triggers 429 errors constantly
+                model_selector = None
+                if self.config_manager and self.agent_config:
+                    try:
+                        model_selector = ModelSelector(self.agent_config)
+                        logger.info("✅ ModelSelector initialized | Rate limiting ENABLED")
+                    except Exception as e:
+                        logger.warning(f"Failed to create ModelSelector: {e} | Rate limiting DISABLED")
+
+                # Create model manager for multi-model support (WITH rate limiting if available)
+                self.model_manager = create_model_manager_from_config(model_selector=model_selector)
                 # Get default LLM from model manager
                 self.llm = self.model_manager.get_chat_model("default")
                 if self.llm is None:
@@ -1659,11 +1671,15 @@ class EnhancedResearchAgent(ResponsesAgent):
         logger.info(f"Processing predict request: {query[:100]}...")
 
         # No mock responses - always run real workflow
-        # Run async research in sync context
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Use safe async executor to avoid event loop conflicts
+        from .core.async_utils import AsyncExecutor
+
         try:
-            result = loop.run_until_complete(self.research(query))
+            # Run async research with timeout using safe executor
+            result = AsyncExecutor.run_async_safe(
+                self.research(query),
+                timeout=300.0  # 5 minute timeout
+            )
 
             # Convert result to ResponsesAgentResponse format
             final_report = result.get("final_report", "No report generated")
@@ -1693,6 +1709,22 @@ class EnhancedResearchAgent(ResponsesAgent):
             return ResponsesAgentResponse(
                 output=[output_item], custom_outputs=custom_outputs
             )
+        except asyncio.TimeoutError:
+            logger.error("Research timed out after 5 minutes")
+            error_item = {
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "Request timed out. The research topic may be too complex. Please try a simpler query.",
+                    }
+                ],
+                "id": str(uuid4()),
+            }
+            return ResponsesAgentResponse(
+                output=[error_item], custom_outputs={"error": "timeout"}
+            )
         except Exception as e:
             logger.error(f"Error in predict: {e}")
             # Return error response
@@ -1710,8 +1742,6 @@ class EnhancedResearchAgent(ResponsesAgent):
             return ResponsesAgentResponse(
                 output=[error_item], custom_outputs={"error": str(e)}
             )
-        finally:
-            loop.close()
 
     def predict_stream(
         self, request: ResponsesAgentRequest
@@ -1779,156 +1809,87 @@ class EnhancedResearchAgent(ResponsesAgent):
 
         # No mock streaming - always run real workflow
 
-        # Import workflow limit initializer
+        # Import workflow limit initializer and async executor
         from .core.routing_policy import initialize_workflow_limits
+        from .core.async_utils import AsyncExecutor
 
-        # Handle async event loop properly to avoid deadlocks
+        # Initialize state
+        initial_state = StateManager.initialize_state(
+            research_topic=query, config=self.config
+        )
+
+        # Add user message to state - this is critical for agent coordination
+        from langchain_core.messages import HumanMessage
+
+        if query:
+            initial_state["messages"] = [HumanMessage(content=query)]
+        else:
+            logger.warning(
+                "No query extracted from request - agents may fail to find user message"
+            )
+
+        # Initialize workflow limits and counters
+        initialize_workflow_limits(initial_state, self.config)
+
+        # Add run ID and session ID for tracking
+        initial_state["run_id"] = str(uuid4())
+        initial_state["session_id"] = getattr(
+            request, "session_id", initial_state["run_id"]
+        )
+
+        # Log initialization for debugging
+        logger.info(
+            f"Initialized workflow limits",
+            max_fact_check_loops=initial_state.get("max_fact_check_loops"),
+            max_total_steps=initial_state.get("max_total_steps"),
+            max_wall_clock_seconds=initial_state.get("max_wall_clock_seconds"),
+        )
+
+        # Monitor memory before workflow execution
+        if hasattr(self, "memory_monitor"):
+            self.memory_monitor.log_memory_usage("before_workflow", initial_state)
+
+        # Track start time for elapsed calculations
+        start_time = time.time()
+
+        # Stream through workflow with event capture
+        collected_content = []
+        final_state = {}  # Track final state for metadata
+
+        async def run_streaming():
+            # Add required config for LangGraph checkpointer
+            # FIX: Ensure recursion_limit is properly set
+            recursion_limit = int(
+                self.config.get("workflow", {}).get("recursion_limit", 200)
+            )
+            # Also check for recursion_limit at root level (for backward compatibility)
+            if "recursion_limit" in self.config:
+                recursion_limit = int(self.config["recursion_limit"])
+
+            # Log the actual limit being used
+            logger.info(f"Using recursion_limit: {recursion_limit}")
+
+            config = {
+                "configurable": {
+                    "thread_id": str(uuid4()),
+                    "checkpoint_ns": "enhanced_research_agent",
+                },
+                "recursion_limit": recursion_limit,
+            }
+            async for event in self.graph.astream(initial_state, config=config):
+                yield event
+
+        # Process events from async generator using safe executor
+        event_generator = run_streaming()
+
         try:
-            # Check if there's already a running event loop
-            loop = asyncio.get_running_loop()
-            use_existing_loop = True
-            logger.info("Using existing event loop for workflow execution")
-        except RuntimeError:
-            # No existing loop, create a new one
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            use_existing_loop = False
-            logger.info("Created new event loop for workflow execution")
-
-        try:
-            # Initialize state
-            initial_state = StateManager.initialize_state(
-                research_topic=query, config=self.config
-            )
-
-            # Add user message to state - this is critical for agent coordination
-            from langchain_core.messages import HumanMessage
-
-            if query:
-                initial_state["messages"] = [HumanMessage(content=query)]
-            else:
-                logger.warning(
-                    "No query extracted from request - agents may fail to find user message"
-                )
-
-            # Initialize workflow limits and counters
-            initialize_workflow_limits(initial_state, self.config)
-
-            # Add run ID and session ID for tracking
-            initial_state["run_id"] = str(uuid4())
-            initial_state["session_id"] = getattr(
-                request, "session_id", initial_state["run_id"]
-            )
-
-            # Log initialization for debugging
-            logger.info(
-                f"Initialized workflow limits",
-                max_fact_check_loops=initial_state.get("max_fact_check_loops"),
-                max_total_steps=initial_state.get("max_total_steps"),
-                max_wall_clock_seconds=initial_state.get("max_wall_clock_seconds"),
-            )
-
-            # Monitor memory before workflow execution
-            if hasattr(self, "memory_monitor"):
-                self.memory_monitor.log_memory_usage("before_workflow", initial_state)
-
-            # Track start time for elapsed calculations
-            start_time = time.time()
-
-            # Stream through workflow with event capture
-            collected_content = []
-            final_state = {}  # Track final state for metadata
-
-            async def run_streaming():
-                # Add required config for LangGraph checkpointer
-                # FIX: Ensure recursion_limit is properly set
-                recursion_limit = int(
-                    self.config.get("workflow", {}).get("recursion_limit", 200)
-                )
-                # Also check for recursion_limit at root level (for backward compatibility)
-                if "recursion_limit" in self.config:
-                    recursion_limit = int(self.config["recursion_limit"])
-
-                # Log the actual limit being used
-                logger.info(f"Using recursion_limit: {recursion_limit}")
-
-                config = {
-                    "configurable": {
-                        "thread_id": str(uuid4()),
-                        "checkpoint_ns": "enhanced_research_agent",
-                    },
-                    "recursion_limit": recursion_limit,
-                }
-                async for event in self.graph.astream(initial_state, config=config):
-                    yield event
-
-            # Process events from async generator
-            event_generator = run_streaming()
-
-            # Setup for dedicated thread if using existing loop
-            dedicated_thread_loop = None
-            event_queue = None
-            dedicated_thread = None
-
-            if use_existing_loop:
-                # Create dedicated thread with persistent loop for entire streaming session
-                # This avoids creating/closing a loop per event, which breaks LangGraph
-                import threading
-                import queue
-
-                event_queue = queue.Queue()
-
-                def run_dedicated_event_thread():
-                    """Dedicated thread that consumes async generator with one persistent loop."""
-                    nonlocal dedicated_thread_loop
-                    dedicated_thread_loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(dedicated_thread_loop)
-                    try:
-                        while True:
-                            try:
-                                event = dedicated_thread_loop.run_until_complete(event_generator.__anext__())
-                                event_queue.put(('event', event))
-                            except StopAsyncIteration:
-                                event_queue.put(('done', None))
-                                break
-                            except Exception as e:
-                                event_queue.put(('error', e))
-                                break
-                    finally:
-                        # Only close loop when completely done with all events
-                        logger.debug("Closing dedicated thread loop after consuming all events")
-                        dedicated_thread_loop.close()
-
-                dedicated_thread = threading.Thread(target=run_dedicated_event_thread, daemon=True)
-                dedicated_thread.start()
-                logger.debug("Started dedicated thread with persistent loop for event streaming")
-
-            try:
-                while True:
-                    # Handle async execution based on whether we have an existing loop
-                    try:
-                        if use_existing_loop:
-                            # Get event from dedicated thread via queue
-                            msg_type, data = event_queue.get(timeout=300)
-                            if msg_type == 'done':
-                                break
-                            elif msg_type == 'error':
-                                raise data
-                            event = data
-                        else:
-                            # We created our own loop, so we can use run_until_complete
-                            event = loop.run_until_complete(event_generator.__anext__())
-                    except RuntimeError as e:
-                        if "Cannot run the event loop while another loop is running" in str(e):
-                            # This should never happen with our new logic - log error and re-raise
-                            logger.error(
-                                f"Unexpected event loop conflict: {e}. "
-                                f"use_existing_loop={use_existing_loop}. "
-                                "This indicates a logic error in event loop management."
-                            )
-                            raise
-                        else:
-                            raise
+            # Use AsyncExecutor to safely iterate through async events
+            # Complex research queries may take several minutes to produce first event
+            for event in AsyncExecutor.stream_async_safe(
+                event_generator,
+                timeout_per_item=30.0,
+                first_item_timeout=300.0  # 5 minutes for first item on complex queries
+            ):
 
                     # Process LangGraph events
                     if isinstance(event, dict):
@@ -2364,10 +2325,6 @@ class EnhancedResearchAgent(ResponsesAgent):
                                         f"No report found in reporter output. node_data type: {type(node_data)}"
                                     )
 
-            except StopAsyncIteration:
-                # Async generator finished normally
-                pass
-
             # Emit final done event with metadata
             final_content = "".join(collected_content)
             if not final_content.strip():
@@ -2421,21 +2378,6 @@ class EnhancedResearchAgent(ResponsesAgent):
                     "id": item_id,
                 },
             )
-        finally:
-            # Clean up dedicated thread if it was used
-            if dedicated_thread is not None and dedicated_thread.is_alive():
-                logger.debug("Waiting for dedicated event thread to complete")
-                dedicated_thread.join(timeout=5.0)
-                if dedicated_thread.is_alive():
-                    logger.warning("Dedicated thread did not terminate within timeout")
-
-            # Only close the loop if we created it
-            # If we're using an existing loop (FastAPI/uvicorn), don't close it
-            if not use_existing_loop:
-                logger.debug("Closing event loop (we created it)")
-                loop.close()
-            else:
-                logger.debug("Not closing event loop (using existing loop from runtime)")
 
     def _smart_chunk_report(
         self, report: str, base_chunk_size: int = 1500
