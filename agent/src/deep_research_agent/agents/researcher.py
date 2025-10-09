@@ -22,6 +22,8 @@ from ..core import (
     Citation,
     SearchResultType,
     SectionResearchResult,
+    EnrichedSearchResult,
+    FetchingConfig,
 )
 from ..core.model_manager import ModelRole
 from ..core import id_generator as id_gen
@@ -75,7 +77,7 @@ class ResearcherAgent:
     - Pass context between steps
     """
     
-    def __init__(self, llm=None, rate_limited_llm=None, search_tools=None, tool_registry=None, config=None, event_emitter=None):
+    def __init__(self, llm=None, rate_limited_llm=None, search_tools=None, tool_registry=None, config=None, event_emitter=None, observation_index=None):
         """
         Initialize the researcher agent.
 
@@ -86,6 +88,7 @@ class ResearcherAgent:
             tool_registry: Registry of available tools
             config: Configuration dictionary
             event_emitter: Optional event emitter for detailed progress tracking
+            observation_index: Optional ObservationEmbeddingIndex for smart deduplication
         """
         self.llm = llm
         self.rate_limited_llm = rate_limited_llm
@@ -93,10 +96,24 @@ class ResearcherAgent:
         self.tool_registry = tool_registry
         self.config = config or {}
         self.event_emitter = event_emitter  # Optional for detailed event emission
+        self.observation_index = observation_index  # For semantic deduplication
         self.name = "Researcher"  # Capital for test compatibility
         self.search_tool = None  # For async methods
+
+        # Initialize smart web content fetching components
+        from ..core.snippet_analyzer import SnippetAnalyzer
+        from ..core.web_content_fetcher import WebContentFetcher
+
+        # Get fetching configuration from config (nested under agents.researcher)
+        fetching_config_dict = self.config.get("agents", {}).get("researcher", {}).get("web_content_fetching", {})
+        self.fetching_config = FetchingConfig(**fetching_config_dict) if fetching_config_dict else FetchingConfig()
+        self.web_fetcher = WebContentFetcher(self.fetching_config)
+
         # Back-reference to parent agent for emitting structured events
         self.parent_agent = getattr(self, 'parent_agent', None)
+
+        # Initialize summarization cache
+        self._summary_cache = {}  # content_hash -> summary
 
         # Determine if we should use rate limiting
         self.use_rate_limiting = (
@@ -197,18 +214,21 @@ class ResearcherAgent:
         except Exception as e:
             logger.warning(f"Failed to emit step event {event_type} for {step_id}: {e}")
     
-    def __call__(
+    async def __call__(
         self,
         state: EnhancedResearchState,
         config: Dict[str, Any]
     ) -> Command[Literal["planner", "fact_checker", "reporter"]]:
         """
         Execute research steps from the plan.
-        
+
+        ASYNC: This method is now async to properly await async operations
+        (LLM calls, processing steps, etc.) without blocking or deadlocks.
+
         Args:
             state: Current research state
             config: Configuration dictionary
-            
+
         Returns:
             Command directing to next agent
         """
@@ -304,9 +324,11 @@ class ResearcherAgent:
             if current_step.step_type == StepType.RESEARCH:
                 results = self._execute_research_step(current_step, state, config)
             elif current_step.step_type == StepType.PROCESSING:
-                results = self._execute_processing_step(current_step, state, config)
+                # FIXED: Properly await async function (no more loop.run_until_complete!)
+                results = await self._execute_processing_step(current_step, state, config)
             elif current_step.step_type == StepType.SYNTHESIS:
-                results = self._execute_synthesis_step(current_step, state, config)
+                # FIXED: Properly await async function (no more loop.run_until_complete!)
+                results = await self._execute_synthesis_step(current_step, state, config)
             else:
                 logger.warning(f"Unknown step type: {current_step.step_type}")
                 results = None
@@ -323,9 +345,9 @@ class ResearcherAgent:
                 current_step.status = StepStatus.COMPLETED
                 current_step.completed_at = datetime.now()
 
-                # CRITICAL FIX: Update plan in state to persist step status changes
-                # This fixes the infinite loop by ensuring routers see the updated plan
-                state["current_plan"] = plan
+                # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
+                # Same fix as intermediate_events: object identity matters for state propagation
+                state["current_plan"] = plan.model_copy(deep=True)
                 logger.info(f"✅ INFINITE_LOOP_FIX: Updated plan in state after marking step {current_step.step_id} as completed")
 
                 logger.info(f"Step '{current_step.title}' completed successfully with {len(current_step.observations)} observations and {len(current_step.citations)} citations")
@@ -407,7 +429,7 @@ class ResearcherAgent:
                         validation_result = None
                     
                     # Always add the observation regardless of validation result
-                    state = StateManager.add_observation(state, observation, current_step, self.config)
+                    state = StateManager.add_observation(state, observation, current_step, self.config, self.observation_index)
                     logger.info(f"Added observation to state: {observation_text[:100]}...")
                     
                     # Track validation info for debugging but don't block observation
@@ -472,8 +494,8 @@ class ResearcherAgent:
                 # Update plan metrics
                 plan.completed_steps += 1
 
-                # CRITICAL FIX: Update plan in state to persist step status changes
-                state["current_plan"] = plan
+                # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
+                state["current_plan"] = plan.model_copy(deep=True)
                 logger.info(f"✅ INFINITE_LOOP_FIX: Updated plan in state after marking step {current_step.step_id} as completed")
                 
                 # Update quality metrics progressively
@@ -501,28 +523,48 @@ class ResearcherAgent:
 
                 # Track rich research observations separately for synthesis/reporting
                 if isinstance(results, dict) and results.get("research_observations"):
+                    from ..core.observation_converter import ObservationConverter
+
                     rich_observations = results["research_observations"]
                     existing_rich_obs = state.get("research_observations", [])
-                    
+
                     # Ensure rich_observations is a list before concatenation
                     if isinstance(rich_observations, list):
-                        state["research_observations"] = existing_rich_obs + rich_observations
+                        combined = existing_rich_obs + rich_observations
                     elif isinstance(rich_observations, str):
                         # Convert string to list
-                        state["research_observations"] = existing_rich_obs + [rich_observations]
+                        combined = existing_rich_obs + [rich_observations]
                     else:
                         # Convert other types to string then to list
-                        state["research_observations"] = existing_rich_obs + [str(rich_observations)]
+                        combined = existing_rich_obs + [str(rich_observations)]
 
-                    # CRITICAL: Sync observations field to prevent data loss in reporter
-                    # The reporter checks both fields, but they need to be in sync
-                    state["observations"] = state["research_observations"].copy()
+                    # FIXED: Convert to StructuredObservation objects, then serialize for state storage
+                    # This ensures consistent format and handles legacy observation formats
+                    structured_obs = ObservationConverter.deserialize_from_state(combined)
+
+                    # CRITICAL: Deduplicate observations by content hash BEFORE storing
+                    deduplicated = []
+                    seen_content = set()
+                    for obs in structured_obs:
+                        # Create hash from normalized content (lowercase, stripped)
+                        content_hash = obs.content.lower().strip()
+                        if content_hash not in seen_content and content_hash:  # Skip empty content
+                            seen_content.add(content_hash)
+                            deduplicated.append(obs)
+
+                    duplicates_removed = len(structured_obs) - len(deduplicated)
+                    if duplicates_removed > 0:
+                        logger.info(f"🧹 Deduplicated observations: removed {duplicates_removed} duplicates, kept {len(deduplicated)}")
+
+                    # Store in single authoritative field (observations)
+                    # REMOVED: old sync to research_observations which created duplicates
+                    state["observations"] = ObservationConverter.serialize_for_state(deduplicated)
             else:
                 current_step.status = StepStatus.FAILED
                 plan.failed_steps += 1
 
-                # CRITICAL FIX: Update plan in state to persist step status changes
-                state["current_plan"] = plan
+                # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
+                state["current_plan"] = plan.model_copy(deep=True)
                 logger.info(f"✅ INFINITE_LOOP_FIX: Updated plan in state after marking step {current_step.step_id} as failed")
 
                 logger.warning(f"Step '{current_step.title}' failed - no results returned from execution")
@@ -603,8 +645,8 @@ class ResearcherAgent:
             current_step.status = StepStatus.FAILED
             plan.failed_steps += 1
 
-            # CRITICAL FIX: Update plan in state to persist step status changes
-            state["current_plan"] = plan
+            # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
+            state["current_plan"] = plan.model_copy(deep=True)
             logger.info(f"✅ INFINITE_LOOP_FIX: Updated plan in state after marking step {current_step.step_id} as failed (retryable)")
 
             state["errors"].append(f"Step {current_step.step_id} failed (attempt {retry_count}/{max_step_retries}): {error_message}")
@@ -701,8 +743,18 @@ class ResearcherAgent:
             search_queries = step.search_queries
         else:
             # Generate focused queries from description instead of using it raw
+            # CRITICAL FIX: Never fall back to full research_topic (can be 2000+ chars)
+            query_input = step.description
+            if not query_input or len(query_input.strip()) == 0:
+                # Use contextual query generation instead of full research topic
+                query_input = self._generate_contextual_query_from_gaps(state, step)
+                logger.warning(
+                    f"[RESEARCHER] Step {step.step_id} has no description, "
+                    f"generated contextual query: '{query_input[:100]}...'"
+                )
+
             search_queries = self._generate_search_queries(
-                step.description or state.get("research_topic", ""), 
+                query_input,
                 max_queries=3,
                 state=state  # Pass state for entity context
             )
@@ -722,7 +774,7 @@ class ResearcherAgent:
         all_results = []
         all_citations = []
         
-        for i, query in enumerate(enhanced_queries[:3]):  # Limit to 3 queries per step
+        for i, query in enumerate(enhanced_queries):  # Limit to 3 queries per step
             logger.info(f"RESEARCHER: Executing search {i+1}/{len(enhanced_queries[:3])}: '{query}'")
             
             try:
@@ -746,91 +798,145 @@ class ResearcherAgent:
                 logger.error(f"RESEARCHER: Failed query was: '{query}'")
                 # Re-raise to stop the workflow and return error to user
                 raise
-        
-        # Synthesize findings
+
+        # Enrich search results with full content for high-value URLs
+        if all_results:
+            # DIAGNOSTIC: Check initial state
+            initial_full_count = sum(1 for r in all_results if getattr(r, 'has_full_content', False))
+            logger.info(f"🔍 DIAGNOSTIC: Before enrichment - {initial_full_count}/{len(all_results)} results have full_content")
+
+            try:
+                all_results = self._enrich_search_results_with_content(
+                    all_results,
+                    research_context=step.description or state.get("research_topic", "")
+                )
+
+                # DIAGNOSTIC: Check after enrichment
+                final_full_count = sum(1 for r in all_results if getattr(r, 'has_full_content', False))
+                logger.info(f"🔍 DIAGNOSTIC: After enrichment - {final_full_count}/{len(all_results)} results have full_content")
+                logger.info(f"RESEARCHER: Content enrichment complete - fetched {final_full_count - initial_full_count} additional pages")
+            except Exception as e:
+                logger.warning(f"RESEARCHER: Content enrichment failed: {e}, continuing with snippets")
+                # Continue with original snippet-only results if enrichment fails
+
+        # Extract facts from each search result individually
         logger.info("=" * 60)
-        logger.info(f"RESEARCHER: SYNTHESIS PHASE - Processing {len(all_results)} search results")
+        logger.info(f"RESEARCHER: FACT EXTRACTION - Processing {len(all_results)} search results")
         logger.info(f"RESEARCHER: Total citations collected: {len(all_citations)}")
         logger.info("=" * 60)
-        
-        if all_results:
+
+        if not all_results:
+            logger.warning("No search results available for fact extraction")
+            return None
+
+        # Extract facts from each result (maintains source link)
+        structured_observations = []
+        for i, result in enumerate(all_results):
+            has_full = getattr(result, 'has_full_content', False)
+            logger.info(f"Processing result {i+1}/{len(all_results)} - has_full_content={has_full}")
             try:
-                synthesis = self._synthesize_results(all_results, step.description)
-                logger.info(f"Synthesis completed successfully, result length: {len(synthesis) if synthesis else 0}")
+                obs_from_result = self._extract_facts_from_result(result, step)
+
+                # DIAGNOSTIC: Check if full_content preserved in observations
+                obs_with_full = sum(1 for obs in obs_from_result if obs.full_content)
+                logger.info(f"🔍 DIAGNOSTIC: Extracted {len(obs_from_result)} facts, {obs_with_full} have full_content preserved")
+
+                structured_observations.extend(obs_from_result)
             except Exception as e:
-                logger.error(f"Synthesis failed with error: {e}")
-                synthesis = None
+                logger.error(f"Failed to extract facts from result {i+1}: {e}")
+                # Continue with other results
+                continue
+
+        if not structured_observations:
+            logger.warning("No observations extracted from any results")
+            return None
+
+        logger.info(f"✅ Total observations extracted: {len(structured_observations)}")
+
+        # Smart deduplication: preserve full_content and source diversity
+        deduplicated = {}
+        for obs in structured_observations:
+            # Include source_id in hash to preserve source diversity
+            content_hash = f"{obs.content.lower().strip()}|{obs.source_id or ''}"
+
+            if not obs.content.strip():  # Skip empty content
+                continue
+
+            if content_hash not in deduplicated:
+                deduplicated[content_hash] = obs
+            elif obs.full_content and not deduplicated[content_hash].full_content:
+                # Upgrade to version with full_content
+                deduplicated[content_hash] = obs
+                logger.debug(f"📄 Upgraded observation to version with full_content from {obs.source_id}")
+            elif obs.full_content and deduplicated[content_hash].full_content:
+                # Both have full_content, keep the longer one
+                if len(obs.full_content) > len(deduplicated[content_hash].full_content):
+                    deduplicated[content_hash] = obs
+                    logger.debug(f"📄 Upgraded to longer full_content version ({len(obs.full_content)} chars)")
+
+        structured_observations = list(deduplicated.values())
+
+        if len(structured_observations) < len(all_results) * 2:  # Rough estimate of duplicates
+            logger.info(f"🧹 Deduplicated to {len(structured_observations)} observations "
+                       f"(preserved source diversity and full_content)")
+
+        # Simple quality filter: discard very short observations without full_content
+        MIN_USEFUL_LENGTH = 200
+        filtered_observations = [
+            obs for obs in structured_observations
+            if len(obs.content) >= MIN_USEFUL_LENGTH or obs.full_content
+        ]
+
+        discarded = len(structured_observations) - len(filtered_observations)
+        if discarded > 0:
+            logger.info(f"🔍 Quality filter: discarded {discarded} low-quality observations "
+                       f"(< {MIN_USEFUL_LENGTH} chars without full_content)")
+
+        structured_observations = filtered_observations
+
+        # Calculate observation content statistics
+        full_content_count = sum(1 for obs in structured_observations if obs.full_content)
+        total_obs = len(structured_observations)
+
+        if total_obs > 0:
+            avg_content_len = sum(len(obs.content) for obs in structured_observations) / total_obs
         else:
-            # No search results obtained - this should not happen if search tools are working
-            logger.warning("No search results available for synthesis")
-            return None
-        
-        if not synthesis:
-            logger.warning("Synthesis returned empty or None result")
-            return None
-        
-        # Parse synthesis from structured output
-        try:
-            parsed = json.loads(synthesis)
-            observations = parsed.get("observations", [])
-            synthesis_text = parsed.get("synthesis", "")
-            extracted_data = parsed.get("extracted_data", {})
-            parsed_citations = parsed.get("citations", [])
+            avg_content_len = 0
 
-            # Convert to structured observations
-            from ..core.observation_models import ensure_structured_observation
-            structured_observations = [
-                ensure_structured_observation(obs)
-                for obs in observations
-            ]
+        if full_content_count > 0:
+            avg_full_len = sum(len(obs.full_content) for obs in structured_observations if obs.full_content) / full_content_count
+        else:
+            avg_full_len = 0
 
-            # Log success
-            logger.info(f"✅ Structured synthesis produced {len(structured_observations)} observations")
-
-            # Convert citations to Citation objects if needed
-            if parsed_citations and isinstance(parsed_citations[0], dict):
-                citation_objects = []
-                for c in parsed_citations:
-                    if isinstance(c, dict):
-                        citation_objects.append(Citation(
-                            source=c.get("source") or c.get("url", ""),
-                            title=c.get("title", ""),
-                            url=c.get("url") or c.get("source", ""),
-                            snippet=c.get("snippet"),
-                            relevance_score=float(c.get("relevance_score", 0.8))
-                        ))
-                parsed_citations = citation_objects
-
-        except (json.JSONDecodeError, KeyError) as e:
-            # Should rarely happen with structured output
-            logger.error(f"CRITICAL: Structured output produced invalid format: {e}")
-
-            # Emergency extraction from search result titles
-            observations = [
-                f"Source: {r.get('title', 'Unknown') if isinstance(r, dict) else getattr(r, 'title', 'Unknown')}"
-                for r in all_results[:5]
-            ]
-            from ..core.observation_models import ensure_structured_observation
-            structured_observations = [
-                ensure_structured_observation(obs)
-                for obs in observations
-            ]
-            synthesis_text = f"Research on {step.description}"
-            extracted_data = {}
-            parsed_citations = None
+        # Log success with detailed statistics
+        logger.info(f"✅ Fact extraction produced {total_obs} observations")
+        logger.info(f"📊 OBSERVATION CONTENT STATISTICS:")
+        logger.info(f"  - Total observations: {total_obs}")
+        logger.info(f"  - With full_content preserved: {full_content_count} ({full_content_count/total_obs*100:.1f}%)")
+        logger.info(f"  - Snippet only: {total_obs - full_content_count} ({(total_obs-full_content_count)/total_obs*100:.1f}%)")
+        logger.info(f"  - Avg LLM fact length: {avg_content_len:.0f} chars")
+        logger.info(f"  - Avg full content length: {avg_full_len:.0f} chars")
+        if avg_full_len > 0:
+            logger.info(f"  - Compression ratio: {avg_content_len/avg_full_len*100:.1f}%")
 
         # Normalize search results for later use
         normalized_results = tuple(self._normalize_search_result(result) for result in all_results)
 
-        # Use parsed citations if provided, otherwise convert results
-        citations_list: List[Citation] = parsed_citations or []
-        if not citations_list:
-            for result in normalized_results:
-                citation = self._result_to_citation(result)
-                citations_list.append(citation)
+        # Generate citations from search results
+        citations_list: List[Citation] = []
+        for result in normalized_results:
+            citation = self._result_to_citation(result)
+            citations_list.append(citation)
         logger.info(f"Generated {len(citations_list)} citations from search results")
-        
-        confidence = self._calculate_confidence(list(normalized_results))
+
+        # Create synthesis text from observations
+        synthesis = f"Research findings on {step.title}: {len(structured_observations)} facts extracted from {len(all_results)} sources."
+
+        # Extracted data is empty with new approach (facts are in observations)
+        extracted_data = {}
+
+        # Calculate confidence based on result count (not scores, which aren't reliable)
+        confidence = 0.8 if normalized_results and len(normalized_results) > 0 else 0.0
 
         # Calculate research quality score
         research_quality_score = None
@@ -873,26 +979,14 @@ class ResearcherAgent:
         # Normalize section identifier for downstream storage
         section_key = id_gen.PlanIDGenerator.normalize_id(step.step_id)
 
-        research_observation_payload = [
-            {
-                "content": obs.content,
-                "section_id": section_key,
-                "section_title": step.title,
-                "confidence": obs.confidence,
-                "entities": list(obs.entity_tags),
-                "metrics": dict(obs.metric_values),
-                "source_id": obs.source_id,
-                "extraction_method": obs.extraction_method.value,
-            }
-            for obs in structured_observations
-        ]
+        # FIXED: Store observations in single authoritative field
+        # Use StructuredObservation.to_dict() format for state storage
+        observations_dicts = [obs.to_dict() for obs in structured_observations]
 
         result_payload: Dict[str, Any] = {
             "summary": section_result.synthesis,
             "synthesis": section_result.synthesis,
-            "observations": observation_texts,
-            "structured_observations": [obs.to_dict() for obs in structured_observations],
-            "research_observations": research_observation_payload,
+            "observations": observations_dicts,  # Single source of truth
             "citations": list(citations_list),
             "search_results": [dict(result) for result in normalized_results],
             "confidence": confidence,
@@ -913,7 +1007,7 @@ class ResearcherAgent:
 
         return result_payload
     
-    def _execute_processing_step(
+    async def _execute_processing_step(
         self,
         step: Step,
         state: EnhancedResearchState,
@@ -933,7 +1027,10 @@ class ResearcherAgent:
                 "summary": "Processing skipped - no data available",
                 "confidence": 0.0,
                 "extracted_data": {},
-                "observations": [StructuredObservation.from_string("Processing step executed but no observations available")]
+                "observations": [StructuredObservation.from_string(
+                    "Processing step executed but no observations available",
+                    step_id=step.step_id
+                )]
             }
         
         # Process the accumulated information
@@ -969,11 +1066,11 @@ Provide a clear, analytical response focused ONLY on the requested entities.
 
             logger.info(f"🔍 LLM_PROMPT [researcher_processing/Tier2]: {processing_prompt[:500]}...")
 
-            response = asyncio.run(self.rate_limited_llm.ainvoke(
+            response = await self.rate_limited_llm.ainvoke(
                 tier="simple",
                 operation="step_validation",
                 messages=messages_dict
-            ))
+            )
         elif self.llm:
             # LEGACY: Direct LLM invocation for backward compatibility
             messages = [
@@ -1012,12 +1109,15 @@ Provide a clear, analytical response focused ONLY on the requested entities.
         
         return {
             "summary": analysis,
-            "observations": [StructuredObservation.from_string(analysis)],
+            "observations": [StructuredObservation.from_string(
+                analysis,
+                step_id=step.step_id
+            )],
             "citations": [],  # Processing steps don't generate new citations
             "confidence": 0.9
         }
     
-    def _execute_synthesis_step(
+    async def _execute_synthesis_step(
         self,
         step: Step,
         state: EnhancedResearchState,
@@ -1035,10 +1135,13 @@ Provide a clear, analytical response focused ONLY on the requested entities.
             # CRITICAL: Return empty result instead of None
             return {
                 "synthesis": "No observations available for synthesis",
-                "summary": "Synthesis skipped - no data available", 
+                "summary": "Synthesis skipped - no data available",
                 "confidence": 0.0,
                 "extracted_data": {},
-                "observations": [StructuredObservation.from_string("Synthesis step executed but no observations available")]
+                "observations": [StructuredObservation.from_string(
+                    "Synthesis step executed but no observations available",
+                    step_id=step.step_id
+                )]
             }
         
         # Create synthesis prompt
@@ -1082,11 +1185,11 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
 
             logger.info(f"🔍 LLM_PROMPT [researcher_synthesis/Tier3]: {synthesis_prompt[:500]}...")
 
-            response = asyncio.run(self.rate_limited_llm.ainvoke(
+            response = await self.rate_limited_llm.ainvoke(
                 tier="analytical",
                 operation="step_synthesis",
                 messages=messages_dict
-            ))
+            )
         elif self.llm:
             # LEGACY: Direct LLM invocation for backward compatibility
             messages = [
@@ -1197,7 +1300,24 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
         return [entity for entity, _ in entity_counts.most_common(5)]
     
     def _generate_search_queries(self, text: str, max_queries: int = 5, state: Dict[str, Any] = None) -> List[str]:
-        """Generate focused search queries using LLM for proper understanding."""
+        """
+        Generate focused search queries using LLM with robust 15-attempt retry.
+
+        Strategy: Try 3 model tiers (simple → analytical → complex) with 5 attempts each.
+        Progressive sanitization removes problematic characters on each retry.
+
+        Args:
+            text: Input text to generate queries from
+            max_queries: Maximum number of queries to generate
+            state: Optional state dictionary with entity context
+
+        Returns:
+            List of validated search queries (3-200 chars each)
+        """
+        logger.info("="*70)
+        logger.info(f"QUERY_GEN: Starting query generation | Input length: {len(text)} chars")
+        logger.info(f"QUERY_GEN: Input preview: {text[:100]}...")
+        logger.info("="*70)
 
         # Get entity context if available
         requested_entities = []
@@ -1214,76 +1334,37 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
             logger.info(f"[INCREMENTAL QUERIES] Generating queries for research loop {research_loops + 1}")
             return self._generate_incremental_queries(text, max_queries, incremental_context, requested_entities, state)
 
-        # Use LLM to generate search queries
-        try:
-            # Get the analytical model for query generation
-            llm = self.model_manager.get_llm_for_role(ModelRole.SIMPLE)
+        # Cascading retry across 3 model tiers with 5 attempts each
+        model_tiers = ['simple', 'analytical', 'complex']
+        total_attempts = 0
 
-            # Build entity context if available
-            entity_context = ""
-            if requested_entities:
-                entity_context = f"\nImportant entities to focus on: {', '.join(requested_entities)}"
+        for tier in model_tiers:
+            logger.info(f"QUERY_GEN: Trying tier '{tier}' with 5 attempts")
 
-            # Build the system prompt for query generation
-            system_prompt = """You are a search query generator for a research agent.
-Given a research task or question, generate specific, focused search queries that will find relevant information.
+            for attempt in range(5):
+                total_attempts += 1
+                logger.info(f"QUERY_GEN: Attempt {total_attempts}/15 (tier={tier}, attempt={attempt+1}/5)")
 
-Guidelines:
-- Generate diverse queries that cover different aspects of the topic
-- Make queries specific and searchable (not too broad or vague)
-- Include entity names and specific terms when relevant
-- Each query should be 3-10 words, optimized for web search
-- Avoid redundant or overly similar queries
+                # Try to generate queries with this tier and attempt
+                queries = self._try_generate_queries_with_llm(text, tier, attempt, max_queries)
 
-Output ONLY the search queries, one per line, with no additional text or formatting."""
+                if queries:
+                    logger.info(f"QUERY_GEN: ✅ SUCCESS on attempt {total_attempts}/15 (tier={tier})")
+                    logger.info(f"QUERY_GEN: Generated {len(queries)} queries: {queries}")
+                    return queries
 
-            user_prompt = f"""Generate {max_queries} specific search queries for this research task:
+            # All 5 attempts for this tier failed
+            logger.warning(f"QUERY_GEN: Tier '{tier}' exhausted (0/5 succeeded)")
 
-{text}{entity_context}
+        # All 15 attempts failed (3 tiers × 5 attempts)
+        logger.error(f"QUERY_GEN: ❌ CRITICAL - All 15 LLM attempts failed!")
+        logger.error(f"QUERY_GEN: Falling back to smart entity/phrase extraction")
 
-Search queries:"""
+        # Create smart fallback queries (better than random truncation)
+        fallback = self._create_smart_fallback_queries(text, max_queries)
+        logger.info(f"QUERY_GEN: Fallback created {len(fallback)} queries: {fallback}")
 
-            messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_prompt)
-            ]
-
-            response = llm.invoke(messages)
-
-            # Extract content from response (handle both string and structured content)
-            content = response.content
-            if isinstance(content, list):
-                # Handle structured content from reasoning models
-                for item in content:
-                    if isinstance(item, dict) and item.get('type') == 'text':
-                        content = item.get('text', '')
-                        break
-                else:
-                    # If no text type found, try to extract any string content
-                    content = str(content)
-
-            # Parse the response to extract queries
-            queries = []
-            for line in content.strip().split('\n'):
-                query = line.strip()
-                # Remove any numbering or bullet points
-                query = re.sub(r'^[\d\-•*]+[\.\)]\s*', '', query)
-                # Skip empty lines or very short queries
-                if query and len(query) > 3:
-                    queries.append(query)
-
-            # Ensure we have at least one query
-            if not queries:
-                # Fallback to a simple truncation of the original text
-                queries = [self._safe_truncate(text, 80)]
-
-            # Limit to max_queries
-            return queries[:max_queries]
-
-        except Exception as e:
-            logger.error(f"LLM query generation failed: {e}")
-            # Ultimate fallback: use a simple truncation
-            return [self._safe_truncate(text, 80)]
+        return fallback
     
     
     def _safe_truncate(self, text: str, max_len: int = 80) -> str:
@@ -1302,18 +1383,262 @@ Search queries:"""
             return truncated[:last_space] + '...'
         
         return truncated + '...'
+
+    def _sanitize_llm_input(self, text: str, level: int = 0) -> str:
+        """
+        Sanitize input text before sending to LLM for query generation.
+
+        Args:
+            text: Input text to sanitize
+            level: Sanitization level (0=minimal, 1=moderate, 2=aggressive)
+
+        Returns:
+            Sanitized text suitable for LLM input
+        """
+        import re
+
+        # Level 0: Basic cleanup - normalize whitespace
+        text = ' '.join(text.split())
+
+        if level >= 1:
+            # Remove unicode bullets, arrows, special symbols
+            text = re.sub(r'[•●○◦▪▫■□⚫⚪➤➢➣→←↑↓€£¥]', ' ', text)
+            # Remove emoji ranges
+            text = re.sub(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF]', ' ', text)
+            # Normalize multiple spaces
+            text = ' '.join(text.split())
+
+        if level >= 2:
+            # Aggressive: alphanumeric + basic punctuation only
+            text = re.sub(r'[^a-zA-Z0-9\s\.,?!\-()]', ' ', text)
+            text = ' '.join(text.split())
+
+        # Always truncate to reasonable length for LLM context
+        if len(text) > 1000:
+            # Break at word boundary
+            text = text[:1000].rsplit(' ', 1)[0] + '...'
+
+        return text
+
+    def _validate_search_queries(self, queries: List[str], original_text: str) -> tuple:
+        """
+        Validate search queries to detect if LLM returned garbage.
+
+        Args:
+            queries: List of generated queries
+            original_text: Original input text
+
+        Returns:
+            Tuple of (is_valid: bool, cleaned_queries: List[str])
+        """
+        if not queries:
+            return False, []
+
+        cleaned = []
+        for q in queries:
+            # Length check - Brave API accepts 3-200 chars
+            if len(q) < 3 or len(q) > 200:
+                logger.warning(f"QUERY_VALIDATION: Query length invalid ({len(q)}): {q[:50]}...")
+                continue
+
+            # Check if LLM just echoed input
+            text_preview = original_text[:50].lower()
+            if text_preview in q.lower() or q.lower() in original_text.lower():
+                logger.warning(f"QUERY_VALIDATION: Query appears to be input echo: {q[:50]}...")
+                continue
+
+            cleaned.append(q)
+
+        if not cleaned:
+            return False, []
+
+        # Check diversity (not all identical)
+        if len(set(cleaned)) == 1 and len(cleaned) > 1:
+            logger.warning("QUERY_VALIDATION: All queries identical - likely LLM error")
+            return False, []
+
+        return True, cleaned
+
+    def _try_generate_queries_with_llm(
+        self,
+        text: str,
+        tier: str,
+        attempt: int,
+        max_queries: int = 5
+    ) -> Optional[List[str]]:
+        """
+        Attempt to generate search queries using LLM with specific tier and sanitization.
+
+        Args:
+            text: Input text
+            tier: Model tier ('simple', 'analytical', 'complex')
+            attempt: Attempt number (0-4) for progressive sanitization
+            max_queries: Maximum number of queries to generate
+
+        Returns:
+            List of validated queries or None if failed
+        """
+        try:
+            # Progressive sanitization based on attempt number
+            sanitization_level = min(attempt // 2, 2)  # 0-1: level 0, 2-3: level 1, 4: level 2
+            sanitized = self._sanitize_llm_input(text, sanitization_level)
+
+            logger.info(f"LLM_QUERY: tier={tier}, attempt={attempt+1}/5, sanitize_lvl={sanitization_level}, input_len={len(sanitized)}")
+            logger.debug(f"LLM_QUERY: Input preview: {sanitized[:100]}...")
+
+            # Get LLM for specified tier
+            from ..core.model_selector import ModelRole
+            if tier == 'simple':
+                llm = self.model_manager.get_llm_for_role(ModelRole.SIMPLE)
+            elif tier == 'analytical':
+                llm = self.model_manager.get_llm_for_role(ModelRole.ANALYTICAL)
+            else:  # complex
+                llm = self.model_manager.get_llm_for_role(ModelRole.COMPLEX)
+
+            # Simple, clear prompt for query generation
+            system_prompt = """You are a search query generator for a research agent.
+Generate specific, focused search queries (3-10 words each) that will find relevant information.
+Output ONLY the search queries, one per line, with no additional text, numbering, or formatting."""
+
+            user_prompt = f"Generate {max_queries} specific search queries for this research task:\n\n{sanitized}\n\nSearch queries:"
+
+            from langchain_core.messages import SystemMessage, HumanMessage
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt)
+            ]
+
+            # Call LLM
+            response = llm.invoke(messages)
+
+            # Extract content (handle structured responses from reasoning models)
+            content = response.content
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        content = item.get('text', '')
+                        break
+                else:
+                    content = str(content)
+
+            # Parse queries from response
+            import re
+            queries = []
+            for line in content.strip().split('\n'):
+                query = line.strip()
+                # Remove numbering, bullets, etc.
+                query = re.sub(r'^[\d\-•*]+[\.\)]\s*', '', query)
+                if query:
+                    queries.append(query)
+
+            logger.debug(f"LLM_QUERY: Parsed {len(queries)} raw queries from response")
+
+            # Validate output
+            is_valid, cleaned = self._validate_search_queries(queries, text)
+
+            if is_valid and cleaned:
+                logger.info(f"LLM_QUERY: ✅ SUCCESS - {len(cleaned)} valid queries generated")
+                return cleaned[:max_queries]
+            else:
+                logger.warning(f"LLM_QUERY: ❌ Validation failed - no valid queries")
+                return None
+
+        except Exception as e:
+            logger.warning(f"LLM_QUERY: ❌ Exception - {type(e).__name__}: {str(e)}")
+            return None
+
+    def _create_smart_fallback_queries(self, text: str, max_queries: int) -> List[str]:
+        """
+        Create intelligent fallback queries when all LLM attempts fail.
+        Extracts entities, years, and meaningful phrases instead of random truncation.
+
+        Args:
+            text: Original input text
+            max_queries: Maximum number of queries to create
+
+        Returns:
+            List of fallback queries
+        """
+        import re
+
+        # Sanitize first (moderate level)
+        clean = self._sanitize_llm_input(text, level=1)
+
+        # Extract entities (capitalized words/phrases)
+        entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', clean)
+        unique_entities = list(dict.fromkeys(entities))  # Preserve order, remove duplicates
+
+        # Extract years
+        years = re.findall(r'\b20\d{2}\b', clean)
+
+        # Extract first meaningful phrase
+        words = clean.split()
+        first_phrase = ' '.join(words[:8])
+
+        queries = []
+
+        # Query 1: First meaningful phrase (if reasonable length)
+        if 10 < len(first_phrase) <= 80:
+            queries.append(first_phrase)
+
+        # Query 2: Top entities combined
+        if len(unique_entities) >= 2:
+            entity_query = ' '.join(unique_entities[:5])
+            if 10 < len(entity_query) <= 80:
+                queries.append(entity_query)
+
+        # Query 3: Entities + year
+        if unique_entities and years:
+            year_query = f"{' '.join(unique_entities[:3])} {years[0]}"
+            if 10 < len(year_query) <= 80:
+                queries.append(year_query)
+
+        # Ensure we have at least one query
+        if not queries:
+            queries = [self._safe_truncate(clean, 60)]
+
+        # Limit to max_queries and ensure all are valid length
+        final = []
+        for q in queries[:max_queries]:
+            if 10 <= len(q) <= 80:
+                final.append(q)
+
+        # Final safety check
+        if not final:
+            final = [self._safe_truncate(clean, 60)]
+
+        logger.info(f"FALLBACK_QUERIES: Created {len(final)} queries from entities/phrases")
+        return final
+
     def _execute_search(
         self,
         query: str,
         config: Dict[str, Any]
     ) -> List[SearchResult]:
         """Execute a search using available tools with comprehensive logging."""
-        
+
         logger.info("=" * 60)
         logger.info(f"RESEARCHER_SEARCH: Initiating search")
         logger.info(f"RESEARCHER_SEARCH: Query: '{query}'")
         logger.info(f"RESEARCHER_SEARCH: Config: {config}")
-        
+
+        # CRITICAL PRE-FLIGHT VALIDATION: Reject oversized queries
+        MAX_QUERY_LENGTH = 400  # Conservative limit for search APIs
+        if len(query) > MAX_QUERY_LENGTH:
+            error_msg = (
+                f"Query length ({len(query)} chars) exceeds maximum ({MAX_QUERY_LENGTH} chars). "
+                f"Query preview: '{query[:100]}...'. "
+                "This indicates a bug in query generation - full research topics should never be used as queries."
+            )
+            logger.error(f"RESEARCHER_SEARCH: {error_msg}")
+            if self.event_emitter:
+                self.event_emitter.emit_tool_call_error(
+                    tool_name="search",
+                    error_message=error_msg,
+                    is_sanitized=True
+                )
+            raise ValueError(error_msg)
+
         # Coordinate with global search manager
         from ..core.search_coordinator import search_coordinator
         search_coordinator.coordinate_search("researcher", query)
@@ -1457,7 +1782,144 @@ Search queries:"""
             )
         
         return results
-    
+
+    def _enrich_search_results_with_content(
+        self,
+        search_results: List[SearchResult],
+        research_context: str
+    ) -> List[SearchResult]:
+        """
+        Enrich search results by selectively fetching full page content for high-value URLs.
+
+        Uses smart snippet analysis to decide which pages are worth fetching, then fetches
+        and extracts clean content using trafilatura.
+
+        Args:
+            search_results: List of search results with snippets
+            research_context: Current research step description for pattern matching
+
+        Returns:
+            List of search results with enriched content where valuable
+        """
+        # Check if web content fetching is enabled
+        if not self.fetching_config.enabled:
+            logger.info("WEB_ENRICHMENT: Disabled in configuration")
+            return search_results
+
+        if not search_results:
+            logger.info("WEB_ENRICHMENT: No search results to enrich")
+            return search_results
+
+        logger.info("=" * 60)
+        logger.info(f"WEB_ENRICHMENT: Starting smart content fetching")
+        logger.info(f"WEB_ENRICHMENT: Input: {len(search_results)} search results")
+        logger.info(f"WEB_ENRICHMENT: Research context: {research_context[:100]}...")
+
+        # Import here to avoid circular dependencies
+        from ..core.snippet_analyzer import SnippetAnalyzer
+
+        # Convert SearchResult to EnrichedSearchResult
+        enriched_results = []
+        for i, result in enumerate(search_results):
+            # Handle both dict and object formats
+            if isinstance(result, dict):
+                enriched = EnrichedSearchResult.from_search_result(
+                    SearchResult(**result), position=i
+                )
+            else:
+                enriched = EnrichedSearchResult.from_search_result(result, position=i)
+            enriched_results.append(enriched)
+
+        logger.info(f"WEB_ENRICHMENT: Converted to {len(enriched_results)} EnrichedSearchResult objects")
+
+        # Create snippet analyzer with research context
+        analyzer = SnippetAnalyzer(research_context=research_context)
+
+        # Analyze snippets to decide what to fetch
+        analysis = analyzer.analyze_snippets(enriched_results, self.fetching_config)
+
+        logger.info(f"WEB_ENRICHMENT: Analysis complete")
+        logger.info(f"WEB_ENRICHMENT: - Data density: {analysis.data_density_score:.2f}")
+        logger.info(f"WEB_ENRICHMENT: - Has sufficient data: {analysis.has_sufficient_data}")
+        logger.info(f"WEB_ENRICHMENT: - Missing data types: {analysis.missing_data_types}")
+        logger.info(f"WEB_ENRICHMENT: - Fetch recommendations: {len(analysis.fetch_recommendations)} URLs")
+        logger.info(f"WEB_ENRICHMENT: - Rationale: {analysis.rationale}")
+
+        # If snippets are sufficient, return as-is
+        if analysis.has_sufficient_data and len(analysis.fetch_recommendations) == 0:
+            logger.info("WEB_ENRICHMENT: ✅ Snippets contain sufficient data, skipping fetching")
+            # Convert back to SearchResult
+            return [self._enriched_to_search_result(r) for r in enriched_results]
+
+        # Fetch content for recommended URLs
+        fetched_count = 0
+        for idx in analysis.fetch_recommendations:
+            result = enriched_results[idx]
+
+            logger.info(f"WEB_ENRICHMENT: Fetching {idx+1}/{len(analysis.fetch_recommendations)}: {result.url[:60]}...")
+            logger.info(f"WEB_ENRICHMENT: - Fetch score: {result.fetch_score:.2f}")
+            logger.info(f"WEB_ENRICHMENT: - Domain: {result.domain}")
+
+            # Fetch full content
+            full_content = self.web_fetcher.fetch_content(result.url)
+
+            if full_content:
+                # Update result with full content
+                result.content = full_content
+                result.has_full_content = True
+                fetched_count += 1
+                logger.info(f"WEB_ENRICHMENT: ✅ Successfully fetched {len(full_content)} chars from {result.domain}")
+            else:
+                logger.warning(f"WEB_ENRICHMENT: ❌ Failed to fetch content from {result.url[:60]}")
+
+        # Calculate enrichment statistics
+        enriched_count = sum(1 for r in enriched_results if r.has_full_content)
+        snippet_count = len(enriched_results) - enriched_count
+
+        # Calculate average content sizes
+        if enriched_count > 0:
+            avg_enriched_size = sum(len(r.content) for r in enriched_results if r.has_full_content) / enriched_count
+        else:
+            avg_enriched_size = 0
+
+        if snippet_count > 0:
+            avg_snippet_size = sum(len(r.content) for r in enriched_results if not r.has_full_content) / snippet_count
+        else:
+            avg_snippet_size = 0
+
+        logger.info("=" * 60)
+        logger.info(f"WEB_ENRICHMENT: COMPLETE - Fetched {fetched_count}/{len(analysis.fetch_recommendations)} URLs")
+        logger.info(f"📊 ENRICHMENT STATISTICS:")
+        logger.info(f"  - Total results: {len(enriched_results)}")
+        logger.info(f"  - With full content: {enriched_count} ({enriched_count/len(enriched_results)*100:.1f}%)")
+        logger.info(f"  - Snippet only: {snippet_count} ({snippet_count/len(enriched_results)*100:.1f}%)")
+        logger.info(f"  - Avg full content size: {avg_enriched_size:.0f} chars")
+        logger.info(f"  - Avg snippet size: {avg_snippet_size:.0f} chars")
+        logger.info("=" * 60)
+
+        # Convert back to SearchResult
+        return [self._enriched_to_search_result(r) for r in enriched_results]
+
+    def _enriched_to_search_result(self, enriched: EnrichedSearchResult) -> SearchResult:
+        """Convert EnrichedSearchResult back to SearchResult."""
+        # Handle both dict and object formats
+        if isinstance(enriched, dict):
+            return SearchResult(
+                title=enriched.get("title", ""),
+                url=enriched.get("url", ""),
+                content=enriched.get("content", ""),
+                source_type=enriched.get("source_type", SearchResultType.WEB_PAGE),
+                has_full_content=enriched.get("has_full_content", False)
+            )
+        else:
+            return SearchResult(
+                title=enriched.title,
+                url=enriched.url,
+                content=enriched.content,
+                source_type=enriched.source_type,
+                has_full_content=enriched.has_full_content
+            )
+
     def _mock_search_results(self, query: str) -> List[SearchResult]:
         """Generate mock search results for testing."""
         return [
@@ -1465,14 +1927,12 @@ Search queries:"""
                 title=f"Result 1 for: {query}",
                 url=f"https://example.com/1",
                 content=f"Mock content about {query}. This is relevant information.",
-                relevance_score=0.9,
                 source_type=SearchResultType.WEB_PAGE
             ),
             SearchResult(
                 title=f"Result 2 for: {query}",
                 url=f"https://example.com/2",
                 content=f"Additional information regarding {query}.",
-                relevance_score=0.8,
                 source_type=SearchResultType.WEB_PAGE
             )
         ]
@@ -1484,19 +1944,15 @@ Search queries:"""
             url = result.get("url", "")
             title = result.get("title", "")
             content = result.get("content", "")
-            # Brave API returns "score", some objects might have "relevance_score"
-            relevance_score = result.get("score", result.get("relevance_score", 0.0))
         else:
             url = getattr(result, "url", "")
             title = getattr(result, "title", "")
             content = getattr(result, "content", "")
-            relevance_score = getattr(result, "relevance_score", 0.0)
-        
+
         return Citation(
             source=url,
             title=title,
-            snippet=content[:200] if content else "",
-            relevance_score=relevance_score
+            snippet=content[:200] if content else ""
         )
 
     def _normalize_search_result(self, result: Any) -> Dict[str, Any]:
@@ -1509,7 +1965,7 @@ Search queries:"""
                 "title": getattr(result, "title", ""),
                 "url": getattr(result, "url", ""),
                 "content": getattr(result, "content", ""),
-                "score": getattr(result, "score", getattr(result, "relevance_score", 0.0)),
+                "score": getattr(result, "score", 0.0),
                 "published_date": getattr(result, "published_date", None),
                 "source": getattr(result, "source", ""),
                 "metadata": getattr(result, "metadata", {}),
@@ -1518,12 +1974,156 @@ Search queries:"""
         normalized.setdefault("title", "")
         normalized.setdefault("url", "")
         normalized.setdefault("content", "")
-        normalized.setdefault("score", normalized.get("relevance_score", 0.0))
+        normalized.setdefault("score", 0.0)
         if "metadata" not in normalized or normalized["metadata"] is None:
             normalized["metadata"] = {}
 
         return normalized
-    
+
+    def _extract_facts_from_result(
+        self,
+        result: SearchResult,
+        step: Step
+    ) -> List[StructuredObservation]:
+        """
+        Extract factual observations from a single search result.
+
+        Creates observations with full_content preserved and source tracked.
+        This is called once per search result to maintain 1:1 mapping.
+
+        Args:
+            result: Search result to extract facts from
+            step: Current research step for context
+
+        Returns:
+            List of StructuredObservation objects, each linked to this source
+        """
+        from ..core.observation_models import StructuredObservation, ExtractionMethod
+        from ..core.synthesis_models import FactExtraction
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        title = getattr(result, 'title', '')
+        content = getattr(result, 'content', '')
+        url = getattr(result, 'url', '')
+        has_full = getattr(result, 'has_full_content', False)
+
+        logger.info(f"📝 Extracting facts from: {title[:60]}... (has_full_content={has_full}, length={len(content)})")
+
+        # STRICT: Only create observations if we have substantial fetched content
+        if not content:
+            logger.warning(f"⏭️ Empty content for {url}, skipping")
+            return []
+
+        if not has_full or len(content) < 200:
+            logger.warning(
+                f"⏭️ Skipping {url} - no substantial content "
+                f"(has_full={has_full}, length={len(content)})"
+            )
+            return []
+
+        # Prepare prompt for THIS result only
+        messages = [
+            SystemMessage(content="""Extract SPECIFIC, VERIFIABLE FACTS from this web page.
+
+REQUIREMENTS:
+- Extract 3-10 substantial facts (not meta-descriptions)
+- Each fact should be complete and self-contained
+- Include quantitative data, dates, entities, specifications
+- Format: '[Topic] Complete factual statement with details'
+
+GOOD Examples:
+✓ "[Python 3.12] Introduced performance improvements achieving 11% faster execution compared to Python 3.11"
+✓ "[GDPR Compliance] Organizations face fines up to €20M or 4% of annual global revenue for violations"
+✓ "[React 18] Added automatic batching feature reducing unnecessary re-renders by approximately 30%"
+✓ "[Tesla Model S] Achieves 0-60 mph acceleration in 1.99 seconds with Plaid powertrain"
+
+BAD Examples (DO NOT):
+✗ "Information about features"
+✗ "Has performance improvements"
+✗ "Provides details on compliance"
+✗ "Overview of specifications"
+
+"""),
+            HumanMessage(content=f"""Extract substantial facts with concrete details as JSON. 
+            
+Source: {title}
+URL: {url}
+
+Content:
+{content[:10000]}
+
+Extract 3-10 specific, substantial facts from this source.""")
+        ]
+
+        try:
+            if not self.llm:
+                logger.warning("No LLM available for fact extraction, using raw content")
+                raise Exception("No LLM available")
+
+            # Use structured output for guaranteed format
+            structured_llm = self.llm.with_structured_output(FactExtraction, method="json_schema")
+            extraction_result = structured_llm.invoke(messages)
+
+            if isinstance(extraction_result, FactExtraction):
+                facts = extraction_result.facts
+            elif isinstance(extraction_result, dict):
+                facts = extraction_result.get('facts', [])
+            else:
+                logger.error(f"Unexpected extraction result type: {type(extraction_result)}")
+                facts = []
+
+            # Create StructuredObservation for each fact
+            observations = []
+            if facts:
+                for fact in facts:
+                    obs = StructuredObservation(
+                        content=fact,  # Short extracted fact
+                        full_content=content,  # Real fetched content
+                        is_summarized=True,
+                        original_length=len(content),
+                        source_id=url,
+                        step_id=step.step_id,
+                        section_title=step.title,
+                        confidence=0.9,
+                        extraction_method=ExtractionMethod.LLM
+                    )
+                    observations.append(obs)
+                logger.info(f"✅ Extracted {len(observations)} facts from {title[:50]}")
+                return observations
+            else:
+                # Empty facts but we have content - use raw content as fallback
+                logger.info(f"📄 No facts extracted, using raw content from {title[:50]}")
+                truncated = content[:1500] + "..." if len(content) > 1500 else content
+                return [StructuredObservation(
+                    content=f"[{title}] {truncated}",
+                    full_content=content,  # Real fetched content
+                    is_summarized=False,
+                    original_length=len(content),
+                    source_id=url,
+                    step_id=step.step_id,
+                    section_title=step.title,
+                    confidence=0.7,
+                    extraction_method=ExtractionMethod.PATTERN
+                )]
+
+        except Exception as e:
+            logger.error(f"Fact extraction failed for {url}: {e}")
+
+            # Only create fallback if we have real content (already checked above)
+            # If we reach here, we have has_full=True and len(content) >= 200
+            truncated = content[:1500] + "..." if len(content) > 1500 else content
+            return [StructuredObservation(
+                content=f"[{title}] {truncated}",
+                full_content=content,  # Real fetched content
+                is_summarized=False,
+                original_length=len(content),
+                source_id=url,
+                step_id=step.step_id,
+                section_title=step.title,
+                confidence=0.5,
+                extraction_method=ExtractionMethod.PATTERN
+            )]
+
     def _synthesize_results(
         self,
         results: List[SearchResult],
@@ -1550,27 +2150,64 @@ Search queries:"""
         # Import the structured model
         from ..core.synthesis_models import ResearchSynthesis
 
-        # Create messages without confusing JSON instructions
+        # Create messages with EXPLICIT extraction instructions
         messages = [
-            SystemMessage(content="""You are a research analyst extracting insights from search results.
-Focus on identifying specific facts, data points, and key findings.
-Be comprehensive and factual in your analysis."""),
+            SystemMessage(content="""Extract SPECIFIC, VERIFIABLE FACTS from search results.
+
+IMPORTANT: Your extracted facts will be stored as concise observations, BUT the full source content
+will be preserved separately for detailed verification and table extraction. Focus on extracting
+KEY FACTS, knowing that complete source text is available for reference.
+
+WHAT TO EXTRACT:
+1. QUANTITATIVE DATA: numbers, percentages, measurements, statistics, rankings
+   Examples: "Processing speed improved by 45%", "Temperature reached 1,200°C", "Ranked #3 globally"
+
+2. TEMPORAL INFORMATION: dates, timeframes, durations, sequences
+   Examples: "Launched in March 2024", "Takes 3-5 business days", "Discovered in 1953"
+
+3. SPECIFIC ENTITIES: names of people, places, organizations, products, technologies
+   Examples: "Tesla Model 3", "University of Cambridge", "Dr. Jane Smith", "React framework"
+
+4. ATTRIBUTES & PROPERTIES: characteristics, features, specifications, states
+   Examples: "Water-resistant up to 50 meters", "Compatible with Windows 11", "Contains 5mg of vitamin C"
+
+5. RELATIONSHIPS & COMPARISONS: causes, effects, differences, dependencies
+   Examples: "Increases efficiency compared to method X", "Requires Python 3.8 or higher"
+
+6. RULES & CONDITIONS: requirements, limitations, thresholds, eligibility
+   Examples: "Minimum age requirement of 18", "Limited to 100 participants", "Only available in EU countries"
+
+FORMAT each observation as: '[CONTEXT/ENTITY] Specific fact with concrete detail'
+
+GOOD Examples (diverse domains):
+✓ "[iPhone 15 Pro] Features titanium frame weighing 187 grams"
+✓ "[Python 3.12] Improved performance by 11% over version 3.11"
+✓ "[EU GDPR] Fines can reach €20 million or 4% of annual revenue"
+✓ "[Amazon rainforest] Produces approximately 20% of world's oxygen"
+
+BAD Examples (DO NOT extract these):
+✗ "Information about smartphone features"
+✗ "Python has performance improvements"
+✗ "Regulations include financial penalties"
+✗ "Detailed description of environmental importance"
+
+Extract ALL specific facts, measurements, and concrete details from the sources."""),
             HumanMessage(content=f"""{combined}
 
 Based on these search results, provide:
-1. A list of specific observations (facts, metrics, findings)
+1. A list of specific observations following the format above
 2. A comprehensive synthesis paragraph
 3. Extracted structured data organized by categories
 4. Quality metrics for the research
 
-Focus on the actual content and data from the sources.""")
+Focus on concrete facts with numbers, dates, entities, and specific details.""")
             ]
 
         # Try with default model using structured output
         try:
             structured_llm = self.llm.with_structured_output(
                 ResearchSynthesis,
-                method="json_mode"
+                method="json_schema"
             )
 
             result = structured_llm.invoke(messages)
@@ -1585,41 +2222,65 @@ Focus on the actual content and data from the sources.""")
                 return json.dumps(validated.dict())
 
         except Exception as e:
-            logger.warning(f"Default model structured output failed: {e}")
+            # COMPREHENSIVE ERROR LOGGING (User requirement)
+            logger.error(
+                f"❌ LLM SYNTHESIS FAILED (Default Tier) | "
+                f"Error: {type(e).__name__}: {str(e)[:200]} | "
+                f"Search results: {len(results)} | "
+                f"Context: '{context[:1000]}...'"
+            )
+
+            # Log first search result for debugging
+            if results:
+                sample = results[0]
+                logger.error(
+                    f"Sample search result: "
+                    f"title='{getattr(sample, 'title', 'N/A')[:50]}...', "
+                    f"content_length={len(getattr(sample, 'content', ''))}"
+                )
+
+            # Log full traceback for debugging
+            import traceback
+            logger.error(f"Full traceback:\n{traceback.format_exc()}")
 
             # Escalate to complex model if available
             if self.model_manager:
                 try:
-                    logger.info("🔄 Escalating to complex model for synthesis")
+                    logger.info("🔄 SYNTHESIS RETRY | Escalating to complex model")
                     complex_llm = self.model_manager.get_chat_model("complex")
 
+                    # IMPORTANT: complex_llm is RateLimitedChatModel with structured output support
                     structured_complex = complex_llm.with_structured_output(
                         ResearchSynthesis,
-                        method="json_mode"
+                        method="json_schema"  # Use json_schema method
                     )
 
                     result = structured_complex.invoke(messages)
 
                     if isinstance(result, ResearchSynthesis):
-                        logger.info(f"✅ Complex model succeeded with {len(result.observations)} observations")
+                        logger.info(f"✅ SYNTHESIS RECOVERED | Complex model succeeded with {len(result.observations)} observations")
                         return json.dumps(result.dict())
                     elif isinstance(result, dict):
                         validated = ResearchSynthesis(**result)
-                        logger.info(f"✅ Complex model validated with {len(validated.observations)} observations")
+                        logger.info(f"✅ SYNTHESIS RECOVERED | Complex model validated with {len(validated.observations)} observations")
                         return json.dumps(validated.dict())
 
                 except Exception as complex_error:
-                    logger.error(f"Complex model also failed: {complex_error}")
+                    logger.error(
+                        f"❌ COMPLEX MODEL ALSO FAILED | "
+                        f"Error: {type(complex_error).__name__}: {str(complex_error)}"
+                    )
+                    logger.error("Full complex model error:", exc_info=True)
 
-        # Should rarely reach here with structured output, but safety net
-        logger.error("All synthesis attempts failed, creating minimal response")
+        # Last resort - use raw content
+        logger.error("⚠️ ALL SYNTHESIS ATTEMPTS FAILED | Creating observations from raw search content")
         return self._create_minimal_synthesis(results, context)
 
     def _prepare_search_context(self, results: List[SearchResult], context: str) -> str:
         """Prepare search results for LLM input."""
         combined = f"Research Context: {context}\n\n"
 
-        for i, result in enumerate(results[:5], 1):
+        for i, result in enumerate(results, 1):
             if isinstance(result, dict):
                 title = result.get("title", "")
                 content = result.get("content", "")
@@ -1628,24 +2289,92 @@ Focus on the actual content and data from the sources.""")
                 content = getattr(result, "content", "")
 
             if title or content:
-                combined += f"Source {i}: {title}\n{content[:500]}\n\n"
+                combined += f"Source {i}: {title}\n{content}\n\n"
 
         return combined
 
     def _create_minimal_synthesis(self, results: List[SearchResult], context: str) -> str:
-        """Create minimal valid synthesis structure as last resort."""
-        # Extract titles as observations
+        """
+        Create observations from raw search content when LLM synthesis fails.
+
+        USER REQUIREMENT: Take first 500-1000 chars of each search result as observations.
+        This ensures substantive content even when LLM processing fails.
+        """
+        logger.warning(
+            f"⚠️ LLM SYNTHESIS FAILED - USING RAW CONTENT FALLBACK | "
+            f"Creating observations from first 500-1000 chars of {len(results)} search results"
+        )
+
         observations = []
-        for r in results[:5]:
-            title = r.get("title", "") if isinstance(r, dict) else getattr(r, "title", "")
-            if title:
-                observations.append(f"Found source: {title}")
+        total_content_extracted = 0
+
+        for i, r in enumerate(results, 1):  # Up to 10 results
+            # Extract content
+            if isinstance(r, dict):
+                title = r.get("title", "")
+                content = r.get("content", "")
+            else:
+                title = getattr(r, "title", "")
+                content = getattr(r, "content", "")
+
+            if content:
+                # CRITICAL FIX: Clean HTML entities and tags from search snippets
+                from ..core.markdown_utils import clean_html_content
+                clean_title = clean_html_content(title) if title else ""
+                clean_content = clean_html_content(content)
+
+                # Take first 500-1000 chars as observation
+                excerpt = clean_content.strip()[:5000]  # Max 1000 chars
+
+                if len(excerpt) >= 500:
+                    # Format with source attribution
+                    observation = f"[{clean_title}] {excerpt}"
+                    observations.append(observation)
+                    total_content_extracted += len(excerpt)
+                    logger.info(f"✓ Observation {i}: {len(excerpt)} chars from '{clean_title[:50]}'")
+                else:
+                    # Content too short, but include if we have nothing else
+                    if len(observations) == 0 and len(excerpt) > 100:
+                        observation = f"[{clean_title}] {excerpt}"
+                        observations.append(observation)
+                        logger.warning(f"⚠️ Using short observation {i}: {len(excerpt)} chars")
+                    else:
+                        logger.warning(f"✗ Skipping source {i}: content only {len(excerpt)} chars")
+            else:
+                logger.warning(f"✗ Source {i} has NO content")
+
+        # Build synthesis from content too
+        synthesis_parts = []
+        for r in results[:3]:
+            content = r.get("content", "") if isinstance(r, dict) else getattr(r, "content", "")
+            if content:
+                synthesis_parts.append(content[:500])
+
+        synthesis = (
+            " ".join(synthesis_parts)
+            if synthesis_parts
+            else f"Retrieved {len(results)} sources but LLM synthesis failed. Using raw content as fallback."
+        )
+
+        logger.info(
+            f"📊 RAW CONTENT FALLBACK STATS: "
+            f"observations={len(observations)}, "
+            f"total_chars={total_content_extracted}, "
+            f"avg_per_obs={total_content_extracted // len(observations) if observations else 0}"
+        )
 
         return json.dumps({
-            "observations": observations or [f"Research conducted on: {context}"],
-            "synthesis": f"Found {len(results)} sources about {context}",
+            "observations": observations or [f"No content available for: {context}"],
+            "synthesis": synthesis,
             "extracted_data": {},
-            "citations": []
+            "citations": [],
+            "quality_metrics": {
+                "completeness": 0.4,  # Mark as fallback quality
+                "data_points_extracted": len(observations),
+                "reliability": 0.5,
+                "coverage": 0.5,
+                "is_llm_synthesized": False  # Flag this as raw content
+            }
         })
     
     def _create_safe_summary_from_search_results(self, results: List[SearchResult]) -> str:
@@ -1726,20 +2455,18 @@ Focus on the actual content and data from the sources.""")
                 if len(sentence) > 20:
                     findings.append(sentence.strip())
 
-        # Add high-relevance results (lower threshold from 0.9 to 0.7)
-        for result in results[:10]:  # Check more results
+        # Add top search results (top results from search engines are most relevant)
+        for idx, result in enumerate(results[:5]):  # Use top 5 results
             if isinstance(result, dict):
-                relevance_score = result.get("score", result.get("relevance_score", 0.0))
                 title = result.get("title", "")
                 content = result.get("content", "")
             else:
-                relevance_score = getattr(result, "relevance_score", 0.0)
                 title = getattr(result, "title", "")
                 content = getattr(result, "content", "")
 
-            # Add high relevance sources
-            if relevance_score > 0.7 and title:
-                findings.append(f"High relevance: {title}")
+            # Add top-ranked sources (position 0-4 are most relevant)
+            if title:
+                findings.append(f"Source #{idx+1}: {title}")
 
             # If we still need findings, extract from content
             if len(findings) < 3 and content:
@@ -1778,33 +2505,6 @@ Focus on the actual content and data from the sources.""")
             insights = [s for s in sentences if len(s) > 30][:3]
         
         return insights
-    
-    def _calculate_confidence(self, results: List[SearchResult]) -> float:
-        """Calculate confidence score based on search results."""
-        if not results:
-            return 0.0
-        
-        # Average relevance scores - handle both dictionary and object formats
-        relevance_scores = []
-        high_quality_count = 0
-        
-        for r in results:
-            if isinstance(r, dict):
-                score = r.get("score", r.get("relevance_score", 0.0))
-            else:
-                score = getattr(r, "relevance_score", 0.0)
-            
-            relevance_scores.append(score)
-            if score > 0.8:
-                high_quality_count += 1
-        
-        avg_relevance = sum(relevance_scores) / len(relevance_scores) if relevance_scores else 0.0
-        high_quality = high_quality_count
-        quality_bonus = min(high_quality * 0.1, 0.3)
-        
-        confidence = min(avg_relevance + quality_bonus, 1.0)
-        
-        return confidence
     
     def _complete_research(
         self,
@@ -1877,21 +2577,13 @@ Focus on the actual content and data from the sources.""")
             reflection_parts.append(
                 "Extensive observations collected. Good coverage achieved."
             )
-        
-        # Assess source quality
+
+        # Note citation count
         if citations:
-            high_quality = sum(1 for c in citations if c.relevance_score > 0.8)
-            quality_ratio = high_quality / len(citations)
-            
-            if quality_ratio < 0.5:
-                reflection_parts.append(
-                    "Many sources have low relevance. Consider refining search queries."
-                )
-            else:
-                reflection_parts.append(
-                    f"Good source quality with {high_quality} highly relevant citations."
-                )
-        
+            reflection_parts.append(
+                f"Gathered {len(citations)} source citations for report generation."
+            )
+
         # Note any errors
         if errors:
             reflection_parts.append(
@@ -2126,7 +2818,11 @@ Focus on the actual content and data from the sources.""")
                 observations_text.append(f"{section_spec.title}: {key} = {value}")
 
         structured_observations = [
-            StructuredObservation.from_string(obs) for obs in observations_text
+            StructuredObservation.from_string(
+                obs,
+                step_id=section_spec.id  # Use actual step ID - will crash if missing (good!)
+            )
+            for obs in observations_text
         ] if observations_text else []
 
         result["observations"] = structured_observations
@@ -2327,7 +3023,10 @@ Focus on the actual content and data from the sources.""")
         if not enable_structured:
             # Return as simple structured observations for backward compatibility
             for obs in observations:
-                structured_obs.append(StructuredObservation.from_string(obs))
+                structured_obs.append(StructuredObservation.from_string(
+                    obs,
+                    step_id=step.step_id
+                ))
             return structured_obs
         
         # Extract entities from step description and synthesis
@@ -2489,7 +3188,10 @@ Focus on the actual content and data from the sources.""")
         combined_synthesis = "\n\n".join(syntheses)
 
         structured_observations = tuple(
-            StructuredObservation.from_string(text)
+            StructuredObservation.from_string(
+                text,
+                step_id=section_spec.id  # Use actual step ID - will crash if missing (good!)
+            )
             for text in syntheses[:3]
             if isinstance(text, str) and len(text) > 30
         )
@@ -2618,6 +3320,54 @@ Focus on the actual content and data from the sources.""")
         # Clean, deduplicate, and limit
         return self._clean_queries(queries, max_queries)
 
+    def _clean_queries(self, queries: List[str], max_queries: int) -> List[str]:
+        """
+        Clean, deduplicate, and limit queries.
+
+        Args:
+            queries: List of query strings (may contain duplicates)
+            max_queries: Maximum number of queries to return
+
+        Returns:
+            Cleaned and deduplicated list of queries, limited to max_queries
+        """
+        # Clean each query (strip whitespace, normalize)
+        cleaned = []
+        MAX_QUERY_LENGTH = 400  # Conservative limit for search API (Brave limit is ~500)
+
+        for q in queries:
+            if not q:
+                continue
+            q_cleaned = ' '.join(q.strip().split())  # Normalize whitespace
+            if q_cleaned:
+                # CRITICAL VALIDATION: Check query length
+                if len(q_cleaned) > MAX_QUERY_LENGTH:
+                    logger.warning(
+                        f"[QUERY VALIDATION] Query exceeds {MAX_QUERY_LENGTH} chars "
+                        f"(actual: {len(q_cleaned)}), truncating: '{q_cleaned[:100]}...'"
+                    )
+                    # Truncate to safe length
+                    q_cleaned = q_cleaned[:MAX_QUERY_LENGTH].rsplit(' ', 1)[0]  # Cut at word boundary
+                    logger.info(f"[QUERY VALIDATION] Truncated to: '{q_cleaned}'")
+
+                cleaned.append(q_cleaned)
+
+        # Deduplicate while preserving order
+        seen = set()
+        deduplicated = []
+        for q in cleaned:
+            q_lower = q.lower()  # Case-insensitive deduplication
+            if q_lower not in seen:
+                seen.add(q_lower)
+                deduplicated.append(q)
+
+        # Limit to max_queries
+        limited = deduplicated[:max_queries] if max_queries else deduplicated
+
+        logger.info(f"[QUERY CLEANING] {len(queries)} → {len(deduplicated)} (dedup) → {len(limited)} (final)")
+
+        return limited
+
     def _extract_key_terms_for_verification(self, claim: str) -> str:
         """Extract key terms from a controversial claim for verification queries."""
         # Remove common uncertainty indicators
@@ -2661,159 +3411,253 @@ Focus on the actual content and data from the sources.""")
 
         return unique_keywords[:5]  # Top 5 unique keywords
 
-    def analyze_research_gaps(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze completed research to identify gaps and areas needing deeper investigation using LLM analysis."""
-        observations = state.get("observations", [])
-        research_topic = state.get("research_topic", "")
-        research_loops = state.get("research_loops", 0)
+    def _generate_contextual_query_from_gaps(self, state: Dict, step: Any) -> str:
+        """
+        Generate a focused query based on research gaps when step has no description.
 
-        if not observations:
-            logger.warning("[GAP ANALYSIS] No observations available for gap analysis")
-            return {
-                "knowledge_gaps": [],
-                "verification_needed": [],
-                "deep_dive_topics": [],
-                "follow_up_queries": [],
-                "quality_issues": []
-            }
+        This method is called when a research step has an empty description to avoid
+        falling back to the full research topic (which can be 2000+ characters).
 
-        # Use LLM for intelligent gap analysis
+        Args:
+            state: Current research state with incremental_context
+            step: Research step that needs a query
+
+        Returns:
+            Focused query string (50-150 chars) based on context
+        """
+        from datetime import datetime
+
+        # Strategy 1: Look at incremental context for gaps
+        incremental_context = state.get("incremental_context", {})
+        knowledge_gaps = incremental_context.get("knowledge_gaps", [])
+
+        if knowledge_gaps:
+            # Use the first knowledge gap as query basis
+            gap = knowledge_gaps[0]
+            logger.info(f"[CONTEXTUAL QUERY] Using knowledge gap: '{gap[:100]}'")
+
+            # Extract key terms from gap
+            if "Missing" in gap:
+                # e.g., "Missing tax rate data" -> "tax rate data analysis 2025"
+                missing_aspect = gap.split("Missing ")[1].split(" perspective")[0] if " perspective" in gap else gap.split("Missing ")[1]
+                query = f"{missing_aspect} analysis {datetime.now().year}"
+                logger.info(f"[CONTEXTUAL QUERY] Generated from gap: '{query}'")
+                return query[:150]  # Limit to 150 chars
+
+            # Use first 100 chars of gap description
+            query = gap[:100].strip()
+            if query:
+                logger.info(f"[CONTEXTUAL QUERY] Using gap description: '{query}'")
+                return query
+
+        # Strategy 2: Look at deep dive topics
+        deep_dive_topics = incremental_context.get("deep_dive_topics", [])
+        if deep_dive_topics:
+            topic = deep_dive_topics[0]
+            if "Deeper analysis of" in topic:
+                subject = topic.replace("Deeper analysis of ", "")
+                query = f"{subject} detailed information"
+                logger.info(f"[CONTEXTUAL QUERY] Generated from deep dive: '{query}'")
+                return query[:150]
+
+        # Strategy 3: Look at completed steps to infer what's next
+        completed_steps = state.get("completed_steps", [])
+        if completed_steps and len(completed_steps) > 0:
+            # Get the last few completed steps
+            recent_steps = completed_steps[-3:] if len(completed_steps) >= 3 else completed_steps
+
+            # Try to extract common themes
+            titles = []
+            for s in recent_steps:
+                if hasattr(s, 'title') and s.title:
+                    titles.append(s.title)
+
+            if titles:
+                # Use the last step title as basis
+                last_title = titles[-1]
+                query = f"follow-up research {last_title[:80]}"
+                logger.info(f"[CONTEXTUAL QUERY] Generated from last step: '{query}'")
+                return query[:150]
+
+        # Strategy 4: Use step title if meaningful
+        if hasattr(step, 'title') and step.title and step.title != "Additional Research":
+            query = f"{step.title} {datetime.now().year}"
+            logger.info(f"[CONTEXTUAL QUERY] Using step title: '{query}'")
+            return query[:150]
+
+        # Last resort: generic but focused query
+        logger.warning("[CONTEXTUAL QUERY] No context available, using generic query")
+        return f"additional research data {datetime.now().year}"
+
+    async def _llm_summarize_content(self, content: str, max_length: int = 400) -> str:
+        """
+        Summarize long content using LLM, preserving factual information.
+
+        Args:
+            content: Original content to summarize
+            max_length: Target summary length in characters
+
+        Returns:
+            Summarized content preserving key facts, numbers, and entities
+        """
+        import hashlib
+
+        # Check cache first
+        content_hash = hashlib.md5(content.encode()).hexdigest()
+        if content_hash in self._summary_cache:
+            logger.debug(f"Using cached summary for content hash {content_hash[:8]}")
+            return self._summary_cache[content_hash]
+
+        # Build summarization prompt
+        prompt = f"""Summarize this research content in approximately {max_length} characters.
+
+CRITICAL - PRESERVE:
+- All specific numbers, dates, percentages, and metrics
+- Key entities (people, places, organizations, products)
+- Main facts and findings
+- Source attribution if mentioned
+- Specific comparisons or contrasts
+
+REMOVE:
+- Redundant phrasing and filler words
+- Unnecessary context and background
+- Minor details that don't affect main findings
+
+Content to summarize:
+{content[:2000]}
+
+Output ONLY the summary text, no preamble or explanation."""
+
         try:
-            gap_analysis = self._llm_based_gap_analysis(research_topic, observations, research_loops)
+            # Use rate-limited LLM if available, otherwise fallback to direct LLM
+            if self.rate_limited_llm:
+                from langchain_core.messages import HumanMessage
+                response = await self.rate_limited_llm.ainvoke([HumanMessage(content=prompt)])
+            elif self.llm:
+                from langchain_core.messages import HumanMessage
+                # Sync fallback
+                response = self.llm.invoke([HumanMessage(content=prompt)])
+            else:
+                # No LLM available - just truncate
+                logger.warning("No LLM available for summarization, truncating content")
+                return content[:max_length] + "..." if len(content) > max_length else content
 
-            logger.info(f"[GAP ANALYSIS] LLM-based analysis found {len(gap_analysis.get('knowledge_gaps', []))} gaps, "
-                       f"{len(gap_analysis.get('verification_needed', []))} items to verify, "
-                       f"{len(gap_analysis.get('deep_dive_topics', []))} deep-dive topics")
+            # Extract summary text
+            from ..core.structured_output import parse_llm_response
+            summary_text = parse_llm_response(response)
 
-            return gap_analysis
+            # Ensure it's a string
+            if not isinstance(summary_text, str):
+                summary_text = str(summary_text)
+
+            # Cache the result
+            self._summary_cache[content_hash] = summary_text
+
+            logger.debug(f"Summarized {len(content)} chars -> {len(summary_text)} chars (compression: {len(summary_text)/len(content):.2%})")
+
+            return summary_text
 
         except Exception as e:
-            logger.error(f"[GAP ANALYSIS] LLM-based analysis failed: {e}")
-            # Return empty structure rather than fallback - project requires LLM
-            return {
-                "knowledge_gaps": [],
-                "verification_needed": [],
-                "deep_dive_topics": [],
-                "follow_up_queries": [],
-                "quality_issues": []
-            }
+            logger.error(f"LLM summarization failed: {e}, falling back to truncation")
+            return content[:max_length] + "..." if len(content) > max_length else content
 
-    def _llm_based_gap_analysis(self, research_topic: str, observations: List, research_loops: int) -> Dict[str, Any]:
-        """Use LLM to perform intelligent gap analysis on research observations."""
-        # Convert observations to text
-        observations_text = []
-        for obs in observations:
-            obs_text = observation_to_text(obs) if hasattr(obs, '__dict__') else str(obs)
-            if obs_text and len(obs_text.strip()) > 10:  # Only include meaningful observations
-                observations_text.append(obs_text[:500])  # Limit length for context window
+    def _create_observation_from_content(
+        self,
+        content: str,
+        source_id: Optional[str] = None,
+        step_id: Optional[str] = None,
+        section_title: Optional[str] = None,
+        entity_tags: Optional[List[str]] = None,
+        metric_values: Optional[Dict[str, Any]] = None,
+        extraction_method: ExtractionMethod = ExtractionMethod.LLM,
+        confidence: float = 0.9
+    ) -> StructuredObservation:
+        """
+        Create observation with intelligent content sizing.
 
-        # Limit observations to avoid token limits
-        observations_sample = observations_text[:20]  # Top 20 observations
+        Strategy:
+        - If content <= 1000 chars: store as-is
+        - If content > 1000 chars: LLM summarize, store both summary and full text
 
-        # Import and format the gap analysis prompt
-        from ..prompts import GAP_ANALYSIS_PROMPT
+        Args:
+            content: Original content
+            source_id: Source URL or identifier
+            step_id: Step that generated this observation
+            section_title: Section title for debugging/display
+            entity_tags: List of entities mentioned
+            metric_values: Dict of metric name -> value
+            extraction_method: How content was extracted
+            confidence: Confidence score for this observation
 
-        formatted_observations = "\n\n".join([f"{i+1}. {obs}" for i, obs in enumerate(observations_sample)])
+        Returns:
+            StructuredObservation with smart content management
+        """
+        from ..core.observation_models import StructuredObservation, ExtractionMethod as ObsExtractionMethod
 
-        gap_prompt = GAP_ANALYSIS_PROMPT.format(
-            research_topic=research_topic,
-            research_loop=research_loops + 1,
-            observations=formatted_observations
-        )
+        # Determine if summarization needed
+        SUMMARIZATION_THRESHOLD = 1000
+        needs_summary = len(content) > SUMMARIZATION_THRESHOLD
 
-        # Use LLM for gap analysis
-        if hasattr(self, 'llm') and self.llm:
+        if needs_summary:
             try:
-                from langchain_core.messages import SystemMessage, HumanMessage
-
-                messages = [
-                    SystemMessage(content="You are a research quality analyst. Respond only with valid JSON."),
-                    HumanMessage(content=gap_prompt)
-                ]
-
-                response = self.llm.invoke(messages)
-                response_text = response.content if hasattr(response, 'content') else str(response)
-
-                # Parse JSON response
-                import json
+                # Attempt async summarization
+                import asyncio
                 try:
-                    gap_analysis = json.loads(response_text)
+                    loop = asyncio.get_event_loop()
+                    summary = loop.run_until_complete(self._llm_summarize_content(content))
+                except RuntimeError:
+                    # No event loop, create one
+                    summary = asyncio.run(self._llm_summarize_content(content))
 
-                    # Validate structure
-                    required_keys = ["knowledge_gaps", "verification_needed", "deep_dive_topics", "quality_issues", "follow_up_queries"]
-                    for key in required_keys:
-                        if key not in gap_analysis:
-                            gap_analysis[key] = []
+                observation = StructuredObservation(
+                    content=summary,  # Summary for prompts
+                    full_content=content,  # Full text for verification
+                    is_summarized=True,
+                    original_length=len(content),
+                    entity_tags=entity_tags or [],
+                    metric_values=metric_values or {},
+                    source_id=source_id,
+                    step_id=step_id,
+                    section_title=section_title,
+                    extraction_method=extraction_method,
+                    confidence=confidence
+                )
 
-                    return gap_analysis
-
-                except json.JSONDecodeError as e:
-                    logger.error(f"[GAP ANALYSIS] Failed to parse JSON response: {e}")
-                    logger.debug(f"LLM response was: {response_text}")
-                    raise
+                logger.info(f"Created summarized observation: {len(content)} -> {len(summary)} chars ({len(summary)/len(content):.0%})")
 
             except Exception as e:
-                logger.error(f"[GAP ANALYSIS] LLM call failed: {e}")
-                raise
-
+                logger.warning(f"Summarization failed: {e}, storing full content")
+                # Fallback: store full content
+                observation = StructuredObservation(
+                    content=content,
+                    full_content=None,
+                    is_summarized=False,
+                    original_length=len(content),
+                    entity_tags=entity_tags or [],
+                    metric_values=metric_values or {},
+                    source_id=source_id,
+                    step_id=step_id,
+                    section_title=section_title,
+                    extraction_method=extraction_method,
+                    confidence=confidence
+                )
         else:
-            raise ValueError("LLM not available for gap analysis - required for this project")
+            # Short enough, store as-is
+            observation = StructuredObservation(
+                content=content,
+                full_content=None,
+                is_summarized=False,
+                original_length=len(content),
+                entity_tags=entity_tags or [],
+                metric_values=metric_values or {},
+                source_id=source_id,
+                step_id=step_id,
+                section_title=section_title,
+                extraction_method=extraction_method,
+                confidence=confidence
+            )
 
-    def _extract_simple_quality_metrics(self, observations: List) -> Dict[str, Any]:
-        """Extract basic quality metrics from observations without LLM."""
-        source_types = set()
-        short_obs_count = 0
+        return observation
 
-        for obs in observations:
-            # Count source types
-            if isinstance(obs, dict) and obs.get("source"):
-                source_types.add(self._categorize_source_type(obs["source"]))
-
-            # Count short observations
-            obs_text = observation_to_text(obs) if hasattr(obs, '__dict__') else str(obs)
-            if len(obs_text) < 100:
-                short_obs_count += 1
-
-        quality_issues = []
-        if len(source_types) < 3:
-            quality_issues.append(f"Limited source diversity - only {len(source_types)} types of sources")
-        if len(observations) < 8:
-            quality_issues.append(f"Insufficient research depth - only {len(observations)} observations")
-        if short_obs_count > len(observations) // 2:
-            quality_issues.append("Many observations are too brief and lack detail")
-
-        return {
-            "source_types_count": len(source_types),
-            "short_observations": short_obs_count,
-            "quality_issues": quality_issues
-        }
-
-    def _categorize_source_type(self, source: str) -> str:
-        """Categorize the type of source for diversity analysis."""
-        source_lower = source.lower()
-
-        if any(academic in source_lower for academic in ['doi', 'journal', 'pubmed', 'arxiv', 'scholar']):
-            return 'academic'
-        elif any(news in source_lower for news in ['news', 'times', 'post', 'cnn', 'bbc', 'reuters']):
-            return 'news'
-        elif any(gov in source_lower for gov in ['.gov', 'government', 'agency']):
-            return 'government'
-        elif any(org in source_lower for org in ['.org', 'foundation', 'institute']):
-            return 'organization'
-        else:
-            return 'other'
-
-    def _extract_topics_from_observation(self, obs_text: str, topic_coverage: Dict[str, int]):
-        """Extract topics mentioned in observation and track coverage."""
-        # Simple keyword extraction for topic coverage
-        import re
-
-        # Extract noun phrases and important terms
-        words = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', obs_text)
-
-        for word in words:
-            if len(word) > 3:  # Skip short words
-                topic_coverage[word] = topic_coverage.get(word, 0) + 1
-
-    # NOTE: Removed hardcoded gap detection methods - now using LLM-based analysis
+    # NOTE: Gap analysis methods removed - now handled by PlannerAgent coordination
 

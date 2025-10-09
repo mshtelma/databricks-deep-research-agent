@@ -126,7 +126,11 @@ const ChatContainer: React.FC = () => {
                 message={message}
                 intermediateEvents={intermediateEvents}
                 isActivelyStreaming={isStreaming && currentStreamingId === message.id}
-                researchProgress={isStreaming && currentStreamingId === message.id ? researchProgress : undefined}
+                researchProgress={
+                  isStreaming && currentStreamingId === message.id
+                    ? researchProgress  // Live progress during streaming
+                    : message.metadata?.researchProgress  // Persisted progress after streaming
+                }
               />
             ))}
           </div>

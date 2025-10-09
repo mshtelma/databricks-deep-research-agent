@@ -4,7 +4,7 @@ Reporter Agent: Report synthesis and formatting specialist.
 Generates styled reports from research findings with proper citations.
 """
 
-from typing import Dict, Any, Optional, List, Literal, Tuple, Sequence
+from typing import Dict, Any, Optional, List, Literal, Tuple, Sequence, Union
 from datetime import datetime
 import time
 import random
@@ -29,11 +29,12 @@ from ..core.presentation_requirements import PresentationRequirements
 from ..core.semantic_extraction import SemanticEntityExtractor, StructuredDataMatcher
 from ..core.message_utils import get_last_user_message, extract_content
 from ..core.observation_models import (
-    StructuredObservation, 
-    ensure_structured_observation, 
+    StructuredObservation,
+    ensure_structured_observation,
     observations_to_research_data,
     observation_to_text,
 )
+from ..core.observation_converter import ObservationConverter
 from ..core.observation_selector import ObservationSelector
 from ..core.plan_models import StepStatus
 from ..core.response_handlers import parse_structured_response, ParsedResponse, ResponseType
@@ -55,10 +56,15 @@ class ReporterAgent:
     - Integrate grounding markers if enabled
     """
     
-    def __init__(self, llm=None, config=None, event_emitter=None):
+    def __init__(
+        self,
+        llm: Optional[Any] = None,
+        config: Optional[Dict[str, Any]] = None,
+        event_emitter: Optional[Any] = None
+    ) -> None:
         """
         Initialize the reporter agent.
-        
+
         Args:
             llm: Language model for report generation
             config: Configuration dictionary
@@ -69,10 +75,13 @@ class ReporterAgent:
         self.event_emitter = event_emitter  # Optional for detailed event emission
         self.name = "Reporter"  # Capital for test compatibility
         self.formatter = ReportFormatter()
-        
+
+        # embedding_manager not currently initialized (could be added in future)
+        self.embedding_manager = None
+
         # Initialize observation selector for intelligent observation filtering
         self.observation_selector = ObservationSelector(
-            embedding_manager=getattr(self, 'embedding_manager', None)
+            embedding_manager=self.embedding_manager
         )
         
         # Extract report configuration
@@ -237,13 +246,13 @@ Generate the report section content:"""
                     prompt_content = ""
                     for msg in messages:
                         if hasattr(msg, 'content'):
-                            prompt_content += f"{msg.content[:200]}... "
-                    logger.info(f"🔍 LLM_PROMPT [reporter_{section_name}]: {prompt_content[:500]}...")
+                            prompt_content += f"{msg.content}... "
+                    logger.info(f"🔍 LLM_PROMPT [reporter_{section_name}]: {prompt_content}...")
                 
                 response = self.llm.invoke(messages)
                 
                 # Log the response received from LLM
-                logger.info(f"🔍 LLM_RESPONSE [reporter_{section_name}]: {response.content[:500]}...")
+                logger.info(f"🔍 LLM_RESPONSE [reporter_{section_name}]: {response.content}...")
                 
                 # ENTITY VALIDATION: Check for hallucinated entities in LLM response
                 if state:
@@ -372,21 +381,38 @@ Generate the report section content:"""
         # Should never reach here
         raise Exception(f"Retry logic error for {section_name}")
     
-    def __call__(
+    async def __call__(
         self,
         state: EnhancedResearchState,
         config: Dict[str, Any]
     ) -> Command[Literal["end"]]:
         """
         Generate final report from research findings with integrated table support.
-        
+
+        ASYNC: Converted to async for consistency with LangGraph async workflow.
+        Note: Internal LLM calls currently use sync invoke() - these can be
+        converted to ainvoke() in a future optimization pass.
+
         Args:
             state: Current research state
             config: Configuration dictionary
-            
+
         Returns:
             Command to end workflow with final report
         """
+        # === DIAGNOSTIC LOGGING FOR DEBUGGING ===
+        import threading
+        import sys
+        logger.info("=" * 80)
+        logger.info("REPORTER AGENT __call__ INVOKED")
+        logger.info(f"Thread: {threading.current_thread().name} (ID: {threading.current_thread().ident})")
+        logger.info(f"Is Main Thread: {threading.current_thread() is threading.main_thread()}")
+        logger.info(f"Python version: {sys.version}")
+        logger.info(f"State type: {type(state).__name__}")
+        logger.info(f"State has {len(state)} top-level keys")
+        logger.info(f"Config has {len(config)} keys: {list(config.keys())}" if config else "Config is None/empty")
+        logger.info("=" * 80)
+
         logger.info("Reporter agent generating final report")
         
         # DEBUG: Log state contents to trace data flow
@@ -405,6 +431,7 @@ Generate the report section content:"""
         # Compile research findings
         compiled_findings = self._compile_findings(state)
         logger.info(f"Compiled findings: {len(compiled_findings.get('observations', []))} observations")
+        logger.info(f"First 20 observations: {compiled_findings["observations"][:20]}")
         
         # Deduplicate citations to prevent accumulation bug
         self._deduplicate_citations(state)
@@ -478,6 +505,116 @@ Generate the report section content:"""
                 logger.error(f"[PROGRESSIVE SYNTHESIS] Failed to enhance report: {e}")
                 # Fall back to regular synthesis
 
+        # ===================================================================
+        # HYBRID MULTI-PASS GENERATION MODE
+        # ===================================================================
+        generation_mode = self.config.get('agents', {}).get('reporter', {}).get('generation_mode', 'section_by_section')
+
+        if generation_mode == 'hybrid':
+            logger.info("[HYBRID MODE] Starting hybrid multi-pass report generation")
+
+            try:
+                # Validate configuration
+                self._validate_hybrid_config(self.config)
+
+                # Sanitize observations
+                sanitized_findings = compiled_findings.copy()
+                sanitized_findings['observations'] = self._sanitize_observations_for_report(
+                    compiled_findings.get('observations', [])
+                )
+
+                # Phase 1: Generate calculation context
+                calc_context = await self._generate_calculation_context(sanitized_findings)
+
+                # Get dynamic structure from plan
+                current_plan = state.get('current_plan')
+                dynamic_sections = []
+                if current_plan and hasattr(current_plan, 'dynamic_sections'):
+                    dynamic_sections = current_plan.dynamic_sections
+                elif current_plan and hasattr(current_plan, 'suggested_report_structure'):
+                    # Convert suggested_report_structure to section titles
+                    dynamic_sections = [
+                        {'title': title, 'purpose': ''}
+                        for title in current_plan.suggested_report_structure
+                    ]
+
+                # Phase 2: Generate holistic report with table anchors
+                holistic_report = await self._generate_holistic_report_with_table_anchors(
+                    sanitized_findings,
+                    calc_context,
+                    dynamic_sections
+                )
+
+                # Phase 3: Generate tables from anchors
+                final_report = await self._generate_tables_from_anchors_async(
+                    holistic_report,
+                    calc_context,
+                    sanitized_findings
+                )
+
+                # Apply citations and metadata
+                final_report = self._add_citations_and_references(
+                    final_report,
+                    state.get('citations', []),
+                    report_style
+                )
+                final_report = self._add_report_metadata(
+                    final_report,
+                    state,
+                    report_style
+                )
+
+                # Final sanitization
+                from ..core.content_sanitizer import sanitize_agent_content
+                sanitized = sanitize_agent_content(final_report)
+                final_report = sanitized.clean_content
+
+                # Build metadata
+                metadata = {
+                    'generation_mode': 'hybrid_multipass',
+                    'observations_used': len(sanitized_findings.get('observations', [])),
+                    'calculations_performed': len(calc_context.calculations),
+                    'data_points_extracted': len(calc_context.extracted_data),
+                    'tables_generated': final_report.count('| '),  # Approximation
+                    'data_quality_notes': calc_context.data_quality_notes
+                }
+
+                self._emit_hybrid_metrics(metrics=metadata)
+
+                # CRITICAL FIX: Ensure all markdown tables have proper separator rows
+                final_report = self._fix_markdown_tables(final_report)
+
+                logger.info(f"[HYBRID MODE] Report generation complete: {len(final_report)} characters")
+
+                state = StateManager.finalize_state(state)
+
+                return Command(
+                    goto='end',
+                    update={
+                        'final_report': final_report,
+                        'report_metadata': metadata,
+                        '_calculation_context': calc_context.to_dict()
+                    }
+                )
+
+            except Exception as exc:
+                logger.error(f"[HYBRID MODE] Hybrid generation failed: {exc}")
+
+                # Check if fallback is enabled
+                fallback_enabled = self.config.get('agents', {}).get('reporter', {}).get('hybrid_settings', {}).get(
+                    'fallback_on_empty_observations', True
+                )
+
+                if fallback_enabled:
+                    logger.warning("[HYBRID MODE] Falling back to section-by-section generation")
+                    # Continue to section-by-section generation below
+                else:
+                    raise
+
+        # ===================================================================
+        # END OF HYBRID MODE
+        # ===================================================================
+
         current_plan = state.get("current_plan")
         template = getattr(current_plan, "report_template", None) if current_plan else None
         dynamic_sections = getattr(current_plan, "dynamic_sections", None) if current_plan else None
@@ -493,7 +630,7 @@ Generate the report section content:"""
         # Structured generation uses section-by-section approach with Pydantic models
         # Template generation uses one-shot markdown generation (error-prone for tables)
         reporter_config = self.config.get('agents', {}).get('reporter', {})
-        use_structured_generation = reporter_config.get('enable_structured_generation', False)
+        use_structured_generation = reporter_config.get('enable_structured_generation', True)
 
         logger.info(f"REPORTER: Structured generation config: {use_structured_generation}")
         logger.info(f"REPORTER: Routing decision: template={template is not None}, "
@@ -586,9 +723,17 @@ Generate the report section content:"""
                 table_metadata={}
             )
 
+            # Deduplicate content across sections (safety net)
+            report_sections = self._deduplicate_content(report_sections)
+
             # Build final report from sections (report_sections is a dict of {section_name: section_content})
-            # Simply join the section content values with double newlines
-            final_report = "\n\n".join(report_sections.values()) if report_sections else ""
+            # Add section headers before each section's content
+            section_parts = []
+            for section_name, section_content in report_sections.items():
+                if section_content and section_content.strip():
+                    # Add markdown header before section content
+                    section_parts.append(f"## {section_name}\n\n{section_content}")
+            final_report = "\n\n".join(section_parts) if section_parts else ""
 
             # Add title if needed
             research_topic = state.get("research_topic", "Research Report")
@@ -661,11 +806,14 @@ Generate the report section content:"""
             embedded_table=table_content,  # Pass table for integration
             table_metadata=table_metadata
         )
-        
+
         # Guard against None return from _generate_report_sections
         if report_sections is None:
             logger.error("_generate_report_sections returned None, using empty dict")
             report_sections = {}
+
+        # Deduplicate content across sections (safety net)
+        report_sections = self._deduplicate_content(report_sections)
         
         # Apply quality enhancement if enabled and memory allows
         if self._should_enhance_quality(state):
@@ -733,12 +881,15 @@ Generate the report section content:"""
             f"{len(state.get('citations', []))} citations, "
             f"table_included: {bool(table_content)}"
         )
-        
+
+        # CRITICAL FIX: Ensure all markdown tables have proper separator rows
+        report_with_metadata = self._fix_markdown_tables(report_with_metadata)
+
         # Record completion
         state = StateManager.finalize_state(state)
-        
+
         logger.info("Report generation completed")
-        
+
         return Command(
             goto="end",
             update={
@@ -898,14 +1049,21 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                 truncated = len(observations) - limit
                 break
 
-            if isinstance(obs, dict):
-                content = obs.get("content") or obs.get("observation") or ""
-                source = obs.get("source")
-                extracted = obs.get("extracted_data") or {}
+            # FIXED: Only handle StructuredObservation objects
+            # All observations should be normalized to StructuredObservation by this point
+            if isinstance(obs, StructuredObservation):
+                content = obs.content
+                source = obs.source_id or obs.step_id or obs.section_title
+                extracted = obs.metric_values or {}
             else:
-                content = observation_to_text(obs)
-                source = None
-                extracted = {}
+                # This should not happen if observations are properly deserialized
+                logger.warning(f"Unexpected observation type: {type(obs)}. Converting to StructuredObservation.")
+                # Convert to StructuredObservation using the converter
+                from ..core.observation_converter import ObservationConverter
+                structured_obs = ObservationConverter.to_structured(obs)
+                content = structured_obs.content
+                source = structured_obs.source_id or structured_obs.step_id or structured_obs.section_title
+                extracted = structured_obs.metric_values or {}
 
             bullet = content.strip()
             if source:
@@ -960,15 +1118,19 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
 
         for obs in observations:
             data = {}
-            if isinstance(obs, dict):
-                data = obs.get("extracted_data") or {}
+            if isinstance(obs, StructuredObservation):
+                data = obs.metric_values or {}
+            elif isinstance(obs, dict):
+                data = obs.get("metric_values", {})
             if not data:
                 continue
 
             row: Dict[str, str] = {}
             label = "Observation"
-            if isinstance(obs, dict):
-                label = obs.get("source") or obs.get("section") or obs.get("content", "Observation")
+            if isinstance(obs, StructuredObservation):
+                label = obs.source_id or obs.step_id or obs.content or "Observation"
+            elif isinstance(obs, dict):
+                label = obs.get("source_id") or obs.get("section_title") or obs.get("content", "Observation")
             row["Observation"] = str(label)[:80]
 
             for key, value in data.items():
@@ -1125,100 +1287,54 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                 if isinstance(obs, str):
                     logger.info(f"[DEBUG] Observation {i}: string with length {len(obs)}: {obs[:200]}")
                 elif isinstance(obs, dict):
-                    content = obs.get("content", obs.get("observation", ""))
+                    content = obs.get("content", "")
                     logger.info(f"[DEBUG] Observation {i}: dict with content length {len(str(content))}: {str(content)[:200]}")
             
-            # Convert string observations to dict format if needed
-            for obs in direct_obs:
-                if isinstance(obs, str):
-                    observations.append({
-                        "content": obs,
-                        "source": "Research Finding",
-                        "relevance": 0.8
-                    })
-                elif isinstance(obs, dict):
-                    observations.append(obs)
+            # Deserialize dict observations back to StructuredObservation objects
+            # This is the critical boundary between state layer (dicts) and business logic (objects)
+            deserialized_obs = ObservationConverter.deserialize_from_state(direct_obs)
+
+            # CRITICAL: Deduplicate observations by content hash (defense in depth)
+            # This provides additional protection even if researcher deduplication fails
+            deduplicated = []
+            seen_content = set()
+            for obs in deserialized_obs:
+                # Create hash from normalized content (lowercase, stripped)
+                content_hash = obs.content.lower().strip()
+                if content_hash not in seen_content and content_hash:  # Skip empty content
+                    seen_content.add(content_hash)
+                    deduplicated.append(obs)
+
+            duplicates_removed = len(deserialized_obs) - len(deduplicated)
+            if duplicates_removed > 0:
+                logger.info(f"🧹 Reporter deduplicated observations: removed {duplicates_removed} duplicates, kept {len(deduplicated)}")
+
+            observations.extend(deduplicated)
+
+        # FIXED: Removed duplicate collection from research_observations
+        # The researcher syncs observations = research_observations, so collecting from both creates 2x duplicates
         
-        # 2. Research observations field (alternative)
-        if "research_observations" in state and state["research_observations"]:
-            research_obs = state["research_observations"]
-            logger.info(f"[OBSERVATION TRACKING] Found {len(research_obs)} research observations")
-            for obs in research_obs:
-                # Avoid duplicates by checking content
-                obs_content = obs if isinstance(obs, str) else obs.get("content", "")
-                existing_contents = [o.get("content", "") for o in observations]
-                if obs_content not in existing_contents:
-                    if isinstance(obs, str):
-                        observations.append({
-                            "content": obs,
-                            "source": "Research Observation",
-                            "relevance": 0.8
-                        })
-                    elif isinstance(obs, dict):
-                        observations.append(obs)
-        
-        # 3. Section research results (for section-based research)
-        if state.get("section_research_results"):
-            section_results = state.get("section_research_results", {})
-            logger.info(f"[OBSERVATION TRACKING] Found section results with {len(section_results)} sections")
-            for section_id, section_data in section_results.items():
-                if isinstance(section_data, SectionResearchResult):
-                    observations.append({
-                        "content": section_data.synthesis,
-                        "source": f"Section Research: {section_id}",
-                        "relevance": section_data.confidence,
-                        "section": section_data.metadata.get("section_title", section_id),
-                        "extracted_data": dict(section_data.extracted_data),
-                    })
-                elif isinstance(section_data, dict):
-                    observations.append({
-                        "content": section_data.get("synthesis", ""),
-                        "source": f"Section Research: {section_id}",
-                        "relevance": section_data.get("confidence", 0.5),
-                        "section": section_data.get("title", section_id),
-                        "extracted_data": section_data.get("extracted_data", {}),
-                    })
-        
-        # 4. Search results as fallback (ENHANCED)
-        if not observations and "search_results" in state:
-            logger.warning("[OBSERVATION TRACKING] No observations found, converting search results to observations")
-            search_results = state.get("search_results", [])
-            for result in search_results[:25]:  # Increased from 10 to 25 for more comprehensive data
-                # Create more comprehensive observation from search result
-                content = result.get("snippet", "")
-                if not content:
-                    content = result.get("title", "")
-                if content:  # Only add if we have some content
-                    observations.append({
-                        "content": content,
-                        "source": result.get("title", "Search Result"),
-                        "url": result.get("url", ""),
-                        "relevance": result.get("relevance_score", 0.5)
-                    })
-        
-        # 5. CRITICAL FALLBACK: If still no observations, create placeholder content from citations
-        if not observations and citations:
-            logger.warning("[OBSERVATION TRACKING] No observations OR search results, creating from citations")
-            for citation in citations[:15]:  # Create observations from citations
-                observations.append({
-                    "content": f"Source: {citation.get('title', 'Unknown')} - {citation.get('snippet', 'Research source')}",
-                    "source": citation.get("title", "Citation"),
-                    "url": citation.get("url", ""),
-                    "relevance": 0.6
-                })
-        
-        # 6. EMERGENCY FALLBACK: If absolutely no content, create a basic structure
+        # CRITICAL: Reporter should NOT create observations - only consume them
+        # If observations are missing, this indicates a bug in researcher or state management
         if not observations:
-            logger.error("[OBSERVATION TRACKING] NO OBSERVATIONS, SEARCH RESULTS, OR CITATIONS FOUND!")
-            logger.error("This will result in a report with only references - creating emergency fallback")
-            # Create a placeholder observation to prevent completely empty reports
-            research_topic = state.get("research_topic", "the requested topic")
-            observations.append({
-                "content": f"Research was conducted on {research_topic}. Multiple sources were consulted but observations were not properly captured in the system.",
-                "source": "System Note",
-                "url": "",
-                "relevance": 0.3
-            })
+            logger.error("=" * 80)
+            logger.error("[REPORTER BUG] NO OBSERVATIONS FOUND IN STATE!")
+            logger.error("This indicates a critical bug in the researcher or state management.")
+            logger.error("Reporter should ONLY consume observations created by researcher.")
+            logger.error("Available state keys: %s", list(state.keys()))
+            logger.error("=" * 80)
+
+            # Check for alternative data sources that researcher should have converted
+            if state.get("section_research_results"):
+                logger.error("Found section_research_results - researcher should convert this to observations!")
+            if state.get("search_results"):
+                logger.error("Found search_results - researcher should convert this to observations!")
+
+            raise ValueError(
+                "Reporter received no observations from researcher. "
+                "Researcher must create StructuredObservation objects during research. "
+                "This is a critical bug in the research workflow."
+            )
         
         logger.info(f"[OBSERVATION TRACKING] Compiled {len(observations)} total observations")
         
@@ -1263,9 +1379,8 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         logger.info(f"[DEBUG] Returning compiled findings with {len(compiled['observations'])} observations")
         if compiled['observations']:
             first_obs = compiled['observations'][0]
-            if isinstance(first_obs, dict):
-                content = first_obs.get('content', '')
-                logger.info(f"[DEBUG] First observation content: {content[:200] if content else 'EMPTY CONTENT'}")
+            content = observation_to_text(first_obs)
+            logger.info(f"[DEBUG] First observation content: {content[:200] if content else 'EMPTY CONTENT'}")
         
         return compiled
 
@@ -1276,10 +1391,9 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         state: EnhancedResearchState
     ) -> List[Dict[str, Any]]:
         """
-        Filter observations to only include those from steps mapped to this section.
+        Filter observations by step_id using direct references from DynamicSection.
 
-        This is the KEY FIX: Instead of giving ALL observations to EVERY section,
-        we filter by step.template_section_title mapping.
+        NO MORE STRING MATCHING! Uses section.step_ids for direct lookup.
 
         Args:
             section_name: The section we're generating
@@ -1292,83 +1406,92 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         plan = state.get("current_plan")
 
         if not plan:
-            logger.warning(f"No plan found in state, using first 20 observations as fallback")
-            return all_observations[:20]
+            logger.warning(f"No plan found in state, returning subset of observations")
+            return all_observations[:30]
 
-        # Get steps that contribute to this section
-        relevant_steps = [
-            step for step in plan.steps
-            if step.template_section_title == section_name
-            and str(step.status).lower() == "completed"
-        ]
+        # Find the section by name using direct reference (no string matching with template_section_title)
+        matching_section = None
+        if hasattr(plan, 'dynamic_sections') and plan.dynamic_sections:
+            for section in plan.dynamic_sections:
+                if section.title == section_name:
+                    matching_section = section
+                    break
 
-        logger.info(f"🔍 Section '{section_name}': found {len(relevant_steps)} mapped steps")
+        if not matching_section:
+            logger.error(f"❌ Section '{section_name}' not found in plan.dynamic_sections!")
+            return all_observations[:30]
 
-        if not relevant_steps:
-            # No steps explicitly mapped to this section
-            # Fallback 1: Try keyword matching in step title
-            section_keywords = section_name.lower().split()
-            keyword_matched_steps = [
-                step for step in plan.steps
-                if any(kw in step.title.lower() for kw in section_keywords)
-                and str(step.status).lower() == "completed"
-            ]
+        # Use direct step_ids from section (NO STRING MATCHING!)
+        if not matching_section.step_ids:
+            logger.warning(f"⚠️ Section '{section_name}' has no step_ids assigned")
+            return all_observations[:30]
 
-            if keyword_matched_steps:
-                logger.info(f"  ✓ No explicit mapping, but found {len(keyword_matched_steps)} steps via keyword matching")
-                relevant_steps = keyword_matched_steps
-            else:
-                # Fallback 2: Use first 20 observations (current behavior)
-                logger.warning(f"  ⚠️ No steps mapped to '{section_name}', using first 20 observations")
-                return all_observations[:20]
+        logger.info(f"🎯 Section '{section_name}' filtering by step_ids: {matching_section.step_ids}")
 
-        # Build set of relevant step IDs
-        relevant_step_ids = {step.step_id for step in relevant_steps}
-        logger.info(f"  📋 Step IDs: {relevant_step_ids}")
-
-        # Filter observations by step_id
+        # Filter observations by step_id - direct membership check
         filtered_observations = []
         observations_without_step_id = 0
 
         for obs in all_observations:
-            # Observations are StructuredObservation objects with step_id field
-            # Also support dict format for backward compatibility
+            # Get step_id from observation
             if isinstance(obs, dict):
-                obs_step_id = obs.get("step_id") or obs.get("source_step") or obs.get("from_step")
+                obs_step_id = obs.get("step_id")
             else:
-                # StructuredObservation object
                 obs_step_id = getattr(obs, "step_id", None)
 
+            # Direct membership check - no string matching!
             if obs_step_id:
-                if obs_step_id in relevant_step_ids:
+                if obs_step_id in matching_section.step_ids:
                     filtered_observations.append(obs)
             else:
                 observations_without_step_id += 1
 
         if observations_without_step_id > 0:
-            logger.warning(f"  ⚠️ {observations_without_step_id} observations missing step_id (cannot filter)")
+            logger.warning(f"  ⚠️ {observations_without_step_id} observations missing step_id")
 
-        # If no observations after filtering, include observations without step_id as fallback
-        if not filtered_observations and observations_without_step_id > 0:
-            logger.warning(f"  ⚠️ No observations matched step IDs, including observations without step_id")
-            filtered_observations = [
-                obs for obs in all_observations
-                if not (obs.get("step_id") if isinstance(obs, dict) else getattr(obs, "step_id", None))
-            ][:20]
+        logger.info(f"✅ Filtered {len(filtered_observations)}/{len(all_observations)} observations by step_id for section '{section_name}'")
 
-        logger.info(f"  ✅ Filtered: {len(filtered_observations)}/{len(all_observations)} observations")
+        # STRICT FILTER: Only keep observations with full_content (real fetched content)
+        with_content = []
+        snippet_only = 0
 
-        # Log first few observation contents for debugging
-        if filtered_observations:
-            first_obs = filtered_observations[0]
-            # Handle both dict and StructuredObservation
+        for obs in filtered_observations:
+            has_full = False
+            if isinstance(obs, dict):
+                has_full = bool(obs.get("full_content"))
+            else:
+                has_full = bool(getattr(obs, "full_content", None))
+
+            if has_full:
+                with_content.append(obs)
+            else:
+                snippet_only += 1
+
+        if snippet_only > 0:
+            logger.info(f"⏭️  Filtered out {snippet_only} snippet-only observations for '{section_name}'")
+
+        logger.info(f"✅ Section '{section_name}': {len(with_content)} observations with full_content")
+
+        # If no observations with content, return None to signal skip
+        if not with_content:
+            logger.warning(
+                f"❌ Section '{section_name}' has NO observations with fetched content. "
+                f"This means web fetching failed for all sources. Section will be skipped."
+            )
+            return None
+
+        # Debug: Log first observation
+        if with_content:
+            first_obs = with_content[0]
             if isinstance(first_obs, dict):
                 content_preview = str(first_obs.get("content", ""))[:100]
+                step_id = first_obs.get("step_id", "NONE")
             else:
                 content_preview = str(getattr(first_obs, "content", ""))[:100]
-            logger.info(f"  📝 First observation: {content_preview}...")
+                step_id = getattr(first_obs, "step_id", "NONE")
+            logger.info(f"  📝 First obs (step_id={step_id}): {content_preview}...")
 
-        return filtered_observations
+        return with_content
 
     def _generate_report_sections(
         self,
@@ -1412,42 +1535,54 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         
         # Fallback to original method
         sections = {}
-        
-        for section_name in style_config.structure:
-            logger.info(f"Generating section: {section_name}")
-            
+
+        # Track context for continuation awareness
+        previous_section_titles = []
+        total_sections = len(style_config.structure)
+
+        for section_index, section_name in enumerate(style_config.structure):
+            logger.info(f"Generating section: {section_name} ({section_index + 1}/{total_sections})")
+
+            # Build smart context from previously generated sections
+            previous_sections_context = self._get_smart_context(sections, previous_section_titles)
+
             # Get section template
             section_template = StyleTemplate.get_section_template(
                 style_config.style,
                 section_name
             )
-            
-            # Generate section content
+
+            # Generate section content with context
             section_content = self._generate_section_content(
                 section_name,
                 findings,
                 section_template,
                 style_config.style,
-                state
+                state,
+                previous_sections_context=previous_sections_context,
+                previous_section_titles=previous_section_titles,
+                section_index=section_index,
+                total_sections=total_sections
             )
-            
+
             # Embed table if this is the designated section
             if section_name == table_section and embedded_table:
                 # Add contextual lead-in
                 table_intro = self._generate_table_introduction(state, table_metadata or {})
-                
+
                 # Integrate table with proper formatting
                 section_content = f"{section_content}\n\n{table_intro}\n\n{embedded_table}\n\n"
-                
+
                 # Add brief analysis after table if confidence is high
                 if (table_metadata or {}).get("confidence", 0) > 0.7:
                     table_analysis = self._generate_brief_table_analysis(embedded_table, state)
                     if table_analysis:
                         section_content += f"{table_analysis}\n\n"
-                
+
                 logger.info(f"Table successfully embedded in {section_name}")
-            
-        sections[section_name] = section_content
+
+            sections[section_name] = section_content
+            previous_section_titles.append(section_name)
 
         return sections
 
@@ -1466,9 +1601,16 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         sections: Dict[str, str] = {}
         table_metadata = table_metadata or {}
 
-        for dynamic in sorted(dynamic_sections, key=lambda s: s.priority):
+        # Track context for continuation awareness
+        previous_section_titles = []
+        total_sections = len(dynamic_sections)
+
+        for section_index, dynamic in enumerate(sorted(dynamic_sections, key=lambda s: s.priority)):
             section_name = dynamic.title
-            logger.info(f"Generating dynamic section: {section_name}")
+            logger.info(f"Generating dynamic section: {section_name} ({section_index + 1}/{total_sections})")
+
+            # Build smart context from previously generated sections
+            previous_sections_context = self._get_smart_context(sections, previous_section_titles)
 
             template = self._build_dynamic_section_template(dynamic)
             section_content = self._generate_section_content(
@@ -1476,8 +1618,17 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                 findings,
                 template,
                 style_config.style,
-                state
+                state,
+                previous_sections_context=previous_sections_context,
+                previous_section_titles=previous_section_titles,
+                section_index=section_index,
+                total_sections=total_sections
             )
+
+            # Check if section was skipped (no observations with content)
+            if section_content is None:
+                logger.warning(f"⏭️  Skipping section '{section_name}' - no observations with fetched content")
+                continue
 
             if embedded_table and section_name == table_section:
                 table_intro = self._generate_table_introduction(state, table_metadata)
@@ -1485,8 +1636,63 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                 logger.info(f"Dynamic section '{section_name}' received embedded table")
 
             sections[section_name] = section_content
+            previous_section_titles.append(section_name)
 
         return sections
+
+    def _deduplicate_content(self, sections: Dict[str, str]) -> Dict[str, str]:
+        """
+        Remove duplicate content across sections (safety net).
+
+        This method provides a final safety check against content duplication,
+        detecting and removing paragraphs that appear in multiple sections.
+
+        Returns:
+            Dictionary with deduplicated section content
+        """
+        import hashlib
+
+        content_hashes = {}
+        deduplicated = {}
+        total_removed = 0
+
+        for section_name, content in sections.items():
+            # Extract paragraphs (split by double newlines)
+            paragraphs = content.split('\n\n')
+            unique_paragraphs = []
+
+            for para in paragraphs:
+                # Skip headers and empty paragraphs
+                if not para.strip() or para.strip().startswith('#'):
+                    unique_paragraphs.append(para)
+                    continue
+
+                # Hash paragraph content for comparison
+                para_normalized = ' '.join(para.split())  # Normalize whitespace
+                para_hash = hashlib.md5(para_normalized.encode()).hexdigest()
+
+                # Check if we've seen this exact content before
+                if para_hash not in content_hashes:
+                    content_hashes[para_hash] = section_name
+                    unique_paragraphs.append(para)
+                else:
+                    # Duplicate found!
+                    total_removed += 1
+                    logger.warning(
+                        f"🔍 Duplicate paragraph detected:\n"
+                        f"  Original: {content_hashes[para_hash]}\n"
+                        f"  Duplicate in: {section_name}\n"
+                        f"  Content preview: '{para[:100]}...'"
+                    )
+
+            deduplicated[section_name] = '\n\n'.join(unique_paragraphs)
+
+        if total_removed > 0:
+            logger.info(f"✅ Deduplication: Removed {total_removed} duplicate paragraphs")
+        else:
+            logger.info("✅ Deduplication: No duplicates found")
+
+        return deduplicated
 
     def _generate_section_content(
         self,
@@ -1494,8 +1700,12 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         findings: Dict[str, Any],
         template: str,
         style: ReportStyle,
-        state: EnhancedResearchState
-    ) -> str:
+        state: EnhancedResearchState,
+        previous_sections_context: str = "",
+        previous_section_titles: List[str] = None,
+        section_index: int = 0,
+        total_sections: int = 1
+    ) -> Optional[str]:
         """
         Generate content for a specific report section.
 
@@ -1505,6 +1715,20 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
 
         The structured approach is preferred when enabled, as it guarantees
         correct table formatting through programmatic rendering.
+
+        Args:
+            section_name: Name of the section
+            findings: Research findings data
+            template: Section template
+            style: Report style
+            state: Current research state
+            previous_sections_context: Summary of previously generated sections
+            previous_section_titles: List of previous section names
+            section_index: Current section index (0-based)
+            total_sections: Total number of sections
+
+        Returns:
+            Generated section content as markdown string
         """
 
         # CRITICAL: Don't generate content if this is an error report
@@ -1524,6 +1748,11 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
             observations,
             state
         )
+
+        # Check if section should be skipped (no observations with content)
+        if filtered_observations is None:
+            logger.warning(f"⏭️  Section '{section_name}' has no observations with fetched content - skipping")
+            return None
 
         # Update findings with filtered observations for this section
         section_findings = findings.copy()
@@ -1553,27 +1782,60 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                     section_findings,
                     template,
                     style,
-                    state
+                    state,
+                    previous_sections_context=previous_sections_context,
+                    previous_section_titles=previous_section_titles,
+                    section_index=section_index,
+                    total_sections=total_sections
                 )
 
                 if structured_content:
                     logger.info(f"✅ Structured generation succeeded for: {section_name}")
                     return structured_content
                 else:
-                    error_msg = f"Structured generation returned empty for {section_name}"
-                    if enable_fallback:
-                        logger.warning(f"⚠️ {error_msg}, falling back to template")
+                    # Analyze WHY it failed
+                    obs_count = len(section_findings.get("observations", []))
+
+                    if obs_count == 0:
+                        # INTERNAL BUG - data pipeline failure
+                        error_msg = (
+                            f"❌ INTERNAL BUG: No observations for '{section_name}'. "
+                            f"Root cause: Observation filtering or creation is broken. "
+                            f"Check _filter_observations_for_section() and researcher step_id assignment."
+                        )
+                        logger.error(error_msg)
+
+                        if enable_fallback:
+                            logger.warning("⚠️ Fallback enabled but this masks a BUG - fix the root cause!")
+                            # Fall through to template (for now)
+                        else:
+                            # Surface the bug clearly
+                            return f"## {section_name}\n\n**Internal Error**: {error_msg}\n\n_This is a bug in observation handling, not a valid empty section._"
+
                     else:
-                        logger.error(f"❌ {error_msg}, fallback disabled - returning error placeholder")
-                        return f"## {section_name}\n\nError: Structured generation failed to produce content. Please check logs."
+                        # Has observations but structured gen failed (LLM issue or irrelevant data)
+                        error_msg = (
+                            f"Structured generation returned empty for '{section_name}' "
+                            f"despite {obs_count} observations. "
+                            f"Possible causes: LLM failure, irrelevant observations, or rate limiting."
+                        )
+                        logger.warning(f"⚠️ {error_msg}")
+
+                        if enable_fallback:
+                            logger.info("→ Falling back to template generation...")
+                            # Fall through to template
+                        else:
+                            # User-facing message (not internal bug)
+                            return f"## {section_name}\n\n_No content could be generated for this section._"
 
             except Exception as e:
                 error_msg = f"Structured generation failed for {section_name}: {e}"
+                logger.error(f"❌ {error_msg}", exc_info=True)
+
                 if enable_fallback:
-                    logger.warning(f"⚠️ {error_msg}, falling back to template approach")
+                    logger.warning(f"⚠️ Exception occurred, falling back to template")
                 else:
-                    logger.error(f"❌ {error_msg}, fallback disabled - returning error placeholder")
-                    return f"## {section_name}\n\nError: Structured generation exception: {str(e)[:100]}. Please check logs."
+                    return f"## {section_name}\n\n**Generation Error**: {str(e)[:200]}"
 
         # EXISTING PATH: Template-based generation (fallback or default)
         if enable_structured and not enable_fallback:
@@ -1613,7 +1875,11 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         findings: Dict[str, Any],
         template: str,
         style: ReportStyle,
-        state: EnhancedResearchState
+        state: EnhancedResearchState,
+        previous_sections_context: str = "",
+        previous_section_titles: List[str] = None,
+        section_index: int = 0,
+        total_sections: int = 1
     ) -> Optional[str]:
         """
         Generate section content using MULTI-CALL structured generation.
@@ -1632,6 +1898,10 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
             template: Section template (for guidance, not currently used)
             style: Report style
             state: Current research state (for event emission and logging)
+            previous_sections_context: Summary of previously generated sections
+            previous_section_titles: List of previous section names
+            section_index: Current section index (0-based)
+            total_sections: Total number of sections
 
         Returns:
             Markdown string with programmatically rendered tables, or None if failed
@@ -1639,60 +1909,131 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         from ..core.report_models_structured import ParagraphBlock, TableBlock
 
         try:
-            # Step 1: Determine block structure
+            # Log input data quality
+            obs_list = findings.get("observations", [])
+            obs_count = len(obs_list)
+
+            logger.info(
+                f"📊 Structured generation for '{section_name}': {obs_count} observations available"
+            )
+
+            # CRITICAL: Detect data pipeline bugs early
+            if obs_count == 0:
+                logger.error(
+                    f"❌ INTERNAL BUG: No observations for '{section_name}'! "
+                    f"This indicates observation filtering or creation failure. "
+                    f"Check _filter_observations_for_section() and researcher agent step_id assignment."
+                )
+                return None  # Don't hide bugs
+
+            # Log observation sample for debugging
+            sample_obs = obs_list[0]
+            if isinstance(sample_obs, dict):
+                sample_content = sample_obs.get("content", "")
+                sample_step_id = sample_obs.get("step_id", "MISSING")
+            else:
+                sample_content = getattr(sample_obs, "content", str(sample_obs))
+                sample_step_id = getattr(sample_obs, "step_id", "MISSING")
+
+            logger.debug(
+                f"  Sample: step_id={sample_step_id}, content={sample_content[:100]}..."
+            )
+
+            # Determine block structure
             block_sequence = self._determine_section_structure(section_name, findings)
             total_blocks = len(block_sequence)
 
-            logger.info(
-                f"Generating '{section_name}' with {total_blocks} blocks: {' → '.join(block_sequence)}"
-            )
+            logger.info(f"  Planned: {total_blocks} blocks → {' → '.join(block_sequence)}")
 
-            # Step 2: Generate each block separately
+            # Generate each block with detailed logging
             markdown_parts = []
-            previous_content = ""  # Accumulate context for subsequent blocks
+            previous_content = ""
+            intro_text = None  # Track intro paragraph for conclusion context
+            generated_table = None  # Track table for conclusion analysis
 
             for i, block_type in enumerate(block_sequence):
                 context = self._get_block_context(block_type, i, total_blocks)
 
-                logger.info(f"  Block {i+1}/{total_blocks}: {block_type} ({context})")
+                try:
+                    if block_type == "paragraph":
+                        # Check if this is conclusion paragraph (after table)
+                        is_conclusion = (generated_table is not None)
 
-                if block_type == "paragraph":
-                    block = self._generate_paragraph_block(
-                        section_name, findings, context, style, previous_content
+                        block = self._generate_paragraph_block(
+                            section_name,
+                            findings,
+                            context,
+                            style,
+                            previous_content,
+                            intro_paragraph=intro_text if is_conclusion else None,
+                            table_content=generated_table if is_conclusion else None,
+                            previous_sections_context=previous_sections_context,
+                            section_index=section_index,
+                            total_sections=total_sections
+                        )
+                        rendered = block.text
+
+                        # Save intro text for conclusion paragraph
+                        if i == 0:
+                            intro_text = rendered
+
+                    elif block_type == "table":
+                        block = self._generate_table_block(
+                            section_name, findings, context, style, previous_content
+                        )
+                        rendered = block.render_markdown()
+                        generated_table = rendered  # Save for conclusion
+                    else:
+                        logger.warning(f"  ⚠️ Unknown block type '{block_type}', skipping")
+                        continue
+
+                    # Validate block output
+                    if rendered and rendered.strip():
+                        logger.info(
+                            f"  ✅ Block {i+1}/{total_blocks} ({block_type}): "
+                            f"{len(rendered)} chars generated"
+                        )
+                        markdown_parts.append(rendered)
+                        previous_content += "\n\n" + rendered
+                    else:
+                        logger.warning(
+                            f"  ⚠️ Block {i+1}/{total_blocks} ({block_type}) EMPTY: "
+                            f"type={type(rendered).__name__}, "
+                            f"repr={repr(rendered)[:100]}"
+                        )
+
+                except Exception as block_err:
+                    logger.error(
+                        f"  ❌ Block {i+1}/{total_blocks} ({block_type}) EXCEPTION: "
+                        f"{type(block_err).__name__}: {block_err}",
+                        exc_info=True
                     )
-                    rendered = block.text
+                    # Continue with other blocks
 
-                elif block_type == "table":
-                    block = self._generate_table_block(
-                        section_name, findings, context, style, previous_content
-                    )
-                    rendered = block.render_markdown()  # Programmatic rendering!
-
-                else:
-                    logger.warning(f"Unknown block type '{block_type}', skipping")
-                    continue
-
-                # Add to output
-                if rendered.strip():
-                    markdown_parts.append(rendered)
-                    previous_content += "\n\n" + rendered  # Build context
-
-            # Step 3: Join all blocks
+            # Combine results
             content = "\n\n".join(markdown_parts)
 
             if not content.strip():
-                logger.warning(f"Multi-call generation for '{section_name}' returned empty content")
+                # Differentiate bug vs legitimate empty
+                logger.error(
+                    f"❌ MULTI-CALL GENERATION FAILED for '{section_name}': "
+                    f"{obs_count} observations → 0/{total_blocks} blocks succeeded. "
+                    f"Check LLM responses and block generation logic."
+                )
                 return None
 
             logger.info(
-                f"✅ Multi-call section generated: {section_name}, "
-                f"{len(content)} chars, {len(markdown_parts)} blocks"
+                f"✅ Structured generation SUCCESS: '{section_name}' → "
+                f"{len(content)} chars from {len(markdown_parts)}/{total_blocks} blocks"
             )
-
             return content
 
         except Exception as e:
-            logger.warning(f"Multi-call generation failed for {section_name}: {e}")
+            logger.error(
+                f"❌ STRUCTURED GENERATION EXCEPTION for '{section_name}': "
+                f"{type(e).__name__}: {e}",
+                exc_info=True
+            )
             return None
 
     def _build_structured_section_prompt(
@@ -1710,7 +2051,7 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         """
         observations = findings.get("observations", [])
         observation_text = "\n\n".join(
-            f"- {obs}" if isinstance(obs, str) else f"- {getattr(obs, 'content', str(obs))}"
+            f"- {observation_to_text(obs)}"
             for obs in observations[:15]  # Limit to prevent context explosion
         )
 
@@ -1788,31 +2129,146 @@ For {style.value} style reports:
         findings: Dict[str, Any]
     ) -> List[str]:
         """
-        Determine what blocks this section needs.
+        Determine what blocks this section needs - OPTIMIZED to reduce duplication.
 
         Returns list like: ["paragraph", "table", "paragraph"]
 
-        Strategy: Heuristic-based (can be enhanced with LLM classification if needed)
-        - Sections with "comparison", "data", "overview", "analysis" usually need tables
-        - Others are typically just paragraphs
+        Strategy: Smart pattern matching to avoid over-generation
+        - Only FINAL comparison sections get full intro+table+conclusion
+        - Data/calculation sections get intro+table (no redundant conclusion)
+        - Other sections get just narrative text
+
+        This prevents the duplication bug where intro and conclusion paragraphs
+        use identical observations and repeat the same content.
         """
         section_lower = section_name.lower()
 
-        # Keywords that suggest tables are needed
-        table_keywords = [
-            "comparison", "compare", "data", "overview",
-            "summary", "results", "findings", "analysis",
-            "rates", "costs", "prices", "metrics"
-        ]
+        # Only use full 3-block pattern for FINAL comprehensive comparisons
+        is_final_comparison = any(keyword in section_lower for keyword in [
+            "cross-country comparison",
+            "apples-to-apples",
+            "final comparison",
+            "comparative table and analysis",
+            "overall comparison",
+            "comprehensive comparison"
+        ])
 
-        needs_table = any(keyword in section_lower for keyword in table_keywords)
+        # Check if this is primarily a data/calculation section
+        is_data_section = any(keyword in section_lower for keyword in [
+            "calculation", "compute", "brackets", "rates",
+            "contributions", "benefits", "allowances"
+        ])
 
-        if needs_table:
-            # Pattern: Intro text → Table → Analysis text
+        if is_final_comparison:
+            # Final comparison needs intro + table + analytical conclusion
+            logger.info(f"Section '{section_name}': Using full 3-block pattern (final comparison)")
             return ["paragraph", "table", "paragraph"]
+        elif is_data_section:
+            # Data sections: brief intro + table (no redundant conclusion)
+            logger.info(f"Section '{section_name}': Using 2-block pattern (data section)")
+            return ["paragraph", "table"]
         else:
-            # Pattern: Just text content
+            # Regular sections: just narrative
+            logger.info(f"Section '{section_name}': Using 1-block pattern (narrative)")
             return ["paragraph"]
+
+    def _get_smart_context(
+        self,
+        previous_sections: Dict[str, str],
+        section_titles: List[str]
+    ) -> str:
+        """
+        Extract relevant context from previous sections without token explosion.
+
+        Returns concise summaries of previous sections showing what was covered.
+
+        Args:
+            previous_sections: Dict of {section_name: content}
+            section_titles: List of section names in order
+
+        Returns:
+            Summarized context string (max ~2000 chars)
+        """
+        if not previous_sections:
+            return ""
+
+        context_parts = []
+        # Take last 3 sections for context
+        for section_name in section_titles[-3:]:
+            if section_name not in previous_sections:
+                continue
+
+            content = previous_sections[section_name]
+            # Extract first meaningful line (skip empty lines)
+            lines = [line.strip() for line in content.split('\n') if line.strip() and not line.strip().startswith('#')]
+            first_line = lines[0] if lines else ""
+
+            # Keep header + opening (shows what was covered)
+            summary = f"## {section_name}\n{first_line[:150]}..."
+            context_parts.append(summary)
+
+        return "\n\n".join(context_parts)
+
+    def _get_continuation_aware_system_prompt(
+        self,
+        style: ReportStyle,
+        section_index: int,
+        total_sections: int,
+        has_previous_content: bool
+    ) -> str:
+        """
+        Generate system prompt that prevents repetitive meta-commentary.
+
+        Args:
+            style: Report style
+            section_index: Current section index (0-based)
+            total_sections: Total number of sections
+            has_previous_content: Whether there are previous sections
+
+        Returns:
+            System prompt string with appropriate continuation rules
+        """
+        base_prompt = f"You are a {style.value} data analyst writing section {section_index + 1} of {total_sections}."
+
+        if has_previous_content:
+            continuation_rules = """
+
+**CRITICAL CONTINUATION RULES**:
+Previous sections have already established context. Your job is to CONTINUE the narrative, not re-introduce it.
+
+**BANNED PHRASES** - Never use:
+❌ "The following section..."
+❌ "In the following analysis..."
+❌ "This section establishes..."
+❌ "This section lays the groundwork..."
+❌ "We establish the foundation..."
+❌ "The framework for..."
+❌ "This section sets the stage..."
+❌ "By outlining..."
+❌ "This narrative description precedes..."
+❌ "In this section we examine..."
+
+**QUALITY REQUIREMENTS**:
+✅ Jump directly into content, data, and analysis
+✅ Cite SPECIFIC NUMBERS from research (e.g., "31.2% in Spain vs 35.8% in France")
+✅ Present information as facts, not descriptions of what you'll present
+✅ Continue the flow from previous sections naturally
+✅ Assume reader has full context from earlier content
+✅ Every statement should reference concrete data points
+
+**Bad**: "Tax rates vary across countries"
+**Good**: "Spain's 31.2% effective rate provides €4,400 more take-home pay than France's 35.8%"
+"""
+            return base_prompt + continuation_rules
+        else:
+            return base_prompt + """
+
+**QUALITY REQUIREMENTS**:
+✅ Start with specific, data-driven insights
+✅ Cite concrete numbers from research
+✅ Establish the analytical framework with actual findings
+✅ Every statement should reference specific data points
+"""
 
     def _get_block_context(self, block_type: str, index: int, total: int) -> str:
         """Get context description for this block's role in the section."""
@@ -1831,7 +2287,12 @@ For {style.value} style reports:
         findings: Dict[str, Any],
         context: str,
         style: ReportStyle,
-        previous_content: str = ""
+        previous_content: str = "",
+        intro_paragraph: Optional[str] = None,
+        table_content: Optional[str] = None,
+        previous_sections_context: str = "",
+        section_index: int = 0,
+        total_sections: int = 1
     ) -> "ParagraphBlock":
         """
         Generate text paragraph block (standard LLM generation, no structured output).
@@ -1842,41 +2303,157 @@ For {style.value} style reports:
             context: Role description (introduction, analysis, etc.)
             style: Report style
             previous_content: Markdown of blocks generated so far in THIS section
+            intro_paragraph: Intro paragraph text (for conclusion paragraphs)
+            table_content: Table markdown (for conclusion paragraphs)
+            previous_sections_context: Summary of previously generated sections
+            section_index: Current section index (0-based)
+            total_sections: Total number of sections in report
 
         Returns:
             ParagraphBlock with text content
         """
         from ..core.report_models_structured import ParagraphBlock
 
-        observations = findings.get("observations", [])
+        # Use ObservationSelector to intelligently select relevant observations
+        all_observations = findings.get("observations", [])
+
+        # CRITICAL FIX: Different observation strategy for conclusions to prevent duplication
+        if context == "conclusion/analysis" and table_content:
+            # For conclusions, use FEWER observations with HIGHER quality
+            # This prevents repeating the same content from the intro paragraph
+            max_obs = 5  # Much fewer than intro
+            min_relevance = 0.7  # Higher quality threshold
+
+            # Use different selection key to get DIFFERENT observations
+            selected_obs = self.observation_selector.select_observations_for_section(
+                section_title=f"{section_name} - Key Insights",  # Different key!
+                section_purpose="analytical conclusions and insights from data",
+                all_observations=all_observations,
+                max_observations=max_obs,
+                min_relevance=min_relevance,
+                use_semantic=self.embedding_manager is not None
+            )
+            logger.info(f"Conclusion paragraph: Selected {len(selected_obs)}/{len(all_observations)} high-quality observations")
+        else:
+            # Normal observation selection for intro/other paragraphs
+            max_paragraph_obs = self.config.get("report", {}).get("max_paragraph_observations", 15)
+            selected_obs = self.observation_selector.select_observations_for_section(
+                section_title=section_name,
+                section_purpose=context,
+                all_observations=all_observations,
+                max_observations=max_paragraph_obs,
+                min_relevance=0.3,  # Standard threshold
+                use_semantic=self.embedding_manager is not None
+            )
+            logger.info(f"Intro paragraph: Selected {len(selected_obs)}/{len(all_observations)} observations")
+
+        # Format observations for prompt
         observation_text = "\n".join(
-            f"- {obs}" if isinstance(obs, str) else f"- {getattr(obs, 'content', str(obs))}"
-            for obs in observations[:10]
+            f"- {observation_to_text(obs)}"
+            for obs in selected_obs
         )
 
+        # Get context fields
+        original_query = findings.get("original_user_query", "")
         research_topic = findings.get("research_topic", "the research topic")
 
-        prompt = f"""Generate {context} paragraph for the '{section_name}' section.
+        # Detect if this is a single-block section (complete content, not intro to table)
+        is_single_block_section = (table_content is None and not previous_content)
+        is_continuation_section = (previous_sections_context and section_index > 0)
+
+        # Build context-appropriate, data-focused prompt
+        if table_content:
+            # CONCLUSION PARAGRAPH - analyze the table that was just shown
+            prompt = f"""**Original User Request**: {original_query}
 
 **Research Topic**: {research_topic}
-**Report Style**: {style.value}
+
+**Section**: {section_name}
+
+**Data table**:
+{table_content}
+
+**Additional Research Findings**:
+{observation_text}
+
+Analyze the data from the table. Reference specific values, identify patterns, compare differences, and explain what the numbers reveal:"""
+
+        elif is_single_block_section:
+            # COMPLETE SECTION CONTENT (no table follows)
+            if is_continuation_section:
+                prompt = f"""**Original User Request**: {original_query}
+
+**Research Topic**: {research_topic}
+
+**Previously Generated Sections**:
+{previous_sections_context}
+
+**Current Section**: {section_name} (Section {section_index + 1} of {total_sections})
 
 **Research Findings**:
 {observation_text}
 
-**PREVIOUS CONTENT IN THIS SECTION**:
-{previous_content if previous_content else "[This is the first block - set the stage]"}
+**CRITICAL RULES**:
+- This is a CONTINUATION - previous sections already established context
+- DO NOT use "The following section...", "This section will...", "We establish..."
+- DO NOT re-introduce concepts already covered above
+- Present the data, analysis, and findings directly
 
-**Instructions**:
-- Write a cohesive {context} paragraph
-- Build on previous content (don't repeat what was already said)
-- {StyleTemplate.get_style_prompt(style)}
-- Use markdown formatting (bold, italic, etc.) appropriately
+Write the content for this section:"""
+            else:
+                # First section
+                prompt = f"""**Original User Request**: {original_query}
 
-Generate the paragraph now:"""
+**Research Topic**: {research_topic}
+
+**Section**: {section_name}
+
+**Research Findings**:
+{observation_text}
+
+Write the content for this section. Present data and analysis directly:"""
+
+        else:
+            # PARAGRAPH BEFORE TABLE (multi-block section)
+            if is_continuation_section:
+                prompt = f"""**Original User Request**: {original_query}
+
+**Research Topic**: {research_topic}
+
+**Previously Generated Sections**:
+{previous_sections_context}
+
+**Current Section**: {section_name} (Section {section_index + 1} of {total_sections})
+
+**Research Findings**:
+{observation_text}
+
+**CRITICAL**: This is a CONTINUATION. DO NOT use "The following section..." language.
+
+Write a paragraph that provides context for the data table that follows. Focus on what data will be shown and why it matters:"""
+            else:
+                # First section with table
+                prompt = f"""**Original User Request**: {original_query}
+
+**Research Topic**: {research_topic}
+
+**Section**: {section_name}
+
+**Research Findings**:
+{observation_text}
+
+Write a paragraph that provides context for the data table that follows:"""
+
+        # Build system prompt with continuation awareness
+        system_prompt = self._get_continuation_aware_system_prompt(
+            style,
+            section_index,
+            total_sections,
+            bool(previous_sections_context)
+        )
 
         messages = [
-            SystemMessage(content=f"You are a {style.value} report writer."),
+            SystemMessage(content=system_prompt),
             HumanMessage(content=prompt)
         ]
 
@@ -1908,50 +2485,77 @@ Generate the paragraph now:"""
         from ..core.report_models_structured import TableBlock, get_databricks_schema
 
         observations = findings.get("observations", [])
+        # CRITICAL FIX: Make table observation limit configurable (was hardcoded 15)
+        max_table_obs = self.config.get("report", {}).get("max_table_observations", 30)
         observation_text = "\n".join(
-            f"- {obs}" if isinstance(obs, str) else f"- {getattr(obs, 'content', str(obs))}"
-            for obs in observations[:15]
+            f"- {observation_to_text(obs)}"
+            for obs in observations[:max_table_obs]  # Increased from hardcoded 15
         )
 
         research_topic = findings.get("research_topic", "the research topic")
 
-        prompt = f"""Generate a comparison table for the '{section_name}' section.
+        prompt = f"""Generate a comparison table for '{section_name}'.
 
 **Research Topic**: {research_topic}
 
 **Research Findings**:
 {observation_text}
 
-**PREVIOUS CONTENT IN THIS SECTION**:
-{previous_content if previous_content else "[This is the first block]"}
+**Previous Content**:
+{previous_content if previous_content else "[First block]"}
 
 **Instructions**:
-- Create a structured comparison table
-- Table should complement the introduction above (if present)
+- Create a comparison table with 3-6 columns
 - Extract key data points from research findings
-- Return JSON with this exact structure:
-{{
-  "type": "table",
-  "headers": ["Column1", "Column2", "Column3"],
-  "rows": [
-    ["Value1", "Value2", "Value3"],
-    ["Value4", "Value5", "Value6"]
-  ],
-  "caption": "Brief table description"
-}}
+- Include at least 2 data rows (headers alone are insufficient)
+- Table should complement previous content
 
-Generate the table data now:"""
+Note: Your response must conform to the TableBlock schema provided."""
 
         messages = [
-            SystemMessage(content="You generate structured table data (NOT markdown strings)."),
+            SystemMessage(content="You create structured data tables from research findings. Follow the schema exactly."),
             HumanMessage(content=prompt)
         ]
 
-        # Use structured output to guarantee valid structure
-        structured_llm = self.llm.with_structured_output(TableBlock, method="json_mode")
-        table_block = structured_llm.invoke(messages)
+        # Use structured output with retry logic
+        # Retry if model doesn't follow schema or returns empty table
+        max_retries = 2
+        last_error = None
 
-        return table_block
+        for attempt in range(max_retries):
+            try:
+                structured_llm = self.llm.with_structured_output(TableBlock, method="json_schema")
+                table_block = structured_llm.invoke(messages)
+
+                # Validate table has data rows
+                if not table_block.rows or len(table_block.rows) == 0:
+                    logger.warning(
+                        f"⚠️  Table has no data rows (attempt {attempt + 1}/{max_retries}). "
+                        f"Headers: {table_block.headers}"
+                    )
+                    if attempt < max_retries - 1:
+                        continue  # Retry
+
+                # Success!
+                logger.info(
+                    f"✅ Table generated successfully: "
+                    f"{len(table_block.headers)} cols × {len(table_block.rows)} rows"
+                )
+                return table_block
+
+            except ValueError as e:
+                last_error = e
+                logger.warning(
+                    f"⚠️  Table generation attempt {attempt + 1}/{max_retries} failed: {str(e)[:200]}"
+                )
+
+                if attempt == max_retries - 1:
+                    # Last attempt failed - raise error
+                    logger.error(f"❌ All {max_retries} table generation attempts failed")
+                    raise
+
+        # Should never reach here, but just in case
+        raise ValueError(f"Table generation failed after {max_retries} attempts: {last_error}")
 
     def _should_enhance_quality(self, state: EnhancedResearchState) -> bool:
         """
@@ -2213,8 +2817,8 @@ Generate the table data now:"""
         return self.config.get('report_generation', {}).get('max_observations_per_section', 50)
     
     def _format_observations_for_prompt(
-        self, 
-        observations: List[Any],
+        self,
+        observations: List[Union[StructuredObservation, Dict[str, Any], str]],
         include_metadata: bool = True
     ) -> str:
         """Format observations preserving structure and metadata."""
@@ -2270,7 +2874,33 @@ Generate the table data now:"""
             formatted.append(obs_text)
         
         return "\n\n".join(formatted)
-    
+
+    def _format_synthesis_for_prompt(self, research: Dict[str, Any]) -> str:
+        """Format synthesis/observations for clean prompt inclusion."""
+
+        # Try observations first (preferred)
+        if 'observations' in research:
+            obs_list = research['observations']
+            if obs_list:
+                return self._format_observations_for_prompt(obs_list, include_metadata=True)
+
+        # Fallback to synthesis if string
+        synthesis = research.get('synthesis', '')
+        if isinstance(synthesis, str):
+            return synthesis
+
+        # Handle list/dict synthesis
+        if isinstance(synthesis, (list, dict)):
+            logger.warning("Synthesis is not a string, formatting observations")
+            # Try to extract observations from it
+            if isinstance(synthesis, list):
+                return self._format_observations_for_prompt(synthesis, include_metadata=False)
+            else:
+                # Dict synthesis - should not happen
+                return '[Invalid synthesis format]'
+
+        return '[No observations available]'
+
     def _build_data_grounded_prompt(
         self,
         spec: Any,
@@ -2312,7 +2942,7 @@ Generate the table data now:"""
         
         AVAILABLE RESEARCH DATA (USE ONLY THIS - {obs_count} observations):
         ====================================================================
-        {research.get('synthesis', '[No observations available]')}
+        {self._format_synthesis_for_prompt(research)}
         
         SPECIFIC DATA POINTS (if available):
         {json.dumps(research.get('extracted_data', {}), indent=2) if research.get('extracted_data') else 'None'}
@@ -2963,17 +3593,35 @@ Return reorganized sections as valid JSON using the target structure section nam
         return False, None
     
     def _generate_planned_table(
-        self, 
-        compiled_findings: Dict[str, Any], 
+        self,
+        compiled_findings: Dict[str, Any],
         table_specifications: Dict[str, Any],
         state: EnhancedResearchState
     ) -> Dict[str, Any]:
         """
-        Generate table using LLM with clean failure handling - NO FALLBACKS.
+        Generate table using LLM - routes to tracked-cells or text-based generation.
+
+        NEW: Checks config for require_cell_derivation to enable cell-level tracking
+        that forces LLM to justify every value before generating it (reduces hallucination).
+
         Supports up to 32k tokens for comprehensive data extraction.
         When table generation fails, return honest error message with specific reason.
         """
         try:
+            # Check if cell-level derivation tracking is enabled
+            reporter_config = self.config.get('agents', {}).get('reporter', {})
+            table_config = reporter_config.get('table_generation', {})
+            require_cell_derivation = table_config.get('require_cell_derivation', False)
+
+            if require_cell_derivation:
+                logger.info("REPORTER: Using TRACKED-CELLS generation (cell-level derivation)")
+                return self._generate_table_with_tracked_cells(
+                    compiled_findings, table_specifications, state
+                )
+            else:
+                logger.info("REPORTER: Using TEXT-BASED generation (legacy mode)")
+
+            # Legacy text-based generation (original implementation)
             logger.info("REPORTER: Generating table with LLM-based extraction (32k token budget)")
             
             # Log what we received for debugging
@@ -3025,9 +3673,9 @@ Return reorganized sections as valid JSON using the target structure section nam
                     SystemMessage("You are a precise data extraction expert. Extract exact values from research content to populate tables."),
                     HumanMessage(prompt)
                 ])
-                
-                table_content = response.content if hasattr(response, 'content') else str(response)
-                
+
+                table_content = self._extract_text_from_response(response)
+
                 # Validate the response contains a proper table
                 if self._validate_table_structure(table_content, len(rows), len(columns)):
                     logger.info(f"REPORTER: Successfully generated table with {len(table_content)} characters")
@@ -3056,6 +3704,189 @@ Return reorganized sections as valid JSON using the target structure section nam
             import traceback
             logger.error(f"REPORTER: Stack trace: {traceback.format_exc()}")
             return self._create_table_unavailable_message(f"Generation error: {str(e)}")
+
+    def _generate_table_with_tracked_cells(
+        self,
+        compiled_findings: Dict[str, Any],
+        table_specifications: Dict[str, Any],
+        state: EnhancedResearchState
+    ) -> Dict[str, Any]:
+        """
+        Generate table using TRACKED CELLS with cell-level derivation.
+
+        This method forces the LLM to provide derivation (source/reasoning) BEFORE
+        the actual cell value, creating a "chain of thought" that dramatically
+        reduces hallucinations.
+
+        Returns:
+            Dict with table content or error message
+        """
+        try:
+            from ..core.report_models_structured import TableBlockWithTrackedCells, get_databricks_schema
+
+            logger.info("REPORTER: Generating table with TRACKED CELLS (derivation-first)")
+
+            # Extract table structure
+            rows = table_specifications.get("entities", []) or table_specifications.get("rows", [])
+            columns = table_specifications.get("metrics", []) or table_specifications.get("columns", [])
+
+            if not rows or not columns:
+                logger.warning(f"REPORTER: Missing table structure - rows={rows}, columns={columns}")
+                return self._create_table_unavailable_message("Table structure not specified")
+
+            # Collect research content
+            research_content = self._collect_all_research_content(
+                compiled_findings,
+                state,
+                max_tokens=32000
+            )
+
+            if not research_content or len(research_content.strip()) < 100:
+                logger.warning(f"REPORTER: Insufficient research content: {len(research_content)} chars")
+                return self._create_table_unavailable_message("Insufficient research data")
+
+            if not self.llm:
+                logger.error("REPORTER: No LLM available")
+                return self._create_table_unavailable_message("LLM not available")
+
+            # Build prompt emphasizing derivation-first approach
+            topic = state.get("research_topic", "")
+            prompt = f"""Generate a comparison table with TRACKED CELLS.
+
+**CRITICAL REQUIREMENTS - READ CAREFULLY:**
+
+For EVERY single cell, you MUST fill the 'derivation' field BEFORE the 'value' field:
+
+1. **EXTRACTED**: If value comes directly from research findings
+   Format: "extracted: [specific text/number from observation]"
+   Example: "extracted: $23,000 from IRS 2024 limits document"
+
+2. **CALCULATED**: If derived from other values in the research
+   Format: "calculated: [exact formula with source values]"
+   Example: "calculated: $23,000 × 0.35 tax rate = $8,050"
+
+3. **NOT_AVAILABLE**: If data is genuinely missing
+   Format: "not_available"
+
+4. **ESTIMATED**: Use ONLY when absolutely necessary
+   Format: "estimated: [clear basis and assumptions]"
+   Example: "estimated: ~7% annual return based on historical averages"
+
+**Research Topic**: {topic}
+
+**Table Structure**:
+- Rows (entities to compare): {', '.join(rows)}
+- Columns (metrics/attributes): {', '.join(columns)}
+
+**Research Findings** (extract exact values from here):
+{research_content[:15000]}  # Limit to avoid token overflow
+
+**Your Task**:
+1. Think through each cell carefully
+2. Write the derivation FIRST (how you got the value)
+3. Then write the actual value
+4. Set confidence level (high/medium/low)
+
+**Table Schema**: You must return a TableBlockWithTrackedCells with:
+- headers: list of column names
+- rows: list of TableRow objects
+  - Each TableRow contains 'cells': list of TableCell objects
+    - Each TableCell has: derivation, value, confidence
+
+Generate the structured table now."""
+
+            messages = [
+                SystemMessage("You are a meticulous data analyst. Every value must have clear provenance. Think step-by-step."),
+                HumanMessage(prompt)
+            ]
+
+            # Use structured output with retry
+            max_retries = 2
+            for attempt in range(max_retries):
+                try:
+                    structured_llm = self.llm.with_structured_output(
+                        TableBlockWithTrackedCells,
+                        method="json_schema"
+                    )
+
+                    table_block = structured_llm.invoke(messages)
+
+                    # Validate we got data rows
+                    if not table_block.rows or len(table_block.rows) == 0:
+                        logger.warning(f"⚠️  Table has no data rows (attempt {attempt + 1}/{max_retries})")
+                        if attempt < max_retries - 1:
+                            continue
+
+                    # Log derivations for audit trail
+                    self._log_cell_derivations(table_block)
+
+                    # Validate cell grounding
+                    self._validate_cell_grounding(table_block, research_content)
+
+                    # Render to markdown
+                    table_markdown = table_block.render_markdown()
+
+                    logger.info(f"✅ Generated tracked-cells table: {len(table_block.headers)} cols × {len(table_block.rows)} rows")
+
+                    return {
+                        "type": "planned_table",
+                        "content": table_markdown,
+                        "metadata": {
+                            "confidence": table_specifications.get("confidence", 0.9),
+                            "reasoning": "Cell-level derivation tracking",
+                            "method": "tracked_cells",
+                            "data_sources": len(research_content.split('\n')),
+                            "derivation_audit": f"{len(table_block.rows) * len(table_block.headers)} cells tracked"
+                        }
+                    }
+
+                except Exception as e:
+                    logger.warning(f"⚠️  Attempt {attempt + 1}/{max_retries} failed: {type(e).__name__}: {str(e)[:200]}")
+                    if attempt == max_retries - 1:
+                        raise
+
+            return self._create_table_unavailable_message("Structured generation failed")
+
+        except Exception as e:
+            logger.error(f"❌ Tracked-cells generation error: {type(e).__name__}: {e}")
+            import traceback
+            logger.error(f"Stack trace: {traceback.format_exc()}")
+            return self._create_table_unavailable_message(f"Generation error: {str(e)}")
+
+    def _log_cell_derivations(self, table_block) -> None:
+        """Log all cell derivations for audit trail."""
+        logger.info("📊 CELL DERIVATION AUDIT:")
+        for row_idx, row in enumerate(table_block.rows):
+            for col_idx, cell in enumerate(row.cells):
+                header = table_block.headers[col_idx] if col_idx < len(table_block.headers) else f"Col{col_idx}"
+                derivation_type = cell.derivation.split(':')[0] if ':' in cell.derivation else cell.derivation
+                logger.info(f"  [{row_idx},{col_idx}] {header}: {cell.value} | {derivation_type} | confidence={cell.confidence}")
+
+    def _validate_cell_grounding(self, table_block, research_content: str) -> None:
+        """Validate that extracted values are actually in the research content."""
+        import re
+
+        for row_idx, row in enumerate(table_block.rows):
+            for col_idx, cell in enumerate(row.cells):
+                if cell.derivation.startswith("extracted:"):
+                    # Extract the claimed source
+                    source_claim = cell.derivation[10:].strip()
+
+                    # Check if the value appears in research content
+                    value_str = str(cell.value)
+                    if value_str not in research_content and not any(
+                        part.strip() in research_content
+                        for part in value_str.replace(',', '').split()
+                        if len(part.strip()) > 2
+                    ):
+                        logger.warning(
+                            f"⚠️  Cell[{row_idx},{col_idx}] claims extraction but value '{cell.value}' "
+                            f"not found in research. Source claim: {source_claim[:100]}"
+                        )
+                elif cell.derivation.startswith("calculated:"):
+                    logger.debug(f"📐 Cell[{row_idx},{col_idx}] calculation: {cell.derivation[11:]}")
+                elif cell.derivation.startswith("estimated:"):
+                    logger.warning(f"⚠️  Cell[{row_idx},{col_idx}] is estimated: {cell.derivation[10:]}")
 
     def _create_table_unavailable_message(self, reason: str) -> Dict[str, Any]:
         """
@@ -3795,6 +4626,1760 @@ Based on the available research findings, I can provide the following summary:
         logger.info(f"Generated fallback report: {len(fallback_report)} characters")
         return fallback_report
 
+    # ===================================================================
+    # HYBRID MULTI-PASS REPORT GENERATION - SANITIZATION
+    # ===================================================================
+
+    def _sanitize_observations_for_report(self, observations: List) -> List:
+        """
+        Sanitize observations to remove file references and external tool mentions.
+
+        Args:
+            observations: List of observations (can be dicts or StructuredObservation objects)
+
+        Returns:
+            List of sanitized observations
+        """
+        from ..core.content_sanitizer import sanitize_agent_content
+
+        # Default contamination patterns
+        DEFAULT_PATTERNS = [
+            r'\b[\w\-]+\.(?:xlsx|xlsm|csv|json|pdf|doc|docx|xls)\b',
+            r'github\.com[/\w\-\.]*',
+            r'gitlab\.com[/\w\-\.]*',
+            r'\b(?:spreadsheet|repository|download|attachment|file)\b'
+        ]
+
+        patterns = self.config.get('agents', {}).get('reporter', {}).get('hybrid_settings', {}).get(
+            'contamination_patterns',
+            DEFAULT_PATTERNS
+        )
+
+        cleaned = []
+        for obs in observations:
+            # Handle both dict and object observations
+            if isinstance(obs, dict):
+                obs_dict = obs
+            elif hasattr(obs, 'to_dict'):
+                obs_dict = obs.to_dict()
+            else:
+                obs_dict = {'content': str(obs), 'step_id': 'unknown'}
+
+            # Sanitize content
+            content = obs_dict.get('content', '')
+
+            # Apply contamination pattern filtering
+            clean_content = content
+            for pattern in patterns:
+                def _annotate(match):
+                    token = match.group(0)
+                    tag = 'FILE' if '.' in token and any(ext in token for ext in ['.xlsx', '.csv', '.pdf', '.json']) else 'REF'
+                    return f"[{tag}]"
+
+                clean_content = re.sub(pattern, _annotate, clean_content, flags=re.IGNORECASE)
+
+            # Create sanitized copy
+            obs_copy = obs_dict.copy()
+            obs_copy['content'] = clean_content
+            obs_copy['was_sanitized'] = clean_content != content
+
+            cleaned.append(obs_copy)
+
+        sanitized_count = sum(1 for obs in cleaned if obs.get('was_sanitized'))
+        if sanitized_count > 0:
+            logger.info(f"[HYBRID Sanitization] Sanitized {sanitized_count}/{len(observations)} observations")
+
+        return cleaned
+
+    # ===================================================================
+    # HYBRID MULTI-PASS REPORT GENERATION - MAIN PHASES
+    # ===================================================================
+
+    def _extract_text_from_response(self, response: Any) -> str:
+        """
+        Extract text content from LLM response, handling both string and structured list formats.
+
+        Some LLM providers return response.content as a list of content blocks:
+        [{"type": "text", "text": "..."}] or [{"type": "reasoning", ...}, {"type": "text", "text": "..."}]
+
+        This helper ensures we always get a string for processing.
+        """
+        if hasattr(response, 'content'):
+            content = response.content
+        else:
+            content = response
+
+        # Handle list format (structured responses)
+        if isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get('type') == 'text' and 'text' in item:
+                        text_parts.append(item['text'])
+                    elif item.get('type') == 'reasoning' and 'text' in item:
+                        # Include reasoning text as well
+                        text_parts.append(item['text'])
+            return "\n\n".join(text_parts) if text_parts else str(content)
+
+        # Handle string format (standard responses)
+        elif isinstance(content, str):
+            return content
+
+        # Fallback for any other format
+        else:
+            return str(content)
+
+    def _fix_markdown_tables(self, markdown_text: str) -> str:
+        """
+        Ensure all markdown tables have proper separator rows.
+
+        Tables must have format:
+        | Header 1 | Header 2 |
+        |----------|----------|
+        | Data 1   | Data 2   |
+
+        This method detects tables and inserts missing separator rows.
+        """
+        if not markdown_text or '|' not in markdown_text:
+            return markdown_text
+
+        lines = markdown_text.split('\n')
+        fixed_lines = []
+        i = 0
+        in_table = False
+
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            # Detect table row (starts with | and has at least 3 |)
+            is_table_row = stripped.startswith('|') and stripped.count('|') >= 3
+
+            if is_table_row:
+                # Check if this is a separator row (contains ---)
+                is_separator = '-' in stripped
+
+                if not in_table:
+                    # This is the first row of a new table (header)
+                    in_table = True
+                    fixed_lines.append(line)
+
+                    # Check next line
+                    if i + 1 < len(lines):
+                        next_line = lines[i + 1].strip()
+                        # Check if next line is a proper separator (only dashes between pipes)
+                        if next_line.startswith('|') and next_line.count('|') >= 3:
+                            content = next_line.replace('|', '').replace(' ', '').replace('\t', '')
+                            next_is_separator = content and all(c == '-' for c in content)
+                        else:
+                            next_is_separator = False
+
+                        if not next_is_separator:
+                            # Next line is a data row, separator is missing!
+                            # Insert separator after header
+                            col_count = stripped.count('|') - 1
+                            separator_parts = ['---' for _ in range(col_count)]
+                            separator = '|' + '|'.join(separator_parts) + '|'
+                            fixed_lines.append(separator)
+                            logger.debug(f"[TABLE FIX] Inserted missing separator after header")
+                        # If next line is separator, it will be added in next iteration
+
+                    i += 1
+                    continue
+                else:
+                    # We're already in a table, just append this row
+                    fixed_lines.append(line)
+                    i += 1
+                    continue
+            else:
+                # Not a table row
+                if stripped == '':
+                    # Empty line might end the table
+                    in_table = False
+
+                fixed_lines.append(line)
+                i += 1
+
+        fixed_text = '\n'.join(fixed_lines)
+
+        # Log if we made changes
+        if fixed_text != markdown_text:
+            original_separators = markdown_text.count('|---')
+            fixed_separators = fixed_text.count('|---')
+            if fixed_separators > original_separators:
+                logger.info(f"[TABLE FIX] Added {fixed_separators - original_separators} missing table separators")
+
+        return fixed_text
+
+    async def _understand_research_context(
+        self,
+        research_topic: str,
+        observations: List[Dict],
+        plan: Any,
+        section_name: str = "All Sections",
+        max_chars: int = 60000
+    ) -> Dict[str, Any]:
+        """
+        Stage 1A: Deep Context Understanding
+
+        Let the LLM deeply analyze the research to understand:
+        1. What is the user trying to learn/compare?
+        2. What are the KEY ENTITIES (countries, products, etc.)?
+        3. What METRICS are being discussed (tax rates, prices, etc.)?
+        4. What TABLE STRUCTURE makes sense (entity-based vs metric-based)?
+        5. What data is available vs missing?
+
+        This stage provides maximum context to the LLM and lets it reason
+        about the optimal structure adaptively rather than forcing rigid formats.
+
+        Args:
+            research_topic: The user's research question
+            observations: All observations with full_content preserved
+            plan: The research plan
+            section_name: Current section being processed
+
+        Returns:
+            Dict with 'understanding' field containing LLM's analysis
+        """
+        logger.info(f"[Stage 1A] Understanding context for: {section_name}")
+
+        # Format observations with FULL content
+        obs_details = []
+        for obs in observations:
+            full_content = obs.get('full_content', obs.get('content', ''))
+            step_id = obs.get('step_id', 'unknown')
+            obs_details.append(f"Step {step_id}: {full_content}")
+
+        # Apply character limit with smart truncation (keep observations in order, stop at limit)
+        all_observations = ""
+        total_chars = 0
+        included_count = 0
+
+        for obs_text in obs_details:
+            # Check if adding this observation would exceed the limit
+            separator = "\n\n" if all_observations else ""
+            new_total = total_chars + len(obs_text) + len(separator)
+
+            if new_total <= max_chars:
+                all_observations += separator + obs_text
+                total_chars = new_total
+                included_count += 1
+            else:
+                # Hit the limit - stop adding observations
+                break
+
+        excluded_count = len(obs_details) - included_count
+        if excluded_count > 0:
+            logger.warning(
+                f"[Stage 1A] Truncated observations: included {included_count}/{len(obs_details)} "
+                f"({total_chars:,}/{max_chars:,} chars, excluded {excluded_count} observations)"
+            )
+        else:
+            logger.info(
+                f"[Stage 1A] Providing {included_count} observations "
+                f"({total_chars:,} chars, limit: {max_chars:,})"
+            )
+
+        # Extract plan sections if available
+        plan_sections = "No structured plan available"
+        if plan and hasattr(plan, 'sections'):
+            section_names = [s.section_name for s in plan.sections]
+            plan_sections = f"Plan sections: {', '.join(section_names)}"
+
+        prompt = f"""You are analyzing research to deeply understand what structure and data extraction is needed.
+
+RESEARCH QUESTION:
+{research_topic}
+
+{plan_sections}
+
+CURRENT SECTION:
+{section_name}
+
+ALL RESEARCH OBSERVATIONS (with full content including tables and numeric data):
+{all_observations}
+
+TASK: Deeply analyze this research and provide your understanding:
+
+1. USER INTENT: What is the user trying to learn or compare? What's the core question?
+
+2. KEY ENTITIES: What are the main entities being discussed?
+   - For country comparisons: List all countries
+   - For product comparisons: List all products
+   - For general analysis: Identify the main subjects
+
+3. KEY METRICS: What quantitative or qualitative attributes are being measured?
+   - Tax rates, prices, percentages, rankings, etc.
+   - For each metric, note if data is available in the observations
+
+4. OPTIMAL TABLE STRUCTURE:
+   - Should rows be ENTITIES (e.g., countries) or METRICS (e.g., different tax types)?
+   - Should columns be METRICS (e.g., tax rate, GDP) or ENTITIES?
+   - Consider: Does the user want to compare entities across metrics, or compare metrics across entities?
+
+5. DATA AVAILABILITY:
+   - What specific values are present in the observations?
+   - What data is missing or not found?
+   - Any data quality concerns (conflicting numbers, unclear sources)?
+
+6. STRUCTURAL RECOMMENDATIONS:
+   - How many tables are needed?
+   - What should each table show?
+   - What calculations might be needed (differences, percentages, averages)?
+
+Provide a detailed, thoughtful analysis that will guide the extraction process."""
+        logger.info(f"[Stage 1A] Generated prompt. Length: {len(prompt)}")
+
+        messages = [
+            {"role": "system", "content": "You are an expert research analyst specializing in data structuring and comparative analysis."},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self.llm.ainvoke(messages)
+            understanding = self._extract_text_from_response(response)
+
+            logger.info(
+                f"[Stage 1A] Context understanding complete: "
+                f"{len(understanding)} chars of analysis"
+            )
+
+            return {
+                'understanding': understanding,
+                'observation_count': len(observations),
+                'total_chars': total_chars
+            }
+
+        except Exception as e:
+            logger.error(f"[Stage 1A] Failed to generate understanding: {e}")
+            return {
+                'understanding': f"Error during context understanding: {e}",
+                'observation_count': len(observations),
+                'total_chars': total_chars
+            }
+
+    async def _extract_with_understanding(
+        self,
+        research_topic: str,
+        observations: List[Dict],
+        understanding: str,
+        section_name: str = "All Sections",
+        max_chars: int = 60000
+    ) -> Dict[str, Any]:
+        """
+        Stage 1B: Guided Extraction with Understanding
+
+        Uses the deep understanding from Stage 1A to guide extraction of:
+        - DataPoints: Individual facts and metrics
+        - Calculations: Derived values with explicit formulas
+        - ComparisonEntries: Structured table rows
+
+        The LLM uses its understanding of the research context to decide
+        the optimal structure (entity-based vs metric-based) adaptively.
+
+        Args:
+            research_topic: The user's research question
+            observations: All observations with full_content
+            understanding: The context understanding from Stage 1A
+            section_name: Current section being processed
+
+        Returns:
+            Dict with 'extraction' field containing structured JSON
+        """
+        from ..core.report_generation.models import CalculationContext, DataPoint, Calculation, ComparisonEntry
+
+        logger.info(f"[Stage 1B] Extracting data with guided understanding for: {section_name}")
+
+        # Format observations with FULL content
+        obs_details = []
+        for obs in observations:
+            full_content = obs.get('full_content', obs.get('content', ''))
+            step_id = obs.get('step_id', 'unknown')
+            obs_details.append(f"Step {step_id}: {full_content}")
+
+        # Apply character limit with smart truncation (same as Stage 1A)
+        all_observations = ""
+        total_chars = 0
+        included_count = 0
+
+        for obs_text in obs_details:
+            # Check if adding this observation would exceed the limit
+            separator = "\n\n" if all_observations else ""
+            new_total = total_chars + len(obs_text) + len(separator)
+
+            if new_total <= max_chars:
+                all_observations += separator + obs_text
+                total_chars = new_total
+                included_count += 1
+            else:
+                # Hit the limit - stop adding observations
+                break
+
+        excluded_count = len(obs_details) - included_count
+        if excluded_count > 0:
+            logger.warning(
+                f"[Stage 1B] Truncated observations: included {included_count}/{len(obs_details)} "
+                f"({total_chars:,}/{max_chars:,} chars, excluded {excluded_count} observations)"
+            )
+        else:
+            logger.info(
+                f"[Stage 1B] Providing {included_count} observations "
+                f"({total_chars:,} chars, limit: {max_chars:,})"
+            )
+
+        # Create example structure for guidance
+        example_entity_based = {
+            "extracted_data": [
+                {"entity": "Country A", "metric": "corporate_tax_rate", "value": 21.0, "unit": "percent", "source_observation_id": "step_1"},
+                {"entity": "Country B", "metric": "corporate_tax_rate", "value": 19.0, "unit": "percent", "source_observation_id": "step_2"}
+            ],
+            "calculations": [
+                {"description": "Tax rate difference", "formula": "21.0 - 19.0", "inputs": {"rate_a": 21.0, "rate_b": 19.0}, "result": 2.0, "unit": "percentage_points"}
+            ],
+            "key_comparisons": [
+                {"primary_key": "Country A", "metrics": {"corporate_tax_rate": 21.0, "gdp_billions": 1500}, "source_observation_ids": ["step_1"]},
+                {"primary_key": "Country B", "metrics": {"corporate_tax_rate": 19.0, "gdp_billions": 1200}, "source_observation_ids": ["step_2"]}
+            ],
+            "summary_insights": ["Country A has 2 percentage points higher corporate tax than Country B"]
+        }
+
+        prompt = f"""You are extracting structured data from research observations to build comparison tables.
+
+RESEARCH QUESTION:
+{research_topic}
+
+CURRENT SECTION:
+{section_name}
+
+YOUR DEEP UNDERSTANDING (from Stage 1A):
+{understanding}
+
+ALL RESEARCH OBSERVATIONS:
+{all_observations}
+
+TASK: Based on your understanding, extract structured data in JSON format following this schema:
+
+{{
+  "extracted_data": [
+    {{
+      "entity": "Name of entity (country/product/etc)",
+      "metric": "Name of metric (tax_rate/price/etc)",
+      "value": numeric_or_string_value,
+      "unit": "unit of measurement",
+      "source_observation_id": "step_X",
+      "confidence": 0.0-1.0
+    }}
+  ],
+  "calculations": [
+    {{
+      "description": "What is being calculated",
+      "formula": "Mathematical formula with actual values",
+      "inputs": {{"input_name": value}},
+      "result": calculated_result,
+      "unit": "unit"
+    }}
+  ],
+  "key_comparisons": [
+    {{
+      "primary_key": "Entity or metric name (based on your understanding)",
+      "metrics": {{"metric1": value1, "metric2": value2}},
+      "source_observation_ids": ["step_X", "step_Y"]
+    }}
+  ],
+  "summary_insights": ["Key insight 1", "Key insight 2"],
+  "data_quality_notes": ["Any warnings about missing/conflicting data"]
+}}
+
+EXAMPLE (entity-based structure for country comparison):
+{example_entity_based}
+
+IMPORTANT GUIDELINES:
+
+1. **Use your understanding** from Stage 1A to decide structure:
+   - If comparing ENTITIES (countries, products): primary_key = entity name, metrics = attributes
+   - If comparing METRICS (different tax types): primary_key = metric name, metrics = entity values
+
+2. **Extract ALL relevant data points** from observations:
+   - Every number, percentage, ranking
+   - Include source_observation_id for traceability
+   - Set confidence based on source quality
+
+3. **Show your work** in calculations:
+   - Explicit formulas with actual values
+   - Named inputs for clarity
+   - Include units
+
+4. **Be honest about data quality**:
+   - List missing data in data_quality_notes
+   - Flag conflicting numbers
+   - Note estimates vs precise values
+
+5. **Create complete comparison entries**:
+   - One entry per entity/metric (based on your chosen structure)
+   - Include all relevant metrics/entities in the metrics dict
+   - Link to source observations
+
+Return ONLY the JSON object, no additional text."""
+
+        messages = [
+            {"role": "system", "content": "You are a precise data extraction specialist. Extract structured data exactly as specified."},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            response = await self.llm.ainvoke(messages)
+            extraction_text = self._extract_text_from_response(response)
+
+            # Try to extract JSON from code blocks or raw text
+            json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', extraction_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # Try direct JSON parse
+                json_str = extraction_text.strip()
+
+            extraction_data = json.loads(json_str)
+
+            logger.info(
+                f"[Stage 1B] Extraction complete: "
+                f"{len(extraction_data.get('extracted_data', []))} data points, "
+                f"{len(extraction_data.get('calculations', []))} calculations, "
+                f"{len(extraction_data.get('key_comparisons', []))} comparisons"
+            )
+
+            return {
+                'extraction': extraction_data,
+                'raw_response': extraction_text
+            }
+
+        except json.JSONDecodeError as e:
+            logger.error(f"[Stage 1B] JSON parsing failed: {e}")
+            logger.error(f"[Stage 1B] Response text: {extraction_text[:500]}...")
+            return {
+                'extraction': {
+                    "extracted_data": [],
+                    "calculations": [],
+                    "key_comparisons": [],
+                    "summary_insights": [],
+                    "data_quality_notes": [f"JSON parsing error: {e}"]
+                },
+                'raw_response': extraction_text,
+                'error': str(e)
+            }
+        except Exception as e:
+            logger.error(f"[Stage 1B] Extraction failed: {e}")
+            return {
+                'extraction': {
+                    "extracted_data": [],
+                    "calculations": [],
+                    "key_comparisons": [],
+                    "summary_insights": [],
+                    "data_quality_notes": [f"Extraction error: {e}"]
+                },
+                'error': str(e)
+            }
+
+    def _validate_extraction_quality(
+        self,
+        extraction: Dict[str, Any],
+        min_comparisons: int = 1,
+        min_data_points: int = 2
+    ) -> Dict[str, Any]:
+        """
+        Stage 1C: Quality Validation
+
+        Validates the extraction quality and provides metrics:
+        - Checks if we have enough comparison entries for tables
+        - Validates data richness (multiple metrics per entity)
+        - Checks entity coverage
+        - Provides quality score and recommendations
+
+        Args:
+            extraction: The extraction dict from Stage 1B
+            min_comparisons: Minimum comparison entries needed
+            min_data_points: Minimum data points needed
+
+        Returns:
+            Dict with 'valid', 'quality_score', 'issues', 'recommendations'
+        """
+        logger.info("[Stage 1C] Validating extraction quality")
+
+        issues = []
+        recommendations = []
+        quality_metrics = {}
+
+        # Extract components
+        extracted_data = extraction.get('extracted_data', [])
+        calculations = extraction.get('calculations', [])
+        key_comparisons = extraction.get('key_comparisons', [])
+        data_quality_notes = extraction.get('data_quality_notes', [])
+
+        # Metric 1: Comparison count
+        comparison_count = len(key_comparisons)
+        quality_metrics['comparison_count'] = comparison_count
+
+        if comparison_count < min_comparisons:
+            issues.append(f"Only {comparison_count} comparison entries (need {min_comparisons}+)")
+            recommendations.append("Try extracting more entities or metrics from observations")
+
+        # Metric 2: Data point count
+        data_point_count = len(extracted_data)
+        quality_metrics['data_point_count'] = data_point_count
+
+        if data_point_count < min_data_points:
+            issues.append(f"Only {data_point_count} data points (need {min_data_points}+)")
+            recommendations.append("Extract more granular facts from observations")
+
+        # Metric 3: Entity coverage (unique entities)
+        unique_entities = set(dp.get('entity', 'unknown') for dp in extracted_data)
+        quality_metrics['unique_entities'] = len(unique_entities)
+
+        if len(unique_entities) < 2:
+            issues.append(f"Only {len(unique_entities)} unique entities found")
+            recommendations.append("Identify more entities for comparison")
+
+        # Metric 4: Metric coverage (unique metrics per entity)
+        unique_metrics = set(dp.get('metric', 'unknown') for dp in extracted_data)
+        quality_metrics['unique_metrics'] = len(unique_metrics)
+
+        if len(unique_metrics) < 2:
+            issues.append(f"Only {len(unique_metrics)} unique metrics found")
+            recommendations.append("Extract more attributes for each entity")
+
+        # Metric 5: Data richness (avg metrics per comparison)
+        if comparison_count > 0:
+            total_metrics = sum(len(comp.get('metrics', {})) for comp in key_comparisons)
+            avg_metrics_per_comp = total_metrics / comparison_count
+            quality_metrics['avg_metrics_per_comparison'] = avg_metrics_per_comp
+
+            if avg_metrics_per_comp < 2:
+                issues.append(f"Average {avg_metrics_per_comp:.1f} metrics per comparison (need 2+)")
+                recommendations.append("Add more metrics to each comparison entry")
+        else:
+            quality_metrics['avg_metrics_per_comparison'] = 0
+
+        # Metric 6: Calculation count
+        quality_metrics['calculation_count'] = len(calculations)
+
+        # Metric 7: Data quality concerns
+        quality_metrics['data_quality_notes_count'] = len(data_quality_notes)
+
+        if data_quality_notes:
+            issues.append(f"Data quality concerns: {', '.join(data_quality_notes[:3])}")
+
+        # Calculate overall quality score (0.0 to 1.0)
+        score_components = []
+
+        # Component 1: Comparison adequacy (0-30 points)
+        comp_score = min(30, (comparison_count / max(min_comparisons, 1)) * 30)
+        score_components.append(comp_score)
+
+        # Component 2: Data point richness (0-25 points)
+        dp_score = min(25, (data_point_count / max(min_data_points * 2, 1)) * 25)
+        score_components.append(dp_score)
+
+        # Component 3: Entity coverage (0-20 points)
+        entity_score = min(20, (len(unique_entities) / 3) * 20)
+        score_components.append(entity_score)
+
+        # Component 4: Metric coverage (0-15 points)
+        metric_score = min(15, (len(unique_metrics) / 3) * 15)
+        score_components.append(metric_score)
+
+        # Component 5: Data richness (0-10 points)
+        richness_score = min(10, quality_metrics.get('avg_metrics_per_comparison', 0) * 3)
+        score_components.append(richness_score)
+
+        # Total score (0-100, normalized to 0.0-1.0)
+        quality_score = sum(score_components) / 100.0
+
+        # Determine validity
+        is_valid = (
+            comparison_count >= min_comparisons and
+            data_point_count >= min_data_points and
+            quality_score >= 0.3  # At least 30% quality
+        )
+
+        logger.info(
+            f"[Stage 1C] Validation complete: "
+            f"Valid={is_valid}, Score={quality_score:.2f}, "
+            f"Comparisons={comparison_count}, DataPoints={data_point_count}, "
+            f"Issues={len(issues)}"
+        )
+
+        return {
+            'valid': is_valid,
+            'quality_score': quality_score,
+            'quality_metrics': quality_metrics,
+            'issues': issues,
+            'recommendations': recommendations,
+            'summary': {
+                'comparisons': comparison_count,
+                'data_points': data_point_count,
+                'entities': len(unique_entities),
+                'metrics': len(unique_metrics),
+                'calculations': len(calculations)
+            }
+        }
+
+    def _build_comparisons_from_datapoints(
+        self,
+        data_points: List[Any]
+    ) -> List[Any]:
+        """
+        Fallback: Build ComparisonEntry objects from DataPoint objects.
+
+        When the LLM fails to generate comparisons directly, we can
+        derive them from the extracted data points by grouping by entity.
+
+        Args:
+            data_points: List of DataPoint objects
+
+        Returns:
+            List of ComparisonEntry objects
+        """
+        from ..core.report_generation.models import ComparisonEntry
+
+        logger.info(f"[Fallback] Building comparisons from {len(data_points)} data points")
+
+        # Group data points by entity
+        entity_metrics = {}
+        entity_sources = {}
+
+        for dp in data_points:
+            entity = dp.entity if hasattr(dp, 'entity') else dp.get('entity', 'Unknown')
+            metric = dp.metric if hasattr(dp, 'metric') else dp.get('metric', 'unknown')
+            value = dp.value if hasattr(dp, 'value') else dp.get('value', 'N/A')
+            source = dp.source_observation_id if hasattr(dp, 'source_observation_id') else dp.get('source_observation_id')
+
+            if entity not in entity_metrics:
+                entity_metrics[entity] = {}
+                entity_sources[entity] = []
+
+            entity_metrics[entity][metric] = value
+
+            if source and source not in entity_sources[entity]:
+                entity_sources[entity].append(source)
+
+        # Create ComparisonEntry objects
+        comparisons = []
+        for entity, metrics in entity_metrics.items():
+            try:
+                comp_entry = ComparisonEntry(
+                    primary_key=entity,
+                    metrics=metrics,
+                    source_observation_ids=entity_sources.get(entity, [])
+                )
+                comparisons.append(comp_entry)
+            except Exception as e:
+                logger.warning(f"[Fallback] Failed to create ComparisonEntry for {entity}: {e}")
+
+        logger.info(
+            f"[Fallback] Built {len(comparisons)} comparison entries from "
+            f"{len(entity_metrics)} unique entities"
+        )
+
+        return comparisons
+
+    async def _generate_calculation_context(
+        self,
+        findings: Dict[str, Any]
+    ):
+        """
+        Phase 1: Three-Stage Calculation Context Generation with Deep Understanding
+
+        This method implements a comprehensive three-stage pipeline:
+        - Stage 1A: Deep context understanding (what's the user asking? what structure makes sense?)
+        - Stage 1B: Guided extraction with understanding (extract data with full context)
+        - Stage 1C: Quality validation (ensure we have enough data for good tables)
+
+        The key improvement: We now supply FULL CONTENT (full_content field) to the LLM
+        with a generous 200K character budget, letting the LLM deeply reason about
+        the optimal structure (entity-based vs metric-based) adaptively.
+
+        Args:
+            findings: Compiled findings from _compile_findings()
+
+        Returns:
+            CalculationContext with extracted data, calculations, and comparisons
+        """
+        from ..core.report_generation.models import CalculationContext, DataPoint, Calculation, ComparisonEntry
+
+        logger.info("[HYBRID Phase 1] Starting THREE-STAGE calculation context generation")
+
+        settings = self.config.get('agents', {}).get('reporter', {}).get('hybrid_settings', {})
+        all_observations = findings.get('observations', [])
+
+        # Get character limit for observation context
+        max_calc_chars = settings.get('max_calc_prompt_chars', 60000)
+        logger.info(f"[HYBRID Phase 1] Using max_calc_prompt_chars: {max_calc_chars:,}")
+
+        # Monitor memory usage
+        self._monitor_memory_usage('calc_context', len(all_observations))
+
+        # Select observations for calculation context
+        selector = self.observation_selector or ObservationSelector(self.embedding_manager)
+        top_k = settings.get('calc_selector_top_k', 60)
+        tail_k = settings.get('calc_recent_tail', 20)
+
+        # Convert observations to dicts for selector
+        obs_dicts = []
+        for obs in all_observations:
+            if hasattr(obs, 'to_dict'):
+                obs_dicts.append(obs.to_dict())
+            elif isinstance(obs, dict):
+                obs_dicts.append(obs)
+            else:
+                obs_dicts.append({'content': str(obs), 'step_id': 'unknown'})
+
+        # Extract research topic for entity detection
+        research_topic = findings.get('research_topic', 'Research Question')
+
+        # Extract key entities (countries, companies, etc.) from research topic
+        diversity_entities = selector.extract_key_entities_from_topic(research_topic)
+
+        # Enable diversity enforcement if entities were found
+        enable_diversity = len(diversity_entities) >= 2  # Need at least 2 entities for comparison
+
+        if enable_diversity:
+            logger.info(
+                f"[HYBRID Phase 1] Entity diversity enforcement ENABLED for {len(diversity_entities)} entities"
+            )
+
+        scored = selector.select_observations_for_section(
+            section_title="Calculation context",
+            section_purpose="extract quantitative facts for holistic synthesis",
+            all_observations=obs_dicts,
+            max_observations=top_k,
+            min_relevance=0.25,
+            use_semantic=self.embedding_manager is not None,
+            ensure_entity_diversity=enable_diversity,
+            diversity_entities=diversity_entities if enable_diversity else None
+        )
+
+        recent_tail = obs_dicts[-tail_k:] if len(obs_dicts) >= tail_k else obs_dicts
+        merged = self._dedupe_preserve_order(scored + recent_tail)
+
+        logger.info(
+            f"[HYBRID Phase 1] Selected {len(merged)} observations "
+            f"(top-k: {len(scored)}, tail: {len(recent_tail)})"
+        )
+
+        # Extract research context
+        research_topic = findings.get('research_topic', 'Research Question')
+        plan = findings.get('current_plan')
+
+        try:
+            # ============================================================
+            # STAGE 1A: DEEP CONTEXT UNDERSTANDING
+            # ============================================================
+            understanding_result = await self._understand_research_context(
+                research_topic=research_topic,
+                observations=merged,
+                plan=plan,
+                section_name="Calculation Context",
+                max_chars=max_calc_chars
+            )
+
+            understanding = understanding_result['understanding']
+
+            logger.info(
+                f"[Stage 1A Complete] Generated {len(understanding)} chars of context understanding"
+            )
+
+            # ============================================================
+            # STAGE 1B: GUIDED EXTRACTION WITH UNDERSTANDING
+            # ============================================================
+            extraction_result = await self._extract_with_understanding(
+                research_topic=research_topic,
+                observations=merged,
+                understanding=understanding,
+                section_name="Calculation Context",
+                max_chars=max_calc_chars
+            )
+
+            extraction_data = extraction_result['extraction']
+
+            logger.info(
+                f"[Stage 1B Complete] Extracted "
+                f"{len(extraction_data.get('extracted_data', []))} data points, "
+                f"{len(extraction_data.get('calculations', []))} calculations, "
+                f"{len(extraction_data.get('key_comparisons', []))} comparisons"
+            )
+
+            # ============================================================
+            # STAGE 1C: QUALITY VALIDATION
+            # ============================================================
+            validation_result = self._validate_extraction_quality(
+                extraction=extraction_data,
+                min_comparisons=1,
+                min_data_points=2
+            )
+
+            logger.info(
+                f"[Stage 1C Complete] Quality Score: {validation_result['quality_score']:.2f}, "
+                f"Valid: {validation_result['valid']}, "
+                f"Issues: {len(validation_result['issues'])}"
+            )
+
+            # Log validation issues and recommendations
+            if validation_result['issues']:
+                logger.warning(f"[Stage 1C] Quality Issues: {validation_result['issues']}")
+            if validation_result['recommendations']:
+                logger.info(f"[Stage 1C] Recommendations: {validation_result['recommendations']}")
+
+            # ============================================================
+            # BUILD CALCULATION CONTEXT
+            # ============================================================
+
+            # Convert extracted data to DataPoint objects
+            data_points = []
+            for dp in extraction_data.get('extracted_data', []):
+                try:
+                    data_points.append(DataPoint(**dp))
+                except Exception as e:
+                    logger.warning(f"[Phase 1] Failed to create DataPoint from {dp}: {e}")
+
+            # Convert calculations to Calculation objects
+            calculations = []
+            for calc in extraction_data.get('calculations', []):
+                try:
+                    calculations.append(Calculation(**calc))
+                except Exception as e:
+                    logger.warning(f"[Phase 1] Failed to create Calculation from {calc}: {e}")
+
+            # Convert comparisons to ComparisonEntry objects
+            comparisons = []
+            for comp in extraction_data.get('key_comparisons', []):
+                try:
+                    comparisons.append(ComparisonEntry(**comp))
+                except Exception as e:
+                    logger.warning(f"[Phase 1] Failed to create ComparisonEntry from {comp}: {e}")
+
+            # Create CalculationContext
+            calc_context = CalculationContext(
+                extracted_data=data_points,
+                calculations=calculations,
+                key_comparisons=comparisons,
+                summary_insights=extraction_data.get('summary_insights', []),
+                data_quality_notes=extraction_data.get('data_quality_notes', []),
+                metadata={
+                    'understanding_chars': len(understanding),
+                    'observation_count': len(merged),
+                    'quality_score': validation_result['quality_score'],
+                    'quality_valid': validation_result['valid'],
+                    'quality_summary': validation_result['summary']
+                }
+            )
+
+            logger.info(
+                f"[HYBRID Phase 1] THREE-STAGE PIPELINE COMPLETE: "
+                f"{len(calc_context.extracted_data)} data points, "
+                f"{len(calc_context.calculations)} calculations, "
+                f"{len(calc_context.key_comparisons)} comparisons "
+                f"(Quality: {validation_result['quality_score']:.2f})"
+            )
+
+            # If quality is too low, try fallback using datapoints
+            if not validation_result['valid'] and len(data_points) > 0:
+                logger.warning(
+                    f"[Phase 1] Quality check failed, attempting fallback to build comparisons from data points"
+                )
+                fallback_comparisons = self._build_comparisons_from_datapoints(data_points)
+                if fallback_comparisons:
+                    calc_context.key_comparisons = fallback_comparisons
+                    logger.info(
+                        f"[Phase 1] Fallback generated {len(fallback_comparisons)} comparisons from data points"
+                    )
+
+            return calc_context
+
+        except Exception as exc:
+            logger.error(f"[HYBRID Phase 1] THREE-STAGE PIPELINE FAILED: {exc}", exc_info=True)
+
+            # Return empty context with error note
+            return CalculationContext(
+                extracted_data=[],
+                calculations=[],
+                key_comparisons=[],
+                data_quality_notes=[
+                    f"Three-stage pipeline failed: {exc}",
+                    "Unable to extract calculation context from observations"
+                ],
+                metadata={'error': str(exc)}
+            )
+
+    async def _generate_holistic_report_with_table_anchors(
+        self,
+        findings: Dict[str, Any],
+        calc_context: Any,
+        dynamic_sections: List[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Phase 2: Generate complete report with table placeholders.
+
+        Args:
+            findings: Compiled findings from _compile_findings()
+            calc_context: CalculationContext from Phase 1
+            dynamic_sections: Section structure from plan (optional)
+
+        Returns:
+            Report text with table anchors like [TABLE: comparison_1]
+        """
+        logger.info("[HYBRID Phase 2] Starting holistic report generation")
+
+        settings = self.config.get('agents', {}).get('reporter', {}).get('hybrid_settings', {})
+        anchor_format = settings.get('table_anchor_format', '[TABLE: {id}]')
+
+        # Format calculation context for prompt
+        calc_summary = f"""
+Extracted Data Points ({len(calc_context.extracted_data)}):
+{chr(10).join([f"- {dp.entity}: {dp.metric} = {dp.value} {dp.unit}" for dp in calc_context.extracted_data[:10]])}
+{f"... and {len(calc_context.extracted_data) - 10} more" if len(calc_context.extracted_data) > 10 else ""}
+
+Calculations Performed ({len(calc_context.calculations)}):
+{chr(10).join([f"- {calc.description}: {calc.formula} = {calc.result} {calc.unit}" for calc in calc_context.calculations[:5]])}
+{f"... and {len(calc_context.calculations) - 5} more" if len(calc_context.calculations) > 5 else ""}
+
+Key Comparisons ({len(calc_context.key_comparisons)}):
+{chr(10).join([f"- {comp.primary_key}: {list(comp.metrics.keys())}" for comp in calc_context.key_comparisons[:5]])}
+{f"... and {len(calc_context.key_comparisons) - 5} more" if len(calc_context.key_comparisons) > 5 else ""}
+
+Insights:
+{chr(10).join([f"- {insight}" for insight in calc_context.summary_insights[:3]])}
+"""
+
+        research_topic = findings.get('research_topic', 'Research Question')
+
+        # Build section structure guidance
+        section_structure = ""
+        if dynamic_sections:
+            section_structure = "\n\nReport Structure (use these sections in order):\n"
+            for i, sec in enumerate(dynamic_sections, 1):
+                title = sec.get('title', sec) if isinstance(sec, dict) else sec
+                purpose = sec.get('purpose', '') if isinstance(sec, dict) else ''
+                section_structure += f"{i}. {title}"
+                if purpose:
+                    section_structure += f" - {purpose}"
+                section_structure += "\n"
+
+        prompt = f"""Generate a comprehensive research report on this topic.
+
+Research Topic: {research_topic}
+
+Pre-Calculated Data and Analysis:
+{calc_summary}
+{section_structure}
+
+Instructions:
+1. Write a complete, well-structured report answering the research question
+2. Use the pre-calculated data and insights provided above
+3. Follow the section structure provided above (if any)
+4. When you need to present tabular data, insert a table anchor using this format: {anchor_format}
+   - Example: {anchor_format.format(id='comparison_1')}
+   - Use descriptive IDs like 'comparison_1', 'metrics_summary', 'detailed_breakdown'
+5. Do NOT describe your research methodology or explain how you searched
+6. Do NOT mention files, spreadsheets, or external tools
+7. Focus on answering the user's question with the facts available
+8. Use professional, clear language
+
+Generate the complete report now:"""
+
+        messages = [
+            SystemMessage(content="""You are a professional research report writer.
+Generate comprehensive, well-structured reports that directly answer research questions.
+Never describe methodology or research process.
+Never mention external files or tools.
+Focus entirely on findings and analysis."""),
+            HumanMessage(content=prompt)
+        ]
+
+        try:
+            logger.info("[HYBRID Phase 2] Invoking LLM for holistic report")
+            response = await self.llm.ainvoke(
+                messages,
+                timeout=settings.get('holistic_timeout_seconds', 240)
+            )
+
+            report_text = extract_content(response)
+            logger.info(f"[HYBRID Phase 2] Generated holistic report: {len(report_text)} characters")
+
+            # Count table anchors
+            table_specs = self._extract_table_specs(report_text)
+            logger.info(f"[HYBRID Phase 2] Found {len(table_specs)} table anchors")
+
+            return report_text
+
+        except Exception as exc:
+            logger.error(f"[HYBRID Phase 2] Holistic report generation failed: {exc}")
+            raise
+
+    async def _generate_tables_from_anchors_async(
+        self,
+        report_text: str,
+        calc_context: Any,
+        findings: Dict[str, Any]
+    ) -> str:
+        """
+        Phase 3: Parse table anchors and generate tables with structured output.
+
+        Args:
+            report_text: Report with table anchors from Phase 2
+            calc_context: CalculationContext from Phase 1
+            findings: Compiled findings
+
+        Returns:
+            Final report with all tables rendered
+        """
+        import asyncio
+
+        logger.info("[HYBRID Phase 3] Starting table generation from anchors")
+
+        tables = self._extract_table_specs(report_text)
+        if not tables:
+            logger.info("[HYBRID Phase 3] No table anchors found, returning report as-is")
+            return report_text
+
+        settings = self.config.get('agents', {}).get('reporter', {}).get('hybrid_settings', {})
+        enable_async = settings.get('enable_async_blocks', False)
+        concurrency = settings.get('max_concurrent_blocks', 2)
+
+        logger.info(f"[HYBRID Phase 3] Generating {len(tables)} tables (async: {enable_async}, concurrency: {concurrency})")
+
+        async def render_table(spec):
+            try:
+                table_md = await self._generate_single_table(spec, calc_context, findings)
+                return spec['full_match'], table_md, None
+            except Exception as exc:
+                logger.error(f"[HYBRID Phase 3] Table generation failed for {spec['table_id']}: {exc}")
+                fallback = self._fallback_table_summary(spec, calc_context, findings, error=str(exc))
+                return spec['full_match'], fallback, exc
+
+        if enable_async:
+            semaphore = asyncio.Semaphore(concurrency)
+
+            async def guarded(spec):
+                async with semaphore:
+                    return await render_table(spec)
+
+            rendered_blocks = await asyncio.gather(*(guarded(spec) for spec in tables), return_exceptions=False)
+        else:
+            rendered_blocks = []
+            for spec in tables:
+                result = await render_table(spec)
+                rendered_blocks.append(result)
+
+        # Aggregate errors
+        error_aggregates = self._aggregate_async_errors(rendered_blocks)
+        logger.info(f"[HYBRID Phase 3] Table generation complete: {error_aggregates['successful']}/{error_aggregates['total_tables']} successful")
+
+        # Replace anchors with rendered tables (in reverse order to preserve positions)
+        final_text = report_text
+        for match, replacement, error in reversed(rendered_blocks):
+            final_text = final_text.replace(match, replacement, 1)
+
+        # Alert on any unreplaced tables
+        self._alert_on_unreplaced_tables(final_text)
+
+        return final_text
+
+    async def _generate_single_table(
+        self,
+        spec: Dict[str, Any],
+        calc_context: Any,
+        findings: Dict[str, Any]
+    ) -> str:
+        """
+        Generate a single table from specification and calculation context.
+
+        Args:
+            spec: Table specification with table_id
+            calc_context: CalculationContext with data
+            findings: Compiled findings
+
+        Returns:
+            Rendered markdown table
+        """
+        from ..core.report_models_structured import TableBlock, get_databricks_schema
+
+        table_id = spec['table_id']
+        logger.info(f"[HYBRID Phase 3] Generating table: {table_id}")
+
+        # Select relevant comparisons for this table
+        relevant_comparisons = calc_context.key_comparisons[:10]  # Limit to 10 rows
+
+        if not relevant_comparisons:
+            logger.warning(f"[HYBRID Phase 3] No comparisons available for table {table_id}")
+            return f"\n\n*Table {table_id}: No data available*\n\n"
+
+        # Build prompt for table generation
+        comparisons_text = "\n".join([
+            f"- {comp.primary_key}: {', '.join([f'{k}={v}' for k, v in comp.metrics.items()])}"
+            for comp in relevant_comparisons
+        ])
+
+        prompt = f"""Generate a table for: {table_id}
+
+Available Comparison Data:
+{comparisons_text}
+
+Create a well-formatted table with:
+- headers: List of column names
+- rows: List of rows, where each row is a list of cell values
+- caption: Brief description of what the table shows
+
+Make the table clear, concise, and informative."""
+
+        messages = [
+            SystemMessage(content="You are a table generation specialist. Create clear, well-structured tables."),
+            HumanMessage(content=prompt)
+        ]
+
+        try:
+            # Use structured output for table
+            structured_llm = self.llm.with_structured_output(
+                TableBlock,
+                method="json_schema"
+            )
+
+            response = await structured_llm.ainvoke(messages)
+            table_block = self._validate_structured_response(response, TableBlock)
+
+            # Render to markdown
+            table_md = table_block.render_markdown()
+            logger.info(f"[HYBRID Phase 3] Successfully generated table {table_id}: {len(table_md)} chars")
+
+            return f"\n\n{table_md}\n\n"
+
+        except Exception as exc:
+            logger.error(f"[HYBRID Phase 3] Structured table generation failed for {table_id}: {exc}")
+            raise
+
+    def _fallback_table_summary(
+        self,
+        spec: Dict[str, Any],
+        calc_context: Any,
+        findings: Dict[str, Any],
+        error: str = None
+    ) -> str:
+        """
+        Generate bullet summary fallback when table generation fails.
+
+        Args:
+            spec: Table specification
+            calc_context: CalculationContext with data
+            findings: Compiled findings
+            error: Optional error message
+
+        Returns:
+            Bullet list summary
+        """
+        table_id = spec['table_id']
+        max_rows = self.config.get('agents', {}).get('reporter', {}).get('hybrid_settings', {}).get(
+            'table_fallback_max_rows', 6
+        )
+
+        logger.info(f"[HYBRID Phase 3] Generating fallback summary for table {table_id}")
+
+        # Select top comparisons
+        comparisons = calc_context.key_comparisons[:max_rows]
+
+        if not comparisons:
+            return f"\n\n*Table {table_id}: No data available for fallback summary*\n\n"
+
+        bullets = [f"\n\n**{table_id}** (summary):"]
+        citations = findings.get('citations', [])
+
+        for comp in comparisons:
+            metrics_str = ", ".join([f"{k}: {v}" for k, v in list(comp.metrics.items())[:3]])
+
+            # Try to find citation
+            citation = ""
+            if comp.source_observation_ids:
+                citation = self._resolve_citation(comp.source_observation_ids[0], citations)
+
+            bullets.append(f"- {comp.primary_key}: {metrics_str} {citation}")
+
+        if error:
+            bullets.append(f"\n*(Structured table unavailable: {error[:100]})*")
+
+        return "\n".join(bullets) + "\n\n"
+
+    # ===================================================================
+    # HYBRID MULTI-PASS REPORT GENERATION - HELPER METHODS
+    # ===================================================================
+
+    def _dedupe_preserve_order(self, observations: List[Dict]) -> List[Dict]:
+        """
+        Deduplicate observations preserving first occurrence order.
+
+        Deduplication key: (step_id, content_hash[:100])
+        This prevents selector top-K and recency tail from duplicating tokens.
+        """
+        import hashlib
+
+        seen = set()
+        deduped = []
+
+        for obs in observations:
+            # Create deduplication key from step_id and content prefix
+            step_id = obs.get('step_id', '')
+            content = obs.get('content', '')[:100]  # First 100 chars for efficiency
+            key = (step_id, hashlib.md5(content.encode()).hexdigest())
+
+            if key not in seen:
+                seen.add(key)
+                deduped.append(obs)
+
+        return deduped
+
+    def _extract_table_specs(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Extract table anchor specifications from report text.
+
+        Handles various bracket styles and validates for duplicates.
+        """
+        pattern_template = self.config.get('agents', {}).get('reporter', {}).get(
+            'hybrid_settings', {}
+        ).get('table_anchor_format', '[TABLE: {id}]')
+
+        # Build regex pattern from template
+        escaped = re.escape(pattern_template)
+        # Replace the escaped {id} placeholder with capture group
+        # Note: re.escape will turn {id} into \{id\}, so we need to match that
+        pattern = escaped.replace(r'\{id\}', r'([^\[\]\{\}]+)')
+
+        specs = []
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            specs.append({
+                'full_match': match.group(0),
+                'table_id': match.group(1).strip(),
+                'position': match.start(),
+                'context': text[max(0, match.start()-50):match.end()+50]  # For debugging
+            })
+
+        # Validate for duplicate IDs
+        table_ids = [s['table_id'] for s in specs]
+        if len(table_ids) != len(set(table_ids)):
+            logger.warning(f"Duplicate table IDs detected: {table_ids}")
+
+        return specs
+
+    def _resolve_citation(self, observation_id: str, citations: List[Dict] = None) -> str:
+        """
+        Map observation ID to citation marker or source reference.
+
+        Args:
+            observation_id: ID of the observation needing citation
+            citations: Optional list of existing citations from state
+
+        Returns:
+            Citation marker like '[1]' or '(ref:abc123)' or empty string
+        """
+        if not observation_id:
+            return ""
+
+        # First try to find in existing citations
+        if citations:
+            for i, cite in enumerate(citations):
+                if cite.get('observation_id') == observation_id:
+                    return f"[{i+1}]"
+                # Also check if observation content matches citation source
+                if cite.get('source_id') == observation_id:
+                    return f"[{i+1}]"
+
+        # Fallback to abbreviated observation ID
+        return f"(obs:{observation_id[-6:]})" if len(observation_id) > 6 else f"(obs:{observation_id})"
+
+    def _enforce_token_budget(self, text: str, max_tokens: int, safety_factor: float = 0.9) -> str:
+        """
+        Enforce token budget with safety margin.
+
+        Args:
+            text: Input text to potentially truncate
+            max_tokens: Maximum allowed tokens
+            safety_factor: Safety margin (0.9 = use 90% of limit)
+
+        Returns:
+            Truncated text if needed, original otherwise
+        """
+        try:
+            from transformers import AutoTokenizer
+
+            # Use cached tokenizer or initialize
+            if not hasattr(self, '_tokenizer'):
+                self._tokenizer = AutoTokenizer.from_pretrained('gpt2')  # Approximate token counter
+
+            actual_limit = int(max_tokens * safety_factor)
+            tokens = self._tokenizer.encode(text)
+
+            if len(tokens) <= actual_limit:
+                return text
+
+            # Smart truncation - try to break at sentence boundary
+            truncated_tokens = tokens[:actual_limit]
+            truncated_text = self._tokenizer.decode(truncated_tokens)
+
+            # Find last complete sentence
+            last_sentence = truncated_text.rfind('. ')
+            if last_sentence > len(truncated_text) * 0.7:  # Keep at least 70% of text
+                truncated_text = truncated_text[:last_sentence + 1]
+
+            return truncated_text + " [truncated for token limit]"
+        except Exception as e:
+            logger.warning(f"Token budget enforcement failed: {e}. Falling back to character limit.")
+            # Fallback to character-based truncation
+            char_limit = int(max_tokens * 4 * safety_factor)  # ~4 chars per token
+            if len(text) <= char_limit:
+                return text
+            return text[:char_limit] + " [truncated for token limit]"
+
+    def _summarize_observations_for_prompt(
+        self,
+        observations: List[Dict],
+        max_chars: int = 200000
+    ) -> str:
+        """
+        Format observations with FULL CONTENT for LLM processing.
+
+        Uses the full_content field to preserve complete observation data including
+        tables, numeric data, and structured information critical for Phase 1 extraction.
+
+        With 200K character budget, this should accommodate most research tasks without truncation.
+        """
+        if not observations:
+            return ""
+
+        # Build formatted observations with FULL content
+        parts = []
+        total_chars = 0
+
+        for obs in observations:
+            # CRITICAL: Use full_content field to preserve tables and numeric data!
+            full_content = obs.get('full_content', obs.get('content', ''))
+            step_id = obs.get('step_id', 'unknown')
+            formatted = f"Step {step_id}: {full_content}"
+            parts.append(formatted)
+            total_chars += len(formatted)
+
+        result = "\n\n".join(parts)
+
+        logger.info(
+            f"[Phase 1 Observations] Formatted {len(observations)} observations: "
+            f"{total_chars:,} chars (limit: {max_chars:,})"
+        )
+
+        # Only truncate if we exceed the generous limit
+        if len(result) > max_chars:
+            logger.warning(
+                f"[Phase 1 Observations] Truncating {len(result):,} -> {max_chars:,} chars"
+            )
+            result = result[:max_chars] + f"\n\n[Content truncated at {max_chars:,} char limit]"
+
+        return result
+
+    def _validate_hybrid_config(self, config: Dict) -> None:
+        """
+        Validate hybrid generation configuration.
+
+        Raises:
+            ValueError: If configuration is invalid or inconsistent
+        """
+        settings = config.get('agents', {}).get('reporter', {}).get('hybrid_settings', {})
+        memory_config = config.get('memory', {})
+        report_config = config.get('report', {})
+
+        # Validate observation windows don't exceed memory limits
+        memory_max = memory_config.get('max_observations', 280)
+        calc_total = settings.get('calc_selector_top_k', 60) + settings.get('calc_recent_tail', 20)
+
+        if calc_total > memory_max:
+            raise ValueError(
+                f"Calculation observations ({calc_total}) exceed memory limit ({memory_max}). "
+                f"Reduce calc_selector_top_k or calc_recent_tail."
+            )
+
+        # Validate async settings
+        if settings.get('enable_async_blocks'):
+            max_concurrent = settings.get('max_concurrent_blocks', 2)
+            if max_concurrent > 5:
+                logger.warning(
+                    f"High concurrency ({max_concurrent}) may cause rate limit issues. "
+                    f"Consider reducing max_concurrent_blocks."
+                )
+
+        # Validate observation limits are sensible
+        para_limit = report_config.get('max_paragraph_observations', 40)
+        table_limit = report_config.get('max_table_observations', 80)
+
+        if table_limit < para_limit:
+            logger.warning(
+                f"Table observation limit ({table_limit}) < paragraph limit ({para_limit}). "
+                f"Tables typically need more context."
+            )
+
+        # Validate section-specific limits don't exceed global
+        section_limits = report_config.get('section_observation_limits', {})
+        for section, limit in section_limits.items():
+            if limit > memory_max:
+                raise ValueError(
+                    f"Section '{section}' limit ({limit}) exceeds global memory limit ({memory_max})"
+                )
+
+        # Validate contamination patterns are valid regexes
+        patterns = settings.get('contamination_patterns', [])
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error as e:
+                raise ValueError(f"Invalid contamination pattern regex '{pattern}': {e}")
+
+        logger.info(f"Hybrid configuration validated: {calc_total} calc observations, "
+                   f"{para_limit}/{table_limit} para/table limits")
+
+    def _monitor_memory_usage(self, phase: str, observations_count: int) -> None:
+        """
+        Monitor and report memory usage during processing.
+
+        Args:
+            phase: Current processing phase name
+            observations_count: Number of observations being processed
+        """
+        try:
+            import psutil
+            import os
+
+            # Get current process
+            process = psutil.Process(os.getpid())
+
+            # Memory metrics
+            memory_info = process.memory_info()
+            memory_mb = memory_info.rss / (1024 * 1024)  # RSS in MB
+            memory_percent = process.memory_percent()
+
+            # Check against soft limit
+            memory_limit_mb = self.config.get('memory_limit_mb', 2048)
+
+            if memory_mb > memory_limit_mb:
+                logger.warning(
+                    f"Memory usage {memory_mb:.1f}MB exceeds soft limit {memory_limit_mb}MB in {phase} "
+                    f"with {observations_count} observations"
+                )
+
+            # Emit metrics for monitoring
+            self._emit_hybrid_metrics(metrics={
+                f'{phase}_memory_mb': round(memory_mb, 1),
+                f'{phase}_memory_percent': round(memory_percent, 2),
+                f'{phase}_observations': observations_count
+            })
+
+            # Log if verbose mode
+            if self.config.get('debug_memory', False):
+                logger.info(f"[{phase}] Memory: {memory_mb:.1f}MB ({memory_percent:.1f}%), "
+                           f"Observations: {observations_count}")
+        except ImportError:
+            logger.warning("psutil not available for memory monitoring")
+        except Exception as e:
+            logger.warning(f"Memory monitoring failed: {e}")
+
+    def _salvage_partial_context(
+        self,
+        partial_response: Any,
+        error: Exception
+    ) -> Optional[Any]:
+        """
+        Attempt to salvage partial calculation context from failed response.
+
+        Args:
+            partial_response: Potentially partial response from LLM
+            error: The exception that occurred
+
+        Returns:
+            CalculationContext with salvaged data or None if unrecoverable
+        """
+        from ..core.report_generation.models import CalculationContext, DataPoint, Calculation
+
+        if partial_response is None:
+            return None
+
+        # Try to extract any valid data points
+        salvaged = CalculationContext(
+            extracted_data=[],
+            calculations=[],
+            key_comparisons=[],
+            data_quality_notes=[f"Partial extraction due to: {str(error)[:100]}"]
+        )
+
+        # If response is a dict, try to extract fields
+        if isinstance(partial_response, dict):
+            # Salvage extracted_data if present
+            if 'extracted_data' in partial_response:
+                try:
+                    for item in partial_response['extracted_data']:
+                        if isinstance(item, dict) and 'entity' in item and 'metric' in item:
+                            salvaged.extracted_data.append(DataPoint(**item))
+                except Exception as e:
+                    salvaged.data_quality_notes.append(f"Failed to parse extracted_data: {e}")
+
+            # Salvage calculations if present
+            if 'calculations' in partial_response:
+                try:
+                    for calc in partial_response.get('calculations', []):
+                        if isinstance(calc, dict) and 'description' in calc:
+                            salvaged.calculations.append(Calculation(**calc))
+                except Exception as e:
+                    salvaged.data_quality_notes.append(f"Failed to parse calculations: {e}")
+
+        # Only return if we salvaged something useful
+        if salvaged.extracted_data or salvaged.calculations:
+            logger.info(f"Salvaged partial context: {len(salvaged.extracted_data)} data points, "
+                       f"{len(salvaged.calculations)} calculations")
+            return salvaged
+
+        return None
+
+    def _aggregate_async_errors(
+        self,
+        results: List[Tuple[str, str, Optional[Exception]]]
+    ) -> Dict[str, Any]:
+        """
+        Aggregate errors from async table generation.
+
+        Args:
+            results: List of (match, replacement, error) tuples
+
+        Returns:
+            Aggregated error metrics and diagnostics
+        """
+        from collections import defaultdict
+
+        errors_by_type = defaultdict(list)
+        successful = 0
+        failed = 0
+
+        for match, replacement, error in results:
+            if error:
+                failed += 1
+                error_type = type(error).__name__
+                errors_by_type[error_type].append({
+                    'match': match[:50],  # Truncate for logging
+                    'error': str(error)[:200]
+                })
+            else:
+                successful += 1
+
+        # Compute aggregates
+        aggregates = {
+            'total_tables': len(results),
+            'successful': successful,
+            'failed': failed,
+            'success_rate': successful / len(results) if results else 0,
+            'error_types': list(errors_by_type.keys()),
+            'error_breakdown': {k: len(v) for k, v in errors_by_type.items()}
+        }
+
+        # Log warnings for high failure rates
+        if aggregates['success_rate'] < 0.5:
+            logger.error(f"High table generation failure rate: {aggregates['success_rate']:.1%}")
+            for error_type, instances in errors_by_type.items():
+                logger.error(f"  {error_type}: {len(instances)} failures")
+                if instances:
+                    logger.error(f"    Example: {instances[0]['error']}")
+
+        return aggregates
+
+    def _validate_structured_response(
+        self,
+        response: Union[Dict, Any],
+        expected_model: Any
+    ) -> Any:
+        """
+        Validate and convert structured output response.
+
+        Args:
+            response: Response from LLM (dict or Pydantic model)
+            expected_model: Expected Pydantic model class
+
+        Returns:
+            Validated Pydantic model instance
+
+        Raises:
+            ValidationError: If response doesn't match schema
+        """
+        from pydantic import ValidationError
+
+        # If already the right type, validate and return
+        if isinstance(response, expected_model):
+            return response
+
+        # If dict, try to construct model
+        if isinstance(response, dict):
+            try:
+                return expected_model(**response)
+            except ValidationError as e:
+                logger.error(f"Schema validation failed for {expected_model.__name__}: {e}")
+
+                # Try to provide helpful error details
+                errors = e.errors()
+                for error in errors[:3]:  # Show first 3 errors
+                    logger.error(f"  Field '{'.'.join(str(x) for x in error['loc'])}': {error['msg']}")
+
+                raise
+
+        # Unexpected type
+        raise TypeError(f"Expected {expected_model.__name__} or dict, got {type(response).__name__}")
+
+    def _alert_on_unreplaced_tables(self, final_text: str) -> None:
+        """
+        Check for and alert on any unreplaced table anchors.
+
+        Args:
+            final_text: Final report text after table replacement
+        """
+        pattern = self.config.get('agents', {}).get('reporter', {}).get(
+            'hybrid_settings', {}
+        ).get('table_anchor_format', '[TABLE: {id}]')
+
+        # Build search pattern
+        escaped = re.escape(pattern)
+        search_pattern = escaped.replace(r'\{id\}', r'[^\\[\\]]+')
+
+        unreplaced = re.findall(search_pattern, final_text)
+
+        if unreplaced:
+            logger.error(f"Found {len(unreplaced)} unreplaced table anchors in final report")
+            for anchor in unreplaced[:3]:  # Log first 3
+                logger.error(f"  Unreplaced: {anchor}")
+
+            # Emit metric for monitoring
+            self._emit_hybrid_metrics(metrics={
+                'unreplaced_tables': len(unreplaced),
+                'unreplaced_examples': unreplaced[:3]
+            })
+
+    def _emit_hybrid_metrics(self, metrics: Dict[str, Any]) -> None:
+        """
+        Emit metrics for hybrid report generation.
+
+        Args:
+            metrics: Dictionary of metric name -> value pairs
+        """
+        if self.event_emitter:
+            try:
+                # Emit metrics through event emitter if available
+                for key, value in metrics.items():
+                    logger.info(f"[HYBRID_METRIC] {key}: {value}")
+            except Exception as e:
+                logger.warning(f"Failed to emit hybrid metrics: {e}")
+        else:
+            # Just log if no event emitter
+            for key, value in metrics.items():
+                logger.info(f"[HYBRID_METRIC] {key}: {value}")
+
+    # ===================================================================
+    # END OF HYBRID HELPER METHODS
+    # ===================================================================
+
     def _extract_loop_findings(self, compiled_findings: Dict[str, Any], loop_discoveries: List[Dict[str, Any]]) -> List[str]:
         """Extract new findings from the current research loop."""
         new_findings = []
@@ -3853,7 +6438,7 @@ Based on the available research findings, I can provide the following summary:
                     ]
 
                     response = self.llm.invoke(messages)
-                    enhanced_synthesis = response.content if hasattr(response, 'content') else str(response)
+                    enhanced_synthesis = self._extract_text_from_response(response)
 
                     logger.info(f"[PROGRESSIVE SYNTHESIS] Generated enhanced synthesis: {len(enhanced_synthesis)} characters")
                     return enhanced_synthesis

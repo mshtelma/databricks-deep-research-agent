@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { IntermediateEvent, PlanMetadata, PlanStep, ResearchMetadata } from '../types/agents'
-import { ProgressItem, StructuredProgress, WORKFLOW_PHASES, AGENT_PHASE_MAP } from '../types/progress'
+import { ProgressItem, StructuredProgress, WORKFLOW_PHASES, AGENT_PHASE_MAP, createInitialStructuredProgress } from '../types/progress'
 import { filterContent, extractPhaseInfo } from '../utils/contentFilter'
 import { evaluatePhaseStatus } from '../config/phaseTransitionRules'
 
@@ -562,23 +562,30 @@ function buildStructuredProgress(
   planDetails?: PlanMetadata,
   currentAgent?: string
 ): StructuredProgress {
-  const workflowPhases: ProgressItem[] = []
-  const planSteps: ProgressItem[] = []
-
-  // Build workflow phases (sorted by order)
-  const sortedPhases = [...WORKFLOW_PHASES].sort((a, b) => a.order - b.order)
-  sortedPhases.forEach(phase => {
+  // CRITICAL FIX: Start from baseline to ensure phases are ALWAYS present
+  // This prevents React from ever seeing an empty array during rebuilds
+  const baseline = createInitialStructuredProgress()
+  
+  // Update each baseline phase with current status from events
+  const workflowPhases: ProgressItem[] = baseline.workflowPhases.map(phase => {
     const status = determinePhaseStatus(phase.id, events, currentAgent, planDetails)
-    workflowPhases.push({
-      id: phase.id,
-      label: phase.name,
+    return {
+      ...phase,
       status,
-      isWorkflowPhase: true,
       timestamp: getPhaseTimestamp(phase.id, events)
-    })
+    }
   })
 
+  if (PLAN_DEBUG_ENABLED) {
+    console.log(`[buildStructuredProgress] Updated ${workflowPhases.length} phases from baseline`, {
+      eventCount: events.length,
+      currentAgent,
+      statuses: workflowPhases.map(p => `${p.id}:${p.status}`).join(', ')
+    })
+  }
+
   // Build plan steps if available
+  const planSteps: ProgressItem[] = []
   if (planDetails?.steps) {
     planDetails.steps.forEach((step: PlanStep, index: number) => {
       planSteps.push({
@@ -606,6 +613,58 @@ function buildStructuredProgress(
   }
 }
 
+/**
+ * Marks all phases and steps as completed with 100% progress.
+ * Used when global completion events arrive (research_completed, report_generated, etc.)
+ */
+function markAllPhasesCompleted(current: StructuredProgress): StructuredProgress {
+  return {
+    ...current,
+    workflowPhases: current.workflowPhases.map(phase => ({
+      ...phase,
+      status: 'completed' as const
+    })),
+    planSteps: current.planSteps.map(step => ({
+      ...step,
+      status: 'completed' as const
+    })),
+    overallProgress: 100
+  }
+}
+
+/**
+ * Checks if any workflow_phase event indicates the phase has started.
+ * Backend emits: { event_type: 'workflow_phase', data: { phase: 'initiate', status: 'started' } }
+ */
+function hasPhaseStartedEvent(phaseId: string, events: IntermediateEvent[]): boolean {
+  return events.some(e =>
+    e.event_type === 'workflow_phase' &&
+    e.data?.phase === phaseId &&
+    (e.data as any)?.status === 'started'
+  )
+}
+
+/**
+ * Checks if any workflow_phase event indicates the phase has completed.
+ * Backend emits: { event_type: 'workflow_phase', data: { phase: 'initiate', status: 'completed' } }
+ */
+function hasPhaseCompletedEvent(phaseId: string, events: IntermediateEvent[]): boolean {
+  return events.some(e =>
+    e.event_type === 'workflow_phase' &&
+    e.data?.phase === phaseId &&
+    (e.data as any)?.status === 'completed'
+  )
+}
+
+/**
+ * Checks if any global completion event has been emitted.
+ * These events signal the entire research workflow is done.
+ */
+function hasGlobalCompletionEvent(events: IntermediateEvent[]): boolean {
+  return events.some(e =>
+    ['research_completed', 'report_generated', 'synthesis_completed'].includes(e.event_type)
+  )
+}
 
 function determinePhaseStatus(
   phaseId: string,
@@ -613,60 +672,70 @@ function determinePhaseStatus(
   currentAgent?: string,
   planDetails?: any
 ): ProgressItem['status'] {
-  // Check for explicit phase completion events first
+  // PRIORITY 1: Global completion events mark ALL phases complete
+  if (hasGlobalCompletionEvent(events)) {
+    return 'completed'
+  }
+
+  // PRIORITY 2: Explicit workflow_phase completion events
+  if (hasPhaseCompletedEvent(phaseId, events)) {
+    return 'completed'
+  }
+
+  // PRIORITY 3: Legacy phase_completed events
   const phaseCompletionEvents = events.filter(e =>
-    e.event_type === 'phase_completed' && e.data && 'phase' in e.data && e.data.phase === phaseId
+    e.event_type === 'phase_completed' && e.data?.phase === phaseId
   )
   if (phaseCompletionEvents.length > 0) {
     return 'completed'
   }
 
-  // Check if this phase is currently active
+  // PRIORITY 4: Current agent match indicates active
   if (currentAgent && AGENT_PHASE_MAP[currentAgent] === phaseId) {
     return 'active'
   }
 
-  // Check events for completion/activation
-  const phaseEvents = events.filter(e => {
-    const agent = e.data.agent || e.data.current_agent || e.data.from_agent
-    return agent && AGENT_PHASE_MAP[agent] === phaseId
-  })
-
-  if (phaseEvents.some(e => e.event_type.includes('complete') || e.event_type.includes('done'))) {
-    return 'completed'
-  }
-
-  if (phaseEvents.some(e => e.event_type.includes('start') || e.event_type.includes('begin'))) {
+  // PRIORITY 5: Explicit workflow_phase started events
+  if (hasPhaseStartedEvent(phaseId, events)) {
     return 'active'
   }
 
-  // Debug logging for phase transitions
-  if (phaseId === 'initiate') {
-    console.group(`🔍 [PHASE DEBUG] ${phaseId}`)
-    console.log('Total Events:', events.length)
-    console.log('Current Agent:', currentAgent)
+  // PRIORITY 6: Check agent_handoff events for activation
+  const phaseEvents = events.filter(e => {
+    const agent = e.data?.agent || e.data?.current_agent || e.data?.from_agent
+    return agent && AGENT_PHASE_MAP[agent] === phaseId
+  })
 
-    // Log agent_handoff events specifically
-    const handoffEvents = events.filter(e => e.event_type === 'agent_handoff')
-    console.log('Agent Handoff Events:', handoffEvents.length)
-    handoffEvents.forEach((e, i) => {
-      console.log(`  Handoff ${i + 1}:`, {
-        from: e.data?.from_agent,
-        to: (e.data as any)?.to_agent,
-        reason: (e.data as any)?.reason
-      })
+  if (phaseEvents.length > 0) {
+    // Has events for this phase, check if completed
+    const completedEvents = phaseEvents.filter(e =>
+      ['completed', 'done', 'finished'].includes((e.data as any)?.status?.toLowerCase() || '')
+    )
+    if (completedEvents.length > 0) {
+      return 'completed'
+    }
+
+    // Has events but not completed - check if later phase is active
+    const currentPhaseOrder = WORKFLOW_PHASES.find(p => p.id === phaseId)?.order || 0
+    const hasLaterPhaseEvents = events.some(e => {
+      const agent = e.data?.agent || e.data?.current_agent
+      const laterPhase = agent && AGENT_PHASE_MAP[agent]
+      if (!laterPhase) return false
+      const laterPhaseOrder = WORKFLOW_PHASES.find(p => p.id === laterPhase)?.order || 0
+      return laterPhaseOrder > currentPhaseOrder
     })
 
-    // Log last 5 events for context
-    console.log('Last 5 Events:')
-    events.slice(-5).forEach(e => {
-      console.log(`  - ${e.event_type}:`, e.data)
-    })
-    console.groupEnd()
+    return hasLaterPhaseEvents ? 'completed' : 'active'
   }
 
-  // Use the abstract phase transition evaluation from config
-  return evaluatePhaseStatus(phaseId, events, currentAgent, planDetails)
+  // PRIORITY 7: Fallback to transition rules (from phaseTransitionRules.ts)
+  const ruleBasedStatus = evaluatePhaseStatus(phaseId, events, currentAgent, planDetails)
+  if (ruleBasedStatus !== 'pending') {
+    return ruleBasedStatus
+  }
+
+  // DEFAULT: pending (waiting to start)
+  return 'pending'
 }
 
 function mapPlanStepStatus(stepStatus?: string): ProgressItem['status'] {
@@ -701,13 +770,13 @@ export function useAgentClient() {
   const [isStreaming, setIsStreaming] = useState(false)
   const [intermediateEvents, setIntermediateEvents] = useState<IntermediateEvent[]>([])
   const [currentStreamingId, setCurrentStreamingId] = useState<string | null>(null)
-  const [researchProgress, setResearchProgress] = useState<StructuredProgress>({
-    workflowPhases: [],
-    planSteps: [],
-    overallProgress: 0
-  })
+  const [researchProgress, setResearchProgress] = useState<StructuredProgress>(
+    createInitialStructuredProgress()  // All phases start as 'pending'
+  )
   const clientRef = useRef(new AgentApiClient())
   const abortControllerRef = useRef<AbortController | null>(null)
+  const currentMetadataRef = useRef<ResearchMetadata>({})
+  const intermediateEventsRef = useRef<IntermediateEvent[]>([])
 
   const addMessage = useCallback((message: Omit<ChatMessage, 'id'>): string => {
     const id = crypto.randomUUID()
@@ -721,6 +790,15 @@ export function useAgentClient() {
   }, [])
 
   const updateMessage = useCallback((id: string, updates: Partial<ChatMessage>) => {
+    // CRITICAL DEBUGGING: Log when we update message metadata
+    if (updates.metadata?.researchProgress && PLAN_DEBUG_ENABLED) {
+      console.log('📝 [updateMessage] Updating message with researchProgress:', {
+        messageId: id,
+        phases: updates.metadata.researchProgress.workflowPhases?.length,
+        steps: updates.metadata.researchProgress.planSteps?.length,
+        overallProgress: updates.metadata.researchProgress.overallProgress
+      })
+    }
     setMessages(prev =>
       prev.map(msg => msg.id === id ? { ...msg, ...updates } : msg)
     )
@@ -731,19 +809,37 @@ export function useAgentClient() {
       console.debug('[ProgressDebug] updateResearchProgress', {
         currentAgent,
         planStatus: planDetails?.status,
-        steps: planDetails?.steps?.length
+        steps: planDetails?.steps?.length,
+        eventCount: intermediateEventsRef.current.length
       })
     }
-    setResearchProgress(prev => {
-      const structuredProgress = buildStructuredProgress(intermediateEvents, planDetails, currentAgent)
+    const structuredProgress = buildStructuredProgress(intermediateEventsRef.current, planDetails, currentAgent)
 
-      return {
+    // Persist current snapshot into metadata ref so messages keep progress
+    currentMetadataRef.current = {
+      ...currentMetadataRef.current,
+      researchProgress: structuredProgress
+    }
+
+    setResearchProgress(prev => {
+      const structuredProgressWithTiming = {
         ...structuredProgress,
-        startTime: prev.startTime,
+        startTime: prev.startTime ?? Date.now(),
         elapsedTime: prev.startTime ? (Date.now() - prev.startTime) / 1000 : undefined
       }
+
+      if (PLAN_DEBUG_ENABLED) {
+        console.log('[Progress] Updated research progress:', {
+          phases: structuredProgressWithTiming.workflowPhases.length,
+          steps: structuredProgressWithTiming.planSteps.length,
+          currentAgent,
+          overallProgress: structuredProgressWithTiming.overallProgress
+        })
+      }
+
+      return structuredProgressWithTiming
     })
-  }, [intermediateEvents])
+  }, [])
 
   const sendStreamingMessage = useCallback(async (userMessage: string) => {
     // Cancel any existing request
@@ -767,12 +863,12 @@ export function useAgentClient() {
     setCurrentStreamingId(assistantMessageId)
     setIsStreaming(true)
     setIntermediateEvents([])
+    intermediateEventsRef.current = []  // Reset ref for new session
     setResearchProgress({
-      workflowPhases: [],
-      planSteps: [],
-      overallProgress: 0,
+      ...createInitialStructuredProgress(),  // Baseline with all phases
       startTime: Date.now()
     })
+    currentMetadataRef.current = {}  // Reset metadata for new session
 
     try {
       const request: ResponsesAgentRequest = {
@@ -840,13 +936,15 @@ export function useAgentClient() {
                 // Update message with filtered content
                 updateMessage(assistantMessageId, {
                   content: displayContent,
-                  isStreaming: true
+                  isStreaming: true,
+                  metadata: currentMetadataRef.current  // Include persisted metadata
                 })
                 updateResearchProgress(currentAgent, currentMetadata.planDetails)
               } else {
                 updateMessage(assistantMessageId, {
                   content: displayContent,
-                  isStreaming: true
+                  isStreaming: true,
+                  metadata: currentMetadataRef.current  // Include persisted metadata
                 })
               }
             }
@@ -873,11 +971,30 @@ export function useAgentClient() {
               // Final research progress update with reporter agent
               updateResearchProgress('reporter', currentMetadata.planDetails)
 
+              // CRITICAL FIX: Persist final research progress in metadata
+              const finalProgress = buildStructuredProgress(intermediateEventsRef.current, currentMetadata.planDetails, 'reporter')
+              currentMetadata.researchProgress = {
+                ...finalProgress,
+                overallProgress: finalProgress.overallProgress || 100  // Ensure 100% on completion
+              }
+              currentMetadataRef.current = currentMetadata  // Sync ref with local
+
+              console.log('✅ [output_item.done] Persisting final progress to message:', {
+                messageId: assistantMessageId,
+                phases: finalProgress.workflowPhases.length,
+                steps: finalProgress.planSteps.length,
+                overallProgress: currentMetadata.researchProgress.overallProgress
+              })
+
               updateMessage(assistantMessageId, {
                 content: cleanFinalContent,
                 isStreaming: false,
                 metadata: currentMetadata
               })
+
+              // End the streaming state
+              setIsStreaming(false)
+              setCurrentStreamingId(null)
             }
             break
 
@@ -901,7 +1018,10 @@ export function useAgentClient() {
                 meta: event.intermediate_event.meta || {}
               }
 
-              setIntermediateEvents(prev => [...prev, intermediateEvent])
+              // CRITICAL: Update ref BEFORE setState (setState is async, ref is sync)
+              const updatedEvents = [...intermediateEventsRef.current, intermediateEvent]
+              intermediateEventsRef.current = updatedEvents
+              setIntermediateEvents(updatedEvents)
 
               const eventAgent = event.intermediate_event.data?.agent ||
                                  event.intermediate_event.data?.current_agent ||
@@ -991,13 +1111,21 @@ export function useAgentClient() {
                     progressAgent = 'researcher'
                   }
 
-                  const updatedPlan = updateStepStatusInPlan(planDetailsWorking, rawStepId, status)
-                  if (updatedPlan) {
-                    planDetailsWorking = updatedPlan
-                    planChanged = true
-                    console.log('✅ Step status updated successfully for step:', rawStepId, 'to status:', status)
+                  // Idempotent check: Only update if status actually changed
+                  const currentStep = currentMetadataRef.current.researchProgress?.planSteps
+                    ?.find(s => canonicalizeStepId(s.id) === canonicalizeStepId(rawStepId))
+
+                  if (currentStep?.status !== status) {
+                    const updatedPlan = updateStepStatusInPlan(planDetailsWorking, rawStepId, status)
+                    if (updatedPlan) {
+                      planDetailsWorking = updatedPlan
+                      planChanged = true
+                      console.log('✅ Step status updated successfully for step:', rawStepId, 'to status:', status)
+                    } else {
+                      console.log('❌ Failed to update step status for step:', rawStepId, 'to status:', status)
+                    }
                   } else {
-                    console.log('❌ Failed to update step status for step:', rawStepId, 'to status:', status)
+                    console.log('⏭️ Step status unchanged, skipping:', rawStepId, status)
                   }
 
                 }
@@ -1007,7 +1135,7 @@ export function useAgentClient() {
               if (normalizedEventType === 'step_added') {
                 const stepData = event.intermediate_event.data
                 console.log('📍 Step added event received:', stepData)
-                
+
                 if (stepData?.step_id && stepData?.step_title && planDetailsWorking) {
                   const newStep: PlanStep = {
                     id: stepData.step_id,
@@ -1016,24 +1144,82 @@ export function useAgentClient() {
                     result: undefined,
                     completedAt: undefined
                   }
-                  
+
                   // Insert the new step at the specified index or at the end
                   const insertIndex = stepData.index !== undefined ? stepData.index : planDetailsWorking.steps.length
                   const updatedSteps: PlanStep[] = [...planDetailsWorking.steps]
                   updatedSteps.splice(insertIndex, 0, newStep)
-                  
+
                   planDetailsWorking = {
                     ...planDetailsWorking,
                     steps: updatedSteps
                   }
                   planChanged = true
-                  
+
                   console.log('✅ Dynamic step added to plan:', stepData.step_title, 'at index:', insertIndex)
-                  
+
                   // Force immediate progress update
                   if (!progressAgent) {
                     progressAgent = 'researcher'
                   }
+                }
+              }
+
+              // CRITICAL FIX: Handle workflow_phase events with idempotent state checks
+              if (normalizedEventType === 'workflow_phase') {
+                const phaseStatus = event.intermediate_event.data?.status
+                const phaseName = event.intermediate_event.data?.phase
+
+                // Get current phase state to check if update is needed
+                const currentPhase = currentMetadataRef.current.researchProgress?.workflowPhases
+                  ?.find(p => p.id === phaseName)
+
+                if (phaseStatus === 'started') {
+                  // Only update if phase is NOT already active (idempotent check)
+                  if (currentPhase?.status !== 'active') {
+                    console.log(`🟢 Phase started: ${phaseName}`)
+                    updateResearchProgress(progressAgent, planDetailsWorking)
+                  } else {
+                    console.log(`⏭️ Phase already active, skipping: ${phaseName}`)
+                  }
+                } else if (phaseStatus === 'completed') {
+                  // Only update if phase is NOT already completed (idempotent check)
+                  if (currentPhase?.status !== 'completed') {
+                    console.log(`✅ Phase completed: ${phaseName}`)
+                    updateResearchProgress(progressAgent, planDetailsWorking)
+                  } else {
+                    console.log(`⏭️ Phase already completed, skipping: ${phaseName}`)
+                  }
+                }
+              }
+
+              // CRITICAL FIX: Handle global research completion events
+              // Handle global research completion events
+              if (['research_completed', 'report_generated', 'synthesis_completed'].includes(normalizedEventType)) {
+                console.log(`✅ Global completion event: ${normalizedEventType} - marking all phases complete`)
+
+                // Mark everything complete and update both live state and metadata
+                setResearchProgress(prev => {
+                  const completed = markAllPhasesCompleted(prev)
+                  // Update metadata ref
+                  currentMetadataRef.current = {
+                    ...currentMetadataRef.current,
+                    researchProgress: completed
+                  }
+                  // Also update local metadata object
+                  currentMetadata = {
+                    ...currentMetadata,
+                    researchProgress: completed
+                  }
+                  return completed
+                })
+
+                // Update message content if available
+                if (fullContent) {
+                  updateMessage(assistantMessageId, {
+                    content: fullContent,
+                    metadata: currentMetadataRef.current
+                  })
                 }
               }
 
@@ -1052,9 +1238,9 @@ export function useAgentClient() {
                 })
               }
 
-              if (planDetailsWorking) {
-                updateResearchProgress(progressAgent, planDetailsWorking)
-              }
+              // NOTE: Removed unconditional updateResearchProgress call here
+              // All updates are now handled in specific event handlers with idempotent checks
+              // This prevents duplicate/unnecessary re-renders
             }
             break
 
@@ -1113,9 +1299,10 @@ export function useAgentClient() {
           isStreaming: false
         })
       }
-    } finally {
+      // Also end the streaming state on error
       setIsStreaming(false)
       setCurrentStreamingId(null)
+    } finally {
       abortControllerRef.current = null
     }
   }, [addMessage, updateMessage])
@@ -1131,12 +1318,10 @@ export function useAgentClient() {
   const clearMessages = useCallback(() => {
     setMessages([])
     setIntermediateEvents([])
+    intermediateEventsRef.current = []  // Reset ref too
     setCurrentStreamingId(null)
-    setResearchProgress({
-      workflowPhases: [],
-      planSteps: [],
-      overallProgress: 0
-    })
+    setResearchProgress(createInitialStructuredProgress())  // Baseline state
+    currentMetadataRef.current = {}  // Reset metadata
   }, [])
 
   return {

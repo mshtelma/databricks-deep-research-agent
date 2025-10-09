@@ -1,65 +1,232 @@
 # Test Configuration Overrides
 # Only override values that need to be different for testing
 
-# Use fallback models for testing to avoid health check failures
+# Model Configuration - Test overrides (reduced tokens, single endpoints)
 models:
   default:
-    endpoint: databricks-claude-3-7-sonnet
+    endpoint: databricks-gpt-oss-20b
+    temperature: 0.7
     max_tokens: 1000
-    fallback_model: databricks-claude-3-5-sonnet
-  web_research:
-    endpoint: databricks-claude-3-7-sonnet
+    reasoning_effort: low
+
+  # TIER 1: MICRO - Single endpoint for tests
+  micro:
+    endpoints:
+      - databricks-gemma-3-12b
+    temperature: 0.5
     max_tokens: 1000
-    fallback_model: databricks-claude-3-5-sonnet
-  synthesis:
-    endpoint: databricks-claude-3-7-sonnet
+    tokens_per_minute: 800000
+    rotation_strategy: priority
+    fallback_on_429: false
+
+  # TIER 2: SIMPLE - Single endpoint for tests
+  simple:
+    endpoints:
+      - databricks-gpt-oss-20b
+    temperature: 0.5
+    max_tokens: 1000
+    reasoning_effort: low
+    tokens_per_minute: 50000
+    rotation_strategy: priority
+    fallback_on_429: false
+
+  # TIER 3: ANALYTICAL - Single endpoint for tests
+  analytical:
+    endpoints:
+      - databricks-gpt-oss-20b
+    temperature: 0.7
     max_tokens: 2000
-    fallback_model: databricks-claude-3-5-sonnet
+    reasoning_effort: low
+    tokens_per_minute: 100000
+    rotation_strategy: priority
+    fallback_on_429: false
 
-# Faster, simpler workflow for tests
-workflow:
-  max_research_loops: 2
-  max_total_steps: 10  # Reduced for faster tests
-  max_wall_clock_seconds: 60  # Reduced for deadlock prevention tests
-  recursion_limit: 500
-  auto_accept_plan: true  # No human feedback in tests
-  enable_background_investigation: false  # Simplified for tests
+  # TIER 4: COMPLEX - Single endpoint for tests
+  complex:
+    endpoints:
+      - databricks-gpt-oss-20b
+    temperature: 0.7
+    max_tokens: 4000
+    reasoning_effort: low
+    tokens_per_minute: 100000
+    rotation_strategy: priority
+    fallback_on_429: false
 
-# Reduced parallelism for test stability
-search:
-  max_concurrent_searches: 5
-  batch_delay_seconds: 1
+# Multi-Agent System Configuration
+multi_agent:
+  enabled: true
 
 # Simplified agent configurations for faster tests
 agents:
   coordinator:
     enabled: true
+    model: simple
     enable_safety_filter: true
+
   planner:
+    enabled: true
+    model: simple  # Use simple model for faster tests
     max_iterations: 1
     quality_threshold: 0.5
+    enable_deep_thinking: false
+
   researcher:
+    enabled: true
+    model: simple  # Use simple model for faster tests
     max_steps_per_execution: 2
     enable_reflexion: false
+    # Smart Web Content Fetching
+    web_content_fetching:
+      enabled: true
+      min_pages_to_fetch: 5  # Guaranteed minimum URLs to fetch
+      max_pages_to_fetch: 10  # Maximum URLs to fetch
+      top_results_to_consider: 10  # Pool size for selecting minimum
+      fetch_score_threshold: 0.6  # Minimum score to fetch
+      max_per_domain: 2  # Maximum fetches per domain
+      timeout_seconds: 10
+      max_retries: 2
+      min_content_length: 500
+      max_content_length: 50000
+
   fact_checker:
+    enabled: true
+    model: simple  # Use simple model for faster tests
     verification_level: lenient
+    enable_contradiction_detection: false
+
   reporter:
+    enabled: true
+    model: analytical  # Use analytical model for synthesis
     default_style: default
+    citation_style: APA
+    enable_grounding_markers: false
+    use_semantic_extraction: false
+    enable_structured_generation: true  # Disabled for faster tests
+    structured_generation_fallback: false
+    enable_table_validation: false  # Disabled for faster tests
+    enable_llm_self_correction: false
+    max_correction_retries: 1
+
+# Reduced parallelism for test stability
+search:
+  providers:
+    brave:
+      enabled: true
+      max_results: 10  # Reduced for tests
+      rate_limit: 1
+      timeout: 15  # Reduced timeout
+    tavily:
+      enabled: false
+  max_concurrent_searches: 2  # Reduced for tests
+  batch_delay_seconds: 0.5  # Faster for tests
+  max_results_per_query: 10  # Reduced for tests
+  enable_safe_search: true
+
+# Global recursion limit
+recursion_limit: 200  # Reduced for tests
+
+# Faster, simpler workflow for tests
+workflow:
+  max_research_loops: 1  # Reduced for faster tests
+  max_fact_check_loops: 1
+  max_total_steps: 10  # Reduced for faster tests
+  max_wall_clock_seconds: 60  # Reduced for deadlock prevention tests
+  recursion_limit: 200  # Reduced for tests
+  enable_background_investigation: false  # Simplified for tests
+  enable_human_feedback: false  # No human feedback in tests
+  auto_accept_plan: true  # Auto-accept plan in tests
+  enable_circuit_breakers: true
+  enable_progress_tracking: true
 
 # Conservative rate limiting for tests
 rate_limiting:
-  max_parallel_requests: 1
-  max_requests_per_minute: 20
+  enabled: true
+
+  retry:
+    base_delay_seconds: 5.0  # Faster for tests
+    max_delay_seconds: 20.0  # Reduced for tests
+    max_retries: 3  # Fewer retries in tests
+    jitter: 0.3
+
+  coordination:
+    max_concurrent_per_endpoint: 1
+
+  cooldown:
+    default_cooldown_seconds: 5  # Reduced for tests
+    respect_retry_after_header: true
+
+  token_tracking:
+    enable_sliding_window: true
+    window_seconds: 60
+    safety_margin: 0.9
+
+  phase_delays:
+    after_research_before_fact_check: 1.0  # Reduced for tests
+    after_fact_check_before_report: 1.0  # Reduced for tests
+    between_section_generations: 0.5  # Reduced for tests
+
+# Tier fallback disabled for tests (single endpoints)
+tier_fallback:
+  enable_cross_tier_fallback: false
+
+# Grounding and Factuality Configuration
+grounding:
+  enable_grounding: false  # Disabled for faster tests
+  verification_level: lenient
+  enable_contradiction_detection: false
+  factuality_threshold: 0.5
+
+# Entity Validation Configuration
+entity_validation:
+  enabled: false  # Disabled for faster tests
+  validation_mode: lenient
+  enable_synthesis_validation: false
+  enable_observation_validation: false
+  enable_section_validation: false
+  track_violations: false
+
+# Reflexion Configuration
+reflexion:
+  enable_reflexion: false  # Disabled for faster tests
+  reflection_memory_size: 10  # Reduced for tests
 
 # Simplified streaming for tests
 streaming:
+  enable_streaming: true
+  max_events_per_second: 5  # Reduced for tests
   batch_events: false
-  max_events_per_second: 5
+  batch_size: 1
+  batch_timeout_ms: 50
+
+# Citations Configuration
+citations:
+  citation_style: APA
+  enable_citations: false  # Disabled for faster tests
+  max_citations_per_section: 10  # Reduced for tests
+
+# Report Configuration
+report:
+  default_style: default
+  enable_grounding_markers: false  # Disabled for faster tests
+  citation_style: APA
+
+# Quality Enhancement Configuration
+quality_enhancement:
+  enabled: false  # Disabled for faster tests
+  detect_redundancy: false
+  eliminate_redundancy: false
+  optimize_structure: false
 
 # Adaptive Structure Configuration
 adaptive_structure:
-  enable_adaptive_structure: true  # Enable context-specific report section generation
-  adaptive_structure_cache_ttl: 3600  # Cache structures for 1 hour
-  use_llm_for_structure: true  # Use LLM to generate creative section names
-  max_structure_sections: 7  # Maximum number of sections
-  min_structure_sections: 4  # Minimum number of sections
+  enable_adaptive_structure: false  # Disabled for simpler tests
+  adaptive_structure_cache_ttl: 600  # Reduced cache time
+  use_llm_for_structure: false  # Disabled for faster tests
+  max_structure_sections: 5  # Reduced for tests
+  min_structure_sections: 3  # Reduced for tests
+
+# Memory and State Management Configuration
+memory:
+  max_observations: 20  # Reduced for tests
+  max_observations_per_step: 10  # Reduced for tests
+  max_search_results: 20  # Reduced for tests

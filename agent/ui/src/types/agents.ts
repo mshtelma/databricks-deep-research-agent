@@ -1,4 +1,6 @@
 // Types for the multi-agent research system
+import { StructuredProgress } from './progress'
+
 export interface IntermediateEvent {
   id: string
   timestamp: number
@@ -21,6 +23,8 @@ export interface IntermediateEvent {
     error_message?: string
     step_id?: string
     plan?: any
+    phase?: string  // Phase ID for workflow_phase events
+    status?: string  // Status for workflow_phase events (started/completed)
   }
   meta?: {
     title?: string
@@ -57,6 +61,7 @@ export interface PlanStep {
   id: string
   description: string
   status: 'pending' | 'in_progress' | 'completed' | 'skipped'
+  phaseId?: string  // Associates step with originating phase
   result?: string
   completedAt?: number
 }
@@ -71,6 +76,7 @@ export interface PlanMetadata {
 
 export interface ResearchMetadata {
   planDetails?: PlanMetadata
+  researchProgress?: StructuredProgress
   sources?: Array<{
     url: string
     title: string

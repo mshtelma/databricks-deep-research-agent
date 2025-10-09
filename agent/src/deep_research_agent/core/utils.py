@@ -610,79 +610,85 @@ class SecretResolver:
     def resolve_secret(self, value: Any) -> Any:
         """
         Resolve a secret reference to its actual value.
-        
+
         Handles {{secrets/scope/key}} syntax and returns the resolved value.
-        Uses caching to avoid repeated resolution attempts.
-        
+        Uses caching to avoid repeated resolution attempts, but always checks
+        environment variables first since they can change at runtime.
+
         Args:
             value: Value to resolve (may be a secret reference or regular value)
-            
+
         Returns:
             Resolved value or original if not a secret reference
         """
         if not isinstance(value, str) or not value.startswith("{{secrets/"):
             return value
-        
-        # Check cache first
+
+        # Parse secret reference first
+        import re
+        match = re.match(r'\{\{secrets/([^/]+)/([^}]+)\}\}', value)
+        if not match:
+            logger.warning(f"Invalid secret format: {value}")
+            return value
+
+        scope, key = match.groups()
+
+        # Check cache for successful resolution first
         if value in self._cache:
             cached_value = self._cache[value]
             if cached_value is not None:
                 logger.debug(f"Using cached secret resolution for {value}")
                 return cached_value
-        
-        # Check if we've already failed to resolve this secret
+
+        # ALWAYS try environment variables first, even if previously failed
+        # Environment variables can change at runtime (test setup, .env loading)
+        # and lookup is extremely fast
+        resolved = self._try_env_resolution(scope, key)
+        if resolved:
+            # Success! Update cache and remove from failed set if present
+            self._cache[value] = resolved
+            self._failed_secrets.discard(value)  # Remove from failed set if it was there
+            logger.info(f"Successfully resolved secret {key} using environment variable")
+            return resolved
+
+        # If env var not found and we've already tried other methods, skip retry
         if value in self._failed_secrets:
-            logger.debug(f"Skipping previously failed secret: {value}")
+            logger.debug(f"Skipping retry for previously failed secret: {value} (env var not available)")
             return value
-        
-        # Parse secret reference
-        import re
-        match = re.match(r'\{\{secrets/([^/]+)/([^}]+)\}\}', value)
-        if not match:
-            logger.warning(f"Invalid secret format: {value}")
-            self._failed_secrets.add(value)
-            return value
-        
-        scope, key = match.groups()
-        logger.debug(f"Attempting to resolve secret: scope={scope}, key={key}")
-        
-        # Try resolution methods in order
-        resolved_value = self._try_resolve_secret(scope, key, value)
-        
+
+        logger.debug(f"Attempting to resolve secret via dbutils/MLflow: scope={scope}, key={key}")
+
+        # Try other resolution methods (dbutils, MLflow)
+        resolved_value = self._try_dbutils_and_mlflow_resolution(scope, key)
+
         # Cache the result
-        if resolved_value != value:
+        if resolved_value:
             self._cache[value] = resolved_value
             logger.info(f"Successfully resolved and cached secret {key}")
+            return resolved_value
         else:
+            # All methods failed
             self._failed_secrets.add(value)
             self._cache[value] = None  # Cache failure to avoid repeated attempts
-            
-        return resolved_value
+            self._log_resolution_failure(scope, key, value)
+            return value
     
-    def _try_resolve_secret(self, scope: str, key: str, original_value: str) -> Any:
-        """Try all available secret resolution methods."""
-        
+    def _try_dbutils_and_mlflow_resolution(self, scope: str, key: str) -> Optional[str]:
+        """Try dbutils and MLflow secret resolution methods."""
+
         # Method 1: dbutils (Databricks notebooks/jobs)
         resolved = self._try_dbutils_resolution(scope, key)
         if resolved:
             logger.info(f"Successfully resolved secret {key} using dbutils")
             return resolved
-        
+
         # Method 2: MLflow get_secret (model serving)
         resolved = self._try_mlflow_resolution(scope, key)
         if resolved:
             logger.info(f"Successfully resolved secret {key} using MLflow")
             return resolved
-        
-        # Method 3: Environment variables (all contexts)
-        resolved = self._try_env_resolution(scope, key)
-        if resolved:
-            logger.info(f"Successfully resolved secret {key} using environment variable")
-            return resolved
-        
-        # All methods failed
-        self._log_resolution_failure(scope, key, original_value)
-        return original_value
+
+        return None
     
     def _try_dbutils_resolution(self, scope: str, key: str) -> Optional[str]:
         """Try to resolve secret using dbutils."""

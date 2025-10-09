@@ -29,6 +29,9 @@ from . import (
 )
 from .observation_models import StructuredObservation
 
+# Initialize logger
+logger = get_logger(__name__)
+
 
 # Reducer functions for concurrent state updates
 def use_latest_plan(left: Optional[Plan], right: Optional[Plan]) -> Optional[Plan]:
@@ -37,43 +40,77 @@ def use_latest_plan(left: Optional[Plan], right: Optional[Plan]) -> Optional[Pla
 
 
 def merge_lists(left: List[Any], right: List[Any]) -> List[Any]:
-    """Reducer that merges two lists, avoiding duplicates."""
+    """
+    Reducer that merges two lists with memory-conscious limits.
+
+    Uses proper type inspection instead of fragile string matching heuristics.
+    This is critical for correctly handling observation dicts, search results,
+    and other state list fields.
+    """
     if not left:
         return right
     if not right:
         return left
-    
+
     # MEMORY OPTIMIZATION: Limit list sizes to prevent unbounded growth
     combined = left + right
-    
+
     # Apply memory-conscious limits based on list content type
-    # Import constants from memory_config for consistency
     from .memory_config import MemoryOptimizedConfig
-    
+
     MAX_OBSERVATIONS = MemoryOptimizedConfig.MAX_OBSERVATIONS        # Keep most recent observations
     MAX_SEARCH_RESULTS = MemoryOptimizedConfig.MAX_SEARCH_RESULTS   # Keep most relevant search results
     MAX_CITATIONS = MemoryOptimizedConfig.MAX_CITATIONS             # Citations are smaller, allow more
     MAX_REFLECTIONS = MemoryOptimizedConfig.MAX_REFLECTIONS         # Limit reflection history
     MAX_AGENT_HANDOFFS = MemoryOptimizedConfig.MAX_AGENT_HANDOFFS   # Limit handoff history
     MAX_GENERAL = MemoryOptimizedConfig.MAX_GENERAL_LIST_SIZE        # Default limit for other lists
-    
-    # Determine appropriate limit (heuristic based on list content)
-    if combined and hasattr(combined[0], 'content') and len(str(combined[0])) > 1000:
-        # Large content items (like SearchResults)
-        limit = MAX_SEARCH_RESULTS if 'SearchResult' in str(type(combined[0])) else MAX_GENERAL
-    elif combined and isinstance(combined[0], str) and len(combined[0]) > 100:
-        # Text observations/reflections
-        limit = MAX_OBSERVATIONS
-    elif combined and isinstance(combined[0], dict) and 'from_agent' in str(combined[0]):
-        # Agent handoffs
-        limit = MAX_AGENT_HANDOFFS
+
+    # Determine appropriate limit using proper dict structure inspection
+    # instead of fragile hasattr/string matching
+    if combined:
+        first = combined[0]
+
+        if isinstance(first, dict):
+            # Inspect dict structure to determine type
+            # StructuredObservation dict: has content, entity_tags, metric_values
+            if "content" in first and "entity_tags" in first and "metric_values" in first:
+                limit = MAX_OBSERVATIONS
+            # SearchResult dict: has url, score, title
+            elif "url" in first and "score" in first:
+                limit = MAX_SEARCH_RESULTS
+            # Citation dict: has source, url, snippet
+            elif "source" in first and "snippet" in first:
+                limit = MAX_CITATIONS
+            # Agent handoff dict: has from_agent, to_agent
+            elif "from_agent" in first and "to_agent" in first:
+                limit = MAX_AGENT_HANDOFFS
+            else:
+                # Generic dict
+                limit = MAX_GENERAL
+
+        elif isinstance(first, str):
+            # String observations/reflections
+            # Longer strings are more likely to be observations
+            limit = MAX_OBSERVATIONS if len(first) > 100 else MAX_GENERAL
+
+        else:
+            # Object types - check type directly
+            type_name = type(first).__name__
+            if "SearchResult" in type_name:
+                limit = MAX_SEARCH_RESULTS
+            elif "Citation" in type_name:
+                limit = MAX_CITATIONS
+            elif "Observation" in type_name:
+                limit = MAX_OBSERVATIONS
+            else:
+                limit = MAX_GENERAL
     else:
         limit = MAX_GENERAL
-    
+
     # Keep most recent items if over limit
     if len(combined) > limit:
         combined = combined[-limit:]
-    
+
     return combined
 
 
@@ -120,11 +157,15 @@ class EnhancedResearchState(TypedDict):
     enable_background_investigation: Annotated[bool, use_latest_value]
     background_investigation_results: Annotated[Optional[str], use_latest_value]
     
-    # Execution state
+    # Execution state (observations stored as dicts for LangGraph serialization)
     observations: Annotated[
-        List[Union[str, StructuredObservation, Dict[str, Any]]],
-        merge_lists
-    ]  # Accumulated observations from all steps
+        List[Dict[str, Any]],  # StructuredObservation dicts (serialized at boundaries)
+        use_latest_value  # FIXED: Changed from merge_lists to prevent duplication
+    ]  # Accumulated observations from all steps - single source of truth
+    new_observations: Annotated[
+        List[Dict[str, Any]],  # Delta: new observations from current pass only
+        merge_lists  # Appends for tracking what each pass contributed
+    ]  # Temporary holding for new observations before consolidation
     completed_steps: Annotated[List[Step], merge_lists]
     current_step: Annotated[Optional[Step], use_latest_value]
     current_step_index: Annotated[int, use_latest_value]
@@ -168,7 +209,9 @@ class EnhancedResearchState(TypedDict):
     # Agent coordination
     current_agent: Annotated[str, use_latest_value]  # Which agent is currently active
     agent_handoffs: Annotated[List[Dict[str, Any]], merge_lists]  # History of agent handoffs
-    
+    coordination_completed: Annotated[bool, use_latest_value]  # Whether gap analysis coordination was performed
+    gap_decision: Annotated[Optional[Dict[str, Any]], use_latest_value]  # Last gap analysis decision
+
     # Quality metrics
     research_quality_score: Annotated[Optional[float], use_latest_value]
     coverage_score: Annotated[Optional[float], use_latest_value]
@@ -303,8 +346,8 @@ class StateManager:
             enable_iterative_planning=config.get("enable_iterative_planning", True),
             max_plan_iterations=config.get("max_plan_iterations", 3),
             
-            # Background investigation
-            enable_background_investigation=config.get("enable_background_investigation", True),
+            # Background investigation (from workflow config)
+            enable_background_investigation=config.get("workflow", {}).get("enable_background_investigation", True),
             background_investigation_results=None,
             
             # Execution
@@ -320,7 +363,8 @@ class StateManager:
             # Research
             search_results=[],
             search_queries=[],
-            
+            section_research_results={},
+
             # Grounding
             enable_grounding=config.get("grounding", {}).get("enabled", True),
             grounding_results=None,
@@ -352,7 +396,9 @@ class StateManager:
             # Coordination
             current_agent="coordinator",
             agent_handoffs=[],
-            
+            coordination_completed=False,
+            gap_decision=None,
+
             # Quality
             research_quality_score=None,
             coverage_score=None,
@@ -399,9 +445,6 @@ class StateManager:
             # Loop execution tracking
             loop_execution_history=[],
             current_loop_focus=None,
-
-            # Section research accumulation
-            section_research_results={},
         )
     
     @staticmethod
@@ -457,11 +500,26 @@ class StateManager:
         state: EnhancedResearchState,
         observation: Union[str, Any],
         step: Optional[Step] = None,
-        config: Optional[Dict[str, Any]] = None
+        config: Optional[Dict[str, Any]] = None,
+        observation_index: Optional['ObservationEmbeddingIndex'] = None
     ) -> EnhancedResearchState:
-        """Add an observation to the state with configurable memory limits, normalizing to StructuredObservation."""
+        """
+        Add an observation to the state with smart deduplication and memory limits.
+
+        Args:
+            state: The current state
+            observation: The observation to add (string or StructuredObservation)
+            step: Optional step to associate with observation
+            config: Optional configuration with memory limits
+            observation_index: Optional ObservationEmbeddingIndex for semantic deduplication
+
+        Returns:
+            Updated state with observation added (if not duplicate)
+        """
         from .observation_models import ensure_structured_observation
         from .memory_config import MemoryOptimizedConfig
+        import logging
+        logger = logging.getLogger(__name__)
 
         # Normalize observation to StructuredObservation
         structured_obs = ensure_structured_observation(observation)
@@ -470,19 +528,55 @@ class StateManager:
         if step:
             structured_obs.step_id = step.step_id
 
-        # Add to global observations with size limit
-        state["observations"].append(structured_obs)
+        # FIXED: Serialize to dict before adding to state (LangGraph requires dicts)
+        obs_dict = structured_obs.to_dict()
+
+        # Add to new_observations (delta tracking for current pass)
+        if "new_observations" not in state:
+            state["new_observations"] = []
+        state["new_observations"].append(obs_dict)
+
+        # Add to complete observations with smart deduplication
+        if "observations" not in state:
+            state["observations"] = []
+
+        # Extract content for deduplication
+        content = str(obs_dict.get("content", "")).strip()
+        if not content:
+            logger.debug("Skipping empty observation")
+            return state
+
+        # Use ObservationEmbeddingIndex if available for smart deduplication
+        if observation_index:
+            # Let the index handle all deduplication logic (hash + semantic)
+            step_id = structured_obs.step_id if hasattr(structured_obs, 'step_id') else None
+            is_new = observation_index.add_observation(content, step_id)
+
+            if is_new:
+                state["observations"].append(obs_dict)
+                logger.debug(f"Added observation to state (passed index dedup): {content[:50]}...")
+            else:
+                logger.debug(f"Skipped duplicate observation (detected by index): {content[:50]}...")
+        else:
+            # Fallback to hash-based deduplication only
+            content_lower = content.lower()
+            obs_hash = hash(content_lower) if content_lower else 0
+            existing_hashes = {
+                hash(str(o.get("content", "")).lower().strip())
+                for o in state["observations"]
+                if str(o.get("content", "")).strip()
+            }
+
+            if obs_hash not in existing_hashes:
+                state["observations"].append(obs_dict)
+                logger.debug(f"Added observation to state (hash dedup): {content[:50]}...")
+            else:
+                logger.debug(f"Skipped duplicate observation (hash match): {content[:50]}...")
 
         # Use configurable observation limit (defaults to 50, can be overridden in base.yaml)
         max_observations = MemoryOptimizedConfig.get_observations_limit(config)
         if len(state["observations"]) > max_observations:
             state["observations"] = state["observations"][-max_observations:]
-
-        # CRITICAL: Sync both observation fields to prevent data loss
-        # Ensure research_observations stays in sync with observations
-        if "research_observations" not in state:
-            state["research_observations"] = []
-        state["research_observations"] = state["observations"].copy()
 
         if step:
             if not step.observations:
@@ -495,7 +589,57 @@ class StateManager:
                 step.observations = step.observations[-max_observations_per_step:]
 
         return state
-    
+
+    @staticmethod
+    def consolidate_observations(state: EnhancedResearchState) -> EnhancedResearchState:
+        """Consolidate new_observations into observations with deduplication.
+
+        Called at workflow node boundaries to merge delta observations into the complete list.
+        Uses content-based deduplication to prevent duplicate observations.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if "new_observations" not in state or not state["new_observations"]:
+            return state
+
+        if "observations" not in state:
+            state["observations"] = []
+
+        # Build hash set of existing observations using full content
+        existing_hashes = {
+            hash(str(o.get("content", "")).lower().strip())
+            for o in state["observations"]
+            if str(o.get("content", "")).strip()
+        }
+
+        # Add new observations that aren't duplicates
+        added_count = 0
+        duplicate_count = 0
+
+        for new_obs in state["new_observations"]:
+            content = str(new_obs.get("content", "")).lower().strip()
+            obs_hash = hash(content) if content else 0
+            if obs_hash not in existing_hashes:
+                state["observations"].append(new_obs)
+                existing_hashes.add(obs_hash)
+                added_count += 1
+            else:
+                duplicate_count += 1
+
+        logger.info(
+            f"📊 Consolidated observations: "
+            f"{len(state['new_observations'])} new → "
+            f"{added_count} unique added, "
+            f"{duplicate_count} duplicates skipped, "
+            f"{len(state['observations'])} total"
+        )
+
+        # Clear new_observations after consolidation
+        state["new_observations"] = []
+
+        return state
+
     @staticmethod
     def add_search_results(
         state: EnhancedResearchState,
@@ -647,8 +791,6 @@ class StateManager:
         section_count = len(section_research)
         if section_count > 0:
             logger.info(f"Preserving ALL {section_count} section research results (no pruning)")
-        elif "section_research_results" in state:
-            logger.warning("section_research_results exists but is empty - this may indicate a bug")
         
         # Smart pruning for search results using relevance-based selection
         from .memory_config import MemoryOptimizedConfig
@@ -1021,35 +1163,83 @@ class StateManager:
 
     @staticmethod
     def should_continue_research_loop(state: EnhancedResearchState) -> bool:
-        """Determine if research should continue to another loop."""
-        current_loops = state.get("research_loops", 0)
-        max_loops = state.get("max_research_loops", 3)
+        """
+        Determine if research should continue based on COVERAGE, not quality scores.
 
-        # Don't exceed max loops
+        Quality scores (diversity, factuality) are calculated AFTER research completes
+        by the fact_checker agent, so they cannot be used to decide if research should continue.
+
+        Research continues if:
+        1. We haven't exceeded max loops
+        2. We have explicit knowledge gaps identified
+        3. We have incomplete coverage of required sections
+        4. We have insufficient observations for a complete report
+        """
+        current_loops = state.get("research_loops", 0)
+        max_loops = state.get("max_research_loops", 2)  # Reduced from 3 to prevent long runs
+
+        # Hard limit on loops
         if current_loops >= max_loops:
+            logger.info(f"[LOOP DECISION] Reached max loops ({max_loops}), stopping research")
             return False
 
-        # Continue if there are unaddressed gaps or verification needs
+        # ✅ COVERAGE-BASED DECISION LOGIC (replaces quality scores)
+
+        # Check 1: Explicit knowledge gaps identified during research
         gaps = state.get("knowledge_gaps", [])
+        if len(gaps) > 0:
+            logger.info(f"[LOOP DECISION] Loop {current_loops + 1}: Found {len(gaps)} explicit knowledge gaps - continuing")
+            return True
+
+        # Check 2: Incomplete section coverage
+        plan = state.get("current_plan")
+        if plan and hasattr(plan, "suggested_report_structure"):
+            sections = plan.suggested_report_structure or []
+            section_research = state.get("section_research_results", {})
+
+            incomplete_sections = [
+                s for s in sections
+                if s not in section_research or not section_research[s]
+            ]
+
+            if len(incomplete_sections) > 2:  # More than 2 sections missing
+                logger.info(
+                    f"[LOOP DECISION] Loop {current_loops + 1}: {len(incomplete_sections)}/{len(sections)} sections lack research - continuing"
+                )
+                logger.info(f"[LOOP DECISION] Incomplete sections (first 3): {incomplete_sections[:3]}")
+                return True
+
+        # Check 3: Insufficient observations for complete report
+        observations = state.get("observations", [])
+        min_observations = state.get("min_observations_for_report", 15)
+
+        if len(observations) < min_observations:
+            logger.info(
+                f"[LOOP DECISION] Loop {current_loops + 1}: Insufficient observations "
+                f"({len(observations)}/{min_observations}) - continuing"
+            )
+            return True
+
+        # Check 4: Significant verification needs (higher threshold than before)
         verification = state.get("verification_needed", [])
+        if len(verification) > 5:  # Increased from 2 to avoid over-researching
+            logger.info(
+                f"[LOOP DECISION] Loop {current_loops + 1}: {len(verification)} items need verification - continuing"
+            )
+            return True
+
+        # Check 5: Deep dive topics (but must be substantial)
         deep_dives = state.get("deep_dive_topics", [])
+        if len(deep_dives) > 2:  # Increased threshold
+            logger.info(
+                f"[LOOP DECISION] Loop {current_loops + 1}: {len(deep_dives)} deep-dive topics identified - continuing"
+            )
+            return True
 
-        # Quality thresholds for continuing
-        source_diversity = state.get("source_diversity_score", 0.0)
-        factuality_confidence = state.get("factuality_confidence", 0.0)
-
-        # Continue if quality is low or there are significant gaps
-        should_continue = (
-            len(gaps) > 0 or
-            len(verification) > 2 or
-            len(deep_dives) > 1 or
-            source_diversity < 0.6 or
-            factuality_confidence < 0.7
+        # All checks passed - research is complete
+        logger.info(
+            f"[LOOP DECISION] Loop {current_loops + 1}: Research complete - "
+            f"observations={len(observations)}, gaps={len(gaps)}, "
+            f"verification={len(verification)}, deep_dives={len(deep_dives)} - proceeding to fact checking"
         )
-
-        logger.info(f"[LOOP DECISION] Loop {current_loops + 1}: "
-                   f"gaps={len(gaps)}, verification={len(verification)}, "
-                   f"deep_dives={len(deep_dives)}, diversity={source_diversity:.2f}, "
-                   f"confidence={factuality_confidence:.2f}, continue={should_continue}")
-
-        return should_continue
+        return False

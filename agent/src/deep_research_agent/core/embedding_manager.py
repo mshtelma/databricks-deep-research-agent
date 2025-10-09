@@ -68,9 +68,8 @@ class EmbeddingManager:
         }
         
         logger.info(
-            "Initialized EmbeddingManager with DatabricksEmbeddings",
-            endpoint=endpoint_name,
-            cache_enabled=True
+            f"Initialized EmbeddingManager with DatabricksEmbeddings | "
+            f"endpoint={endpoint_name} | cache_enabled=True"
         )
     
     def get_or_compute_embedding(self, text: str, cache_key: Optional[str] = None) -> np.ndarray:
@@ -302,3 +301,209 @@ class EmbeddingManager:
         if hasattr(self.cache, 'clear_category'):
             self.cache.clear_category(category)
             logger.info(f"Cleared embedding cache for category: {category}")
+
+
+class ObservationEmbeddingIndex:
+    """
+    Efficient index for observation embeddings to enable semantic deduplication.
+
+    This class maintains a vectorized index of all observation embeddings,
+    allowing fast similarity searches across hundreds of observations.
+    """
+
+    def __init__(self, embedding_manager: EmbeddingManager, max_observations: int = 400):
+        """
+        Initialize the observation embedding index.
+
+        Args:
+            embedding_manager: The EmbeddingManager instance for computing embeddings
+            max_observations: Maximum number of observations to index
+        """
+        self.embedding_manager = embedding_manager
+        self.max_observations = max_observations
+
+        # Storage for embeddings and metadata
+        self.embeddings: List[np.ndarray] = []  # Embedding vectors
+        self.observation_hashes: List[str] = []  # Hash of observation content
+        self.step_ids: List[Optional[str]] = []  # Step IDs for partitioning
+        self.observation_texts: List[str] = []  # Original texts (for debugging)
+
+        # Stats
+        self.stats = {
+            "total_indexed": 0,
+            "duplicates_detected": 0,
+            "similarity_checks": 0
+        }
+
+        logger.info(f"Initialized ObservationEmbeddingIndex with max_observations={max_observations}")
+
+    def add_observation(self, text: str, step_id: Optional[str] = None) -> bool:
+        """
+        Add an observation to the index.
+
+        Args:
+            text: The observation text
+            step_id: Optional step ID for partitioning
+
+        Returns:
+            True if added (not duplicate), False if duplicate detected
+        """
+        if not text or not text.strip():
+            return False
+
+        # Generate hash for exact duplicate check
+        text_hash = hashlib.md5(text.encode('utf-8')).hexdigest()
+
+        # Check for exact duplicate by hash
+        if text_hash in self.observation_hashes:
+            self.stats["duplicates_detected"] += 1
+            logger.debug(f"Exact duplicate detected by hash: {text[:50]}...")
+            return False
+
+        # Compute embedding for this observation
+        try:
+            embedding = self.embedding_manager.get_or_compute_embedding(text)
+        except Exception as e:
+            logger.warning(f"Failed to compute embedding for observation: {e}")
+            # Fall back to adding without embedding check
+            self._add_to_index(text, text_hash, None, step_id)
+            return True
+
+        # Check for semantic duplicates
+        is_duplicate = self._check_semantic_duplicate(embedding, text, step_id)
+
+        if is_duplicate:
+            self.stats["duplicates_detected"] += 1
+            logger.debug(f"Semantic duplicate detected: {text[:50]}...")
+            return False
+
+        # Add to index
+        self._add_to_index(text, text_hash, embedding, step_id)
+        return True
+
+    def _check_semantic_duplicate(self, embedding: np.ndarray, text: str, step_id: Optional[str] = None) -> bool:
+        """
+        Check if an observation is a semantic duplicate of existing ones.
+
+        Uses different thresholds for within-step vs cross-step comparisons.
+
+        Args:
+            embedding: Embedding vector of the new observation
+            text: The observation text
+            step_id: Optional step ID for partitioning
+
+        Returns:
+            True if semantic duplicate found, False otherwise
+        """
+        if not self.embeddings:
+            return False
+
+        self.stats["similarity_checks"] += 1
+
+        # Convert embeddings list to numpy array for vectorized operations
+        embeddings_array = np.array(self.embeddings)
+
+        # Compute similarities with all existing embeddings (vectorized)
+        similarities = self._compute_batch_similarities(embedding, embeddings_array)
+
+        # Apply different thresholds based on step_id
+        for i, similarity in enumerate(similarities):
+            existing_step_id = self.step_ids[i] if i < len(self.step_ids) else None
+
+            # Determine threshold based on step context
+            if step_id and existing_step_id == step_id:
+                # Same step - use lower threshold (more aggressive dedup)
+                threshold = 0.85
+            else:
+                # Different steps - use higher threshold (only exact semantic duplicates)
+                threshold = 0.95
+
+            if similarity >= threshold:
+                logger.debug(
+                    f"Semantic duplicate found (similarity={similarity:.3f}, threshold={threshold}): "
+                    f"'{text[:30]}...' similar to '{self.observation_texts[i][:30]}...'"
+                )
+                return True
+
+        return False
+
+    def _compute_batch_similarities(self, query_embedding: np.ndarray, embeddings_array: np.ndarray) -> np.ndarray:
+        """
+        Compute cosine similarities between query and all embeddings (vectorized).
+
+        Args:
+            query_embedding: The query embedding vector
+            embeddings_array: Array of existing embeddings
+
+        Returns:
+            Array of similarity scores
+        """
+        # Normalize query embedding
+        query_norm = np.linalg.norm(query_embedding)
+        if query_norm == 0:
+            return np.zeros(len(embeddings_array))
+
+        query_normalized = query_embedding / query_norm
+
+        # Compute dot products with all embeddings
+        dot_products = embeddings_array @ query_normalized
+
+        # Compute norms of all embeddings
+        norms = np.linalg.norm(embeddings_array, axis=1)
+
+        # Avoid division by zero
+        norms[norms == 0] = 1.0
+
+        # Compute cosine similarities
+        similarities = dot_products / norms
+
+        # Ensure positive similarities (text embeddings should be non-negative)
+        similarities = np.maximum(similarities, 0.0)
+
+        return similarities
+
+    def _add_to_index(self, text: str, text_hash: str, embedding: Optional[np.ndarray], step_id: Optional[str] = None):
+        """
+        Add observation to the index.
+
+        Args:
+            text: The observation text
+            text_hash: Hash of the text
+            embedding: Embedding vector (can be None if computation failed)
+            step_id: Optional step ID
+        """
+        # If we're at max capacity, remove oldest observations
+        if len(self.observation_hashes) >= self.max_observations:
+            # Remove oldest 10% to make room
+            remove_count = max(1, self.max_observations // 10)
+            self.embeddings = self.embeddings[remove_count:]
+            self.observation_hashes = self.observation_hashes[remove_count:]
+            self.step_ids = self.step_ids[remove_count:]
+            self.observation_texts = self.observation_texts[remove_count:]
+            logger.debug(f"Pruned {remove_count} oldest observations from index")
+
+        # Add new observation
+        if embedding is not None:
+            self.embeddings.append(embedding)
+        self.observation_hashes.append(text_hash)
+        self.step_ids.append(step_id)
+        self.observation_texts.append(text[:100])  # Store truncated for debugging
+
+        self.stats["total_indexed"] += 1
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get index statistics."""
+        return {
+            **self.stats,
+            "current_size": len(self.observation_hashes),
+            "has_embeddings": len(self.embeddings),
+            "unique_steps": len(set(s for s in self.step_ids if s))
+        }
+
+    def clear(self):
+        """Clear the entire index."""
+        self.embeddings.clear()
+        self.observation_hashes.clear()
+        self.step_ids.clear()
+        self.observation_texts.clear()
+        logger.info("Cleared observation embedding index")

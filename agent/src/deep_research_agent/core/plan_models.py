@@ -200,16 +200,18 @@ class Plan(BaseModel):
                 # Check if dependencies are met using proper title-to-ID mapping
                 if hasattr(step, 'depends_on') and step.depends_on:
                     deps_met = True
-                    
+
                     for dependency in step.depends_on:
                         dep_step = self.get_step_by_id(dependency)
-                        if dep_step and dep_step.status == StepStatus.COMPLETED:
+                        # Accept both COMPLETED and FAILED as "done" - allow proceeding with partial data
+                        if dep_step and dep_step.status in (StepStatus.COMPLETED, StepStatus.FAILED):
                             continue
 
                         # Allow title-based dependency matching for backward compatibility
                         matched = False
                         for candidate_step in self.steps:
-                            if candidate_step.status == StepStatus.COMPLETED and self._titles_similar(dependency, candidate_step.title):
+                            # Accept both COMPLETED and FAILED as "done"
+                            if candidate_step.status in (StepStatus.COMPLETED, StepStatus.FAILED) and self._titles_similar(dependency, candidate_step.title):
                                 matched = True
                                 break
 
@@ -219,7 +221,7 @@ class Plan(BaseModel):
 
                     if not deps_met:
                         continue
-                
+
                 return step
         return None
     

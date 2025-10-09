@@ -372,9 +372,9 @@ class EnhancedResearchAgent(ResponsesAgent):
                 "reflexion": {"enabled": True},
                 # Controls maximum number of graph transitions before forcing a stop
                 # Note: This is a low-level guardrail across ALL node transitions, not just research loops.
-                # Keep high (e.g., 100) and rely on high-level loop caps for behavior.
+                # Keep high (e.g., 500) and rely on high-level loop caps for behavior.
                 "recursion_limit": int(
-                    self.config.get("workflow", {}).get("recursion_limit", 200)
+                    self.config.get("workflow", {}).get("recursion_limit", 50)
                 ),
             }
 
@@ -624,6 +624,29 @@ class EnhancedResearchAgent(ResponsesAgent):
             if not plan:
                 return END
 
+            # CRITICAL: Check if coordination completed and decided SUFFICIENT
+            if state.get("coordination_completed"):
+                decision = state.get("gap_decision", {})
+                action = decision.get("action")
+
+                # SAFETY: Handle None or invalid action
+                if not action:
+                    logger.warning(f"[PLANNER_ROUTER] Coordinator returned no action - defaulting to SUFFICIENT")
+                    return "fact_checker" if state.get("enable_grounding", True) else "reporter"
+
+                if action == "SUFFICIENT":
+                    logger.info(f"[PLANNER_ROUTER] Coordination decided SUFFICIENT - routing to fact_checker")
+                    return "fact_checker" if state.get("enable_grounding", True) else "reporter"
+
+                elif action in ["EXTEND", "VERIFY"]:
+                    logger.info(f"[PLANNER_ROUTER] Coordination decided {action} - adding steps, routing to researcher")
+                    # Plan was extended with new steps - continue research
+                    return "researcher"
+
+                else:
+                    logger.warning(f"[PLANNER_ROUTER] Unexpected action '{action}' - defaulting to fact_checker")
+                    return "fact_checker" if state.get("enable_grounding", True) else "reporter"
+
             if state.get("enable_human_feedback") and not state.get("auto_accept_plan"):
                 return "human_feedback"
 
@@ -637,6 +660,7 @@ class EnhancedResearchAgent(ResponsesAgent):
             planner_router,
             {
                 "researcher": "researcher",
+                "fact_checker": "fact_checker",  # CRITICAL: Add this edge for coordination
                 "human_feedback": "human_feedback",
                 "reporter": "reporter",
                 END: END,
@@ -659,6 +683,11 @@ class EnhancedResearchAgent(ResponsesAgent):
         def researcher_router(state):
             """Route from researcher based on step completion."""
             global logger
+
+            # DIAGNOSTIC: Track all researcher_router calls
+            logger.info("🎯 [ROUTER] ===== RESEARCHER_ROUTER CALLED =====")
+            logger.info(f"🎯 [ROUTER] State keys: {list(state.keys())[:30]}")
+            logger.info(f"🎯 [ROUTER] State object ID: {id(state)}")
 
             # SAFETY CHECK: Check for permanent error flags in state
             if state.get("permanent_failure"):
@@ -731,112 +760,43 @@ class EnhancedResearchAgent(ResponsesAgent):
                         f"[ROUTER] Plan has {len(plan.section_specifications)} sections"
                     )
 
-            # Circuit breaker for infinite loops
-            researcher_loops = state.get("researcher_loops", 0)
-            max_researcher_loops = state.get("max_researcher_loops", 5)
-
-            logger.info(
-                f"[ROUTER] Researcher loops: {researcher_loops}/{max_researcher_loops}"
-            )
-
-            if researcher_loops >= max_researcher_loops:
-                logger.warning(
-                    f"[ROUTER] CIRCUIT BREAKER: Max researcher loops reached ({researcher_loops}/{max_researcher_loops})"
-                )
-                state["researcher_loops"] = 0  # Reset counter
-                return (
-                    "fact_checker"
-                    if state.get("enable_grounding", True)
-                    else "reporter"
-                )
-
             # Step-based completion check with enhanced logging
             if plan and hasattr(plan, "get_next_step"):
                 try:
                     next_step = plan.get_next_step()
                     if next_step is None:
-                        logger.info(
-                            "[ROUTER] ✓ All steps complete - checking if incremental research loop needed"
-                        )
+                        # All steps complete - check research loop limit before coordinating
+                        research_loops = state.get("research_loops", 0)
+                        max_research_loops = state.get("max_research_loops", 2)
 
-                        # ENHANCED: Check if we should continue with incremental research loop
-                        from .core.multi_agent_state import StateManager
-
-                        if StateManager.should_continue_research_loop(state):
-                            logger.info("[ROUTER] Initiating incremental research loop with gap analysis")
-
-                            # Perform gap analysis
-                            researcher_agent = None
-                            try:
-                                from .agents.researcher import ResearcherAgent
-                                researcher_agent = ResearcherAgent()
-                                gap_analysis = researcher_agent.analyze_research_gaps(state)
-
-                                # Update state with gap analysis
-                                StateManager.update_knowledge_gaps(state, gap_analysis.get("knowledge_gaps", []))
-                                StateManager.update_verification_needed(state, gap_analysis.get("verification_needed", []))
-                                StateManager.update_deep_dive_topics(state, gap_analysis.get("deep_dive_topics", []))
-                                StateManager.update_research_quality_metrics(
-                                    state,
-                                    source_diversity=0.6,  # Default value, could be calculated
-                                    factuality_confidence=0.7,  # Default value, could be calculated
-                                    quality_issues=gap_analysis.get("quality_issues", [])
-                                )
-
-                                # Prepare incremental context for planner
-                                StateManager.prepare_incremental_context(state, gap_analysis)
-
-                                # Set loop focus based on gap analysis
-                                if gap_analysis.get("knowledge_gaps"):
-                                    StateManager.set_loop_focus(state, "gap_filling")
-                                elif gap_analysis.get("verification_needed"):
-                                    StateManager.set_loop_focus(state, "verification")
-                                elif gap_analysis.get("deep_dive_topics"):
-                                    StateManager.set_loop_focus(state, "deep_dive")
-                                else:
-                                    StateManager.set_loop_focus(state, "comprehensive_review")
-
-                                # Increment research loop counter
-                                state["research_loops"] = state.get("research_loops", 0) + 1
-
-                                logger.info(f"[ROUTER] Starting research loop {state['research_loops']} with {len(gap_analysis.get('knowledge_gaps', []))} gaps, "
-                                           f"{len(gap_analysis.get('verification_needed', []))} verification items, "
-                                           f"{len(gap_analysis.get('deep_dive_topics', []))} deep-dive topics")
-
-                                # Route back to planner for incremental planning
-                                state["researcher_loops"] = 0  # Reset counter
-                                return "planner"
-
-                            except Exception as e:
-                                logger.error(f"[ROUTER] Error in gap analysis: {e}")
-                                # Fall back to normal flow
-
-                        logger.info("[ROUTER] No incremental research needed - proceeding to fact checker")
-                        state["researcher_loops"] = 0  # Reset counter
-                        return (
-                            "fact_checker"
-                            if state.get("enable_grounding", True)
-                            else "reporter"
-                        )
-                    else:
-                        # Log detailed next step information
-                        step_info = f"{next_step.step_id} - {next_step.title[:50]}"
-                        if hasattr(next_step, "metadata") and next_step.metadata:
-                            section_title = next_step.metadata.get(
-                                "section_title", "N/A"
+                        # CRITICAL FIX: Enforce research loop limit to prevent infinite coordination loops
+                        if research_loops >= max_research_loops:
+                            logger.warning(
+                                f"[ROUTER] Research loops limit reached ({research_loops}/{max_research_loops}) - "
+                                f"skipping coordination, routing to fact_checker"
                             )
-                            step_info += f" (section: {section_title})"
+                            return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
-                        logger.info(f"[ROUTER] → Routing to specific step: {step_info}")
-
-                        # CRITICAL FIX: Set current_step in state to communicate with researcher
+                        # Under loop limit - planner will coordinate
+                        logger.info(
+                            f"[ROUTER] All steps complete - routing to planner for coordination "
+                            f"(loop {research_loops + 1}/{max_research_loops})"
+                        )
+                        state["coordination_completed"] = False  # Let planner decide
+                        return "planner"
+                    else:
+                        # Continue executing steps
+                        logger.info(f"[ROUTER] Next step: {next_step.step_id} - {next_step.title}")
                         state["current_step"] = next_step
-
-                        # Increment loop counter
-                        state["researcher_loops"] = researcher_loops + 1
+                        state["current_step_number"] = state.get("current_step_number", 0) + 1
                         return "researcher"
 
                 except Exception as e:
+                    import traceback
+                    logger.error(f"❌ [ROUTER] EXCEPTION in researcher_router!")
+                    logger.error(f"❌ [ROUTER] Exception type: {type(e).__name__}")
+                    logger.error(f"❌ [ROUTER] Exception message: {str(e)}")
+                    logger.error(f"❌ [ROUTER] Traceback:\n{traceback.format_exc()}")
                     logger.warning(f"[ROUTER] Error checking step completion: {e}")
                     # Fallback: check if we have section results
                     section_results = state.get("section_research_results", {})
@@ -868,12 +828,9 @@ class EnhancedResearchAgent(ResponsesAgent):
                     else "reporter"
                 )
 
-            # Continue researching - increment loop counter
-            state["researcher_loops"] = researcher_loops + 1
-            logger.info(
-                f"[ROUTER] Continuing research (loop {state['researcher_loops']}/{max_researcher_loops})"
-            )
-            return "researcher"
+            # This should never be reached - defensive programming
+            logger.error("[ROUTER] CRITICAL: Reached end of researcher_router without returning - defaulting to reporter")
+            return "reporter"
 
         workflow.add_conditional_edges(
             "researcher",
@@ -1014,6 +971,8 @@ class EnhancedResearchAgent(ResponsesAgent):
             checkpointer = MemorySaver()
             logger.info("Using MemorySaver for proper state persistence between workflow nodes")
 
+        # Compile the workflow
+        # recursion_limit is set via config during graph execution, not during compilation
         return workflow.compile(checkpointer=checkpointer)
 
     async def research(
@@ -1072,7 +1031,7 @@ class EnhancedResearchAgent(ResponsesAgent):
             config = {
                 "configurable": {"thread_id": "research_thread"},
                 "recursion_limit": int(
-                    self.config.get("workflow", {}).get("recursion_limit", 200)
+                    self.config.get("workflow", {}).get("recursion_limit", 50)
                 ),
             }
             final_state = await self.graph.ainvoke(initial_state, config)
@@ -1115,7 +1074,7 @@ class EnhancedResearchAgent(ResponsesAgent):
             config = {
                 "configurable": {"thread_id": "research_thread"},
                 "recursion_limit": int(
-                    self.config.get("workflow", {}).get("recursion_limit", 200)
+                    self.config.get("workflow", {}).get("recursion_limit", 50)
                 ),
             }
 
@@ -1743,11 +1702,49 @@ class EnhancedResearchAgent(ResponsesAgent):
                 output=[error_item], custom_outputs={"error": str(e)}
             )
 
+    async def predict_stream_async(
+        self, request: ResponsesAgentRequest
+    ):
+        """
+        Native async streaming API for FastAPI and async clients.
+
+        This method provides direct async generator access without thread overhead,
+        ideal for async web frameworks like FastAPI. For sync clients (MLflow),
+        use predict_stream() instead which provides sync generator interface.
+
+        Args:
+            request: ResponsesAgentRequest with user query
+
+        Yields:
+            ResponsesAgentStreamEvent objects with intermediate events and final response
+
+        Example:
+            ```python
+            # FastAPI usage
+            @app.post("/stream")
+            async def stream_endpoint(request: Request):
+                agent = EnhancedResearchAgent(...)
+                async for event in agent.predict_stream_async(req):
+                    yield event
+            ```
+        """
+        # Delegate to predict_stream which now uses context-aware bridge
+        # The bridge will detect async context and return async generator
+        async for event in self.predict_stream(request):
+            yield event
+
     def predict_stream(
         self, request: ResponsesAgentRequest
     ) -> Generator[ResponsesAgentStreamEvent, None, None]:
         """
         Stream responses with intermediate events for real-time UI updates.
+
+        HYBRID: This method works in both sync and async contexts:
+        - Sync context (MLflow): Returns sync generator using thread-based bridge
+        - Async context (FastAPI): Returns async generator directly
+
+        For async-native code, prefer predict_stream_async() for clearer semantics.
+
         Routes through multi-agent workflow with full event emission.
         """
         # Extract last message as query from input format
@@ -1858,13 +1855,10 @@ class EnhancedResearchAgent(ResponsesAgent):
 
         async def run_streaming():
             # Add required config for LangGraph checkpointer
-            # FIX: Ensure recursion_limit is properly set
+            # FIX: Ensure recursion_limit is properly set from workflow config
             recursion_limit = int(
-                self.config.get("workflow", {}).get("recursion_limit", 200)
+                self.config.get("workflow", {}).get("recursion_limit", 50)
             )
-            # Also check for recursion_limit at root level (for backward compatibility)
-            if "recursion_limit" in self.config:
-                recursion_limit = int(self.config["recursion_limit"])
 
             # Log the actual limit being used
             logger.info(f"Using recursion_limit: {recursion_limit}")
@@ -1876,30 +1870,96 @@ class EnhancedResearchAgent(ResponsesAgent):
                 },
                 "recursion_limit": recursion_limit,
             }
+
+            # DIAGNOSTIC: Track stream lifecycle
+            logger.info("🎯 [STREAM] ===== STARTING WORKFLOW EVENT STREAM =====")
+            node_count = 0
+
             async for event in self.graph.astream(initial_state, config=config):
+                node_count += 1
+                event_summary = list(event.keys()) if isinstance(event, dict) else type(event).__name__
+                logger.debug(f"🎯 [STREAM] Event {node_count}: {event_summary}")
                 yield event
+
+            logger.info(f"🎯 [STREAM] ===== ASTREAM LOOP COMPLETED after {node_count} events =====")
+            logger.info("🎯 [STREAM] Workflow has terminated, proceeding to emit final event")
 
         # Process events from async generator using safe executor
         event_generator = run_streaming()
 
         try:
-            # Use AsyncExecutor to safely iterate through async events
-            # Complex research queries may take several minutes to produce first event
-            for event in AsyncExecutor.stream_async_safe(
+            # Calculate streaming timeouts from workflow config
+            # This ensures stream stays alive for entire workflow duration
+            workflow_config = self.config.get("workflow", {})
+            max_wall_clock = float(workflow_config.get("max_wall_clock_seconds", 300))
+
+            # Allow explicit overrides for streaming timeouts
+            timeout_per_item = workflow_config.get("stream_timeout_per_item_seconds")
+            first_item_timeout = workflow_config.get("stream_first_item_timeout_seconds")
+
+            if timeout_per_item is None:
+                # Give downstream nodes enough time to finish long LLM calls (planner ~300s)
+                computed_timeout = max(
+                    60.0,
+                    max_wall_clock * 0.5,
+                    max(0.0, max_wall_clock - 30.0)
+                )
+                timeout_per_item = min(max_wall_clock, computed_timeout)
+            else:
+                timeout_per_item = float(timeout_per_item)
+
+            if first_item_timeout is None:
+                first_item_timeout = max(
+                    timeout_per_item,
+                    max(180.0, max_wall_clock * 0.75)
+                )
+            else:
+                first_item_timeout = float(first_item_timeout)
+
+            logger.info(
+                f"Streaming timeouts: per_item={timeout_per_item:.0f}s, "
+                f"first_item={first_item_timeout:.0f}s (based on max_wall_clock={max_wall_clock}s)"
+            )
+            logger.info(
+                f"Workflow config keys: {list(workflow_config.keys())}, "
+                f"enable_background_investigation={workflow_config.get('enable_background_investigation', 'NOT SET')}"
+            )
+
+            # Use AsyncExecutor context-aware bridge for async/sync compatibility
+            # This automatically detects if we're in async (FastAPI) or sync (MLflow) context
+            for event in AsyncExecutor.stream_async_bridge(
                 event_generator,
-                timeout_per_item=30.0,
-                first_item_timeout=300.0  # 5 minutes for first item on complex queries
+                timeout_per_item=timeout_per_item,
+                first_item_timeout=first_item_timeout
             ):
 
                     # Process LangGraph events
                     if isinstance(event, dict):
                         for node_name, node_data in event.items():
+                            # DIAGNOSTIC: Log every node execution
+                            logger.info(f"🎯 [EVENT] Processing node: {node_name}")
+
                             # Defensive check: Skip if node returned None
                             if node_data is None:
                                 logger.warning(
                                     f"Node {node_name} returned None, skipping"
                                 )
                                 continue
+
+                            # DIAGNOSTIC: Check for reporter completion
+                            if node_name == "reporter" and isinstance(node_data, dict):
+                                has_completion = node_data.get("reporter_completed", False)
+                                should_terminate = node_data.get("workflow_should_terminate", False)
+                                has_error = node_data.get("workflow_failed", False)
+                                logger.info(f"🎯 [EVENT] Reporter event received")
+                                logger.info(f"🎯 [EVENT] Reporter flags: completed={has_completion}, terminate={should_terminate}, failed={has_error}")
+
+                            # DIAGNOSTIC: Detect unexpected coordinator-after-reporter loop
+                            elif node_name == "coordinator" and isinstance(node_data, dict):
+                                if node_data.get("reporter_completed"):
+                                    logger.error("🎯 [EVENT] ❌ BUG DETECTED: COORDINATOR RUNNING AFTER REPORTER!")
+                                    logger.error("🎯 [EVENT] State has reporter_completed=True but coordinator is executing again")
+                                    logger.error("🎯 [EVENT] This indicates the workflow is looping instead of terminating")
 
                             # Track state updates for final metadata
                             if isinstance(node_data, dict):
@@ -1908,7 +1968,7 @@ class EnhancedResearchAgent(ResponsesAgent):
                                 # Process intermediate_events from state and add to pending events
                                 if "intermediate_events" in node_data and node_data["intermediate_events"]:
                                     events_to_add = node_data["intermediate_events"]
-                                    logger.info("🎯 Processing %d intermediate events from state for node %s", 
+                                    logger.info("🎯 Processing %d intermediate events from state for node %s",
                                                len(events_to_add), node_name)
                                     
                                     # Add these events to our pending list for streaming
@@ -2347,7 +2407,7 @@ class EnhancedResearchAgent(ResponsesAgent):
             logger.info("Successfully completed predict_stream request")
 
         except Exception as e:
-            # COMPREHENSIVE ERROR LOGGING for debugging
+            # COMPREHENSIVE ERROR LOGGING for debugging (DON'T SWALLOW ERRORS!)
             import traceback
 
             stack_trace = traceback.format_exc()
@@ -2357,6 +2417,10 @@ class EnhancedResearchAgent(ResponsesAgent):
                 "stack_trace": stack_trace,
             }
 
+            logger.error("❌ [STREAM] ===== CRITICAL: STREAMING FAILED WITH EXCEPTION =====")
+            logger.error(f"❌ [STREAM] Exception type: {type(e).__name__}")
+            logger.error(f"❌ [STREAM] Exception message: {str(e)}")
+            logger.error(f"❌ [STREAM] Full traceback:\n{stack_trace}")
             logger.error(
                 f"PREDICT_STREAM ERROR: {type(e).__name__}: {e}\n"
                 f"Full stack trace:\n{stack_trace}\n"

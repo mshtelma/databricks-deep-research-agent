@@ -33,6 +33,7 @@ export interface ResearchProgress {
 export interface StructuredProgress {
   workflowPhases: ProgressItem[]
   planSteps: ProgressItem[]
+  planStepsByPhase?: Record<string, ProgressItem[]>  // Grouped steps by phase
   currentPhase?: string
   currentAgent?: string
   overallProgress: number
@@ -108,4 +109,26 @@ export interface PhaseTransition {
   timestamp: number
   agent: string
   event?: string
+}
+
+/**
+ * Creates initial structured progress with all phases in pending state.
+ * This ensures the UI always has a baseline to render, preventing the
+ * empty state bug that causes components to unmount.
+ */
+export function createInitialStructuredProgress(): StructuredProgress {
+  const workflowPhases: ProgressItem[] = WORKFLOW_PHASES
+    .sort((a, b) => a.order - b.order)
+    .map(phase => ({
+      id: phase.id,
+      label: phase.name,
+      status: 'pending' as const,
+      isWorkflowPhase: true
+    }))
+
+  return {
+    workflowPhases,
+    planSteps: [],
+    overallProgress: 0
+  }
 }

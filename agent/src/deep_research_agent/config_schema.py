@@ -5,8 +5,8 @@ This module defines the complete configuration structure with type safety,
 validation, and environment variable support.
 """
 
-from pydantic import BaseModel, Field, validator
-from pydantic_settings import BaseSettings
+from pydantic import BaseModel, Field, validator, ConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional, Dict, Any, List
 from enum import Enum
 from pathlib import Path
@@ -67,6 +67,8 @@ class ModelConfig(BaseSettings):
             raise ValueError(f"rotation_strategy must be one of: round_robin, lru, random, priority")
         return v
 
+    model_config = SettingsConfigDict(extra="allow")  # Allow additional fields for rate limiting configs
+
 class RetryConfig(BaseSettings):
     """Retry configuration for rate limiting"""
     base_delay_seconds: float = Field(default=2.0, ge=0.1, description="Base delay between retries")
@@ -125,6 +127,68 @@ class FactCheckerConfig(BaseSettings):
     verification_level: VerificationLevel = VerificationLevel.MODERATE
     enable_contradiction_detection: bool = True
 
+class HybridSettingsConfig(BaseSettings):
+    """Hybrid multi-pass report generation settings"""
+    enable_async_blocks: bool = Field(
+        default=False,
+        description="Enable async table generation (test in staging first)"
+    )
+    fallback_on_empty_observations: bool = Field(
+        default=True,
+        description="Auto-fallback to section-by-section on errors"
+    )
+    table_anchor_format: str = Field(
+        default="[TABLE: {id}]",
+        description="Placeholder format in Phase 2"
+    )
+    calc_selector_top_k: int = Field(
+        default=60,
+        ge=10,
+        le=200,
+        description="Top-scoring observations for calculation prompt"
+    )
+    calc_recent_tail: int = Field(
+        default=20,
+        ge=5,
+        le=100,
+        description="Recent observations appended after scoring"
+    )
+    max_calc_prompt_chars: int = Field(
+        default=12000,
+        ge=1000,
+        le=50000,
+        description="Hard limit on Phase 1 prompt length"
+    )
+    table_fallback_max_rows: int = Field(
+        default=6,
+        ge=1,
+        le=20,
+        description="Maximum rows in bullet fallback summaries"
+    )
+    enable_table_fallback_summary: bool = Field(
+        default=True,
+        description="Generate bullet summaries when tables fail"
+    )
+    enable_file_reference_filter: bool = Field(
+        default=True,
+        description="Remove file/tool references from observations"
+    )
+    contamination_patterns: List[str] = Field(
+        default_factory=lambda: [
+            r'\b[\w\-]+\.(xlsx|xlsm|csv|json|pdf|doc|docx|xls)\b',
+            r'github\.com[/\w\-\.]*',
+            r'gitlab\.com[/\w\-\.]*',
+            r'\b(spreadsheet|repository|download|attachment)\b'
+        ],
+        description="Regex patterns for content sanitization"
+    )
+    holistic_timeout_seconds: int = Field(
+        default=240,
+        ge=30,
+        le=600,
+        description="Timeout for Phase 2 holistic report generation"
+    )
+
 class ReporterConfig(BaseSettings):
     """Reporter agent configuration"""
     enabled: bool = True
@@ -133,6 +197,24 @@ class ReporterConfig(BaseSettings):
     citation_style: str = "APA"
     enable_grounding_markers: bool = True
     use_semantic_extraction: bool = True
+    generation_mode: str = Field(
+        default="section_by_section",
+        description="Report generation mode: section_by_section or hybrid"
+    )
+    fail_on_empty_observations: bool = Field(
+        default=True,
+        description="Raise error if observation filtering produces empty sections"
+    )
+    max_concurrent_blocks: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Throttle for concurrent structured output calls"
+    )
+    hybrid_settings: HybridSettingsConfig = Field(
+        default_factory=HybridSettingsConfig,
+        description="Hybrid multi-pass generation configuration"
+    )
 
 class SearchProviderConfig(BaseSettings):
     """Search provider configuration"""
@@ -165,6 +247,14 @@ class WorkflowConfig(BaseSettings):
     auto_accept_plan: bool = False
     enable_circuit_breakers: bool = True
     enable_progress_tracking: bool = True
+
+    # Async Architecture (Phase 3 - Hybrid Async Implementation)
+    experimental_async_nodes: bool = Field(
+        default=True,
+        description="Enable async agent nodes for proper LLM await handling. "
+                    "Context-aware streaming bridge automatically detects FastAPI (async) vs MLflow (sync). "
+                    "Set to false to rollback to legacy sync nodes."
+    )
 
 class RateLimitingConfig(BaseSettings):
     """Rate limiting configuration - supports both legacy and enhanced modes"""
@@ -212,6 +302,22 @@ class ReportConfig(BaseSettings):
     default_style: ReportStyle = ReportStyle.DEFAULT
     enable_grounding_markers: bool = True
     citation_style: str = "APA"
+    max_table_observations: int = Field(
+        default=30,
+        ge=1,
+        le=500,
+        description="Maximum observations to feed to table generation"
+    )
+    max_paragraph_observations: int = Field(
+        default=15,
+        ge=1,
+        le=200,
+        description="Maximum observations per paragraph"
+    )
+    section_observation_limits: Dict[str, int] = Field(
+        default_factory=dict,
+        description="Section-specific observation limits (optional overrides for hybrid mode)"
+    )
 
 class QualityEnhancementConfig(BaseSettings):
     """Quality enhancement configuration for report generation"""
@@ -241,8 +347,14 @@ class EntityValidationConfig(BaseSettings):
 class MemoryConfig(BaseSettings):
     """Memory and state management configuration"""
     max_observations: int = Field(default=50, ge=10, le=1000, description="Maximum observations to keep in state")
-    max_observations_per_step: int = Field(default=10, ge=5, le=100, description="Maximum observations per research step")
+    max_observations_per_step: int = Field(default=10, ge=5, le=500, description="Maximum observations per research step")
     max_search_results: int = Field(default=100, ge=10, le=1000, description="Maximum search results to accumulate")
+    relevance_buffer: int = Field(
+        default=40,
+        ge=10,
+        le=200,
+        description="Minimum high-scoring observations per section before chronological pruning"
+    )
 
 class TierFallbackConfig(BaseSettings):
     """Tier fallback configuration for cross-tier degradation"""
@@ -260,10 +372,11 @@ class TierFallbackConfig(BaseSettings):
 class ResearchConfig(BaseSettings):
     """Main research agent configuration"""
     
-    class Config:
-        env_prefix = "AGENT_"
-        env_nested_delimiter = "__"
-        extra = "forbid"  # Reject unknown fields
+    model_config = SettingsConfigDict(
+        extra="allow",  # Allow fields not explicitly defined (required for rate limiting config)
+        env_prefix="AGENT_",
+        env_nested_delimiter="__"
+    )
         
     # Core models (only the ones actually used)
     models: Dict[str, ModelConfig] = Field(default_factory=lambda: {

@@ -107,8 +107,14 @@ class DatabricksResponseParser:
         
         # Determine final content with stricter validation
         if actual_content and actual_content.strip():
-            # We have actual content - clean it and use it
-            final_content = self._clean_json_artifacts(actual_content)
+            # We have actual content - only clean if it has markdown table artifacts
+            if self._has_markdown_table_json_artifacts(actual_content):
+                final_content = self._clean_json_artifacts(actual_content)
+                logger.debug("Detected markdown table JSON artifacts, cleaning content")
+            else:
+                final_content = actual_content
+                logger.debug("No artifacts detected, preserving original content")
+
             response_type = ResponseType.TEXT
             metadata['content_source'] = 'text_block'
             logger.debug("Using actual text content")
@@ -165,8 +171,14 @@ class DatabricksResponseParser:
             min_length = 30 if has_structure_markers else 100
             
             if not is_likely_reasoning and len(reasoning_stripped) > min_length:
-                # This might be actual content mislabeled as reasoning - clean it
-                final_content = self._clean_json_artifacts(reasoning_text)
+                # This might be actual content mislabeled as reasoning - only clean if has artifacts
+                if self._has_markdown_table_json_artifacts(reasoning_text):
+                    final_content = self._clean_json_artifacts(reasoning_text)
+                    logger.debug("Detected artifacts in reasoning block, cleaning")
+                else:
+                    final_content = reasoning_text
+                    logger.debug("No artifacts in reasoning block, preserving original")
+
                 response_type = ResponseType.TEXT
                 metadata['content_source'] = 'reasoning_block_repurposed'
                 logger.warning("Using reasoning text as content - may be mislabeled content")
@@ -198,6 +210,37 @@ class DatabricksResponseParser:
                 if isinstance(summary_item, dict) and summary_item.get('type') == 'summary_text':
                     return summary_item.get('text', '')
         return ""
+
+    def _has_markdown_table_json_artifacts(self, content: str) -> bool:
+        """
+        Check if content has markdown table JSON artifacts that need cleaning.
+
+        Specifically detects patterns like:
+        | | }, ]   <- Artifact from broken table rendering
+        | | }      <- Artifact from broken table rendering
+
+        Does NOT match:
+        | {"a":1} | <- Normal JSON data in table cell
+
+        Returns:
+            True if content has artifacts that need cleaning, False otherwise
+        """
+        import re
+
+        # Very specific patterns that indicate broken table rendering with JSON fragments
+        # These appear when markdown tables have JSON objects that got split across cells
+        artifact_patterns = [
+            r'\|\s*\|\s*[}\]],?',     # | | }, or | | ] or | | }
+            r'\|\s*\|\s*},\s*\]',     # | | }, ]
+            r'\|\s*\|\s*}\s*\]',      # | | } ]
+        ]
+
+        for pattern in artifact_patterns:
+            if re.search(pattern, content):
+                logger.debug(f"Detected markdown table JSON artifact pattern: {pattern}")
+                return True
+
+        return False
 
     def _clean_json_artifacts(self, content: str) -> str:
         """Clean JSON artifacts from extracted content."""

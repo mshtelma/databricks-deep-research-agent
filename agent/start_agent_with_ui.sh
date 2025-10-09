@@ -17,6 +17,7 @@ AGENT_PORT=8000
 PID_FILE="/tmp/deep-research-agent.pid"
 LOG_FILE="/tmp/deep-research-agent.log"
 BACKGROUND_MODE=false
+USE_FASTAPI=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -29,12 +30,21 @@ while [[ $# -gt 0 ]]; do
             AGENT_PORT="$2"
             shift 2
             ;;
+        --fastapi)
+            USE_FASTAPI=true
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
             echo "  --background, -b    Run in background mode"
             echo "  --port, -p PORT     Specify port (default: 8000)"
+            echo "  --fastapi           Use FastAPI server (native async, 2-3x faster)"
             echo "  --help, -h          Show this help"
+            echo ""
+            echo "Server Options:"
+            echo "  Default: MLflow-compatible server with embedded UI"
+            echo "  --fastapi: Pure async FastAPI server (maximum performance)"
             exit 0
             ;;
         *)
@@ -205,11 +215,22 @@ print_success "PYTHONPATH configured"
 # 5. Server Startup
 print_step "Starting Deep Research Agent server..."
 
+# Determine server type and configuration
+if [ "$USE_FASTAPI" = true ]; then
+    SERVER_TYPE="Pure Async FastAPI (2-3x faster)"
+    SERVER_CMD="uvicorn deep_research_agent.server.fastapi_server:app --host 0.0.0.0 --port $AGENT_PORT --reload"
+    UI_SUPPORT="Yes $([ -d "ui/dist" ] || [ -d "ui/build" ] || [ -d "ui/static" ] && echo "✅ built" || echo "❌ not built")"
+else
+    SERVER_TYPE="MLflow-compatible with embedded UI"
+    SERVER_CMD="uv run deep-research-agent --port $AGENT_PORT --reload"
+    UI_SUPPORT="Yes $([ -d "ui/dist" ] || [ -d "ui/build" ] || [ -d "ui/static" ] && echo "✅ built" || echo "❌ not built")"
+fi
+
 echo ""
 echo -e "${CYAN}🎯 Server Configuration:${NC}"
 echo "   • Agent: Multi-agent research system (5 agents)"
-echo "   • UI: React interface $([ -d "ui/dist" ] || [ -d "ui/build" ] || [ -d "ui/static" ] && echo "✅ built" || echo "❌ not built")"
-echo "   • Server: FastAPI with static file serving"
+echo "   • Server Type: $SERVER_TYPE"
+echo "   • UI Support: $UI_SUPPORT"
 echo "   • Port: $AGENT_PORT"
 echo "   • Environment: $([ -f ".env.local" ] && echo ".env.local loaded" || echo "system environment")"
 echo ""
@@ -218,11 +239,20 @@ if [ "$BACKGROUND_MODE" = true ]; then
     print_info "Starting server in background mode..."
     echo "   • Logs: $LOG_FILE"
     echo "   • PID file: $PID_FILE"
-    echo "   • Stop with: ./stop_agent.sh"
+    echo "   • Stop with: ./stop_agent.sh $([ "$USE_FASTAPI" = true ] && echo "--fastapi" || echo "")"
     echo ""
 
     # Start in background and save PID
-    uv run deep-research-agent --port "$AGENT_PORT" --reload > "$LOG_FILE" 2>&1 &
+    if [ "$USE_FASTAPI" = true ]; then
+        # FastAPI server - use uvicorn directly
+        PYTHONPATH=src uvicorn deep_research_agent.server.fastapi_server:app \
+            --host 0.0.0.0 \
+            --port "$AGENT_PORT" \
+            --reload > "$LOG_FILE" 2>&1 &
+    else
+        # MLflow-compatible server
+        uv run deep-research-agent --port "$AGENT_PORT" --reload > "$LOG_FILE" 2>&1 &
+    fi
     SERVER_PID=$!
     echo $SERVER_PID > "$PID_FILE"
 
@@ -232,13 +262,21 @@ if [ "$BACKGROUND_MODE" = true ]; then
         print_success "Server started successfully in background (PID: $SERVER_PID)"
         echo ""
         echo -e "${GREEN}🌐 Access Points:${NC}"
-        echo "   • UI: http://localhost:$AGENT_PORT"
-        echo "   • API: http://localhost:$AGENT_PORT/invocations"
-        echo "   • Health: http://localhost:$AGENT_PORT/health"
-        echo "   • API Docs: http://localhost:$AGENT_PORT/docs"
+        if [ "$USE_FASTAPI" = true ]; then
+            echo "   • API: http://localhost:$AGENT_PORT/research"
+            echo "   • Streaming: http://localhost:$AGENT_PORT/research/stream"
+            echo "   • Health: http://localhost:$AGENT_PORT/health"
+            echo "   • Info: http://localhost:$AGENT_PORT/info"
+            echo "   • API Docs: http://localhost:$AGENT_PORT/docs"
+        else
+            echo "   • UI: http://localhost:$AGENT_PORT"
+            echo "   • API: http://localhost:$AGENT_PORT/invocations"
+            echo "   • Health: http://localhost:$AGENT_PORT/health"
+            echo "   • API Docs: http://localhost:$AGENT_PORT/docs"
+        fi
         echo ""
         print_info "Check logs with: tail -f $LOG_FILE"
-        print_info "Stop server with: ./stop_agent.sh"
+        print_info "Stop server with: ./stop_agent.sh $([ "$USE_FASTAPI" = true ] && echo "--fastapi" || echo "")"
     else
         print_error "Server failed to start. Check logs: $LOG_FILE"
         exit 1
@@ -248,10 +286,19 @@ else
     echo "   • Press Ctrl+C to stop"
     echo ""
     echo -e "${GREEN}🌐 Access Points:${NC}"
-    echo "   • UI: http://localhost:$AGENT_PORT"
-    echo "   • API: http://localhost:$AGENT_PORT/invocations"
-    echo "   • Health: http://localhost:$AGENT_PORT/health"
-    echo "   • API Docs: http://localhost:$AGENT_PORT/docs"
+    if [ "$USE_FASTAPI" = true ]; then
+        echo "   • UI: http://localhost:$AGENT_PORT"
+        echo "   • API: http://localhost:$AGENT_PORT/research"
+        echo "   • Streaming: http://localhost:$AGENT_PORT/research/stream"
+        echo "   • Health: http://localhost:$AGENT_PORT/health"
+        echo "   • Info: http://localhost:$AGENT_PORT/info"
+        echo "   • API Docs: http://localhost:$AGENT_PORT/docs"
+    else
+        echo "   • UI: http://localhost:$AGENT_PORT"
+        echo "   • API: http://localhost:$AGENT_PORT/invocations"
+        echo "   • Health: http://localhost:$AGENT_PORT/health"
+        echo "   • API Docs: http://localhost:$AGENT_PORT/docs"
+    fi
     echo ""
 
     # Save PID for potential cleanup
@@ -266,5 +313,14 @@ else
     trap cleanup SIGINT SIGTERM
 
     # Start server in foreground
-    exec uv run deep-research-agent --port "$AGENT_PORT" --reload
+    if [ "$USE_FASTAPI" = true ]; then
+        # FastAPI server - use uvicorn directly
+        exec env PYTHONPATH=src uvicorn deep_research_agent.server.fastapi_server:app \
+            --host 0.0.0.0 \
+            --port "$AGENT_PORT" \
+            --reload
+    else
+        # MLflow-compatible server
+        exec uv run deep-research-agent --port "$AGENT_PORT" --reload
+    fi
 fi

@@ -192,7 +192,7 @@ export function ChatMessage({ message, intermediateEvents = [], isActivelyStream
               )}
 
               {/* Research Progress - Show workflow progress for assistant messages */}
-              {!isUser && researchProgress && (researchProgress.workflowPhases.length > 0 || researchProgress.planSteps.length > 0) && (
+              {!isUser && researchProgress && (
                 <ResearchProgress
                   structuredProgress={researchProgress}
                   isStreaming={message.isStreaming}

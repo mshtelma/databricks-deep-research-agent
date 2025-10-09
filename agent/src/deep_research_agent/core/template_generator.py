@@ -27,6 +27,7 @@ class DynamicSection:
     priority: int = 100
     content_type: SectionContentType = SectionContentType.ANALYSIS
     hints: Sequence[str] = field(default_factory=tuple)
+    step_ids: Sequence[str] = field(default_factory=tuple)  # Direct step references for observation filtering
 
     def prompt_block(self) -> str:
         """Render this section into a markdown block with inline instructions."""

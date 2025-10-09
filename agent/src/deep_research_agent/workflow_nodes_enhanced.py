@@ -65,7 +65,26 @@ class EnhancedWorkflowNodes:
         
         # Initialize embedding infrastructure for semantic similarity
         self.embedding_manager = self._initialize_embedding_manager()
-        
+
+        # Initialize observation embedding index for smart deduplication
+        self.observation_index = None
+        if self.embedding_manager:
+            try:
+                from .core.embedding_manager import ObservationEmbeddingIndex
+                from .core.memory_config import MemoryOptimizedConfig
+
+                # Get max observations from config
+                max_observations = MemoryOptimizedConfig.get_observations_limit(self.agent_config)
+
+                self.observation_index = ObservationEmbeddingIndex(
+                    embedding_manager=self.embedding_manager,
+                    max_observations=max_observations
+                )
+                logger.info(f"Initialized ObservationEmbeddingIndex with max_observations={max_observations}")
+            except Exception as e:
+                logger.warning(f"Failed to initialize ObservationEmbeddingIndex: {e}")
+                self.observation_index = None
+
           # Note: Enhanced circuit breaker removed - using legacy one for backward compatibility
         
         # Legacy circuit breaker method for backward compatibility
@@ -117,7 +136,8 @@ class EnhancedWorkflowNodes:
             search_tools=None,
             tool_registry=self.tool_registry,
             config=self.agent_config,
-            event_emitter=self.event_emitter
+            event_emitter=self.event_emitter,
+            observation_index=self.observation_index
         )
         # Set references for emitting plan/step events
         stream_callback = getattr(agent, 'stream_callback', None)
@@ -131,42 +151,70 @@ class EnhancedWorkflowNodes:
             embedding_manager=self.embedding_manager
         )
 
-    def _emit_workflow_event(self, phase: str, agent: str, status: str = 'started', metadata: Dict[str, Any] = None):
+    def _emit_workflow_event(self, phase: str, agent: str, status: str = 'started', metadata: Dict[str, Any] = None, state: Dict[str, Any] = None):
         """Emit workflow phase event for UI visualization."""
         logger.info(f"[WORKFLOW] Emitting workflow event: phase={phase}, agent={agent}, status={status}")
-        
-        if self.event_emitter:
-            event_data = {
-                "phase": phase,
-                "agent": agent,
-                "status": status,
+
+        event_data = {
+            "phase": phase,
+            "agent": agent,
+            "status": status,
+            "timestamp": time.time()
+        }
+        if metadata:
+            event_data["metadata"] = metadata
+
+        # CRITICAL: Add event directly to state for streaming
+        # IMPORTANT: Create a NEW list so LangGraph's reducer detects the change!
+        if state is not None:
+            existing_events = state.get("intermediate_events", [])
+            workflow_event = {
+                "event_type": "workflow_phase",
+                "data": event_data,
                 "timestamp": time.time()
             }
-            if metadata:
-                event_data["metadata"] = metadata
-                
+            # Create NEW list with the event appended (don't mutate in place!)
+            state["intermediate_events"] = existing_events + [workflow_event]
+            logger.info(f"✅ Added workflow_phase event to intermediate_events: {phase}={status}")
+
+        # Also emit via event emitter for backward compatibility
+        if self.event_emitter:
             self.event_emitter.emit(
                 event_type="workflow_phase",
                 data=event_data,
                 correlation_id=f"workflow_{phase}_{agent}"
             )
-    
-    def _emit_agent_handoff(self, from_agent: str, to_agent: str, phase: str = None, reason: str = None):
+
+    def _emit_agent_handoff(self, from_agent: str, to_agent: str, phase: str = None, reason: str = None, state: Dict[str, Any] = None):
         """Emit agent handoff event for workflow visualization."""
         logger.info(f"[WORKFLOW] Agent handoff: {from_agent} → {to_agent} (phase={phase})")
-        
-        if self.event_emitter:
-            from .core.types import IntermediateEventType
-            
-            event_data = {
-                "from_agent": from_agent,
-                "to_agent": to_agent,
+
+        event_data = {
+            "from_agent": from_agent,
+            "to_agent": to_agent,
+            "timestamp": time.time()
+        }
+        if phase:
+            event_data["phase"] = phase
+        if reason:
+            event_data["reason"] = reason
+
+        # CRITICAL: Add event directly to state for streaming
+        # IMPORTANT: Create a NEW list so LangGraph's reducer detects the change!
+        if state is not None:
+            existing_events = state.get("intermediate_events", [])
+            handoff_event = {
+                "event_type": "agent_handoff",
+                "data": event_data,
                 "timestamp": time.time()
             }
-            if phase:
-                event_data["phase"] = phase
-            if reason:
-                event_data["reason"] = reason
+            # Create NEW list with the event appended (don't mutate in place!)
+            state["intermediate_events"] = existing_events + [handoff_event]
+            logger.info(f"✅ Added agent_handoff event to intermediate_events: {from_agent} → {to_agent}")
+
+        # Also emit via event emitter for backward compatibility
+        if self.event_emitter:
+            from .core.types import IntermediateEventType
                 
             # Calculate progress based on agent sequence
             agent_sequence = ['coordinator', 'background_investigation', 'planner', 'researcher', 'fact_checker', 'reporter']
@@ -306,13 +354,42 @@ class EnhancedWorkflowNodes:
             return payload.get('summary') or payload.get('synthesis', '')
         return str(payload)
 
-    def _extract_observation_texts(self, payload: Any) -> List[str]:
+    def _extract_observations(self, payload: Any) -> List['StructuredObservation']:
+        """
+        Extract observations preserving step_id and metadata.
+
+        Returns List[StructuredObservation] instead of List[str] to maintain
+        step_id for section filtering and other metadata.
+        """
+        from .core.observation_models import ensure_structured_observation
+
+        observations = []
+
         if isinstance(payload, SectionResearchResult):
-            return [obs.content for obs in payload.observations]
-        if isinstance(payload, dict):
-            observations = payload.get('observations') or payload.get('research', {}).get('observations', [])
-            return [observation_to_text(item) for item in observations]
-        return []
+            # Already StructuredObservation objects with step_id
+            observations = list(payload.observations)
+        elif isinstance(payload, dict):
+            raw_obs = payload.get('observations', [])
+            # Convert to StructuredObservation if needed (preserves step_id if present)
+            observations = [ensure_structured_observation(obs) for obs in raw_obs]
+
+        # Debug logging - track step_id presence
+        with_step_id = sum(1 for obs in observations if obs.step_id)
+        without_step_id = len(observations) - with_step_id
+
+        logger.debug(
+            f"Extracted {len(observations)} observations: "
+            f"{with_step_id} with step_id, {without_step_id} without"
+        )
+
+        # Log detailed warning if many missing step_id (indicates bug)
+        if without_step_id > with_step_id and len(observations) > 5:
+            logger.warning(
+                f"⚠️ POTENTIAL BUG: {without_step_id}/{len(observations)} observations missing step_id. "
+                f"Check researcher agent observation creation code."
+            )
+
+        return observations
 
     def _extract_citations(self, payload: Any) -> List[Any]:
         if isinstance(payload, SectionResearchResult):
@@ -414,7 +491,7 @@ class EnhancedWorkflowNodes:
     def coordinator_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Coordinator node - entry point for requests.
-        
+
         Classifies and routes incoming requests to appropriate agents.
         """
         logger.info("🎯 [WORKFLOW] Executing coordinator node")
@@ -433,17 +510,18 @@ class EnhancedWorkflowNodes:
 
         # Emit agent handoff event for workflow visualization
         self._emit_agent_handoff(
-            from_agent="system", 
-            to_agent="coordinator", 
-            phase="classification", 
-            reason="Starting multi-agent research workflow"
+            from_agent="system",
+            to_agent="coordinator",
+            phase="classification",
+            reason="Starting multi-agent research workflow",
+            state=state
         )
-        
+
         # Emit workflow phase event - coordinator started
         self._emit_workflow_event("classification", "coordinator", "started", {
             "message": "Starting request classification and routing",
             "workflow_step": "coordinator_classification"
-        })
+        }, state=state)
         
         # Debug state at coordinator entry
         self._debug_state_transition("COORDINATOR", state)
@@ -552,14 +630,23 @@ class EnhancedWorkflowNodes:
             
             # CRITICAL FIX: Mark coordinator as visited to prevent infinite loops
             updated_state["coordinator_visited"] = True
-            
-            # CRITICAL FIX: Emit proper handoff event to mark "Understanding Your Request" as completed
-            next_agent = updated_state.get("current_agent", "planner")
+
+            # CRITICAL FIX: Coordinator must determine next agent - never route to itself
+            # Don't rely on current_agent which gets set to "coordinator" by contract handler
+            if updated_state.get("enable_background_investigation", True) and not updated_state.get("background_investigation_completed"):
+                next_agent = "background_investigation"
+            else:
+                next_agent = "planner"
+
+            # Override current_agent to ensure correct routing
+            updated_state["current_agent"] = next_agent
+
             self._emit_agent_handoff(
-                from_agent="coordinator", 
-                to_agent=next_agent, 
-                phase="coordination_complete", 
-                reason=f"Request classification complete, routing to {next_agent}"
+                from_agent="coordinator",
+                to_agent=next_agent,
+                phase="coordination_complete",
+                reason=f"Request classification complete, routing to {next_agent}",
+                state=updated_state
             )
             
             logger.info(f"🎯 [COORDINATOR] Handoff complete: coordinator → {next_agent}")
@@ -568,7 +655,7 @@ class EnhancedWorkflowNodes:
             self._emit_workflow_event("classification", "coordinator", "completed", {
                 "message": "Request classification and routing completed",
                 "next_phase": "background_investigation"
-            })
+            }, state=updated_state)
             
             # Apply memory pruning before returning
             from .core.multi_agent_state import StateManager
@@ -636,10 +723,10 @@ class EnhancedWorkflowNodes:
             observations.append(observation)
         return observations
 
-    def background_investigation_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def background_investigation_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Background investigation node - gathers initial context.
-        
+
         Performs preliminary search before planning to provide context.
         """
         logger.info("🔍 [WORKFLOW] Executing background investigation node")
@@ -648,7 +735,7 @@ class EnhancedWorkflowNodes:
         self._emit_workflow_event("investigation", "background_investigator", "started", {
             "message": "Starting background investigation and context gathering",
             "workflow_step": "background_research"
-        })
+        }, state=state)
         
         # Emit phase completion for coordinator (initiate phase)
         if self.event_emitter:
@@ -695,11 +782,13 @@ class EnhancedWorkflowNodes:
         # Check if enabled
         if not state.get("enable_background_investigation", True):
             logger.info("Background investigation disabled, skipping")
+            state["background_investigation_completed"] = True
             return state
-        
+
         research_topic = state.get("research_topic", "")
         if not research_topic:
             logger.warning("No research topic for background investigation")
+            state["background_investigation_completed"] = True
             return state
         
         # CRITICAL FIX: Add circuit breaker to prevent infinite loops
@@ -724,7 +813,10 @@ class EnhancedWorkflowNodes:
             state["warnings"].append(
                 f"NOTICE: Workflow completed early due to {reason.value}: {explanation}"
             )
-            
+
+            # Mark as completed to prevent router loop
+            state["background_investigation_completed"] = True
+
             # Return state with termination flag - router will handle termination
             return state
         
@@ -836,13 +928,16 @@ class EnhancedWorkflowNodes:
         # Prune state to reduce memory usage before next node
         from .core.multi_agent_state import StateManager
         state = StateManager.prune_state_for_memory(state)
-        
+
+        # CRITICAL FIX: Mark background investigation as completed so router progresses!
+        state["background_investigation_completed"] = True
+
         return state
     
-    def planner_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def planner_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Planner node - generates research plans.
-        
+
         Creates structured plans with quality assessment.
         """
         logger.info("Executing planner node")
@@ -982,7 +1077,8 @@ class EnhancedWorkflowNodes:
             start_time = time.time()
             request_count_before = getattr(self, '_total_requests', 0)
 
-            result = self.planner(state, self.agent_config or {})
+            # FIXED: Properly await async planner agent
+            result = await self.planner(state, self.agent_config or {})
             
             # ENHANCED: Calculate execution metrics  
             execution_time = time.time() - start_time
@@ -1331,13 +1427,16 @@ class EnhancedWorkflowNodes:
         
         return state
     
-    def researcher_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def researcher_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Researcher node - executes research steps.
-        
+
         Gathers information and accumulates observations.
         """
         logger.info("Executing researcher node")
+
+        # Import at function start to avoid UnboundLocalError
+        from .core.multi_agent_state import StateManager
 
         # CRITICAL: Add observation tracking debug
         logger.info(f"[RESEARCHER DEBUG] Current observations count: {len(state.get('observations', []))}")
@@ -1362,6 +1461,12 @@ class EnhancedWorkflowNodes:
                 correlation_id=f"researcher_{state.get('current_iteration', 0)}",
                 stage_id="researcher"
             )
+
+            # Emit workflow phase event - research started
+            self._emit_workflow_event("research", "researcher", "started", {
+                "message": "Starting research execution",
+                "workflow_step": "researcher_execution"
+            }, state=state)
 
             # Emit phase started event for research phase
             self.event_emitter.emit(
@@ -1679,7 +1784,8 @@ class EnhancedWorkflowNodes:
                             # Emit step activation event for real-time UI updates
                             if plan and hasattr(plan, 'mark_step_activated'):
                                 plan.mark_step_activated(plan_managed_step.step_id, event_emitter=self.event_emitter)
-                                state["current_plan"] = plan  # Update plan state
+                                # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
+                                state["current_plan"] = plan.model_copy(deep=True)
 
                     # Execute ONLY the specific step requested by router
                     logger.info(f"Executing specific step: {current_step.step_id} - {current_step.title}")
@@ -1775,7 +1881,7 @@ class EnhancedWorkflowNodes:
                                 result = SectionResearchResult.from_dict(result)
 
                             # CRITICAL FIX: Format observations with [Obs#N] labels and include in synthesis
-                            observations = self._extract_observation_texts(result)
+                            observations = self._extract_observations(result)
                             if observations:
                                 formatted_observations = self._format_observations_with_labels(observations)
                                 # Combine synthesis with formatted observations
@@ -1809,7 +1915,7 @@ class EnhancedWorkflowNodes:
 
                             if plan:
                                 logger.info(f"🔍 WORKFLOW DEBUG: About to mark step {current_step.step_id} as completed")
-                                observation_text = self._extract_observation_texts(result)
+                                observation_text = self._extract_observations(result)
                                 plan.mark_step_completed(
                                     current_step.step_id,
                                     execution_result=self._extract_synthesis_text(result),
@@ -1844,8 +1950,9 @@ class EnhancedWorkflowNodes:
                                 state["intermediate_events"].append(step_completed_event)
                                 logger.info(f"✅ Added step_completed event to intermediate_events for section step: {current_step.step_id}")
                                 
-                                # CRITICAL FIX: Update plan in state to persist step status changes
-                                state["current_plan"] = plan
+                                # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
+                                # Same fix as intermediate_events: object identity matters for state propagation
+                                state["current_plan"] = plan.model_copy(deep=True)
                             else:
                                 logger.warning(f"🔍 WORKFLOW DEBUG: No plan available to mark step {current_step.step_id} as completed")
 
@@ -1861,7 +1968,7 @@ class EnhancedWorkflowNodes:
                 # CRITICAL FIX: Mark step as completed when all sections are done
                 if plan and current_step:
                     logger.info(f"🔍 STEP_COMPLETION: All sections completed for step {current_step.step_id}, marking as complete")
-                    observation_text = self._extract_observation_texts(result) if 'result' in locals() else []
+                    observation_text = self._extract_observations(result) if 'result' in locals() else []
                     execution_summary = self._extract_synthesis_text(result) if 'result' in locals() else "Step completed successfully"
                     
                     # Mark step as completed in the plan
@@ -1897,9 +2004,9 @@ class EnhancedWorkflowNodes:
                         state["intermediate_events"] = []
                     state["intermediate_events"].append(step_completed_event)
                     logger.info(f"✅ Added step_completed event to intermediate_events for all sections complete: {current_step.step_id}")
-                    
-                    # Update plan in state
-                    state["current_plan"] = plan
+
+                    # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
+                    state["current_plan"] = plan.model_copy(deep=True)
                 
                 state["current_step"] = None
                 logger.info(f"Completed step {current_step.step_id}")
@@ -1958,7 +2065,7 @@ class EnhancedWorkflowNodes:
 
                         # CRITICAL FIX: Format observations with [Obs#N] labels for processing/synthesis steps
                         if isinstance(result, dict) or hasattr(result, 'observations'):
-                            observations = self._extract_observation_texts(result)
+                            observations = self._extract_observations(result)
                             if observations:
                                 formatted_observations = self._format_observations_with_labels(observations)
                                 # Add formatted observations to the result's synthesis
@@ -2010,7 +2117,7 @@ class EnhancedWorkflowNodes:
                         # Mark as completed
                         execution_result = self._extract_synthesis_text(result)
                         current_step.execution_result = execution_result
-                        current_step.observations = self._extract_observation_texts(result) or [execution_result]
+                        current_step.observations = self._extract_observations(result) or [execution_result]
                         if plan:
                             plan.mark_step_completed(
                                 current_step.step_id,
@@ -2018,8 +2125,8 @@ class EnhancedWorkflowNodes:
                                 observations=current_step.observations,
                                 event_emitter=self.event_emitter,
                             )
-                            # CRITICAL FIX: Update plan in state to persist step status changes
-                            state["current_plan"] = plan
+                            # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
+                            state["current_plan"] = plan.model_copy(deep=True)
 
                             # Add to intermediate_events for UI
     
@@ -2064,7 +2171,8 @@ class EnhancedWorkflowNodes:
 
                         if plan:
                             plan.mark_step_failed(current_step.step_id, reason=str(e), event_emitter=self.event_emitter)
-                            state["current_plan"] = plan  # CRITICAL: Persist plan state after marking failed
+                            # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
+                            state["current_plan"] = plan.model_copy(deep=True)
                             logger.info(f"Plan state persisted after marking step {current_step.step_id} as failed")
                         section_results[step_key] = {
                             "id": step_key,
@@ -2074,17 +2182,17 @@ class EnhancedWorkflowNodes:
                                 "synthesis": current_step.execution_result,
                                 "confidence": 0.0,
                                 "extracted_data": {},
-                                "observations": self._extract_observation_texts(result),
+                                "observations": self._extract_observations(result),
                             },
                         }
                     finally:
                         state["current_step"] = None
                 
-                # Convert section results to observations format for reporter
-                research_observations = []
+                # Convert section results to observations format for reporter (CONSOLIDATED - no more research_observations duplication)
+                observations_from_sections = []
                 for section_id, section_data in section_results.items():
                     if isinstance(section_data, SectionResearchResult):
-                        research_observations.append({
+                        observations_from_sections.append({
                             "content": section_data.synthesis,
                             "source": f"Section Research: {section_id}",
                             "relevance": section_data.confidence,
@@ -2100,7 +2208,7 @@ class EnhancedWorkflowNodes:
                                 "extracted_data": section_data.get("extracted_data", {}),
                                 "confidence": section_data.get("confidence"),
                             }
-                        research_observations.append({
+                        observations_from_sections.append({
                             "content": research_payload.get("synthesis", ""),
                             "source": f"Section Research: {section_id}",
                             "relevance": research_payload.get("confidence", 0.5),
@@ -2108,27 +2216,27 @@ class EnhancedWorkflowNodes:
                             "section_id": section_data.get("id", section_id),
                             "extracted_data": research_payload.get("extracted_data", {}),
                         })
-                
+
                 # NOTE: Step updates now happen directly in the research loop above
                 # No need for complex sync logic since steps are updated immediately
-                
-                # Create result with both formats for compatibility
+
                 # Count completed steps
                 completed_count = sum(1 for step in plan.steps if step.status == StepStatus.COMPLETED)
                 logger.info(f"Section research completed: {completed_count}/{len(plan.steps)} steps finished")
-                
-                # CRITICAL FIX: Include updated plan to persist step status changes
+
+                # Create result with section results and observations (single source of truth)
                 logger.info(f"[ACCUMULATION_DEBUG] Before creating result, section_results has {len(section_results)} sections: {list(section_results.keys())}")
                 result = {
                     "section_research_results": section_results,
-                    "research_observations": research_observations,
+                    "observations": observations_from_sections,  # Standardized field name
                     "current_plan": plan  # This fixes the infinite loop by persisting step updates
                 }
                 logger.info(f"[SECTION_RESEARCH] Created result with {len(section_results)} section results: {list(section_results.keys())}")
                 logger.info(f"[ACCUMULATION_DEBUG] Returning section_research_results with keys: {list(result['section_research_results'].keys())}")
             if result is None:
                 # Execute normal researcher (template-driven flow or generic plan)
-                result = self.researcher(state, self.agent_config or {})
+                # FIXED: Properly await async researcher agent
+                result = await self.researcher(state, self.agent_config or {})
             
             # ENHANCED: Calculate execution metrics
             execution_time = time.time() - start_time
@@ -2204,41 +2312,35 @@ class EnhancedWorkflowNodes:
                 validate_section_research_state(state, "after_merge")
             
             # Emit events for findings
-            # FIX: Ensure observations are properly collected from all sources
+            # Collect observations from all result sources (consolidated - no more research_observations duplication)
             new_observations = []
             if isinstance(result, dict):
-                new_observations = result.get("research_observations", [])
-                # If no research_observations, check for other observation sources
-                if not new_observations:
-                    # Check for observations field
-                    new_observations = result.get("observations", [])
-                    # Check for search_results and convert to observations
-                    if not new_observations and "search_results" in result:
-                        search_results = result.get("search_results", [])
-                        new_observations = self._convert_search_results_to_observations(search_results)
-                        result["research_observations"] = new_observations
-                    # Check for section_research_results
-                    if not new_observations and "section_research_results" in result:
-                        new_observations = result.get("research_observations", [])
+                # Primary source: observations field (standardized)
+                new_observations = result.get("observations", [])
+                # Fallback: check for search_results and convert to observations
+                if not new_observations and "search_results" in result:
+                    search_results = result.get("search_results", [])
+                    new_observations = self._convert_search_results_to_observations(search_results)
+                # Fallback: extract from section_research_results if present
+                if not new_observations and "section_research_results" in result:
+                    section_results = result.get("section_research_results", {})
+                    for section_data in section_results.values():
+                        if isinstance(section_data, SectionResearchResult):
+                            # Extract observations from section result
+                            new_observations.extend([obs.to_dict() if hasattr(obs, 'to_dict') else obs
+                                                    for obs in section_data.observations])
             elif hasattr(result, 'update') and result.update:
-                new_observations = result.update.get("research_observations", [])
-                if not new_observations:
-                    new_observations = result.update.get("observations", [])
-                    if not new_observations and "search_results" in result.update:
-                        search_results = result.update.get("search_results", [])
-                        new_observations = self._convert_search_results_to_observations(search_results)
-                        result.update["research_observations"] = new_observations
-            
-            # CRITICAL FIX: Accumulate observations in state
+                new_observations = result.update.get("observations", [])
+                if not new_observations and "search_results" in result.update:
+                    search_results = result.update.get("search_results", [])
+                    new_observations = self._convert_search_results_to_observations(search_results)
+
+            # Accumulate observations in state (single source of truth)
             if new_observations:
                 # Get existing observations from state
                 existing_observations = state.get("observations", [])
                 # Add new observations to the list
                 state["observations"] = existing_observations + new_observations
-
-                # CRITICAL: Sync research_observations field to prevent data loss
-                # Ensure both observation fields stay synchronized
-                state["research_observations"] = state["observations"].copy()
 
                 logger.info(f"Accumulated {len(new_observations)} new observations, total: {len(state['observations'])}")
             
@@ -2258,7 +2360,7 @@ class EnhancedWorkflowNodes:
                             )
                 
                 # Check if we have enough information or need more
-                total_observations = len(state.get("research_observations", []) + new_observations)
+                total_observations = len(state.get("observations", []))
                 if total_observations < 5 and self.event_emitter:
                     self.event_emitter.emit_knowledge_gap_identified(
                         topic=state.get("research_topic", "topic"),
@@ -2281,9 +2383,9 @@ class EnhancedWorkflowNodes:
             if self.event_emitter:
                 findings_count = 0
                 if isinstance(result, dict):
-                    findings_count = len(result.get("research_observations", []))
+                    findings_count = len(result.get("observations", []))
                 elif hasattr(result, 'update') and result.update:
-                    findings_count = len(result.update.get("research_observations", []))
+                    findings_count = len(result.update.get("observations", []))
                 
                 self.event_emitter.emit_action_complete(
                     action="research_execution",
@@ -2300,49 +2402,47 @@ class EnhancedWorkflowNodes:
             if isinstance(result, dict):
                 result = self._enrich_search_results_with_embeddings(result)
                 
-                # PRESERVE CRITICAL DATA BEFORE PRUNING
+                # PRESERVE CRITICAL DATA BEFORE PRUNING (consolidated - no more research_observations duplication)
                 accumulated_observations = state.get("observations", [])
                 section_results_backup = result.get("section_research_results", {})
-                research_observations = result.get("research_observations", [])
-                logger.info(f"[OBSERVATION TRACKING] Preserving {len(accumulated_observations)} observations before pruning")
-                logger.info(f"[OBSERVATION TRACKING] Preserving {len(research_observations)} research observations before pruning") 
+                observations_from_result = result.get("observations", [])
+                plan_backup = result.get("current_plan")  # CRITICAL FIX: Preserve plan before pruning to prevent infinite loop
+                logger.info(f"[OBSERVATION TRACKING] Preserving {len(accumulated_observations)} accumulated observations before pruning")
+                logger.info(f"[OBSERVATION TRACKING] Preserving {len(observations_from_result)} new observations from result before pruning")
                 logger.info(f"[SECTION_RESEARCH] Preserving {len(section_results_backup)} section results before pruning")
-                
+                logger.info(f"[PLAN PRESERVATION] Preserving plan before pruning: {plan_backup.plan_id if plan_backup and hasattr(plan_backup, 'plan_id') else 'None'}")
+
                 # Calculate total observation data being preserved
-                total_obs_data = len(accumulated_observations) + len(research_observations)
+                total_obs_data = len(accumulated_observations) + len(observations_from_result)
                 for section, data in section_results_backup.items():
                     if isinstance(data, dict) and 'observations' in data:
                         total_obs_data += len(data['observations'])
                 logger.info(f"[DATA PRESERVATION] Total observation data preserved: {total_obs_data} items")
-                
+
                 # Apply memory pruning
                 from .core.multi_agent_state import StateManager
                 result = StateManager.prune_state_for_memory(result)
-                
+
                 # RESTORE CRITICAL DATA AFTER PRUNING
-                if accumulated_observations:
-                    result["observations"] = accumulated_observations
-                    logger.info(f"[OBSERVATION TRACKING] Restored {len(accumulated_observations)} observations after pruning")
-                
-                if research_observations:
-                    result["research_observations"] = research_observations
-                    logger.info(f"[OBSERVATION TRACKING] Restored {len(research_observations)} research observations after pruning")
-                
-                # If we don't have research_observations but do have observations, copy them for compatibility
-                if not result.get("research_observations") and accumulated_observations:
-                    result["research_observations"] = accumulated_observations
-                    logger.info(f"[OBSERVATION TRACKING] Copied observations to research_observations for compatibility")
-                
+                if observations_from_result:
+                    result["observations"] = observations_from_result
+                    logger.info(f"[OBSERVATION TRACKING] Restored {len(observations_from_result)} observations after pruning")
+
                 # CRITICAL FIX: Restore section_research_results after pruning
                 if section_results_backup:
                     result["section_research_results"] = section_results_backup
                     logger.info(f"[SECTION_RESEARCH] Restored {len(section_results_backup)} section results after pruning")
-                    
+
                     # Log section observation counts for debugging
                     for section, data in section_results_backup.items():
                         if isinstance(data, dict) and 'observations' in data:
                             obs_count = len(data['observations'])
                             logger.info(f"[SECTION_RESEARCH] Section '{section}': {obs_count} observations restored")
+
+                # CRITICAL FIX: Restore current_plan after pruning to prevent infinite loop
+                if plan_backup is not None:
+                    result["current_plan"] = plan_backup
+                    logger.info(f"[PLAN PRESERVATION] Restored plan after pruning: {plan_backup.plan_id if hasattr(plan_backup, 'plan_id') else 'unknown'}")
             elif hasattr(result, 'update') and result.update:
                 # For Command objects returned by agent, extract the update dict
                 enriched_update = self._enrich_search_results_with_embeddings(result.update)
@@ -2351,9 +2451,10 @@ class EnhancedWorkflowNodes:
                 # CRITICAL FIX: Ensure observations are in the update dict
                 if "observations" in state and state["observations"]:
                     result.update["observations"] = state["observations"]
-                
-                # CRITICAL FIX: Preserve section_research_results if it exists in original result  
+
+                # CRITICAL FIX: Preserve section_research_results AND current_plan if they exist
                 section_results_backup = None
+                plan_backup_cmd = None  # NEW: For preserving plan from Command.update
                 if isinstance(result, dict) and "section_research_results" in result:
                     section_results_backup = result["section_research_results"]
                     logger.info(f"[SECTION_RESEARCH] Backing up {len(section_results_backup)} section results before pruning")
@@ -2361,17 +2462,27 @@ class EnhancedWorkflowNodes:
                 elif hasattr(result, 'update') and result.update and "section_research_results" in result.update:
                     section_results_backup = result.update["section_research_results"]
                     logger.info(f"[SECTION_RESEARCH] Backing up {len(section_results_backup)} section results from Command.update before pruning")
+
+                # NEW: Preserve current_plan from Command.update dict to prevent infinite loop
+                if hasattr(result, 'update') and result.update and "current_plan" in result.update:
+                    plan_backup_cmd = result.update["current_plan"]
+                    logger.info(f"[PLAN PRESERVATION] Backing up plan from Command.update before pruning: {plan_backup_cmd.plan_id if hasattr(plan_backup_cmd, 'plan_id') else 'unknown'}")
                 
                 # Apply memory pruning to the update dict
                 from .core.multi_agent_state import StateManager
                 if result.update:
                     pruned_update = StateManager.prune_state_for_memory(result.update)
-                    
-                    # CRITICAL FIX: Restore section_research_results after pruning
+
+                    # CRITICAL FIX: Restore section_research_results AND current_plan after pruning
                     if section_results_backup is not None:
                         pruned_update["section_research_results"] = section_results_backup
                         logger.info(f"[SECTION_RESEARCH] Restored {len(section_results_backup)} section results after pruning")
-                    
+
+                    # NEW: Restore current_plan after pruning to prevent infinite loop
+                    if plan_backup_cmd is not None:
+                        pruned_update["current_plan"] = plan_backup_cmd
+                        logger.info(f"[PLAN PRESERVATION] Restored plan from Command.update after pruning: {plan_backup_cmd.plan_id if hasattr(plan_backup_cmd, 'plan_id') else 'unknown'}")
+
                     # Return the pruned update dict, not a Command
                     result = pruned_update
             
@@ -2389,7 +2500,13 @@ class EnhancedWorkflowNodes:
                 from .core.debug_utils import dump_section_state, validate_section_research_state
                 dump_section_state(temp_state, "after_section_research")
                 validate_section_research_state(temp_state, "researcher_return")
-            
+
+            # Emit workflow phase event - research completed
+            self._emit_workflow_event("research", "researcher", "completed", {
+                "message": "Research execution completed successfully",
+                "workflow_step": "researcher_complete"
+            }, state=state)
+
             return result
             
         except SearchToolsFailedException as e:
@@ -2411,7 +2528,14 @@ class EnhancedWorkflowNodes:
                     correlation_id=correlation_id,
                     stage_id="researcher"
                 )
-            
+
+            # Emit workflow phase event - research failed (critical search failure)
+            self._emit_workflow_event("research", "researcher", "failed", {
+                "message": f"Critical search failure: {e.message}",
+                "error_type": "SearchToolsFailedException",
+                "is_critical": True
+            }, state=state)
+
             # Re-raise to stop the workflow and return error to user
             raise e
             
@@ -2421,7 +2545,14 @@ class EnhancedWorkflowNodes:
             error_msg = f"Researcher node failed: {e}"
             logger.error(f"{error_msg}\n\n=== FULL STACK TRACE ===\n{full_traceback}\n=== END STACK TRACE ===")
             logger.exception(error_msg)
-            
+
+            # Emit workflow phase event - research failed
+            self._emit_workflow_event("research", "researcher", "failed", {
+                "message": f"Research execution failed: {str(e)}",
+                "error_type": type(e).__name__,
+                "is_critical": False
+            }, state=state)
+
             # CRITICAL FIX: Track this as a structural error for circuit breaker
             state = track_structural_error(state, error_msg)
             
@@ -2554,9 +2685,9 @@ class EnhancedWorkflowNodes:
                                 description=matching_step.title
                             )
                             logger.info(f"🔄 FINAL_CHECK: Emitted step_completed event for {matching_step.step_id}")
-                
-                # Update plan in state
-                state["current_plan"] = plan
+
+                # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
+                state["current_plan"] = plan.model_copy(deep=True)
             
             # Emit phase completion for researcher (research phase)
             if self.event_emitter:
@@ -2582,20 +2713,32 @@ class EnhancedWorkflowNodes:
                 state["intermediate_events"].append(phase_event)
                 logger.info("✅ Added phase_completed event for 'research' to intermediate_events")
 
+            # Consolidate observations before returning
+            state = StateManager.consolidate_observations(state)
+
+            # Log observation statistics
+            logger.info(
+                f"📊 Researcher complete: "
+                f"Total observations accumulated: {len(state.get('observations', []))}"
+            )
+
             # FIX: Always return state, never lose data
             # Continue to next step or fact checker with preserved state
             return state
     
-    def _safe_fact_checker_call(self, state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    async def _safe_fact_checker_call(self, state: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
         """
         Defensive wrapper for fact_checker calls to guarantee dict return.
-        
+
+        ASYNC: Made async to properly await the async fact_checker agent.
+
         This ensures that no matter what the fact_checker returns (Command, string, None, etc.),
         we always get a valid dict that the workflow can process.
         """
         logger.debug("_safe_fact_checker_call: Starting fact checker call")
         try:
-            result = self.fact_checker(state, config)
+            # FIXED: Properly await async fact_checker agent
+            result = await self.fact_checker(state, config)
             logger.debug(f"_safe_fact_checker_call: Raw result type: {type(result)}, is dict: {isinstance(result, dict)}")
             
             # Log the actual value for debugging
@@ -2646,10 +2789,10 @@ class EnhancedWorkflowNodes:
             "errors": ["Fact checker failed, using default values"]
         }
     
-    def fact_checker_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def fact_checker_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Fact checker node - validates claims.
-        
+
         Ensures factual accuracy and grounding.
         """
         logger.info("Executing fact checker node")
@@ -2715,7 +2858,7 @@ class EnhancedWorkflowNodes:
                 event_type="grounding_start",
                 data={
                     "level": verification_level,
-                    "sources_to_verify": len(state.get("research_observations", []))
+                    "sources_to_verify": len(state.get("observations", []))
                 },
                 reasoning=f"Starting {verification_level} fact verification process",
                 correlation_id=correlation_id,
@@ -2729,7 +2872,8 @@ class EnhancedWorkflowNodes:
             
             # Use defensive wrapper for fact checker call
             logger.debug(f"Calling fact checker with state type: {type(state)}, keys: {list(state.keys()) if isinstance(state, dict) else 'N/A'}")
-            raw_result = self._safe_fact_checker_call(state, self.agent_config or {})
+            # FIXED: Properly await async fact_checker wrapper
+            raw_result = await self._safe_fact_checker_call(state, self.agent_config or {})
             logger.debug(f"Safe fact checker returned type: {type(raw_result)}, keys: {list(raw_result.keys()) if isinstance(raw_result, dict) else 'N/A'}")
             
             # The safe wrapper guarantees raw_result is a dict
@@ -2925,19 +3069,31 @@ class EnhancedWorkflowNodes:
                 )
             
             # CRITICAL FIX: Clear embeddings after fact checking to save memory
-            if "background_investigation_results" in state:
-                for bg_result in state["background_investigation_results"]:
+            # ROBUST: Handle all possible types of background_investigation_results (None, str, list, empty)
+            bg_results = state.get("background_investigation_results")
+
+            # Only iterate if it's a non-empty collection of objects
+            if bg_results and isinstance(bg_results, (list, tuple)) and len(bg_results) > 0:
+                for bg_result in bg_results:
+                    # Verify it's an object with metadata before accessing
                     if hasattr(bg_result, 'metadata') and bg_result.metadata:
                         if 'embedding' in bg_result.metadata:
                             del bg_result.metadata['embedding']
                         if 'embedding_vector' in bg_result.metadata:
                             del bg_result.metadata['embedding_vector']
+            else:
+                # Log what we got for debugging (helps diagnose issues)
+                logger.debug(
+                    "Skipping background results embedding cleanup",
+                    bg_results_type=type(bg_results).__name__ if bg_results is not None else "None",
+                    bg_results_value=str(bg_results)[:100] if bg_results else None
+                )
             
             # Create progress metrics before incrementing loop counter
             from .core.routing_policy import ProgressMetrics
-            
+
             current_metrics = ProgressMetrics(state)
-            if isinstance(result, dict) and 'factuality_report' in result:
+            if isinstance(result, dict) and 'factuality_report' in result and result['factuality_report'] is not None:
                 # Store the progress metrics to track progress between iterations
                 factuality_report = result['factuality_report']
                 current_metrics.current_ungrounded = factuality_report.ungrounded_claims
@@ -2983,15 +3139,24 @@ class EnhancedWorkflowNodes:
             updated_state = {**state}
             updated_state.update(result)
             
+            # Consolidate observations before pruning
+            updated_state = StateManager.consolidate_observations(updated_state)
+
             # Prune the merged state
             pruned_state = StateManager.prune_state_for_memory(updated_state)
-            
+
             # Validate pruned result
             if not isinstance(pruned_state, dict):
                 logger.error(f"StateManager.prune_state_for_memory returned non-dict: {type(pruned_state)}, value: {repr(pruned_state)[:100]}")
                 # Return the unpruned merged state
                 return updated_state
-            
+
+            # Log observation statistics
+            logger.info(
+                f"📊 Fact checker complete: "
+                f"Total observations accumulated: {len(pruned_state.get('observations', []))}"
+            )
+
             return pruned_state
             
         except Exception as e:
@@ -3033,18 +3198,26 @@ class EnhancedWorkflowNodes:
             state["warnings"] = state.get("warnings", [])
             state["warnings"].append("Proceeding to report generation despite fact checking error")
             
-            # Apply memory pruning and return state
+            # Apply memory pruning and consolidate observations
             from .core.multi_agent_state import StateManager
+            state = StateManager.consolidate_observations(state)
             state = StateManager.prune_state_for_memory(state)
             logger.info("Returning state to continue workflow despite fact checker error")
             return state
     
-    def reporter_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def reporter_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Reporter node - generates final report.
-        
+
         Creates styled reports with citations.
         """
+        from uuid import uuid4
+        invocation_id = str(uuid4())[:8]
+
+        logger.info("🎯 [REPORTER] ===== ENTERING REPORTER NODE =====")
+        logger.info(f"🎯 [REPORTER] Invocation ID: {invocation_id}")
+        logger.info(f"🎯 [REPORTER] State keys: {list(state.keys())[:20]}")
+        logger.info(f"🎯 [REPORTER] State object ID: {id(state)}")
         logger.info("Executing reporter node")
 
         # CRITICAL: Debug what reporter is receiving
@@ -3104,7 +3277,13 @@ class EnhancedWorkflowNodes:
             
             # Reporter is the final node, so proceed with report generation anyway
             # The circuit breaker warning will be included in the final report
-        
+
+        # Emit workflow phase event - report generation started
+        self._emit_workflow_event("report_generation", "reporter", "started", {
+            "message": "Starting comprehensive report synthesis",
+            "workflow_step": "reporter_synthesis"
+        }, state=state)
+
         # Emit report generation start event
         if self.event_emitter:
             self.event_emitter.emit_action_start(
@@ -3116,7 +3295,7 @@ class EnhancedWorkflowNodes:
             # Emit synthesis strategy
             report_style = state.get("report_style", "default")
             sections_planned = ["introduction", "findings", "analysis", "conclusion"]
-            source_count = len(state.get("research_observations", []))
+            source_count = len(state.get("observations", []))
             
             self.event_emitter.emit(
                 event_type="synthesis_strategy",
@@ -3132,7 +3311,8 @@ class EnhancedWorkflowNodes:
         
         try:
             # Execute reporter
-            result = self.reporter(state, self.agent_config or {})
+            # FIXED: Properly await async reporter agent
+            result = await self.reporter(state, self.agent_config or {})
             
             # Emit events for report sections generated
             final_report = ""
@@ -3185,7 +3365,7 @@ class EnhancedWorkflowNodes:
                 
                 self.event_emitter.emit_partial_synthesis(
                     conclusion=f"Comprehensive {report_style} report synthesizing research findings",
-                    source_count=len(state.get("research_observations", [])),
+                    source_count=len(state.get("observations", [])),
                     confidence=report_confidence,
                     supporting_sources=[f"{len(citations)} citations"],
                     correlation_id=correlation_id,
@@ -3236,22 +3416,56 @@ class EnhancedWorkflowNodes:
                 # Apply memory pruning before returning
                 from .core.multi_agent_state import StateManager
                 updated_state = StateManager.prune_state_for_memory(updated_state)
-                logger.info(f"Reporter completed with state keys: {list(updated_state.keys())}")
-                return updated_state
+
+                # CRITICAL: Mark reporter as completed and create NEW state object
+                # This ensures LangGraph detects the state change (same pattern as plan mutation fix)
+                logger.info(f"🎯 [REPORTER] ===== REPORTER EXECUTION SUCCESSFUL ({invocation_id}) =====")
+                logger.info(f"🎯 [REPORTER] Returning state with {len(updated_state)} keys")
+
+                # Create NEW state object for proper LangGraph propagation
+                final_state = dict(updated_state)
+                final_state["reporter_completed"] = True
+                final_state["workflow_should_terminate"] = True
+
+                logger.info(f"🎯 [REPORTER] New state object ID: {id(final_state)} (original: {id(updated_state)})")
+                logger.info(f"🎯 [REPORTER] Completion flags: reporter_completed={final_state.get('reporter_completed')}, workflow_should_terminate={final_state.get('workflow_should_terminate')}")
+                logger.info(f"Reporter completed with state keys: {list(final_state.keys())}")
+
+                # Emit workflow phase event - report generation completed
+                self._emit_workflow_event("report_generation", "reporter", "completed", {
+                    "message": "Report synthesis completed successfully",
+                    "workflow_step": "reporter_complete"
+                }, state=final_state)
+
+                return final_state
                 
             except Exception as e:
-                logger.error(f"Error in reporter state validation: {e}")
-                # Fallback - return original state with pruning
-                logger.warning(f"Unexpected reporter return type: {type(result)}")
+                logger.error(f"🎯 [REPORTER] Error in reporter state validation: {e}", exc_info=True)
+                # Fallback - return original state with pruning and completion markers
+                logger.warning(f"🎯 [REPORTER] Unexpected reporter return type: {type(result) if 'result' in locals() else 'N/A'}")
                 from .core.multi_agent_state import StateManager
                 state = StateManager.prune_state_for_memory(state)
-                return state
+
+                # CRITICAL: Still mark as completed so workflow terminates (even with validation error)
+                fallback_state = dict(state)
+                fallback_state["reporter_completed"] = True
+                fallback_state["workflow_should_terminate"] = True
+                fallback_state["reporter_validation_error"] = True
+
+                logger.info(f"🎯 [REPORTER] Returning fallback state (invocation {invocation_id})")
+                return fallback_state
             
         except Exception as e:
             import traceback
             full_traceback = traceback.format_exc()
+
+            # COMPREHENSIVE ERROR LOGGING (don't swallow errors!)
+            logger.error(f"❌ [REPORTER] ===== REPORTER NODE FAILED ({invocation_id}) =====")
+            logger.error(f"❌ [REPORTER] Exception type: {type(e).__name__}")
+            logger.error(f"❌ [REPORTER] Exception message: {str(e)}")
+            logger.error(f"❌ [REPORTER] Full traceback:\n{full_traceback}")
             logger.error(f"Reporter node failed: {e}\n\n=== FULL STACK TRACE ===\n{full_traceback}\n=== END STACK TRACE ===")
-            
+
             # Parse error for user-friendly message
             error_str = str(e)
             
@@ -3296,11 +3510,33 @@ class EnhancedWorkflowNodes:
                         "user_friendly_message": user_message,
                         "can_retry": can_retry
                     },
-                    correlation_id=correlation_id,
+                    correlation_id=correlation_id if 'correlation_id' in locals() else f"reporter_{invocation_id}",
                     stage_id="reporter"
                 )
-            
+
+                # Emit workflow phase event - report generation failed
+                self._emit_workflow_event("report_generation", "reporter", "failed", {
+                    "message": f"Report generation failed: {user_message}",
+                    "error_type": type(e).__name__,
+                    "can_retry": can_retry
+                }, state=state)
+
+                # Also emit node_error event for consistent error handling
+                self.event_emitter.emit(
+                    event_type="node_error",
+                    data={
+                        "node": "reporter",
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "recoverable": can_retry,
+                        "timestamp": time.time()
+                    },
+                    correlation_id=f"reporter_error_{invocation_id}",
+                    stage_id="reporter"
+                )
+
             # Return state with user-friendly error message and metadata
+            # CRITICAL: Create NEW state object for LangGraph propagation
             error_state = dict(state)
             error_state["final_report"] = user_message
             error_state["report_generation_failed"] = True
@@ -3311,7 +3547,22 @@ class EnhancedWorkflowNodes:
                 "can_retry": can_retry,
                 "user_friendly_message": user_message
             }
-            
+
+            # CRITICAL: Mark workflow as failed but completed so it terminates
+            error_state["workflow_failed"] = True
+            error_state["reporter_completed"] = True  # Reporter DID complete (with error)
+            error_state["workflow_should_terminate"] = True
+            error_state["node_error"] = {
+                "node": "reporter",
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "timestamp": time.time(),
+                "traceback": full_traceback
+            }
+
+            logger.info(f"🎯 [REPORTER] Returning error state (invocation {invocation_id})")
+            logger.info(f"🎯 [REPORTER] Error state flags: workflow_failed=True, reporter_completed=True, workflow_should_terminate=True")
+
             return error_state
     
     def human_feedback_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -3449,14 +3700,19 @@ class EnhancedWorkflowNodes:
                 processed.append(result)
             elif isinstance(result, dict):
                 # Convert dictionary to SearchResult
+                # FIXED: SearchResult doesn't accept 'score' parameter - use 'position' and store score in metadata
+                metadata = result.get('metadata', {})
+                if 'score' in result:
+                    metadata['score'] = result['score']  # Preserve score in metadata
+
                 search_result = SearchResult(
                     title=result.get('title', ''),
                     url=result.get('url', ''),
                     content=result.get('content', result.get('snippet', '')),
                     source=result.get('source', 'web'),
-                    score=result.get('score', 0.0),
+                    position=result.get('position'),  # FIXED: Use position instead of score
                     published_date=result.get('published_date'),
-                    metadata=result.get('metadata', {})
+                    metadata=metadata
                 )
                 processed.append(search_result)
             else:

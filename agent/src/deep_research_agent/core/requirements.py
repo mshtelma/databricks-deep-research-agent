@@ -6,8 +6,11 @@ extracted from natural language instructions.
 """
 
 from typing import List, Dict, Any, Optional, Union, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from enum import Enum
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class OutputFormatType(str, Enum):
@@ -36,6 +39,9 @@ class ConstraintType(str, Enum):
     FORMAT_REQUIREMENT = "format_requirement"
     DATA_REQUIREMENT = "data_requirement"
     STYLE_REQUIREMENT = "style_requirement"
+    METHODOLOGY = "methodology"
+    RIGOR = "rigor"
+    OTHER = "other"  # Catch-all for LLM-generated constraint types
 
 
 class TableSpecification(BaseModel):
@@ -122,23 +128,60 @@ class VisualizationSpecification(BaseModel):
 
 class Constraint(BaseModel):
     """A specific constraint on the output."""
-    
+
     type: ConstraintType = Field(
         description="Type of constraint"
     )
-    
+
     value: Union[int, str, bool] = Field(
         description="The constraint value"
     )
-    
+
     description: str = Field(
         description="Human-readable description of the constraint"
     )
-    
+
     is_hard_requirement: bool = Field(
         default=True,
         description="Whether this is a hard requirement or preference"
     )
+
+    @validator('type', pre=True)
+    def normalize_constraint_type(cls, v):
+        """Normalize unexpected constraint types to valid enum values."""
+        # If already a valid ConstraintType, return as-is
+        if isinstance(v, ConstraintType):
+            return v
+
+        # If it's a string, check if it's valid
+        if isinstance(v, str):
+            # Try direct match first
+            try:
+                return ConstraintType(v)
+            except ValueError:
+                pass
+
+            # Map common LLM-generated types to appropriate categories
+            type_mappings = {
+                "rigor": ConstraintType.STYLE_REQUIREMENT,
+                "precision": ConstraintType.STYLE_REQUIREMENT,
+                "depth": ConstraintType.STYLE_REQUIREMENT,
+                "detail": ConstraintType.STYLE_REQUIREMENT,
+                "detail_level": ConstraintType.STYLE_REQUIREMENT,
+                "scope": ConstraintType.DATA_REQUIREMENT,
+                "coverage": ConstraintType.DATA_REQUIREMENT,
+                "length": ConstraintType.WORD_COUNT,
+                "size": ConstraintType.WORD_COUNT,
+            }
+
+            normalized = type_mappings.get(v.lower(), ConstraintType.OTHER)
+            logger.warning(
+                f"Unknown constraint type '{v}' normalized to '{normalized.value}'"
+            )
+            return normalized
+
+        # Fallback
+        return ConstraintType.OTHER
 
 
 class RequiredDataPoint(BaseModel):

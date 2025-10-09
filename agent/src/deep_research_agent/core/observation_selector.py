@@ -53,11 +53,13 @@ class ObservationSelector:
         all_observations: List[Any],
         max_observations: int = 50,
         min_relevance: float = 0.2,
-        use_semantic: bool = True
+        use_semantic: bool = True,
+        ensure_entity_diversity: bool = False,
+        diversity_entities: Optional[List[str]] = None
     ) -> List[Any]:
         """
         Select relevant observations for a specific section.
-        
+
         Args:
             section_title: Title of the report section
             section_purpose: Purpose/description of the section
@@ -65,7 +67,9 @@ class ObservationSelector:
             max_observations: Maximum observations to return (default 50 for ~30k tokens)
             min_relevance: Minimum relevance score (0-1)
             use_semantic: Whether to use semantic similarity scoring
-            
+            ensure_entity_diversity: Force at least 1 observation per key entity
+            diversity_entities: List of entities to ensure diversity across (e.g., country names)
+
         Returns:
             List of relevant observations sorted by relevance
         """
@@ -112,7 +116,16 @@ class ObservationSelector:
         
         # Take top N observations from primary selection
         selected = primary_selected[:max_observations]
-        
+
+        # DIVERSITY ENFORCEMENT: Ensure key entities are represented
+        if ensure_entity_diversity and diversity_entities:
+            selected = self._ensure_entity_diversity(
+                selected=selected,
+                all_scored=scored_observations,
+                diversity_entities=diversity_entities,
+                max_observations=max_observations
+            )
+
         # Log selection statistics
         if selected:
             avg_score = sum(r.total_score for r in selected) / len(selected)
@@ -405,36 +418,197 @@ class ObservationSelector:
         # Simple heuristic: look for country names first
         countries = ['Spain', 'France', 'Germany', 'Poland', 'Bulgaria', 'Switzerland', 'United Kingdom', 'UK']
         content_lower = content.lower()
-        
+
         for country in countries:
             if country.lower() in content_lower:
                 return country
-        
+
         # Look for other key terms
         key_terms = ['tax', 'income', 'RSU', 'salary', 'childcare', 'housing', 'rent', 'benefit']
         for term in key_terms:
             if term.lower() in content_lower:
                 return term
-        
+
         # Default
         return 'general'
+
+    def extract_key_entities_from_topic(self, research_topic: str) -> List[str]:
+        """
+        Extract key entities (countries, companies, products, etc.) from research topic.
+
+        This helps identify which entities should have diverse representation in observations.
+
+        Args:
+            research_topic: The research question/topic
+
+        Returns:
+            List of entity names found in the topic
+        """
+        # Extended country list for comprehensive matching
+        countries = [
+            'Spain', 'France', 'Germany', 'Poland', 'Bulgaria', 'Switzerland',
+            'United Kingdom', 'UK', 'USA', 'United States', 'Canada', 'Australia',
+            'Italy', 'Netherlands', 'Belgium', 'Austria', 'Sweden', 'Norway',
+            'Denmark', 'Finland', 'Portugal', 'Greece', 'Ireland', 'Japan',
+            'China', 'India', 'Brazil', 'Mexico', 'Argentina', 'Chile'
+        ]
+
+        topic_lower = research_topic.lower()
+        found_entities = []
+
+        # Find countries
+        for country in countries:
+            if country.lower() in topic_lower:
+                found_entities.append(country)
+
+        # De-duplicate (e.g., "UK" and "United Kingdom")
+        # Keep longer names
+        deduplicated = []
+        for entity in found_entities:
+            # Check if this entity is a substring of another found entity
+            is_substring = False
+            for other in found_entities:
+                if entity != other and entity.lower() in other.lower():
+                    is_substring = True
+                    break
+
+            if not is_substring:
+                deduplicated.append(entity)
+
+        logger.info(
+            f"[ENTITY EXTRACTION] Found {len(deduplicated)} key entities in topic: "
+            f"{', '.join(deduplicated)}"
+        )
+
+        return deduplicated
     
     def _consolidate_groups(self, groups: Dict[str, List[Any]], max_groups: int) -> Dict[str, List[Any]]:
         """Consolidate smaller groups into 'other' category."""
         # Sort groups by size
         sorted_groups = sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)
-        
+
         # Keep top groups, merge rest into 'other'
         consolidated = {}
         other = []
-        
+
         for i, (topic, obs_list) in enumerate(sorted_groups):
             if i < max_groups - 1:
                 consolidated[topic] = obs_list
             else:
                 other.extend(obs_list)
-        
+
         if other:
             consolidated['other'] = other
-            
+
         return consolidated
+
+    def _ensure_entity_diversity(
+        self,
+        selected: List[ObservationRelevance],
+        all_scored: List[ObservationRelevance],
+        diversity_entities: List[str],
+        max_observations: int
+    ) -> List[ObservationRelevance]:
+        """
+        Ensure observations about each key entity are represented in the selection.
+
+        This prevents scenarios where all observations are about one country (e.g., Spain)
+        when the research covers multiple countries.
+
+        Args:
+            selected: Initially selected observations
+            all_scored: All scored observations (sorted by score)
+            diversity_entities: List of entities to ensure diversity (e.g., country names)
+            max_observations: Maximum observations to return
+
+        Returns:
+            Modified selection with guaranteed diversity
+        """
+        logger.info(
+            f"[DIVERSITY] Ensuring representation of {len(diversity_entities)} entities: "
+            f"{', '.join(diversity_entities)}"
+        )
+
+        # Track which entities are already represented in selected observations
+        represented_entities = set()
+        entity_coverage = {entity: [] for entity in diversity_entities}
+
+        for rel in selected:
+            obs_entities = self._extract_observation_entities(rel.observation)
+            for entity in diversity_entities:
+                # Case-insensitive matching
+                if any(entity.lower() in obs_entity.lower() for obs_entity in obs_entities):
+                    represented_entities.add(entity)
+                    entity_coverage[entity].append(rel)
+
+        missing_entities = set(diversity_entities) - represented_entities
+
+        if not missing_entities:
+            logger.info(
+                f"[DIVERSITY] All {len(diversity_entities)} entities already represented. "
+                f"Coverage: {', '.join(f'{e}({len(entity_coverage[e])})' for e in diversity_entities)}"
+            )
+            return selected
+
+        logger.warning(
+            f"[DIVERSITY] Missing {len(missing_entities)} entities in initial selection: "
+            f"{', '.join(missing_entities)}"
+        )
+
+        # Find best observations for missing entities from all_scored
+        diversity_additions = []
+        for entity in missing_entities:
+            # Find observations mentioning this entity
+            candidates = []
+            for rel in all_scored:
+                if rel in selected:
+                    continue  # Already selected
+
+                obs_entities = self._extract_observation_entities(rel.observation)
+                if any(entity.lower() in obs_entity.lower() for obs_entity in obs_entities):
+                    candidates.append(rel)
+
+            if candidates:
+                # Take best scoring observation for this entity
+                best = candidates[0]  # Already sorted by score
+                diversity_additions.append(best)
+                entity_coverage[entity].append(best)
+                logger.info(
+                    f"[DIVERSITY] Added observation for '{entity}' (score: {best.total_score:.3f})"
+                )
+            else:
+                logger.warning(f"[DIVERSITY] No observations found mentioning '{entity}'")
+
+        # Combine selected + diversity additions
+        combined = selected + diversity_additions
+
+        # If we exceed max_observations, keep diversity additions and trim from bottom of original selection
+        if len(combined) > max_observations:
+            # Keep ALL diversity additions (they're critical for coverage)
+            # Trim from the lowest-scoring original selections
+            trim_count = len(combined) - max_observations
+            logger.info(
+                f"[DIVERSITY] Trimming {trim_count} lowest-scoring observations "
+                f"to stay within limit ({max_observations})"
+            )
+            selected_trimmed = selected[:-trim_count] if trim_count < len(selected) else []
+            combined = selected_trimmed + diversity_additions
+
+        # Log final coverage
+        final_coverage = {}
+        for entity in diversity_entities:
+            count = sum(
+                1 for rel in combined
+                if any(
+                    entity.lower() in obs_entity.lower()
+                    for obs_entity in self._extract_observation_entities(rel.observation)
+                )
+            )
+            final_coverage[entity] = count
+
+        logger.info(
+            f"[DIVERSITY] Final coverage: "
+            f"{', '.join(f'{e}({final_coverage[e]})' for e in diversity_entities)}"
+        )
+
+        return combined

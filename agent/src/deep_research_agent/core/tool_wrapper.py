@@ -182,8 +182,7 @@ class UnifiedToolWrapper:
             source=result_dict.get('source') or result_dict.get('url', ''),
             url=result_dict.get('url', ''),
             title=result_dict.get('title', ''),
-            score=float(result_dict.get('score', 0.0)),
-            relevance_score=float(result_dict.get('relevance_score', result_dict.get('score', 0.0))),
+            position=result_dict.get('position'),  # Position in search results for quality scoring
             published_date=result_dict.get('published_date'),
             result_type=SearchResultType.WEB,
             metadata=result_dict.get('metadata', {})

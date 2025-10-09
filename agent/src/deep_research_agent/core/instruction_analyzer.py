@@ -13,11 +13,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.language_models import BaseChatModel
 
 from .requirements import (
-    RequirementSet, RequiredDataPoint, OutputFormat, TableSpecification, 
+    RequirementSet, RequiredDataPoint, OutputFormat, TableSpecification,
     NarrativeSpecification, Constraint, AssumptionRequirement,
     OutputFormatType, TableStructureType, ConstraintType,
     RequirementExtractionResult
 )
+from .response_handlers import extract_text_from_response
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,7 @@ Return your analysis as JSON with this exact structure:
     ],
     "constraints": [
         {
-            "type": "word_count|format_requirement|data_requirement",
+            "type": "word_count|section_count|format_requirement|data_requirement|style_requirement|methodology|rigor|other",
             "value": "constraint value",
             "description": "human readable description"
         }
@@ -180,10 +181,11 @@ Return complete JSON with all identified requirements."""
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_prompt)
             ]
-            
+
             response = self.llm.invoke(messages)
-            response_text = response.content if hasattr(response, 'content') else str(response)
-            
+            # Handle both string and structured list responses
+            response_text = extract_text_from_response(response)
+
             # Parse JSON response
             json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             if not json_match:

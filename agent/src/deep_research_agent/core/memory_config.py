@@ -20,13 +20,13 @@ class MemoryOptimizedConfig:
 
     # State list size limits - These are now configurable via base.yaml
     # Defaults maintained for backward compatibility
-    MAX_OBSERVATIONS = 50            # Default - overridden by config.memory.max_observations
+    MAX_OBSERVATIONS = 200            # CRITICAL FIX: Match base.yaml config (was 50, losing 75% of data!)
     MAX_SEARCH_RESULTS = 500         # Default - overridden by config.memory.max_search_results
     MAX_CITATIONS = 200              # Citations are smaller, allow more
     MAX_REFLECTIONS = 30             # Limit reflection history
     MAX_AGENT_HANDOFFS = 20          # Limit handoff history
     MAX_GENERAL_LIST_SIZE = 100      # Default for other lists
-    MAX_OBSERVATIONS_PER_STEP = 10   # Default - overridden by config.memory.max_observations_per_step
+    MAX_OBSERVATIONS_PER_STEP = 100  # CRITICAL FIX: Match base.yaml config (was 10)
 
     # Memory pruning limits (for prune_state_for_memory)
     MAX_PRUNED_SEARCH_RESULTS = 200  # Target size after intelligent pruning (was 20)

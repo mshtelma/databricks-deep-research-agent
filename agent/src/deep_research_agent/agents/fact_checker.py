@@ -83,17 +83,21 @@ class FactCheckerAgent:
                 logger.error(f"Failed to initialize LLM: {e}")
                 self.llm = None
     
-    def __call__(self, state: Dict[str, Any], config: Dict[str, Any] = None) -> Dict[str, Any]:
+    async def __call__(self, state: Dict[str, Any], config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Main entry point - always returns a valid dictionary.
-        
+
+        ASYNC: Converted to async for consistency with LangGraph async workflow.
+        Note: Internal LLM calls currently use sync invoke() - these can be
+        converted to ainvoke() in a future optimization pass.
+
         CRITICAL: This method MUST return a dict, never a Command object.
         The workflow will handle any Command creation if needed.
-        
+
         Args:
             state: Current research state dictionary
             config: Optional configuration dictionary (passed by workflow but not used)
-            
+
         Returns:
             Dict[str, Any]: Dictionary with fact checking results (NEVER a Command)
         """
@@ -149,9 +153,9 @@ class FactCheckerAgent:
             
             # Extract sources for verification
             sources = self._extract_sources(state)
-            
+
             # Create factuality report
-            factuality_report = self._create_factuality_report(content, sources)
+            factuality_report = await self._create_factuality_report(content, sources)
             
             # Update result with report data
             result = self._update_result_from_report(result, factuality_report)
@@ -308,14 +312,14 @@ class FactCheckerAgent:
         
         return sources
     
-    def _create_factuality_report(self, content: str, sources: List[Dict[str, Any]]) -> FactualityReport:
+    async def _create_factuality_report(self, content: str, sources: List[Dict[str, Any]]) -> FactualityReport:
         """
         Create a factuality report for the content.
-        
+
         This is simplified - no complex LLM loops or undefined variables.
         """
         # Extract claims from content
-        claims = self._extract_claims(content)
+        claims = await self._extract_claims(content)
         
         # Verify claims against sources
         verified_claims = []
@@ -368,7 +372,7 @@ class FactCheckerAgent:
         
         return report
     
-    def _extract_claims(self, content: str) -> List[Claim]:
+    async def _extract_claims(self, content: str) -> List[Claim]:
         """Extract factual claims from content."""
         claims = []
         
@@ -405,11 +409,11 @@ Claims:"""
                     {"role": "user", "content": prompt}
                 ]
 
-                response = asyncio.run(self.rate_limited_llm.ainvoke(
+                response = await self.rate_limited_llm.ainvoke(
                     tier="simple",
                     operation="claim_extraction",
                     messages=messages_dict
-                ))
+                )
             elif self.llm:
                 # LEGACY: Direct LLM invocation for backward compatibility
                 messages = [

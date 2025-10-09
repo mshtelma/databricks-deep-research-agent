@@ -68,6 +68,8 @@ from .types import (
     OutputDict,
     ContentType,
     ResponseContent,
+    EnrichedSearchResult,
+    FetchingConfig,
 )
 from .utils import (
     CircuitBreaker,
@@ -166,7 +168,9 @@ __all__ = [
     "OutputDict",
     "ContentType",
     "ResponseContent",
-    
+    "EnrichedSearchResult",
+    "FetchingConfig",
+
     # Utils
     "CircuitBreaker",
     "URLResolver",

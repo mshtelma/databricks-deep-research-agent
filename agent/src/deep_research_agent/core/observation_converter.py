@@ -151,10 +151,10 @@ class ObservationConverter:
     def extract_content(observation: Union[StructuredObservation, Dict, str]) -> str:
         """
         Extract text content from any observation format.
-        
+
         Args:
             observation: Observation in any format
-            
+
         Returns:
             String content
         """
@@ -166,3 +166,79 @@ class ObservationConverter:
             return observation
         else:
             return str(observation)
+
+    @staticmethod
+    def serialize_for_state(observations: List[StructuredObservation]) -> List[Dict[str, Any]]:
+        """
+        Serialize StructuredObservation objects to dicts for LangGraph state storage.
+
+        This is the explicit boundary method for converting from agent business logic
+        (StructuredObservation objects) to LangGraph state layer (JSON-serializable dicts).
+
+        Args:
+            observations: List of StructuredObservation objects from agent processing
+
+        Returns:
+            List of dictionaries suitable for state storage
+
+        Note:
+            This ensures LangGraph can serialize state between nodes and to checkpoints.
+            Call this at agent exit points before returning state updates.
+        """
+        return [obs.to_dict() for obs in observations]
+
+    @staticmethod
+    def deserialize_from_state(observations: List[Union[Dict[str, Any], StructuredObservation, str]]) -> List[StructuredObservation]:
+        """
+        Deserialize observations from state dicts to StructuredObservation objects.
+
+        This is the explicit boundary method for converting from LangGraph state layer
+        (dicts) to agent business logic (StructuredObservation objects).
+
+        Args:
+            observations: List of observations from state (can be dicts, strings, or already objects)
+
+        Returns:
+            List of StructuredObservation objects for type-safe agent processing
+
+        Note:
+            Handles mixed formats gracefully for backwards compatibility.
+            Handles legacy field names (entities→entity_tags, metrics→metric_values, section_id→step_id).
+            Call this at agent entry points when reading state.
+        """
+        result = []
+        for obs in observations:
+            try:
+                if isinstance(obs, StructuredObservation):
+                    # Already an object, no conversion needed
+                    result.append(obs)
+                elif isinstance(obs, dict):
+                    # FIXED: Handle legacy field names before deserializing
+                    obs_dict = obs.copy()  # Don't modify original
+
+                    # Map legacy field names to new ones
+                    if "entities" in obs_dict and "entity_tags" not in obs_dict:
+                        obs_dict["entity_tags"] = obs_dict.pop("entities")
+                    if "metrics" in obs_dict and "metric_values" not in obs_dict:
+                        obs_dict["metric_values"] = obs_dict.pop("metrics")
+                    if "section_id" in obs_dict and "step_id" not in obs_dict:
+                        obs_dict["step_id"] = obs_dict.pop("section_id")
+
+                    # Dict from state - deserialize using from_dict
+                    result.append(StructuredObservation.from_dict(obs_dict))
+                elif isinstance(obs, str):
+                    # Legacy string observation
+                    result.append(StructuredObservation.from_string(obs))
+                else:
+                    # Unexpected type - convert to string then to observation
+                    logger.warning(f"Unexpected observation type: {type(obs)}. Converting to string.")
+                    result.append(StructuredObservation.from_string(str(obs)))
+            except Exception as e:
+                logger.error(f"Failed to deserialize observation: {e}. Creating placeholder.")
+                # Create placeholder observation to prevent data loss
+                result.append(StructuredObservation(
+                    content=f"[Error deserializing observation: {str(obs)[:100]}]",
+                    metric_values={"deserialization_error": str(e)}
+                ))
+
+        return result

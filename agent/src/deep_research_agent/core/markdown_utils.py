@@ -3,8 +3,45 @@ Utilities for processing and fixing markdown content.
 """
 
 import re
+import html
 from typing import List
 from .table_validator import TableValidator
+
+
+def clean_html_content(text: str) -> str:
+    """
+    Clean HTML entities and tags from text.
+
+    This function:
+    1. Unescapes HTML entities (&amp; -> &, &lt; -> <, &quot; -> ", etc.)
+    2. Removes HTML tags (<strong>, <em>, <span>, etc.)
+    3. Cleans up excessive whitespace
+
+    Args:
+        text: Text potentially containing HTML entities and tags
+
+    Returns:
+        Clean text without HTML entities or tags
+
+    Examples:
+        >>> clean_html_content("Python &amp; Java")
+        'Python & Java'
+        >>> clean_html_content("<strong>Python</strong> is great")
+        'Python is great'
+    """
+    if not text:
+        return text
+
+    # First, unescape HTML entities (&amp; -> &, &lt; -> <, etc.)
+    text = html.unescape(text)
+
+    # Remove HTML tags (like <strong>, <em>, <span>, etc.)
+    text = re.sub(r'<[^>]+>', '', text)
+
+    # Clean up multiple spaces that may be left after tag removal
+    text = re.sub(r'\s+', ' ', text)
+
+    return text.strip()
 
 
 def fix_markdown_tables(content: str) -> str:

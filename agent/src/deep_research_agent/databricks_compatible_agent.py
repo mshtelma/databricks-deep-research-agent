@@ -157,13 +157,10 @@ class DatabricksCompatibleAgent(ResponsesAgent):
                 )
                 logger.info("Initialized DatabricksCompatibleAgent with config override")
             else:
-                # Use config file for production
+                # Use config file for production - let config control all settings
+                # Don't hardcode parameters that should come from config
                 self.agent = EnhancedResearchAgent(
                     config_path=yaml_path,
-                    enable_grounding=True,
-                    enable_background_investigation=True,
-                    default_report_style=ReportStyle.DEFAULT,
-                    verification_level=VerificationLevel.MODERATE,
                     stream_emitter=None  # Will be set in predict_stream if needed
                 )
                 logger.info(

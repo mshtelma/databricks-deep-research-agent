@@ -47,11 +47,22 @@ class BraveSearchTool(BaseSearchTool):
             List of search results with title, url, content
         """
         start_time = time.time()
-        
+
         # Log search initiation
         logger.info(f"BRAVE_SEARCH: Starting search for query: '{query[:50]}...'")
         logger.info(f"BRAVE_SEARCH: Max results requested: {max_results}")
-        
+
+        # CRITICAL PRE-FLIGHT VALIDATION: Reject oversized queries before API call
+        MAX_QUERY_LENGTH = 500  # Brave API practical limit (returns 422 if exceeded)
+        if len(query) > MAX_QUERY_LENGTH:
+            error_msg = (
+                f"Query too long for Brave API ({len(query)} chars, max {MAX_QUERY_LENGTH}). "
+                f"Query preview: '{query[:100]}...'. "
+                "Rejecting to avoid 422 Unprocessable Entity error."
+            )
+            logger.error(f"BRAVE_SEARCH: {error_msg}")
+            raise ValueError(error_msg)
+
         # Acquire permission from global rate limiter with timing
         logger.info("BRAVE_SEARCH: Acquiring rate limiter permission...")
         if not global_rate_limiter.acquire('brave'):
@@ -67,7 +78,8 @@ class BraveSearchTool(BaseSearchTool):
             "q": query,
             "count": max_results,
             "search_lang": "en",
-            "country": "us"
+            "country": "us",
+            "extra_snippets": "true"  # Get up to 5 additional snippets per result for richer content
         }
         
         headers = {
@@ -143,22 +155,27 @@ class BraveSearchTool(BaseSearchTool):
             # Format results consistently with Tavily output
             formatted_results = []
             for i, result in enumerate(results[:max_results]):
-                # NO TRUNCATION - preserve full content for comprehensive research
-                content = result.get("description", "")
-                # Commented out content truncation - it was destroying research quality
-                # if len(content) > 1000:  # Limit to 1000 characters
-                #     content = content[:1000] + "..."
-                
+                # Extract main snippet and extra snippets (Brave API feature)
+                description = result.get("description", "")
+                extra_snippets = result.get("extra_snippets", [])
+
+                # Combine all snippets for richer context
+                all_snippets = [description] + extra_snippets if extra_snippets else [description]
+                combined_content = "\n\n".join(s for s in all_snippets if s and s.strip())
+
+                # Use combined content or fall back to description
+                content = combined_content if combined_content else description
+
                 title = result.get("title", "")
                 # Keep title truncation as titles are usually short anyway
                 if len(title) > 500:  # Increased title limit
                     title = title[:500] + "..."
-                
+
                 formatted_results.append({
                     "title": title,
                     "url": result.get("url", ""),
                     "content": content,
-                    "score": result.get("relevance_score", 0.0) if "relevance_score" in result else 0.0,
+                    "position": i,  # Position in search results for quality scoring
                     "published_date": result.get("age") if "age" in result else None,
                 })
                 

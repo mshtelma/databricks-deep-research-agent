@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 class BaseSearchInput(BaseModel):
     """Base input schema for search tools."""
     query: str = Field(description="Search query to execute", min_length=1)
-    max_results: int = Field(default=5, description="Maximum results to return", ge=1, le=20)
+    max_results: int = Field(default=5, description="Maximum results to return (1 to 20)")
 
 
 class BaseSearchTool(BaseTool, ABC):

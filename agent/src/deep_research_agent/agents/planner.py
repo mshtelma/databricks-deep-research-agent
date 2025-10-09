@@ -38,9 +38,29 @@ from ..core.presentation_requirements import PresentationRequirements, Presentat
 from ..core.entity_validation import extract_entities_from_query, EntityValidator, EntityValidationMode, set_global_validator
 from ..core.message_utils import get_last_user_message
 from ..core.observation_models import observations_to_text_list
+from ..core.response_handlers import extract_text_from_response
+from pydantic import BaseModel, Field
 
 
 logger = get_logger(__name__)
+
+
+class CoordinatorDecision(BaseModel):
+    """Structured output for coordinator gap analysis decisions."""
+    action: Literal["SUFFICIENT", "EXTEND", "VERIFY"] = Field(
+        description="Decision on research sufficiency"
+    )
+    reasoning: str = Field(
+        description="Explanation for the decision"
+    )
+    gap_analysis: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Analysis of knowledge gaps"
+    )
+    new_steps: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="New steps to add if action is EXTEND or VERIFY"
+    )
 
 
 class PlannerAgent:
@@ -88,90 +108,112 @@ class PlannerAgent:
         # Memory tracking for circuit breaker
         self._initial_memory_mb = None
     
-    def __call__(
+    async def __call__(
         self,
         state: EnhancedResearchState,
         config: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
         Generate or refine research plan.
-        
+
+        MODES:
+        1. Initial Planning: No existing plan
+        2. Coordination: Existing plan with all steps complete
+
         Args:
             state: Current research state
             config: Configuration dictionary
-            
+
         Returns:
             Updated state dictionary with planning information
         """
-        logger.info("Planner agent generating research plan")
-        
+        existing_plan = state.get("current_plan")
+        research_loops = state.get("research_loops", 0)
+
+        # MODE 1: Initial Planning
+        if not existing_plan:
+            logger.info("No existing plan - generating initial plan")
+            return await self._initial_planning(state, config)
+
+        # MODE 2: Coordination
+        logger.info(f"Existing plan found - checking if coordination needed (loop {research_loops})")
+        return await self._coordinate_research(state, existing_plan, research_loops)
+
+    async def _initial_planning(
+        self,
+        state: EnhancedResearchState,
+        config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Initial plan generation (MODE 1).
+
+        Extracted from original __call__() method.
+        """
+        logger.info("Planner agent generating initial research plan")
+
         # MEMORY CIRCUIT BREAKER: Check memory health before processing
         memory_ok, memory_msg = self._check_memory_health()
         if not memory_ok:
             logger.warning(f"Memory circuit breaker triggered: {memory_msg}")
-            # Accept current plan or generate minimal plan
-            if state.get("current_plan"):
-                return self._proceed_with_plan(state)
-            else:
-                # Generate minimal fallback plan
-                plan = self._generate_minimal_plan(state["research_topic"])
-                state = StateManager.update_plan(state, plan)
-                return self._proceed_with_plan(state, plan)
-        
+            # Generate minimal fallback plan
+            plan = self._generate_minimal_plan(state["research_topic"])
+            state = StateManager.update_plan(state, plan)
+            return self._proceed_with_plan(state, plan)
+
         # Check if we've exceeded max iterations
         if state["plan_iterations"] >= state.get("max_plan_iterations", 3):
             logger.warning("Max plan iterations reached, proceeding with current plan")
             return self._proceed_with_plan(state)
-        
+
         # Generate plan
         plan = self._generate_plan(state, config)
-        
+
         # Assess plan quality
         quality = self._assess_plan_quality(plan, state)
         plan.quality_assessment = quality
-        
+
         # Check if plan meets quality threshold
         quality_threshold = config.get("plan_quality_threshold", 0.7)
-        
+
         if quality.overall_score < quality_threshold:
             logger.info(f"Plan quality ({quality.overall_score}) below threshold ({quality_threshold})")
-            
+
             if state["enable_iterative_planning"]:
                 # Refine the plan
                 return self._refine_plan(state, plan, quality)
             else:
                 logger.warning("Iterative planning disabled, proceeding with suboptimal plan")
-        
+
         # Extract and validate requirements from user instructions
         requirements_result = self._extract_and_validate_requirements(state)
-        
+
         # Map requirements to plan steps
         self._map_requirements_to_plan(plan, requirements_result, state)
-        
+
         # Generate report structure if needed
         self._generate_report_structure_if_needed(plan, state)
-        
+
         # Update state with plan
         state = StateManager.update_plan(state, plan)
-        
+
         # Check if human feedback is needed
         if not state.get("auto_accept_plan", True) and state["enable_human_feedback"]:
             return self._request_human_feedback(state, plan)
-        
+
         # Check if we have enough context
         if plan.has_enough_context:
             logger.info("Plan indicates sufficient context, proceeding to report generation")
             updated_state = dict(state)
             updated_state["current_plan"] = plan
             updated_state["plan_iterations"] = state["plan_iterations"] + 1
-            
+
             # Add entities from plan to state
             if hasattr(plan, 'requested_entities') and plan.requested_entities:
                 updated_state["requested_entities"] = plan.requested_entities
                 logger.info(f"PLANNER: Added {len(plan.requested_entities)} entities to state: {plan.requested_entities}")
-            
+
             return updated_state
-        
+
         # Proceed with research
         return self._proceed_with_plan(state, plan)
     
@@ -762,9 +804,9 @@ Output your plan as a JSON object with this structure:
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=context)
             ])
-            
-            # Parse JSON response
-            response_text = response.content.strip()
+
+            # Parse JSON response (handle both string and structured list responses)
+            response_text = extract_text_from_response(response).strip()
             if response_text.startswith("```json"):
                 response_text = response_text.replace("```json", "").replace("```", "").strip()
                 
@@ -1050,7 +1092,255 @@ Output your plan as a JSON object with this structure:
             ])
         
         return "\n".join(lines)
-    
+
+    async def _coordinate_research(
+        self,
+        state: EnhancedResearchState,
+        existing_plan: Plan,
+        research_loops: int
+    ) -> Dict[str, Any]:
+        """
+        IDEMPOTENT COORDINATION after all plan steps complete.
+
+        Checks:
+        1. Are there still pending steps? → Reuse plan
+        2. Was coordination already done? → Reuse plan
+        3. Analyze gaps → Decide SUFFICIENT/EXTEND/VERIFY
+        """
+
+        # Idempotency check 1: Plan still executing?
+        completed_steps = [s for s in existing_plan.steps if s.status == "completed"]
+        failed_steps = [s for s in existing_plan.steps if s.status == "failed"]
+        pending_steps = [s for s in existing_plan.steps if s.status == "pending"]
+        done_steps = completed_steps + failed_steps  # Both completed and failed are "done"
+
+        if pending_steps:
+            logger.info(f"Plan in progress: {len(done_steps)}/{len(existing_plan.steps)} done ({len(completed_steps)} completed, {len(failed_steps)} failed)")
+            return self._proceed_with_plan(state, existing_plan)
+
+        # Idempotency check 2: Already coordinated?
+        if state.get("coordination_completed"):
+            logger.info("Coordination already performed for this plan completion")
+            return self._proceed_with_plan(state, existing_plan)
+
+        # Conscious decision: Analyze gaps
+        logger.info(f"All {len(existing_plan.steps)} steps complete - analyzing gaps")
+
+        decision = await self._analyze_and_decide(state, existing_plan)
+
+        # Store decision for audit trail
+        state_dict = dict(state)
+        state_dict["gap_decision"] = decision
+        state_dict["coordination_completed"] = True
+
+        # Act on decision
+        if decision.get("action") == "SUFFICIENT":
+            logger.info(f"✅ Research sufficient: {decision.get('reasoning')}")
+            return self._proceed_with_plan(state_dict, existing_plan)
+
+        elif decision.get("action") in ["EXTEND", "VERIFY"]:
+            new_steps = decision.get("new_steps") or []
+            logger.info(f"➕ Adding {len(new_steps)} steps: {decision.get('reasoning')}")
+            extended_plan = self._add_steps_to_plan(existing_plan, new_steps)
+            state_dict = StateManager.update_plan(state_dict, extended_plan)
+            state_dict["research_loops"] = research_loops + 1
+            state_dict["coordination_completed"] = False  # Reset for next round
+            return self._proceed_with_plan(state_dict, extended_plan)
+
+        # Default: proceed with existing plan
+        return self._proceed_with_plan(state_dict, existing_plan)
+
+    async def _analyze_and_decide(
+        self,
+        state: EnhancedResearchState,
+        existing_plan: Plan
+    ) -> Dict[str, Any]:
+        """
+        SINGLE LLM CALL: Gap analysis + decision + new steps generation.
+
+        This replaces researcher.analyze_research_gaps() and router logic.
+        """
+
+        observations = state.get("observations", [])
+        research_topic = state.get("research_topic")
+        max_loops = state.get("max_research_loops", 2)
+        current_loop = state.get("research_loops", 0)
+
+        # Build observation summary using pre-summarized content
+        obs_summaries = self._format_observations_compact(observations)
+
+        prompt = f"""You are a research coordinator analyzing completed research.
+
+RESEARCH TOPIC: {research_topic}
+
+COMPLETED PLAN ({len(existing_plan.steps)} steps):
+{self._format_plan_summary(existing_plan)}
+
+RESEARCH FINDINGS ({len(observations)} observations):
+{obs_summaries}
+
+RESEARCH STATUS: Loop {current_loop + 1} of {max_loops}
+
+DECISION CRITERIA:
+1. **SUFFICIENT** if:
+   - Current loop >= max loops (ALWAYS)
+   - All key aspects comprehensively covered
+   - Claims well-supported with sources
+   - Observation count adequate (>= 15 for complex topics)
+
+2. **EXTEND** if:
+   - CRITICAL knowledge gaps exist (not minor details)
+   - Missing entire aspects of the topic
+   → Generate 2-3 targeted research steps
+
+3. **VERIFY** if:
+   - Controversial/uncertain claims need fact-checking
+   → Generate 1-2 verification steps
+
+OUTPUT JSON:
+{{
+    "action": "SUFFICIENT" | "EXTEND" | "VERIFY",
+    "reasoning": "1-2 sentence explanation",
+    "gap_analysis": {{
+        "knowledge_gaps": ["gap1", ...],
+        "verification_needed": ["claim1", ...],
+        "coverage_assessment": "comprehensive|adequate|thin"
+    }},
+    "new_steps": [  // Only if EXTEND or VERIFY
+        {{
+            "step_id": "gap_001",
+            "title": "Research specific gap",
+            "description": "...",
+            "step_type": "research",
+            "search_queries": ["query1", "query2"]
+        }}
+    ]
+}}"""
+
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        messages = [
+            SystemMessage(content="You are a research coordinator. Make conscious, well-reasoned decisions."),
+            HumanMessage(content=prompt)
+        ]
+
+        # Use structured output to guarantee valid response format
+        try:
+            structured_llm = self.llm.with_structured_output(
+                CoordinatorDecision,
+                method="json_schema"
+            )
+            decision = await structured_llm.ainvoke(messages)
+
+            logger.info(f"🎯 DECISION: {decision.action}")
+            logger.info(f"💭 REASONING: {decision.reasoning}")
+
+            # Convert to dict for state storage
+            return decision.model_dump()
+
+        except Exception as e:
+            logger.error(f"Structured output failed: {e}")
+            # Fallback: Default to SUFFICIENT to avoid infinite loop
+            logger.warning("Defaulting to SUFFICIENT decision due to parsing error")
+            return {
+                "action": "SUFFICIENT",
+                "reasoning": f"Defaulting to sufficient due to parsing error: {str(e)}",
+                "gap_analysis": {},
+                "new_steps": []
+            }
+
+    def _format_observations_compact(
+        self,
+        observations: List[Any],
+        max_obs: int = 50
+    ) -> str:
+        """
+        Format observations for gap analysis.
+
+        Uses pre-summarized content from StructuredObservation.content
+        No additional truncation needed!
+        """
+        from ..core.observation_models import StructuredObservation, observation_to_text
+
+        lines = []
+
+        for idx, obs in enumerate(observations[:max_obs]):
+            if isinstance(obs, StructuredObservation):
+                # Already summarized if it was long!
+                content = obs.get_content_for_prompt()
+                stats = obs.get_stats()
+
+                line = f"{idx+1}. {content}"
+                if stats["is_summarized"]:
+                    line += f" [Summary of {stats['full_length']} chars]"
+
+                lines.append(line)
+            else:
+                # Legacy format
+                content = observation_to_text(obs)
+                lines.append(f"{idx+1}. {content[:500]}")
+
+        if len(observations) > max_obs:
+            lines.append(f"... {len(observations) - max_obs} more observations")
+
+        return "\n".join(lines)
+
+    def _format_plan_summary(self, plan: Plan) -> str:
+        """
+        Format plan as compact summary for gap analysis.
+
+        Shows step completion status to help LLM understand what's been done.
+        """
+        lines = [f"Plan: {plan.title}"]
+
+        for idx, step in enumerate(plan.steps, 1):
+            status_icon = "✅" if step.status == "completed" else "⏳" if step.status == "in_progress" else "⏸️"
+            lines.append(f"{idx}. {status_icon} {step.title} ({step.step_type.value if hasattr(step.step_type, 'value') else step.step_type})")
+
+        return "\n".join(lines)
+
+    def _add_steps_to_plan(
+        self,
+        existing_plan: Plan,
+        new_steps_data: List[Dict[str, Any]]
+    ) -> Plan:
+        """
+        Add new steps to existing plan.
+
+        Creates new Step objects and appends to plan.
+        """
+        from ..core.plan_models import Step, StepType
+
+        updated_plan = existing_plan.model_copy(deep=True)
+
+        for step_data in new_steps_data:
+            # Determine step type
+            step_type_str = step_data.get("step_type", "research")
+            if isinstance(step_type_str, str):
+                step_type = StepType.RESEARCH if step_type_str.lower() == "research" else StepType.PROCESSING
+            else:
+                step_type = step_type_str
+
+            new_step = Step(
+                step_id=step_data.get("step_id", f"gap_{len(updated_plan.steps)+1:03d}"),
+                title=step_data.get("title", "Additional Research"),
+                description=step_data.get("description", ""),
+                step_type=step_type,
+                search_queries=step_data.get("search_queries", []),
+                depends_on=step_data.get("depends_on", []),
+                metadata=step_data.get("metadata", {})
+            )
+
+            updated_plan.steps.append(new_step)
+
+        # Refresh counters
+        if hasattr(updated_plan, '_refresh_step_counters'):
+            updated_plan._refresh_step_counters()
+
+        logger.info(f"Added {len(new_steps_data)} new steps to plan (total: {len(updated_plan.steps)})")
+
+        return updated_plan
+
     def _proceed_with_plan(
         self,
         state: EnhancedResearchState,
@@ -1059,25 +1349,17 @@ Output your plan as a JSON object with this structure:
         """Proceed with plan execution."""
         if not plan:
             plan = state.get("current_plan")
-        
+
         if not plan or not plan.steps:
             logger.error("No valid plan to proceed with")
             updated_state = dict(state)
             return updated_state
-        
-        # Record handoff to researcher
-        state = StateManager.record_handoff(
-            state,
-            from_agent=self.name,
-            to_agent="researcher",
-            reason="Plan ready for execution",
-            context={"plan_id": plan.plan_id, "total_steps": len(plan.steps)}
-        )
-        
+
+        # Prepare state for router (router will decide next agent based on coordination status)
         updated_state = dict(state)
         updated_state["current_plan"] = plan
         updated_state["plan_iterations"] = state["plan_iterations"] + 1
-        
+
         # Add entities from plan to state
         if hasattr(plan, 'requested_entities') and plan.requested_entities:
             updated_state["requested_entities"] = plan.requested_entities
@@ -1172,25 +1454,107 @@ Output your plan as a JSON object with this structure:
                 logger.info("PLANNER: Missing research topic; cannot generate template")
                 return
 
-            structure_prompt = (
-                f"Design a domain-specific, use-case-tailored outline for this research request:\n\n"
-                f"{query}\n\n"
-                "CRITICAL: Create section titles that are SPECIFIC to the query topic and domain.\n"
-                "DO NOT use generic academic sections like 'Executive Summary', 'Key Findings', 'Detailed Analysis'.\n"
-                "INSTEAD, create sections that directly address the specific research question.\n\n"
-                "Examples of good domain-specific sections:\n"
-                "- For tax comparison: 'Tax Rate Analysis by Country', 'Social Contribution Breakdown', 'Family Scenario Comparisons'\n"
-                "- For technology evaluation: 'Performance Benchmarks', 'Implementation Complexity', 'Cost-Benefit Analysis'\n"
-                "- For market analysis: 'Market Size by Region', 'Competitive Landscape', 'Growth Projections'\n\n"
-                "Return JSON with a \"sections\" array. Each section entry must include:\n"
-                "  - title (SPECIFIC to the query domain, not generic)\n"
-                "  - purpose\n"
-                "  - section_type (research | synthesis | hybrid)\n"
-                "  - priority (integer, lower renders earlier)\n"
-                "  - requires_search (boolean)\n"
-                "  - style_hints (array of optional guidance strings)\n\n"
-                "Also include \"include_appendix\": true | false if an appendix should be recommended."
-            )
+            # CRITICAL: Section generation requires plan.steps for mapping
+            if not plan.steps:
+                logger.warning("PLANNER: No plan steps available, cannot generate sections with mappings")
+                logger.warning("PLANNER: Skipping dynamic template generation")
+                return
+
+            logger.info(f"PLANNER: Generating sections by grouping {len(plan.steps)} plan steps")
+
+            # Format steps for prompt inclusion
+            formatted_steps = self._format_steps_for_section_prompt(plan.steps)
+            all_step_ids = ', '.join([s.step_id for s in plan.steps])
+
+            structure_prompt = f"""Your task is to GROUP the research steps below into logical report sections.
+
+RESEARCH QUERY:
+{query}
+
+RESEARCH STEPS TO BE EXECUTED:
+{formatted_steps}
+
+YOUR TASK:
+1. Analyze the research steps and their search queries
+2. Group related steps into logical report sections
+3. Create section titles that reflect what those specific steps will discover
+4. Every section MUST be based on at least one step from the plan above
+
+CRITICAL RULES:
+✗ DO NOT create sections for topics not covered by the research steps
+✗ DO NOT invent new research areas beyond what the plan covers
+✗ DO NOT create sections with empty mapped_step_ids
+✓ DO base section titles on what the grouped steps will actually research
+✓ DO ensure every section has mapped_step_ids.length >= 1
+
+GROUPING STRATEGY:
+- Steps researching similar topics → group into one section
+- Steps that compare entities → create comparison section
+- Steps with related search queries → group together
+- A step can appear in multiple sections if it contributes to different aspects
+
+EXAMPLE - Grouping steps into sections:
+
+Steps:
+  step_001: Research Spain income tax rates
+    Queries: "Spain income tax 2024", "Spain tax brackets"
+  step_002: Research France income tax rates
+    Queries: "France income tax rates", "French tax system"
+  step_003: Compare Spain vs France for families
+    Queries: "Spain France tax comparison families"
+
+✓ CORRECT - sections derived from steps:
+{{
+  "sections": [
+    {{
+      "title": "Income Tax Rates: Spain and France",
+      "purpose": "Present tax rate structures from step_001 and step_002",
+      "mapped_step_ids": ["step_001", "step_002"],
+      "section_type": "research",
+      "priority": 10
+    }},
+    {{
+      "title": "Family Tax Comparison: Spain vs France",
+      "purpose": "Comparative analysis from step_003",
+      "mapped_step_ids": ["step_003"],
+      "section_type": "synthesis",
+      "priority": 20
+    }}
+  ]
+}}
+
+✗ WRONG - section not based on any step:
+{{
+  "sections": [
+    {{
+      "title": "Future EU Tax Policy Trends",  ← No steps research this!
+      "mapped_step_ids": []  ← INVALID! Must have at least one step
+    }}
+  ]
+}}
+
+Return JSON format:
+{{
+  "sections": [
+    {{
+      "title": "Section title based on what mapped steps will discover",
+      "purpose": "What those specific steps will tell us",
+      "mapped_step_ids": ["step_001", "step_002"],
+      "section_type": "research",
+      "priority": 10,
+      "requires_search": true,
+      "style_hints": []
+    }}
+  ],
+  "include_appendix": false
+}}
+
+VALIDATION REQUIREMENTS:
+✓ Every step ID ({all_step_ids}) must appear in at least one section
+✓ Every section must have mapped_step_ids with at least 1 step ID
+✓ Section titles reflect what the mapped steps will research
+✓ 2-5 sections for good organization
+"""
 
             messages = [
                 SystemMessage(content="You are an expert report architect who creates domain-specific, tailored outlines. Your sections should directly address the specific research question rather than using generic academic templates. Focus on the unique aspects of each query domain."),
@@ -1273,6 +1637,8 @@ Output your plan as a JSON object with this structure:
                     logger.error("PLANNER: Failed to generate even fallback structure")
                     return
 
+            # Track all mapped step IDs for coverage validation
+            all_mapped_step_ids = set()
             dynamic_sections: List[DynamicSection] = []
 
             for idx, section in enumerate(raw_sections, start=1):
@@ -1280,6 +1646,37 @@ Output your plan as a JSON object with this structure:
                 section_type_key = str(section.get("section_type", "research")).lower()
                 hints = tuple(section.get("style_hints", []) or [])
                 priority = int(section.get("priority", idx * 10))
+
+                # NEW: Extract and validate mapped_step_ids
+                mapped_step_ids = section.get("mapped_step_ids", [])
+                if not isinstance(mapped_step_ids, list):
+                    logger.warning(f"PLANNER: Section '{title}' has invalid mapped_step_ids type: {type(mapped_step_ids)}, using empty list")
+                    mapped_step_ids = []
+
+                # IMMEDIATE VALIDATION: Reject sections with no steps
+                if not mapped_step_ids:
+                    logger.error(f"PLANNER: ❌ Section '{title}' has ZERO mapped steps - LLM violated grouping rules!")
+                    logger.error(f"PLANNER: This section will be SKIPPED (not added to report)")
+                    continue  # Skip this invalid section entirely
+
+                # Validate step IDs exist in plan
+                valid_step_ids = [sid for sid in mapped_step_ids if any(s.step_id == sid for s in plan.steps)]
+                if len(valid_step_ids) < len(mapped_step_ids):
+                    invalid = set(mapped_step_ids) - set(valid_step_ids)
+                    logger.warning(f"PLANNER: Section '{title}' references unknown steps: {invalid}")
+
+                # ADDITIONAL VALIDATION: After filtering, check if any valid steps remain
+                if not valid_step_ids:
+                    logger.error(f"PLANNER: ❌ Section '{title}' has no VALID step IDs after validation!")
+                    logger.error(f"PLANNER: Original IDs: {mapped_step_ids} - all invalid!")
+                    logger.error(f"PLANNER: This section will be SKIPPED")
+                    continue  # Skip this section
+
+                # Track for coverage validation
+                all_mapped_step_ids.update(valid_step_ids)
+                logger.info(f"PLANNER: ✓ Section '{title}' maps to {len(valid_step_ids)} steps: {valid_step_ids}")
+
+                # Determine content type (existing logic)
                 lowered_title = title.lower()
                 if "compare" in lowered_title or " vs " in lowered_title:
                     content_type = SectionContentType.COMPARISON
@@ -1290,6 +1687,7 @@ Output your plan as a JSON object with this structure:
                 else:
                     content_type = SectionContentType.ANALYSIS
 
+                # Create DynamicSection WITH step_ids from LLM-provided mapping
                 dynamic_sections.append(
                     DynamicSection(
                         title=title,
@@ -1297,14 +1695,42 @@ Output your plan as a JSON object with this structure:
                         priority=priority,
                         content_type=content_type,
                         hints=hints,
+                        step_ids=tuple(valid_step_ids),  # Use validated step IDs from LLM
                     )
                 )
 
-            # Store the lightweight dynamic sections for downstream template usage
-            plan.dynamic_sections = dynamic_sections
+            # Validate coverage
+            plan_step_ids = {step.step_id for step in plan.steps}
+            unmapped_steps = plan_step_ids - all_mapped_step_ids
+            if unmapped_steps:
+                logger.warning(f"PLANNER: LLM failed to map {len(unmapped_steps)} steps: {unmapped_steps}")
+                logger.warning(f"PLANNER: Coverage: {len(all_mapped_step_ids)}/{len(plan_step_ids)} steps mapped")
+            else:
+                logger.info(f"PLANNER: ✅ All {len(plan_step_ids)} steps mapped to sections")
 
-            # CRITICAL: Map steps to sections for proper observation filtering
-            self._map_steps_to_sections(plan)
+            # Store sections in plan (step_ids already populated from LLM response)
+            plan.dynamic_sections = dynamic_sections
+            logger.info(f"PLANNER: ✅ Created {len(dynamic_sections)} sections with step_ids from LLM")
+
+            # CRITICAL FIX: Set template_section_title on steps based on section mappings
+            # Without this bidirectional mapping, the reporter cannot filter observations by section
+            step_mapping_count = 0
+            for section in dynamic_sections:
+                for step_id in section.step_ids:
+                    # Find the step with this ID
+                    for step in plan.steps:
+                        if step.step_id == step_id:
+                            step.template_section_title = section.title
+                            step_mapping_count += 1
+                            logger.info(f"PLANNER: ✅ Mapped step {step_id} → section '{section.title}'")
+                            break
+
+            # Validate that all steps were mapped
+            unmapped_steps = [s.step_id for s in plan.steps if not s.template_section_title]
+            if unmapped_steps:
+                logger.warning(f"PLANNER: ⚠️ {len(unmapped_steps)} steps not mapped to sections: {unmapped_steps}")
+            else:
+                logger.info(f"PLANNER: ✅ All {len(plan.steps)} steps mapped to sections")
 
             generator = ReportTemplateGenerator()
             include_appendix = bool(structure_payload.get("include_appendix", False))
@@ -1959,6 +2385,218 @@ Output your plan as a JSON object with this structure:
             logger.warning(f"PLANNER: Sections with no mapped steps: {unmapped_sections}")
 
         logger.info(f"PLANNER: Section usage: {section_usage}")
+
+        # CRITICAL FIX: Populate step_ids in DynamicSection for direct reference filtering
+        # Build mapping of section_title -> [step_ids]
+        section_step_mapping = {}
+        for step in plan.steps:
+            if hasattr(step, 'template_section_title') and step.template_section_title:
+                if step.template_section_title not in section_step_mapping:
+                    section_step_mapping[step.template_section_title] = []
+                section_step_mapping[step.template_section_title].append(step.step_id)
+
+        # Recreate dynamic_sections with populated step_ids
+        updated_sections = []
+        for section in plan.dynamic_sections:
+            step_ids = section_step_mapping.get(section.title, [])
+            # Create new frozen instance with step_ids
+            updated_section = DynamicSection(
+                title=section.title,
+                purpose=section.purpose,
+                priority=section.priority,
+                content_type=section.content_type,
+                hints=section.hints,
+                step_ids=tuple(step_ids)  # Populate with actual step IDs!
+            )
+            updated_sections.append(updated_section)
+            logger.info(f"PLANNER: ✅ Section '{section.title}' owns steps: {step_ids}")
+
+        # Replace with updated sections
+        plan.dynamic_sections = updated_sections
+
+        # Validate all steps are assigned to a section
+        all_assigned_steps = set()
+        for section in updated_sections:
+            all_assigned_steps.update(section.step_ids)
+
+        unassigned = [s.step_id for s in plan.steps if s.step_id not in all_assigned_steps]
+        if unassigned:
+            logger.error(f"PLANNER: ❌ Steps not assigned to any section: {unassigned}")
+        else:
+            logger.info(f"PLANNER: ✅ All {len(plan.steps)} steps assigned to sections")
+
+    def _format_steps_for_section_prompt(self, steps: List[Step]) -> str:
+        """
+        Format plan steps for inclusion in section generation prompt.
+
+        Provides LLM with step IDs, titles, descriptions, and search queries
+        so it can intelligently map steps to sections.
+        """
+        formatted_lines = []
+        for step in steps:
+            # Basic step info
+            formatted_lines.append(f"**{step.step_id}**: {step.title}")
+
+            # Add description (truncated to 150 chars for prompt efficiency)
+            desc = step.description[:150] + "..." if len(step.description) > 150 else step.description
+            formatted_lines.append(f"  Description: {desc}")
+
+            # Add search queries (up to 3 for context)
+            if step.search_queries and len(step.search_queries) > 0:
+                query_sample = ", ".join(f'"{q}"' for q in step.search_queries[:3])
+                if len(step.search_queries) > 3:
+                    query_sample += f" (+{len(step.search_queries) - 3} more)"
+                formatted_lines.append(f"  Queries: {query_sample}")
+
+            formatted_lines.append("")  # Blank line between steps
+
+        return "\n".join(formatted_lines)
+
+    def _apply_llm_step_mappings(self, plan: Plan, section_mapping: Dict[str, List[str]]) -> None:
+        """
+        Apply LLM-provided step-to-section mappings.
+
+        Sets step.template_section_title based on section_mapping dict.
+        This replaces keyword-based matching with semantic LLM assignments.
+
+        Args:
+            plan: Plan object with steps and dynamic_sections
+            section_mapping: {section_title: [step_id1, step_id2, ...]}
+        """
+        if not plan.steps or not plan.dynamic_sections:
+            logger.warning("PLANNER: Cannot apply mappings - missing steps or sections")
+            return
+
+        logger.info(f"PLANNER: Applying LLM-based mappings for {len(plan.steps)} steps to {len(plan.dynamic_sections)} sections")
+
+        # Build step lookup: step_id → Step object
+        step_map = {step.step_id: step for step in plan.steps}
+
+        # Track statistics
+        mapped_steps = set()
+        section_usage = {section.title: 0 for section in plan.dynamic_sections}
+        multi_section_steps = []  # Steps that appear in multiple sections
+
+        # Apply mappings: for each section, assign steps to it
+        for section_title, step_ids in section_mapping.items():
+            if not step_ids:
+                logger.warning(f"PLANNER: Section '{section_title}' has no mapped steps")
+                continue
+
+            for step_id in step_ids:
+                if step_id not in step_map:
+                    logger.warning(f"PLANNER: Unknown step_id '{step_id}' in mapping for '{section_title}'")
+                    continue
+
+                step = step_map[step_id]
+
+                # Check if step already assigned to another section
+                if hasattr(step, 'template_section_title') and step.template_section_title:
+                    # Step wants to contribute to multiple sections
+                    # Keep first assignment (primary section for observations)
+                    multi_section_steps.append({
+                        'step_id': step_id,
+                        'primary': step.template_section_title,
+                        'secondary': section_title
+                    })
+                    logger.info(f"PLANNER: {step_id} already in '{step.template_section_title}', skipping '{section_title}'")
+                    continue
+
+                # Assign step to this section
+                step.template_section_title = section_title
+                mapped_steps.add(step_id)
+                section_usage[section_title] += 1
+                logger.info(f"PLANNER: ✅ {step_id} → '{section_title}'")
+
+        # Handle unmapped steps (LLM failed to include them)
+        unmapped_step_ids = set(step_map.keys()) - mapped_steps
+        if unmapped_step_ids:
+            logger.warning(f"PLANNER: ⚠️ {len(unmapped_step_ids)} steps not mapped by LLM: {unmapped_step_ids}")
+            logger.warning(f"PLANNER: Applying intelligent fallback distribution")
+
+            # Strategy: Distribute unmapped steps round-robin across sections
+            # This ensures no section gets 0 steps and unmapped work still appears
+            section_list = list(plan.dynamic_sections)
+            for idx, step_id in enumerate(sorted(unmapped_step_ids)):
+                fallback_section = section_list[idx % len(section_list)]
+                step = step_map[step_id]
+                step.template_section_title = fallback_section.title
+                section_usage[fallback_section.title] += 1
+                logger.warning(f"PLANNER: ⚠️ {step_id} → '{fallback_section.title}' (fallback distribution)")
+
+        # Detect and FIX unmapped sections through redistribution
+        unmapped_sections = [title for title, count in section_usage.items() if count == 0]
+        if unmapped_sections:
+            logger.warning(f"PLANNER: ⚠️ {len(unmapped_sections)} sections have NO mapped steps: {unmapped_sections}")
+            logger.warning(f"PLANNER: Attempting automatic redistribution from overloaded sections...")
+
+            # Find sections with 2+ steps (candidates for redistribution)
+            overloaded = [(title, count) for title, count in section_usage.items() if count > 1]
+            overloaded.sort(key=lambda x: x[1], reverse=True)  # Most loaded first
+
+            if overloaded:
+                redistribution_count = 0
+                for empty_section_title in unmapped_sections:
+                    if redistribution_count >= len(overloaded):
+                        break
+
+                    # Take one step from the most overloaded section
+                    source_section_title = overloaded[redistribution_count][0]
+
+                    # Find a step currently assigned to this overloaded section
+                    step_to_move = None
+                    for step in plan.steps:
+                        if getattr(step, 'template_section_title', None) == source_section_title:
+                            step_to_move = step
+                            break
+
+                    if step_to_move:
+                        # Reassign step to unmapped section
+                        step_to_move.template_section_title = empty_section_title
+                        section_usage[source_section_title] -= 1
+                        section_usage[empty_section_title] += 1
+                        redistribution_count += 1
+                        logger.info(f"PLANNER: ♻️  Redistributed {step_to_move.step_id}: '{source_section_title}' → '{empty_section_title}'")
+
+                # Check results
+                still_empty = [title for title, count in section_usage.items() if count == 0]
+                if still_empty:
+                    logger.error(f"PLANNER: ❌ {len(still_empty)} sections still empty after redistribution: {still_empty}")
+                    logger.error(f"PLANNER: These will use fallback observations in reporter")
+                else:
+                    logger.info(f"PLANNER: ✅ Redistribution successful - all sections now have at least one step")
+            else:
+                logger.warning(f"PLANNER: ⚠️ No overloaded sections available for redistribution")
+                logger.warning(f"PLANNER: Empty sections will use fallback observations in reporter")
+
+        # Log comprehensive summary
+        logger.info(f"PLANNER: ═══ MAPPING SUMMARY ═══")
+        logger.info(f"PLANNER: Total steps: {len(plan.steps)}")
+        logger.info(f"PLANNER: Total sections: {len(plan.dynamic_sections)}")
+        logger.info(f"PLANNER: Mapped by LLM: {len(mapped_steps)}")
+        logger.info(f"PLANNER: Fallback assigned: {len(unmapped_step_ids)}")
+        logger.info(f"PLANNER: Multi-section steps: {len(multi_section_steps)}")
+
+        # Section-level statistics
+        sections_with_steps = len([c for c in section_usage.values() if c > 0])
+        empty_sections = len([c for c in section_usage.values() if c == 0])
+        logger.info(f"PLANNER: Sections with steps: {sections_with_steps}/{len(plan.dynamic_sections)}")
+        logger.info(f"PLANNER: Empty sections: {empty_sections}")
+
+        # Show distribution (sorted by step count)
+        sorted_usage = dict(sorted(section_usage.items(), key=lambda x: x[1], reverse=True))
+        logger.info(f"PLANNER: Section distribution: {sorted_usage}")
+
+        # Validate completeness
+        all_steps_mapped = all(
+            hasattr(step, 'template_section_title') and step.template_section_title
+            for step in plan.steps
+        )
+        if all_steps_mapped:
+            logger.info(f"PLANNER: ✅ SUCCESS: All steps have template_section_title assigned")
+        else:
+            unassigned = [s.step_id for s in plan.steps if not getattr(s, 'template_section_title', None)]
+            logger.error(f"PLANNER: ❌ FAILURE: Steps without assignment: {unassigned}")
 
     def _find_best_section_for_step(self, step: Step, sections: List) -> Optional[Any]:
         """

@@ -54,6 +54,18 @@ class ConfigLoader:
             logger.debug(f"Loading base config from: {base_path}")
             with open(base_path) as f:
                 config_dict = yaml.safe_load(f) or {}
+
+            # DIAGNOSTIC: Log what was loaded
+            logger.info(f"[DIAGNOSTIC] Loaded base config from: {base_path}")
+            logger.info(f"[DIAGNOSTIC]   Config keys: {list(config_dict.keys())}")
+            if "models" in config_dict:
+                models_keys = list(config_dict['models'].keys())
+                logger.info(f"[DIAGNOSTIC]   models keys: {models_keys}")
+                # Check analytical tier specifically
+                if "analytical" in config_dict['models']:
+                    analytical_cfg = config_dict['models']['analytical']
+                    endpoints = analytical_cfg.get('endpoints', [])
+                    logger.info(f"[DIAGNOSTIC]   analytical.endpoints: {endpoints}")
         else:
             logger.warning(f"Base config file not found: {base_path}")
         
@@ -70,6 +82,16 @@ class ConfigLoader:
             with open(override_path) as f:
                 overrides = yaml.safe_load(f) or {}
                 config_dict = ConfigLoader._deep_merge(config_dict, overrides)
+
+            # DIAGNOSTIC: Log after merge
+            logger.info(f"[DIAGNOSTIC] After merging overrides from: {override_path}")
+            if "models" in config_dict:
+                models_keys = list(config_dict['models'].keys())
+                logger.info(f"[DIAGNOSTIC]   models keys after merge: {models_keys}")
+                if "analytical" in config_dict['models']:
+                    analytical_cfg = config_dict['models']['analytical']
+                    endpoints = analytical_cfg.get('endpoints', [])
+                    logger.info(f"[DIAGNOSTIC]   analytical.endpoints after merge: {endpoints}")
         elif override_path:
             logger.debug(f"Override file not found (skipping): {override_path}")
         

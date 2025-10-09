@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 import logging
 import re
 import json
+from .structured_output import extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -210,16 +211,13 @@ Examples:
 
         response = self.llm.invoke(messages)
 
-        # Parse response
+        # Parse response using unified parser
         try:
-            content = response.content
-            # Handle response that might be wrapped in code blocks
-            if "```json" in content:
-                content = content.split("```json")[1].split("```")[0]
-            elif "```" in content:
-                content = content.split("```")[1].split("```")[0]
+            # ✅ NEW: Use unified JSON extraction (replaces duplicated markdown/JSON parsing)
+            data = extract_json(response, repair=True)
 
-            data = json.loads(content)
+            if data is None:
+                raise ValueError("LLM did not return valid JSON for constraint extraction")
 
             return QueryConstraints(
                 entities=data.get("entities", []),

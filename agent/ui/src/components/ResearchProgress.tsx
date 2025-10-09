@@ -35,8 +35,8 @@ export function ResearchProgress({
   const containerRef = useRef<HTMLDivElement>(null)
 
   // Extract structured data
-  const workflowPhases = structuredProgress.workflowPhases
-  const planSteps = structuredProgress.planSteps
+  const workflowPhases = structuredProgress?.workflowPhases || []
+  const planSteps = structuredProgress?.planSteps || []
   const allItems = [...workflowPhases, ...planSteps]
 
   // Auto-scroll to active item
@@ -105,9 +105,24 @@ export function ResearchProgress({
   const totalCount = allItems.length
   const progressPercentage = structuredProgress.overallProgress || 0
 
-  if (!allItems.length) {
-    return null
+  // Don't hide component when empty - show skeleton/loading state instead
+  // This prevents unmount/remount issues and maintains React component tree
+  const isEmpty = !allItems.length
+
+  if (isEmpty && !isStreaming) {
+    // Static empty state (no research in progress)
+    // This should rarely happen now that we maintain baseline phases
+    return (
+      <div className={cn("bg-white border border-gray-200 rounded-lg p-4", className)} ref={containerRef}>
+        <div className="text-center text-gray-400">
+          <div className="text-sm">Waiting for research to begin...</div>
+        </div>
+      </div>
+    )
   }
+
+  // isEmpty && isStreaming: Show phases as pending (baseline state)
+  // This case handles initial render before any events arrive
 
   return (
     <div className={cn("bg-white border border-gray-200 rounded-lg", className)} ref={containerRef}>

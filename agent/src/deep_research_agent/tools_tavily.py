@@ -48,7 +48,7 @@ class TavilySearchTool(BaseSearchTool):
             "search_depth": "advanced",
             "include_answer": False,
             "include_images": False,
-            "include_raw_content": False,
+            "include_raw_content": True,  # CRITICAL FIX: Get full page content, not just snippets
             "max_results": max_results
         }
         

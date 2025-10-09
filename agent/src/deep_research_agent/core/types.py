@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
+from langchain_core.pydantic_v1 import BaseModel, Field
 
 
 class SearchResultType(str, Enum):
@@ -175,11 +176,11 @@ class SearchResult:
     source: Optional[str] = None  # Made optional with default None for flexibility
     url: Optional[str] = None
     title: Optional[str] = None
-    score: float = 0.0
-    relevance_score: float = 0.0  # Alias for tests
+    position: Optional[int] = None  # Position in search results (0-based), used for quality scoring
     published_date: Optional[str] = None
     result_type: SearchResultType = SearchResultType.WEB
     source_type: SearchResultType = SearchResultType.WEB  # Alias for tests
+    has_full_content: bool = False  # Track if full content was fetched (vs snippet only)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -187,27 +188,128 @@ class SearchResult:
         MAX_CONTENT_LENGTH = 50000  # ~50KB max per result for detailed content
         if len(self.content) > MAX_CONTENT_LENGTH:
             self.content = self.content[:MAX_CONTENT_LENGTH] + "...[truncated for memory efficiency]"
-        
-        # Keep aliases in sync
-        if self.relevance_score == 0.0 and self.score:
-            self.relevance_score = self.score
-        if self.score == 0.0 and self.relevance_score:
-            self.score = self.relevance_score
 
         # Mirror result_type and source_type
-        if self.source_type and self.result_type != self.source_type:
+        if not self.result_type and self.source_type:
             self.result_type = self.source_type
 
 
 @dataclass
-class Citation:
+class EnrichedSearchResult:
+    """
+    Enhanced search result with metadata for smart content fetching.
+
+    Extends SearchResult with enrichment-specific fields for scoring,
+    deduplication, and tracking fetch status.
+    """
+    # Core fields (from SearchResult)
+    title: str
+    url: str
+    content: str  # Snippet initially, full content after fetch
+    source_type: SearchResultType
+
+    # Enrichment metadata
+    original_snippet: str  # Preserve original snippet
+    position: int  # Position in search results (0-based)
+    domain: str  # Extracted domain for dedup and scoring
+
+    # Scoring metadata
+    fetch_score: float = 0.0  # Score from analyzer (0-1)
+    data_density: float = 0.0  # Data density of content (0-1)
+    has_full_content: bool = False  # Was full content fetched?
+
+    # Deduplication
+    content_hash: str = ""  # MD5 hash for snippet dedup
+    url_canonical: str = ""  # Normalized URL for URL dedup
+
+    # Optional fields
+    published_date: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_search_result(self) -> SearchResult:
+        """Convert back to standard SearchResult."""
+        return SearchResult(
+            title=self.title,
+            url=self.url,
+            content=self.content,
+            source_type=self.source_type,
+            position=self.position,
+            published_date=self.published_date,
+            metadata=self.metadata
+        )
+
+    @classmethod
+    def from_search_result(cls, result: SearchResult, position: int) -> 'EnrichedSearchResult':
+        """Create from standard SearchResult."""
+        import hashlib
+        from urllib.parse import urlparse, urlunparse
+
+        url = result.url or ""
+        content = result.content or ""
+
+        # Extract domain
+        try:
+            domain = urlparse(url).netloc.lower()
+        except:
+            domain = ""
+
+        # Canonicalize URL (remove fragments, trailing slash, etc.)
+        try:
+            parsed = urlparse(url.lower())
+            url_canonical = urlunparse((
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path.rstrip('/'),
+                parsed.params,
+                parsed.query,
+                ''  # No fragment
+            ))
+        except:
+            url_canonical = url.lower()
+
+        return cls(
+            title=result.title or "",
+            url=url,
+            content=content,
+            source_type=result.source_type or SearchResultType.WEB_PAGE,
+            original_snippet=content,  # Preserve original
+            position=position,
+            domain=domain,
+            content_hash=hashlib.md5(content.encode()).hexdigest(),
+            url_canonical=url_canonical,
+            published_date=result.published_date,
+            metadata=result.metadata if hasattr(result, 'metadata') else {}
+        )
+
+
+@dataclass
+class FetchingConfig:
+    """Configuration for web content fetching behavior."""
+    enabled: bool = True  # Enable/disable full content fetching
+    min_pages_to_fetch: int = 3  # Minimum pages to fetch if any
+    max_pages_to_fetch: int = 10  # Maximum pages to fetch per search
+    top_results_to_consider: int = 15  # Pool size for selecting minimum fetches
+    early_stop_threshold: int = 3  # Stop after N successful fetches
+    early_stop_data_density: float = 0.6  # Stop if density exceeds this
+    fetch_score_threshold: float = 0.6  # Only fetch if score > this
+    dedup_snippets: bool = True  # Deduplicate by snippet content
+    dedup_urls: bool = True  # Deduplicate by canonical URL
+    max_per_domain: int = 2  # Max results per domain
+    timeout_seconds: int = 10  # HTTP timeout for fetching
+    max_retries: int = 2  # Retry attempts on failure
+    min_content_length: int = 500  # Minimum chars to consider valid
+    max_content_length: int = 50000  # Maximum chars to extract
+    cache_enabled: bool = True  # Cache fetched content
+    cache_ttl_seconds: int = 3600  # Cache time-to-live (1 hour)
+
+
+class Citation(BaseModel):
     """Represents a citation for a piece of information."""
     source: str
     url: Optional[str] = None
     title: Optional[str] = None
     snippet: Optional[str] = None
-    relevance_score: float = 0.0
-    
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert Citation to dictionary for serialization."""
         return {
@@ -215,10 +317,11 @@ class Citation:
             "url": self.url,
             "title": self.title,
             "snippet": self.snippet,
-            "relevance_score": self.relevance_score
         }
 
-
+    class Config:
+        orm_mode = True
+        
 @dataclass
 class IntermediateEvent:
     """Represents an intermediate event emitted during agent execution."""
@@ -240,6 +343,7 @@ class IntermediateEvent:
     alternatives_considered: List[str] = field(default_factory=list)  # Other options considered
     related_event_ids: List[str] = field(default_factory=list)  # IDs of related events
     priority: int = 0  # Priority for UI ordering (higher = more important)
+    is_last_chunk: Optional[bool] = None  # Flag for final streaming message
     
     def set_category_from_event_type(self) -> None:
         """Set category based on event type if not already set."""
