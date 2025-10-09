@@ -5671,26 +5671,68 @@ Pre-Calculated Data and Analysis:
 {calc_summary}
 {section_structure}
 
-Instructions:
-1. Write a complete, well-structured report answering the research question
-2. Use the pre-calculated data and insights provided above
-3. Follow the section structure provided above (if any)
-4. When you need to present tabular data, insert a table anchor using this format: {anchor_format}
-   - Example: {anchor_format.format(id='comparison_1')}
-   - Use descriptive IDs like 'comparison_1', 'metrics_summary', 'detailed_breakdown'
-5. Do NOT describe your research methodology or explain how you searched
-6. Do NOT mention files, spreadsheets, or external tools
-7. Focus on answering the user's question with the facts available
-8. Use professional, clear language
+CRITICAL INSTRUCTIONS FOR TABLES:
+1. NEVER generate table rows with markdown syntax like: | column | column |
+2. NEVER create separator rows like: |---|---|
+3. NEVER present tabular data inline
+4. INSTEAD: Insert a table anchor using this format: {anchor_format.format(id='your_table_id')}
+5. The table will be generated in a later phase with proper formatting
+
+Examples of CORRECT table handling:
+✅ When discussing 7-country comparison:
+   "The following table summarizes the key metrics:
+
+   {anchor_format.format(id='country_comparison')}"
+
+✅ When presenting tax calculations:
+   "Tax rates vary significantly across jurisdictions:
+
+   {anchor_format.format(id='tax_rates_table')}"
+
+✅ Multiple tables:
+   "First, consider the basic metrics:
+
+   {anchor_format.format(id='basic_metrics')}
+
+   For detailed breakdown by scenario:
+
+   {anchor_format.format(id='scenario_breakdown')}"
+
+Examples of INCORRECT handling (DO NOT DO THIS):
+❌ | Country | Tax Rate | Benefits |
+❌ |---|---|---|
+❌ | Spain | 35% | Yes |
+
+❌ Country **Tax Rate** **Benefits**
+❌ Spain 35% Yes
+
+REMEMBER: Table anchors are MANDATORY for any tabular data. Tables without anchors will be INVALID.
+
+General Instructions:
+7. Write a complete, well-structured report answering the research question
+8. Use the pre-calculated data and insights provided above
+9. Follow the section structure provided above (if any)
+10. Do NOT describe your research methodology or explain how you searched
+11. Do NOT mention files, spreadsheets, or external tools
+12. Focus on answering the user's question with the facts available
+13. Use professional, clear language
 
 Generate the complete report now:"""
 
         messages = [
-            SystemMessage(content="""You are a professional research report writer.
-Generate comprehensive, well-structured reports that directly answer research questions.
+            SystemMessage(content="""You are a professional research report writer specializing in multi-phase report generation.
+
+CRITICAL RULE: You are currently in Phase 2 (narrative generation). You MUST NOT generate table markdown syntax.
+
+Your job in this phase:
+- Write clear narrative prose
+- Insert table anchors {anchor_format} where tables are needed
+- Let Phase 3 handle actual table generation
+
 Never describe methodology or research process.
 Never mention external files or tools.
-Focus entirely on findings and analysis."""),
+Never generate table markdown (| pipes | or |---|).
+Focus entirely on findings and analysis with proper table anchors."""),
             HumanMessage(content=prompt)
         ]
 
@@ -5707,6 +5749,31 @@ Focus entirely on findings and analysis."""),
             # Count table anchors
             table_specs = self._extract_table_specs(report_text)
             logger.info(f"[HYBRID Phase 2] Found {len(table_specs)} table anchors")
+
+            # CRITICAL VALIDATION: Check for inline tables without anchors
+            inline_tables = self._detect_inline_tables(report_text)
+            if inline_tables and len(table_specs) == 0:
+                error_msg = (
+                    f"[HYBRID Phase 2 VALIDATION FAILURE] LLM generated {len(inline_tables)} inline "
+                    f"table(s) without using anchors! This violates the prompt instructions. "
+                    f"Sample: {inline_tables[0]['sample'][:200]}"
+                )
+                logger.error(error_msg)
+
+                # RECOVERY: Auto-insert anchors at detected table positions
+                logger.info(f"[HYBRID Phase 2 RECOVERY] Attempting auto-recovery by inserting anchors")
+                report_text = self._auto_insert_table_anchors(report_text, inline_tables, anchor_format)
+
+                # Re-extract after recovery
+                table_specs = self._extract_table_specs(report_text)
+                logger.info(f"[HYBRID Phase 2 RECOVERY] Auto-inserted {len(table_specs)} table anchors")
+
+            elif inline_tables and len(table_specs) > 0:
+                # Partial failure - some tables have anchors, some don't
+                logger.warning(
+                    f"[HYBRID Phase 2 PARTIAL VALIDATION] Found {len(table_specs)} anchors but also "
+                    f"detected {len(inline_tables)} inline tables. Some tables may have been generated inline."
+                )
 
             return report_text
 
@@ -5737,8 +5804,26 @@ Focus entirely on findings and analysis."""),
 
         tables = self._extract_table_specs(report_text)
         if not tables:
-            logger.info("[HYBRID Phase 3] No table anchors found, returning report as-is")
-            return report_text
+            logger.warning("[HYBRID Phase 3] No table anchors found in report")
+
+            # Check if report contains comparison data that should be tabled
+            if calc_context and len(calc_context.key_comparisons) > 0:
+                logger.error(
+                    f"[HYBRID Phase 3 ERROR] Report has {len(calc_context.key_comparisons)} "
+                    f"comparisons but no table anchors! Phase 2 may have failed."
+                )
+
+                # Fallback: Insert one table at the end with all comparisons
+                anchor_format = settings.get('table_anchor_format', '[TABLE: {id}]')
+                fallback_anchor = anchor_format.format(id='comparison_fallback')
+                report_text += f"\n\n## Data Summary\n\n{fallback_anchor}\n\n"
+                logger.info("[HYBRID Phase 3 RECOVERY] Inserted fallback table anchor")
+
+                # Re-extract after adding fallback
+                tables = self._extract_table_specs(report_text)
+            else:
+                logger.info("[HYBRID Phase 3] No comparison data available, skipping tables")
+                return report_text
 
         settings = self.config.get('agents', {}).get('reporter', {}).get('hybrid_settings', {})
         enable_async = settings.get('enable_async_blocks', False)
@@ -5780,6 +5865,17 @@ Focus entirely on findings and analysis."""),
 
         # Alert on any unreplaced tables
         self._alert_on_unreplaced_tables(final_text)
+
+        # NEW: Final validation - check for any table syntax that slipped through
+        final_inline_tables = self._detect_inline_tables(final_text)
+        if final_inline_tables:
+            logger.error(
+                f"[HYBRID Phase 3 FINAL VALIDATION] Found {len(final_inline_tables)} "
+                f"inline tables in final output! These will have incorrect markdown syntax."
+            )
+            # Log samples for debugging
+            for i, tbl in enumerate(final_inline_tables[:3]):  # Log first 3
+                logger.error(f"  Inline table {i+1} ({tbl['type']}): {tbl['sample'][:150]}")
 
         return final_text
 
@@ -5964,6 +6060,155 @@ Make the table clear, concise, and informative."""
             logger.warning(f"Duplicate table IDs detected: {table_ids}")
 
         return specs
+
+    def _detect_inline_tables(self, text: str) -> List[Dict[str, Any]]:
+        """
+        Detect if LLM generated table content without using anchors.
+
+        This is critical for hybrid mode Phase 2 validation to catch when
+        the LLM ignores instructions and generates tables directly.
+
+        Returns:
+            List of detected table patterns with positions and samples
+        """
+        import re
+
+        detected_tables = []
+
+        # Pattern 1: Multiple lines starting with | (markdown tables)
+        table_pattern = r'(^\s*\|[^\n]+\|\s*$\n)+'
+        for match in re.finditer(table_pattern, text, re.MULTILINE):
+            detected_tables.append({
+                'type': 'markdown_table',
+                'position': match.start(),
+                'sample': match.group(0)[:100],
+                'line_count': match.group(0).count('\n')
+            })
+
+        # Pattern 2: Lines with 3+ data points separated by whitespace
+        # This catches plaintext "tables" like in the bug report:
+        # Country **Scenario 1** **Scenario 2** ...
+        # **Spain** €171,900 €248,800 ...
+        data_row_pattern = r'.{10,}\s+[€$£¥]\s*\d+[,\d]+\s+[€$£¥]\s*\d+[,\d]+\s+[€$£¥]\s*\d+[,\d]+'
+        lines = text.split('\n')
+        consecutive_data_rows = 0
+        start_line = -1
+
+        for i, line in enumerate(lines):
+            if re.search(data_row_pattern, line):
+                if consecutive_data_rows == 0:
+                    start_line = i
+                consecutive_data_rows += 1
+            else:
+                if consecutive_data_rows >= 3:  # 3+ rows = likely a table
+                    sample_lines = lines[start_line:min(start_line+2, len(lines))]
+                    detected_tables.append({
+                        'type': 'plaintext_table',
+                        'position': start_line,
+                        'sample': '\n'.join(sample_lines),
+                        'line_count': consecutive_data_rows
+                    })
+                consecutive_data_rows = 0
+
+        # Check final sequence at end of file
+        if consecutive_data_rows >= 3:
+            sample_lines = lines[start_line:min(start_line+2, len(lines))]
+            detected_tables.append({
+                'type': 'plaintext_table',
+                'position': start_line,
+                'sample': '\n'.join(sample_lines),
+                'line_count': consecutive_data_rows
+            })
+
+        return detected_tables
+
+    def _auto_insert_table_anchors(
+        self,
+        text: str,
+        detected_tables: List[Dict],
+        anchor_format: str
+    ) -> str:
+        """
+        Automatically insert table anchors where LLM generated inline tables.
+
+        This is a RECOVERY mechanism for when Phase 2 LLM ignores instructions.
+        Strategy:
+        - Replace detected table content with appropriate anchor
+        - Use position-based naming (auto_table_1, auto_table_2, etc.)
+        - Preserve surrounding context
+
+        Args:
+            text: Report text with inline tables
+            detected_tables: List from _detect_inline_tables()
+            anchor_format: Template like '[TABLE: {id}]'
+
+        Returns:
+            Modified text with anchors replacing inline tables
+        """
+        import re
+
+        if not detected_tables:
+            return text
+
+        modified_text = text
+        offset = 0  # Track position shifts from replacements
+
+        # Sort by position to maintain order
+        for i, detected in enumerate(sorted(detected_tables, key=lambda x: x['position'])):
+            table_id = f"auto_table_{i+1}"
+            anchor = anchor_format.format(id=table_id)
+
+            position = detected['position'] + offset
+
+            if detected['type'] == 'markdown_table':
+                # Find table boundaries (consecutive lines with |)
+                # Search backward for blank line or start
+                table_start = modified_text.rfind('\n\n', 0, position)
+                if table_start == -1:
+                    table_start = 0
+                else:
+                    table_start += 2
+
+                # Search forward for blank line or end
+                table_end = modified_text.find('\n\n', position)
+                if table_end == -1:
+                    table_end = len(modified_text)
+
+                # Replace table with anchor
+                replacement = f"\n\n{anchor}\n\n"
+                modified_text = modified_text[:table_start] + replacement + modified_text[table_end:]
+                offset += len(replacement) - (table_end - table_start)
+
+                logger.info(f"[RECOVERY] Replaced markdown table at position {position} with {anchor}")
+
+            elif detected['type'] == 'plaintext_table':
+                # Find paragraph boundaries containing the table
+                paragraph_start = modified_text.rfind('\n\n', 0, position)
+                if paragraph_start == -1:
+                    paragraph_start = 0
+                else:
+                    paragraph_start += 2
+
+                # Search forward to find where table ends
+                # Table ends when we stop seeing data row patterns
+                lines = modified_text[position:].split('\n')
+                table_line_count = detected.get('line_count', 3)
+                end_offset = len('\n'.join(lines[:table_line_count]))
+                paragraph_end = position + end_offset
+
+                # Find next paragraph break
+                next_break = modified_text.find('\n\n', paragraph_end)
+                if next_break != -1:
+                    paragraph_end = next_break
+
+                # Insert anchor before the table content, remove table lines
+                replacement = f"\n\n{anchor}\n\n"
+                modified_text = modified_text[:paragraph_start] + replacement + modified_text[paragraph_end:]
+                offset += len(replacement) - (paragraph_end - paragraph_start)
+
+                logger.info(f"[RECOVERY] Inserted {anchor} for plaintext table at position {position}")
+
+        return modified_text
 
     def _resolve_citation(self, observation_id: str, citations: List[Dict] = None) -> str:
         """

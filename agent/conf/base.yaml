@@ -154,6 +154,13 @@ agents:
         - 'gitlab\.com[/\w\-\.]*'
         - '\b(spreadsheet|repository|download|attachment)\b'
 
+      # Table validation settings (5-layer defense against inline tables)
+      enable_table_validation: true  # Enable inline table detection in Phase 2
+      auto_recovery_enabled: true    # Auto-insert anchors when inline tables detected
+      table_detection_threshold: 3   # Minimum consecutive data rows to detect plaintext table
+      log_validation_details: true   # Log detected tables for debugging
+      enable_phase3_fallback: true   # Insert fallback anchor if Phase 2 produced no anchors
+
       # Timeouts
       holistic_timeout_seconds: 240  # Timeout for Phase 2 holistic report generation
 
