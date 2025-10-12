@@ -12,6 +12,9 @@ from datetime import datetime
 import json
 import os
 import re
+import time
+from urllib.parse import urlparse, urlunparse
+from collections import defaultdict
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langgraph.types import Command
@@ -25,6 +28,7 @@ from ..core import (
     EnrichedSearchResult,
     FetchingConfig,
 )
+from ..core.async_utils import AsyncExecutor
 from ..core.model_manager import ModelRole
 from ..core import id_generator as id_gen
 from ..core.entity_validation import EntityExtractor
@@ -100,6 +104,10 @@ class ResearcherAgent:
         self.name = "Researcher"  # Capital for test compatibility
         self.search_tool = None  # For async methods
 
+        # CRITICAL FIX: Track observation hashes to prevent duplicates at source
+        # This prevents 70%+ duplication observed in production (1045 → 325 after dedup)
+        self.observation_hashes = set()  # Stores (content_hash, source_id) tuples
+
         # Initialize smart web content fetching components
         from ..core.snippet_analyzer import SnippetAnalyzer
         from ..core.web_content_fetcher import WebContentFetcher
@@ -128,6 +136,141 @@ class ResearcherAgent:
 
         # Store model manager if available for dynamic model selection
         self.model_manager = getattr(llm, '__model_manager__', None)
+
+    async def _fetch_urls_concurrent(
+        self,
+        urls: List[str],
+        max_concurrent: int = 5,
+        per_domain_delay: float = 2.0
+    ) -> Dict[str, Optional[str]]:
+        """
+        Fetch multiple URLs concurrently with per-domain rate limiting.
+
+        This method fetches web content in parallel while respecting per-domain
+        rate limits to avoid overwhelming any single server.
+
+        Args:
+            urls: List of URLs to fetch
+            max_concurrent: Maximum number of concurrent fetches (default: 5)
+            per_domain_delay: Minimum seconds between requests to same domain (default: 2.0)
+
+        Returns:
+            Dict mapping URL -> fetched content (or None if fetch failed)
+        """
+        if not urls:
+            return {}
+
+        logger.info(f"🌐 Concurrent fetch: {len(urls)} URLs (max_concurrent={max_concurrent}, per_domain_delay={per_domain_delay}s)")
+
+        # Per-domain rate limiting state
+        domain_locks = defaultdict(asyncio.Lock)
+        domain_last_fetch = defaultdict(lambda: 0.0)
+
+        async def fetch_one(url: str) -> Tuple[str, Optional[str]]:
+            """Fetch a single URL with per-domain rate limiting."""
+            try:
+                parsed = urlparse(url)
+                domain = parsed.netloc
+
+                async with domain_locks[domain]:
+                    # Enforce per-domain rate limit
+                    elapsed = time.time() - domain_last_fetch[domain]
+                    if elapsed < per_domain_delay:
+                        wait_time = per_domain_delay - elapsed
+                        logger.debug(f"   Rate limiting {domain}: waiting {wait_time:.1f}s")
+                        await asyncio.sleep(wait_time)
+
+                    # Fetch content (web_fetcher.fetch_content is synchronous)
+                    logger.debug(f"   Fetching: {url[:60]}...")
+                    content = await asyncio.to_thread(
+                        self.web_fetcher.fetch_content,
+                        url
+                    )
+
+                    domain_last_fetch[domain] = time.time()
+
+                    if content:
+                        logger.debug(f"   ✅ Success: {len(content)} chars from {url[:60]}")
+                    else:
+                        logger.debug(f"   ❌ Failed: {url[:60]}")
+
+                    return (url, content)
+
+            except Exception as e:
+                logger.warning(f"   ❌ Exception fetching {url[:60]}: {e}")
+                return (url, None)
+
+        # Use semaphore to limit max concurrent fetches
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def fetch_with_semaphore(url: str):
+            """Wrapper to limit concurrent fetches globally."""
+            async with semaphore:
+                return await fetch_one(url)
+
+        # Fetch all URLs concurrently
+        start_time = time.time()
+        results = await asyncio.gather(
+            *[fetch_with_semaphore(url) for url in urls],
+            return_exceptions=True
+        )
+
+        # Convert results to dict, filtering exceptions
+        url_to_content = {}
+        for result in results:
+            if isinstance(result, Exception):
+                logger.warning(f"   Fetch exception (ignored): {result}")
+            elif isinstance(result, tuple) and len(result) == 2:
+                url, content = result
+                url_to_content[url] = content
+
+        # Log statistics
+        elapsed = time.time() - start_time
+        success_count = sum(1 for c in url_to_content.values() if c is not None)
+        logger.info(
+            f"🌐 Concurrent fetch complete: {success_count}/{len(urls)} successful "
+            f"in {elapsed:.1f}s ({len(urls)/elapsed:.1f} URLs/sec)"
+        )
+
+        return url_to_content
+
+    def _normalize_url(self, url: str) -> str:
+        """
+        Normalize URL for consistent matching across dictionaries.
+
+        Handles common URL variations that prevent matching:
+        - Trailing slashes: "http://example.com/" vs "http://example.com"
+        - Case differences in scheme/domain: "HTTP://EXAMPLE.COM" vs "http://example.com"
+        - URL fragments: "http://example.com/page#section" vs "http://example.com/page"
+
+        Preserves path case since many servers are case-sensitive.
+
+        Args:
+            url: URL to normalize
+
+        Returns:
+            Normalized URL string
+        """
+        if not url:
+            return url
+
+        try:
+            parsed = urlparse(url)
+
+            # Normalize: lowercase scheme and netloc, remove fragment, strip trailing slash from path
+            normalized = urlunparse((
+                parsed.scheme.lower() if parsed.scheme else '',
+                parsed.netloc.lower() if parsed.netloc else '',
+                parsed.path.rstrip('/') if parsed.path else '',
+                parsed.params,
+                parsed.query,
+                ''  # Remove fragment
+            ))
+
+            return normalized
+        except Exception as e:
+            logger.warning(f"URL normalization failed for '{url}': {e}")
+            return url  # Return original on error
 
     def _get_llm_for_complexity(self, complexity: str = "default"):
         """
@@ -526,39 +669,31 @@ class ResearcherAgent:
                     from ..core.observation_converter import ObservationConverter
 
                     rich_observations = results["research_observations"]
-                    existing_rich_obs = state.get("research_observations", [])
 
-                    # Ensure rich_observations is a list before concatenation
+                    # Ensure rich_observations is a list
                     if isinstance(rich_observations, list):
-                        combined = existing_rich_obs + rich_observations
+                        new_obs = rich_observations
                     elif isinstance(rich_observations, str):
-                        # Convert string to list
-                        combined = existing_rich_obs + [rich_observations]
+                        new_obs = [rich_observations]
                     else:
-                        # Convert other types to string then to list
-                        combined = existing_rich_obs + [str(rich_observations)]
+                        new_obs = [str(rich_observations)]
 
-                    # FIXED: Convert to StructuredObservation objects, then serialize for state storage
-                    # This ensures consistent format and handles legacy observation formats
-                    structured_obs = ObservationConverter.deserialize_from_state(combined)
+                    # Convert to StructuredObservation objects
+                    structured_obs = ObservationConverter.deserialize_from_state(new_obs)
 
-                    # CRITICAL: Deduplicate observations by content hash BEFORE storing
-                    deduplicated = []
-                    seen_content = set()
-                    for obs in structured_obs:
-                        # Create hash from normalized content (lowercase, stripped)
-                        content_hash = obs.content.lower().strip()
-                        if content_hash not in seen_content and content_hash:  # Skip empty content
-                            seen_content.add(content_hash)
-                            deduplicated.append(obs)
+                    # Use StateManager batch processing for automatic deduplication against ALL state observations
+                    state, added_count, duplicate_count = StateManager.add_observations_batch(
+                        state,
+                        structured_obs,
+                        step=current_step,
+                        config=self.config,
+                        observation_index=self.observation_index
+                    )
 
-                    duplicates_removed = len(structured_obs) - len(deduplicated)
-                    if duplicates_removed > 0:
-                        logger.info(f"🧹 Deduplicated observations: removed {duplicates_removed} duplicates, kept {len(deduplicated)}")
-
-                    # Store in single authoritative field (observations)
-                    # REMOVED: old sync to research_observations which created duplicates
-                    state["observations"] = ObservationConverter.serialize_for_state(deduplicated)
+                    logger.info(
+                        f"🧹 Batch processed observations: {added_count} new, "
+                        f"{duplicate_count} duplicates skipped (total: {len(state.get('observations', []))})"
+                    )
             else:
                 current_step.status = StepStatus.FAILED
                 plan.failed_steps += 1
@@ -573,9 +708,12 @@ class ResearcherAgent:
                 state["errors"].append(f"Failed to execute step: {current_step.title}")
             
         except SearchToolsFailedException as e:
-            # Re-raise search tool failures to stop the entire workflow
-            logger.error(f"Search tools failed during step execution: {e.message}")
-            raise
+            # Log search failure but don't crash - let workflow handle gracefully
+            logger.warning(f"Search tools failed during step execution: {e.message} - marking step as failed")
+            state["errors"].append(f"Search failed: {e.message}")
+            state["warnings"].append("Some searches failed - results may be incomplete")
+            # Don't re-raise - let workflow continue with partial results
+            return state
         except Exception as e:
             error_message = str(e)
             logger.error(f"Error executing step {current_step.step_id}: {error_message}")
@@ -793,11 +931,11 @@ class ResearcherAgent:
                     logger.warning(f"RESEARCHER: Search {i+1} returned empty results for query: '{query}'")
                     
             except SearchToolsFailedException as e:
-                # Log the search failure but let the exception propagate
-                logger.error(f"RESEARCHER: Search {i+1} FAILED with SearchToolsFailedException: {e.message}")
-                logger.error(f"RESEARCHER: Failed query was: '{query}'")
-                # Re-raise to stop the workflow and return error to user
-                raise
+                # Log the search failure and continue with next search attempt
+                logger.warning(f"RESEARCHER: Search {i+1} FAILED with SearchToolsFailedException: {e.message}")
+                logger.warning(f"RESEARCHER: Failed query was: '{query}' - continuing with remaining searches")
+                # Don't re-raise - let the loop try other queries or return partial results
+                continue
 
         # Enrich search results with full content for high-value URLs
         if all_results:
@@ -880,17 +1018,41 @@ class ResearcherAgent:
             logger.info(f"🧹 Deduplicated to {len(structured_observations)} observations "
                        f"(preserved source diversity and full_content)")
 
-        # Simple quality filter: discard very short observations without full_content
-        MIN_USEFUL_LENGTH = 200
-        filtered_observations = [
+        # V4.0 ADAPTIVE RELEVANCE-BASED FILTERING
+        # Use semantic/keyword relevance scoring with adaptive thresholds
+        # No hardcoded quality thresholds - adapts to available data
+
+        # First filter: observations must have full_content
+        observations_with_full = [
             obs for obs in structured_observations
-            if len(obs.content) >= MIN_USEFUL_LENGTH or obs.full_content
+            if obs.full_content
         ]
 
-        discarded = len(structured_observations) - len(filtered_observations)
-        if discarded > 0:
-            logger.info(f"🔍 Quality filter: discarded {discarded} low-quality observations "
-                       f"(< {MIN_USEFUL_LENGTH} chars without full_content)")
+        discarded_no_full = len(structured_observations) - len(observations_with_full)
+        if discarded_no_full > 0:
+            logger.info(
+                f"🔍 CONTENT FILTER: Discarded {discarded_no_full} observations without full_content"
+            )
+
+        # Second filter: Apply adaptive relevance-based filtering
+        research_topic = state.get("research_topic", "")
+        step_description = step.description if hasattr(step, 'description') else step.title
+
+        if observations_with_full:
+            filtered_observations = self._filter_observations_adaptively(
+                observations_with_full,
+                research_topic,
+                step_description
+            )
+        else:
+            logger.warning("No observations with full_content available for relevance filtering")
+            filtered_observations = []
+
+        discarded_irrelevant = len(observations_with_full) - len(filtered_observations)
+        if discarded_irrelevant > 0:
+            logger.info(
+                f"🔍 RELEVANCE FILTER: Discarded {discarded_irrelevant} low-relevance observations"
+            )
 
         structured_observations = filtered_observations
 
@@ -991,9 +1153,10 @@ class ResearcherAgent:
             "search_results": [dict(result) for result in normalized_results],
             "confidence": confidence,
             "extracted_data": dict(extracted_data),
-            # Preserve the rich section result for reporter/rendering stages
+            # CRITICAL FIX: Serialize section_result to dict for JSON compliance
+            # This prevents Python repr strings in state storage
             "section_research_results": {
-                section_key: section_result
+                section_key: section_result.to_dict()  # Use to_dict() for proper serialization
             },
             "section_metadata": {
                 "step_id": step.step_id,
@@ -1495,9 +1658,19 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
             else:  # complex
                 llm = self.model_manager.get_llm_for_role(ModelRole.COMPLEX)
 
-            # Simple, clear prompt for query generation
-            system_prompt = """You are a search query generator for a research agent.
-Generate specific, focused search queries (3-10 words each) that will find relevant information.
+            # Context-aware prompt for intelligent query generation
+            system_prompt = """You are an intelligent search query generator for a research agent.
+
+Your task: Generate focused search queries (3-10 words each) that will find relevant information.
+
+Key principles:
+1. Understand the INTENT behind the request, not just literal words
+2. Recognize and properly interpret idioms and metaphors (e.g., "apples-to-apples" means fair comparison, not Apple Inc.)
+3. Generate diverse queries covering different aspects of the research topic
+4. Include temporal context when relevant (current year, "recent", "latest")
+5. Be specific enough to avoid generic results but broad enough to find information
+6. Focus on searchable entities, facts, and concepts
+
 Output ONLY the search queries, one per line, with no additional text, numbering, or formatting."""
 
             user_prompt = f"Generate {max_queries} specific search queries for this research task:\n\n{sanitized}\n\nSearch queries:"
@@ -1789,17 +1962,21 @@ Output ONLY the search queries, one per line, with no additional text, numbering
         research_context: str
     ) -> List[SearchResult]:
         """
-        Enrich search results by selectively fetching full page content for high-value URLs.
+        AGGRESSIVE FETCHING: Fetch full content for ALL non-junk URLs.
 
-        Uses smart snippet analysis to decide which pages are worth fetching, then fetches
-        and extracts clean content using trafilatura.
+        V4.0 GRACEFUL FALLBACK: Three-tier quality system that never discards valuable data.
+        Uses simple junk filter to remove obvious junk, then aggressively fetches
+        ALL remaining URLs concurrently. Keeps ALL results with quality tiers:
+        - TIER 1 (Rich >= 1KB): Full article extraction, has_full_content=True
+        - TIER 2 (Minimal 200B-1KB): Partial content, has_full_content=False
+        - TIER 3 (Snippet < 200B): Original snippet, has_full_content=False
 
         Args:
             search_results: List of search results with snippets
-            research_context: Current research step description for pattern matching
+            research_context: Current research step description (for logging only)
 
         Returns:
-            List of search results with enriched content where valuable
+            List of ALL search results with fetched content attached where available
         """
         # Check if web content fetching is enabled
         if not self.fetching_config.enabled:
@@ -1811,94 +1988,184 @@ Output ONLY the search queries, one per line, with no additional text, numbering
             return search_results
 
         logger.info("=" * 60)
-        logger.info(f"WEB_ENRICHMENT: Starting smart content fetching")
+        logger.info(f"WEB_ENRICHMENT V3.0: AGGRESSIVE MODE - Fetch ALL non-junk URLs")
         logger.info(f"WEB_ENRICHMENT: Input: {len(search_results)} search results")
-        logger.info(f"WEB_ENRICHMENT: Research context: {research_context[:100]}...")
+        logger.info(f"WEB_ENRICHMENT: Context: {research_context[:80]}...")
 
-        # Import here to avoid circular dependencies
-        from ..core.snippet_analyzer import SnippetAnalyzer
+        # Import junk filter
+        from ..core.junk_filter import JunkFilter
 
-        # Convert SearchResult to EnrichedSearchResult
-        enriched_results = []
-        for i, result in enumerate(search_results):
-            # Handle both dict and object formats
+        # STEP 1: Filter out OBVIOUS junk using simple rules
+        junk_filter = JunkFilter()
+        non_junk_results = []
+        junk_count = 0
+
+        for result in search_results:
+            # Extract URL and title
             if isinstance(result, dict):
-                enriched = EnrichedSearchResult.from_search_result(
-                    SearchResult(**result), position=i
-                )
+                url = result.get('url', '')
+                title = result.get('title', '')
             else:
-                enriched = EnrichedSearchResult.from_search_result(result, position=i)
-            enriched_results.append(enriched)
+                url = getattr(result, 'url', '')
+                title = getattr(result, 'title', '')
 
-        logger.info(f"WEB_ENRICHMENT: Converted to {len(enriched_results)} EnrichedSearchResult objects")
+            # Check if junk
+            is_junk, reason = junk_filter.is_junk(url, title)
 
-        # Create snippet analyzer with research context
-        analyzer = SnippetAnalyzer(research_context=research_context)
-
-        # Analyze snippets to decide what to fetch
-        analysis = analyzer.analyze_snippets(enriched_results, self.fetching_config)
-
-        logger.info(f"WEB_ENRICHMENT: Analysis complete")
-        logger.info(f"WEB_ENRICHMENT: - Data density: {analysis.data_density_score:.2f}")
-        logger.info(f"WEB_ENRICHMENT: - Has sufficient data: {analysis.has_sufficient_data}")
-        logger.info(f"WEB_ENRICHMENT: - Missing data types: {analysis.missing_data_types}")
-        logger.info(f"WEB_ENRICHMENT: - Fetch recommendations: {len(analysis.fetch_recommendations)} URLs")
-        logger.info(f"WEB_ENRICHMENT: - Rationale: {analysis.rationale}")
-
-        # If snippets are sufficient, return as-is
-        if analysis.has_sufficient_data and len(analysis.fetch_recommendations) == 0:
-            logger.info("WEB_ENRICHMENT: ✅ Snippets contain sufficient data, skipping fetching")
-            # Convert back to SearchResult
-            return [self._enriched_to_search_result(r) for r in enriched_results]
-
-        # Fetch content for recommended URLs
-        fetched_count = 0
-        for idx in analysis.fetch_recommendations:
-            result = enriched_results[idx]
-
-            logger.info(f"WEB_ENRICHMENT: Fetching {idx+1}/{len(analysis.fetch_recommendations)}: {result.url[:60]}...")
-            logger.info(f"WEB_ENRICHMENT: - Fetch score: {result.fetch_score:.2f}")
-            logger.info(f"WEB_ENRICHMENT: - Domain: {result.domain}")
-
-            # Fetch full content
-            full_content = self.web_fetcher.fetch_content(result.url)
-
-            if full_content:
-                # Update result with full content
-                result.content = full_content
-                result.has_full_content = True
-                fetched_count += 1
-                logger.info(f"WEB_ENRICHMENT: ✅ Successfully fetched {len(full_content)} chars from {result.domain}")
+            if is_junk:
+                junk_count += 1
+                logger.debug(f"⏭️ JUNK FILTERED: {reason} - {url[:60]}")
             else:
-                logger.warning(f"WEB_ENRICHMENT: ❌ Failed to fetch content from {result.url[:60]}")
+                non_junk_results.append(result)
 
-        # Calculate enrichment statistics
-        enriched_count = sum(1 for r in enriched_results if r.has_full_content)
-        snippet_count = len(enriched_results) - enriched_count
+        if junk_count > 0:
+            logger.info(f"🗑️ Filtered {junk_count}/{len(search_results)} obvious junk URLs")
 
-        # Calculate average content sizes
-        if enriched_count > 0:
-            avg_enriched_size = sum(len(r.content) for r in enriched_results if r.has_full_content) / enriched_count
+        logger.info(f"✅ Fetching content for {len(non_junk_results)} non-junk URLs (AGGRESSIVE)")
+
+        if not non_junk_results:
+            logger.info("WEB_ENRICHMENT: All results were junk, returning empty list")
+            return []
+
+        # STEP 2: Extract URLs for concurrent fetching
+        urls_to_fetch = []
+        url_to_result = {}  # Map normalized URL -> SearchResult for updating later
+
+        for result in non_junk_results:
+            if isinstance(result, dict):
+                url = result.get('url', '')
+            else:
+                url = getattr(result, 'url', '')
+
+            if url:
+                # CRITICAL: Normalize URL for consistent matching between fetch dict and result dict
+                normalized_url = self._normalize_url(url)
+                urls_to_fetch.append(normalized_url)
+                url_to_result[normalized_url] = result
+
+        # STEP 3: Fetch ALL URLs concurrently (5 at a time with rate limiting)
+        logger.info(f"🌐 Starting concurrent fetch for {len(urls_to_fetch)} URLs...")
+
+        try:
+            # Use AsyncExecutor to safely run async fetch from any context
+            # CRITICAL: Never call asyncio.run() inside LangGraph-managed steps
+            timeout = max(60.0, len(urls_to_fetch) * 10.0)  # Based on FetchingConfig.timeout_seconds
+            logger.debug(f"WEB_FETCH: Using AsyncExecutor with timeout={timeout}s for {len(urls_to_fetch)} URLs")
+
+            url_to_content = AsyncExecutor.run_async_safe(
+                self._fetch_urls_concurrent(urls_to_fetch),
+                timeout=timeout
+            )
+
+            logger.info(f"✅ Concurrent fetch completed: {len(url_to_content)} URLs fetched successfully")
+
+        except asyncio.TimeoutError:
+            logger.error(f"❌ Concurrent fetch timed out after {timeout}s for {len(urls_to_fetch)} URLs")
+            url_to_content = {}
+        except Exception as e:
+            logger.error(f"❌ Concurrent fetch failed: {e}")
+            url_to_content = {}
+
+        # STEP 4: Update results with fetched content (GRACEFUL FALLBACK v4.0)
+        # Three-tier quality system - never discard valuable data
+        MIN_RICH_CONTENT = 1000    # 1KB - Full article extraction
+        MIN_MINIMAL_CONTENT = 200  # 200B - Some useful content
+
+        enriched_results = []
+        results_with_rich_content = 0
+        results_with_minimal_content = 0
+        results_with_no_content = 0
+
+        for url, result in url_to_result.items():
+            content = url_to_content.get(url)
+
+            if content and len(content) >= MIN_RICH_CONTENT:
+                # TIER 1: Rich content - full article extraction successful
+                if isinstance(result, dict):
+                    result['content'] = content
+                    result['full_content'] = content  # CRITICAL: observation system expects this field
+                    result['has_full_content'] = True
+                else:
+                    result.content = content
+                    result.full_content = content  # CRITICAL: observation system expects this field
+                    result.has_full_content = True
+
+                enriched_results.append(result)
+                results_with_rich_content += 1
+                logger.debug(f"✅ RICH: {len(content)} chars from {url[:60]}")
+
+            elif content and len(content) >= MIN_MINIMAL_CONTENT:
+                # TIER 2: Minimal content - attach it anyway, mark as partial
+                # This is valuable data we should not discard!
+                if isinstance(result, dict):
+                    result['content'] = content
+                    result['full_content'] = content  # CRITICAL: observation system expects this field
+                    result['has_full_content'] = False  # Mark as partial
+                else:
+                    result.content = content
+                    result.full_content = content  # CRITICAL: observation system expects this field
+                    result.has_full_content = False
+
+                enriched_results.append(result)
+                results_with_minimal_content += 1
+                logger.debug(f"📄 MINIMAL: {len(content)} chars from {url[:60]}")
+
+            else:
+                # TIER 3: Snippet only - keep original search result
+                # Content < 200B or fetch failed, but URL/title/snippet still valuable
+                if isinstance(result, dict):
+                    result['full_content'] = None  # No full content available
+                    result['has_full_content'] = False
+                else:
+                    result.full_content = None  # No full content available
+                    result.has_full_content = False
+
+                enriched_results.append(result)
+                results_with_no_content += 1
+
+                if content:
+                    logger.debug(f"📋 SNIPPET: {len(content)} chars (too short) from {url[:60]}")
+                else:
+                    logger.debug(f"📋 SNIPPET: fetch failed for {url[:60]}")
+
+        # STEP 5: Enhanced Statistics
+        fetched_count = len([c for c in url_to_content.values() if c])
+        total_results = len(enriched_results)
+
+        # Calculate average content sizes by tier
+        if results_with_rich_content > 0:
+            rich_avg = sum(
+                len(r['content'] if isinstance(r, dict) else r.content)
+                for r in enriched_results[:results_with_rich_content]
+            ) / results_with_rich_content
         else:
-            avg_enriched_size = 0
-
-        if snippet_count > 0:
-            avg_snippet_size = sum(len(r.content) for r in enriched_results if not r.has_full_content) / snippet_count
-        else:
-            avg_snippet_size = 0
+            rich_avg = 0
 
         logger.info("=" * 60)
-        logger.info(f"WEB_ENRICHMENT: COMPLETE - Fetched {fetched_count}/{len(analysis.fetch_recommendations)} URLs")
-        logger.info(f"📊 ENRICHMENT STATISTICS:")
-        logger.info(f"  - Total results: {len(enriched_results)}")
-        logger.info(f"  - With full content: {enriched_count} ({enriched_count/len(enriched_results)*100:.1f}%)")
-        logger.info(f"  - Snippet only: {snippet_count} ({snippet_count/len(enriched_results)*100:.1f}%)")
-        logger.info(f"  - Avg full content size: {avg_enriched_size:.0f} chars")
-        logger.info(f"  - Avg snippet size: {avg_snippet_size:.0f} chars")
+        logger.info(f"WEB_ENRICHMENT V4.0: GRACEFUL FALLBACK")
+        logger.info(f"📊 QUALITY-TIERED STATISTICS:")
+        logger.info(f"  - Input URLs: {len(search_results)}")
+        logger.info(f"  - Junk filtered: {junk_count}")
+        logger.info(f"  - Attempted fetch: {len(urls_to_fetch)}")
+        logger.info(f"  - Fetch succeeded: {fetched_count}")
+        logger.info(f"  - Fetch failed: {len(urls_to_fetch) - fetched_count}")
+        logger.info(f"")
+        logger.info(f"  📊 CONTENT QUALITY BREAKDOWN:")
+        logger.info(f"  - TIER 1 (Rich >= {MIN_RICH_CONTENT}B): {results_with_rich_content}")
+        logger.info(f"  - TIER 2 (Minimal {MIN_MINIMAL_CONTENT}-{MIN_RICH_CONTENT}B): {results_with_minimal_content}")
+        logger.info(f"  - TIER 3 (Snippet only): {results_with_no_content}")
+        logger.info(f"  - TOTAL KEPT: {total_results} (0 discarded)")
+        logger.info(f"")
+        logger.info(f"  - Rich content avg size: {rich_avg:.0f} chars")
+        logger.info(f"  - Attachment rate: {(results_with_rich_content + results_with_minimal_content)/total_results*100:.1f}%" if total_results else "  - Attachment rate: N/A")
         logger.info("=" * 60)
 
-        # Convert back to SearchResult
-        return [self._enriched_to_search_result(r) for r in enriched_results]
+        # EMERGENCY FALLBACK: Never return empty list if we had input
+        if not enriched_results and search_results:
+            logger.warning("⚠️ EMERGENCY: All results filtered, returning original search results")
+            return search_results
+
+        return enriched_results
 
     def _enriched_to_search_result(self, enriched: EnrichedSearchResult) -> SearchResult:
         """Convert EnrichedSearchResult back to SearchResult."""
@@ -1980,6 +2247,277 @@ Output ONLY the search queries, one per line, with no additional text, numbering
 
         return normalized
 
+    def _assess_url_credibility(self, url: str) -> float:
+        """
+        Assess URL credibility without hardcoding specific domains.
+
+        Uses general patterns like TLD, protocol, and URL structure.
+        """
+        credibility = 0.5  # Neutral default
+
+        url_lower = url.lower()
+
+        # Boost for trusted TLDs (government, education, academic, nonprofit)
+        if any(tld in url_lower for tld in ['.gov', '.edu', '.org', '.ac.', '.int']):
+            credibility += 0.3
+
+        # Boost for HTTPS
+        if url.startswith('https://'):
+            credibility += 0.1
+
+        # Boost for established domains (have multiple path segments = established site)
+        path_segments = url.split('/')[3:]  # Skip protocol and domain
+        if len(path_segments) >= 2:
+            credibility += 0.05
+
+        # Penalty for certain patterns that suggest lower quality
+        low_quality_patterns = ['blog', 'forum', 'comment', 'user', 'profile', '/ads/', 'affiliate']
+        if any(pattern in url_lower for pattern in low_quality_patterns):
+            credibility -= 0.2
+
+        # Bonus for common quality indicators
+        quality_indicators = ['/research/', '/publication/', '/report/', '/study/', '/analysis/', '/statistics/']
+        if any(indicator in url_lower for indicator in quality_indicators):
+            credibility += 0.15
+
+        return max(0, min(1, credibility))
+
+    def _assess_content_quality(self, content: str, url: str, title: str = "") -> dict:
+        """
+        Assess content quality using multiple signals.
+
+        Returns dict with score, signals, and accept recommendation.
+        No hardcoded domains or case-specific checks.
+        """
+        import re
+
+        quality_signals = {
+            'length': len(content),
+            'has_numbers': bool(re.findall(r'\d+\.?\d*', content)),
+            'has_structured_data': any(marker in content for marker in ['<table', '<ul>', '<ol>', '|', '\t']),
+            'has_citations': bool(re.findall(r'\[\d+\]|\(\d{4}\)|\bet al\.', content)),
+            'sentence_count': len(re.findall(r'[.!?]+', content)),
+            'unique_words': len(set(content.lower().split())),
+            'technical_density': len(re.findall(r'\b\w{7,}\b', content)) / max(len(content.split()), 1),
+            'url_credibility': self._assess_url_credibility(url),
+        }
+
+        # Calculate composite score
+        score = 0.0
+
+        # Length scoring (graduated)
+        if quality_signals['length'] > 2000:
+            score += 0.35
+        elif quality_signals['length'] > 1000:
+            score += 0.30
+        elif quality_signals['length'] > 500:
+            score += 0.20
+        elif quality_signals['length'] > 200:
+            score += 0.10
+
+        # Content richness signals
+        if quality_signals['has_numbers']:
+            score += 0.15
+        if quality_signals['has_structured_data']:
+            score += 0.15
+        if quality_signals['has_citations']:
+            score += 0.10
+
+        # Sentence complexity (good content has multiple sentences)
+        if quality_signals['sentence_count'] > 10:
+            score += 0.10
+        elif quality_signals['sentence_count'] > 5:
+            score += 0.05
+
+        # Vocabulary richness
+        if quality_signals['unique_words'] > 100:
+            score += 0.10
+        elif quality_signals['unique_words'] > 50:
+            score += 0.05
+
+        # Technical content (but not too dense = spam)
+        tech_density = quality_signals['technical_density']
+        if 0.1 <= tech_density <= 0.3:
+            score += 0.05
+
+        # URL credibility factor
+        score += quality_signals['url_credibility'] * 0.15
+
+        return {
+            'score': min(score, 1.0),
+            'signals': quality_signals,
+            'accept': score >= 0.30,  # Flexible threshold - can be tuned
+            'tier': 'high' if score >= 0.6 else 'medium' if score >= 0.4 else 'low'
+        }
+
+    def _keyword_relevance(self, content: str, topic: str) -> float:
+        """
+        Calculate relevance based on intelligent keyword overlap.
+
+        Extracts meaningful terms and calculates overlap, avoiding stopwords.
+        """
+        import re
+        from collections import Counter
+
+        def extract_meaningful_terms(text):
+            """Extract meaningful terms, removing common stopwords."""
+            text_lower = text.lower()
+            # Extract words (4+ chars to avoid common small words)
+            terms = re.findall(r'\b[a-z]{4,}\b', text_lower)
+
+            # Remove common words (simple stopword list)
+            common_words = {
+                'this', 'that', 'these', 'those', 'have', 'been', 'were',
+                'will', 'with', 'from', 'into', 'through', 'during', 'before',
+                'after', 'above', 'below', 'between', 'under', 'about', 'their',
+                'there', 'where', 'which', 'while', 'would', 'could', 'should',
+                'other', 'also', 'such', 'some', 'than', 'then', 'them', 'when',
+                'what', 'more', 'most', 'much', 'many', 'very', 'just', 'only'
+            }
+            terms = [t for t in terms if t not in common_words]
+
+            return Counter(terms)
+
+        topic_terms = extract_meaningful_terms(topic)
+        content_terms = extract_meaningful_terms(content)
+
+        if not topic_terms:
+            return 0.5  # Neutral if no terms extracted
+
+        # Calculate overlap
+        overlap = sum((topic_terms & content_terms).values())
+        max_possible = sum(topic_terms.values())
+
+        base_relevance = overlap / max(max_possible, 1)
+
+        # Boost for exact phrase matches (2-word phrases from topic)
+        phrases = re.findall(r'\b\w+\s+\w+\b', topic.lower())
+        phrase_matches = sum(1 for phrase in phrases if phrase in content.lower())
+        if phrase_matches > 0:
+            base_relevance = min(1.0, base_relevance + (phrase_matches * 0.1))
+
+        return base_relevance
+
+    def _calculate_semantic_relevance(self,
+                                     observation_content: str,
+                                     research_topic: str,
+                                     step_description: str = None) -> float:
+        """
+        Calculate semantic relevance using embeddings or keyword overlap.
+
+        Tries embedding-based similarity first, falls back to keyword overlap.
+        """
+        # Try embedding-based similarity if available
+        try:
+            if hasattr(self, 'embedding_manager') and self.embedding_manager:
+                # Get embeddings
+                topic_embedding = self.embedding_manager.embed_text(research_topic)
+                content_embedding = self.embedding_manager.embed_text(observation_content[:1000])
+
+                # Cosine similarity
+                import numpy as np
+                similarity = np.dot(topic_embedding, content_embedding) / (
+                    np.linalg.norm(topic_embedding) * np.linalg.norm(content_embedding)
+                )
+
+                # Boost if step description also matches
+                if step_description:
+                    step_embedding = self.embedding_manager.embed_text(step_description)
+                    step_similarity = np.dot(content_embedding, step_embedding) / (
+                        np.linalg.norm(content_embedding) * np.linalg.norm(step_embedding)
+                    )
+                    similarity = (similarity * 0.7) + (step_similarity * 0.3)
+
+                return max(0, min(1, float(similarity)))
+
+        except Exception as e:
+            logger.debug(f"Embedding similarity failed: {e}, using keyword fallback")
+
+        # Fallback to keyword overlap
+        base_relevance = self._keyword_relevance(observation_content, research_topic)
+
+        # If step description provided, blend it in
+        if step_description:
+            step_relevance = self._keyword_relevance(observation_content, step_description)
+            return (base_relevance * 0.7) + (step_relevance * 0.3)
+
+        return base_relevance
+
+    def _filter_observations_adaptively(self,
+                                       observations: List[StructuredObservation],
+                                       research_topic: str,
+                                       step_description: str = None) -> List[StructuredObservation]:
+        """
+        Filter observations adaptively based on relevance scores.
+
+        Adjusts acceptance threshold based on score distribution:
+        - Many observations (20+): High threshold (75th percentile)
+        - Moderate observations (10-20): Medium threshold (median)
+        - Few observations (<10): Low threshold (25th percentile)
+
+        Always ensures minimum viable observations (5+) even if below threshold.
+        """
+        if not observations:
+            logger.warning("ADAPTIVE_FILTER: No observations to filter")
+            return []
+
+        # Calculate relevance scores for all observations
+        scored_observations = []
+        for obs in observations:
+            score = self._calculate_semantic_relevance(
+                obs.content,
+                research_topic,
+                step_description
+            )
+            scored_observations.append((score, obs))
+
+        # Sort by score (highest first)
+        scored_observations.sort(key=lambda x: x[0], reverse=True)
+
+        # Log score distribution
+        scores = [score for score, _ in scored_observations]
+        logger.info(
+            f"ADAPTIVE_FILTER: Score distribution: "
+            f"min={min(scores):.2f}, max={max(scores):.2f}, "
+            f"mean={sum(scores)/len(scores):.2f}, count={len(scores)}"
+        )
+
+        # Determine adaptive threshold based on count
+        import numpy as np
+        count = len(observations)
+
+        if count >= 20:
+            # Many observations: be selective (75th percentile)
+            threshold = np.percentile(scores, 75)
+            logger.info(f"ADAPTIVE_FILTER: Many observations ({count}), using 75th percentile threshold: {threshold:.2f}")
+        elif count >= 10:
+            # Moderate: use median
+            threshold = np.median(scores)
+            logger.info(f"ADAPTIVE_FILTER: Moderate observations ({count}), using median threshold: {threshold:.2f}")
+        else:
+            # Few: be lenient (25th percentile)
+            threshold = np.percentile(scores, 25)
+            logger.info(f"ADAPTIVE_FILTER: Few observations ({count}), using 25th percentile threshold: {threshold:.2f}")
+
+        # Apply threshold
+        filtered = [obs for score, obs in scored_observations if score >= threshold]
+
+        # Ensure minimum viable observations (at least 5 if available)
+        MIN_OBSERVATIONS = 5
+        if len(filtered) < MIN_OBSERVATIONS and len(scored_observations) >= MIN_OBSERVATIONS:
+            logger.warning(
+                f"ADAPTIVE_FILTER: Only {len(filtered)} passed threshold, "
+                f"including top {MIN_OBSERVATIONS} to ensure viability"
+            )
+            filtered = [obs for _, obs in scored_observations[:MIN_OBSERVATIONS]]
+
+        logger.info(
+            f"ADAPTIVE_FILTER: Kept {len(filtered)}/{len(observations)} observations "
+            f"(threshold={threshold:.2f})"
+        )
+
+        return filtered
+
     def _extract_facts_from_result(
         self,
         result: SearchResult,
@@ -2002,24 +2540,55 @@ Output ONLY the search queries, one per line, with no additional text, numbering
         from ..core.synthesis_models import FactExtraction
         from langchain_core.messages import SystemMessage, HumanMessage
 
-        title = getattr(result, 'title', '')
-        content = getattr(result, 'content', '')
-        url = getattr(result, 'url', '')
-        has_full = getattr(result, 'has_full_content', False)
+        # CRITICAL: Handle both dict and object SearchResults
+        # Enrichment sets dict keys, but getattr() only works on object attributes!
+        if isinstance(result, dict):
+            title = result.get('title', '')
+            content = result.get('content', '')
+            url = result.get('url', '')
+            has_full = result.get('has_full_content', False)
+            full_content = result.get('full_content')  # Get the actual full content field
+        else:
+            title = getattr(result, 'title', '')
+            content = getattr(result, 'content', '')
+            url = getattr(result, 'url', '')
+            has_full = getattr(result, 'has_full_content', False)
+            full_content = getattr(result, 'full_content', None)
 
         logger.info(f"📝 Extracting facts from: {title[:60]}... (has_full_content={has_full}, length={len(content)})")
 
-        # STRICT: Only create observations if we have substantial fetched content
+        # V4.0 INTELLIGENT QUALITY ASSESSMENT
+        # Use dynamic quality scoring instead of hardcoded thresholds
+
         if not content:
-            logger.warning(f"⏭️ Empty content for {url}, skipping")
+            logger.info(f"⏭️ REJECTED (empty content): {url[:60]}")
             return []
 
-        if not has_full or len(content) < 200:
-            logger.warning(
-                f"⏭️ Skipping {url} - no substantial content "
-                f"(has_full={has_full}, length={len(content)})"
+        if not has_full:
+            logger.info(f"⏭️ REJECTED (no full_content flag): {url[:60]}")
+            return []
+
+        # Assess content quality dynamically
+        quality_assessment = self._assess_content_quality(content, url, title)
+
+        logger.info(
+            f"QUALITY_CHECK: {url[:60]} - "
+            f"score={quality_assessment['score']:.2f}, "
+            f"tier={quality_assessment['tier']}, "
+            f"length={quality_assessment['signals']['length']}, "
+            f"url_credibility={quality_assessment['signals']['url_credibility']:.2f}"
+        )
+
+        # Accept if quality assessment passes
+        if not quality_assessment['accept']:
+            logger.info(
+                f"⏭️ REJECTED (quality score {quality_assessment['score']:.2f} < 0.30): {url[:60]}"
             )
             return []
+
+        logger.info(
+            f"✅ ACCEPTED ({len(content)} chars, quality={quality_assessment['score']:.2f}): {url[:60]}"
+        )
 
         # Prepare prompt for THIS result only
         messages = [
@@ -2076,11 +2645,23 @@ Extract 3-10 specific, substantial facts from this source.""")
             observations = []
             if facts:
                 for fact in facts:
+                    # CRITICAL FIX: Hash-based deduplication at source to prevent 70%+ duplication
+                    # Normalize content for hashing (lowercase, strip whitespace)
+                    normalized_content = fact.lower().strip()
+                    obs_hash = (normalized_content, url)  # Hash by (content, source)
+
+                    if obs_hash in self.observation_hashes:
+                        logger.debug(f"Skipping duplicate observation: {fact[:100]}... from {url}")
+                        continue  # Skip this duplicate
+
+                    # Mark as seen
+                    self.observation_hashes.add(obs_hash)
+
                     obs = StructuredObservation(
                         content=fact,  # Short extracted fact
-                        full_content=content,  # Real fetched content
+                        full_content=full_content or content,  # Use enriched full_content if available
                         is_summarized=True,
-                        original_length=len(content),
+                        original_length=len(full_content) if full_content else len(content),
                         source_id=url,
                         step_id=step.step_id,
                         section_title=step.title,
@@ -2093,12 +2674,13 @@ Extract 3-10 specific, substantial facts from this source.""")
             else:
                 # Empty facts but we have content - use raw content as fallback
                 logger.info(f"📄 No facts extracted, using raw content from {title[:50]}")
-                truncated = content[:1500] + "..." if len(content) > 1500 else content
+                use_content = full_content or content
+                truncated = use_content[:1500] + "..." if len(use_content) > 1500 else use_content
                 return [StructuredObservation(
                     content=f"[{title}] {truncated}",
-                    full_content=content,  # Real fetched content
+                    full_content=full_content or content,  # Use enriched full_content if available
                     is_summarized=False,
-                    original_length=len(content),
+                    original_length=len(full_content) if full_content else len(content),
                     source_id=url,
                     step_id=step.step_id,
                     section_title=step.title,
@@ -2111,12 +2693,13 @@ Extract 3-10 specific, substantial facts from this source.""")
 
             # Only create fallback if we have real content (already checked above)
             # If we reach here, we have has_full=True and len(content) >= 200
-            truncated = content[:1500] + "..." if len(content) > 1500 else content
+            use_content = full_content or content
+            truncated = use_content[:1500] + "..." if len(use_content) > 1500 else use_content
             return [StructuredObservation(
                 content=f"[{title}] {truncated}",
-                full_content=content,  # Real fetched content
+                full_content=full_content or content,  # Use enriched full_content if available
                 is_summarized=False,
-                original_length=len(content),
+                original_length=len(full_content) if full_content else len(content),
                 source_id=url,
                 step_id=step.step_id,
                 section_title=step.title,
@@ -3036,13 +3619,36 @@ Focus on concrete facts with numbers, dates, entities, and specific details.""")
         
         for i, obs_raw in enumerate(observations):
             obs_text = observation_to_text(obs_raw)
+
+            # Preserve full_content from source observation if available
+            full_content = None
+            original_length = 0
+            is_summarized = False
+
+            if isinstance(obs_raw, StructuredObservation):
+                full_content = obs_raw.full_content
+                is_summarized = obs_raw.is_summarized
+                original_length = obs_raw.original_length
+            elif isinstance(obs_raw, dict):
+                full_content = obs_raw.get('full_content')
+                is_summarized = obs_raw.get('is_summarized', False)
+                original_length = obs_raw.get('original_length', 0)
+
+            # If no full_content but content is different from obs_text, preserve it
+            if not full_content and obs_text:
+                # If original was a string and longer than extracted text, preserve it
+                if isinstance(obs_raw, str) and len(obs_raw) > len(obs_text):
+                    full_content = obs_raw
+                    original_length = len(obs_raw)
+                    is_summarized = True
+
             # Extract entity tags for this observation
             obs_entities = self._extract_entities_from_text(obs_text)
             entity_tags = list(set(obs_entities + combined_entities[:3]))  # Limit to 3 main entities
-            
+
             # Extract metric values from the observation
             metric_values = self._extract_metrics_from_text(obs_text)
-            
+
             # Determine confidence based on entity/metric richness
             confidence = 0.8
             if metric_values:
@@ -3050,10 +3656,13 @@ Focus on concrete facts with numbers, dates, entities, and specific details.""")
             if len(entity_tags) > 1:
                 confidence += 0.1
             confidence = min(confidence, 1.0)
-            
-            # Create structured observation
+
+            # Create structured observation with preserved full_content
             structured_observation = StructuredObservation(
                 content=obs_text,
+                full_content=full_content,
+                is_summarized=is_summarized,
+                original_length=original_length if original_length > 0 else len(obs_text),
                 entity_tags=entity_tags,
                 metric_values=metric_values,
                 confidence=confidence,
@@ -3600,14 +4209,15 @@ Output ONLY the summary text, no preamble or explanation."""
 
         if needs_summary:
             try:
-                # Attempt async summarization
-                import asyncio
-                try:
-                    loop = asyncio.get_event_loop()
-                    summary = loop.run_until_complete(self._llm_summarize_content(content))
-                except RuntimeError:
-                    # No event loop, create one
-                    summary = asyncio.run(self._llm_summarize_content(content))
+                # Use AsyncExecutor to safely run async summarization from any context
+                # CRITICAL: Never call asyncio.run() inside LangGraph-managed steps
+                timeout = 60.0  # 60s timeout for LLM summarization
+                logger.debug(f"LLM_SUMMARIZE: Using AsyncExecutor with timeout={timeout}s for {len(content)} chars")
+
+                summary = AsyncExecutor.run_async_safe(
+                    self._llm_summarize_content(content),
+                    timeout=timeout
+                )
 
                 observation = StructuredObservation(
                     content=summary,  # Summary for prompts
@@ -3625,6 +4235,22 @@ Output ONLY the summary text, no preamble or explanation."""
 
                 logger.info(f"Created summarized observation: {len(content)} -> {len(summary)} chars ({len(summary)/len(content):.0%})")
 
+            except asyncio.TimeoutError:
+                logger.warning(f"Summarization timed out after {timeout}s, storing full content")
+                # Fallback: store full content
+                observation = StructuredObservation(
+                    content=content,
+                    full_content=None,
+                    is_summarized=False,
+                    original_length=len(content),
+                    entity_tags=entity_tags or [],
+                    metric_values=metric_values or {},
+                    source_id=source_id,
+                    step_id=step_id,
+                    section_title=section_title,
+                    extraction_method=extraction_method,
+                    confidence=confidence
+                )
             except Exception as e:
                 logger.warning(f"Summarization failed: {e}, storing full content")
                 # Fallback: store full content

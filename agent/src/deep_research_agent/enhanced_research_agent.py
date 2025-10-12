@@ -2406,6 +2406,41 @@ class EnhancedResearchAgent(ResponsesAgent):
 
             logger.info("Successfully completed predict_stream request")
 
+        except SearchToolsFailedException as e:
+            # Graceful degradation for search failures
+            logger.warning(f"Search tools failed during streaming: {e.message} - returning partial results")
+
+            # Emit warning event with helpful message
+            yield ResponsesAgentStreamEvent(
+                type="response.output_text.delta",
+                item_id=item_id,
+                delta=f"\n\n⚠️ **Search Error**: {e.message}\n\n"
+                     f"Some searches failed, but continuing with available results...\n\n"
+            )
+
+            # Check if we have any content to return
+            final_content = "".join(collected_content)
+            if not final_content.strip():
+                final_content = f"Research encountered search failures: {e.message}\n\n"
+                if not e.details.get("has_brave_key", True):
+                    final_content += "💡 Tip: Check that BRAVE_API_KEY is properly configured.\n\n"
+                final_content += "Please try rephrasing your query or try again later."
+
+            # Extract what metadata we can
+            research_metadata = self._extract_streaming_metadata(final_state) if final_state else {}
+
+            # Emit final response with partial results
+            yield ResponsesAgentStreamEvent(
+                type="response.output_item.done",
+                item={
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": final_content}],
+                    "id": item_id,
+                },
+                metadata=research_metadata,
+            )
+
         except Exception as e:
             # COMPREHENSIVE ERROR LOGGING for debugging (DON'T SWALLOW ERRORS!)
             import traceback

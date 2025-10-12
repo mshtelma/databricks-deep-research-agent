@@ -1314,6 +1314,13 @@ OUTPUT JSON:
         updated_plan = existing_plan.model_copy(deep=True)
 
         for step_data in new_steps_data:
+            # CRITICAL FIX: Validate gap step has search queries before creating
+            # Empty gap steps cause research failures
+            search_queries = step_data.get("search_queries", [])
+            if not search_queries or len(search_queries) == 0:
+                logger.warning(f"Skipping gap step creation - no search queries provided: {step_data.get('step_id', 'unknown')}")
+                continue
+
             # Determine step type
             step_type_str = step_data.get("step_type", "research")
             if isinstance(step_type_str, str):
@@ -1326,7 +1333,7 @@ OUTPUT JSON:
                 title=step_data.get("title", "Additional Research"),
                 description=step_data.get("description", ""),
                 step_type=step_type,
-                search_queries=step_data.get("search_queries", []),
+                search_queries=search_queries,
                 depends_on=step_data.get("depends_on", []),
                 metadata=step_data.get("metadata", {})
             )

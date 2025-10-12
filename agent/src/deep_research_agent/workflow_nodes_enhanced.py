@@ -7,6 +7,8 @@ for the multi-agent research system.
 
 import json
 import time
+import asyncio
+import traceback
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -41,6 +43,117 @@ from .agents import (
 
 
 logger = get_logger(__name__)
+
+
+# ============================================================================
+# State Capture Decorator
+# ============================================================================
+
+def with_state_capture(agent_name: str):
+    """
+    Decorator to add state capture to workflow nodes.
+
+    This decorator automatically captures state before/after/error for any agent node,
+    keeping the capture logic DRY and consistent across all agents.
+
+    Args:
+        agent_name: Name of the agent (coordinator, planner, researcher, fact_checker, reporter)
+
+    Usage:
+        @with_state_capture("planner")
+        async def planner_node(self, state):
+            # ... node logic ...
+            return result
+    """
+    def decorator(func):
+        # Handle both sync and async functions
+        if asyncio.iscoroutinefunction(func):
+            async def async_wrapper(self, state: Dict[str, Any]) -> Dict[str, Any]:
+                from .core.state_capture import state_capture
+                import traceback
+
+                # STATE CAPTURE: Before
+                state_capture.capture_if_enabled(agent_name, state, "before")
+
+                try:
+                    # Execute the actual node function
+                    result = await func(self, state)
+
+                    # STATE CAPTURE: After (success)
+                    result_state = dict(state)
+                    # Check dict first - dicts have .update() method which confuses hasattr check
+                    if isinstance(result, dict):
+                        result_state.update(result)
+                    elif hasattr(result, 'update') and isinstance(getattr(result, 'update', None), dict):
+                        result_state.update(result.update)
+
+                    state_capture.capture_if_enabled(agent_name, result_state, "after")
+
+                    return result
+
+                except Exception as e:
+                    # STATE CAPTURE: Error (don't mask original exception if capture fails)
+                    try:
+                        error_state = dict(state)
+                        error_state["_error"] = {
+                            "type": type(e).__name__,
+                            "message": str(e),
+                            "traceback": traceback.format_exc()[:1000]  # Truncate to 1KB
+                        }
+                        state_capture.capture_if_enabled(agent_name, error_state, "error")
+                    except Exception as capture_error:
+                        # Log but don't crash - original exception is more important
+                        logger.warning(f"Failed to capture error state for {agent_name}: {capture_error}")
+
+                    # ALWAYS re-raise the original exception
+                    raise
+
+            return async_wrapper
+        else:
+            # Sync version
+            def sync_wrapper(self, state: Dict[str, Any]) -> Dict[str, Any]:
+                from .core.state_capture import state_capture
+                import traceback
+
+                # STATE CAPTURE: Before
+                state_capture.capture_if_enabled(agent_name, state, "before")
+
+                try:
+                    # Execute the actual node function
+                    result = func(self, state)
+
+                    # STATE CAPTURE: After (success)
+                    result_state = dict(state)
+                    # Check dict first - dicts have .update() method which confuses hasattr check
+                    if isinstance(result, dict):
+                        result_state.update(result)
+                    elif hasattr(result, 'update') and isinstance(getattr(result, 'update', None), dict):
+                        result_state.update(result.update)
+
+                    state_capture.capture_if_enabled(agent_name, result_state, "after")
+
+                    return result
+
+                except Exception as e:
+                    # STATE CAPTURE: Error (don't mask original exception if capture fails)
+                    try:
+                        error_state = dict(state)
+                        error_state["_error"] = {
+                            "type": type(e).__name__,
+                            "message": str(e),
+                            "traceback": traceback.format_exc()[:1000]  # Truncate to 1KB
+                        }
+                        state_capture.capture_if_enabled(agent_name, error_state, "error")
+                    except Exception as capture_error:
+                        # Log but don't crash - original exception is more important
+                        logger.warning(f"Failed to capture error state for {agent_name}: {capture_error}")
+
+                    # ALWAYS re-raise the original exception
+                    raise
+
+            return sync_wrapper
+
+    return decorator
 
 
 class EnhancedWorkflowNodes:
@@ -488,6 +601,7 @@ class EnhancedWorkflowNodes:
         logger.info(f"🔍 STATE_DEBUG [{node_name}] Total state keys: {total_keys}")
         logger.info(f"🔍 STATE_DEBUG [{node_name}] === END NODE ENTRY ===")
     
+    @with_state_capture("coordinator")
     def coordinator_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Coordinator node - entry point for requests.
@@ -603,9 +717,8 @@ class EnhancedWorkflowNodes:
             enhanced_state["warnings"].append(
                 f"NOTICE: Workflow completed early due to {reason.value}: {explanation}"
             )
-            
+
             # Force termination to reporter to generate final report
-            from .core.multi_agent_state import StateManager
             enhanced_state = StateManager.prune_state_for_memory(enhanced_state)
             return enhanced_state
         
@@ -656,9 +769,8 @@ class EnhancedWorkflowNodes:
                 "message": "Request classification and routing completed",
                 "next_phase": "background_investigation"
             }, state=updated_state)
-            
+
             # Apply memory pruning before returning
-            from .core.multi_agent_state import StateManager
             updated_state = StateManager.prune_state_for_memory(updated_state)
             return updated_state
             
@@ -668,36 +780,120 @@ class EnhancedWorkflowNodes:
             raise ValueError(f"Coordinator node failed with contract violation: {e}")
     
     def _generate_background_query(self, topic: str) -> str:
-        """Generate a simplified query for background investigation."""
+        """
+        Generate intelligent background query using LLM understanding.
+
+        Uses LLM to understand context and intent rather than naive text extraction.
+        This prevents issues like literal interpretation of idioms.
+        """
         import re
-        
-        # Clean the text - remove newlines and excessive whitespace
-        clean_text = ' '.join(topic.split())
-        
-        # If already short enough, use it
-        if len(clean_text) < 80:
-            return clean_text
-        
-        # Extract key entities (capitalized phrases)
-        entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', clean_text)
-        
-        # If we found entities, use the first few
-        if entities:
-            query = ' '.join(entities[:3])
-            if len(query) < 80:
+        from langchain_core.messages import SystemMessage, HumanMessage
+
+        logger.info(f"BACKGROUND_QUERY: Generating intelligent query for topic (len={len(topic)})")
+
+        # Try LLM-based generation first
+        try:
+            # Get simple model for quick query generation
+            from deep_research_agent.core.model_selector import ModelRole
+            llm = self.model_manager.get_llm_for_role(ModelRole.SIMPLE)
+
+            system_prompt = """You are a search query generator for background research.
+
+Generate a single focused search query (5-10 words) for initial context gathering.
+
+Key principles:
+1. Understand the INTENT behind the request, not just literal words
+2. Recognize and properly interpret idioms and metaphors (e.g., "apples-to-apples" means fair comparison)
+3. Extract the core research need and main entities
+4. Include relevant temporal context (year, "recent", etc.) if appropriate
+5. Be specific enough to find relevant information but broad enough for initial context
+
+Output ONLY the search query, nothing else."""
+
+            user_prompt = f"Generate a background research query for:\n\n{topic[:800]}\n\nSearch query:"
+
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt)
+            ]
+
+            # Call LLM
+            response = llm.invoke(messages)
+
+            # Extract content
+            content = response.content
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        content = item.get('text', '')
+                        break
+                else:
+                    content = str(content)
+
+            query = content.strip()
+
+            # Validate query
+            if 10 <= len(query) <= 200 and not any(c in query for c in ['\n', '\r', '\t']):
+                logger.info(f"BACKGROUND_QUERY: ✅ LLM generated: '{query}'")
                 return query
-        
-        # Extract text before first punctuation or list marker
-        first_part = re.split(r'[.!?;:\n]|\d\)', clean_text)[0]
-        if 10 < len(first_part) < 80:
-            return first_part.strip()
-        
-        # Final fallback: truncate at word boundary
-        truncated = clean_text[:75]
-        last_space = truncated.rfind(' ')
-        if last_space > 50:
-            return truncated[:last_space] + '...'
-        return truncated + '...'
+            else:
+                logger.warning(f"BACKGROUND_QUERY: LLM query invalid (len={len(query)}), falling back")
+
+        except Exception as e:
+            logger.warning(f"BACKGROUND_QUERY: LLM generation failed: {e}, falling back")
+
+        # Fallback to intelligent extraction without LLM
+        return self._intelligent_query_extraction_fallback(topic)
+
+    def _intelligent_query_extraction_fallback(self, topic: str) -> str:
+        """Extract query intelligently without LLM (fallback method)."""
+        import re
+        from collections import Counter
+
+        # Clean and normalize
+        clean_text = ' '.join(topic.split())
+
+        # Remove common idioms/metaphors that cause confusion
+        GENERAL_IDIOMS = [
+            r'\bapples?\s+to\s+apples?\b',
+            r'\bcomparing\s+apples\s+(?:and|to)\s+oranges?\b',
+            r'\bcut\s+to\s+the\s+chase\b',
+            r'\bby\s+the\s+book\b',
+            r'\bhit\s+the\s+nail\s+on\s+the\s+head\b',
+            r'\bpiece\s+of\s+cake\b',
+            r'\bbreak\s+the\s+ice\b',
+        ]
+
+        for idiom in GENERAL_IDIOMS:
+            clean_text = re.sub(idiom, '', clean_text, flags=re.IGNORECASE)
+
+        # Extract high-value terms using patterns (not specific entities)
+        key_terms = []
+
+        # Pattern 1: Proper nouns (capitalized)
+        proper_nouns = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', clean_text)
+        key_terms.extend(proper_nouns[:3])
+
+        # Pattern 2: Numbers and amounts (years, money)
+        numbers = re.findall(r'\b(?:20\d{2}|19\d{2})\b|\$[\d,]+|€[\d,]+|£[\d,]+', clean_text)
+        key_terms.extend(numbers[:2])
+
+        # Pattern 3: Technical/domain terms (words with technical suffixes)
+        technical = re.findall(r'\b\w+(?:tion|ment|ance|ence|ity|ology|ics|ing)\b', clean_text)
+        # Count frequency and take most common
+        tech_counter = Counter(technical)
+        key_terms.extend([term for term, _ in tech_counter.most_common(2)])
+
+        if key_terms:
+            query = ' '.join(key_terms[:5])  # Top 5 terms
+            logger.info(f"BACKGROUND_QUERY: Extracted from patterns: '{query}'")
+            return query
+
+        # Final fallback: first sentence or 100 chars
+        first_sentence = re.split(r'[.!?]', clean_text)[0]
+        result = first_sentence[:100] if first_sentence else clean_text[:100]
+        logger.info(f"BACKGROUND_QUERY: Using fallback extraction")
+        return result.strip()
     
     def _convert_search_results_to_observations(self, search_results: list) -> list:
         """Convert search results to observation format."""
@@ -913,7 +1109,6 @@ class EnhancedWorkflowNodes:
             # Add to search results for later use with memory limits
             if "search_results" not in state:
                 state["search_results"] = []
-            from .core.multi_agent_state import StateManager
             state = StateManager.add_search_results(state, search_results, self.agent_config)
             
             # Enrich search results with embeddings for later use in grounding
@@ -924,9 +1119,8 @@ class EnhancedWorkflowNodes:
         except Exception as e:
             logger.error(f"Background investigation failed: {str(e)}")
             state["background_investigation_results"] = f"Background research on: {research_topic}"
-        
+
         # Prune state to reduce memory usage before next node
-        from .core.multi_agent_state import StateManager
         state = StateManager.prune_state_for_memory(state)
 
         # CRITICAL FIX: Mark background investigation as completed so router progresses!
@@ -934,6 +1128,7 @@ class EnhancedWorkflowNodes:
 
         return state
     
+    @with_state_capture("planner")
     async def planner_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Planner node - generates research plans.
@@ -1030,11 +1225,10 @@ class EnhancedWorkflowNodes:
                     correlation_id=correlation_id,
                     stage_id="planner"
                 )
-        
+
         # AGGRESSIVE EARLY PRUNING: Clean state before expensive planner operation
-        from .core.multi_agent_state import StateManager
         state = StateManager.prune_state_for_memory(state)
-        
+
         # Memory health check before planner execution
         try:
             import psutil
@@ -1413,20 +1607,22 @@ class EnhancedWorkflowNodes:
             return state
     
     def _truncate_large_messages(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Balance context preservation with memory limits by truncating very large messages."""
+        """Balance context preservation with memory limits - 5MB limit per message."""
         if "messages" in state and state["messages"]:
             truncated_count = 0
-            for msg in state["messages"][-5:]:  # Check last 5 messages  
+            max_message_size = 5 * 1024 * 1024  # 5MB limit
+            for msg in state["messages"][-10:]:  # Check last 10 messages
                 if hasattr(msg, 'content') and isinstance(msg.content, str):
-                    if len(msg.content) > 10000:  # Much higher limit for comprehensive research
-                        msg.content = msg.content[:10000] + "\n[Truncated for memory management]"
+                    if len(msg.content) > max_message_size:
+                        msg.content = msg.content[:max_message_size] + "\n[Truncated at 5MB for memory management]"
                         truncated_count += 1
-            
+
             if truncated_count > 0:
-                logger.info(f"Truncated {truncated_count} large messages to prevent memory explosion")
-        
+                logger.info(f"Truncated {truncated_count} large messages (>5MB) to prevent memory explosion")
+
         return state
     
+    @with_state_capture("researcher")
     async def researcher_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Researcher node - executes research steps.
@@ -1434,9 +1630,6 @@ class EnhancedWorkflowNodes:
         Gathers information and accumulates observations.
         """
         logger.info("Executing researcher node")
-
-        # Import at function start to avoid UnboundLocalError
-        from .core.multi_agent_state import StateManager
 
         # CRITICAL: Add observation tracking debug
         logger.info(f"[RESEARCHER DEBUG] Current observations count: {len(state.get('observations', []))}")
@@ -2335,14 +2528,20 @@ class EnhancedWorkflowNodes:
                     search_results = result.update.get("search_results", [])
                     new_observations = self._convert_search_results_to_observations(search_results)
 
-            # Accumulate observations in state (single source of truth)
+            # Accumulate observations in state (single source of truth) with batch deduplication
             if new_observations:
-                # Get existing observations from state
-                existing_observations = state.get("observations", [])
-                # Add new observations to the list
-                state["observations"] = existing_observations + new_observations
+                # Use batch processing with automatic deduplication
+                state, added_count, duplicate_count = StateManager.add_observations_batch(
+                    state,
+                    new_observations,
+                    step=state.get("current_step"),
+                    config=self.agent_config
+                )
 
-                logger.info(f"Accumulated {len(new_observations)} new observations, total: {len(state['observations'])}")
+                logger.info(
+                    f"📊 Batch processed observations: {added_count} added, "
+                    f"{duplicate_count} duplicates skipped, total: {len(state.get('observations', []))}"
+                )
             
             if new_observations:
                 
@@ -2420,7 +2619,6 @@ class EnhancedWorkflowNodes:
                 logger.info(f"[DATA PRESERVATION] Total observation data preserved: {total_obs_data} items")
 
                 # Apply memory pruning
-                from .core.multi_agent_state import StateManager
                 result = StateManager.prune_state_for_memory(result)
 
                 # RESTORE CRITICAL DATA AFTER PRUNING
@@ -2467,9 +2665,9 @@ class EnhancedWorkflowNodes:
                 if hasattr(result, 'update') and result.update and "current_plan" in result.update:
                     plan_backup_cmd = result.update["current_plan"]
                     logger.info(f"[PLAN PRESERVATION] Backing up plan from Command.update before pruning: {plan_backup_cmd.plan_id if hasattr(plan_backup_cmd, 'plan_id') else 'unknown'}")
-                
+
+
                 # Apply memory pruning to the update dict
-                from .core.multi_agent_state import StateManager
                 if result.update:
                     pruned_update = StateManager.prune_state_for_memory(result.update)
 
@@ -2510,18 +2708,18 @@ class EnhancedWorkflowNodes:
             return result
             
         except SearchToolsFailedException as e:
-            # Critical search failure - stop the entire workflow
-            logger.error(f"Search tools failed in researcher node: {e.message}")
-            
-            # Emit critical error event
+            # Graceful degradation: log error and continue with partial results
+            logger.warning(f"Search tools failed in researcher node: {e.message} - continuing with partial results")
+
+            # Emit error event (non-critical)
             if self.event_emitter:
                 self.event_emitter.emit(
                     event_type="tool_call_error",
                     data={
                         "tool_name": "researcher",
-                        "error_message": f"Critical search failure: {e.message}",
+                        "error_message": f"Search failure (continuing): {e.message}",
                         "step": current_step,
-                        "is_critical": True,
+                        "is_critical": False,  # Changed to non-critical
                         "failed_tools": getattr(e, 'failed_tools', []),
                         "failure_reasons": getattr(e, 'failure_reasons', {})
                     },
@@ -2529,15 +2727,24 @@ class EnhancedWorkflowNodes:
                     stage_id="researcher"
                 )
 
-            # Emit workflow phase event - research failed (critical search failure)
-            self._emit_workflow_event("research", "researcher", "failed", {
-                "message": f"Critical search failure: {e.message}",
+            # Emit workflow phase event - research degraded
+            self._emit_workflow_event("research", "researcher", "degraded", {
+                "message": f"Search failure - continuing with partial results: {e.message}",
                 "error_type": "SearchToolsFailedException",
-                "is_critical": True
+                "is_critical": False
             }, state=state)
 
-            # Re-raise to stop the workflow and return error to user
-            raise e
+            # Add error to state but continue
+            state["errors"].append(f"Search failed for step {current_step.get('step_id', 'unknown')}: {e.message}")
+            state["warnings"].append("Some research steps failed - results may be incomplete")
+
+            # Mark step as failed but continue workflow
+            if current_step:
+                current_step['status'] = StepStatus.FAILED
+                current_step['execution_result'] = f"Search failed: {e.message}"
+
+            # Return state to continue workflow
+            return state
             
         except Exception as e:
             import traceback
@@ -2789,6 +2996,7 @@ class EnhancedWorkflowNodes:
             "errors": ["Fact checker failed, using default values"]
         }
     
+    @with_state_capture("fact_checker")
     async def fact_checker_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Fact checker node - validates claims.
@@ -3133,8 +3341,7 @@ class EnhancedWorkflowNodes:
             
             # Apply memory pruning to the dict result
             logger.info(f"Fact checker returned dict with keys: {list(result.keys())}")
-            from .core.multi_agent_state import StateManager
-            
+
             # Merge fact checker results into state before pruning
             updated_state = {**state}
             updated_state.update(result)
@@ -3197,14 +3404,15 @@ class EnhancedWorkflowNodes:
             state["errors"].append(f"Fact checker failed: {str(e)}")
             state["warnings"] = state.get("warnings", [])
             state["warnings"].append("Proceeding to report generation despite fact checking error")
-            
+
+
             # Apply memory pruning and consolidate observations
-            from .core.multi_agent_state import StateManager
             state = StateManager.consolidate_observations(state)
             state = StateManager.prune_state_for_memory(state)
             logger.info("Returning state to continue workflow despite fact checker error")
             return state
     
+    @with_state_capture("reporter")
     async def reporter_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         Reporter node - generates final report.
@@ -3313,11 +3521,11 @@ class EnhancedWorkflowNodes:
             # Execute reporter
             # FIXED: Properly await async reporter agent
             result = await self.reporter(state, self.agent_config or {})
-            
+
             # Emit events for report sections generated
             final_report = ""
             citations = []
-            
+
             # Extract report data from either Command.update or direct dict
             # Check for dict first since dicts also have .update method
             if isinstance(result, dict):
@@ -3413,8 +3621,8 @@ class EnhancedWorkflowNodes:
                     state_snapshot=updated_state
                 )
 
+
                 # Apply memory pruning before returning
-                from .core.multi_agent_state import StateManager
                 updated_state = StateManager.prune_state_for_memory(updated_state)
 
                 # CRITICAL: Mark reporter as completed and create NEW state object
@@ -3443,7 +3651,6 @@ class EnhancedWorkflowNodes:
                 logger.error(f"🎯 [REPORTER] Error in reporter state validation: {e}", exc_info=True)
                 # Fallback - return original state with pruning and completion markers
                 logger.warning(f"🎯 [REPORTER] Unexpected reporter return type: {type(result) if 'result' in locals() else 'N/A'}")
-                from .core.multi_agent_state import StateManager
                 state = StateManager.prune_state_for_memory(state)
 
                 # CRITICAL: Still mark as completed so workflow terminates (even with validation error)
@@ -3657,17 +3864,20 @@ class EnhancedWorkflowNodes:
         ]
     
     def _compile_background_info(self, results: List[SearchResult]) -> str:
-        """Compile search results into background information."""
+        """Compile search results into background information - NO TRUNCATION."""
         if not results:
             return "No background information available."
-        
+
         info_parts = ["Background Information:\n"]
-        
-        for i, result in enumerate(results[:3], 1):
+
+        # Include up to 10 results with full content (5000 chars each)
+        for i, result in enumerate(results[:10], 1):
             info_parts.append(f"{i}. {result.title}")
-            info_parts.append(f"   {result.content[:200]}...")
+            # Keep full content up to 5000 chars for comprehensive context
+            content = result.content[:5000] if len(result.content) > 5000 else result.content
+            info_parts.append(f"   {content}")
             info_parts.append("")
-        
+
         return "\n".join(info_parts)
     
     def _format_plan_for_review(self, plan) -> str:
@@ -3742,28 +3952,28 @@ class EnhancedWorkflowNodes:
 
         for step in completed_steps:
             if hasattr(step, 'observations') and step.observations:
-                # Extract insights from observations
+                # Extract insights from observations - FULL CONTENT
                 for obs in step.observations:
                     if isinstance(obs, str):
                         # Simple heuristics to identify different types of findings
                         if any(keyword in obs.lower() for keyword in ['however', 'but', 'controversial', 'disputed', 'unclear']):
-                            verification_needed.append(obs[:200])
+                            verification_needed.append(obs)  # Full observation
                         elif any(keyword in obs.lower() for keyword in ['emerging', 'new', 'recent', 'breakthrough']):
-                            deep_dive_topics.append(obs[:200])
+                            deep_dive_topics.append(obs)  # Full observation
                         elif any(keyword in obs.lower() for keyword in ['gap', 'missing', 'limited', 'need more']):
-                            knowledge_gaps.append(obs[:200])
+                            knowledge_gaps.append(obs)  # Full observation
                         else:
-                            key_discoveries.append(obs[:200])
+                            key_discoveries.append(obs)  # Full observation
 
-        # Add incremental planning context to state
+        # Add incremental planning context to state - NO LIMITS (capture everything)
         state["incremental_context"] = {
             "research_loop": state.get("research_loops", 0) + 1,
             "completed_steps_count": len(completed_steps),
             "pending_steps_count": len(pending_steps),
-            "key_discoveries": key_discoveries[:5],  # Top 5 discoveries
-            "knowledge_gaps": knowledge_gaps[:5],    # Top 5 gaps
-            "verification_needed": verification_needed[:3],  # Top 3 items needing verification
-            "deep_dive_topics": deep_dive_topics[:3],  # Top 3 topics for deep dive
+            "key_discoveries": key_discoveries,  # ALL discoveries
+            "knowledge_gaps": knowledge_gaps,    # ALL gaps
+            "verification_needed": verification_needed,  # ALL items
+            "deep_dive_topics": deep_dive_topics,  # ALL topics
             "existing_plan_summary": self._summarize_existing_plan(existing_plan),
             "planning_mode": "incremental_enhancement"
         }

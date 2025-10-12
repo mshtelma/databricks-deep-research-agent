@@ -5,7 +5,7 @@ Extends the existing state with support for planning, grounding,
 and multi-agent coordination.
 """
 
-from typing import List, Dict, Any, Optional, Literal, Union
+from typing import List, Dict, Any, Optional, Literal, Union, Tuple
 from datetime import datetime
 from pydantic import BaseModel, Field
 
@@ -641,6 +641,132 @@ class StateManager:
         return state
 
     @staticmethod
+    def add_observations_batch(
+        state: EnhancedResearchState,
+        observations: List[Any],
+        step: Optional[Step] = None,
+        config: Optional[Dict[str, Any]] = None,
+        observation_index: Optional['ObservationEmbeddingIndex'] = None
+    ) -> Tuple[EnhancedResearchState, int, int]:
+        """
+        Add multiple observations with efficient batch deduplication.
+
+        This is the recommended way to add observations in bulk as it:
+        - Deduplicates against existing observations
+        - Applies memory limits
+        - Tracks step association
+        - Returns metrics for monitoring
+
+        Args:
+            state: Current state
+            observations: List of observations to add
+            step: Optional step to associate observations with
+            config: Optional configuration with memory limits
+            observation_index: Optional embedding index for semantic deduplication
+
+        Returns:
+            Tuple of (updated_state, added_count, duplicate_count)
+        """
+        from .observation_models import ensure_structured_observation
+        from .memory_config import MemoryOptimizedConfig
+        import logging
+        logger = logging.getLogger(__name__)
+
+        if not observations:
+            return state, 0, 0
+
+        # Initialize observations list if needed
+        if "observations" not in state:
+            state["observations"] = []
+
+        # Build hash set of existing observations
+        existing_hashes = {
+            hash(str(o.get("content", "")).lower().strip())
+            for o in state["observations"]
+            if str(o.get("content", "")).strip()
+        }
+
+        # Process new observations
+        added = []
+        duplicate_count = 0
+        excessive_duplicate_warning = False
+
+        for obs in observations:
+            # Normalize to StructuredObservation
+            structured_obs = ensure_structured_observation(obs)
+
+            # Set step_id for section-specific filtering
+            if step:
+                structured_obs.step_id = step.step_id
+
+            # Serialize to dict for state storage
+            obs_dict = structured_obs.to_dict()
+
+            # Check for duplication
+            content = str(obs_dict.get("content", "")).strip()
+            if not content:
+                continue
+
+            content_lower = content.lower()
+            obs_hash = hash(content_lower)
+
+            # Circuit breaker: detect excessive duplicates (indicates bug)
+            if obs_hash in existing_hashes:
+                duplicate_count += 1
+                # Count how many times this specific observation exists
+                specific_duplicate_count = sum(
+                    1 for o in state["observations"]
+                    if hash(str(o.get("content", "")).lower().strip()) == obs_hash
+                )
+                if specific_duplicate_count >= 10 and not excessive_duplicate_warning:
+                    logger.error(
+                        f"🚨 CIRCUIT BREAKER: Observation already exists {specific_duplicate_count} times! "
+                        f"Content: {content[:100]}..."
+                    )
+                    excessive_duplicate_warning = True
+                continue
+
+            # Add unique observation
+            added.append(obs_dict)
+            existing_hashes.add(obs_hash)
+
+            # Also add to step if provided
+            if step:
+                if not step.observations:
+                    step.observations = []
+                step.observations.append(structured_obs)
+
+        # Batch add all unique observations
+        if added:
+            state["observations"].extend(added)
+
+            # Apply memory limits
+            max_observations = MemoryOptimizedConfig.get_observations_limit(config)
+            if len(state["observations"]) > max_observations:
+                trimmed = len(state["observations"]) - max_observations
+                state["observations"] = state["observations"][-max_observations:]
+                logger.info(f"📉 Trimmed {trimmed} old observations to maintain limit of {max_observations}")
+
+        added_count = len(added)
+
+        # Log summary
+        if added_count > 0 or duplicate_count > 0:
+            logger.info(
+                f"📊 Batch processed {len(observations)} observations: "
+                f"{added_count} added, {duplicate_count} duplicates skipped, "
+                f"total: {len(state['observations'])}"
+            )
+
+            # Warn if excessive duplicates (indicates potential bug)
+            if duplicate_count > 100:
+                logger.warning(
+                    f"⚠️  Excessive duplicates: {duplicate_count}/{len(observations)}. "
+                    f"This may indicate a bug in observation generation."
+                )
+
+        return state, added_count, duplicate_count
+
+    @staticmethod
     def add_search_results(
         state: EnhancedResearchState,
         search_results: List[Any],
@@ -944,18 +1070,30 @@ class StateManager:
     ) -> EnhancedResearchState:
         """Finalize the state at the end of research."""
         state["end_time"] = datetime.now()
-        
-        if state["start_time"]:
-            duration = (state["end_time"] - state["start_time"]).total_seconds()
+
+        # Safe access to start_time (may not exist in test fixtures)
+        start_time = state.get("start_time")
+        if start_time:
+            duration = (state["end_time"] - start_time).total_seconds()
             state["total_duration_seconds"] = duration
-        
+
         # Calculate final metrics if not already set
-        if state["current_plan"] and not state["research_quality_score"]:
-            completed = len([s for s in state["current_plan"].steps 
-                           if s.status == "completed"])
-            total = len(state["current_plan"].steps)
+        current_plan = state.get("current_plan")
+        if current_plan and not state.get("research_quality_score"):
+            # Handle both Plan object and dict
+            if hasattr(current_plan, 'steps'):
+                steps = current_plan.steps
+            elif isinstance(current_plan, dict):
+                steps = current_plan.get('steps', [])
+            else:
+                steps = []
+
+            completed = len([s for s in steps
+                           if (hasattr(s, 'status') and s.status == "completed") or
+                              (isinstance(s, dict) and s.get('status') == 'completed')])
+            total = len(steps)
             state["research_quality_score"] = completed / total if total > 0 else 0
-        
+
         return state
     
     @staticmethod

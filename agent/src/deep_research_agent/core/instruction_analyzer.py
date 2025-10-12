@@ -254,9 +254,9 @@ Return complete JSON with all identified requirements."""
         # Parse constraints
         constraints = []
         for c_data in data.get('constraints', []):
-            constraint_type = ConstraintType(c_data['type'])
+            # Pass string directly to Constraint - let Pydantic validator normalize
             constraints.append(Constraint(
-                type=constraint_type,
+                type=c_data['type'],  # Validator will normalize unknown types to OTHER
                 value=c_data['value'],
                 description=c_data['description']
             ))

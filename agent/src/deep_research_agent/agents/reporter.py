@@ -6,6 +6,7 @@ Generates styled reports from research findings with proper citations.
 
 from typing import Dict, Any, Optional, List, Literal, Tuple, Sequence, Union
 from datetime import datetime
+import os
 import time
 import random
 import re
@@ -115,7 +116,15 @@ class ReporterAgent:
             self.entity_extractor = None
             self.data_matcher = None
             logger.info("Semantic extraction disabled or no LLM available")
-    
+
+        # Initialize debug logger if REPORTER_DEBUG environment variable is set
+        if os.getenv("REPORTER_DEBUG", "").lower() in ("true", "1", "yes"):
+            from .reporter_debug import ReportDebugLogger
+            self.debug_logger = ReportDebugLogger()
+            logger.info(f"🐛 Reporter debug logging ENABLED → {self.debug_logger.debug_dir}")
+        else:
+            self.debug_logger = None
+
     def _classify_databricks_error(self, error: Exception) -> Tuple[bool, Optional[float]]:
         """
         Classify Databricks errors and extract retry guidance.
@@ -414,15 +423,48 @@ Generate the report section content:"""
         logger.info("=" * 80)
 
         logger.info("Reporter agent generating final report")
-        
+
         # DEBUG: Log state contents to trace data flow
         logger.info(f"STATE KEYS: {list(state.keys())}")
         logger.info(f"Observations: {len(state.get('observations', []))}")
         logger.info(f"Search results: {len(state.get('search_results', []))}")
         logger.info(f"Section research: {list(state.get('section_research_results', {}).keys())}")
-        
-        # Get report style
+
+        # === PERIMETER DESERIALIZATION ===
+        # Convert dict state to proper objects at entry point (not scattered throughout)
+        from ..core.plan_models import Plan
+
+        # Deserialize current_plan from dict to Plan object if needed
+        if "current_plan" in state and isinstance(state["current_plan"], dict):
+            try:
+                # Pydantic BaseModel can deserialize from dict
+                state["current_plan"] = Plan.model_validate(state["current_plan"])
+                logger.info("Deserialized current_plan from dict to Plan object")
+            except Exception as e:
+                logger.warning(f"Failed to deserialize current_plan: {e}. Will handle as dict.")
+
+        # Deserialize report_style from string to ReportStyle enum if needed
         report_style = state.get("report_style", ReportStyle.DEFAULT)
+        if isinstance(report_style, str):
+            if report_style.startswith('ReportStyle.'):
+                style_name = report_style.split('.')[1]
+                try:
+                    report_style = ReportStyle[style_name]
+                    state["report_style"] = report_style  # Update state with enum
+                    logger.info(f"Deserialized report_style from '{state.get('report_style')}' to {report_style}")
+                except KeyError:
+                    logger.warning(f"Unknown ReportStyle name '{style_name}', falling back to DEFAULT")
+                    report_style = ReportStyle.DEFAULT
+                    state["report_style"] = report_style
+            else:
+                try:
+                    report_style = ReportStyle[report_style.upper()]
+                    state["report_style"] = report_style  # Update state with enum
+                    logger.info(f"Deserialized report_style from string to {report_style}")
+                except KeyError:
+                    logger.warning(f"Unknown ReportStyle '{report_style}', falling back to DEFAULT")
+                    report_style = ReportStyle.DEFAULT
+                    state["report_style"] = report_style
         logger.info(f"Using report style: {report_style}")
         
         # Get style configuration (with adaptive structure support)
@@ -890,6 +932,21 @@ Generate the report section content:"""
 
         logger.info("Report generation completed")
 
+        # Debug logging - final report after all post-processing
+        if self.debug_logger:
+            self.debug_logger.log_stage(
+                "Final_Report",
+                report_with_metadata,
+                {
+                    "length": len(report_with_metadata),
+                    "citation_count": len(state.get('citations', [])),
+                    "has_table": bool(table_content),
+                    "report_style": report_style
+                }
+            )
+            # Generate summary index
+            self.debug_logger.create_summary()
+
         return Command(
             goto="end",
             update={
@@ -1237,8 +1294,27 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
             else:
                 # Use standard configuration
                 logger.info(f"REPORTER: Using standard configuration for style: {report_style}")
+
+                # CRITICAL FIX: Handle string representation of enum (e.g., 'ReportStyle.DEFAULT')
+                if isinstance(report_style, str):
+                    if report_style.startswith('ReportStyle.'):
+                        # Parse string like 'ReportStyle.DEFAULT' to enum
+                        style_name = report_style.split('.')[1]
+                        try:
+                            report_style = ReportStyle[style_name]
+                        except KeyError:
+                            logger.warning(f"REPORTER: Unknown style name '{style_name}', falling back to DEFAULT")
+                            report_style = ReportStyle.DEFAULT
+                    else:
+                        # Parse string like 'DEFAULT' to enum
+                        try:
+                            report_style = ReportStyle[report_style.upper()]
+                        except KeyError:
+                            logger.warning(f"REPORTER: Unknown style '{report_style}', falling back to DEFAULT")
+                            report_style = ReportStyle.DEFAULT
+
                 return STYLE_CONFIGS[report_style]
-                
+
         except Exception as e:
             logger.warning(f"REPORTER: Failed to get adaptive structure, using fallback: {e}")
             import traceback
@@ -1342,9 +1418,12 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         plan = state.get("current_plan")
         completed_steps = []
         if plan:
+            # Plan is already deserialized at perimeter (entry point)
+            steps = plan.steps if hasattr(plan, 'steps') else []
+
             completed_steps = [
-                step for step in plan.steps
-                if step.status == StepStatus.COMPLETED or str(step.status).lower() == "completed"
+                step for step in steps
+                if hasattr(step, 'status') and (step.status == StepStatus.COMPLETED or str(step.status).lower() == "completed")
             ]
         
         # Get citations
@@ -2136,6 +2215,7 @@ For {style.value} style reports:
         Strategy: Smart pattern matching to avoid over-generation
         - Only FINAL comparison sections get full intro+table+conclusion
         - Data/calculation sections get intro+table (no redundant conclusion)
+        - Methodology/appendix sections get intro+table (structured data presentation)
         - Other sections get just narrative text
 
         This prevents the duplication bug where intro and conclusion paragraphs
@@ -2159,13 +2239,21 @@ For {style.value} style reports:
             "contributions", "benefits", "allowances"
         ])
 
+        # Check for sections that commonly need structured data presentation
+        # These sections naturally contain tabular information (sources, assumptions, etc.)
+        needs_structured_data = any(keyword in section_lower for keyword in [
+            "methodology", "sources", "appendix", "assumptions",
+            "data sources", "references", "technical details",
+            "data quality", "limitations"
+        ])
+
         if is_final_comparison:
             # Final comparison needs intro + table + analytical conclusion
             logger.info(f"Section '{section_name}': Using full 3-block pattern (final comparison)")
             return ["paragraph", "table", "paragraph"]
-        elif is_data_section:
-            # Data sections: brief intro + table (no redundant conclusion)
-            logger.info(f"Section '{section_name}': Using 2-block pattern (data section)")
+        elif is_data_section or needs_structured_data:
+            # Data/methodology sections: brief intro + table (no redundant conclusion)
+            logger.info(f"Section '{section_name}': Using 2-block pattern (data/structured)")
             return ["paragraph", "table"]
         else:
             # Regular sections: just narrative
@@ -2230,6 +2318,32 @@ For {style.value} style reports:
         """
         base_prompt = f"You are a {style.value} data analyst writing section {section_index + 1} of {total_sections}."
 
+        # Table prohibition rules (critical for all sections)
+        table_rules = """
+
+**TABLE GENERATION RULES** (CRITICAL):
+❌ NEVER generate markdown table syntax using pipes (|)
+❌ NEVER create table separators like |---|---|
+❌ NEVER format data in columns and rows with pipes
+❌ DO NOT use any table markdown syntax whatsoever
+✅ Present tabular data as descriptive prose instead
+✅ Use bullet lists for structured information
+✅ Tables are handled separately through structured generation
+
+**Example of FORBIDDEN table syntax**:
+| Country | Tax Rate |
+|---------|----------|
+| Spain   | 19%      |
+
+**Correct alternative** (descriptive prose):
+Spain applies a 19% tax rate, France uses 24%, and the UK applies 20%...
+
+**Correct alternative** (bullet list):
+- Spain: 19% tax rate
+- France: 24% tax rate
+- UK: 20% tax rate
+"""
+
         if has_previous_content:
             continuation_rules = """
 
@@ -2259,9 +2373,9 @@ Previous sections have already established context. Your job is to CONTINUE the 
 **Bad**: "Tax rates vary across countries"
 **Good**: "Spain's 31.2% effective rate provides €4,400 more take-home pay than France's 35.8%"
 """
-            return base_prompt + continuation_rules
+            return base_prompt + table_rules + continuation_rules
         else:
-            return base_prompt + """
+            quality_rules = """
 
 **QUALITY REQUIREMENTS**:
 ✅ Start with specific, data-driven insights
@@ -2269,6 +2383,7 @@ Previous sections have already established context. Your job is to CONTINUE the 
 ✅ Establish the analytical framework with actual findings
 ✅ Every statement should reference specific data points
 """
+            return base_prompt + table_rules + quality_rules
 
     def _get_block_context(self, block_type: str, index: int, total: int) -> str:
         """Get context description for this block's role in the section."""
@@ -2280,6 +2395,95 @@ Previous sections have already established context. Your job is to CONTINUE the 
             return "data comparison"
         else:
             return "supporting analysis"
+
+    def _strip_inline_tables(self, text: str) -> str:
+        """
+        Strip markdown table syntax from text as safety fallback.
+
+        This shouldn't be necessary if prompts work correctly,
+        but provides defense-in-depth against LLM non-compliance.
+
+        Args:
+            text: Paragraph text that may contain inline tables
+
+        Returns:
+            Text with table syntax removed or converted to prose
+        """
+        import re
+
+        # Quick check - if no pipes, no tables
+        if '|' not in text:
+            return text
+
+        # Detect table rows (lines with multiple pipes indicating table structure)
+        table_row_pattern = r'^\s*\|[^\n]+\|[^\n]*$'
+        lines = text.split('\n')
+        cleaned_lines = []
+        in_table = False
+        table_rows = []
+
+        for line in lines:
+            is_table_row = bool(re.match(table_row_pattern, line))
+
+            if is_table_row:
+                if not in_table:
+                    in_table = True
+                    logger.warning(
+                        "⚠️ LLM generated inline table despite explicit instructions. "
+                        "Stripping table syntax from paragraph as safety fallback."
+                    )
+                table_rows.append(line)
+            else:
+                if in_table:
+                    # End of table - convert to bullet list
+                    converted = self._convert_table_to_bullets(table_rows)
+                    if converted:
+                        cleaned_lines.append(converted)
+                    table_rows = []
+                    in_table = False
+                cleaned_lines.append(line)
+
+        # Handle table at end of text
+        if in_table and table_rows:
+            converted = self._convert_table_to_bullets(table_rows)
+            if converted:
+                cleaned_lines.append(converted)
+
+        return '\n'.join(cleaned_lines)
+
+    def _convert_table_to_bullets(self, table_rows: List[str]) -> str:
+        """
+        Convert markdown table rows to bullet list format.
+
+        Args:
+            table_rows: List of markdown table row strings
+
+        Returns:
+            Bullet list representation
+        """
+        if not table_rows:
+            return ""
+
+        import re
+
+        # Skip separator rows (|---|---|)
+        data_rows = [
+            row for row in table_rows
+            if not re.match(r'^\s*\|[\s\-:]+\|\s*$', row)
+        ]
+
+        if not data_rows:
+            return ""
+
+        bullets = []
+        for row in data_rows:
+            # Extract cell content
+            cells = [cell.strip() for cell in row.split('|')[1:-1]]
+            if cells:
+                # Format as bullet: "Header1: Value1, Header2: Value2"
+                bullets.append(f"- {', '.join(c for c in cells if c)}")
+
+        return '\n'.join(bullets)
 
     def _generate_paragraph_block(
         self,
@@ -2458,6 +2662,17 @@ Write a paragraph that provides context for the data table that follows:"""
         ]
 
         response = self._invoke_llm_with_smart_retry(messages, f"paragraph_{section_name}")
+
+        # SAFETY: Strip any markdown tables that LLM generated despite explicit instructions
+        # This is a defense-in-depth measure that shouldn't be necessary if prompts work correctly
+        original_length = len(response)
+        response = self._strip_inline_tables(response)
+        if len(response) != original_length:
+            chars_removed = original_length - len(response)
+            logger.warning(
+                f"⚠️ Removed {chars_removed} chars of inline table syntax "
+                f"from '{section_name}' paragraph (LLM ignored instructions)"
+            )
 
         return ParagraphBlock(text=response)
 
@@ -3053,6 +3268,44 @@ Note: Your response must conform to the TableBlock schema provided."""
         
         return None
     
+    @staticmethod
+    def _extract_citation_field(citation: Any, field: str, default: str = "") -> str:
+        """
+        Extract field from citation regardless of type (Citation object, dict, or string).
+
+        Handles:
+        - Citation objects with attributes
+        - Dicts with keys
+        - String representations (fallback)
+
+        Args:
+            citation: Citation in any format (object, dict, or string)
+            field: Field name to extract ('source', 'title', 'url', 'snippet')
+            default: Default value if field not found
+
+        Returns:
+            Field value as string, or default if not found
+        """
+        # Try attribute access (Citation object)
+        if hasattr(citation, field):
+            value = getattr(citation, field)
+            return str(value) if value is not None else default
+
+        # Try dict access
+        if isinstance(citation, dict):
+            value = citation.get(field)
+            return str(value) if value is not None else default
+
+        # Fallback for strings - try to parse
+        if isinstance(citation, str) and field in citation:
+            import re
+            pattern = rf"{field}='([^']*)'"
+            match = re.search(pattern, citation)
+            if match:
+                return match.group(1)
+
+        return default
+
     def _add_citations_and_references(
         self,
         report: str,
@@ -3060,7 +3313,7 @@ Note: Your response must conform to the TableBlock schema provided."""
         style: ReportStyle
     ) -> str:
         """Add citations and references section to report."""
-        
+
         if not citations:
             return report
         
@@ -3068,17 +3321,18 @@ Note: Your response must conform to the TableBlock schema provided."""
         unique_citations = []
         seen_urls = set()
         for citation in citations:
-            if citation.source not in seen_urls:
+            source = self._extract_citation_field(citation, 'source')
+            if source and source not in seen_urls:
                 unique_citations.append(citation)
-                seen_urls.add(citation.source)
+                seen_urls.add(source)
         
         # Format unique citations according to style
         formatted_citations = []
         for i, citation in enumerate(unique_citations, 1):
             citation_dict = {
                 "number": i,
-                "title": citation.title,
-                "url": citation.source,
+                "title": self._extract_citation_field(citation, 'title'),
+                "url": self._extract_citation_field(citation, 'source'),
                 "author": "",  # Remove "Unknown" - leave empty
                 "date": ""     # Remove current year - leave empty
             }
@@ -3204,9 +3458,23 @@ Note: Your response must conform to the TableBlock schema provided."""
             
             # Add research metrics
             plan = state.get("current_plan")
+            completed_steps = state.get("completed_steps", [])
             if plan:
+                # Handle both dict and Plan object cases (defensive programming)
+                if isinstance(plan, dict):
+                    total_steps = len(plan.get('steps', []))
+                    num_completed = plan.get('completed_steps', len(completed_steps))
+                elif hasattr(plan, 'steps'):
+                    # Plan object
+                    total_steps = len(plan.steps)
+                    num_completed = len(completed_steps)
+                else:
+                    # Fallback for unexpected plan types
+                    total_steps = 0
+                    num_completed = len(completed_steps)
+
                 footer_parts.append(
-                    f"Research Steps Completed: {plan.completed_steps}/{len(plan.steps)}\n"
+                    f"Research Steps Completed: {num_completed}/{total_steps}\n"
                 )
             
             footer_parts.append("="*50)
@@ -3235,12 +3503,12 @@ Note: Your response must conform to the TableBlock schema provided."""
         
         for citation in citations:
             # Create a unique key based on URL and title
-            url = getattr(citation, 'source', '') or getattr(citation, 'url', '')
-            title = getattr(citation, 'title', '')
-            
+            url = self._extract_citation_field(citation, 'source') or self._extract_citation_field(citation, 'url')
+            title = self._extract_citation_field(citation, 'title')
+
             # Create unique identifier
             unique_key = f"{url}|{title}".lower().strip()
-            
+
             if unique_key not in seen_urls and url.strip():
                 seen_urls.add(unique_key)
                 unique_citations.append(citation)
@@ -4846,8 +5114,13 @@ Based on the available research findings, I can provide the following summary:
         # Format observations with FULL content
         obs_details = []
         for obs in observations:
-            full_content = obs.get('full_content', obs.get('content', ''))
-            step_id = obs.get('step_id', 'unknown')
+            # Handle both dict and StructuredObservation objects
+            if isinstance(obs, dict):
+                full_content = obs.get('full_content', obs.get('content', ''))
+                step_id = obs.get('step_id', 'unknown')
+            else:
+                full_content = getattr(obs, 'full_content', None) or getattr(obs, 'content', '')
+                step_id = getattr(obs, 'step_id', 'unknown')
             obs_details.append(f"Step {step_id}: {full_content}")
 
         # Apply character limit with smart truncation (keep observations in order, stop at limit)
@@ -4944,6 +5217,18 @@ Provide a detailed, thoughtful analysis that will guide the extraction process."
                 f"{len(understanding)} chars of analysis"
             )
 
+            # Debug logging
+            if self.debug_logger:
+                self.debug_logger.log_stage(
+                    "Phase1A_Understanding",
+                    understanding,
+                    {
+                        "observation_count": len(observations),
+                        "total_chars": total_chars,
+                        "understanding_length": len(understanding)
+                    }
+                )
+
             return {
                 'understanding': understanding,
                 'observation_count': len(observations),
@@ -4993,8 +5278,13 @@ Provide a detailed, thoughtful analysis that will guide the extraction process."
         # Format observations with FULL content
         obs_details = []
         for obs in observations:
-            full_content = obs.get('full_content', obs.get('content', ''))
-            step_id = obs.get('step_id', 'unknown')
+            # Handle both dict and StructuredObservation objects
+            if isinstance(obs, dict):
+                full_content = obs.get('full_content', obs.get('content', ''))
+                step_id = obs.get('step_id', 'unknown')
+            else:
+                full_content = getattr(obs, 'full_content', None) or getattr(obs, 'content', '')
+                step_id = getattr(obs, 'step_id', 'unknown')
             obs_details.append(f"Step {step_id}: {full_content}")
 
         # Apply character limit with smart truncation (same as Stage 1A)
@@ -5119,6 +5409,25 @@ IMPORTANT GUIDELINES:
    - Include all relevant metrics/entities in the metrics dict
    - Link to source observations
 
+CRITICAL VALUE FORMAT RULES (to ensure valid JSON):
+
+✅ CORRECT value formats:
+  - Simple numbers: "value": 21.0, "value": 19
+  - Simple strings: "value": "progressive", "value": "married"
+  - Percentage numbers: "value": 35.5, "unit": "percent"
+
+❌ INCORRECT value formats (will break JSON parsing):
+  - Compound values: "value": "0‑12,450 €:19%; 12,450‑20,200 €:24%" ← NO!
+  - Multiple data in one: "value": "Spain 35%, France 40%, UK 45%" ← NO!
+  - Complex strings: "value": "Rate varies: 10%-40% depending on income" ← NO!
+
+If you find compound data, create SEPARATE data points:
+  Instead of: {{"entity": "All", "metric": "rates", "value": "Spain:19%, France:20%"}}
+  Do this: [
+    {{"entity": "Spain", "metric": "rate", "value": 19.0, "unit": "percent"}},
+    {{"entity": "France", "metric": "rate", "value": 20.0, "unit": "percent"}}
+  ]
+
 Return ONLY the JSON object, no additional text."""
 
         messages = [
@@ -5138,34 +5447,66 @@ Return ONLY the JSON object, no additional text."""
                 # Try direct JSON parse
                 json_str = extraction_text.strip()
 
-            extraction_data = json.loads(json_str)
+            # Strategy 1: Try standard JSON parsing
+            try:
+                extraction_data = json.loads(json_str)
+                logger.info(
+                    f"[Stage 1B] Standard JSON parse succeeded: "
+                    f"{len(extraction_data.get('extracted_data', []))} data points, "
+                    f"{len(extraction_data.get('calculations', []))} calculations, "
+                    f"{len(extraction_data.get('key_comparisons', []))} comparisons"
+                )
 
-            logger.info(
-                f"[Stage 1B] Extraction complete: "
-                f"{len(extraction_data.get('extracted_data', []))} data points, "
-                f"{len(extraction_data.get('calculations', []))} calculations, "
-                f"{len(extraction_data.get('key_comparisons', []))} comparisons"
-            )
+                # Debug logging
+                if self.debug_logger:
+                    self.debug_logger.log_stage(
+                        "Phase1B_Extraction_Success",
+                        json.dumps(extraction_data, indent=2),
+                        {
+                            "strategy": "standard_json_parse",
+                            "data_points": len(extraction_data.get('extracted_data', [])),
+                            "calculations": len(extraction_data.get('calculations', [])),
+                            "comparisons": len(extraction_data.get('key_comparisons', []))
+                        }
+                    )
 
-            return {
-                'extraction': extraction_data,
-                'raw_response': extraction_text
-            }
+                return {
+                    'extraction': extraction_data,
+                    'raw_response': extraction_text
+                }
+            except json.JSONDecodeError as e:
+                # Log detailed error context
+                error_context = self._get_json_error_context(json_str, e.lineno, e.colno)
+                logger.warning(
+                    f"[Stage 1B] JSON parsing failed: {e.msg}\n"
+                    f"Error context:\n{error_context}"
+                )
 
-        except json.JSONDecodeError as e:
-            logger.error(f"[Stage 1B] JSON parsing failed: {e}")
-            logger.error(f"[Stage 1B] Response text: {extraction_text[:500]}...")
-            return {
-                'extraction': {
-                    "extracted_data": [],
-                    "calculations": [],
-                    "key_comparisons": [],
-                    "summary_insights": [],
-                    "data_quality_notes": [f"JSON parsing error: {e}"]
-                },
-                'raw_response': extraction_text,
-                'error': str(e)
-            }
+                # Strategy 2: Attempt JSON repair
+                logger.info("[Stage 1B] Attempting JSON repair...")
+                try:
+                    repaired_json = self._repair_json_string(json_str)
+                    extraction_data = json.loads(repaired_json)
+                    logger.info(
+                        f"[Stage 1B] JSON repair succeeded! Extracted "
+                        f"{len(extraction_data.get('extracted_data', []))} data points"
+                    )
+                    return {
+                        'extraction': extraction_data,
+                        'raw_response': extraction_text,
+                        'repair_applied': True
+                    }
+                except json.JSONDecodeError as repair_error:
+                    logger.warning(f"[Stage 1B] JSON repair failed: {repair_error}")
+
+                    # Strategy 3: Fallback to regex-based partial extraction
+                    logger.info("[Stage 1B] Falling back to regex-based extraction...")
+                    extraction_data = self._extract_partial_json_data(json_str)
+                    return {
+                        'extraction': extraction_data,
+                        'raw_response': extraction_text,
+                        'fallback_used': True
+                    }
         except Exception as e:
             logger.error(f"[Stage 1B] Extraction failed: {e}")
             return {
@@ -5178,6 +5519,154 @@ Return ONLY the JSON object, no additional text."""
                 },
                 'error': str(e)
             }
+
+    def _repair_json_string(self, json_str: str) -> str:
+        """
+        Attempt to repair common JSON formatting issues that LLMs produce.
+
+        Args:
+            json_str: Potentially malformed JSON string
+
+        Returns:
+            Repaired JSON string
+        """
+        import unicodedata
+
+        repaired = json_str
+
+        # Fix 1: Replace problematic Unicode characters
+        # Non-breaking hyphens, special dashes, etc.
+        repaired = repaired.replace('\u202f', ' ')  # Narrow no-break space
+        repaired = repaired.replace('\u2011', '-')  # Non-breaking hyphen
+        repaired = repaired.replace('\u2013', '-')  # En dash
+        repaired = repaired.replace('\u2014', '-')  # Em dash
+
+        # Fix 2: Remove trailing commas before closing brackets
+        repaired = re.sub(r',\s*}', '}', repaired)
+        repaired = re.sub(r',\s*\]', ']', repaired)
+
+        # Fix 3: Fix common quote escaping issues in string values
+        # Replace unescaped quotes inside string values (heuristic)
+        def fix_unescaped_quotes(match):
+            string_content = match.group(1)
+            # Escape quotes that aren't already escaped
+            fixed = re.sub(r'(?<!\\)"', '\\"', string_content)
+            return f'"{fixed}"'
+
+        # This is a simple heuristic - may need refinement
+        # repaired = re.sub(r'"([^"]*)"', fix_unescaped_quotes, repaired)
+
+        return repaired
+
+    def _extract_partial_json_data(self, broken_json: str) -> Dict[str, Any]:
+        """
+        Extract partial data from malformed JSON using regex fallback.
+
+        This is a last-resort strategy when JSON parsing completely fails.
+
+        Args:
+            broken_json: Malformed JSON that couldn't be parsed
+
+        Returns:
+            Dict with partially extracted data
+        """
+        logger.info("[Stage 1B] Attempting regex fallback extraction from malformed JSON")
+
+        extracted_data = []
+        calculations = []
+        key_comparisons = []
+
+        # Pattern to match data point-like structures
+        # Example: {"entity": "Spain", "metric": "rate", "value": 19, "unit": "percent"}
+        data_point_pattern = r'\{[^}]*"entity"\s*:\s*"([^"]+)"[^}]*"metric"\s*:\s*"([^"]+)"[^}]*"value"\s*:\s*([^,}]+)[^}]*\}'
+
+        for match in re.finditer(data_point_pattern, broken_json):
+            try:
+                entity = match.group(1)
+                metric = match.group(2)
+                value_str = match.group(3).strip().strip('"')
+
+                # Try to parse value as number
+                try:
+                    value = float(value_str)
+                except ValueError:
+                    value = value_str
+
+                extracted_data.append({
+                    "entity": entity,
+                    "metric": metric,
+                    "value": value,
+                    "unit": "unknown",
+                    "confidence": 0.6  # Lower confidence for regex-extracted data
+                })
+            except Exception as e:
+                logger.debug(f"[Stage 1B] Failed to parse regex match: {e}")
+                continue
+
+        logger.info(f"[Stage 1B] Regex fallback extracted {len(extracted_data)} data points")
+
+        return {
+            "extracted_data": extracted_data,
+            "calculations": calculations,
+            "key_comparisons": key_comparisons,
+            "summary_insights": [],
+            "data_quality_notes": [
+                "JSON parsing failed - partial data extracted via regex fallback",
+                f"Extracted {len(extracted_data)} data points with reduced confidence"
+            ]
+        }
+
+    def _get_json_error_context(
+        self,
+        json_str: str,
+        line_num: int,
+        col_num: int,
+        window: int = 200
+    ) -> str:
+        """
+        Extract context around JSON parsing error for debugging.
+
+        Args:
+            json_str: The JSON string that failed to parse
+            line_num: Line number where error occurred
+            col_num: Column number where error occurred
+            window: Number of characters to show before/after error
+
+        Returns:
+            Formatted error context string
+        """
+        try:
+            lines = json_str.split('\n')
+            if line_num <= 0 or line_num > len(lines):
+                return f"Line {line_num} out of range (total lines: {len(lines)})"
+
+            # Get the error line (convert to 0-indexed)
+            error_line = lines[line_num - 1]
+
+            # Calculate character position in full string
+            chars_before_line = sum(len(lines[i]) + 1 for i in range(line_num - 1))
+            error_pos = chars_before_line + col_num - 1
+
+            # Extract window around error
+            start = max(0, error_pos - window)
+            end = min(len(json_str), error_pos + window)
+            context = json_str[start:end]
+
+            # Mark error position
+            error_indicator_pos = error_pos - start
+            if 0 <= error_indicator_pos < len(context):
+                context_with_marker = (
+                    context[:error_indicator_pos] +
+                    " <<<ERROR HERE>>> " +
+                    context[error_indicator_pos:]
+                )
+            else:
+                context_with_marker = context
+
+            return f"Line {line_num}, Column {col_num}:\n{context_with_marker}"
+
+        except Exception as e:
+            return f"Could not extract error context: {e}"
 
     def _validate_extraction_quality(
         self,
@@ -5746,6 +6235,39 @@ Focus entirely on findings and analysis with proper table anchors."""),
             report_text = extract_content(response)
             logger.info(f"[HYBRID Phase 2] Generated holistic report: {len(report_text)} characters")
 
+            # Debug logging - raw Phase 2 output BEFORE any processing
+            if self.debug_logger:
+                self.debug_logger.log_stage(
+                    "Phase2_Raw_LLM_Output",
+                    report_text,
+                    {
+                        "length": len(report_text),
+                        "model": str(self.llm)
+                    }
+                )
+
+            # SAFETY: Strip any inline tables that LLM generated despite explicit instructions
+            original_length = len(report_text)
+            report_text = self._strip_inline_tables(report_text)
+            if len(report_text) != original_length:
+                chars_removed = original_length - len(report_text)
+                logger.warning(
+                    f"[HYBRID Phase 2] Stripped {chars_removed} chars of inline table markdown "
+                    f"from holistic report (LLM violated table anchor instructions)"
+                )
+
+                # Debug logging - show what was stripped
+                if self.debug_logger:
+                    self.debug_logger.log_stage(
+                        "Phase2_After_Table_Stripping",
+                        report_text,
+                        {
+                            "length": len(report_text),
+                            "chars_removed": chars_removed,
+                            "original_length": original_length
+                        }
+                    )
+
             # Count table anchors
             table_specs = self._extract_table_specs(report_text)
             logger.info(f"[HYBRID Phase 2] Found {len(table_specs)} table anchors")
@@ -5866,12 +6388,25 @@ Focus entirely on findings and analysis with proper table anchors."""),
         # Alert on any unreplaced tables
         self._alert_on_unreplaced_tables(final_text)
 
+        # Debug logging - Phase 3 complete with tables inserted
+        if self.debug_logger:
+            self.debug_logger.log_stage(
+                "Phase3_After_Table_Generation",
+                final_text,
+                {
+                    "length": len(final_text),
+                    "table_count": len(rendered_blocks),
+                    "anchors_replaced": len([r for r in rendered_blocks if not r[2]])  # Count successful replacements
+                }
+            )
+
         # NEW: Final validation - check for any table syntax that slipped through
         final_inline_tables = self._detect_inline_tables(final_text)
         if final_inline_tables:
             logger.error(
-                f"[HYBRID Phase 3 FINAL VALIDATION] Found {len(final_inline_tables)} "
-                f"inline tables in final output! These will have incorrect markdown syntax."
+                f"[HYBRID Phase 3 VALIDATION] Found {len(final_inline_tables)} "
+                f"inline tables that should have been generated through structured output. "
+                f"The LLM ignored instructions and generated markdown tables directly in paragraphs."
             )
             # Log samples for debugging
             for i, tbl in enumerate(final_inline_tables[:3]):  # Log first 3
@@ -6301,8 +6836,13 @@ Make the table clear, concise, and informative."""
 
         for obs in observations:
             # CRITICAL: Use full_content field to preserve tables and numeric data!
-            full_content = obs.get('full_content', obs.get('content', ''))
-            step_id = obs.get('step_id', 'unknown')
+            # Handle both dict and StructuredObservation objects
+            if isinstance(obs, dict):
+                full_content = obs.get('full_content', obs.get('content', ''))
+                step_id = obs.get('step_id', 'unknown')
+            else:
+                full_content = getattr(obs, 'full_content', None) or getattr(obs, 'content', '')
+                step_id = getattr(obs, 'step_id', 'unknown')
             formatted = f"Step {step_id}: {full_content}"
             parts.append(formatted)
             total_chars += len(formatted)

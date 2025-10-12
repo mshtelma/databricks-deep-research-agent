@@ -105,6 +105,9 @@ from .result_evaluation import ResultEvaluator
 from .adaptive_generation import AdaptiveQueryGenerator, AdaptationStrategy
 from .section_models import SectionResearchResult
 
+# State capture for testing
+from .state_capture import state_capture
+
 __version__ = "1.0.0"
 
 __all__ = [
@@ -199,7 +202,7 @@ __all__ = [
     "DatabricksEmbeddingError",
     "EmbeddingManager",
     "ModelManager",
-    "NodeModelConfiguration", 
+    "NodeModelConfiguration",
     "ModelRole",
     "SemanticDeduplicator",
     "SimilarityCluster",
@@ -209,4 +212,7 @@ __all__ = [
     "AdaptiveQueryGenerator",
     "AdaptationStrategy",
     "SectionResearchResult",
+
+    # State capture
+    "state_capture",
 ]

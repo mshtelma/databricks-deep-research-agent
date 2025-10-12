@@ -17,6 +17,7 @@ from enum import Enum
 from .error_handler import retry, ErrorSeverity, RetryPolicy
 from .event_emitter import get_event_emitter
 from .types import IntermediateEventType
+from .async_utils import AsyncExecutor
 
 
 logger = logging.getLogger(__name__)
@@ -171,8 +172,14 @@ class SearchProvider(ABC):
         
         start_time = time.time()
         try:
-            results = asyncio.run(self.search_async(query, max_results, **kwargs))
-            
+            # Use AsyncExecutor to safely run async search from any context
+            # CRITICAL: Never call asyncio.run() inside LangGraph-managed steps
+            timeout = self.timeout_seconds * 2  # Allow 2x timeout for search operations
+            results = AsyncExecutor.run_async_safe(
+                self.search_async(query, max_results, **kwargs),
+                timeout=timeout
+            )
+
             # Emit search completion event
             execution_time = time.time() - start_time
             event_emitter.emit_tool_call_complete(
@@ -495,7 +502,16 @@ class UnifiedSearchManager:
     def search(self, query: str, max_results: int = 5, **kwargs) -> List[SearchResult]:
         """Synchronous wrapper for search with fallback."""
         try:
-            return asyncio.run(self.search_with_fallback(query, max_results, **kwargs))
+            # Use AsyncExecutor to safely run async search from any context
+            # CRITICAL: Never call asyncio.run() inside LangGraph-managed steps
+            timeout = 120.0  # 2 minutes for fallback search with retries
+            return AsyncExecutor.run_async_safe(
+                self.search_with_fallback(query, max_results, **kwargs),
+                timeout=timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Unified search timed out after {timeout}s")
+            return []
         except Exception as e:
             logger.error(f"Unified search failed: {e}")
             return []
