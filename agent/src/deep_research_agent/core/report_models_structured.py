@@ -16,6 +16,9 @@ from pydantic import BaseModel, Field, field_validator
 from typing import List, Literal, Dict, Any, Type
 import json
 
+# Import ReportSection from report_models to resolve forward reference
+from .report_models import ReportSection
+
 
 # ===== ENHANCED TABLE MODELS WITH CELL-LEVEL DERIVATION TRACKING =====
 # These models force LLM to justify values before generating them
@@ -557,3 +560,8 @@ def render_structured_report(report: StructuredReport) -> str:
         parts.append("")
 
     return "\n".join(parts)
+
+
+# Rebuild models to resolve forward references
+# This is necessary because StructuredReport references ReportSection from another module
+StructuredReport.model_rebuild()

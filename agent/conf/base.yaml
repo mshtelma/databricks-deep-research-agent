@@ -125,6 +125,9 @@ agents:
 
     # Generation Mode: section_by_section (default) or hybrid (multi-pass)
     generation_mode: hybrid  # Safe default - change to 'hybrid' to enable new mode
+
+    # NEW: Structured Pipeline for programmatic table generation
+    use_structured_pipeline: true  # Replaces Phase 2&3 with structured generation to fix inline table issues
     fail_on_empty_observations: true  # Raise error if observation filtering produces empty sections
     max_concurrent_blocks: 2  # Throttle for concurrent structured output calls
 

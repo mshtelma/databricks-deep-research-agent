@@ -504,9 +504,6 @@ Generate the report section content:"""
                 enhanced_report = self._generate_progressive_synthesis(
                     state,
                     progressive_context,
-                    compiled_findings,
-                    style_config,
-                    report_style
                 )
 
                 if enhanced_report:
@@ -580,19 +577,40 @@ Generate the report section content:"""
                         for title in current_plan.suggested_report_structure
                     ]
 
-                # Phase 2: Generate holistic report with table anchors
-                holistic_report = await self._generate_holistic_report_with_table_anchors(
-                    sanitized_findings,
-                    calc_context,
-                    dynamic_sections
+                # Check if structured generation is enabled
+                logger.info(f"[CONFIG DEBUG] Full config keys: {list(self.config.keys())}")
+                logger.info(f"[CONFIG DEBUG] agents config: {self.config.get('agents', {})}")
+                use_structured = self.config.get('agents', {}).get('reporter', {}).get(
+                    'use_structured_pipeline', False
                 )
+                logger.info(f"[CONFIG DEBUG] use_structured_pipeline = {use_structured}")
 
-                # Phase 3: Generate tables from anchors
-                final_report = await self._generate_tables_from_anchors_async(
-                    holistic_report,
-                    calc_context,
-                    sanitized_findings
-                )
+                if use_structured:
+                    # Use new structured pipeline for Phase 2 & 3
+                    logger.info("✅ [HYBRID MODE] Using STRUCTURED PIPELINE for table generation")
+                    final_report = await self._generate_report_with_structured_pipeline(
+                        state,  # Pass the full state object for proper type compliance
+                        sanitized_findings,
+                        calc_context,
+                        dynamic_sections
+                    )
+                else:
+                    # Original Phase 2 & 3 (legacy)
+                    logger.info("⚠️ [HYBRID MODE] Using LEGACY generation (inline table issues expected)")
+
+                    # Phase 2: Generate holistic report with table anchors
+                    holistic_report = await self._generate_holistic_report_with_table_anchors(
+                        sanitized_findings,
+                        calc_context,
+                        dynamic_sections
+                    )
+
+                    # Phase 3: Generate tables from anchors
+                    final_report = await self._generate_tables_from_anchors_async(
+                        holistic_report,
+                        calc_context,
+                        sanitized_findings
+                    )
 
                 # Apply citations and metadata
                 final_report = self._add_citations_and_references(
@@ -4997,6 +5015,46 @@ Based on the available research findings, I can provide the following summary:
         else:
             return str(content)
 
+    def _parse_table_specifications_from_understanding(self, understanding: str) -> List:
+        """
+        Parse table specifications from Phase 1A understanding text.
+
+        Args:
+            understanding: The understanding text from Phase 1A
+
+        Returns:
+            List of TableSpec objects
+        """
+        from ..core.report_generation.models import TableSpec
+
+        table_specs = []
+
+        try:
+            # Look for JSON code blocks with table_specifications
+            json_match = re.search(r'```json\s*(\{.*?"table_specifications".*?\})\s*```', understanding, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+                data = json.loads(json_str)
+
+                if 'table_specifications' in data:
+                    for spec_dict in data['table_specifications']:
+                        try:
+                            table_spec = TableSpec(**spec_dict)
+                            table_specs.append(table_spec)
+                        except Exception as e:
+                            logger.warning(f"Failed to create TableSpec from {spec_dict}: {e}")
+
+                logger.info(f"Successfully parsed {len(table_specs)} table specifications from JSON")
+            else:
+                logger.warning("No table_specifications JSON block found in understanding")
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse table specifications JSON: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error parsing table specifications: {e}")
+
+        return table_specs
+
     def _fix_markdown_tables(self, markdown_text: str) -> str:
         """
         Ensure all markdown tables have proper separator rows.
@@ -5200,37 +5258,79 @@ TASK: Deeply analyze this research and provide your understanding:
    - What should each table show?
    - What calculations might be needed (differences, percentages, averages)?
 
-Provide a detailed, thoughtful analysis that will guide the extraction process."""
+7. TABLE SPECIFICATIONS:
+   For each table needed, specify EXACTLY what structure it should have.
+
+**CRITICAL: Your entire response must be valid JSON matching this schema:**
+
+```json
+{{
+  "narrative_understanding": "your detailed analysis addressing points 1-6 above",
+  "table_specifications": [
+    {{
+      "table_id": "descriptive_identifier",
+      "purpose": "what this table shows",
+      "row_entities": ["entity1", "entity2", "entity3"],
+      "column_metrics": ["metric1", "metric2", "metric3"]
+    }}
+  ]
+}}
+```
+
+Example for country tax comparison:
+```json
+{{
+  "narrative_understanding": "The user requests a comprehensive after-tax financial comparison across 7 European countries (Spain, France, UK, Switzerland, Germany, Poland, Bulgaria) for 3 family scenarios. The optimal structure uses countries as rows since we're comparing across entities, with columns representing different scenarios and metrics. Key metrics include net take-home income, effective tax rates, rent costs, daycare expenses, and disposable income.",
+  "table_specifications": [
+    {{
+      "table_id": "comprehensive_comparison",
+      "purpose": "Compare after-tax finances across all countries and scenarios",
+      "row_entities": ["Spain", "France", "UK", "Switzerland", "Germany", "Poland", "Bulgaria"],
+      "column_metrics": ["net_income_single", "net_income_married", "net_income_married_child", "effective_tax_rate", "disposable_income"]
+    }}
+  ]
+}}
+```
+
+Respond with ONLY the JSON object - no other text."""
         logger.info(f"[Stage 1A] Generated prompt. Length: {len(prompt)}")
 
+        # Import model for structured generation
+        from ..core.report_generation.models import Phase1AUnderstanding
+
+        # Use proper LangChain message format (not dict format)
         messages = [
-            {"role": "system", "content": "You are an expert research analyst specializing in data structuring and comparative analysis."},
-            {"role": "user", "content": prompt}
+            SystemMessage(content="You are an expert research analyst specializing in data structuring and comparative analysis."),
+            HumanMessage(content=prompt)
         ]
 
         try:
-            response = await self.llm.ainvoke(messages)
-            understanding = self._extract_text_from_response(response)
+            # Use structured generation with proper message format
+            structured_llm = self.llm.with_structured_output(Phase1AUnderstanding, method="json_schema")
+            result = await structured_llm.ainvoke(messages)
 
             logger.info(
                 f"[Stage 1A] Context understanding complete: "
-                f"{len(understanding)} chars of analysis"
+                f"{len(result.narrative_understanding)} chars of analysis, "
+                f"{len(result.table_specifications)} table specs extracted"
             )
 
             # Debug logging
             if self.debug_logger:
                 self.debug_logger.log_stage(
                     "Phase1A_Understanding",
-                    understanding,
+                    result.narrative_understanding,
                     {
                         "observation_count": len(observations),
                         "total_chars": total_chars,
-                        "understanding_length": len(understanding)
+                        "understanding_length": len(result.narrative_understanding),
+                        "table_specs_count": len(result.table_specifications)
                     }
                 )
 
             return {
-                'understanding': understanding,
+                'understanding': result.narrative_understanding,
+                'table_specifications': result.table_specifications,
                 'observation_count': len(observations),
                 'total_chars': total_chars
             }
@@ -5239,6 +5339,7 @@ Provide a detailed, thoughtful analysis that will guide the extraction process."
             logger.error(f"[Stage 1A] Failed to generate understanding: {e}")
             return {
                 'understanding': f"Error during context understanding: {e}",
+                'table_specifications': [],
                 'observation_count': len(observations),
                 'total_chars': total_chars
             }
@@ -5248,6 +5349,7 @@ Provide a detailed, thoughtful analysis that will guide the extraction process."
         research_topic: str,
         observations: List[Dict],
         understanding: str,
+        table_specifications: List = None,
         section_name: str = "All Sections",
         max_chars: int = 60000
     ) -> Dict[str, Any]:
@@ -5266,7 +5368,9 @@ Provide a detailed, thoughtful analysis that will guide the extraction process."
             research_topic: The user's research question
             observations: All observations with full_content
             understanding: The context understanding from Stage 1A
+            table_specifications: Table structure specs from Phase 1A (for dynamic guidance)
             section_name: Current section being processed
+            max_chars: Maximum characters for observations
 
         Returns:
             Dict with 'extraction' field containing structured JSON
@@ -5318,7 +5422,48 @@ Provide a detailed, thoughtful analysis that will guide the extraction process."
             )
 
         # Create example structure for guidance
-        example_entity_based = {
+        # Generate dynamic extraction requirements from table specifications
+        dynamic_requirements = self._build_dynamic_extraction_requirements(
+            table_specifications or [],
+            research_topic
+        )
+
+        logger.info(
+            f"[Stage 1B] Generated dynamic requirements from {len(table_specifications or [])} table specs: "
+            f"{len(dynamic_requirements)} chars"
+        )
+
+        # Build guidance from table specifications
+        entity_guidance = ""
+        entities_for_comparisons = []
+        if table_specifications:
+            # Extract entities from table specs to enforce in comparisons
+            all_entities = set()
+            for spec in table_specifications:
+                if hasattr(spec, 'row_entities') and spec.row_entities:
+                    all_entities.update(spec.row_entities)
+
+            if all_entities:
+                entities_for_comparisons = sorted(list(all_entities))
+                entity_list = ', '.join(entities_for_comparisons)
+                entity_guidance = f"""
+
+CRITICAL INSTRUCTION FROM TABLE ANALYSIS:
+The table specifications identified these entities as rows: {entity_list}
+
+Therefore, your key_comparisons MUST use these exact entity names as primary_key values.
+Each entity should have its own comparison entry with all available metrics.
+
+For example:
+- ✅ CORRECT: "primary_key": "Spain"
+- ✅ CORRECT: "primary_key": "France"
+- ❌ WRONG: "primary_key": "Top Marginal Tax Rate"
+- ❌ WRONG: "primary_key": "Tax Comparison"
+
+You should create {len(all_entities)} comparison entries, one for each entity listed above.
+"""
+
+        example_output = {
             "extracted_data": [
                 {"entity": "Country A", "metric": "corporate_tax_rate", "value": 21.0, "unit": "percent", "source_observation_id": "step_1"},
                 {"entity": "Country B", "metric": "corporate_tax_rate", "value": 19.0, "unit": "percent", "source_observation_id": "step_2"}
@@ -5326,11 +5471,8 @@ Provide a detailed, thoughtful analysis that will guide the extraction process."
             "calculations": [
                 {"description": "Tax rate difference", "formula": "21.0 - 19.0", "inputs": {"rate_a": 21.0, "rate_b": 19.0}, "result": 2.0, "unit": "percentage_points"}
             ],
-            "key_comparisons": [
-                {"primary_key": "Country A", "metrics": {"corporate_tax_rate": 21.0, "gdp_billions": 1500}, "source_observation_ids": ["step_1"]},
-                {"primary_key": "Country B", "metrics": {"corporate_tax_rate": 19.0, "gdp_billions": 1200}, "source_observation_ids": ["step_2"]}
-            ],
-            "summary_insights": ["Country A has 2 percentage points higher corporate tax than Country B"]
+            "summary_insights": ["Country A has 2 percentage points higher corporate tax than Country B"],
+            "data_quality_notes": []
         }
 
         prompt = f"""You are extracting structured data from research observations to build comparison tables.
@@ -5347,7 +5489,9 @@ YOUR DEEP UNDERSTANDING (from Stage 1A):
 ALL RESEARCH OBSERVATIONS:
 {all_observations}
 
-TASK: Based on your understanding, extract structured data in JSON format following this schema:
+TASK: Extract ONLY data points and calculations. Stage 1D will create comparisons from your extracted data.
+
+Return JSON in this format:
 
 {{
   "extracted_data": [
@@ -5369,45 +5513,31 @@ TASK: Based on your understanding, extract structured data in JSON format follow
       "unit": "unit"
     }}
   ],
-  "key_comparisons": [
-    {{
-      "primary_key": "Entity or metric name (based on your understanding)",
-      "metrics": {{"metric1": value1, "metric2": value2}},
-      "source_observation_ids": ["step_X", "step_Y"]
-    }}
-  ],
   "summary_insights": ["Key insight 1", "Key insight 2"],
   "data_quality_notes": ["Any warnings about missing/conflicting data"]
 }}
 
-EXAMPLE (entity-based structure for country comparison):
-{example_entity_based}
+EXAMPLE:
+{example_output}
 
 IMPORTANT GUIDELINES:
 
-1. **Use your understanding** from Stage 1A to decide structure:
-   - If comparing ENTITIES (countries, products): primary_key = entity name, metrics = attributes
-   - If comparing METRICS (different tax types): primary_key = metric name, metrics = entity values
-
-2. **Extract ALL relevant data points** from observations:
-   - Every number, percentage, ranking
+1. **Extract ALL relevant data points** from observations:
+{dynamic_requirements}
+   - Focus on entities from table specifications: {', '.join(entities_for_comparisons) if entities_for_comparisons else "all identified entities"}
    - Include source_observation_id for traceability
    - Set confidence based on source quality
+   - Extract data for EVERY entity (don't truncate!)
 
-3. **Show your work** in calculations:
+2. **Show your work** in calculations:
    - Explicit formulas with actual values
    - Named inputs for clarity
    - Include units
 
-4. **Be honest about data quality**:
+3. **Be honest about data quality**:
    - List missing data in data_quality_notes
    - Flag conflicting numbers
    - Note estimates vs precise values
-
-5. **Create complete comparison entries**:
-   - One entry per entity/metric (based on your chosen structure)
-   - Include all relevant metrics/entities in the metrics dict
-   - Link to source observations
 
 CRITICAL VALUE FORMAT RULES (to ensure valid JSON):
 
@@ -5453,8 +5583,7 @@ Return ONLY the JSON object, no additional text."""
                 logger.info(
                     f"[Stage 1B] Standard JSON parse succeeded: "
                     f"{len(extraction_data.get('extracted_data', []))} data points, "
-                    f"{len(extraction_data.get('calculations', []))} calculations, "
-                    f"{len(extraction_data.get('key_comparisons', []))} comparisons"
+                    f"{len(extraction_data.get('calculations', []))} calculations"
                 )
 
                 # Debug logging
@@ -5707,7 +5836,9 @@ Return ONLY the JSON object, no additional text."""
         comparison_count = len(key_comparisons)
         quality_metrics['comparison_count'] = comparison_count
 
-        if comparison_count < min_comparisons:
+        # Only check comparisons if they're required (min_comparisons > 0)
+        # Stage 1B no longer creates comparisons - Stage 1D handles that
+        if comparison_count < min_comparisons and min_comparisons > 0:
             issues.append(f"Only {comparison_count} comparison entries (need {min_comparisons}+)")
             recommendations.append("Try extracting more entities or metrics from observations")
 
@@ -5760,7 +5891,11 @@ Return ONLY the JSON object, no additional text."""
         score_components = []
 
         # Component 1: Comparison adequacy (0-30 points)
-        comp_score = min(30, (comparison_count / max(min_comparisons, 1)) * 30)
+        # If comparisons not required (min_comparisons == 0), give full score
+        if min_comparisons > 0:
+            comp_score = min(30, (comparison_count / max(min_comparisons, 1)) * 30)
+        else:
+            comp_score = 30  # Full score when comparisons are created by Stage 1D
         score_components.append(comp_score)
 
         # Component 2: Data point richness (0-25 points)
@@ -5783,8 +5918,9 @@ Return ONLY the JSON object, no additional text."""
         quality_score = sum(score_components) / 100.0
 
         # Determine validity
+        # If min_comparisons is 0, don't check comparison count (Stage 1D will create them)
         is_valid = (
-            comparison_count >= min_comparisons and
+            (comparison_count >= min_comparisons or min_comparisons == 0) and
             data_point_count >= min_data_points and
             quality_score >= 0.3  # At least 30% quality
         )
@@ -5866,6 +6002,133 @@ Return ONLY the JSON object, no additional text."""
         logger.info(
             f"[Fallback] Built {len(comparisons)} comparison entries from "
             f"{len(entity_metrics)} unique entities"
+        )
+
+        return comparisons
+
+    def _aggregate_into_entity_comparisons(
+        self,
+        data_points: List[Any],
+        table_specifications: List[Any]
+    ) -> List[Any]:
+        """
+        Stage 1D: Aggregate data points into entity-level comparisons.
+
+        This method groups data points by entity (matching table row entities)
+        and creates ComparisonEntry objects for each entity.
+
+        Args:
+            data_points: List of DataPoint objects with entity/metric/value
+            table_specifications: List of TableSpec objects defining expected entities
+
+        Returns:
+            List of ComparisonEntry objects with entity-based primary keys
+        """
+        from ..core.report_generation.models import ComparisonEntry
+
+        logger.info(
+            f"[Stage 1D] Aggregating {len(data_points)} data points "
+            f"for {len(table_specifications)} table specifications"
+        )
+
+        # Extract expected entities from table specifications
+        expected_entities = set()
+        for spec in table_specifications:
+            if hasattr(spec, 'row_entities') and spec.row_entities:
+                expected_entities.update(spec.row_entities)
+
+        if not expected_entities:
+            logger.warning(
+                "[Stage 1D] No row entities found in table specifications, "
+                "will use all entities from data"
+            )
+
+        # Group data points by entity
+        entity_metrics = {}
+        entity_sources = {}
+        entities_found = set()
+
+        for dp in data_points:
+            # Handle both object and dict access patterns
+            entity = dp.entity if hasattr(dp, 'entity') else dp.get('entity', 'Unknown')
+            metric = dp.metric if hasattr(dp, 'metric') else dp.get('metric', 'unknown')
+            value = dp.value if hasattr(dp, 'value') else dp.get('value', 'N/A')
+            unit = dp.unit if hasattr(dp, 'unit') else dp.get('unit', '')
+            source = dp.source_observation_id if hasattr(dp, 'source_observation_id') else dp.get('source_observation_id')
+
+            # Skip if entity doesn't match expected entities (if we have them)
+            if expected_entities and entity not in expected_entities:
+                # Try fuzzy matching for common variations
+                matched = False
+                entity_lower = entity.lower()
+                for expected in expected_entities:
+                    expected_lower = expected.lower()
+                    # Check for substring match or common variations
+                    if (expected_lower in entity_lower or
+                        entity_lower in expected_lower or
+                        entity_lower.replace(' ', '') == expected_lower.replace(' ', '')):
+                        entity = expected  # Use canonical entity name
+                        matched = True
+                        break
+
+                if not matched:
+                    logger.debug(f"[Stage 1D] Skipping entity '{entity}' not in expected list")
+                    continue
+
+            entities_found.add(entity)
+
+            # Initialize entity if needed
+            if entity not in entity_metrics:
+                entity_metrics[entity] = {}
+                entity_sources[entity] = []
+
+            # Store metric with unit if available
+            metric_key = metric
+            if unit:
+                value_with_unit = f"{value} {unit}".strip()
+            else:
+                value_with_unit = str(value)
+
+            entity_metrics[entity][metric_key] = value_with_unit
+
+            # Track sources
+            if source and source not in entity_sources[entity]:
+                entity_sources[entity].append(source)
+
+        # Create ComparisonEntry objects for each entity
+        comparisons = []
+
+        # First, create entries for entities with data
+        for entity in sorted(entity_metrics.keys()):
+            try:
+                comp_entry = ComparisonEntry(
+                    primary_key=entity,
+                    metrics=entity_metrics[entity],
+                    source_observation_ids=entity_sources.get(entity, [])
+                )
+                comparisons.append(comp_entry)
+                logger.debug(
+                    f"[Stage 1D] Created comparison for '{entity}' "
+                    f"with {len(entity_metrics[entity])} metrics"
+                )
+            except Exception as e:
+                logger.warning(f"[Stage 1D] Failed to create ComparisonEntry for {entity}: {e}")
+
+        # Add placeholder entries for missing expected entities
+        if expected_entities:
+            missing_entities = expected_entities - entities_found
+            for entity in sorted(missing_entities):
+                logger.info(f"[Stage 1D] Adding placeholder for missing entity: {entity}")
+                comp_entry = ComparisonEntry(
+                    primary_key=entity,
+                    metrics={},  # Empty metrics - will show as N/A in tables
+                    source_observation_ids=[]
+                )
+                comparisons.append(comp_entry)
+
+        logger.info(
+            f"[Stage 1D Complete] Created {len(comparisons)} entity-level comparisons "
+            f"({len(entities_found)} with data, {len(expected_entities - entities_found)} placeholders)"
         )
 
         return comparisons
@@ -5971,9 +6234,11 @@ Return ONLY the JSON object, no additional text."""
             )
 
             understanding = understanding_result['understanding']
+            table_specs = understanding_result.get('table_specifications', [])
 
             logger.info(
-                f"[Stage 1A Complete] Generated {len(understanding)} chars of context understanding"
+                f"[Stage 1A Complete] Generated {len(understanding)} chars of context understanding, "
+                f"{len(table_specs)} table specifications"
             )
 
             # ============================================================
@@ -5983,6 +6248,7 @@ Return ONLY the JSON object, no additional text."""
                 research_topic=research_topic,
                 observations=merged,
                 understanding=understanding,
+                table_specifications=table_specs,
                 section_name="Calculation Context",
                 max_chars=max_calc_chars
             )
@@ -5992,16 +6258,17 @@ Return ONLY the JSON object, no additional text."""
             logger.info(
                 f"[Stage 1B Complete] Extracted "
                 f"{len(extraction_data.get('extracted_data', []))} data points, "
-                f"{len(extraction_data.get('calculations', []))} calculations, "
-                f"{len(extraction_data.get('key_comparisons', []))} comparisons"
+                f"{len(extraction_data.get('calculations', []))} calculations"
             )
 
             # ============================================================
             # STAGE 1C: QUALITY VALIDATION
             # ============================================================
+            # Stage 1B no longer creates comparisons - Stage 1D handles that
+            # So we set min_comparisons=0 to only validate data points and calculations
             validation_result = self._validate_extraction_quality(
                 extraction=extraction_data,
-                min_comparisons=1,
+                min_comparisons=0,  # Comparisons created by Stage 1D, not Stage 1B
                 min_data_points=2
             )
 
@@ -6045,19 +6312,22 @@ Return ONLY the JSON object, no additional text."""
                 except Exception as e:
                     logger.warning(f"[Phase 1] Failed to create ComparisonEntry from {comp}: {e}")
 
-            # Create CalculationContext
+            # Create CalculationContext with table specifications
             calc_context = CalculationContext(
                 extracted_data=data_points,
                 calculations=calculations,
                 key_comparisons=comparisons,
                 summary_insights=extraction_data.get('summary_insights', []),
                 data_quality_notes=extraction_data.get('data_quality_notes', []),
+                table_specifications=understanding_result.get('table_specifications', []),
+                structural_understanding=understanding,
                 metadata={
                     'understanding_chars': len(understanding),
                     'observation_count': len(merged),
                     'quality_score': validation_result['quality_score'],
                     'quality_valid': validation_result['valid'],
-                    'quality_summary': validation_result['summary']
+                    'quality_summary': validation_result['summary'],
+                    'table_specs_count': len(understanding_result.get('table_specifications', []))
                 }
             )
 
@@ -6069,10 +6339,41 @@ Return ONLY the JSON object, no additional text."""
                 f"(Quality: {validation_result['quality_score']:.2f})"
             )
 
-            # If quality is too low, try fallback using datapoints
-            if not validation_result['valid'] and len(data_points) > 0:
+            # ============================================================
+            # STAGE 1D: AGGREGATE DATA INTO ENTITY COMPARISONS
+            # ============================================================
+            # Stage 1B only extracts data points. Stage 1D creates ALL comparisons.
+            if calc_context.table_specifications and len(calc_context.extracted_data) > 0:
+                logger.info(
+                    f"[Stage 1D] Creating entity-level comparisons from "
+                    f"{len(calc_context.extracted_data)} data points"
+                )
+
+                entity_comparisons = self._aggregate_into_entity_comparisons(
+                    calc_context.extracted_data,
+                    calc_context.table_specifications
+                )
+
+                if entity_comparisons:
+                    # Replace any existing comparisons with entity-based ones
+                    calc_context.key_comparisons = entity_comparisons
+                    logger.info(
+                        f"[Stage 1D Complete] Created {len(entity_comparisons)} entity-level comparisons"
+                    )
+                else:
+                    logger.warning("[Stage 1D] No entity comparisons created")
+            else:
                 logger.warning(
-                    f"[Phase 1] Quality check failed, attempting fallback to build comparisons from data points"
+                    f"[Stage 1D] Skipped: table_specifications={bool(calc_context.table_specifications)}, "
+                    f"data_points={len(calc_context.extracted_data)}"
+                )
+
+            # Fallback only if BOTH validation failed AND Stage 1D failed to create comparisons
+            # This prevents discarding Stage 1D's work when validation fails for other reasons
+            if not validation_result['valid'] and len(calc_context.key_comparisons) == 0 and len(data_points) > 0:
+                logger.warning(
+                    f"[Phase 1] Quality check failed and no comparisons exist, "
+                    f"attempting fallback to build comparisons from data points"
                 )
                 fallback_comparisons = self._build_comparisons_from_datapoints(data_points)
                 if fallback_comparisons:
@@ -6080,6 +6381,11 @@ Return ONLY the JSON object, no additional text."""
                     logger.info(
                         f"[Phase 1] Fallback generated {len(fallback_comparisons)} comparisons from data points"
                     )
+            elif len(calc_context.key_comparisons) > 0:
+                logger.info(
+                    f"[Phase 1] Stage 1D created {len(calc_context.key_comparisons)} comparisons, "
+                    f"skipping fallback"
+                )
 
             return calc_context
 
@@ -6097,6 +6403,118 @@ Return ONLY the JSON object, no additional text."""
                 ],
                 metadata={'error': str(exc)}
             )
+
+    async def _generate_report_with_structured_pipeline(
+        self,
+        state: Dict[str, Any],  # Full state object (dict or EnhancedResearchState-compatible)
+        findings: Dict[str, Any],
+        calc_context,
+        dynamic_sections: List[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Replace Phase 2 & 3 with structured pipeline for programmatic table generation.
+
+        This method prevents inline table generation by using structured output
+        and building tables programmatically from ComparisonEntry data.
+
+        Args:
+            state: Full state object with research context and plan
+            findings: Compiled and sanitized findings
+            calc_context: CalculationContext from Phase 1 (already generated)
+            dynamic_sections: Optional sections from plan
+
+        Returns:
+            Complete report with perfectly formatted tables
+        """
+        from .reporter_pipeline import StructuredReportPipeline
+
+        logger.info("🚀 [STRUCTURED PIPELINE] Replacing Phase 2 & 3 with programmatic generation")
+
+        try:
+            # Initialize structured pipeline
+            pipeline = StructuredReportPipeline(self.llm, self.config)
+
+            # Use the EXISTING calc_context from Phase 1 (no need to regenerate!)
+            logger.info(
+                f"[STRUCTURED PIPELINE] Using existing calc_context: "
+                f"{len(calc_context.extracted_data)} data points, "
+                f"{len(calc_context.calculations)} calculations, "
+                f"{len(calc_context.key_comparisons)} comparisons, "
+                f"{len(calc_context.table_specifications)} table specs"
+            )
+
+            # Ensure we have table specifications
+            if not calc_context.table_specifications:
+                logger.warning("[STRUCTURED PIPELINE] No table specs found, generating defaults")
+                # Generate default table spec from comparisons
+                if calc_context.key_comparisons:
+                    from ..core.report_generation.models import TableSpec
+
+                    # Get all unique metrics from comparisons
+                    all_metrics = set()
+                    for comp in calc_context.key_comparisons:
+                        all_metrics.update(comp.metrics.keys())
+
+                    default_spec = TableSpec(
+                        table_id="comparison_table",
+                        purpose="Data comparison across entities",
+                        row_entities=[c.primary_key for c in calc_context.key_comparisons],
+                        column_metrics=sorted(list(all_metrics))
+                    )
+                    calc_context.table_specifications = [default_spec]
+                    logger.info(
+                        f"[STRUCTURED PIPELINE] Generated default table spec with "
+                        f"{len(default_spec.row_entities)} rows, {len(default_spec.column_metrics)} columns"
+                    )
+
+            # Pass the state object directly to the pipeline
+            # The pipeline expects an EnhancedResearchState-compatible object,
+            # and the state dict we receive should be compatible
+            logger.info(f"[STRUCTURED PIPELINE] Passing state to pipeline (type: {type(state).__name__})")
+
+            # Generate report using structured pipeline
+            # This will:
+            # 1. Generate structured sections (no inline tables!)
+            # 2. Build tables programmatically from comparisons
+            # 3. Assemble final report with perfect markdown
+            report = await pipeline.generate_report(
+                state,  # ✓ Pass the full state object
+                findings,
+                calc_context
+            )
+
+            logger.info(
+                f"[STRUCTURED PIPELINE] Report generated: {len(report)} characters, "
+                f"tables: {report.count('| ---')}, "  # Count separator rows as proxy for tables
+                f"no table anchors: {('[TABLE:' not in report)}"
+            )
+
+            # Validate no inline table anchors remain (shouldn't happen with structured generation)
+            if '[TABLE:' in report:
+                logger.warning("[STRUCTURED PIPELINE] Table anchors found, removing...")
+                import re
+                report = re.sub(r'\[TABLE:\s*\w+\s*\]', '', report)
+
+            return report
+
+        except Exception as e:
+            logger.error(f"[STRUCTURED PIPELINE] Failed: {e}", exc_info=True)
+            logger.warning("[STRUCTURED PIPELINE] Falling back to legacy generation")
+
+            # Fallback to original Phase 2 & 3
+            holistic_report = await self._generate_holistic_report_with_table_anchors(
+                findings,
+                calc_context,
+                dynamic_sections
+            )
+
+            final_report = await self._generate_tables_from_anchors_async(
+                holistic_report,
+                calc_context,
+                findings
+            )
+
+            return final_report
 
     async def _generate_holistic_report_with_table_anchors(
         self,
@@ -6423,10 +6841,14 @@ Focus entirely on findings and analysis with proper table anchors."""),
         """
         Generate a single table from specification and calculation context.
 
+        CRITICAL FIX: This method now uses ALL comparison data and passes
+        comprehensive context from Phase 1A, plan, and user intent to ensure
+        complete table generation.
+
         Args:
             spec: Table specification with table_id
-            calc_context: CalculationContext with data
-            findings: Compiled findings
+            calc_context: CalculationContext with data, table specs, and understanding
+            findings: Compiled findings including research topic and plan
 
         Returns:
             Rendered markdown table
@@ -6436,33 +6858,85 @@ Focus entirely on findings and analysis with proper table anchors."""),
         table_id = spec['table_id']
         logger.info(f"[HYBRID Phase 3] Generating table: {table_id}")
 
-        # Select relevant comparisons for this table
-        relevant_comparisons = calc_context.key_comparisons[:10]  # Limit to 10 rows
+        # CRITICAL FIX: Use ALL comparisons, not just first 10!
+        all_comparisons = calc_context.key_comparisons
 
-        if not relevant_comparisons:
+        if not all_comparisons:
             logger.warning(f"[HYBRID Phase 3] No comparisons available for table {table_id}")
             return f"\n\n*Table {table_id}: No data available*\n\n"
 
-        # Build prompt for table generation
-        comparisons_text = "\n".join([
-            f"- {comp.primary_key}: {', '.join([f'{k}={v}' for k, v in comp.metrics.items()])}"
-            for comp in relevant_comparisons
-        ])
+        logger.info(f"[HYBRID Phase 3] Using ALL {len(all_comparisons)} comparisons for table generation")
 
-        prompt = f"""Generate a table for: {table_id}
+        # Get table specification from Phase 1A (if available)
+        table_spec = None
+        if hasattr(calc_context, 'table_specifications') and calc_context.table_specifications:
+            table_spec = next(
+                (ts for ts in calc_context.table_specifications
+                 if ts.table_id == table_id or table_id in ts.table_id or ts.table_id in table_id),
+                None
+            )
+            if table_spec:
+                logger.info(f"[HYBRID Phase 3] Found table spec: {table_spec.purpose}")
 
-Available Comparison Data:
+        # Extract plan entities for additional context
+        plan_entities = self._extract_plan_entities(findings.get('current_plan'))
+
+        # Format ALL comparison data clearly
+        comparisons_text = self._format_all_comparisons_structured(all_comparisons)
+
+        # Build comprehensive prompt with all context
+        user_request = findings.get('research_topic', '')
+        understanding_snippet = ""
+        if hasattr(calc_context, 'structural_understanding') and calc_context.structural_understanding:
+            # Include first 500 chars of understanding for context
+            understanding_snippet = calc_context.structural_understanding[:500] + "..."
+
+        prompt = f"""Generate a COMPLETE comparison table based on all available data.
+
+ORIGINAL USER REQUEST:
+{user_request}
+
+TABLE PURPOSE: {table_spec.purpose if table_spec else f'Comparison table for {table_id}'}
+
+STRUCTURAL GUIDANCE (from Phase 1A analysis):
+{understanding_snippet if understanding_snippet else 'No structural guidance available'}
+
+REQUIRED TABLE STRUCTURE:
+"""
+
+        if table_spec:
+            prompt += f"""- Rows: {', '.join(table_spec.row_entities) if table_spec.row_entities else 'All entities in data'}
+- Columns: {', '.join(table_spec.column_metrics) if table_spec.column_metrics else 'All metrics in data'}
+- Expected rows: {len(table_spec.row_entities) if table_spec.row_entities else len(all_comparisons)}
+"""
+        else:
+            prompt += f"""- Use all {len(all_comparisons)} entities as rows
+- Use all metrics from the comparison data as columns
+"""
+
+        prompt += f"""
+PLAN ENTITIES (from research plan): {', '.join(plan_entities) if plan_entities else 'Not specified'}
+
+ALL AVAILABLE DATA ({len(all_comparisons)} comparison entries):
 {comparisons_text}
 
-Create a well-formatted table with:
-- headers: List of column names
-- rows: List of rows, where each row is a list of cell values
-- caption: Brief description of what the table shows
+CRITICAL REQUIREMENTS:
+1. Include ALL {len(all_comparisons)} entities as table rows - DO NOT TRUNCATE
+2. Include ALL metrics from the data as columns
+3. EVERY cell must have a value from the data above
+4. Use 'N/A' or empty string ONLY if data is genuinely missing
+5. Maintain the order and completeness of entities from the data
+6. Do NOT limit, sample, or reduce the number of rows
 
-Make the table clear, concise, and informative."""
+Create a TableBlock with:
+- headers: List of ALL column names (metrics)
+- rows: List of ALL {len(all_comparisons)} rows with cell values
+- caption: Brief description
+
+REMEMBER: A half-empty table means INCOMPLETE data extraction. Use ALL data provided above."""
 
         messages = [
-            SystemMessage(content="You are a table generation specialist. Create clear, well-structured tables."),
+            SystemMessage(content="You are a table generation specialist. Create COMPLETE tables using ALL provided data. Never truncate or limit rows."),
             HumanMessage(content=prompt)
         ]
 
@@ -6476,9 +6950,22 @@ Make the table clear, concise, and informative."""
             response = await structured_llm.ainvoke(messages)
             table_block = self._validate_structured_response(response, TableBlock)
 
+            # Validate completeness
+            actual_rows = len(table_block.rows) if hasattr(table_block, 'rows') else 0
+            expected_rows = len(table_spec.row_entities) if table_spec and table_spec.row_entities else len(all_comparisons)
+
+            if actual_rows < expected_rows:
+                logger.warning(
+                    f"[HYBRID Phase 3] Table {table_id} is INCOMPLETE: "
+                    f"generated {actual_rows} rows but expected {expected_rows}"
+                )
+
             # Render to markdown
             table_md = table_block.render_markdown()
-            logger.info(f"[HYBRID Phase 3] Successfully generated table {table_id}: {len(table_md)} chars")
+            logger.info(
+                f"[HYBRID Phase 3] Successfully generated table {table_id}: "
+                f"{len(table_md)} chars, {actual_rows}/{expected_rows} rows"
+            )
 
             return f"\n\n{table_md}\n\n"
 
@@ -7023,6 +7510,144 @@ Make the table clear, concise, and informative."""
 
         return None
 
+    def _extract_plan_entities(self, plan: Any) -> List[str]:
+        """
+        Extract entity list from research plan.
+
+        Args:
+            plan: Research plan object
+
+        Returns:
+            List of entity names from the plan
+        """
+        entities = []
+
+        if not plan:
+            return entities
+
+        try:
+            if hasattr(plan, 'sections'):
+                for section in plan.sections:
+                    if hasattr(section, 'entities') and section.entities:
+                        entities.extend(section.entities)
+
+            # Deduplicate while preserving order
+            seen = set()
+            unique_entities = []
+            for entity in entities:
+                if entity not in seen:
+                    seen.add(entity)
+                    unique_entities.append(entity)
+
+            return unique_entities
+
+        except Exception as e:
+            logger.warning(f"Failed to extract plan entities: {e}")
+            return []
+
+    def _format_all_comparisons_structured(self, comparisons: List) -> str:
+        """
+        Format ALL comparison entries clearly for LLM consumption.
+
+        Args:
+            comparisons: List of ComparisonEntry objects
+
+        Returns:
+            Formatted string with all comparison data
+        """
+        lines = []
+
+        for i, comp in enumerate(comparisons, 1):
+            # Get primary key (entity name)
+            primary_key = comp.primary_key if hasattr(comp, 'primary_key') else str(comp)
+
+            # Get all metrics
+            metrics = comp.metrics if hasattr(comp, 'metrics') else {}
+
+            # Format each metric clearly
+            metric_parts = []
+            for metric_name, metric_value in metrics.items():
+                if metric_value is not None:
+                    metric_parts.append(f"  {metric_name} = {metric_value}")
+                else:
+                    metric_parts.append(f"  {metric_name} = N/A")
+
+            # Build entry
+            lines.append(f"{i}. {primary_key}:")
+            lines.extend(metric_parts)
+
+        return "\n".join(lines)
+
+    def _build_dynamic_extraction_requirements(
+        self,
+        table_specs: List,
+        research_topic: str
+    ) -> str:
+        """
+        Generate dynamic extraction requirements from table specifications.
+
+        Replaces hardcoded domain-specific guidance with topic-agnostic instructions
+        derived from Phase 1A table specifications. This makes the extraction process
+        work for ANY research topic, not just tax comparisons.
+
+        Args:
+            table_specs: Table specifications from Phase 1A (list of TableSpec objects or dicts)
+            research_topic: Original research question for context
+
+        Returns:
+            Formatted extraction requirements string
+        """
+        if not table_specs:
+            return """
+**COMPLETENESS REQUIREMENTS**:
+- Extract ALL entities and metrics found in observations
+- Do not limit or truncate the number of comparison entries
+- Include every data point available
+"""
+
+        requirements = ["**COMPLETENESS REQUIREMENTS** (derived from research structure):"]
+
+        for spec in table_specs:
+            # Handle both dict and object formats
+            if isinstance(spec, dict):
+                table_id = spec.get('table_id', 'table')
+                purpose = spec.get('purpose', '')
+                row_entities = spec.get('row_entities', [])
+                column_metrics = spec.get('column_metrics', [])
+            else:
+                table_id = getattr(spec, 'table_id', 'table')
+                purpose = getattr(spec, 'purpose', '')
+                row_entities = getattr(spec, 'row_entities', [])
+                column_metrics = getattr(spec, 'column_metrics', [])
+
+            # Entity requirements
+            if row_entities:
+                entities_preview = ', '.join(row_entities[:30])
+                if len(row_entities) > 30:
+                    entities_preview += f", ... ({len(row_entities)} total)"
+
+                requirements.append(
+                    f"\n- For {purpose}: extract data for ALL {len(row_entities)} "
+                    f"entities ({entities_preview})"
+                )
+
+            # Metric requirements
+            if column_metrics:
+                metrics_preview = ', '.join(column_metrics[:30])
+                if len(column_metrics) > 30:
+                    metrics_preview += f", ... ({len(column_metrics)} total)"
+
+                requirements.append(
+                    f"  Include ALL {len(column_metrics)} metrics: {metrics_preview}"
+                )
+
+        requirements.append(
+            "\n**CRITICAL**: Missing any entity = INCOMPLETE results. "
+            "Create one ComparisonEntry per entity."
+        )
+
+        return '\n'.join(requirements)
+
     def _aggregate_async_errors(
         self,
         results: List[Tuple[str, str, Optional[Exception]]]
@@ -7190,9 +7815,6 @@ Make the table clear, concise, and informative."""
         self,
         state: EnhancedResearchState,
         progressive_context: Dict[str, Any],
-        compiled_findings: Dict[str, Any],
-        style_config: Any,
-        report_style: str
     ) -> str:
         """Generate progressive synthesis that builds on previous research loops."""
         try:

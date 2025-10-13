@@ -255,6 +255,9 @@ local.properties
 *.sqlite
 *.sqlite3
 
+# Reporter debug logs
+agent/log/
+
 # Temporary files
 *.tmp
 *.temp
