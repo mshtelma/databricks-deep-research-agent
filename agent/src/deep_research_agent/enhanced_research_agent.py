@@ -574,6 +574,7 @@ class EnhancedResearchAgent(ResponsesAgent):
         )
         workflow.add_node("planner", self.workflow_nodes.planner_node)
         workflow.add_node("researcher", self.workflow_nodes.researcher_node)
+        workflow.add_node("calculation_planning", self.workflow_nodes.calculation_planning_node)
         workflow.add_node("fact_checker", self.workflow_nodes.fact_checker_node)
         workflow.add_node("reporter", self.workflow_nodes.reporter_node)
         workflow.add_node("human_feedback", self.workflow_nodes.human_feedback_node)
@@ -632,10 +633,14 @@ class EnhancedResearchAgent(ResponsesAgent):
                 # SAFETY: Handle None or invalid action
                 if not action:
                     logger.warning(f"[PLANNER_ROUTER] Coordinator returned no action - defaulting to SUFFICIENT")
+                    if state.get("metric_capability_enabled", False):
+                        return "calculation_planning"
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
                 if action == "SUFFICIENT":
-                    logger.info(f"[PLANNER_ROUTER] Coordination decided SUFFICIENT - routing to fact_checker")
+                    logger.info(f"[PLANNER_ROUTER] Coordination decided SUFFICIENT - routing to next phase")
+                    if state.get("metric_capability_enabled", False):
+                        return "calculation_planning"
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
                 elif action in ["EXTEND", "VERIFY"]:
@@ -644,7 +649,9 @@ class EnhancedResearchAgent(ResponsesAgent):
                     return "researcher"
 
                 else:
-                    logger.warning(f"[PLANNER_ROUTER] Unexpected action '{action}' - defaulting to fact_checker")
+                    logger.warning(f"[PLANNER_ROUTER] Unexpected action '{action}' - defaulting to next phase")
+                    if state.get("metric_capability_enabled", False):
+                        return "calculation_planning"
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
             if state.get("enable_human_feedback") and not state.get("auto_accept_plan"):
@@ -773,8 +780,10 @@ class EnhancedResearchAgent(ResponsesAgent):
                         if research_loops >= max_research_loops:
                             logger.warning(
                                 f"[ROUTER] Research loops limit reached ({research_loops}/{max_research_loops}) - "
-                                f"skipping coordination, routing to fact_checker"
+                                f"skipping coordination, routing to next phase"
                             )
+                            if state.get("metric_capability_enabled", False):
+                                return "calculation_planning"
                             return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
                         # Under loop limit - planner will coordinate
@@ -804,6 +813,9 @@ class EnhancedResearchAgent(ResponsesAgent):
                         logger.info(
                             "[ROUTER] Found section results - assuming complete"
                         )
+                        # Check if calculation planning should be done first
+                        if state.get("metric_capability_enabled", False):
+                            return "calculation_planning"
                         return (
                             "fact_checker"
                             if state.get("enable_grounding", True)
@@ -814,6 +826,9 @@ class EnhancedResearchAgent(ResponsesAgent):
                         logger.warning(
                             "[ROUTER] Error in step checking and no section results - completing research phase"
                         )
+                        # Check if calculation planning should be done first
+                        if state.get("metric_capability_enabled", False):
+                            return "calculation_planning"
                         return (
                             "fact_checker"
                             if state.get("enable_grounding", True)
@@ -822,6 +837,9 @@ class EnhancedResearchAgent(ResponsesAgent):
             else:
                 # No plan - should not happen but handle gracefully
                 logger.warning("[ROUTER] No plan found - assuming complete")
+                # Check if calculation planning should be done first
+                if state.get("metric_capability_enabled", False):
+                    return "calculation_planning"
                 return (
                     "fact_checker"
                     if state.get("enable_grounding", True)
@@ -836,12 +854,18 @@ class EnhancedResearchAgent(ResponsesAgent):
             "researcher",
             researcher_router,
             {
+                "calculation_planning": "calculation_planning",  # NEW: Route to calculation planning
                 "fact_checker": "fact_checker",
                 "reporter": "reporter",
                 "researcher": "researcher",  # Continue research
                 "planner": "planner",  # Re-plan if needed
             },
         )
+        
+        # Calculation planning routing
+        # Note: The calculation_planning_node returns Command(goto=...) which handles routing
+        # So edges are implicit via Command, but we add them here for graph completeness
+        workflow.add_edge("calculation_planning", "reporter")  # Default path
 
         # Import routing policy for bulletproof routing decisions
         from .core.routing_policy import determine_next_node, TerminationReason

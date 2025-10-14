@@ -45,6 +45,9 @@ class StructuredObservation(BaseModel):
     full_content: Optional[str] = None  # Original full text if content is summarized
     is_summarized: bool = False  # True if content is LLM-generated summary
     original_length: int = 0  # Character count of original content before summarization
+    
+    # Calculation feedback tracking
+    feedback_source: Optional[str] = None  # Identifies if observation comes from calculation feedback (e.g., "calculation_feedback")
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -60,6 +63,7 @@ class StructuredObservation(BaseModel):
             "full_content": self.full_content,
             "is_summarized": self.is_summarized,
             "original_length": self.original_length,
+            "feedback_source": self.feedback_source,
         }
 
     def __str__(self) -> str:
@@ -209,7 +213,8 @@ class StructuredObservation(BaseModel):
             section_title=data.get("section_title"),
             full_content=data.get("full_content"),  # Preserve summarization
             is_summarized=data.get("is_summarized", False),
-            original_length=data.get("original_length", 0)
+            original_length=data.get("original_length", 0),
+            feedback_source=data.get("feedback_source")
         )
 
 

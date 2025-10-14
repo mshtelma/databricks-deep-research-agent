@@ -12,6 +12,8 @@ import traceback
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
+from langgraph.types import Command
+
 from .core import (
     get_logger,
     SearchResult,
@@ -3411,6 +3413,127 @@ Output ONLY the search query, nothing else."""
             state = StateManager.prune_state_for_memory(state)
             logger.info("Returning state to continue workflow despite fact checker error")
             return state
+    
+    @with_state_capture("calculation_planning")
+    async def calculation_planning_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Calculation planning node - plans metric calculations after research.
+        
+        This node:
+        1. Checks if metric pipeline is enabled
+        2. Runs metric pipeline to generate calculations
+        3. Detects if more research is needed
+        4. Routes to researcher (feedback) or reporter (done)
+        """
+        logger.info("🧮 [CALCULATION PLANNING] ===== ENTERING CALCULATION PLANNING NODE =====")
+        
+        # Check if metric pipeline is enabled
+        if not state.get("metric_capability_enabled", True):
+            logger.info("[CALCULATION PLANNING] Metric pipeline disabled, skipping to reporter")
+            return Command(goto="reporter")
+        
+        # Emit agent handoff event
+        if self.event_emitter:
+            self.event_emitter.emit(
+                event_type="agent_handoff",
+                data={
+                    "from_agent": "researcher",
+                    "to_agent": "calculation_planning",
+                    "reason": "Planning metric calculations from research data",
+                    "current_phase": "calculation_planning"
+                },
+                title="Calculation Planning Starting",
+                description="Analyzing research data to plan calculations",
+                correlation_id=f"calculation_planning_{state.get('current_iteration', 0)}",
+                stage_id="calculation_planning"
+            )
+        
+        try:
+            # Compile findings from state
+            findings = self._compile_findings_from_state(state)
+            
+            # Get reporter agent (which has the metric pipeline)
+            reporter = self.agents.get("reporter")
+            
+            if reporter and hasattr(reporter, 'metric_pipeline') and reporter.metric_pipeline:
+                logger.info("[CALCULATION PLANNING] Running metric pipeline")
+                
+                # Get existing metric state or create new
+                metric_state_dict = state.get("metric_state")
+                if metric_state_dict:
+                    from deep_research_agent.core.metrics.state import MetricPipelineState
+                    metric_state = MetricPipelineState.from_dict(metric_state_dict)
+                else:
+                    metric_state = None
+                
+                # Run the pipeline
+                metric_state, messages = await reporter.metric_pipeline.run(
+                    findings,
+                    metric_state
+                )
+                
+                # Log messages from pipeline
+                for message in messages:
+                    logger.info(f"[CALCULATION PLANNING] {getattr(message, 'content', message)}")
+                
+                # Check if we need more research
+                if metric_state.pending_research_queries:
+                    logger.info(
+                        f"[CALCULATION PLANNING] Need research for "
+                        f"{len(metric_state.pending_research_queries)} missing metrics"
+                    )
+                    
+                    # Emit event about feedback loop
+                    if self.event_emitter:
+                        self.event_emitter.emit(
+                            event_type="calculation_feedback",
+                            data={
+                                "queries_needed": len(metric_state.pending_research_queries),
+                                "queries": metric_state.pending_research_queries[:3],
+                                "iteration": metric_state.iteration_count
+                            },
+                            title="Research Feedback Needed",
+                            description=f"Triggering research for {len(metric_state.pending_research_queries)} missing metrics",
+                            correlation_id=f"calc_feedback_{state.get('current_iteration', 0)}",
+                            stage_id="calculation_planning"
+                        )
+                    
+                    # Route back to researcher with calculation queries
+                    return Command(
+                        goto="researcher",
+                        update={
+                            "metric_state": metric_state.to_dict(),
+                            "pending_calculation_research": metric_state.pending_research_queries
+                        }
+                    )
+                
+                # All calculations ready - proceed to reporter
+                logger.info("[CALCULATION PLANNING] All calculations successful, proceeding to reporter")
+                
+                return Command(
+                    goto="reporter",
+                    update={"metric_state": metric_state.to_dict()}
+                )
+            
+            else:
+                logger.warning("[CALCULATION PLANNING] Metric pipeline not available, proceeding to reporter")
+                return Command(goto="reporter")
+        
+        except Exception as e:
+            logger.error(f"[CALCULATION PLANNING] Error during calculation planning: {e}", exc_info=True)
+            
+            # On error, proceed to reporter
+            return Command(goto="reporter")
+    
+    def _compile_findings_from_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Compile research findings from state for metric pipeline."""
+        return {
+            'research_topic': state.get('research_topic', ''),
+            'observations': state.get('observations', []),
+            'search_results': state.get('search_results', []),
+            'citations': state.get('citations', []),
+            'current_plan': state.get('current_plan'),
+        }
     
     @with_state_capture("reporter")
     async def reporter_node(self, state: Dict[str, Any]) -> Dict[str, Any]:

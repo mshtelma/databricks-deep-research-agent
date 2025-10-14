@@ -80,6 +80,32 @@ class Calculation(BaseModel):
         default="unitless",
         description="Unit of measurement for the result"
     )
+    
+    # Enhanced fields for v2 metric pipeline
+    calculation_id: Optional[str] = Field(
+        default=None,
+        description="Unique identifier for this calculation"
+    )
+    source_tasks: List[str] = Field(
+        default_factory=list,
+        description="Task IDs this calculation depends on"
+    )
+    provenance: Optional[Any] = Field(
+        default=None,
+        description="Traceability metadata (observation sources, task lineage)"
+    )
+    validation: Optional[Any] = Field(
+        default=None,
+        description="Validation status from execution"
+    )
+    formula_katex: Optional[str] = Field(
+        default=None,
+        description="KaTeX-formatted formula for display"
+    )
+    confidence: float = Field(
+        default=0.9,
+        description="Confidence in calculation result (0.0-1.0)"
+    )
 
     class Config:
         extra = "forbid"

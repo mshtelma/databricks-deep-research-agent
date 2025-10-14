@@ -377,6 +377,15 @@ class ResearcherAgent:
         """
         logger.info("Researcher agent executing research steps")
         
+        # Check if this is a calculation feedback research
+        calc_queries = state.get("pending_calculation_research", [])
+        if calc_queries:
+            logger.info(f"[RESEARCHER] Processing {len(calc_queries)} calculation feedback queries")
+            # Handle calculation feedback queries by extending the plan
+            await self._handle_calculation_feedback(state, calc_queries, config)
+            # Clear the pending queries
+            state["pending_calculation_research"] = []
+        
         # Get current plan
         plan = state.get("current_plan")
         if not plan:
@@ -483,6 +492,14 @@ class ResearcherAgent:
                 from ..core.observation_models import ensure_structured_observation
                 raw_observations = results.get("observations", [])
                 current_step.observations = [ensure_structured_observation(obs) for obs in raw_observations]
+                
+                # Tag observations from calculation feedback steps
+                if current_step.metadata and current_step.metadata.get("is_feedback_step"):
+                    logger.info(f"[RESEARCHER] Tagging {len(current_step.observations)} observations as calculation_feedback")
+                    for obs in current_step.observations:
+                        if isinstance(obs, StructuredObservation):
+                            obs.feedback_source = "calculation_feedback"
+                
                 current_step.citations = results.get("citations", [])
                 current_step.confidence_score = results.get("confidence", 0.8)
                 current_step.status = StepStatus.COMPLETED
@@ -3088,6 +3105,81 @@ Focus on concrete facts with numbers, dates, entities, and specific details.""")
             insights = [s for s in sentences if len(s) > 30][:3]
         
         return insights
+    
+    async def _handle_calculation_feedback(
+        self,
+        state: EnhancedResearchState,
+        calc_queries: List[str],
+        config: Dict[str, Any]
+    ) -> None:
+        """
+        Handle calculation feedback queries by extending the research plan.
+        
+        This method adds high-priority research steps for missing data needed
+        by calculations, and tags resulting observations with feedback source.
+        
+        Args:
+            state: Current research state
+            calc_queries: List of search queries for missing data
+            config: Configuration dictionary
+        """
+        from ..core.planning.research_plan import ResearchPlan, ResearchStep, StepType, StepStatus
+        from datetime import datetime
+        
+        plan = state.get("current_plan")
+        if not plan:
+            logger.warning("[RESEARCHER] No plan available for adding calculation feedback steps")
+            return
+        
+        # Get config limits
+        feedback_config = config.get('metrics', {}).get('feedback', {})
+        max_queries = feedback_config.get('max_research_queries_per_iteration', 5)
+        
+        # Limit queries to avoid overwhelming the system
+        queries_to_process = calc_queries[:max_queries]
+        if len(calc_queries) > max_queries:
+            logger.info(
+                f"[RESEARCHER] Limiting calculation feedback queries from {len(calc_queries)} to {max_queries}"
+            )
+        
+        # Create new research steps for each query with high priority
+        new_steps = []
+        for i, query in enumerate(queries_to_process):
+            step_id = f"calc_feedback_{i+1}_{datetime.now().strftime('%H%M%S')}"
+            step = ResearchStep(
+                step_id=step_id,
+                title=f"Find data for calculation: {query[:60]}...",
+                description=f"Research to find missing data for metric calculation: {query}",
+                step_type=StepType.RESEARCH,
+                status=StepStatus.PENDING,
+                query=query,
+                priority=1,  # High priority
+                metadata={
+                    "source": "calculation_feedback",
+                    "query": query,
+                    "is_feedback_step": True
+                }
+            )
+            new_steps.append(step)
+            logger.info(f"[RESEARCHER] Added calculation feedback step: {step_id} - {query[:100]}")
+        
+        # Insert new steps at the front of pending steps (high priority)
+        pending_steps = [s for s in plan.steps if s.status == StepStatus.PENDING]
+        completed_or_active_steps = [s for s in plan.steps if s.status != StepStatus.PENDING]
+        
+        # Rebuild plan with feedback steps first
+        plan.steps = completed_or_active_steps + new_steps + pending_steps
+        
+        # Update plan in state
+        state["current_plan"] = plan.model_copy(deep=True)
+        
+        logger.info(
+            f"[RESEARCHER] Extended plan with {len(new_steps)} calculation feedback steps "
+            f"(total plan steps: {len(plan.steps)})"
+        )
+        
+        # Tag state to indicate feedback mode
+        state["calculation_feedback_active"] = True
     
     def _complete_research(
         self,

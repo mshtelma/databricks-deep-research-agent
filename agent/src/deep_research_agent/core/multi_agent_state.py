@@ -28,6 +28,7 @@ from . import (
     get_logger
 )
 from .observation_models import StructuredObservation
+from .metrics.state import MetricPipelineState
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -200,6 +201,9 @@ class EnhancedResearchState(TypedDict):
     report_style: Annotated[ReportStyle, use_latest_value]
     final_report: Annotated[Optional[str], use_latest_value]
     report_sections: Annotated[Optional[Dict[str, str]], use_latest_value]  # Section name -> content
+    metric_state: Annotated[Optional[Dict[str, Any]], use_latest_value]
+    metric_capability_enabled: Annotated[bool, use_latest_value]
+    pending_calculation_research: Annotated[Optional[List[str]], use_latest_value]  # Queries needed for calculations
     
     # Reflexion and self-improvement
     enable_reflexion: Annotated[bool, use_latest_value]
