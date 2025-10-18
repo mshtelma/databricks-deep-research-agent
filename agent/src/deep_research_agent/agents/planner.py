@@ -1474,6 +1474,11 @@ OUTPUT JSON:
             all_step_ids = ', '.join([s.step_id for s in plan.steps])
 
             structure_prompt = f"""Your task is to GROUP the research steps below into logical report sections.
+Each section should have:
+1. Clear title based on what the mapped steps will discover
+2. Purpose statement explaining what those steps will tell us
+3. **DETAILED bullet points** listing specific aspects to cover (3-5 bullets)
+4. Mapped step IDs
 
 RESEARCH QUERY:
 {query}
@@ -1481,18 +1486,13 @@ RESEARCH QUERY:
 RESEARCH STEPS TO BE EXECUTED:
 {formatted_steps}
 
-YOUR TASK:
-1. Analyze the research steps and their search queries
-2. Group related steps into logical report sections
-3. Create section titles that reflect what those specific steps will discover
-4. Every section MUST be based on at least one step from the plan above
-
-CRITICAL RULES:
-✗ DO NOT create sections for topics not covered by the research steps
-✗ DO NOT invent new research areas beyond what the plan covers
-✗ DO NOT create sections with empty mapped_step_ids
-✓ DO base section titles on what the grouped steps will actually research
-✓ DO ensure every section has mapped_step_ids.length >= 1
+CRITICAL REQUIREMENTS:
+✓ Every section must have 3-5 specific content bullets
+✓ Bullet points should be MUTUALLY EXCLUSIVE (no overlap between sections)
+✓ Each bullet should reference specific data/findings from the mapped steps
+✓ Make sections complementary, not redundant
+✓ Every section MUST have at least one step ID in mapped_step_ids
+✓ DO NOT create sections for topics not covered by research steps
 
 GROUPING STRATEGY:
 - Steps researching similar topics → group into one section
@@ -1500,7 +1500,33 @@ GROUPING STRATEGY:
 - Steps with related search queries → group together
 - A step can appear in multiple sections if it contributes to different aspects
 
-EXAMPLE - Grouping steps into sections:
+EXAMPLES OF GOOD CONTENT BULLETS:
+
+Section: "Executive Summary"
+Content bullets:
+- Provide high-level comparison summary (1-2 sentences per country)
+- State the single lowest and highest tax jurisdictions with percentages
+- Mention rent range (cheapest to most expensive city)
+- Reference that detailed breakdowns are in later sections
+- DO NOT include full country analysis or duplicate tables
+
+Section: "Country-by-Country Breakdown"
+Content bullets:
+- Present detailed scenario breakdown for each of the 7 countries
+- Include all three family configurations with exact numbers
+- Show net income, tax rate, rent, daycare, and disposable income
+- Use the main comparison table (generated from calculation context)
+- DO NOT repeat high-level conclusions (those go in Executive Summary)
+
+Section: "Data Sources and Methodology"
+Content bullets:
+- List specific tax authority sources for each country (with names)
+- Document RSU treatment assumptions clearly
+- Explain rent data sources (Numbeo, local real estate portals)
+- Describe daycare cost methodology and subsidy calculations
+- DO NOT analyze findings (analysis goes in other sections)
+
+EXAMPLE - Complete section structure:
 
 Steps:
   step_001: Research Spain income tax rates
@@ -1510,19 +1536,32 @@ Steps:
   step_003: Compare Spain vs France for families
     Queries: "Spain France tax comparison families"
 
-✓ CORRECT - sections derived from steps:
+✓ CORRECT - sections with content bullets:
 {{
   "sections": [
     {{
       "title": "Income Tax Rates: Spain and France",
-      "purpose": "Present tax rate structures from step_001 and step_002",
+      "purpose": "Present detailed tax rate structures from step_001 and step_002",
+      "content_bullets": [
+        "Show Spain's 2024 tax brackets with exact percentages and income thresholds",
+        "Show France's 2024 tax brackets with exact percentages and income thresholds",
+        "Compare marginal vs effective rates for both countries",
+        "DO NOT include family-specific scenarios (covered in next section)"
+      ],
       "mapped_step_ids": ["step_001", "step_002"],
       "section_type": "research",
       "priority": 10
     }},
     {{
       "title": "Family Tax Comparison: Spain vs France",
-      "purpose": "Comparative analysis from step_003",
+      "purpose": "Comparative analysis from step_003 for different family scenarios",
+      "content_bullets": [
+        "Present tax outcomes for single earner scenario in both countries",
+        "Present tax outcomes for married couple scenario in both countries",
+        "Present tax outcomes for family with children scenario in both countries",
+        "Highlight which country is more favorable for each scenario",
+        "DO NOT repeat tax bracket details (already covered in previous section)"
+      ],
       "mapped_step_ids": ["step_003"],
       "section_type": "synthesis",
       "priority": 20
@@ -1546,6 +1585,12 @@ Return JSON format:
     {{
       "title": "Section title based on what mapped steps will discover",
       "purpose": "What those specific steps will tell us",
+      "content_bullets": [
+        "Specific aspect 1 to cover from these steps",
+        "Specific aspect 2 to cover from these steps",
+        "Specific aspect 3 to cover from these steps",
+        "What NOT to include (avoid duplication)"
+      ],
       "mapped_step_ids": ["step_001", "step_002"],
       "section_type": "research",
       "priority": 10,
@@ -1559,6 +1604,8 @@ Return JSON format:
 VALIDATION REQUIREMENTS:
 ✓ Every step ID ({all_step_ids}) must appear in at least one section
 ✓ Every section must have mapped_step_ids with at least 1 step ID
+✓ Every section must have 3-5 content_bullets
+✓ Content bullets should be specific and mutually exclusive
 ✓ Section titles reflect what the mapped steps will research
 ✓ 2-5 sections for good organization
 """
@@ -1694,7 +1741,17 @@ VALIDATION REQUIREMENTS:
                 else:
                     content_type = SectionContentType.ANALYSIS
 
-                # Create DynamicSection WITH step_ids from LLM-provided mapping
+                # Extract content bullets from LLM response
+                content_bullets = section.get("content_bullets", [])
+                if not isinstance(content_bullets, list):
+                    logger.warning(f"PLANNER: Section '{title}' has invalid content_bullets type: {type(content_bullets)}, using empty list")
+                    content_bullets = []
+                
+                # Log if bullets are missing (but don't fail - fallback to empty)
+                if not content_bullets:
+                    logger.warning(f"PLANNER: Section '{title}' has no content_bullets - section may lack focus")
+                
+                # Create DynamicSection WITH step_ids and content_bullets from LLM-provided mapping
                 dynamic_sections.append(
                     DynamicSection(
                         title=title,
@@ -1702,6 +1759,7 @@ VALIDATION REQUIREMENTS:
                         priority=priority,
                         content_type=content_type,
                         hints=hints,
+                        content_bullets=tuple(content_bullets),  # NEW: Add content bullets for section focus
                         step_ids=tuple(valid_step_ids),  # Use validated step IDs from LLM
                     )
                 )

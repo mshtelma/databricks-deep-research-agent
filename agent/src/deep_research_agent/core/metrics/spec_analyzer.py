@@ -1072,11 +1072,106 @@ async def _generate_calculation_context(
     findings: Dict[str, Any]
 ):
     """
-    Phase 1: Three-stage calculation context generation.
+    Phase 1: Calculation context generation.
 
-    Mirrors the legacy reporter implementation while delegating to
-    shared helpers within this module.
+    Supports two modes:
+    1. Unified Planning (NEW): Single-pass user-request-driven planning with explicit data links
+    2. Three-Stage Pipeline (LEGACY): Multi-stage extraction with metric matching
+
+    Mode is controlled by metrics.use_unified_planning config flag.
     """
+    # Check if unified planning is enabled
+    use_unified = reporter.config.get('metrics', {}).get('use_unified_planning', False)
+
+    if use_unified:
+        logger.info("[UNIFIED PLANNING] Using user-request-driven planning mode")
+
+        # Extract research topic
+        research_topic = findings.get('research_topic', 'Research Question')
+        all_observations = findings.get('observations', [])
+
+        # Convert observations to dicts if needed
+        obs_dicts = []
+        for obs in all_observations:
+            if hasattr(obs, 'to_dict'):
+                obs_dicts.append(obs.to_dict())
+            elif isinstance(obs, dict):
+                obs_dicts.append(obs)
+            else:
+                obs_dicts.append({'content': str(obs), 'step_id': 'unknown'})
+
+        # Select observations (reuse existing selection logic)
+        settings = reporter.config.get('agents', {}).get('reporter', {}).get('hybrid_settings', {})
+        selector = reporter.observation_selector or ObservationSelector(reporter.embedding_manager)
+        top_k = settings.get('calc_selector_top_k', 60)
+        tail_k = settings.get('calc_recent_tail', 20)
+
+        diversity_entities = selector.extract_key_entities_from_topic(research_topic)
+        enable_diversity = len(diversity_entities) >= 2
+
+        scored = selector.select_observations_for_section(
+            section_title="Calculation context",
+            section_purpose="extract quantitative facts for holistic synthesis",
+            all_observations=obs_dicts,
+            max_observations=top_k,
+            min_relevance=0.25,
+            use_semantic=getattr(selector, 'embedding_manager', None) is not None,
+            ensure_entity_diversity=enable_diversity,
+            diversity_entities=diversity_entities if enable_diversity else None,
+        )
+
+        recent_tail = obs_dicts[-tail_k:] if len(obs_dicts) >= tail_k else obs_dicts
+        merged = reporter._dedupe_preserve_order(scored + recent_tail)
+
+        logger.info(
+            f"[UNIFIED PLANNING] Selected {len(merged)} observations for planning "
+            f"(top-k: {len(scored)}, tail: {len(recent_tail)})"
+        )
+
+        # Try unified planning with fallback to legacy on failure
+        try:
+            # Create unified plan
+            unified_plan = await _create_unified_plan(reporter, research_topic, merged)
+
+            # Execute plan to generate calculation context
+            calc_context = await _execute_unified_plan(reporter, unified_plan, merged)
+
+            logger.info(
+                f"[UNIFIED PLANNING] Complete: "
+                f"{len(calc_context.calculations)} calculations, "
+                f"{len(calc_context.key_comparisons)} comparisons"
+            )
+
+            # FIX #3: Validate that unified planning produced usable data
+            # Check if we have comparisons with actual non-None values
+            valid_comparisons = sum(
+                1 for comp in calc_context.key_comparisons
+                if comp.metrics and any(v is not None for v in comp.metrics.values())
+            )
+
+            if valid_comparisons == 0:
+                logger.warning(
+                    "[UNIFIED PLANNING] Produced 0 comparisons with valid data "
+                    "(all values are None). Falling back to three-stage pipeline for better coverage."
+                )
+                # Fall through to legacy path below
+                use_unified = False
+            else:
+                logger.info(
+                    f"[UNIFIED PLANNING] Validation passed: "
+                    f"{valid_comparisons}/{len(calc_context.key_comparisons)} comparisons have valid data"
+                )
+                return calc_context
+
+        except Exception as e:
+            logger.error(
+                f"[UNIFIED PLANNING] Failed with exception, falling back to three-stage pipeline: {e}",
+                exc_info=True
+            )
+            # Fall through to legacy path below
+            use_unified = False
+
+    # LEGACY PATH: Three-stage pipeline
     logger.info("[HYBRID Phase 1] Starting THREE-STAGE calculation context generation")
 
     settings = reporter.config.get('agents', {}).get('reporter', {}).get('hybrid_settings', {})
@@ -1221,7 +1316,8 @@ async def _generate_calculation_context(
                     'quality_valid': validation_result['valid'],
                     'quality_summary': validation_result['summary'],
                     'table_specs_count': len(table_specs),
-                }
+                },
+                'source_observations': merged  # Store for Planner's formula extraction
             },
             table_specifications=table_specs,
             structural_understanding=understanding,
@@ -1301,6 +1397,723 @@ async def generate_calculation_context(
     """Public wrapper used by reporter fallbacks."""
 
     return await _generate_calculation_context(reporter, findings)
+
+
+# === UNIFIED PLANNING (NEW ARCHITECTURE) ===
+
+async def _create_unified_plan(
+    reporter,
+    user_request: str,
+    observations: List[Dict]
+):
+    """Create unified plan that directly answers user's request.
+
+    This replaces the multi-stage extraction with a single LLM call
+    that creates explicit links between user request, data sources,
+    and response tables.
+
+    Args:
+        reporter: Reporter instance with LLM access
+        user_request: The original user request/research topic
+        observations: Selected research observations
+
+    Returns:
+        UnifiedPlan with explicit data links
+    """
+    from .unified_models import UnifiedPlan, UserRequestAnalysis, DataSource, ResponseTable, TableCell
+
+    logger.info(
+        f"[UNIFIED PLAN] Creating user-request-driven plan for: '{user_request}' "
+        f"with {len(observations)} observations"
+    )
+
+    # Format observations for prompt (limit to avoid token overflow)
+    obs_text = "\n\n".join([
+        f"[Observation {i+1} - Step {obs.get('step_id', 'unknown')}]\n{obs.get('content', '')[:2000]}"
+        for i, obs in enumerate(observations)
+    ])
+
+    prompt = f"""You are creating a complete plan to answer a user's research request.
+
+USER REQUEST:
+{user_request}
+
+RESEARCH OBSERVATIONS (first 1000 chars each):
+{obs_text}
+
+YOUR TASK:
+Create a unified plan that DIRECTLY ANSWERS the user's request with explicit data links.
+
+Step 1: Analyze the request
+- What is the user asking for? (comparison? analysis? specific values?)
+- What entities should be compared? (countries, products, scenarios)
+- What metrics would answer their question?
+- What dimensions are relevant? (scenarios, time periods)
+
+Step 2: Design response structure
+- What table(s) would best present the answer?
+- What should be in rows vs columns?
+- What narrative points would highlight key findings?
+
+Step 3: Map each table cell to data
+- For each cell: specify exact data_id, row, column
+- For each data_id: specify how to get it:
+  - "extract": from which observation and where to find the value
+  - "calculate": formula and required inputs (other data_ids)
+
+CRITICAL CONSTRAINTS:
+- MAXIMUM 3 tables (focus on most important comparisons)
+- MAXIMUM 7 rows per table (one per entity/country)
+- MAXIMUM 6 columns per table (key metrics only)
+- MAXIMUM 30 data sources total (extractions + calculations)
+- Create EXPLICIT LINKS: User question → Metrics → Data sources → Table cells
+- NO matching needed - everything is explicitly connected!
+- Focus on data that DIRECTLY answers user's request - quality over quantity
+- If data is missing from observations, note it but don't fabricate
+- PREFER direct extractions over calculations whenever possible
+- Each extraction_path MUST be specific enough to locate the exact value
+
+**CRITICAL: Use these EXACT field names from the DataSource Pydantic schema!**
+
+For EXTRACTION (getting value from observation):
+{{
+  "data_sources": {{
+    "unique_data_id": {{
+      "data_id": "unique_data_id",              # REQUIRED: Must match the key
+      "source_type": "extract",                 # REQUIRED: Literal "extract"
+      "observation_id": "step_23",              # REQUIRED: Which observation (must exist!)
+      "extraction_path": "Spain tax rate: 35%" # REQUIRED: Specific hint with entity + metric
+    }}
+  }}
+}}
+
+EXTRACTION_PATH GUIDELINES (FIX #4):
+✅ GOOD extraction_path examples (specific context):
+  - "Spain net take-home income: €172,000"
+  - "France effective tax rate 31%"
+  - "London average rent for 2-bedroom: £1,800/month"
+  - "Germany child benefit: €2,628 annually"
+
+❌ BAD extraction_path examples (too vague):
+  - "tax rate" (which country?)
+  - "income" (which metric? gross or net?)
+  - "rent" (which city? which property type?)
+  
+GOLDEN RULE: extraction_path should mention BOTH the entity (country/city) AND the specific metric name.
+This helps the extractor find the right value even in long observations.
+
+For CALCULATION (computing from other data):
+{{
+  "data_sources": {{
+    "calc_id": {{
+      "data_id": "calc_id",                     # REQUIRED: Must match the key
+      "source_type": "calculate",               # REQUIRED: Literal "calculate"
+      "formula": "data_a - data_b",             # REQUIRED: Math expression
+      "required_inputs": ["data_a", "data_b"]   # REQUIRED: List of input data_ids
+    }}
+  }}
+}}
+
+❌ WRONG field names (validation will fail):
+- "type" instead of "source_type"
+- "desc" instead of "data_id"
+- Any other creative field names
+
+✅ CORRECT field names (from Pydantic schema):
+- "data_id" (string, unique identifier)
+- "source_type" (literal "extract" or "calculate")
+- "observation_id" (for extractions only)
+- "extraction_path" (for extractions only)
+- "formula" (for calculations only)
+- "required_inputs" (for calculations only, list of strings)
+
+Return structured data matching the UnifiedPlan schema with these fields:
+- request_analysis: UserRequestAnalysis with what_user_wants, entities_to_compare, metrics_requested, comparison_dimensions
+- data_sources: Dict of data_id to DataSource (source_type="extract" or "calculate")
+- response_tables: List of ResponseTable with table_id, title, purpose, rows, columns, cells
+- narrative_points: List of key insights
+
+REMEMBER: Only include data that helps answer the user's SPECIFIC request.
+Don't extract random metrics just because they're available."""
+
+    messages = [
+        SystemMessage(content="You are an expert at understanding user requests and creating structured data plans with explicit links. You MUST use exact field names from the Pydantic schema."),
+        HumanMessage(content=prompt)
+    ]
+
+    try:
+        # Get temperature from config (default to 0.2 for deterministic generation)
+        unified_config = reporter.config.get('metrics', {}).get('unified_planning', {})
+        planning_temp = unified_config.get('temperature', 0.2)
+
+        logger.info(
+            f"[UNIFIED PLAN] Using reporter's LLM "
+            f"with temperature override {planning_temp} for structured generation"
+        )
+
+        # Use reporter's LLM (already configured with appropriate model tier)
+        # Apply temperature override for more deterministic schema following
+        planning_llm = reporter.llm
+        if hasattr(planning_llm, 'temperature'):
+            original_temp = planning_llm.temperature
+            planning_llm.temperature = planning_temp
+            logger.debug(
+                f"[UNIFIED PLAN] Overrode temperature from {original_temp} to {planning_temp}"
+            )
+
+        # Use structured generation - NO JSON PARSING!
+        structured_llm = planning_llm.with_structured_output(
+            UnifiedPlan,
+            method="json_schema"
+        )
+
+        # Direct Pydantic model output - guaranteed valid!
+        unified_plan = await structured_llm.ainvoke(messages)
+
+        # Detailed logging
+        extraction_count = sum(1 for s in unified_plan.data_sources.values() if s.source_type == "extract")
+        calculation_count = sum(1 for s in unified_plan.data_sources.values() if s.source_type == "calculate")
+
+        logger.info(
+            f"[UNIFIED PLAN] Successfully created plan: "
+            f"{len(unified_plan.data_sources)} total data sources "
+            f"({extraction_count} extractions, {calculation_count} calculations), "
+            f"{len(unified_plan.response_tables)} tables, "
+            f"{len(unified_plan.request_analysis.entities_to_compare)} entities to compare"
+        )
+
+        # Log request analysis details
+        logger.debug(
+            f"[UNIFIED PLAN] Request analysis: "
+            f"User wants: '{unified_plan.request_analysis.what_user_wants}', "
+            f"Entities: {unified_plan.request_analysis.entities_to_compare}, "
+            f"Metrics: {unified_plan.request_analysis.metrics_requested}"
+        )
+
+        # Log table structure
+        for table in unified_plan.response_tables:
+            logger.debug(
+                f"[UNIFIED PLAN] Table '{table.title}': "
+                f"{len(table.rows)} rows × {len(table.columns)} columns = {len(table.cells)} cells"
+            )
+
+        return unified_plan
+
+    except Exception as e:
+        logger.error(
+            f"[UNIFIED PLAN] Failed to create plan: {e}\n"
+            f"Prompt length: {len(prompt)}, Observations: {len(observations)}",
+            exc_info=True
+        )
+        # Re-raise to trigger fallback to legacy pipeline
+        raise
+
+
+async def _execute_unified_plan(
+    reporter,
+    plan,
+    observations: List[Dict]
+) -> CalculationContext:
+    """Execute unified plan to generate response.
+
+    Args:
+        reporter: Reporter instance
+        plan: UnifiedPlan with explicit data links
+        observations: Research observations
+
+    Returns:
+        CalculationContext with calculations and comparisons
+    """
+    logger.info(
+        f"[UNIFIED EXECUTION] Starting execution of plan with "
+        f"{len(plan.data_sources)} data sources, {len(plan.response_tables)} tables"
+    )
+
+    # Build observation index for fast lookup
+    obs_index = {}
+    for i, obs in enumerate(observations):
+        step_id = obs.get('step_id', f'obs_{i}')
+        obs_index[step_id] = obs
+
+    logger.debug(
+        f"[UNIFIED EXECUTION] Built observation index with {len(obs_index)} entries"
+    )
+
+    # Step 1: Extract/calculate all data sources
+    data_values = {}
+    calculations = []
+    extraction_count = 0
+    calculation_count = 0
+    failed_count = 0
+
+    for data_id, source in plan.data_sources.items():
+        logger.debug(
+            f"[UNIFIED EXECUTION] Processing data source '{data_id}' "
+            f"(type: {source.source_type})"
+        )
+
+        if source.source_type == "extract":
+            # Extract from observation
+            obs = obs_index.get(source.observation_id)
+            if obs:
+                # FIX #2: Try LLM extraction first, fall back to regex if it fails
+                try:
+                    value = await _extract_value_from_observation_llm(
+                        reporter, obs, source.extraction_path, data_id
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[UNIFIED EXECUTION] LLM extraction failed for '{data_id}': {e}. "
+                        "Falling back to regex extraction."
+                    )
+                    value = _extract_value_from_observation(obs, source.extraction_path)
+                
+                data_values[data_id] = value
+                
+                # FIX #5: Enhanced logging to track extraction success/failure
+                if value is not None:
+                    extraction_count += 1
+                    logger.info(
+                        f"[UNIFIED EXECUTION] ✓ Extracted '{data_id}' = {value} "
+                        f"from observation {source.observation_id} "
+                        f"using path: '{source.extraction_path}'"
+                    )
+                else:
+                    failed_count += 1
+                    logger.warning(
+                        f"[UNIFIED EXECUTION] ✗ Extraction FAILED for '{data_id}': "
+                        f"no value found in observation {source.observation_id} "
+                        f"with extraction_path: '{source.extraction_path}'. "
+                        f"This will result in N/A in the table."
+                    )
+            else:
+                logger.warning(
+                    f"[UNIFIED EXECUTION] ✗ Observation {source.observation_id} not found "
+                    f"for data source '{data_id}'. Available observations: {list(obs_index.keys())[:5]}..."
+                )
+                data_values[data_id] = None
+                failed_count += 1
+
+        elif source.source_type == "calculate":
+            # Calculate using formula
+            try:
+                # Get input values
+                inputs = {}
+                missing_inputs = []
+                for input_id in source.required_inputs:
+                    input_val = data_values.get(input_id)
+                    inputs[input_id] = input_val
+                    if input_val is None:
+                        missing_inputs.append(input_id)
+
+                if missing_inputs:
+                    logger.warning(
+                        f"[UNIFIED EXECUTION] Calculation '{data_id}' missing inputs: {missing_inputs}"
+                    )
+
+                # Evaluate formula
+                result = _evaluate_formula(source.formula, inputs)
+                data_values[data_id] = result
+
+                # Create Calculation object
+                calculations.append(Calculation(
+                    description=f"Calculate {data_id}",
+                    formula=source.formula,
+                    inputs=inputs,
+                    result=result,
+                    unit="",
+                    calculation_id=data_id
+                ))
+
+                calculation_count += 1
+                logger.info(
+                    f"[UNIFIED EXECUTION] Calculated '{data_id}' = {result} "
+                    f"using formula: {source.formula}"
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"[UNIFIED EXECUTION] Calculation failed for '{data_id}': {e}",
+                    exc_info=True
+                )
+                data_values[data_id] = None
+                failed_count += 1
+
+    # Log execution summary
+    logger.info(
+        f"[UNIFIED EXECUTION] Data source processing complete: "
+        f"{extraction_count} extracted, {calculation_count} calculated, "
+        f"{failed_count} failed, {len(data_values)} total values"
+    )
+
+    # Step 2: Build response tables as ComparisonEntry objects
+    comparisons = []
+
+    for table in plan.response_tables:
+        logger.info(
+            f"[UNIFIED EXECUTION] Building table '{table.title}': "
+            f"{len(table.cells)} cells across {len(table.rows)} rows"
+        )
+
+        # Group cells by row to create ComparisonEntry objects
+        row_cells = {}
+        for cell in table.cells:
+            if cell.row not in row_cells:
+                row_cells[cell.row] = {}
+            cell_value = data_values.get(cell.data_id)
+            row_cells[cell.row][cell.column] = cell_value
+            logger.debug(
+                f"[UNIFIED EXECUTION] Cell ({cell.row}, {cell.column}): "
+                f"data_id='{cell.data_id}', value={cell_value}"
+            )
+
+        # Create ComparisonEntry for each row
+        for row, metrics in row_cells.items():
+            comparisons.append(ComparisonEntry(
+                primary_key=row,
+                metrics=metrics,
+                source_observation_ids=[]
+            ))
+            logger.debug(
+                f"[UNIFIED EXECUTION] Created comparison for '{row}' "
+                f"with {len(metrics)} metrics"
+            )
+
+    # FIX #1: Convert unified plan tables to TableSpec format for pipeline compatibility
+    # Without this, the StructuredReportPipeline can't build tables (it iterates over table_specifications)
+    from ..report_generation.models import TableSpec
+    
+    table_specs = []
+    for table in plan.response_tables:
+        table_specs.append(TableSpec(
+            table_id=table.table_id,
+            purpose=table.title,
+            row_entities=table.rows,
+            column_metrics=table.columns
+        ))
+        logger.info(
+            f"[UNIFIED EXECUTION] Created TableSpec '{table.table_id}' with "
+            f"{len(table.rows)} rows × {len(table.columns)} columns"
+        )
+
+    # FIX #5: Log data quality metrics for debugging
+    populated_values = sum(1 for v in data_values.values() if v is not None)
+    none_values = len(data_values) - populated_values
+    valid_comparisons = sum(
+        1 for comp in comparisons
+        if comp.metrics and any(v is not None for v in comp.metrics.values())
+    )
+    
+    logger.info(
+        f"[UNIFIED EXECUTION] Data Quality: "
+        f"{populated_values}/{len(data_values)} values populated ({none_values} None), "
+        f"{valid_comparisons}/{len(comparisons)} comparisons have valid data"
+    )
+    
+    if populated_values == 0:
+        logger.error(
+            "[UNIFIED EXECUTION] CRITICAL: All extracted values are None! "
+            "This will result in empty tables with N/A values."
+        )
+
+    # Create CalculationContext
+    calc_context = CalculationContext(
+        extracted_data=[],  # Empty - data is in comparisons
+        calculations=calculations,
+        key_comparisons=comparisons,
+        summary_insights=plan.narrative_points,
+        data_quality_notes=[],
+        metadata={
+            'unified_plan': True,
+            'request_analysis': plan.request_analysis.model_dump(),
+            'tables': [t.model_dump() for t in plan.response_tables]
+        },
+        table_specifications=table_specs,  # FIX #1: Populate instead of leaving empty
+        structural_understanding=plan.request_analysis.what_user_wants
+    )
+
+    logger.info(
+        f"[UNIFIED EXECUTION] Complete: "
+        f"{len(calculations)} calculations, {len(comparisons)} comparison entries, "
+        f"{len(plan.narrative_points)} narrative points"
+    )
+
+    return calc_context
+
+
+async def _extract_value_from_observation_llm(
+    reporter,
+    obs: Dict,
+    extraction_path: str,
+    data_id: str
+) -> Any:
+    """Use LLM to intelligently extract values from observations.
+    
+    FIX #2: LLM-assisted extraction as specified in the plan.
+    Uses structured output to extract specific values with context awareness.
+    
+    Args:
+        reporter: Reporter instance with LLM access
+        obs: Observation dictionary
+        extraction_path: Hint about what to find (e.g., "Spain net income: €XX")
+        data_id: Identifier for what we're extracting (e.g., "spain_net_income")
+    
+    Returns:
+        Extracted value or None
+    """
+    from pydantic import BaseModel, Field
+    from langchain_core.messages import SystemMessage, HumanMessage
+    
+    content = obs.get('content', '')
+    step_id = obs.get('step_id', 'unknown')
+    
+    if not content or not extraction_path:
+        return None
+    
+    # Parse data_id to extract context
+    # e.g., "spain_single_net_takehome" -> entity="Spain", metric="net_takehome"
+    parts = data_id.lower().replace('-', '_').split('_')
+    entity = parts[0] if parts else "entity"
+    metric = '_'.join(parts[1:]) if len(parts) > 1 else "value"
+    
+    # Define structured output model
+    class ExtractionResult(BaseModel):
+        value: Optional[str] = Field(
+            default=None,
+            description="The extracted value as a string (number, currency, percentage, etc.)"
+        )
+        found: bool = Field(
+            description="True if the value was found in the observation, False otherwise"
+        )
+        context: Optional[str] = Field(
+            default=None,
+            description="Brief snippet showing where the value was found"
+        )
+    
+    # Truncate content if too long (keep first 2000 chars for context)
+    content_excerpt = content[:2000] if len(content) > 2000 else content
+    
+    prompt = f"""Extract a specific value from the research observation below.
+
+WHAT TO EXTRACT:
+- Data ID: {data_id}
+- Entity: {entity.capitalize()}
+- Metric: {metric.replace('_', ' ')}
+- Hint: {extraction_path}
+
+OBSERVATION (step {step_id}):
+{content_excerpt}
+
+INSTRUCTIONS:
+1. Find the value that matches the hint for the specified entity/metric
+2. Return ONLY the numeric/text value (remove currency symbols, units, etc.)
+3. For percentages, return just the number (e.g., "31.5" not "31.5%")
+4. For currency, return just the number (e.g., "150000" not "€150,000")
+5. If the value is genuinely not present, set found=False
+6. If multiple values exist, choose the one closest to the hint
+
+EXAMPLES:
+- Hint: "Spain net income: €172,000" → value: "172000", found: true
+- Hint: "France tax rate 31%" → value: "31", found: true
+- Hint: "London rent" (if not in observation) → value: null, found: false
+"""
+    
+    try:
+        # Use reporter's LLM with structured output
+        structured_llm = reporter.llm.with_structured_output(
+            ExtractionResult,
+            method="json_schema"
+        )
+        
+        messages = [
+            SystemMessage(content="You are a precise data extractor. Extract only the requested value, nothing more."),
+            HumanMessage(content=prompt)
+        ]
+        
+        result = await structured_llm.ainvoke(messages)
+        
+        if result.found and result.value:
+            # Try to convert to float if it looks numeric
+            try:
+                numeric_value = float(result.value.replace(',', ''))
+                logger.debug(
+                    f"[LLM EXTRACTION] ✓ Extracted '{data_id}' = {numeric_value} "
+                    f"from observation {step_id}"
+                )
+                return numeric_value
+            except (ValueError, AttributeError):
+                # Return as string if not numeric
+                logger.debug(
+                    f"[LLM EXTRACTION] ✓ Extracted '{data_id}' = '{result.value}' (string) "
+                    f"from observation {step_id}"
+                )
+                return result.value
+        else:
+            logger.debug(
+                f"[LLM EXTRACTION] ✗ No value found for '{data_id}' in observation {step_id}"
+            )
+            return None
+            
+    except Exception as e:
+        logger.warning(
+            f"[LLM EXTRACTION] Failed for '{data_id}': {e}. Falling back to regex."
+        )
+        # Fall back to regex extraction
+        return _extract_value_from_observation(obs, extraction_path)
+
+
+def _extract_value_from_observation(obs: Dict, extraction_path: str) -> Any:
+    """Extract value from observation using enhanced pattern matching.
+    
+    FIX #2: Improved extraction using smarter context-aware pattern matching.
+    Previously, this only looked for the first number in the entire observation,
+    ignoring context. Now it searches near the extraction_path hint for better accuracy.
+
+    Args:
+        obs: Observation dictionary
+        extraction_path: Hint about where to find the value (e.g., "Spain net income: €XX")
+
+    Returns:
+        Extracted value or None
+    """
+    content = obs.get('content', '')
+    step_id = obs.get('step_id', 'unknown')
+
+    logger.debug(
+        f"[VALUE EXTRACTION] Extracting from observation {step_id}, "
+        f"path hint: '{extraction_path}', content length: {len(content)}"
+    )
+
+    if not extraction_path or not content:
+        logger.warning(f"[VALUE EXTRACTION] Missing extraction_path or content")
+        return None
+
+    # Strategy 1: Look for value near the extraction hint (context-aware)
+    # Extract key terms from the hint to find the right section
+    hint_lower = extraction_path.lower()
+    content_lower = content.lower()
+    
+    # Find the most relevant section of content (within 500 chars of hint keywords)
+    relevant_section = content
+    hint_keywords = [word for word in hint_lower.split() if len(word) > 3]
+    
+    if hint_keywords:
+        # Find position of first keyword match
+        best_pos = -1
+        for keyword in hint_keywords:
+            pos = content_lower.find(keyword)
+            if pos != -1 and (best_pos == -1 or pos < best_pos):
+                best_pos = pos
+        
+        if best_pos != -1:
+            # Extract window around the keyword
+            start = max(0, best_pos - 250)
+            end = min(len(content), best_pos + 250)
+            relevant_section = content[start:end]
+            logger.debug(
+                f"[VALUE EXTRACTION] Found hint keyword at position {best_pos}, "
+                f"using context window: chars {start}-{end}"
+            )
+    
+    # Strategy 2: Enhanced pattern matching for various formats
+    patterns = [
+        # Currency with thousands separators: €150,000 or $45,000.50
+        (r'[€$£]\s*[\d,]+(?:\.\d+)?', lambda m: m.replace('€', '').replace('$', '').replace('£', '').replace(',', '')),
+        # Percentages: 25.5% or 25%
+        (r'\d+(?:\.\d+)?%', lambda m: m.replace('%', '')),
+        # Numbers with thousands separators: 150,000 or 1,234.56
+        (r'\d{1,3}(?:,\d{3})+(?:\.\d+)?', lambda m: m.replace(',', '')),
+        # Plain numbers with decimals: 1234.56
+        (r'\d+\.\d+', lambda m: m),
+        # Plain integers: 1234
+        (r'\d+', lambda m: m),
+    ]
+    
+    for pattern, cleaner in patterns:
+        matches = re.findall(pattern, relevant_section)
+        if matches:
+            # Use the first match in the relevant section
+            value_str = cleaner(matches[0])
+            try:
+                value = float(value_str)
+                logger.debug(
+                    f"[VALUE EXTRACTION] Successfully extracted numeric value: {value} "
+                    f"from '{matches[0]}' using pattern {pattern}"
+                )
+                return value
+            except ValueError:
+                logger.debug(
+                    f"[VALUE EXTRACTION] Extracted string value: {value_str}"
+                )
+                return value_str
+    
+    # Strategy 3: Fallback - look in full content if context search failed
+    pattern = r'[€$£]\s*[\d,]+(?:\.\d+)?|\d+(?:,\d{3})*(?:\.\d+)?'
+    matches = re.findall(pattern, content)
+    if matches:
+        value_str = matches[0].replace('€', '').replace('$', '').replace('£', '').replace(',', '')
+        try:
+            value = float(value_str)
+            logger.debug(
+                f"[VALUE EXTRACTION] Fallback extraction: {value} from '{matches[0]}'"
+            )
+            return value
+        except:
+            pass
+
+    logger.warning(
+        f"[VALUE EXTRACTION] No value found in observation {step_id} "
+        f"with path '{extraction_path}'"
+    )
+    return None
+
+
+def _evaluate_formula(formula: str, inputs: Dict[str, Any]) -> Any:
+    """Safely evaluate formula with inputs.
+
+    Args:
+        formula: Mathematical formula string
+        inputs: Dictionary of variable name -> value
+
+    Returns:
+        Calculation result or None
+    """
+    logger.debug(
+        f"[FORMULA EVAL] Evaluating formula: '{formula}' "
+        f"with inputs: {inputs}"
+    )
+
+    # Replace variable names with values
+    expr = formula
+    for var, value in inputs.items():
+        if value is not None:
+            expr = expr.replace(var, str(value))
+
+    # Check if all variables were replaced
+    missing_vars = [inp for inp in inputs.keys() if inp in expr]
+    if missing_vars:
+        # Some inputs missing
+        logger.warning(
+            f"[FORMULA EVAL] Missing or None inputs in formula '{formula}': {missing_vars}"
+        )
+        return None
+
+    try:
+        # Safe eval (only math operations, no builtins)
+        logger.debug(f"[FORMULA EVAL] Evaluating expression: '{expr}'")
+        result = eval(expr, {"__builtins__": {}}, {})
+        final_result = float(result) if isinstance(result, (int, float)) else result
+        logger.info(
+            f"[FORMULA EVAL] Successfully evaluated '{formula}' = {final_result}"
+        )
+        return final_result
+    except Exception as e:
+        logger.error(
+            f"[FORMULA EVAL] Evaluation failed for expression '{expr}' "
+            f"(original: '{formula}'): {e}",
+            exc_info=True
+        )
+        return None
 
 
 __all__ = ["MetricSpecAnalyzer", "generate_calculation_context"]

@@ -40,7 +40,11 @@ class CalculationValidation(BaseModel):
 
 
 class CalculationTask(BaseModel):
-    """Single unit of work produced by the planner."""
+    """Single unit of work produced by the planner.
+    
+    Supports multi-dimensional calculations where a metric is computed
+    for all combinations of entity dimensions (e.g., country × scenario × year).
+    """
 
     task_id: str
     operation: CalculationTaskType
@@ -52,6 +56,24 @@ class CalculationTask(BaseModel):
     fallback_research_query: Optional[str] = None
     expected_unit: Optional[str] = None
     tolerance: Optional[float] = None
+    
+    # Multi-dimensional support
+    entity_group: Optional[str] = Field(
+        default=None,
+        description="Entity group identifier (e.g., 'Spain_Single', 'Q1_2024')"
+    )
+    entity_dimensions: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Dimension mapping (e.g., {'country': 'Spain', 'scenario': 'Single'})"
+    )
+    formula_display: Optional[str] = Field(
+        default=None,
+        description="Human-readable formula for transparency"
+    )
+    depends_on_metrics: List[str] = Field(
+        default_factory=list,
+        description="List of metric names this calculation depends on"
+    )
 
     class Config:
         use_enum_values = True

@@ -42,7 +42,9 @@ class MetricPipeline:
         metrics_config = self._config.get('metrics', {})
         
         self._spec_analyzer = MetricSpecAnalyzer(reporter_like)
-        self._planner = CalculationPlanner(llm)
+        codegen_config = metrics_config.get('codegen', {})
+        code_llm = getattr(reporter_like, 'codegen_llm', None)
+        self._planner = CalculationPlanner(llm, code_llm=code_llm)
         self._executor = CalculationExecutor(
             llm,
             python_runner=python_runner,

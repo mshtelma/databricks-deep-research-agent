@@ -49,6 +49,19 @@ MODEL_MAX_TOKENS: Dict[str, int] = {
 }
 
 
+# Models that DO NOT support response_format parameter (JSON mode)
+# These models will use prompt-based JSON generation instead
+# Source: Databricks API testing - Claude models don't support response_format
+MODELS_WITHOUT_JSON_MODE_SUPPORT: set = {
+    "databricks-claude-3-7-sonnet",
+    "databricks-claude-sonnet-4",
+    "databricks-claude-3-5-sonnet",
+    "databricks-claude-3-opus",
+    "databricks-claude-3-sonnet",
+    "databricks-claude-3-haiku",
+}
+
+
 @dataclass
 class EndpointHealth:
     """Track health metrics for an endpoint"""
@@ -355,6 +368,18 @@ class ModelSelector:
         """Get configuration for a tier"""
         return self.models_config.get(tier, {})
 
+    def supports_json_mode(self, endpoint: str) -> bool:
+        """
+        Check if an endpoint supports JSON mode (response_format parameter).
+
+        Args:
+            endpoint: Model endpoint name
+
+        Returns:
+            True if model supports response_format, False otherwise
+        """
+        return endpoint not in MODELS_WITHOUT_JSON_MODE_SUPPORT
+
     def create_llm(
         self,
         tier: str,
@@ -393,13 +418,23 @@ class ModelSelector:
             llm_kwargs["reasoning_effort"] = tier_config["reasoning_effort"]
 
         # Handle response_format for structured output (Databricks pattern)
+        # Only add if model supports it
         response_format = kwargs.pop("response_format", None)
         if response_format:
-            # Add to extra_params for ChatDatabricks
-            extra_params = kwargs.get("extra_params", {})
-            extra_params["response_format"] = response_format
-            kwargs["extra_params"] = extra_params
-            logger.info(f"🔧 Structured output enabled: {response_format.get('type', 'unknown')}")
+            # Check if this model supports JSON mode
+            if self.supports_json_mode(endpoint):
+                # Add to extra_params for ChatDatabricks
+                extra_params = kwargs.get("extra_params", {})
+                extra_params["response_format"] = response_format
+                kwargs["extra_params"] = extra_params
+                logger.info(f"🔧 Structured output enabled: {response_format.get('type', 'unknown')}")
+            else:
+                # Model doesn't support response_format - log warning and skip
+                logger.warning(
+                    f"⚠️  Model {endpoint} does not support response_format parameter. "
+                    f"Falling back to prompt-based JSON generation. "
+                    f"The LLM will be instructed via prompt to return JSON."
+                )
 
         # Override with any provided kwargs
         llm_kwargs.update(kwargs)

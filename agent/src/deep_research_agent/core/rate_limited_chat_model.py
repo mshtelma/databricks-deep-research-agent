@@ -146,6 +146,17 @@ class RateLimitedChatModel:
             f"endpoints={endpoints}"
         )
 
+        # CRITICAL: Validate endpoints are configured before proceeding
+        if not endpoints:
+            error_msg = (
+                f"No LLM endpoints configured for tier='{self.tier}', operation='{self.operation}'. "
+                f"Check your configuration file (base.yaml) and ensure the '{self.tier}' tier "
+                f"has at least one endpoint configured. "
+                f"Available tier_config keys: {list(tier_config.keys())}"
+            )
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+
         # Check endpoint status BEFORE request
         logger.debug(f"[DIAGNOSTIC] About to call get_endpoint_status_summary with endpoints={endpoints}")
         status_list, available_count = self.model_selector.rate_limiter.get_endpoint_status_summary(endpoints)
@@ -168,13 +179,17 @@ class RateLimitedChatModel:
             # Find first available endpoint
             first_available = next(s for s in status_list if s["available"])
             logger.info(f"→ Proceeding immediately with {first_available['endpoint']}")
-        else:
-            # All in cooldown - find shortest wait
+        elif status_list:
+            # All in cooldown - find shortest wait (only if status_list is not empty)
             shortest = min(status_list, key=lambda s: s["cooldown_remaining"])
             logger.warning(
                 f"⏳ All {len(endpoints)} endpoints in cooldown. "
                 f"Waiting {shortest['cooldown_remaining']:.1f}s for {shortest['endpoint']} (next available)..."
             )
+        else:
+            # This should never happen because we checked endpoints above, but be safe
+            logger.error(f"No endpoint status available for tier='{self.tier}'")
+            raise ValueError(f"No endpoint status available for tier='{self.tier}'")
 
         # Extract timeout from kwargs or use default derived from workflow config
         timeout_seconds = kwargs.pop('timeout', self.default_timeout_seconds)

@@ -3,6 +3,13 @@
 # Only includes parameters that are actually used in the codebase.
 
 # Model Configuration - 4-Tier System with Rate Limiting
+#
+# IMPORTANT - Model Capabilities:
+# - Claude models (databricks-claude-*) DO NOT support response_format parameter (JSON mode)
+# - GPT OSS, Gemma, and Llama models DO support response_format
+# - System automatically detects and skips response_format for unsupported models
+# - Unsupported models fall back to prompt-based JSON generation
+#
 models:
   default:
     endpoint: databricks-gpt-oss-20b
@@ -59,6 +66,20 @@ models:
     rotation_strategy: priority  # CHANGED: Priority-based (config order = priority order)
     fallback_on_429: true  # Single powerful endpoint
 
+  # TIER 5: STRUCTURED - Specialized for complex structured output (JSON schema compliance)
+  # Use for: Pydantic model generation, complex nested schemas, strict field name compliance
+  structured:
+    endpoints:
+      - databricks-claude-sonnet-4      # Best at following complex schemas
+      - databricks-claude-3-7-sonnet    # Fallback Claude
+      - databricks-gpt-oss-120b         # Final fallback to GPT
+    temperature: 0.3  # Lower temperature for deterministic schema following
+    max_tokens: 25000
+    reasoning_effort: high  # Enable reasoning for schema understanding
+    reasoning_budget: 12000  # Increased budget (vs 8000) for complex schema planning
+    tokens_per_minute: 50000
+    rotation_strategy: priority
+    fallback_on_429: true
 
 
 # Multi-Agent System Configuration
@@ -177,7 +198,47 @@ agents:
 # Metric Calculation Pipeline Configuration
 metrics:
   enabled: true  # Master switch for metric calculation features
-  use_pipeline_v2: true  # Feature flag for new calculation pipeline (default off until tested)
+  use_pipeline_v2: true  # CHANGED: Enable new calculation pipeline with formula discovery by default
+  use_unified_planning: true  # NEW: Enable unified user-request-driven planning (eliminates metric matching)
+
+  # Unified planning configuration (NEW - uses dedicated structured model tier)
+  unified_planning:
+    model: structured  # Use specialized tier for JSON schema compliance (Claude Sonnet 4)
+    temperature: 0.2   # Very conservative for deterministic field names
+    max_planning_retries: 2  # Retry on validation failure before falling back
+    enable_validation_logging: true  # Log detailed validation errors
+
+  # Multi-dimensional calculation support (NEW - Phase 1)
+  multi_dimensional:
+    enabled: true  # Enable multi-dimensional calculations (e.g., country × scenario × metric)
+    max_dimensions: 3  # Maximum number of dimensions per calculation
+    max_combinations: 500  # Safety limit to prevent combinatorial explosion
+    parallel_execution: true  # Execute independent dimension combinations in parallel
+    enable_dimension_inference: true  # Auto-detect dimensions from entity names (e.g., "Spain_Single")
+  
+  # Formula transparency (NEW - Phase 4)
+  transparency:
+    show_formulas_in_tables: true  # Display formula for each calculated cell
+    include_formula_appendix: true  # Add "Calculation Formulas" section to reports
+    link_to_sources: true  # Link formulas to source observation IDs
+    formula_format: inline  # Display format: "inline", "tooltip", or "appendix-only"
+    show_provenance: true  # Show data sources for all calculations
+  
+  # Formula discovery (NEW - Phase 4)
+  formula_discovery:
+    enabled: true  # Enable 3-tier formula discovery system
+    use_pattern_matching: true  # Tier 1: Regex-based extraction
+    use_llm_extraction: true  # Tier 2: LLM-based formula extraction
+    use_synthesis: true  # Tier 3: Formula synthesis from examples
+    min_confidence_threshold: 0.5  # Minimum confidence to use extracted formula
+
+  # Dedicated code-generation model and repair settings
+  codegen:
+    model: complex  # Override model tier for calculation code generation
+    temperature: 0.2  # Conservative sampling for deterministic snippets
+    max_tokens: 400  # Limit code snippet length
+    max_repair_attempts: 2  # How many times to retry fixing broken code
+    strict_prompt: true  # Inject allowed/forbidden rule blocks into prompts
   
   # Execution settings for sandboxed Python code
   execution:
@@ -185,6 +246,8 @@ metrics:
     memory_limit_mb: 100  # Maximum memory per calculation
     max_retries_per_calculation: 2  # Retry attempts on failure
     enable_sandbox: true  # Use RestrictedPython sandbox
+    enable_parallel_execution: true  # Use ParallelCalculationExecutor
+    max_parallel_workers: 10  # Maximum concurrent calculations
   
   # Iteration limits for research feedback loop
   feedback:
@@ -192,11 +255,13 @@ metrics:
     max_research_queries_per_iteration: 5  # Maximum queries per feedback round
     enable_auto_research: true  # Automatically trigger research for missing data
   
-  # Performance & Caching (Phase 8: Production Hardening)
+  # Performance & Caching (Phase 6)
   performance:
-    enable_caching: true  # Cache calculation plans and results
-    max_cache_size: 100  # Maximum number of cached plans
+    enable_caching: true  # Cache calculation results
+    cache_ttl_seconds: 3600  # Cache TTL (1 hour)
+    max_cache_size: 10000  # Maximum number of cached entries
     enable_detailed_logging: false  # Detailed instrumentation logs (for debugging)
+    enable_cache_stats: true  # Track and report cache performance statistics
     parallel_execution: false  # Execute independent calculations concurrently (future)
   
   # Validation presets by domain

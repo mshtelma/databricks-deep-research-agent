@@ -141,6 +141,30 @@ class SafePythonExecutor:
                     '_write_': full_write_guard,
                 }
             }
+            # Add exception types needed for try-except blocks in generated code
+            safe_dict['__builtins__'].update({
+                'Exception': Exception,
+                'ValueError': ValueError,
+                'TypeError': TypeError,
+                'ZeroDivisionError': ZeroDivisionError,
+                'KeyError': KeyError,
+                'AttributeError': AttributeError,
+                'IndexError': IndexError,
+                'RuntimeError': RuntimeError,
+            })
+            # Add safe type/inspection functions (Issue #3 fix)
+            safe_dict['__builtins__'].update({
+                'isinstance': isinstance,
+                'type': type,
+                'hasattr': hasattr,
+                'all': all,
+                'any': any,
+                'enumerate': enumerate,
+                'zip': zip,
+                'map': map,
+                'filter': filter,
+                'pow': pow,
+            })
         else:
             # Fallback: minimal safe builtins
             safe_dict = {
@@ -165,10 +189,37 @@ class SafePythonExecutor:
                     'set': set,
                 }
             }
+            # Add exception types needed for try-except blocks in generated code
+            safe_dict['__builtins__'].update({
+                'Exception': Exception,
+                'ValueError': ValueError,
+                'TypeError': TypeError,
+                'ZeroDivisionError': ZeroDivisionError,
+                'KeyError': KeyError,
+                'AttributeError': AttributeError,
+                'IndexError': IndexError,
+                'RuntimeError': RuntimeError,
+            })
+            # Add safe type/inspection functions (Issue #3 fix)
+            safe_dict['__builtins__'].update({
+                'isinstance': isinstance,
+                'type': type,
+                'hasattr': hasattr,
+                'all': all,
+                'any': any,
+                'enumerate': enumerate,
+                'zip': zip,
+                'map': map,
+                'filter': filter,
+                'pow': pow,
+            })
         
         # Add safe modules
         safe_dict['math'] = math
         safe_dict['statistics'] = statistics
+        
+        # Log available built-ins for debugging (Issue #3 fix)
+        logger.debug(f"[SANDBOX] Available built-ins: {sorted(safe_dict['__builtins__'].keys())}")
         
         # Add pandas if enabled
         if self.enable_pandas:
@@ -184,12 +235,44 @@ class SafePythonExecutor:
         
         return safe_dict
     
+    def _strip_imports_defensive(self, code: str) -> str:
+        """Strip import statements as defense-in-depth before security scan.
+
+        This is a last-line-of-defense protection against imports that may have
+        slipped through the planner-level stripping. Uses simple line-based
+        removal since AST parsing might fail on malformed code.
+
+        Args:
+            code: Python code string
+
+        Returns:
+            Code with import statements removed
+        """
+        lines = code.split('\n')
+        cleaned = []
+        removed_count = 0
+
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('import ') or stripped.startswith('from '):
+                logger.warning(f"[SANDBOX] Defense-in-depth: Stripped import statement: {stripped}")
+                removed_count += 1
+                # Keep the line as a comment to maintain line numbers for debugging
+                cleaned.append(f"# STRIPPED: {line}")
+            else:
+                cleaned.append(line)
+
+        if removed_count > 0:
+            logger.info(f"[SANDBOX] Defensive import stripping removed {removed_count} import statements")
+
+        return '\n'.join(cleaned)
+
     def _scan_for_dangerous_patterns(self, code: str) -> None:
         """Scan code for dangerous patterns before execution.
-        
+
         Args:
             code: Python code to scan
-        
+
         Raises:
             SecurityError: If dangerous patterns detected
         """
@@ -198,14 +281,14 @@ class SafePythonExecutor:
                 raise SecurityError(
                     f"Code contains disallowed pattern: {pattern}"
                 )
-        
+
         # Check for suspicious imports (even non-os ones in calculation context)
         if re.search(r'\bimport\s+\w+', code):
             raise SecurityError(
                 "Import statements are not allowed in calculation code. "
                 "Use the provided context API instead."
             )
-        
+
         # Check for from imports
         if re.search(r'\bfrom\s+\w+', code):
             raise SecurityError(
@@ -218,14 +301,14 @@ class SafePythonExecutor:
         context: Optional[Dict[str, Any]] = None
     ) -> ExecutionResult:
         """Execute code in sandboxed environment.
-        
+
         Args:
             code: Python code to execute
             context: Additional context (e.g., {'ctx': MetricDataContext()})
-        
+
         Returns:
             ExecutionResult with success status and result/error
-        
+
         Example:
             >>> result = executor.execute(
             ...     "result = 100 * 0.19",
@@ -235,8 +318,12 @@ class SafePythonExecutor:
             >>> result.result  # 19.0
         """
         start_time = time.time()
-        
+
         try:
+            # Step 0: Defense-in-depth - Strip imports as last line of defense
+            # This protects against any imports that slipped through planner-level stripping
+            code = self._strip_imports_defensive(code)
+
             # Step 1: Security scan
             self._scan_for_dangerous_patterns(code)
             
@@ -296,9 +383,16 @@ class SafePythonExecutor:
             if 'result' in safe_locals:
                 result_value = safe_locals['result']
             else:
-                # Fallback: return all locals
+                # Fallback: Try to extract a reasonable result from locals
                 logger.warning("Code did not assign to 'result' variable")
-                result_value = safe_locals
+                result_value = self._extract_fallback_result(safe_locals)
+                
+                if result_value is None:
+                    logger.error(
+                        "Failed to extract result from locals. "
+                        "Code must assign final value to 'result' variable. "
+                        f"Available variables: {list(safe_locals.keys())}"
+                    )
             
             return ExecutionResult(
                 success=True,
@@ -357,6 +451,39 @@ class SafePythonExecutor:
                 error_type=type(e).__name__,
                 error_message=f"Execution error: {str(e)}"
             )
+    
+    def _extract_fallback_result(self, safe_locals: Dict[str, Any]) -> Any:
+        """Try to extract a reasonable result when 'result' variable is not assigned.
+        
+        Args:
+            safe_locals: Local variables from code execution
+        
+        Returns:
+            Extracted result value or None if no reasonable value found
+        """
+        # Filter out special variables and built-ins
+        excluded_keys = {'__builtins__', '__name__', '__doc__', 'ctx', 'pd', 'math', 'statistics'}
+        user_vars = {k: v for k, v in safe_locals.items() if k not in excluded_keys}
+        
+        # If only one user variable and it's a valid type, use it
+        if len(user_vars) == 1:
+            value = list(user_vars.values())[0]
+            if isinstance(value, (int, float, str, bool, type(None))):
+                logger.info(f"Extracted fallback result from single variable: {list(user_vars.keys())[0]}")
+                return value
+        
+        # Look for common result variable names
+        result_candidates = ['output', 'answer', 'value', 'total', 'final']
+        for candidate in result_candidates:
+            if candidate in user_vars:
+                value = user_vars[candidate]
+                if isinstance(value, (int, float, str, bool, type(None))):
+                    logger.info(f"Extracted fallback result from variable: {candidate}")
+                    return value
+        
+        # No reasonable result found
+        logger.warning(f"Could not extract fallback result. User variables: {list(user_vars.keys())}")
+        return None
     
     def validate_code(self, code: str) -> Tuple[bool, Optional[str]]:
         """Validate code without executing it.

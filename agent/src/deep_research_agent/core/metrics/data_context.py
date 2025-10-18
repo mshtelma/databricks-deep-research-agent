@@ -44,6 +44,7 @@ class MetricDataContext:
         self._data_points = extracted_data
         self._constants = constants or {}
         self._entity_index: Dict[str, Dict[str, Any]] = {}
+        self._dimensional_index: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._build_indices()
     
     def _build_indices(self) -> None:
@@ -64,19 +65,61 @@ class MetricDataContext:
                 except (ValueError, AttributeError):
                     pass  # Keep as string
             
-            self._entity_index[entity][metric] = {
+            metadata = {
                 'value': value,
                 'unit': getattr(dp, 'unit', 'unitless'),
                 'confidence': getattr(dp, 'confidence', 0.8),
                 'source': getattr(dp, 'source_observation_id', None)
             }
+            
+            self._entity_index[entity][metric] = metadata
+            
+            # Build dimensional index for multi-dimensional support
+            # Parse entity name for dimensions (e.g., "Spain_Single" -> {"country": "Spain", "scenario": "Single"})
+            dimensions = self._parse_entity_dimensions(entity)
+            if dimensions:
+                dim_key = self._make_dimension_key(dimensions)
+                if dim_key not in self._dimensional_index:
+                    self._dimensional_index[dim_key] = {}
+                self._dimensional_index[dim_key][metric] = metadata
     
-    def get_scalar(self, entity: str, metric: str) -> Optional[Union[float, str]]:
+    def _parse_entity_dimensions(self, entity: str) -> Optional[Dict[str, str]]:
+        """Parse entity name into dimensions.
+        
+        Examples:
+            "Spain_Single" -> {"country": "Spain", "scenario": "Single"}
+            "Q1_2024" -> {"quarter": "Q1", "year": "2024"}
+            "Spain" -> {"entity": "Spain"} (single dimension)
+        """
+        if '_' not in entity:
+            return {"entity": entity}
+        
+        parts = entity.split('_')
+        if len(parts) == 2:
+            # Try to infer dimension types
+            # Common patterns: Country_Scenario, Entity_Year, Quarter_Year
+            return {"dim1": parts[0], "dim2": parts[1]}
+        elif len(parts) == 3:
+            return {"dim1": parts[0], "dim2": parts[1], "dim3": parts[2]}
+        
+        return {"entity": entity}
+    
+    def _make_dimension_key(self, dimensions: Dict[str, str]) -> str:
+        """Create a consistent key from dimension dictionary."""
+        return "_".join(f"{k}={v}" for k, v in sorted(dimensions.items()))
+    
+    def get_scalar(
+        self,
+        entity: str,
+        metric: str,
+        dimensions: Optional[Dict[str, str]] = None
+    ) -> Optional[Union[float, str]]:
         """Get a single scalar value by entity and metric name.
         
         Args:
             entity: Entity name (e.g., "Spain", "Product A")
             metric: Metric name (e.g., "gross_income", "tax_rate")
+            dimensions: Optional dimension filter (e.g., {"scenario": "Single"})
         
         Returns:
             The metric value, or None if not found
@@ -84,16 +127,130 @@ class MetricDataContext:
         Example:
             >>> income = ctx.get_scalar("Spain", "gross_income")
             >>> # Returns: 50000.0
+            >>> income_single = ctx.get_scalar("Spain", "gross_income", {"scenario": "Single"})
+            >>> # Returns: 50000.0 (for Spain in Single scenario)
         """
+        # If dimensions provided, try dimensional lookup first
+        if dimensions:
+            # Build entity key with dimensions
+            entity_with_dims = self._build_entity_key(entity, dimensions)
+            if entity_with_dims in self._entity_index and metric in self._entity_index[entity_with_dims]:
+                return self._entity_index[entity_with_dims][metric]['value']
+            
+            # Try dimensional index lookup
+            dim_key = self._make_dimension_key({**dimensions, "entity": entity})
+            if dim_key in self._dimensional_index and metric in self._dimensional_index[dim_key]:
+                return self._dimensional_index[dim_key][metric]['value']
+        
+        # Fallback to simple entity lookup
         if entity not in self._entity_index:
-            logger.debug(f"Entity '{entity}' not found in data context")
-            return None
+            # Try fuzzy matching on entity name
+            fuzzy_match = self._find_similar_entity(entity)
+            if fuzzy_match:
+                logger.info(f"Entity '{entity}' not found, using similar entity '{fuzzy_match}'")
+                entity = fuzzy_match
+            else:
+                logger.debug(f"Entity '{entity}' not found in data context. Available: {list(self._entity_index.keys())[:10]}")
+                return None
         
         if metric not in self._entity_index[entity]:
-            logger.debug(f"Metric '{metric}' not found for entity '{entity}'")
-            return None
+            # Try fuzzy matching on metric name
+            fuzzy_metric = self._find_similar_metric(entity, metric)
+            if fuzzy_metric:
+                logger.info(f"Metric '{metric}' not found for '{entity}', using similar metric '{fuzzy_metric}'")
+                metric = fuzzy_metric
+            else:
+                logger.debug(f"Metric '{metric}' not found for entity '{entity}'. Available: {list(self._entity_index[entity].keys())[:10]}")
+                return None
         
         return self._entity_index[entity][metric]['value']
+    
+    def _find_similar_entity(self, target: str) -> Optional[str]:
+        """Find similar entity name using fuzzy matching.
+        
+        Args:
+            target: Target entity name
+        
+        Returns:
+            Similar entity name, or None if no close match
+        """
+        if not self._entity_index:
+            return None
+        
+        target_lower = target.lower().replace('_', '').replace('-', '').replace(' ', '')
+        best_match = None
+        min_distance = float('inf')
+        
+        for entity in self._entity_index.keys():
+            entity_lower = entity.lower().replace('_', '').replace('-', '').replace(' ', '')
+            
+            # Exact match after normalization
+            if target_lower == entity_lower:
+                return entity
+            
+            # Check if one contains the other
+            if target_lower in entity_lower or entity_lower in target_lower:
+                if len(entity_lower) - len(target_lower) < min_distance:
+                    min_distance = len(entity_lower) - len(target_lower)
+                    best_match = entity
+        
+        # Return match if it's reasonably close
+        if best_match and min_distance <= 5:
+            return best_match
+        
+        return None
+    
+    def _find_similar_metric(self, entity: str, target: str) -> Optional[str]:
+        """Find similar metric name using fuzzy matching.
+        
+        Args:
+            entity: Entity name
+            target: Target metric name
+        
+        Returns:
+            Similar metric name, or None if no close match
+        """
+        if entity not in self._entity_index:
+            return None
+        
+        metrics = self._entity_index[entity].keys()
+        if not metrics:
+            return None
+        
+        target_lower = target.lower().replace('_', '').replace('-', '').replace(' ', '')
+        best_match = None
+        min_distance = float('inf')
+        
+        for metric in metrics:
+            metric_lower = metric.lower().replace('_', '').replace('-', '').replace(' ', '')
+            
+            # Exact match after normalization
+            if target_lower == metric_lower:
+                return metric
+            
+            # Check if one contains the other
+            if target_lower in metric_lower or metric_lower in target_lower:
+                if len(metric_lower) - len(target_lower) < min_distance:
+                    min_distance = len(metric_lower) - len(target_lower)
+                    best_match = metric
+        
+        # Return match if it's reasonably close
+        if best_match and min_distance <= 5:
+            return best_match
+        
+        return None
+    
+    def _build_entity_key(self, entity: str, dimensions: Dict[str, str]) -> str:
+        """Build entity key from base entity and dimensions.
+        
+        Examples:
+            entity="Spain", dimensions={"scenario": "Single"} -> "Spain_Single"
+            entity="Q1", dimensions={"year": "2024"} -> "Q1_2024"
+        """
+        dim_values = list(dimensions.values())
+        if entity not in dim_values:
+            return f"{entity}_{'_'.join(dim_values)}"
+        return '_'.join(dim_values)
     
     def get_table(self, entity: str) -> pd.DataFrame:
         """Get all metrics for an entity as a pandas DataFrame.
@@ -206,12 +363,42 @@ class MetricDataContext:
         
         return self._entity_index[entity][metric].copy()
     
+    def get_by_dimensions(
+        self,
+        metric: str,
+        dimensions: Dict[str, str]
+    ) -> Optional[Union[float, str]]:
+        """Get metric value by dimensions only (without explicit entity).
+        
+        Args:
+            metric: Metric name
+            dimensions: Dimension mapping (e.g., {"country": "Spain", "scenario": "Single"})
+        
+        Returns:
+            The metric value, or None if not found
+        
+        Example:
+            >>> income = ctx.get_by_dimensions(
+            ...     "net_income",
+            ...     {"country": "Spain", "scenario": "Single"}
+            ... )
+        """
+        dim_key = self._make_dimension_key(dimensions)
+        if dim_key in self._dimensional_index and metric in self._dimensional_index[dim_key]:
+            return self._dimensional_index[dim_key][metric]['value']
+        
+        # Try building entity key and looking up
+        entity_key = '_'.join(dimensions.values())
+        return self.get_scalar(entity_key, metric)
+    
     def __repr__(self) -> str:
         """String representation for debugging."""
         entity_count = len(self._entity_index)
         total_metrics = sum(len(metrics) for metrics in self._entity_index.values())
+        dimensional_count = len(self._dimensional_index)
         return (f"MetricDataContext(entities={entity_count}, "
-                f"total_metrics={total_metrics})")
+                f"total_metrics={total_metrics}, "
+                f"dimensional_combinations={dimensional_count})")
 
 
 __all__ = ["MetricDataContext"]

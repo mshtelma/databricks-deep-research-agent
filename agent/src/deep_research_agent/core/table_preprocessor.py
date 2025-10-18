@@ -78,9 +78,10 @@ class TablePreprocessor:
                 content = self._protect_footnote_markers(content)
 
                 # PHASE 0.5: Convert space-delimited tables to markdown format
-                # LLMs often generate tables with spaces instead of pipes
-                logger.debug("Phase 0.5: Converting space-delimited tables to markdown")
-                content = self._detect_and_convert_space_delimited_tables(content)
+                # DISABLED: We use structured generation (TableBlock) which produces valid markdown
+                # No need to detect/convert space-delimited tables - causes false positives
+                # logger.debug("Phase 0.5: Converting space-delimited tables to markdown")
+                # content = self._detect_and_convert_space_delimited_tables(content)
 
                 # Step 0: Protect reference sections from table processing
                 logger.debug("Step 0: Protecting reference sections")

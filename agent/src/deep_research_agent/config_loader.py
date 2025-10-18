@@ -43,11 +43,45 @@ class ConfigLoader:
         logger.info(f"Loading agent configuration for environment: {env}")
         
         # Find base directory properly - relative to this module
-        base_dir = Path(__file__).parent.parent  # Go up to agent/
-        conf_dir = base_dir / "conf"
+        base_dir = Path(__file__).parent.parent  # Go up to agent/ src directory
+        # For config files, we need to go up one more level to get to agent/ directory
+        agent_dir = base_dir.parent  # Go up to agent/ directory (from agent/src)
+        conf_dir = agent_dir / "conf"  # agent/conf/
         
         # Load base config with proper path resolution
-        base_path = config_path or conf_dir / "base.yaml"
+        if config_path:
+            # Try multiple resolution strategies for provided path
+            base_path_obj = Path(config_path)
+            if base_path_obj.is_absolute() and base_path_obj.exists():
+                # Absolute path provided and exists
+                base_path = base_path_obj
+            elif Path.cwd() / config_path:
+                # Relative to current working directory
+                candidate = Path.cwd() / config_path
+                if candidate.exists():
+                    base_path = candidate
+                else:
+                    # Try relative to agent/ directory (common for tests running from repo root)
+                    candidate = agent_dir / config_path
+                    if candidate.exists():
+                        base_path = candidate
+                    else:
+                        # Last resort: assume conf/ prefix and look in agent/conf/
+                        if "conf" in str(config_path):
+                            filename = Path(config_path).name
+                            candidate = conf_dir / filename
+                            if candidate.exists():
+                                base_path = candidate
+                            else:
+                                base_path = base_path_obj  # Use original, will fail below
+                        else:
+                            base_path = base_path_obj  # Use original, will fail below
+            else:
+                base_path = base_path_obj
+        else:
+            # No path provided, use default
+            base_path = conf_dir / "base.yaml"
+        
         config_dict = {}
         
         if base_path.exists():
@@ -67,7 +101,18 @@ class ConfigLoader:
                     endpoints = analytical_cfg.get('endpoints', [])
                     logger.info(f"[DIAGNOSTIC]   analytical.endpoints: {endpoints}")
         else:
-            logger.warning(f"Base config file not found: {base_path}")
+            error_msg = (
+                f"Base config file not found: {base_path}\n"
+                f"Config resolution attempted:\n"
+                f"  1. Provided path: {config_path}\n"
+                f"  2. Working directory: {Path.cwd()}\n"
+                f"  3. Agent directory: {agent_dir}\n"
+                f"  4. Conf directory: {conf_dir}\n"
+                f"  5. Expected at: {conf_dir / 'base.yaml'}\n"
+                f"Please provide a valid path or use None for auto-detection."
+            )
+            logger.error(error_msg)
+            raise FileNotFoundError(error_msg)
         
         # Apply overrides based on environment with proper paths
         if env == "test" and not override_path:

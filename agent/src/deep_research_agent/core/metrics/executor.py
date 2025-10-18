@@ -103,15 +103,25 @@ class CalculationExecutor:
             
             # Create Calculation object with full provenance for successful computations
             if event.status == "computed" and event.result is not None:
-                calculation = self._build_calculation_with_provenance(
-                    task, event, plan, context
-                )
-                if calculation:
-                    context.calculations.append(calculation)
-                    logger.debug(
-                        f"[EXECUTOR] Added calculation: {calculation.description} "
-                        f"= {calculation.result}"
+                # Validate result type before creating Calculation
+                if not self._is_valid_result_type(event.result):
+                    logger.error(
+                        f"[EXECUTOR] Task {task.task_id} produced invalid result type: "
+                        f"{type(event.result).__name__}. Expected float, str, or None. "
+                        f"Skipping calculation creation."
                     )
+                    event.status = "failed"
+                    event.message = f"Invalid result type: {type(event.result).__name__}"
+                else:
+                    calculation = self._build_calculation_with_provenance(
+                        task, event, plan, context
+                    )
+                    if calculation:
+                        context.calculations.append(calculation)
+                        logger.debug(
+                            f"[EXECUTOR] Added calculation: {calculation.description} "
+                            f"= {calculation.result}"
+                        )
         
         # Count statistics
         success_count = sum(1 for e in events if e.status in ["computed", "existing"])
@@ -182,23 +192,38 @@ class CalculationExecutor:
                 'attempts': 1,
                 'execution_time': exec_result.execution_time
             }
-        else:
-            logger.warning(
-                f"[EXECUTOR] Execution failed: {exec_result.error_type} - "
-                f"{exec_result.error_message}"
-            )
-            
-            # Check if this is a data availability issue
-            needs_research = self._is_data_missing_error(exec_result)
-            
-            return {
-                'status': 'failed',
-                'result': None,
-                'attempts': 1,
-                'error_message': f"{exec_result.error_type}: {exec_result.error_message}",
-                'needs_research': needs_research,
-                'research_query': task.fallback_research_query if needs_research else None
-            }
+
+        logger.warning(
+            f"[EXECUTOR] Execution failed: {exec_result.error_type} - "
+            f"{exec_result.error_message}"
+        )
+
+        needs_research = self._is_data_missing_error(exec_result)
+        graceful_result = None if exec_result.error_type != "SecurityError" else None
+        status = 'failed'
+
+        return {
+            'status': status,
+            'result': graceful_result,
+            'attempts': 1,
+            'error_message': f"{exec_result.error_type}: {exec_result.error_message}",
+            'needs_research': needs_research,
+            'research_query': task.fallback_research_query if needs_research else None
+        }
+    
+    def _is_valid_result_type(self, result: Any) -> bool:
+        """Check if result has a valid type for Calculation model.
+        
+        Args:
+            result: The result value to validate
+        
+        Returns:
+            True if result is float, int, str, bool, or None
+        """
+        # Calculation model expects Union[float, str]
+        # We accept int, bool as they're compatible with float
+        # We also accept None as it indicates missing data (graceful failure)
+        return isinstance(result, (float, int, str, bool, type(None)))
     
     def _is_data_missing_error(self, exec_result: ExecutionResult) -> bool:
         """Check if execution failure was due to missing data.

@@ -41,6 +41,7 @@ from ..core.plan_models import StepStatus
 from ..core.response_handlers import parse_structured_response, ParsedResponse, ResponseType
 from ..core.table_preprocessor import TablePreprocessor
 from ..core.metrics import MetricPipeline, MetricPipelineState
+from ..core.adaptive_structure_validator import AdaptiveStructureValidator
 
 
 logger = get_logger(__name__)
@@ -143,6 +144,13 @@ class ReporterAgent:
             MetricPipelineState() if self.metric_pipeline_enabled else None
         )
 
+        # Fail-fast: Validate required pipeline mode configuration
+        if use_pipeline_v2 and self.llm is None:
+            raise ValueError(
+                "Metric pipeline is required (use_pipeline_v2=True) but no LLM provided. "
+                "Either provide a valid LLM or set use_pipeline_v2=False for optional mode."
+            )
+
     def _serialize_metric_state_for_update(self, calc_context) -> Optional[Dict[str, Any]]:
         """Serialize metric pipeline state for workflow propagation."""
 
@@ -163,6 +171,116 @@ class ReporterAgent:
             return temp_state.to_dict()
 
         return None
+
+    async def _get_calculation_context(
+        self,
+        sanitized_findings: Dict[str, Any]
+    ) -> Optional[Any]:
+        """
+        Get calculation context from metric pipeline with proper mode handling.
+
+        This method implements fail-fast behavior for pipeline initialization:
+        - If metrics disabled → return None (no pipeline needed)
+        - If pipeline required but unavailable → raise ConfigurationError
+        - If pipeline optional but unavailable → log warning, return None
+        - If pipeline available → run it and return context
+
+        Args:
+            sanitized_findings: Sanitized findings from research
+
+        Returns:
+            CalculationContext if successful, None if pipeline disabled/unavailable
+
+        Raises:
+            RuntimeError: If pipeline is required (use_pipeline_v2=True) but not available
+        """
+        # Check if metrics are disabled
+        metrics_config = self.config.get("metrics", {})
+        metrics_enabled = metrics_config.get("enabled", True)
+
+        if not metrics_enabled:
+            logger.info("Metrics disabled, skipping calculation context")
+            return None
+
+        # Check pipeline availability and mode
+        use_pipeline_v2 = metrics_config.get("use_pipeline_v2", False)
+        use_pipeline = metrics_config.get("use_pipeline", False)
+
+        if not self.metric_pipeline:
+            # Pipeline not available - check if it's required
+            if use_pipeline_v2:
+                # Required mode - this is a configuration error
+                raise RuntimeError(
+                    "Metric pipeline is required (use_pipeline_v2=True) but not initialized. "
+                    "This indicates LLM is not available or pipeline initialization failed. "
+                    "Either provide a valid LLM or set use_pipeline_v2=False."
+                )
+            elif use_pipeline:
+                # Optional mode - log warning and continue without pipeline
+                logger.warning(
+                    "Metric pipeline requested (use_pipeline=True) but not available. "
+                    "Continuing without calculation context. "
+                    "This may result in reports without structured tables/metrics."
+                )
+                return None
+            else:
+                # Pipeline not requested
+                logger.info("Metric pipeline not enabled, skipping calculation context")
+                return None
+
+        # Pipeline is available - run it
+        try:
+            logger.info("[METRIC PIPELINE] Running calculation pipeline")
+            metric_state, metric_messages = await self.metric_pipeline.run(
+                sanitized_findings,
+                self.metric_pipeline_state,
+            )
+            self.metric_pipeline_state = metric_state
+            calc_context = metric_state.calculation_context
+
+            # Log pipeline messages
+            for message in metric_messages:
+                logger.info(
+                    "[METRIC PIPELINE] %s",
+                    getattr(message, "content", message),
+                )
+
+            # Validate that pipeline produced context
+            if calc_context is None:
+                if use_pipeline_v2:
+                    # Required mode - context is mandatory
+                    raise ValueError(
+                        "Metric pipeline failed to generate calculation context. "
+                        "Cannot proceed with report generation in required mode."
+                    )
+                else:
+                    # Optional mode - log warning and continue
+                    logger.warning(
+                        "Metric pipeline returned None for calculation context. "
+                        "Continuing without structured tables/metrics."
+                    )
+                    return None
+
+            logger.info(
+                "[METRIC PIPELINE] Context generated: %d data points, %d calculations",
+                len(calc_context.extracted_data) if hasattr(calc_context, 'extracted_data') else 0,
+                len(calc_context.calculations) if hasattr(calc_context, 'calculations') else 0
+            )
+            return calc_context
+
+        except Exception as e:
+            # Pipeline execution failed
+            if use_pipeline_v2:
+                # Required mode - must fail
+                logger.error(f"[METRIC PIPELINE] Failed in required mode: {e}")
+                raise
+            else:
+                # Optional mode - log error and continue without context
+                logger.error(
+                    f"[METRIC PIPELINE] Failed to generate calculation context: {e}. "
+                    "Continuing without structured tables/metrics."
+                )
+                return None
 
     def _classify_databricks_error(self, error: Exception) -> Tuple[bool, Optional[float]]:
         """
@@ -618,41 +736,24 @@ Generate the report section content:"""
                     compiled_findings.get('observations', [])
                 )
 
-                # Phase 1: Generate calculation context via metric pipeline when enabled
-                if self.metric_pipeline_enabled and self.metric_pipeline:
-                    metric_state, metric_messages = await self.metric_pipeline.run(
-                        sanitized_findings,
-                        self.metric_pipeline_state,
+                # Phase 1: Generate calculation context via metric pipeline
+                # Use the new _get_calculation_context() method with proper mode handling
+                calc_context = await self._get_calculation_context(sanitized_findings)
+
+                # If calc_context is None, hybrid mode cannot proceed
+                # Fall back to section-by-section generation
+                if calc_context is None:
+                    logger.warning(
+                        "[HYBRID MODE] Calculation context unavailable, "
+                        "falling back to section-by-section generation"
                     )
-                    self.metric_pipeline_state = metric_state
-                    calc_context = metric_state.calculation_context
+                    raise ValueError("Calculation context unavailable for hybrid mode")
 
-                    for message in metric_messages:
-                        logger.info(
-                            "[METRIC PIPELINE] %s",
-                            getattr(message, "content", message),
-                        )
-
-                    if calc_context is None:
-                        logger.warning(
-                            "[METRIC PIPELINE] Calculation context missing after pipeline run; "
-                            "falling back to legacy generation"
-                        )
-                        calc_context = await self._generate_calculation_context(sanitized_findings)
-                else:
-                    calc_context = await self._generate_calculation_context(sanitized_findings)
-
-                # Get dynamic structure from plan
-                current_plan = state.get('current_plan')
-                dynamic_sections = []
-                if current_plan and hasattr(current_plan, 'dynamic_sections'):
-                    dynamic_sections = current_plan.dynamic_sections
-                elif current_plan and hasattr(current_plan, 'suggested_report_structure'):
-                    # Convert suggested_report_structure to section titles
-                    dynamic_sections = [
-                        {'title': title, 'purpose': ''}
-                        for title in current_plan.suggested_report_structure
-                    ]
+                # Get dynamic structure from plan with validation
+                dynamic_sections = AdaptiveStructureValidator.validate_and_recover(
+                    state,
+                    fallback_to_default=True
+                )
 
                 # Check if structured generation is enabled
                 logger.info(f"[CONFIG DEBUG] Full config keys: {list(self.config.keys())}")
@@ -756,13 +857,18 @@ Generate the report section content:"""
 
         current_plan = state.get("current_plan")
         template = getattr(current_plan, "report_template", None) if current_plan else None
-        dynamic_sections = getattr(current_plan, "dynamic_sections", None) if current_plan else None
+
+        # Validate and recover adaptive structure
+        dynamic_sections = AdaptiveStructureValidator.validate_and_recover(
+            state,
+            fallback_to_default=False  # Don't force default, allow None for template fallback
+        )
 
         # Debug logging for template and dynamic sections
         logger.info(f"REPORTER: Template available: {template is not None}")
         logger.info(f"REPORTER: Dynamic sections available: {dynamic_sections is not None}")
         if dynamic_sections:
-            section_titles = [getattr(s, 'title', str(s)) for s in dynamic_sections]
+            section_titles = AdaptiveStructureValidator.get_section_titles(dynamic_sections)
             logger.info(f"REPORTER: Dynamic section titles: {section_titles}")
 
         # 🔍 CRITICAL: Check if structured generation is enabled BEFORE using template
@@ -803,13 +909,17 @@ Generate the report section content:"""
                 report_style
             )
 
-            dynamic_sections = []
-            if current_plan and getattr(current_plan, "dynamic_sections", None):
-                dynamic_sections = [section.title for section in current_plan.dynamic_sections]
+            # Use already-validated dynamic_sections from above (line 862)
+            # Convert to titles for metadata
+            section_titles = (
+                AdaptiveStructureValidator.get_section_titles(dynamic_sections)
+                if dynamic_sections
+                else []
+            )
 
             report_metadata = {
                 "rendering_mode": "template",
-                "template_sections": dynamic_sections,
+                "template_sections": section_titles,
                 "template_appendix": template_metadata.get("include_appendix", False),
                 "observation_count": template_metadata.get("observation_count", 0),
                 "has_embedded_table": template_metadata.get("has_table", False),
@@ -1023,6 +1133,13 @@ Generate the report section content:"""
 
         # CRITICAL FIX: Ensure all markdown tables have proper separator rows
         report_with_metadata = self._fix_markdown_tables(report_with_metadata)
+
+        # Remove TABLE_START/TABLE_END markers from final output
+        # These are added by table_preprocessor but should not appear in the final report
+        report_with_metadata = report_with_metadata.replace("TABLE_START\n", "")
+        report_with_metadata = report_with_metadata.replace("\nTABLE_END", "")
+        report_with_metadata = report_with_metadata.replace("TABLE_START", "")
+        report_with_metadata = report_with_metadata.replace("TABLE_END", "")
 
         # Record completion
         state = StateManager.finalize_state(state)
@@ -1546,7 +1663,8 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
             "confidence_score": state.get("confidence_score", 0.8),  # Default to reasonable confidence
             "factuality_score": state.get("factuality_score", 0.9),  # Default to high factuality
             "coverage_score": state.get("coverage_score", 0.7),      # Default to good coverage
-            "research_quality_score": state.get("research_quality_score", 0.8)  # Default to good quality
+            "research_quality_score": state.get("research_quality_score", 0.8),  # Default to good quality
+            "calculation_context": state.get("calculation_context")  # CRITICAL: Include calculations for table generation
         }
         
         logger.info(f"Compiled {len(observations)} observations from {len(completed_steps)} steps")
@@ -1557,6 +1675,15 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
             first_obs = compiled['observations'][0]
             content = observation_to_text(first_obs)
             logger.info(f"[DEBUG] First observation content: {content[:200] if content else 'EMPTY CONTENT'}")
+        
+        # DEBUG: Check if calculation_context was included
+        calc_ctx = compiled.get('calculation_context')
+        if calc_ctx and hasattr(calc_ctx, 'calculations'):
+            logger.info(f"[DEBUG] Compiled findings includes {len(calc_ctx.calculations)} calculations")
+        elif calc_ctx:
+            logger.warning(f"[DEBUG] Compiled findings has calculation_context but no calculations attribute")
+        else:
+            logger.warning(f"[DEBUG] Compiled findings does NOT include calculation_context")
         
         return compiled
 
@@ -2115,6 +2242,18 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                 f"  Sample: step_id={sample_step_id}, content={sample_content[:100]}..."
             )
 
+            # Extract section bullets from dynamic section (for focus/guidance)
+            section_bullets = []
+            if state.get('current_plan'):
+                plan = state['current_plan']
+                if hasattr(plan, 'dynamic_sections'):
+                    for dyn_sec in plan.dynamic_sections:
+                        if dyn_sec.title == section_name:
+                            section_bullets = list(dyn_sec.content_bullets) if dyn_sec.content_bullets else []
+                            if section_bullets:
+                                logger.info(f"  📋 Section has {len(section_bullets)} content bullets for focus")
+                            break
+
             # Determine block structure
             block_sequence = self._determine_section_structure(section_name, findings)
             total_blocks = len(block_sequence)
@@ -2145,7 +2284,8 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
                             table_content=generated_table if is_conclusion else None,
                             previous_sections_context=previous_sections_context,
                             section_index=section_index,
-                            total_sections=total_sections
+                            total_sections=total_sections,
+                            section_bullets=section_bullets  # NEW: Pass bullets for section focus
                         )
                         rendered = block.text
 
@@ -2593,7 +2733,8 @@ Previous sections have already established context. Your job is to CONTINUE the 
         table_content: Optional[str] = None,
         previous_sections_context: str = "",
         section_index: int = 0,
-        total_sections: int = 1
+        total_sections: int = 1,
+        section_bullets: Optional[List[str]] = None
     ) -> "ParagraphBlock":
         """
         Generate text paragraph block (standard LLM generation, no structured output).
@@ -2609,6 +2750,7 @@ Previous sections have already established context. Your job is to CONTINUE the 
             previous_sections_context: Summary of previously generated sections
             section_index: Current section index (0-based)
             total_sections: Total number of sections in report
+            section_bullets: Specific content bullets this section should cover
 
         Returns:
             ParagraphBlock with text content
@@ -2658,6 +2800,20 @@ Previous sections have already established context. Your job is to CONTINUE the 
         original_query = findings.get("original_user_query", "")
         research_topic = findings.get("research_topic", "the research topic")
 
+        # Build section guidance from bullets (provides specific focus)
+        section_guidance = ""
+        if section_bullets:
+            bullets_text = "\n".join(f"  - {b}" for b in section_bullets)
+            section_guidance = f"""
+
+**What THIS Section Must Cover**:
+{bullets_text}
+
+**What THIS Section Must NOT Cover**:
+  - Content belonging to other sections
+  - Duplicate analysis from previous sections
+"""
+
         # Detect if this is a single-block section (complete content, not intro to table)
         is_single_block_section = (table_content is None and not previous_content)
         is_continuation_section = (previous_sections_context and section_index > 0)
@@ -2669,8 +2825,8 @@ Previous sections have already established context. Your job is to CONTINUE the 
 
 **Research Topic**: {research_topic}
 
-**Section**: {section_name}
-
+**Section**: {section_name} (Section {section_index + 1} of {total_sections})
+{section_guidance}
 **Data table**:
 {table_content}
 
@@ -2690,7 +2846,7 @@ Analyze the data from the table. Reference specific values, identify patterns, c
 {previous_sections_context}
 
 **Current Section**: {section_name} (Section {section_index + 1} of {total_sections})
-
+{section_guidance}
 **Research Findings**:
 {observation_text}
 
@@ -2708,7 +2864,7 @@ Write the content for this section:"""
 **Research Topic**: {research_topic}
 
 **Section**: {section_name}
-
+{section_guidance}
 **Research Findings**:
 {observation_text}
 
@@ -2725,7 +2881,7 @@ Write the content for this section. Present data and analysis directly:"""
 {previous_sections_context}
 
 **Current Section**: {section_name} (Section {section_index + 1} of {total_sections})
-
+{section_guidance}
 **Research Findings**:
 {observation_text}
 
@@ -2739,7 +2895,7 @@ Write a paragraph that provides context for the data table that follows. Focus o
 **Research Topic**: {research_topic}
 
 **Section**: {section_name}
-
+{section_guidance}
 **Research Findings**:
 {observation_text}
 
@@ -2991,6 +3147,11 @@ Note: Your response must conform to the TableBlock schema provided."""
         guidance_lines = []
         if section.purpose:
             guidance_lines.append(section.purpose)
+
+        # Add content bullets if available (provides specific focus for this section)
+        if section.content_bullets:
+            guidance_lines.append("\nSpecific aspects to cover in THIS section:")
+            guidance_lines.extend(f"  • {bullet}" for bullet in section.content_bullets)
 
         if section.content_type == SectionContentType.COMPARISON:
             guidance_lines.append("Provide a comparative analysis; include a markdown table when presenting metrics.")
@@ -3989,6 +4150,21 @@ Return reorganized sections as valid JSON using the target structure section nam
             # Legacy text-based generation (original implementation)
             logger.info("REPORTER: Generating table with LLM-based extraction (32k token budget)")
             
+            # DIAGNOSTIC: Check if calculations are available
+            logger.info(f"[TABLE DEBUG] calc_context available: {compiled_findings.get('calculation_context') is not None}")
+            if 'calculation_context' in compiled_findings:
+                calc_ctx = compiled_findings['calculation_context']
+                num_calcs = len(calc_ctx.calculations) if calc_ctx and hasattr(calc_ctx, 'calculations') else 0
+                logger.info(f"[TABLE DEBUG] Number of calculations: {num_calcs}")
+                if num_calcs > 0 and num_calcs <= 10:
+                    for i, calc in enumerate(calc_ctx.calculations[:10]):
+                        if hasattr(calc, 'entity') and hasattr(calc, 'description'):
+                            logger.info(f"[TABLE DEBUG]   Calc[{i}]: {calc.entity} | {calc.description} = {calc.result}")
+                        else:
+                            logger.info(f"[TABLE DEBUG]   Calc[{i}]: {calc.description} = {calc.result}")
+            else:
+                logger.error("[TABLE DEBUG] NO CALCULATION CONTEXT IN COMPILED FINDINGS!")
+            
             # Log what we received for debugging
             logger.info(f"REPORTER: Table specs received: {json.dumps(table_specifications, indent=2)}")
             
@@ -4043,10 +4219,12 @@ Return reorganized sections as valid JSON using the target structure section nam
 
                 # Validate the response contains a proper table
                 if self._validate_table_structure(table_content, len(rows), len(columns)):
-                    logger.info(f"REPORTER: Successfully generated table with {len(table_content)} characters")
+                    # Filter out incomplete rows with too many N/A values
+                    filtered_table = self._filter_incomplete_table_rows(table_content, min_valid_cells=2)
+                    logger.info(f"REPORTER: Successfully generated table with {len(filtered_table)} characters")
                     return {
                         "type": "planned_table",
-                        "content": table_content,
+                        "content": filtered_table,
                         "metadata": {
                             "confidence": table_specifications.get("confidence", 0.9),
                             "reasoning": table_specifications.get("reasoning", "LLM extraction successful"),
@@ -4190,12 +4368,15 @@ Generate the structured table now."""
 
                     # Render to markdown
                     table_markdown = table_block.render_markdown()
+                    
+                    # Filter out incomplete rows with too many N/A values
+                    filtered_table = self._filter_incomplete_table_rows(table_markdown, min_valid_cells=2)
 
                     logger.info(f"✅ Generated tracked-cells table: {len(table_block.headers)} cols × {len(table_block.rows)} rows")
 
                     return {
                         "type": "planned_table",
-                        "content": table_markdown,
+                        "content": filtered_table,
                         "metadata": {
                             "confidence": table_specifications.get("confidence", 0.9),
                             "reasoning": "Cell-level derivation tracking",
@@ -4544,10 +4725,40 @@ Generate the structured table now."""
                                      max_tokens: int = 32000) -> str:
         """
         Collect all available research content within token budget.
-        Prioritizes observations and search results with relevant data.
+        Prioritizes calculations, then observations and search results with relevant data.
         """
         content_parts = []
         current_tokens = 0
+        
+        # PRIORITY 0: Calculated values (HIGHEST PRIORITY - these are exact numbers)
+        if "calculation_context" in compiled_findings:
+            calc_ctx = compiled_findings["calculation_context"]
+            if calc_ctx and hasattr(calc_ctx, 'calculations') and calc_ctx.calculations:
+                calc_section = "=== CALCULATED VALUES FOR TABLE ===\n\n"
+                calc_section += "INSTRUCTIONS: Use these values to populate the table.\n"
+                calc_section += "Match the Entity/Country to table rows and Metric to table columns.\n\n"
+                calc_section += "Entity/Country | Metric | Value | Description\n"
+                calc_section += "---------------|--------|-------|-------------\n"
+                
+                for calc in calc_ctx.calculations:
+                    # Extract hints from description for better mapping
+                    entity_hint = self._extract_entity_hint(calc.description) or "General"
+                    metric_hint = self._extract_metric_hint(calc.description)
+                    
+                    # Format as structured table for easy LLM parsing
+                    desc_short = calc.description[:60] + "..." if len(calc.description) > 60 else calc.description
+                    calc_section += f"{entity_hint} | {metric_hint} | {calc.result} | {desc_short}\n"
+                
+                calc_section += "\n=== END CALCULATED VALUES ===\n\n"
+                
+                calc_tokens = len(calc_section) // 4
+                content_parts.append(calc_section)
+                current_tokens += calc_tokens
+                logger.info(f"REPORTER: Added {len(calc_ctx.calculations)} calculated values to research content ({calc_tokens} tokens)")
+            else:
+                logger.warning("REPORTER: calculation_context exists but has no calculations")
+        else:
+            logger.warning("REPORTER: No calculation_context in compiled_findings for table generation")
         
         # Priority 1: Direct observations (most relevant)
         for obs in compiled_findings.get("observations", []):
@@ -4607,7 +4818,11 @@ Generate the structured table now."""
                                          query_context: str) -> str:
         """Build detailed prompt for table generation with clear instructions."""
         
+        mapping_instructions = self._get_calculation_mapping_instructions()
+        
         return f"""Create a data table based on comprehensive research findings.
+
+{mapping_instructions}
 
 ORIGINAL QUERY CONTEXT:
 {query_context[:1000]}
@@ -4618,7 +4833,7 @@ REQUIRED TABLE STRUCTURE:
 - Table Rows (entities/countries/items): {', '.join(rows)}
 - Table Columns (metrics/attributes): {', '.join(columns)}
 
-COMPREHENSIVE RESEARCH CONTENT:
+COMPREHENSIVE RESEARCH CONTENT (with calculated values first):
 {research_content}
 
 CRITICAL INSTRUCTIONS FOR TABLE GENERATION:
@@ -4802,6 +5017,190 @@ EXAMPLE FORMAT:
                 "method": "pattern_matching"
             }
         }
+    
+    def _get_calculation_mapping_instructions(self) -> str:
+        """Get detailed instructions for mapping calculations to table cells.
+        
+        Returns:
+            Comprehensive mapping instructions for LLM
+        """
+        return """
+=== CALCULATION MAPPING INSTRUCTIONS ===
+
+The research content includes a "CALCULATED VALUES FOR TABLE" section formatted as:
+Entity/Country | Metric | Value | Description
+
+Use these calculated values to populate your table:
+
+1. ENTITY MATCHING (flexible, intelligent):
+   - Match "Switzerland" or "Swiss" → "Switzerland (Zug)" row
+   - Match "Spain" or "Spanish" → "Spain" row
+   - Match "UK" or "United Kingdom" or "British" → "United Kingdom" row
+   - Match "France" or "French" → "France" row
+   - Match "Germany" or "German" → "Germany" row
+   - Match entity names intelligently, even with slight variations
+
+2. METRIC MATCHING (by meaning, not exact text):
+   - "Daycare cost" or "Childcare" → daycare_cost_sX columns
+   - "Net take-home" or "Net income" → net_take_home_sX columns
+   - "Tax rate" or "Effective tax" → effective_tax_rate_sX columns
+   - "Annual rent" or "Rent" → annual_rent_sX columns
+   - "Family benefits" or "Child benefit" → family_benefits_cash_sX columns
+   - "Disposable income" → disposable_income_sX columns
+
+3. SCENARIO DETECTION (from description or metric name):
+   - Look for "single", "scenario 1", or "s1" → _s1 columns
+   - Look for "married, no child", "scenario 2", or "s2" → _s2 columns
+   - Look for "married with child", "scenario 3", or "s3" → _s3 columns
+   - If scenario unclear, use context from description
+
+4. MAPPING EXAMPLE:
+   Calculation Row: "Spain | Daycare cost | 3,600 | Annual public preschool"
+   → Goes to: Spain row, daycare_cost_s3 column
+   
+   Calculation Row: "France | Net take-home | 145,000 | Single scenario net income"
+   → Goes to: France row, net_take_home_s1 column
+
+5. IMPORTANT RULES:
+   - ALWAYS use calculated values when available - they are precise and authoritative
+   - NEVER make up numbers - use calculated values or "N/A"
+   - Only use "N/A" if truly no calculation or data exists for that cell
+   - If unsure about mapping, use your best judgment based on description
+
+=== END MAPPING INSTRUCTIONS ===
+"""
+    
+    def _extract_entity_hint(self, description: str) -> Optional[str]:
+        """Extract entity/country name from calculation description.
+        
+        Args:
+            description: Calculation description text
+        
+        Returns:
+            Standardized entity name or None
+        """
+        desc_lower = description.lower()
+        
+        # Map common variations to standardized entity names
+        entity_map = {
+            'swiss': 'Switzerland (Zug)',
+            'switzerland': 'Switzerland (Zug)',
+            'zug': 'Switzerland (Zug)',
+            'spain': 'Spain',
+            'spanish': 'Spain',
+            'france': 'France',
+            'french': 'France',
+            'germany': 'Germany',
+            'german': 'Germany',
+            'uk': 'United Kingdom',
+            'united kingdom': 'United Kingdom',
+            'british': 'United Kingdom',
+            'poland': 'Poland',
+            'polish': 'Poland',
+            'bulgaria': 'Bulgaria',
+            'bulgarian': 'Bulgaria',
+        }
+        
+        for key, entity in entity_map.items():
+            if key in desc_lower:
+                return entity
+        
+        return None
+    
+    def _extract_metric_hint(self, description: str) -> str:
+        """Extract metric type from calculation description.
+        
+        Args:
+            description: Calculation description text
+        
+        Returns:
+            Simplified metric description for table mapping
+        """
+        desc_lower = description.lower()
+        
+        # Identify metric type from keywords
+        if 'daycare' in desc_lower or 'childcare' in desc_lower:
+            return 'Daycare cost'
+        elif 'rent' in desc_lower and 'annual' in desc_lower:
+            return 'Annual rent'
+        elif 'rent' in desc_lower:
+            return 'Rent'
+        elif 'net take' in desc_lower or 'take-home' in desc_lower or 'net income' in desc_lower:
+            return 'Net take-home'
+        elif 'tax rate' in desc_lower or 'effective tax' in desc_lower:
+            return 'Effective tax rate'
+        elif 'family benefit' in desc_lower or 'child benefit' in desc_lower:
+            return 'Family benefits'
+        elif 'disposable income' in desc_lower:
+            return 'Disposable income'
+        elif 'gross income' in desc_lower:
+            return 'Gross income'
+        
+        # Return original description if can't categorize
+        return description
+    
+    def _filter_incomplete_table_rows(self, table_content: str, min_valid_cells: int = 2) -> str:
+        """Filter out rows from markdown table that contain too many N/A values.
+        
+        Args:
+            table_content: Markdown table content
+            min_valid_cells: Minimum number of non-N/A cells required to keep a row
+        
+        Returns:
+            Filtered table content with incomplete rows removed
+        """
+        if not table_content or '|' not in table_content:
+            return table_content
+        
+        lines = table_content.strip().split('\n')
+        if len(lines) < 3:  # Need at least header, separator, and one data row
+            return table_content
+        
+        # Preserve header and separator
+        filtered_lines = []
+        header_idx = 0
+        separator_idx = 1
+        
+        # Find actual header line (first line with |)
+        for i, line in enumerate(lines):
+            if '|' in line:
+                header_idx = i
+                break
+        
+        # Separator is typically next line after header
+        if header_idx + 1 < len(lines) and '---' in lines[header_idx + 1]:
+            separator_idx = header_idx + 1
+        
+        # Add header and separator
+        filtered_lines.extend(lines[:separator_idx + 1])
+        
+        # Filter data rows
+        for line in lines[separator_idx + 1:]:
+            if '|' not in line:
+                continue
+            
+            # Count N/A values in this row
+            cells = [cell.strip() for cell in line.split('|')[1:-1]]  # Skip empty strings from split
+            if not cells:
+                continue
+            
+            # Count valid (non-N/A) cells, excluding first cell (entity name)
+            data_cells = cells[1:] if len(cells) > 1 else cells
+            valid_count = sum(1 for cell in data_cells 
+                            if cell and cell.upper() not in ['N/A', 'NA', 'NONE', '', '-'])
+            
+            # Keep row if it has enough valid data
+            if valid_count >= min_valid_cells:
+                filtered_lines.append(line)
+            else:
+                logger.info(f"Filtering out incomplete table row: {cells[0] if cells else 'unknown'} ({valid_count}/{len(data_cells)} valid cells)")
+        
+        # If we filtered out all data rows, return original table
+        if len(filtered_lines) <= separator_idx + 1:
+            logger.warning("All table rows were filtered out. Returning original table.")
+            return table_content
+        
+        return '\n'.join(filtered_lines)
     
     def _determine_optimal_table_section(self, structure: List[str], 
                                         state: EnhancedResearchState,
@@ -5220,10 +5619,12 @@ Based on the available research findings, I can provide the following summary:
         self,
         findings: Dict[str, Any]
     ):
-        """Backward-compatible entry point delegating to metric pipeline helper."""
-
+        """DEPRECATED: Legacy calculation context generation.
+        
+        This method is no longer called since metric pipeline is now mandatory (Phase 2).
+        Kept for reference only. Will be removed in future cleanup.
+        """
         from ..core.metrics.spec_analyzer import generate_calculation_context
-
         return await generate_calculation_context(self, findings)
 
     async def _generate_report_with_structured_pipeline(
@@ -5726,14 +6127,36 @@ STRUCTURAL GUIDANCE (from Phase 1A analysis):
 REQUIRED TABLE STRUCTURE:
 """
 
+        # Extract column list (generic approach - works for any entity/metric combination)
+        columns = []
+        if table_spec and table_spec.column_metrics:
+            columns = table_spec.column_metrics
+        else:
+            # Fallback: extract all unique metrics from comparison data
+            all_metrics = set()
+            for comp in all_comparisons:
+                if hasattr(comp, 'metrics'):
+                    all_metrics.update(comp.metrics.keys())
+            columns = sorted(list(all_metrics))
+
+        # Build example row from first entity to show exact structure
+        example_row = None
+        if all_comparisons and columns:
+            first_comp = all_comparisons[0]
+            entity_name = first_comp.primary_key if hasattr(first_comp, 'primary_key') else str(first_comp)
+            example_cells = [entity_name]
+            metrics = first_comp.metrics if hasattr(first_comp, 'metrics') else {}
+            for col in columns:
+                value = metrics.get(col, 'N/A')
+                example_cells.append(str(value))
+            example_row = example_cells
+
         if table_spec:
             prompt += f"""- Rows: {', '.join(table_spec.row_entities) if table_spec.row_entities else 'All entities in data'}
-- Columns: {', '.join(table_spec.column_metrics) if table_spec.column_metrics else 'All metrics in data'}
 - Expected rows: {len(table_spec.row_entities) if table_spec.row_entities else len(all_comparisons)}
 """
         else:
             prompt += f"""- Use all {len(all_comparisons)} entities as rows
-- Use all metrics from the comparison data as columns
 """
 
         prompt += f"""
@@ -5742,20 +6165,43 @@ PLAN ENTITIES (from research plan): {', '.join(plan_entities) if plan_entities e
 ALL AVAILABLE DATA ({len(all_comparisons)} comparison entries):
 {comparisons_text}
 
-CRITICAL REQUIREMENTS:
+CRITICAL: Create a TableBlock with this EXACT column structure:
+
+headers: ["Entity"] + {columns}
+Number of columns: {len(columns) + 1} (1 entity column + {len(columns)} metric columns)
+
+STRUCTURE RULES (MUST FOLLOW):
+1. First column header: "Entity" (or primary key name)
+2. Remaining {len(columns)} columns: ONE header per metric name from the list above
+3. Do NOT group, combine, or reorganize columns
+4. Do NOT create new column names or scenarios
+5. Column order: EXACTLY as shown in the list above
+
+rows: {len(all_comparisons)} rows, each with EXACTLY {len(columns) + 1} cells:
+- Cell[0]: Entity name from comparison data
+- Cell[1]: Value for metric "{columns[0] if columns else 'metric'}"
+- Cell[2]: Value for metric "{columns[1] if columns and len(columns) > 1 else 'metric'}"
+- ...and so on for each metric in order
+
+CRITICAL - ONE VALUE PER CELL:
+❌ WRONG: "Net: €128k, Rate: 48.8%, Rent: €27k"  (multiple values in one cell)
+❌ WRONG: Creating column "Scenario 1" with grouped values
+✅ CORRECT: Each cell = ONE value for ONE metric
+
+Example first row (using actual data):
+{example_row if example_row else '["Entity1", "value1", "value2", ...]'}
+
+REQUIREMENTS:
 1. Include ALL {len(all_comparisons)} entities as table rows - DO NOT TRUNCATE
-2. Include ALL metrics from the data as columns
+2. Use EXACTLY the {len(columns)} metric columns listed above - NO MORE, NO LESS
 3. EVERY cell must have a value from the data above
 4. Use 'N/A' or empty string ONLY if data is genuinely missing
 5. Maintain the order and completeness of entities from the data
 6. Do NOT limit, sample, or reduce the number of rows
 
-Create a TableBlock with:
-- headers: List of ALL column names (metrics)
-- rows: List of ALL {len(all_comparisons)} rows with cell values
-- caption: Brief description
-
-REMEMBER: A half-empty table means INCOMPLETE data extraction. Use ALL data provided above."""
+Build ALL {len(all_comparisons)} rows following this exact pattern.
+Use data from the comparison entries above - match entity names and metric values exactly.
+"""
 
         messages = [
             SystemMessage(content="You are a table generation specialist. Create COMPLETE tables using ALL provided data. Never truncate or limit rows."),
