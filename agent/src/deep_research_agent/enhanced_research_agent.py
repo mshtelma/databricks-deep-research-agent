@@ -574,7 +574,7 @@ class EnhancedResearchAgent(ResponsesAgent):
         )
         workflow.add_node("planner", self.workflow_nodes.planner_node)
         workflow.add_node("researcher", self.workflow_nodes.researcher_node)
-        workflow.add_node("calculation_planning", self.workflow_nodes.calculation_planning_node)  # OLD: Legacy metric pipeline
+        # Removed: calculation_planning node (legacy MetricPipeline code)
         workflow.add_node("calculation_agent", self.workflow_nodes.calculation_agent_node)  # NEW: UnifiedPlan execution
         workflow.add_node("fact_checker", self.workflow_nodes.fact_checker_node)
         workflow.add_node("reporter", self.workflow_nodes.reporter_node)
@@ -634,18 +634,16 @@ class EnhancedResearchAgent(ResponsesAgent):
                 # SAFETY: Handle None or invalid action
                 if not action:
                     logger.warning(f"[PLANNER_ROUTER] Coordinator returned no action - defaulting to SUFFICIENT")
-                    if state.get("metric_capability_enabled", False):
-                        return "calculation_planning"
+                    # Route to calculation_agent if UnifiedPlan exists, otherwise to fact_checker/reporter
+                    if state.get("unified_plan"):
+                        return "calculation_agent"
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
                 if action == "SUFFICIENT":
                     logger.info(f"[PLANNER_ROUTER] Coordination decided SUFFICIENT - routing to next phase")
-                    # NEW: Route to calculation_agent if UnifiedPlan exists
+                    # Route to calculation_agent if UnifiedPlan exists
                     if state.get("unified_plan"):
                         return "calculation_agent"
-                    # Fallback to legacy calculation_planning if metric_capability_enabled (old path)
-                    if state.get("metric_capability_enabled", False):
-                        return "calculation_planning"
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
                 elif action in ["EXTEND", "VERIFY"]:
@@ -655,12 +653,9 @@ class EnhancedResearchAgent(ResponsesAgent):
 
                 else:
                     logger.warning(f"[PLANNER_ROUTER] Unexpected action '{action}' - defaulting to next phase")
-                    # NEW: Route to calculation_agent if UnifiedPlan exists
+                    # Route to calculation_agent if UnifiedPlan exists
                     if state.get("unified_plan"):
                         return "calculation_agent"
-                    # Fallback to legacy calculation_planning if metric_capability_enabled (old path)
-                    if state.get("metric_capability_enabled", False):
-                        return "calculation_planning"
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
             if state.get("enable_human_feedback") and not state.get("auto_accept_plan"):
@@ -676,7 +671,7 @@ class EnhancedResearchAgent(ResponsesAgent):
             planner_router,
             {
                 "researcher": "researcher",
-                "calculation_planning": "calculation_planning",  # OLD: Legacy metric pipeline
+                # Removed: calculation_planning (legacy MetricPipeline code)
                 "calculation_agent": "calculation_agent",  # NEW: UnifiedPlan execution
                 "fact_checker": "fact_checker",  # CRITICAL: Add this edge for coordination
                 "human_feedback": "human_feedback",
@@ -793,8 +788,9 @@ class EnhancedResearchAgent(ResponsesAgent):
                                 f"[ROUTER] Research loops limit reached ({research_loops}/{max_research_loops}) - "
                                 f"skipping coordination, routing to next phase"
                             )
-                            if state.get("metric_capability_enabled", False):
-                                return "calculation_planning"
+                            # Route to calculation_agent if UnifiedPlan exists
+                            if state.get("unified_plan"):
+                                return "calculation_agent"
                             return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
                         # Under loop limit - planner will coordinate
@@ -824,9 +820,9 @@ class EnhancedResearchAgent(ResponsesAgent):
                         logger.info(
                             "[ROUTER] Found section results - assuming complete"
                         )
-                        # Check if calculation planning should be done first
-                        if state.get("metric_capability_enabled", False):
-                            return "calculation_planning"
+                        # Route to calculation_agent if UnifiedPlan exists
+                        if state.get("unified_plan"):
+                            return "calculation_agent"
                         return (
                             "fact_checker"
                             if state.get("enable_grounding", True)
@@ -837,9 +833,9 @@ class EnhancedResearchAgent(ResponsesAgent):
                         logger.warning(
                             "[ROUTER] Error in step checking and no section results - completing research phase"
                         )
-                        # Check if calculation planning should be done first
-                        if state.get("metric_capability_enabled", False):
-                            return "calculation_planning"
+                        # Route to calculation_agent if UnifiedPlan exists
+                        if state.get("unified_plan"):
+                            return "calculation_agent"
                         return (
                             "fact_checker"
                             if state.get("enable_grounding", True)
@@ -848,9 +844,9 @@ class EnhancedResearchAgent(ResponsesAgent):
             else:
                 # No plan - should not happen but handle gracefully
                 logger.warning("[ROUTER] No plan found - assuming complete")
-                # Check if calculation planning should be done first
-                if state.get("metric_capability_enabled", False):
-                    return "calculation_planning"
+                # Route to calculation_agent if UnifiedPlan exists
+                if state.get("unified_plan"):
+                    return "calculation_agent"
                 return (
                     "fact_checker"
                     if state.get("enable_grounding", True)
@@ -865,7 +861,7 @@ class EnhancedResearchAgent(ResponsesAgent):
             "researcher",
             researcher_router,
             {
-                "calculation_planning": "calculation_planning",  # OLD: Legacy metric pipeline
+                # Removed: calculation_planning (legacy MetricPipeline code)
                 "calculation_agent": "calculation_agent",  # NEW: UnifiedPlan execution
                 "fact_checker": "fact_checker",
                 "reporter": "reporter",
@@ -875,10 +871,10 @@ class EnhancedResearchAgent(ResponsesAgent):
         )
 
         # Calculation routing
-        # Note: Both nodes return Command(goto=...) which handles routing
+        # Note: calculation_agent returns Command(goto=...) which handles routing
         # So edges are implicit via Command, but we add them here for graph completeness
-        workflow.add_edge("calculation_planning", "reporter")  # OLD: Default path
-        workflow.add_edge("calculation_agent", "reporter")  # NEW: Default path
+        # Removed: calculation_planning edge (legacy MetricPipeline code)
+        workflow.add_edge("calculation_agent", "reporter")  # Default path
 
         # Import routing policy for bulletproof routing decisions
         from .core.routing_policy import determine_next_node, TerminationReason

@@ -29,7 +29,7 @@ from . import (
     get_logger
 )
 from .observation_models import StructuredObservation
-from .metrics.state import MetricPipelineState
+# Legacy MetricPipelineState removed - now using calculation_results from calculation_agent
 from .metrics.unified_models import UnifiedPlan
 
 # Initialize logger
@@ -46,75 +46,23 @@ def merge_lists(left: List[Any], right: List[Any]) -> List[Any]:
     """
     Reducer that merges two lists with memory-conscious limits.
 
-    Uses proper type inspection instead of fragile string matching heuristics.
-    This is critical for correctly handling observation dicts, search results,
-    and other state list fields.
+    Uses TypeAwareListMergeManager for proper type detection with Pydantic validation
+    instead of fragile dict key inspection. This is critical for correctly handling
+    observation dicts, search results, and other state list fields.
+
+    This is a LangGraph reducer function - maintains compatibility with existing
+    state annotations while using the refactored TypeAwareListMergeManager internally.
     """
-    if not left:
-        return right
-    if not right:
-        return left
+    from .advanced_utilities import TypeAwareListMergeManager
 
-    # MEMORY OPTIMIZATION: Limit list sizes to prevent unbounded growth
-    combined = left + right
-
-    # Apply memory-conscious limits based on list content type
-    from .memory_config import MemoryOptimizedConfig
-
-    MAX_OBSERVATIONS = MemoryOptimizedConfig.MAX_OBSERVATIONS        # Keep most recent observations
-    MAX_SEARCH_RESULTS = MemoryOptimizedConfig.MAX_SEARCH_RESULTS   # Keep most relevant search results
-    MAX_CITATIONS = MemoryOptimizedConfig.MAX_CITATIONS             # Citations are smaller, allow more
-    MAX_REFLECTIONS = MemoryOptimizedConfig.MAX_REFLECTIONS         # Limit reflection history
-    MAX_AGENT_HANDOFFS = MemoryOptimizedConfig.MAX_AGENT_HANDOFFS   # Limit handoff history
-    MAX_GENERAL = MemoryOptimizedConfig.MAX_GENERAL_LIST_SIZE        # Default limit for other lists
-
-    # Determine appropriate limit using proper dict structure inspection
-    # instead of fragile hasattr/string matching
-    if combined:
-        first = combined[0]
-
-        if isinstance(first, dict):
-            # Inspect dict structure to determine type
-            # StructuredObservation dict: has content, entity_tags, metric_values
-            if "content" in first and "entity_tags" in first and "metric_values" in first:
-                limit = MAX_OBSERVATIONS
-            # SearchResult dict: has url, score, title
-            elif "url" in first and "score" in first:
-                limit = MAX_SEARCH_RESULTS
-            # Citation dict: has source, url, snippet
-            elif "source" in first and "snippet" in first:
-                limit = MAX_CITATIONS
-            # Agent handoff dict: has from_agent, to_agent
-            elif "from_agent" in first and "to_agent" in first:
-                limit = MAX_AGENT_HANDOFFS
-            else:
-                # Generic dict
-                limit = MAX_GENERAL
-
-        elif isinstance(first, str):
-            # String observations/reflections
-            # Longer strings are more likely to be observations
-            limit = MAX_OBSERVATIONS if len(first) > 100 else MAX_GENERAL
-
-        else:
-            # Object types - check type directly
-            type_name = type(first).__name__
-            if "SearchResult" in type_name:
-                limit = MAX_SEARCH_RESULTS
-            elif "Citation" in type_name:
-                limit = MAX_CITATIONS
-            elif "Observation" in type_name:
-                limit = MAX_OBSERVATIONS
-            else:
-                limit = MAX_GENERAL
-    else:
-        limit = MAX_GENERAL
-
-    # Keep most recent items if over limit
-    if len(combined) > limit:
-        combined = combined[-limit:]
-
-    return combined
+    # Use TypeAwareListMergeManager for type-aware merging
+    # This replaces 72 lines of fragile dict inspection with robust type detection
+    merger = TypeAwareListMergeManager()
+    return merger.merge_with_type_limits(
+        left=left,
+        right=right,
+        deduplicate=False  # LangGraph handles deduplication at higher level
+    )
 
 
 def use_latest_value(left: Any, right: Any) -> Any:

@@ -1825,44 +1825,47 @@ def _parse_data_id(data_id: str) -> tuple[str, str]:
     return entity, metric
 
 
-async def _execute_unified_plan(
-    reporter,
-    plan,
-    observations: List[Dict]
-) -> CalculationContext:
-    """Execute unified plan to generate response.
+def _build_unified_observation_index(observations: List[Dict]) -> Dict[str, Dict]:
+    """Build observation index for fast lookup by step_id.
 
     Args:
-        reporter: Reporter instance
-        plan: UnifiedPlan with explicit data links
-        observations: Research observations
+        observations: List of research observations
 
     Returns:
-        CalculationContext with calculations and comparisons
+        Dictionary mapping step_id to observation
     """
-    logger.info(
-        f"[UNIFIED EXECUTION] Starting execution of plan with "
-        f"{len(plan.data_sources)} data sources, {len(plan.response_tables)} tables"
-    )
-
-    # Build observation index for fast lookup
     obs_index = {}
     for i, obs in enumerate(observations):
         step_id = obs.get('step_id', f'obs_{i}')
         obs_index[step_id] = obs
 
-    logger.debug(
-        f"[UNIFIED EXECUTION] Built observation index with {len(obs_index)} entries"
-    )
+    logger.debug(f"[UNIFIED EXECUTION] Built observation index with {len(obs_index)} entries")
+    return obs_index
 
-    # Step 1: Extract/calculate all data sources
+
+async def _process_unified_data_sources(
+    reporter,
+    plan,
+    obs_index: Dict[str, Dict],
+    observations: List[Dict]
+) -> tuple:
+    """Extract and calculate all data sources from the unified plan.
+
+    Args:
+        reporter: Reporter instance
+        plan: UnifiedPlan with data sources
+        obs_index: Observation index for fast lookup
+        observations: Original observations list
+
+    Returns:
+        Tuple of (data_values dict, calculations list, extraction_stats dict)
+    """
     data_values = {}
     calculations = []
     extraction_count = 0
     calculation_count = 0
     failed_count = 0
 
-    # FIX Layer 4: Track extraction analytics for monitoring
     extraction_stats = {
         "total_extractions": 0,
         "successful_extractions": 0,
@@ -1877,16 +1880,12 @@ async def _execute_unified_plan(
 
     for data_id, source in plan.data_sources.items():
         logger.debug(
-            f"[UNIFIED EXECUTION] Processing data source '{data_id}' "
-            f"(type: {source.source_type})"
+            f"[UNIFIED EXECUTION] Processing data source '{data_id}' (type: {source.source_type})"
         )
 
         if source.source_type == "extract":
-            # CRITICAL FIX: Use pre-extracted value from MetricSpec if it exists!
-            # The hybrid planner already extracted values from observation.metric_values
-            # Re-extraction is redundant and often fails due to truncated content
+            # Use pre-extracted value if available
             if source.value is not None:
-                # Trust the pre-extracted value from planner/researcher
                 data_values[data_id] = source.value
                 extraction_count += 1
                 extraction_stats["successful_extractions"] += 1
@@ -1895,18 +1894,14 @@ async def _execute_unified_plan(
                     f"(source: {source.observation_id}, path: '{source.extraction_path}')"
                 )
             else:
-                # Only attempt extraction if value is not pre-set (fallback for edge cases)
+                # Attempt extraction from observation
                 logger.info(
                     f"[UNIFIED EXECUTION] ⚠️ No pre-extracted value for '{data_id}', "
                     f"attempting extraction from observation..."
                 )
 
-                # Extract from observation
-                # FIX: Use multi-strategy observation finder (Layer 0)
                 extraction_stats["total_extractions"] += 1
                 obs, match_type = _find_best_observation(source, obs_index, observations)
-
-                # FIX Layer 4: Track match type statistics
                 extraction_stats["match_types"][match_type] += 1
 
                 if obs:
@@ -1922,7 +1917,7 @@ async def _execute_unified_plan(
                     )
 
                 if obs:
-                    # FIX #2: Try LLM extraction first, fall back to regex if it fails
+                    # Try LLM extraction first, fall back to regex
                     try:
                         value = await _extract_value_from_observation_llm(
                             reporter, obs, source.extraction_path, data_id
@@ -1936,10 +1931,9 @@ async def _execute_unified_plan(
 
                     data_values[data_id] = value
 
-                    # FIX #5: Enhanced logging to track extraction success/failure
                     if value is not None:
                         extraction_count += 1
-                        extraction_stats["successful_extractions"] += 1  # FIX Layer 4
+                        extraction_stats["successful_extractions"] += 1
                         logger.info(
                             f"[UNIFIED EXECUTION] ✓ Extracted '{data_id}' = {value} "
                             f"from observation {obs.get('step_id', 'unknown')} "
@@ -1947,7 +1941,7 @@ async def _execute_unified_plan(
                         )
                     else:
                         failed_count += 1
-                        extraction_stats["failed_extractions"] += 1  # FIX Layer 4
+                        extraction_stats["failed_extractions"] += 1
                         logger.warning(
                             f"[UNIFIED EXECUTION] ✗ Extraction FAILED for '{data_id}': "
                             f"no value found in observation {obs.get('step_id', 'unknown')} "
@@ -1961,21 +1955,19 @@ async def _execute_unified_plan(
                     )
                     data_values[data_id] = None
                     failed_count += 1
-                    extraction_stats["failed_extractions"] += 1  # FIX Layer 4
+                    extraction_stats["failed_extractions"] += 1
 
         elif source.source_type == "calculate":
             # Calculate using formula
             try:
-                # Start with standard variables that formulas commonly use
                 inputs = {
-                    'gross': 100000,  # Standard gross salary for ratio calculations
+                    'gross': 100000,
                     'hours_per_week': 40,
                     'weeks_per_year': 52,
                     'months_per_year': 12,
                     'working_days_per_year': 250
                 }
 
-                # Add input values from data_values (these override standard vars if same name)
                 missing_inputs = []
                 for input_id in source.required_inputs:
                     input_val = data_values.get(input_id)
@@ -1988,11 +1980,9 @@ async def _execute_unified_plan(
                         f"[UNIFIED EXECUTION] Calculation '{data_id}' missing inputs: {missing_inputs}"
                     )
 
-                # Evaluate formula with standard variables + extracted data
                 result = _evaluate_formula(source.formula, inputs)
                 data_values[data_id] = result
 
-                # Create Calculation object
                 calculations.append(Calculation(
                     description=f"Calculate {data_id}",
                     formula=source.formula,
@@ -2016,14 +2006,28 @@ async def _execute_unified_plan(
                 data_values[data_id] = None
                 failed_count += 1
 
-    # Log execution summary
     logger.info(
         f"[UNIFIED EXECUTION] Data source processing complete: "
         f"{extraction_count} extracted, {calculation_count} calculated, "
         f"{failed_count} failed, {len(data_values)} total values"
     )
 
-    # Step 2: Build response tables as ComparisonEntry objects
+    return data_values, calculations, extraction_stats
+
+
+def _build_unified_response_tables(
+    plan,
+    data_values: Dict[str, Any]
+) -> List[ComparisonEntry]:
+    """Build ComparisonEntry objects from response tables.
+
+    Args:
+        plan: UnifiedPlan with response tables
+        data_values: Dictionary of extracted/calculated values
+
+    Returns:
+        List of ComparisonEntry objects
+    """
     comparisons = []
 
     for table in plan.response_tables:
@@ -2032,20 +2036,18 @@ async def _execute_unified_plan(
             f"{len(table.cells)} cells across {len(table.rows)} rows"
         )
 
-        # FIX: Extract actual column names from cells to detect mismatches
+        # Extract actual column names from cells
         actual_columns_in_cells = set()
         for cell in table.cells:
             actual_columns_in_cells.add(cell.column)
-        
-        # Compare with declared table.columns
+
         declared_columns = set(table.columns)
-        
+
         if actual_columns_in_cells != declared_columns:
             logger.warning(
                 f"[UNIFIED EXECUTION] Column mismatch in table '{table.title}': "
                 f"declared={sorted(declared_columns)}, actual={sorted(actual_columns_in_cells)}"
             )
-            # Use actual columns from cells (source of truth)
             consistent_columns = sorted(list(actual_columns_in_cells))
         else:
             consistent_columns = table.columns
@@ -2053,7 +2055,7 @@ async def _execute_unified_plan(
                 f"[UNIFIED EXECUTION] Column names validated: {len(consistent_columns)} columns match"
             )
 
-        # Group cells by row to create ComparisonEntry objects
+        # Group cells by row
         row_cells = {}
         for cell in table.cells:
             if cell.row not in row_cells:
@@ -2074,27 +2076,35 @@ async def _execute_unified_plan(
                 source_observation_ids=[]
             ))
             logger.debug(
-                f"[UNIFIED EXECUTION] Created comparison for '{row}' "
-                f"with {len(metrics)} metrics"
+                f"[UNIFIED EXECUTION] Created comparison for '{row}' with {len(metrics)} metrics"
             )
-        
-        # FIX: Log what keys are actually in the ComparisonEntry objects
+
+        # Log ComparisonEntry keys
         for comp in comparisons[row_start_idx:]:
             logger.info(
                 f"[UNIFIED EXECUTION] ComparisonEntry '{comp.primary_key}': "
                 f"metrics keys={sorted(comp.metrics.keys())}"
             )
-        
-        # Store consistent_columns for later use in TableSpec
+
+        # Store consistent columns for table spec creation
         table._consistent_columns = consistent_columns
 
-    # FIX #1: Convert unified plan tables to TableSpec format for pipeline compatibility
-    # Without this, the StructuredReportPipeline can't build tables (it iterates over table_specifications)
+    return comparisons
+
+
+def _create_unified_table_specs(plan) -> List:
+    """Convert unified plan tables to TableSpec format.
+
+    Args:
+        plan: UnifiedPlan with response tables
+
+    Returns:
+        List of TableSpec objects
+    """
     from ..report_generation.models import TableSpec
-    
+
     table_specs = []
     for table in plan.response_tables:
-        # FIX: Use consistent_columns (validated from actual cells) instead of table.columns
         consistent_columns = getattr(table, '_consistent_columns', table.columns)
         table_specs.append(TableSpec(
             table_id=table.table_id,
@@ -2107,60 +2117,31 @@ async def _execute_unified_plan(
             f"{len(table.rows)} rows × {len(consistent_columns)} columns (validated)"
         )
 
-    # FIX #5: Log data quality metrics for debugging
-    populated_values = sum(1 for v in data_values.values() if v is not None)
-    none_values = len(data_values) - populated_values
-    valid_comparisons = sum(
-        1 for comp in comparisons
-        if comp.metrics and any(v is not None for v in comp.metrics.values())
-    )
-    
-    logger.info(
-        f"[UNIFIED EXECUTION] Data Quality: "
-        f"{populated_values}/{len(data_values)} values populated ({none_values} None), "
-        f"{valid_comparisons}/{len(comparisons)} comparisons have valid data"
-    )
-    
-    if populated_values == 0:
-        logger.error(
-            "[UNIFIED EXECUTION] CRITICAL: All extracted values are None! "
-            "This will result in empty tables with N/A values."
-        )
+    return table_specs
 
-    # FIX Layer 4: Log extraction analytics for monitoring and debugging
-    success_rate = (
-        extraction_stats["successful_extractions"] / extraction_stats["total_extractions"] * 100
-        if extraction_stats["total_extractions"] > 0 else 0
-    )
-    logger.info(
-        f"[UNIFIED EXECUTION] FIX Layer 4 Analytics: "
-        f"Success Rate: {success_rate:.1f}% "
-        f"({extraction_stats['successful_extractions']}/{extraction_stats['total_extractions']} extractions)"
-    )
-    logger.info(
-        f"[UNIFIED EXECUTION] Match Strategy Distribution: "
-        f"direct_id={extraction_stats['match_types']['direct_id']}, "
-        f"entity_match={extraction_stats['match_types']['entity_match']}, "
-        f"keyword_match={extraction_stats['match_types']['keyword_match']}, "
-        f"not_found={extraction_stats['match_types']['not_found']}"
-    )
 
-    # FIX Layer 2: Build extracted_data from data_values for data flow consistency
-    # This ensures table rendering and other components have access to extracted values
+def _build_unified_extracted_data(data_values: Dict[str, Any]) -> List[DataPoint]:
+    """Build DataPoint objects from extracted/calculated values.
+
+    Args:
+        data_values: Dictionary of data_id to value mappings
+
+    Returns:
+        List of DataPoint objects
+    """
     extracted_data_points = []
+
     for data_id, value in data_values.items():
         if value is not None:
-            # Parse entity and metric from data_id
             entity, metric = _parse_data_id(data_id)
 
-            # Create DataPoint with extracted value
             extracted_data_points.append(DataPoint(
                 entity=entity,
                 metric=metric,
                 value=value,
-                confidence=0.9,  # High confidence from successful extraction
-                source_observation_id=None,  # FIXED: Use correct field name (was source_id)
-                unit=""  # Unit info may be in source.unit if available
+                confidence=0.9,
+                source_observation_id=None,
+                unit=""
             ))
 
             logger.debug(
@@ -2173,9 +2154,86 @@ async def _execute_unified_plan(
         f"extracted values to DataPoints (was hardcoded to 0)"
     )
 
-    # Create CalculationContext
+    return extracted_data_points
+
+
+async def _execute_unified_plan(
+    reporter,
+    plan,
+    observations: List[Dict]
+) -> CalculationContext:
+    """Execute unified plan - orchestrator for data extraction and table building.
+
+    Args:
+        reporter: Reporter instance
+        plan: UnifiedPlan with explicit data links
+        observations: Research observations
+
+    Returns:
+        CalculationContext with calculations and comparisons
+    """
+    logger.info(
+        f"[UNIFIED EXECUTION] Starting execution of plan with "
+        f"{len(plan.data_sources)} data sources, {len(plan.response_tables)} tables"
+    )
+
+    # Step 1: Build observation index
+    obs_index = _build_unified_observation_index(observations)
+
+    # Step 2: Extract and calculate all data sources
+    data_values, calculations, extraction_stats = await _process_unified_data_sources(
+        reporter, plan, obs_index, observations
+    )
+
+    # Step 3: Build response tables as ComparisonEntry objects
+    comparisons = _build_unified_response_tables(plan, data_values)
+
+    # Step 4: Convert to TableSpec format for pipeline compatibility
+    table_specs = _create_unified_table_specs(plan)
+
+    # Step 5: Log data quality metrics
+    populated_values = sum(1 for v in data_values.values() if v is not None)
+    none_values = len(data_values) - populated_values
+    valid_comparisons = sum(
+        1 for comp in comparisons
+        if comp.metrics and any(v is not None for v in comp.metrics.values())
+    )
+
+    logger.info(
+        f"[UNIFIED EXECUTION] Data Quality: "
+        f"{populated_values}/{len(data_values)} values populated ({none_values} None), "
+        f"{valid_comparisons}/{len(comparisons)} comparisons have valid data"
+    )
+
+    if populated_values == 0:
+        logger.error(
+            "[UNIFIED EXECUTION] CRITICAL: All extracted values are None! "
+            "This will result in empty tables with N/A values."
+        )
+
+    # Log extraction analytics
+    success_rate = (
+        extraction_stats["successful_extractions"] / extraction_stats["total_extractions"] * 100
+        if extraction_stats["total_extractions"] > 0 else 0
+    )
+    logger.info(
+        f"[UNIFIED EXECUTION] FIX Layer 4 Analytics: Success Rate: {success_rate:.1f}% "
+        f"({extraction_stats['successful_extractions']}/{extraction_stats['total_extractions']} extractions)"
+    )
+    logger.info(
+        f"[UNIFIED EXECUTION] Match Strategy Distribution: "
+        f"direct_id={extraction_stats['match_types']['direct_id']}, "
+        f"entity_match={extraction_stats['match_types']['entity_match']}, "
+        f"keyword_match={extraction_stats['match_types']['keyword_match']}, "
+        f"not_found={extraction_stats['match_types']['not_found']}"
+    )
+
+    # Step 6: Build extracted data points
+    extracted_data_points = _build_unified_extracted_data(data_values)
+
+    # Step 7: Create CalculationContext
     calc_context = CalculationContext(
-        extracted_data=extracted_data_points,  # FIX Layer 2: Populated from successful extractions
+        extracted_data=extracted_data_points,
         calculations=calculations,
         key_comparisons=comparisons,
         summary_insights=plan.narrative_points,
@@ -2185,7 +2243,7 @@ async def _execute_unified_plan(
             'request_analysis': plan.request_analysis.model_dump(),
             'tables': [t.model_dump() for t in plan.response_tables]
         },
-        table_specifications=table_specs,  # FIX #1: Populate instead of leaving empty
+        table_specifications=table_specs,
         structural_understanding=plan.request_analysis.what_user_wants
     )
 
@@ -2195,7 +2253,7 @@ async def _execute_unified_plan(
         f"{len(plan.narrative_points)} narrative points"
     )
 
-    # FIX Layer 2: Validate that extracted_data matches expected count
+    # Validate extracted_data count
     actual_data_points = len(calc_context.extracted_data)
     if actual_data_points != populated_values:
         logger.warning(

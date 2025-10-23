@@ -37,9 +37,8 @@ from .formula_evaluator import (
     execute_calculation_with_safety,
 )
 
-# Existing components
-from .state import MetricPipelineState
-from .pipeline import MetricPipeline
+# Legacy components removed (pipeline.py, planner.py, state.py, instrumentation.py, planner_prompts.py)
+# Now using only UnifiedPlan-based calculation via calculation_agent
 
 __all__ = [
     # NEW: Calculation Agent exports
@@ -62,13 +61,11 @@ __all__ = [
     "SimpleFormulaEvaluator",
     "FormulaEvaluation",
     "execute_calculation_with_safety",
-    # Existing exports
-    "MetricPipelineState",
+    # Active metric models (still used)
     "MetricSpecBundle",
     "CalculationTask",
     "CalculationPlan",
     "CalculationEvent",
     "CalculationValidation",
     "CalculationProvenance",
-    "MetricPipeline",
 ]

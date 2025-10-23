@@ -129,6 +129,8 @@ class StateCapture:
                 "enable_grounding": state.get("enable_grounding"),
                 "citation_style": state.get("citation_style"),
                 "query_constraints": self._simplify_query_constraints(state.get("query_constraints")),  # CRITICAL: Needed for hybrid planner decision
+                "unified_plan": self._simplify_unified_plan(state.get("unified_plan")),  # CRITICAL FIX: Needed for Tier 1 Hybrid mode
+                "calculation_results": state.get("calculation_results"),  # CRITICAL FIX: Output from executing unified_plan
             })
 
         elif agent_name == "planner":
@@ -344,7 +346,13 @@ class StateCapture:
             return None
 
         # Convert to dict if it's an object
-        if hasattr(constraints, '__dict__'):
+        # CRITICAL: Use dataclasses.asdict() for dataclasses to recursively convert nested dataclasses
+        from dataclasses import is_dataclass, asdict
+
+        if is_dataclass(constraints) and not isinstance(constraints, type):
+            # It's a dataclass instance - use asdict() for recursive conversion
+            constraints_dict = asdict(constraints)
+        elif hasattr(constraints, '__dict__'):
             constraints_dict = constraints.__dict__
         elif hasattr(constraints, 'dict'):
             constraints_dict = constraints.dict()
@@ -353,13 +361,45 @@ class StateCapture:
         else:
             return {"_raw": str(constraints)[:200]}
 
+        # Scenarios should already be dicts after asdict(), but double-check
+        scenarios = constraints_dict.get("scenarios", [])
+        if scenarios and not isinstance(scenarios[0], dict):
+            print(f"⚠️ Warning: Scenarios not converted to dicts by asdict(): {type(scenarios[0])}")
+
         return {
             "entities": constraints_dict.get("entities", []),
             "metrics": constraints_dict.get("metrics", []),
-            "scenarios": constraints_dict.get("scenarios", []),
+            "scenarios": scenarios,  # Already converted by asdict()
             "time_period": constraints_dict.get("time_period"),
             "data_quality_requirements": constraints_dict.get("data_quality_requirements"),
         }
+
+    def _simplify_unified_plan(self, plan: Any) -> Optional[Dict]:
+        """
+        Simplify UnifiedPlan to essential fields for testing.
+
+        UnifiedPlan is a complex Pydantic model with data_sources, table_specs, etc.
+        We serialize it properly to enable Tier 1 Hybrid mode testing.
+        """
+        if not plan:
+            return None
+
+        # Convert to dict if it's a Pydantic model
+        if hasattr(plan, 'model_dump'):
+            # Pydantic v2
+            plan_dict = plan.model_dump()
+        elif hasattr(plan, 'dict'):
+            # Pydantic v1 or custom object
+            plan_dict = plan.dict()
+        elif isinstance(plan, dict):
+            # Already a dict
+            plan_dict = plan
+        else:
+            return {"_raw": str(plan)[:500]}
+
+        # Return the full plan dict for complete testing
+        # UnifiedPlan is already well-structured and necessary for calculation testing
+        return plan_dict
 
     def _extract_recent_messages(self, messages: List) -> List[Dict]:
         """Extract ALL messages for coordinator - NO TRUNCATION."""

@@ -40,7 +40,7 @@ from ..core.observation_selector import ObservationSelector
 from ..core.plan_models import StepStatus
 from ..core.response_handlers import parse_structured_response, ParsedResponse, ResponseType
 from ..core.table_preprocessor import TablePreprocessor
-from ..core.metrics import MetricPipeline, MetricPipelineState
+# Removed: MetricPipeline and MetricPipelineState (deleted in metrics cleanup)
 from ..core.adaptive_structure_validator import AdaptiveStructureValidator
 
 
@@ -127,160 +127,12 @@ class ReporterAgent:
         else:
             self.debug_logger = None
 
-        metrics_config = self.config.get("metrics", {})
-        self.metric_capability_enabled = metrics_config.get("enabled", True)
-        use_pipeline_v2 = metrics_config.get("use_pipeline_v2", False)
-        self.metric_pipeline_enabled = (
-            self.metric_capability_enabled
-            and use_pipeline_v2
-            and self.llm is not None
-        )
-        self.metric_pipeline = (
-            MetricPipeline(self, self.llm, config=self.config)
-            if self.metric_capability_enabled and self.llm is not None
-            else None
-        )
-        self.metric_pipeline_state: Optional[MetricPipelineState] = (
-            MetricPipelineState() if self.metric_pipeline_enabled else None
-        )
+        # Note: Legacy metric pipeline code removed (MetricPipeline/MetricPipelineState deleted)
+        # Metric calculations now handled by CalculationAgent using UnifiedPlan architecture
 
-        # Fail-fast: Validate required pipeline mode configuration
-        if use_pipeline_v2 and self.llm is None:
-            raise ValueError(
-                "Metric pipeline is required (use_pipeline_v2=True) but no LLM provided. "
-                "Either provide a valid LLM or set use_pipeline_v2=False for optional mode."
-            )
-
-    def _serialize_metric_state_for_update(self, calc_context) -> Optional[Dict[str, Any]]:
-        """Serialize metric pipeline state for workflow propagation."""
-
-        if self.metric_pipeline_state:
-            self.metric_pipeline_state.calculation_context = calc_context
-            self.metric_pipeline_state.touch()
-            return self.metric_pipeline_state.to_dict()
-
-        if self.metric_capability_enabled and calc_context is not None:
-            temp_state = MetricPipelineState(
-                spec_bundle=None,
-                calculation_plan=None,
-                calculation_context=calc_context,
-                execution_summary=[],
-                pending_research_queries=[],
-            )
-            temp_state.touch()
-            return temp_state.to_dict()
-
-        return None
-
-    async def _get_calculation_context(
-        self,
-        sanitized_findings: Dict[str, Any]
-    ) -> Optional[Any]:
-        """
-        Get calculation context from metric pipeline with proper mode handling.
-
-        This method implements fail-fast behavior for pipeline initialization:
-        - If metrics disabled → return None (no pipeline needed)
-        - If pipeline required but unavailable → raise ConfigurationError
-        - If pipeline optional but unavailable → log warning, return None
-        - If pipeline available → run it and return context
-
-        Args:
-            sanitized_findings: Sanitized findings from research
-
-        Returns:
-            CalculationContext if successful, None if pipeline disabled/unavailable
-
-        Raises:
-            RuntimeError: If pipeline is required (use_pipeline_v2=True) but not available
-        """
-        # Check if metrics are disabled
-        metrics_config = self.config.get("metrics", {})
-        metrics_enabled = metrics_config.get("enabled", True)
-
-        if not metrics_enabled:
-            logger.info("Metrics disabled, skipping calculation context")
-            return None
-
-        # Check pipeline availability and mode
-        use_pipeline_v2 = metrics_config.get("use_pipeline_v2", False)
-        use_pipeline = metrics_config.get("use_pipeline", False)
-
-        if not self.metric_pipeline:
-            # Pipeline not available - check if it's required
-            if use_pipeline_v2:
-                # Required mode - this is a configuration error
-                raise RuntimeError(
-                    "Metric pipeline is required (use_pipeline_v2=True) but not initialized. "
-                    "This indicates LLM is not available or pipeline initialization failed. "
-                    "Either provide a valid LLM or set use_pipeline_v2=False."
-                )
-            elif use_pipeline:
-                # Optional mode - log warning and continue without pipeline
-                logger.warning(
-                    "Metric pipeline requested (use_pipeline=True) but not available. "
-                    "Continuing without calculation context. "
-                    "This may result in reports without structured tables/metrics."
-                )
-                return None
-            else:
-                # Pipeline not requested
-                logger.info("Metric pipeline not enabled, skipping calculation context")
-                return None
-
-        # Pipeline is available - run it
-        try:
-            logger.info("[METRIC PIPELINE] Running calculation pipeline")
-            metric_state, metric_messages = await self.metric_pipeline.run(
-                sanitized_findings,
-                self.metric_pipeline_state,
-            )
-            self.metric_pipeline_state = metric_state
-            calc_context = metric_state.calculation_context
-
-            # Log pipeline messages
-            for message in metric_messages:
-                logger.info(
-                    "[METRIC PIPELINE] %s",
-                    getattr(message, "content", message),
-                )
-
-            # Validate that pipeline produced context
-            if calc_context is None:
-                if use_pipeline_v2:
-                    # Required mode - context is mandatory
-                    raise ValueError(
-                        "Metric pipeline failed to generate calculation context. "
-                        "Cannot proceed with report generation in required mode."
-                    )
-                else:
-                    # Optional mode - log warning and continue
-                    logger.warning(
-                        "Metric pipeline returned None for calculation context. "
-                        "Continuing without structured tables/metrics."
-                    )
-                    return None
-
-            logger.info(
-                "[METRIC PIPELINE] Context generated: %d data points, %d calculations",
-                len(calc_context.extracted_data) if hasattr(calc_context, 'extracted_data') else 0,
-                len(calc_context.calculations) if hasattr(calc_context, 'calculations') else 0
-            )
-            return calc_context
-
-        except Exception as e:
-            # Pipeline execution failed
-            if use_pipeline_v2:
-                # Required mode - must fail
-                logger.error(f"[METRIC PIPELINE] Failed in required mode: {e}")
-                raise
-            else:
-                # Optional mode - log error and continue without context
-                logger.error(
-                    f"[METRIC PIPELINE] Failed to generate calculation context: {e}. "
-                    "Continuing without structured tables/metrics."
-                )
-                return None
+    # Removed: _serialize_metric_state_for_update (legacy MetricPipeline code)
+    # Removed: _get_calculation_context (legacy MetricPipeline code)
+    # Calculations now handled by CalculationAgent with calculation_results in state
 
     def _classify_databricks_error(self, error: Exception) -> Tuple[bool, Optional[float]]:
         """
@@ -637,22 +489,8 @@ Generate the report section content:"""
         # Deduplicate citations to prevent accumulation bug
         self._deduplicate_citations(state)
 
-        # Rehydrate metric pipeline state if provided by workflow
-        metric_state_payload = state.get("metric_state")
-        if metric_state_payload:
-            try:
-                self.metric_pipeline_state = MetricPipelineState.from_dict(metric_state_payload)
-                logger.info(
-                    "Rehydrated metric pipeline state: %s calculations, %s comparisons",
-                    len(self.metric_pipeline_state.calculation_context.calculations)
-                    if self.metric_pipeline_state.calculation_context
-                    else 0,
-                    len(self.metric_pipeline_state.calculation_context.key_comparisons)
-                    if self.metric_pipeline_state.calculation_context
-                    else 0,
-                )
-            except Exception as exc:
-                logger.warning(f"Failed to restore metric pipeline state: {exc}")
+        # Note: Legacy metric_pipeline_state rehydration removed
+        # Calculations now provided by CalculationAgent via state['calculation_results']
 
         # ENHANCED: Check for progressive synthesis (incremental research loops)
         research_loops = state.get("research_loops", 0)
@@ -738,18 +576,18 @@ Generate the report section content:"""
                     compiled_findings.get('observations', [])
                 )
 
-                # Phase 1: Generate calculation context via metric pipeline
-                # Use the new _get_calculation_context() method with proper mode handling
-                calc_context = await self._get_calculation_context(sanitized_findings)
+                # Phase 1: Get calculation results from CalculationAgent (via state)
+                # CalculationAgent runs before Reporter and populates calculation_results
+                calc_context = state.get('calculation_results')
 
                 # If calc_context is None, hybrid mode cannot proceed
                 # Fall back to section-by-section generation
                 if calc_context is None:
                     logger.warning(
-                        "[HYBRID MODE] Calculation context unavailable, "
+                        "[HYBRID MODE] Calculation results unavailable, "
                         "falling back to section-by-section generation"
                     )
-                    raise ValueError("Calculation context unavailable for hybrid mode")
+                    raise ValueError("Calculation results unavailable for hybrid mode")
 
                 # Get dynamic structure from plan with validation
                 dynamic_sections = AdaptiveStructureValidator.validate_and_recover(
@@ -5609,18 +5447,6 @@ Based on the available research findings, I can provide the following summary:
             logger.info(f"[TABLE FIX] Fixed {tables_fixed} tables with missing separators")
 
         return fixed_text
-
-    async def _generate_calculation_context(
-        self,
-        findings: Dict[str, Any]
-    ):
-        """DEPRECATED: Legacy calculation context generation.
-        
-        This method is no longer called since metric pipeline is now mandatory (Phase 2).
-        Kept for reference only. Will be removed in future cleanup.
-        """
-        from ..core.metrics.spec_analyzer import generate_calculation_context
-        return await generate_calculation_context(self, findings)
 
     async def _generate_report_with_structured_pipeline(
         self,
