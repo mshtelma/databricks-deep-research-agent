@@ -27,9 +27,22 @@ def load_model_config_from_yaml(config_dict: Dict[str, Any]) -> NodeModelConfigu
     model_configs = {}
     for model_name, model_dict in models_config.items():
         if isinstance(model_dict, dict):
+            # Handle both 'endpoint' (single) and 'endpoints' (list) formats
+            endpoint = model_dict.get('endpoint')
+            if not endpoint:
+                endpoints = model_dict.get('endpoints', [])
+                # Use first endpoint if multiple are defined (priority-based)
+                endpoint = endpoints[0] if endpoints else 'databricks-gpt-oss-20b'
+
+                if endpoints and len(endpoints) > 1:
+                    logger.info(
+                        f"📌 {model_name}: Using primary endpoint '{endpoint}' "
+                        f"(fallbacks: {endpoints[1:]})"
+                    )
+
             # Extract all fields including reasoning-specific ones
             model_config = ModelConfig(
-                endpoint=model_dict.get('endpoint', f'databricks-gpt-oss-20b'),
+                endpoint=endpoint,
                 temperature=model_dict.get('temperature', 0.7),
                 max_tokens=model_dict.get('max_tokens', 4000),
                 timeout_seconds=model_dict.get('timeout_seconds', 30),

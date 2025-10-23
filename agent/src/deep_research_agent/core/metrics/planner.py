@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, SystemMessage, HumanMessage
 from pydantic import BaseModel, Field
 
 from .. import get_logger
+from ..llm_response_parser import extract_text_from_response
 from ..report_generation.models import Calculation, CalculationContext, DataPoint
 from .models import CalculationPlan, CalculationTask, CalculationTaskType, MissingDataRequest
 from .formula_extractor import FormulaExtractor, FormulaSpec
@@ -499,11 +500,12 @@ class CalculationPlanner:
                     available_data,
                     calc_context
                 )
-                
-                # Strip any import statements (defense in depth)
-                code = self._strip_imports(code)
-                # Convert f-strings to .format() (defense in depth - already done in _generate_code_from_formula)
+
+                # FIX: Convert f-strings BEFORE import stripping to avoid AST parse errors
+                # If code has bad f-strings (e.g., f"{var :.2f}"), AST parsing will fail
                 code = self._convert_fstrings_to_format(code)
+                # Strip any import statements (defense in depth) - now safe to parse
+                code = self._strip_imports(code)
                 # Wrap code to force scalar results (fixes dict/list returns)
                 code = self._wrap_code_for_scalar_result(code)
 
@@ -881,7 +883,100 @@ elif isinstance(result, list):
             logger.info("[PLANNER] Sanitized f-string format specifiers (removed spaces before colons)")
 
         return sanitized
-    
+
+    def _extract_response_text(self, response: Any) -> str:
+        """
+        Extract text content from LLM response.
+
+        Handles various response formats from different LLM providers:
+        - String responses (simple text)
+        - List responses with content blocks (structured)
+        - Responses with reasoning blocks
+
+        Args:
+            response: AIMessage from LLM ainvoke()
+
+        Returns:
+            Extracted text content as string
+
+        Raises:
+            ValueError: If response format is invalid or empty
+        """
+        return extract_text_from_response(response)
+
+    def _sanitize_generated_code(self, code: str) -> str:
+        """
+        Sanitize LLM-generated code for safe sandbox execution.
+
+        Applies defensive transformations:
+        1. Strips all import statements (security)
+        2. Converts f-strings to .format() (compatibility)
+        3. Wraps code to enforce scalar results (correctness)
+        4. Sanitizes format specifiers (safety)
+
+        Args:
+            code: Raw Python code from LLM
+
+        Returns:
+            Sanitized Python code ready for sandbox execution
+
+        Example:
+            Input:  'import os\\nresult = f"{x}"'
+            Output: 'result = "{}".format(x)'  # stripped import, converted f-string
+        """
+        if not code:
+            return code
+
+        # Step 1: Remove prohibited imports (security)
+        code = self._strip_imports(code)
+
+        # Step 2: Convert f-strings to .format() (compatibility with sandbox)
+        code = self._convert_fstrings_to_format(code)
+
+        # Step 3: Wrap to enforce scalar results (prevent dict/list returns)
+        code = self._wrap_code_for_scalar_result(code)
+
+        # Step 4: Sanitize format specifiers (defensive)
+        code = self._sanitize_format_specifiers(code)
+
+        return code
+
+    async def _attempt_repairs_if_needed(
+        self,
+        metric_name: str,
+        original_code: str,
+        formula: Optional[str],
+        available_data: Dict[str, Any],
+        calc_context: CalculationContext
+    ) -> str:
+        """
+        Attempt to repair generated code if validation fails.
+
+        Currently returns original code as-is. Future enhancements could:
+        - Run code in test sandbox
+        - Detect common errors (undefined variables, syntax errors)
+        - Use LLM to fix detected issues
+        - Apply heuristic repairs
+
+        Args:
+            metric_name: Name of metric being calculated
+            original_code: Code to validate/repair
+            formula: Original formula (if available)
+            available_data: Available data context
+            calc_context: Full calculation context
+
+        Returns:
+            Repaired code (currently returns original)
+
+        Note:
+            This is a stub for future enhancement. The validator is already
+            called before this method (line 512), so basic validation is covered.
+        """
+        # TODO: Future enhancement - implement automatic code repair
+        # For now, return original code (validation already done at line 512-523)
+        logger.debug(f"[PLANNER] Repair check for {metric_name}: code already validated")
+        return original_code
+
     def _extract_code_from_response(self, response: str) -> Optional[str]:
         """Extract Python code from LLM response."""
         # Try to find code block

@@ -14,9 +14,10 @@ from typing_extensions import Annotated, TypedDict
 
 from .plan_models import Plan, Step, PlanFeedback, PlanQuality
 from .report_styles import ReportStyle
+from .constraint_system import QueryConstraints
 from .grounding import (
-    GroundingResult, 
-    FactualityReport, 
+    GroundingResult,
+    FactualityReport,
     Contradiction,
     VerificationLevel
 )
@@ -29,6 +30,7 @@ from . import (
 )
 from .observation_models import StructuredObservation
 from .metrics.state import MetricPipelineState
+from .metrics.unified_models import UnifiedPlan
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -189,8 +191,9 @@ class EnhancedResearchState(TypedDict):
     factuality_score: Annotated[Optional[float], use_latest_value]
     verification_level: Annotated[VerificationLevel, use_latest_value]
     
-    # Entity validation
-    requested_entities: Annotated[List[str], use_latest_value]
+    # Entity validation and constraints
+    query_constraints: Annotated[Optional[QueryConstraints], use_latest_value]  # NEW: Extracted constraints (entities, metrics, scenarios)
+    # requested_entities: REMOVED - Use query_constraints.entities instead
     entity_violations: Annotated[List[Dict[str, Any]], merge_lists]
     
     # Citations and references
@@ -202,6 +205,7 @@ class EnhancedResearchState(TypedDict):
     final_report: Annotated[Optional[str], use_latest_value]
     report_sections: Annotated[Optional[Dict[str, str]], use_latest_value]  # Section name -> content
     metric_state: Annotated[Optional[Dict[str, Any]], use_latest_value]
+    unified_plan: Annotated[Optional[UnifiedPlan], use_latest_value]  # NEW: Unified plan for metric extraction/calculation
     metric_capability_enabled: Annotated[bool, use_latest_value]
     pending_calculation_research: Annotated[Optional[List[str]], use_latest_value]  # Queries needed for calculations
     
@@ -379,8 +383,9 @@ class StateManager:
                 config.get("grounding", {}).get("verification_level", "moderate")
             ),
             
-            # Entity validation
-            requested_entities=[],
+            # Entity validation and constraints
+            query_constraints=None,  # Will be populated by planner during constraint extraction
+            # requested_entities=[], # REMOVED - Use query_constraints.entities instead
             entity_violations=[],
             
             # Citations
@@ -391,7 +396,13 @@ class StateManager:
             report_style=StateManager._initialize_report_style(config),
             final_report=None,
             report_sections=None,
-            
+
+            # Metric calculation and extraction (CRITICAL FIX - these fields were missing!)
+            metric_state=None,
+            unified_plan=None,
+            metric_capability_enabled=config.get("metrics", {}).get("enabled", False),
+            pending_calculation_research=None,
+
             # Reflexion
             enable_reflexion=config.get("enable_reflexion", True),
             reflections=[],
@@ -450,7 +461,361 @@ class StateManager:
             loop_execution_history=[],
             current_loop_focus=None,
         )
-    
+
+    @staticmethod
+    def hydrate_state(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Hydrate state by converting dict representations back to Pydantic/dataclass objects.
+
+        This is the PERIMETER CONVERSION point - converts serialized dicts from JSON fixtures
+        back to proper Pydantic BaseModel and dataclass objects so all code can use attribute access.
+
+        Handles:
+        - Pydantic BaseModel objects (Plan, Step, Citation, etc.) - use .model_validate()
+        - Dataclass objects (QueryConstraints, SearchResult, etc.) - use ClassName(**dict)
+        - Lists of objects
+        - Nested objects (QueryConstraints contains ScenarioDefinition list)
+        - Already-hydrated objects (skip gracefully)
+        - None/missing values
+
+        Args:
+            state_dict: State dictionary from JSON.load() or similar
+
+        Returns:
+            State dictionary with all objects hydrated
+        """
+        import logging
+        import re
+        logger = logging.getLogger(__name__)
+
+        # ====================================================================
+        # PRE-HYDRATION NORMALIZATION HELPERS
+        # ====================================================================
+
+        def normalize_enum_strings(data):
+            """
+            Normalize enum strings from 'EnumName.VALUE' to 'value'.
+
+            Fixes state_capture bug where json.dumps(..., default=str) converts
+            StepType.RESEARCH → 'StepType.RESEARCH' instead of 'research'.
+
+            Recursively processes dicts and lists.
+            """
+            if isinstance(data, dict):
+                return {k: normalize_enum_strings(v) for k, v in data.items()}
+            elif isinstance(data, list):
+                return [normalize_enum_strings(item) for item in data]
+            elif isinstance(data, str):
+                # Pattern: 'EnumName.VALUE' → 'value'
+                # Examples: 'StepType.RESEARCH' → 'research'
+                #           'StepStatus.COMPLETED' → 'completed'
+                match = re.match(r'^[A-Z][a-zA-Z]*\.([A-Z_]+)$', data)
+                if match:
+                    # Extract the value part and convert to lowercase
+                    enum_value = match.group(1).lower()
+                    logger.debug(f"Normalized enum string: '{data}' → '{enum_value}'")
+                    return enum_value
+                return data
+            else:
+                return data
+
+        def add_plan_backward_compatibility(plan_dict):
+            """Add missing required fields for Plan model."""
+            if not isinstance(plan_dict, dict):
+                return plan_dict
+
+            # Required field: 'thought'
+            if 'thought' not in plan_dict:
+                plan_dict['thought'] = "Plan loaded from test fixture"
+                logger.debug("Added missing 'thought' field to plan")
+
+            return plan_dict
+
+        # ====================================================================
+        # HYDRATION HELPERS (WITH FAIL-FAST ERROR HANDLING)
+        # ====================================================================
+
+        # Helper: Check if object is already hydrated
+        def is_hydrated(obj, expected_type):
+            """Check if object is already the expected type."""
+            if obj is None:
+                return True
+            if isinstance(obj, expected_type):
+                return True
+            return False
+
+        # Helper: Hydrate a single Pydantic BaseModel object
+        def hydrate_pydantic(obj, model_class, field_name):
+            """Hydrate a Pydantic BaseModel from dict with FAIL-FAST error handling."""
+            if obj is None:
+                return None
+            if is_hydrated(obj, model_class):
+                return obj
+            if isinstance(obj, dict):
+                try:
+                    # Handle both Pydantic v1 and v2
+                    if hasattr(model_class, 'model_validate'):
+                        # Pydantic v2
+                        return model_class.model_validate(obj)
+                    elif hasattr(model_class, 'parse_obj'):
+                        # Pydantic v1
+                        return model_class.parse_obj(obj)
+                    else:
+                        raise AttributeError(f"{model_class.__name__} has neither model_validate nor parse_obj")
+                except Exception as e:
+                    logger.error(
+                        f"❌ HYDRATION FAILED for {field_name}:\n"
+                        f"  Expected: {model_class.__name__}\n"
+                        f"  Error: {e}\n"
+                        f"  Data keys: {list(obj.keys())[:10]}"
+                    )
+                    raise ValueError(
+                        f"Cannot hydrate {field_name} to {model_class.__name__}. "
+                        f"Validation failed - state contains dict when object is required."
+                    ) from e
+            return obj
+
+        # Helper: Hydrate a list of Pydantic BaseModel objects
+        def hydrate_pydantic_list(obj_list, model_class, field_name):
+            """Hydrate a list of Pydantic BaseModel objects from dicts with FAIL-FAST."""
+            if not obj_list:
+                return obj_list
+            if not isinstance(obj_list, list):
+                return obj_list
+
+            hydrated = []
+            for idx, item in enumerate(obj_list):
+                if isinstance(item, dict):
+                    try:
+                        # Handle both Pydantic v1 and v2
+                        if hasattr(model_class, 'model_validate'):
+                            hydrated.append(model_class.model_validate(item))
+                        elif hasattr(model_class, 'parse_obj'):
+                            hydrated.append(model_class.parse_obj(item))
+                        else:
+                            raise AttributeError(f"{model_class.__name__} has neither model_validate nor parse_obj")
+                    except Exception as e:
+                        logger.error(
+                            f"❌ HYDRATION FAILED for {field_name}[{idx}]:\n"
+                            f"  Expected: {model_class.__name__}\n"
+                            f"  Error: {e}"
+                        )
+                        raise ValueError(
+                            f"Cannot hydrate {field_name}[{idx}] to {model_class.__name__}"
+                        ) from e
+                else:
+                    # Already hydrated or wrong type
+                    hydrated.append(item)
+            return hydrated
+
+        # Helper: Hydrate a dataclass object
+        def hydrate_dataclass(obj, dataclass_type, field_name):
+            """Hydrate a dataclass from dict with FAIL-FAST error handling."""
+            if obj is None:
+                return None
+            if is_hydrated(obj, dataclass_type):
+                return obj
+            if isinstance(obj, dict):
+                try:
+                    return dataclass_type(**obj)
+                except Exception as e:
+                    logger.error(
+                        f"❌ HYDRATION FAILED for {field_name}:\n"
+                        f"  Expected: {dataclass_type.__name__}\n"
+                        f"  Error: {e}"
+                    )
+                    raise ValueError(
+                        f"Cannot hydrate {field_name} to {dataclass_type.__name__}"
+                    ) from e
+            return obj
+
+        # Helper: Hydrate a list of dataclass objects
+        def hydrate_dataclass_list(obj_list, dataclass_type, field_name):
+            """Hydrate a list of dataclass objects from dicts with FAIL-FAST."""
+            if not obj_list:
+                return obj_list
+            if not isinstance(obj_list, list):
+                return obj_list
+
+            hydrated = []
+            for idx, item in enumerate(obj_list):
+                if isinstance(item, dict):
+                    try:
+                        hydrated.append(dataclass_type(**item))
+                    except Exception as e:
+                        logger.error(
+                            f"❌ HYDRATION FAILED for {field_name}[{idx}]:\n"
+                            f"  Expected: {dataclass_type.__name__}\n"
+                            f"  Error: {e}"
+                        )
+                        raise ValueError(
+                            f"Cannot hydrate {field_name}[{idx}] to {dataclass_type.__name__}"
+                        ) from e
+                else:
+                    # Already hydrated or wrong type
+                    hydrated.append(item)
+            return hydrated
+
+        # Import all required types
+        from .plan_models import Plan, Step, PlanQuality, PlanFeedback
+        from .constraint_system import QueryConstraints, ScenarioDefinition
+        from .types import Citation, SearchResult, ResearchQuery, ResearchContext
+        from .observation_models import StructuredObservation
+        from .grounding import FactualityReport, GroundingResult, Contradiction
+        from .metrics.unified_models import UnifiedPlan
+
+        # Create a copy to avoid modifying original
+        state = dict(state_dict)
+
+        # ====================================================================
+        # PHASE 1: NORMALIZE ENTIRE STATE (enums, missing fields)
+        # ====================================================================
+        logger.debug("Phase 1: Normalizing entire state for enum strings...")
+        state = normalize_enum_strings(state)
+
+        # Add backward compatibility for specific models
+        if "current_plan" in state and isinstance(state["current_plan"], dict):
+            state["current_plan"] = add_plan_backward_compatibility(state["current_plan"])
+
+        # Add description to completed_steps if missing
+        if "completed_steps" in state and isinstance(state["completed_steps"], list):
+            for step_dict in state["completed_steps"]:
+                if isinstance(step_dict, dict) and "description" not in step_dict:
+                    step_dict["description"] = step_dict.get("title", "Step from fixture")
+                    logger.debug(f"Added description to step {step_dict.get('step_id', 'unknown')}")
+
+        # ========================================================================
+        # PHASE 2: HYDRATE ALL OBJECTS
+        # ========================================================================
+        logger.debug("Phase 2: Hydrating all Pydantic/dataclass objects...")
+
+        # Single Plan object
+        if "current_plan" in state and isinstance(state["current_plan"], dict):
+            state["current_plan"] = hydrate_pydantic(
+                state["current_plan"], Plan, "current_plan"
+            )
+
+        # Single PlanQuality object
+        if "plan_quality" in state:
+            state["plan_quality"] = hydrate_pydantic(
+                state["plan_quality"], PlanQuality, "plan_quality"
+            )
+
+        # Single UnifiedPlan object
+        if "unified_plan" in state:
+            state["unified_plan"] = hydrate_pydantic(
+                state["unified_plan"], UnifiedPlan, "unified_plan"
+            )
+
+        # Single FactualityReport object
+        if "factuality_report" in state:
+            state["factuality_report"] = hydrate_pydantic(
+                state["factuality_report"], FactualityReport, "factuality_report"
+            )
+
+        # Single Step object
+        if "current_step" in state:
+            state["current_step"] = hydrate_pydantic(
+                state["current_step"], Step, "current_step"
+            )
+
+        # List of Steps
+        if "completed_steps" in state:
+            state["completed_steps"] = hydrate_pydantic_list(
+                state["completed_steps"], Step, "completed_steps"
+            )
+
+        # List of PlanFeedback
+        if "plan_feedback" in state:
+            state["plan_feedback"] = hydrate_pydantic_list(
+                state["plan_feedback"], PlanFeedback, "plan_feedback"
+            )
+
+        # List of Citations
+        if "citations" in state:
+            state["citations"] = hydrate_pydantic_list(
+                state["citations"], Citation, "citations"
+            )
+
+        # List of StructuredObservations
+        if "observations" in state:
+            state["observations"] = hydrate_pydantic_list(
+                state["observations"], StructuredObservation, "observations"
+            )
+
+        if "new_observations" in state:
+            state["new_observations"] = hydrate_pydantic_list(
+                state["new_observations"], StructuredObservation, "new_observations"
+            )
+
+        # List of GroundingResults
+        if "grounding_results" in state:
+            state["grounding_results"] = hydrate_pydantic_list(
+                state["grounding_results"], GroundingResult, "grounding_results"
+            )
+
+        # List of Contradictions
+        if "contradictions" in state:
+            state["contradictions"] = hydrate_pydantic_list(
+                state["contradictions"], Contradiction, "contradictions"
+            )
+
+        # ========================================================================
+        # Hydrate Dataclass objects
+        # ========================================================================
+
+        # QueryConstraints (with nested ScenarioDefinition list) - THE PRIMARY FIX!
+        if "query_constraints" in state and state["query_constraints"] is not None:
+            qc = state["query_constraints"]
+            if isinstance(qc, dict):
+                try:
+                    # First hydrate nested ScenarioDefinition list
+                    hydrated_scenarios = []
+                    if "scenarios" in qc and isinstance(qc["scenarios"], list):
+                        for scenario in qc["scenarios"]:
+                            if isinstance(scenario, dict):
+                                hydrated_scenarios.append(ScenarioDefinition(**scenario))
+                            elif isinstance(scenario, str):
+                                # state_capture bug: scenarios serialized as strings
+                                logger.warning(f"⚠️ Skipping string scenario (state_capture bug): {scenario[:100]}")
+                            else:
+                                # Already a ScenarioDefinition object
+                                hydrated_scenarios.append(scenario)
+                        qc["scenarios"] = hydrated_scenarios
+
+                    # Then hydrate QueryConstraints (filter to only valid fields)
+                    valid_fields = {
+                        'entities', 'metrics', 'scenarios', 'comparison_type', 'topics',
+                        'comparisons', 'data_format', 'specifics', 'time_constraints', 'monetary_values'
+                    }
+                    filtered_qc = {k: v for k, v in qc.items() if k in valid_fields}
+                    state["query_constraints"] = QueryConstraints(**filtered_qc)
+                    logger.info(f"✅ Hydrated query_constraints with {len(qc.get('entities', []))} entities, {len(hydrated_scenarios)} scenarios")
+                except Exception as e:
+                    logger.error(f"❌ Could not hydrate query_constraints: {e}")
+                    raise ValueError(f"Cannot hydrate query_constraints") from e
+
+        # Single ResearchContext object
+        if "research_context" in state:
+            state["research_context"] = hydrate_dataclass(
+                state["research_context"], ResearchContext, "research_context"
+            )
+
+        # List of SearchResults
+        if "search_results" in state:
+            state["search_results"] = hydrate_dataclass_list(
+                state["search_results"], SearchResult, "search_results"
+            )
+
+        # List of ResearchQueries
+        if "search_queries" in state:
+            state["search_queries"] = hydrate_dataclass_list(
+                state["search_queries"], ResearchQuery, "search_queries"
+            )
+
+        logger.debug(f"✅ State hydration complete - {len(state)} fields processed")
+        return state
+
     @staticmethod
     def update_plan(
         state: EnhancedResearchState, 

@@ -260,10 +260,25 @@ class EnhancedWorkflowNodes:
         self.researcher.parent_agent = agent
         self.reporter = ReporterAgent(llm=reporter_llm, config=self.agent_config, event_emitter=self.event_emitter)
         self.fact_checker = FactCheckerAgent(
-            llm=fact_checker_llm, 
+            llm=fact_checker_llm,
             config=self.agent_config,
             event_emitter=self.event_emitter,
             embedding_manager=self.embedding_manager
+        )
+
+        # NEW: Initialize calculation agent with simple model for extraction
+        if self.model_manager:
+            extraction_llm = self.model_manager.get_chat_model("simple")
+        else:
+            extraction_llm = self.llm
+
+        # Import CalculationAgent
+        from .agents import CalculationAgent
+
+        self.calculation_agent = CalculationAgent(
+            extraction_llm=extraction_llm,
+            config=self.agent_config,
+            event_emitter=self.event_emitter
         )
 
     def _emit_workflow_event(self, phase: str, agent: str, status: str = 'started', metadata: Dict[str, Any] = None, state: Dict[str, Any] = None):
@@ -579,11 +594,11 @@ class EnhancedWorkflowNodes:
         
         # Log key state fields
         key_fields = [
-            "original_user_query", "research_topic", "requested_entities", 
+            "original_user_query", "research_topic", # "requested_entities", # REMOVED - Use query_constraints.entities
             "current_step", "step_count", "observations", "citations",
             "plan", "factuality_score", "confidence_score"
         ]
-        
+
         for field in key_fields:
             value = state.get(field)
             if value is not None:
@@ -591,8 +606,7 @@ class EnhancedWorkflowNodes:
                     logger.info(f"🔍 STATE_DEBUG [{node_name}] {field}: {value[:200]}...")
                 elif isinstance(value, list):
                     logger.info(f"🔍 STATE_DEBUG [{node_name}] {field}: {len(value)} items")
-                    if value and field == "requested_entities":
-                        logger.info(f"🔍 STATE_DEBUG [{node_name}] {field}_content: {value}")
+                    # REMOVED: requested_entities logging - Use query_constraints.entities instead
                 elif isinstance(value, dict):
                     logger.info(f"🔍 STATE_DEBUG [{node_name}] {field}: {len(value)} keys")
                 else:
@@ -673,13 +687,12 @@ class EnhancedWorkflowNodes:
             
             # CRITICAL: Store original user query for context in all downstream prompts
             enhanced_state["original_user_query"] = original_query
-            requested_entities = extract_entities_from_query(original_query, self.llm)
-            if requested_entities:
-                enhanced_state["requested_entities"] = requested_entities
-            else:
-                requested_entities = []
+            # REMOVED: Entity extraction - Planner will extract query_constraints with entities
+            # requested_entities = extract_entities_from_query(original_query, self.llm)
+            # if requested_entities:
+            #     enhanced_state["requested_entities"] = requested_entities
             logger.info(f"🎯 ENTITY DEBUG: Stored original user query: {original_query[:100]}...")
-            logger.info(f"🎯 ENTITY DEBUG: Extracted {len(requested_entities)} entities: {requested_entities}")
+            # logger.info(f"🎯 ENTITY DEBUG: Extracted {len(requested_entities)} entities: {requested_entities}")
         else:
             enhanced_state = state
             # Ensure original query is captured if not already stored
@@ -687,15 +700,16 @@ class EnhancedWorkflowNodes:
                 original_query = get_last_user_message(enhanced_state.get("messages", [])) or ""
                 enhanced_state["original_user_query"] = original_query
                 logger.info(f"Captured original user query: {original_query[:100]}...")
-            requested_entities = enhanced_state.get("requested_entities")
-            if requested_entities is None:
-                original_query = enhanced_state.get("original_user_query", "")
-                requested_entities = extract_entities_from_query(original_query, self.llm)
-                if requested_entities:
-                    enhanced_state["requested_entities"] = requested_entities
-                else:
-                    requested_entities = []
-            logger.info(f"🎯 ENTITY DEBUG: Extracted {len(requested_entities)} entities: {requested_entities}")
+            # REMOVED: Entity extraction - Planner will extract query_constraints with entities
+            # requested_entities = enhanced_state.get("requested_entities")
+            # if requested_entities is None:
+            #     original_query = enhanced_state.get("original_user_query", "")
+            #     requested_entities = extract_entities_from_query(original_query, self.llm)
+            #     if requested_entities:
+            #         enhanced_state["requested_entities"] = requested_entities
+            #     else:
+            #         requested_entities = []
+            # logger.info(f"🎯 ENTITY DEBUG: Extracted {len(requested_entities)} entities: {requested_entities}")
         
         # CRITICAL FIX: Add circuit breaker to prevent infinite loops
         total_steps = enhanced_state.get("total_workflow_steps", 0)
@@ -2206,182 +2220,31 @@ Output ONLY the search query, nothing else."""
                 state["current_step"] = None
                 logger.info(f"Completed step {current_step.step_id}")
             else:
-                # Handle non-section steps (e.g., processing, synthesis)
-                from .core.plan_models import StepType
-                if current_step.step_type in (StepType.PROCESSING, StepType.SYNTHESIS):
-                    logger.info(f"Executing {current_step.step_type} step: {current_step.step_id}")
-                    # Track step execution for infinite loop detection
-                    state = track_step_execution(state, current_step.step_id)
-                    # Initialize step_key before try block to ensure it's available in exception handler
-                    normalized_step_id = (
-                        id_gen.PlanIDGenerator.normalize_id(current_step.step_id)
-                        if isinstance(current_step.step_id, str)
-                        else current_step.step_id
+                # DEFENSIVE HANDLING: PROCESSING/SYNTHESIS steps should not exist in new architecture
+                # Per Phase 1 of CALCULATION_AGENT_MASTER_PLAN:
+                # - PROCESSING removed → Calculation Agent handles via UnifiedPlan
+                # - SYNTHESIS removed → Reporter handles final report
+                # - Only RESEARCH and VALIDATION steps should appear
+                logger.warning(
+                    f"⚠️ Unexpected step type '{current_step.step_type}' for step {current_step.step_id}. "
+                    f"Only RESEARCH and VALIDATION steps should be in plan. "
+                    f"PROCESSING/SYNTHESIS were removed in Phase 1. "
+                    f"Marking as completed to avoid infinite loops."
+                )
+
+                # Mark step as completed to prevent workflow from getting stuck
+                current_step.status = StepStatus.COMPLETED
+                if plan:
+                    plan.mark_step_completed(
+                        current_step.step_id,
+                        execution_result="Step skipped - legacy step type no longer supported",
+                        observations=[],
+                        event_emitter=self.event_emitter
                     )
-                    # Use normalized step ID directly to avoid duplicate keys
-                    step_key = normalized_step_id
+                    # Create NEW plan object so LangGraph detects the change
+                    state["current_plan"] = plan.model_copy(deep=True)
 
-                    # EMIT STEP ACTIVATION EVENT before processing/synthesis
-                    if plan and hasattr(plan, 'mark_step_activated'):
-                        plan.mark_step_activated(current_step.step_id, event_emitter=self.event_emitter)
-                        state["current_plan"] = plan
-
-                    # Add to intermediate_events for UI
-
-                    # Find step index
-                    step_index = 0
-                    if plan and hasattr(plan, 'steps'):
-                        for i, step in enumerate(plan.steps):
-                            if step.step_id == current_step.step_id:
-                                step_index = i
-                                break
-
-                    step_activated_event = databricks_response_builder.emit_step_activated_event(
-                        step_id=current_step.step_id,
-                        step_index=step_index,
-                        step_name=current_step.title,
-                        step_type=getattr(current_step.step_type, 'value', 'processing') if hasattr(current_step, 'step_type') else 'processing'
-                    )
-
-                    if "intermediate_events" not in state:
-                        state["intermediate_events"] = []
-                    state["intermediate_events"].append(step_activated_event)
-                    logger.info(f"📢 Added step_activated event to intermediate_events for {current_step.step_type} step: {current_step.step_id}")
-
-                    try:
-                        if current_step.step_type == StepType.PROCESSING:
-                            result = self.researcher._execute_processing_step(current_step, state, self.agent_config or {})
-                        else:
-                            result = self.researcher._execute_synthesis_step(current_step, state, self.agent_config or {})
-
-                        # Guard against tools returning None
-                        if result is None:
-                            raise ValueError("Processing/Synthesis step returned no result payload")
-
-                        # CRITICAL FIX: Format observations with [Obs#N] labels for processing/synthesis steps
-                        if isinstance(result, dict) or hasattr(result, 'observations'):
-                            observations = self._extract_observations(result)
-                            if observations:
-                                formatted_observations = self._format_observations_with_labels(observations)
-                                # Add formatted observations to the result's synthesis
-                                if isinstance(result, dict):
-                                    original_synthesis = result.get('synthesis', '')
-                                    result['synthesis'] = f"{formatted_observations}\n\n{original_synthesis}" if original_synthesis else formatted_observations
-                                elif isinstance(result, SectionResearchResult):
-                                    original_synthesis = result.synthesis or ""
-                                    new_synthesis = (
-                                        f"{formatted_observations}\n\n{original_synthesis}"
-                                        if original_synthesis
-                                        else formatted_observations
-                                    )
-                                    result = replace_section_research_result(
-                                        result,
-                                        synthesis=new_synthesis,
-                                    )
-                                elif hasattr(result, 'synthesis'):
-                                    # Try to use replace helper for other objects with synthesis
-                                    original_synthesis = getattr(result, 'synthesis', '') or ""
-                                    try:
-                                        # If it's any object with synthesis, try replace_section_research_result
-                                        result = replace_section_research_result(
-                                            result,
-                                            synthesis=f"{formatted_observations}\n\n{original_synthesis}"
-                                            if original_synthesis
-                                            else formatted_observations,
-                                        )
-                                    except (TypeError, AttributeError):
-                                        # If replace doesn't work, try setattr (for mutable objects)
-                                        try:
-                                            setattr(
-                                                result,
-                                                'synthesis',
-                                                f"{formatted_observations}\n\n{original_synthesis}"
-                                                if original_synthesis
-                                                else formatted_observations,
-                                            )
-                                        except AttributeError:
-                                            # If object is immutable and can't be replaced, log warning
-                                            logger.warning(f"Could not update synthesis for immutable result of type {type(result)}")
-                                logger.info(f"[OBSERVATION_FORMATTING] Added {len(observations)} formatted observations to {current_step.step_type} step {current_step.step_id}")
-
-                        # Store generic key since not tied to a section
-                        section_results[step_key] = result
-                        state["section_research_results"] = section_results
-                        self._update_section_title_mapping(state, plan, {step_key: result})
-
-                        # Mark as completed
-                        execution_result = self._extract_synthesis_text(result)
-                        current_step.execution_result = execution_result
-                        current_step.observations = self._extract_observations(result) or [execution_result]
-                        if plan:
-                            plan.mark_step_completed(
-                                current_step.step_id,
-                                execution_result=execution_result,
-                                observations=current_step.observations,
-                                event_emitter=self.event_emitter,
-                            )
-                            # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
-                            state["current_plan"] = plan.model_copy(deep=True)
-
-                            # Add to intermediate_events for UI
-    
-                            # Find step index
-                            step_index = 0
-                            if plan and hasattr(plan, 'steps'):
-                                for i, step in enumerate(plan.steps):
-                                    if step.step_id == current_step.step_id:
-                                        step_index = i
-                                        break
-
-                            step_completed_event = databricks_response_builder.emit_step_completed_event(
-                                step_id=current_step.step_id,
-                                step_index=step_index,
-                                step_name=current_step.title,
-                                step_type=getattr(current_step.step_type, 'value', 'processing') if hasattr(current_step, 'step_type') else 'processing',
-                                success=True,
-                                summary=execution_result[:100] + "..." if len(execution_result) > 100 else execution_result
-                            )
-
-                            if "intermediate_events" not in state:
-                                state["intermediate_events"] = []
-                            state["intermediate_events"].append(step_completed_event)
-                            logger.info(f"✅ Added step_completed event to intermediate_events for {current_step.step_type} step: {current_step.step_id}")
-
-                    except Exception as e:
-                        import traceback
-                        full_traceback = traceback.format_exc()
-                        error_msg = f"Failed {current_step.step_type} step {current_step.step_id}: {e}"
-                        logger.error(f"{error_msg}\n\n=== FULL STACK TRACE ===\n{full_traceback}\n=== END STACK TRACE ===")
-
-                        # CRITICAL FIX: Track this as a structural error for circuit breaker
-                        state = track_structural_error(state, error_msg)
-
-                        # Track failed attempts for circuit breaker
-                        from .core.routing_policy import increment_failed_attempts, should_skip_failed_step
-                        state = increment_failed_attempts(state, current_step.step_id)
-
-                        # Check if we should permanently skip this step
-                        if should_skip_failed_step(state, current_step.step_id):
-                            logger.warning(f"Permanently skipping step {current_step.step_id} after max retries")
-
-                        if plan:
-                            plan.mark_step_failed(current_step.step_id, reason=str(e), event_emitter=self.event_emitter)
-                            # CRITICAL FIX: Create NEW plan object so LangGraph detects the change!
-                            state["current_plan"] = plan.model_copy(deep=True)
-                            logger.info(f"Plan state persisted after marking step {current_step.step_id} as failed")
-                        section_results[step_key] = {
-                            "id": step_key,
-                            "title": getattr(current_step, "title", step_key),
-                            "step_type": str(current_step.step_type),
-                            "research": {
-                                "synthesis": current_step.execution_result,
-                                "confidence": 0.0,
-                                "extracted_data": {},
-                                "observations": self._extract_observations(result),
-                            },
-                        }
-                    finally:
-                        state["current_step"] = None
+                state["current_step"] = None
                 
                 # Convert section results to observations format for reporter (CONSOLIDATED - no more research_observations duplication)
                 observations_from_sections = []
@@ -3524,7 +3387,102 @@ Output ONLY the search query, nothing else."""
             
             # On error, proceed to reporter
             return Command(goto="reporter")
-    
+
+    async def calculation_agent_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        NEW: Calculation agent node - executes UnifiedPlan for metric extraction/calculation.
+
+        This node:
+        1. Retrieves UnifiedPlan from state (created by Planner)
+        2. Uses CalculationAgent to extract/calculate all metrics
+        3. Stores results in state for Reporter to use
+        4. Routes directly to reporter (no feedback loop)
+        """
+        logger.info("🧮 [CALCULATION AGENT] ===== ENTERING CALCULATION AGENT NODE =====")
+
+        # Check if calculation agent is enabled
+        calc_agent_config = self.config.get('agents', {}).get('calculation_agent', {})
+        if not calc_agent_config.get('enabled', True):
+            logger.info("[CALCULATION AGENT] Calculation agent disabled, skipping to reporter")
+            return Command(goto="reporter")
+
+        # Check if we have a UnifiedPlan
+        unified_plan = state.get('unified_plan')
+        if not unified_plan:
+            logger.info("[CALCULATION AGENT] No UnifiedPlan in state, skipping to reporter")
+            return Command(goto="reporter")
+
+        # Emit agent handoff event
+        if self.event_emitter:
+            self.event_emitter.emit(
+                event_type="agent_handoff",
+                data={
+                    "from_agent": "researcher",
+                    "to_agent": "calculation_agent",
+                    "reason": "Executing metric extraction and calculations from UnifiedPlan",
+                    "current_phase": "calculation"
+                },
+                title="Calculation Agent Starting",
+                description="Extracting and calculating metrics from research observations",
+                correlation_id=f"calculation_agent_{state.get('current_iteration', 0)}",
+                stage_id="calculation"
+            )
+
+        try:
+            # Use calculation agent
+            calculation_agent = self.calculation_agent
+
+            if calculation_agent:
+                logger.info(
+                    f"[CALCULATION AGENT] Executing UnifiedPlan with "
+                    f"{len(unified_plan.data_sources) if hasattr(unified_plan, 'data_sources') else 0} metrics"
+                )
+
+                # Execute the plan
+                results = await calculation_agent.execute(state)
+
+                # Log results
+                calc_results = results.get('calculation_results', {})
+                if calc_results:
+                    logger.info(
+                        f"[CALCULATION AGENT] Calculation complete: "
+                        f"{calc_results.get('extracted_count', 0)} extracted, "
+                        f"{calc_results.get('calculated_count', 0)} calculated, "
+                        f"{calc_results.get('failed_count', 0)} failed"
+                    )
+
+                # Emit completion event
+                if self.event_emitter:
+                    self.event_emitter.emit(
+                        event_type="calculation_complete",
+                        data={
+                            "extracted_count": calc_results.get('extracted_count', 0),
+                            "calculated_count": calc_results.get('calculated_count', 0),
+                            "failed_count": calc_results.get('failed_count', 0),
+                        },
+                        title="Calculations Complete",
+                        description=f"Extracted {calc_results.get('extracted_count', 0)} metrics, "
+                                  f"calculated {calc_results.get('calculated_count', 0)} metrics",
+                        correlation_id=f"calc_complete_{state.get('current_iteration', 0)}",
+                        stage_id="calculation"
+                    )
+
+                # Proceed to reporter with results
+                return Command(
+                    goto="reporter",
+                    update=results
+                )
+
+            else:
+                logger.warning("[CALCULATION AGENT] Calculation agent not available, proceeding to reporter")
+                return Command(goto="reporter")
+
+        except Exception as e:
+            logger.error(f"[CALCULATION AGENT] Error during calculation: {e}", exc_info=True)
+
+            # On error, proceed to reporter anyway
+            return Command(goto="reporter")
+
     def _compile_findings_from_state(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Compile research findings from state for metric pipeline."""
         return {

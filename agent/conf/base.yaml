@@ -195,6 +195,29 @@ agents:
       log_derivation_details: true   # Log all derivations for audit trail
       validate_extractions: true     # Verify "extracted" claims against research content
 
+  # NEW: Calculation Agent - Executes UnifiedPlan for metric extraction and calculation
+  calculation_agent:
+    enabled: true  # Feature flag for calculation agent
+
+    # Extraction LLM (can use smaller/faster model for metric extraction)
+    extraction_llm:
+      model: simple  # Use simple tier for metric extraction
+      temperature: 0.0  # Deterministic extraction
+      max_tokens: 500
+      timeout: 10
+
+    # Metric extraction configuration
+    metric_extraction:
+      max_context_length: 8000  # Maximum characters from observation to use for extraction
+      confidence_threshold: 0.7  # Minimum confidence to accept extraction
+      enable_fallback_search: true  # Search fallback observations if primary fails
+
+    # Calculation configuration
+    calculation:
+      tolerance: 0.01  # Tolerance for numerical validation (1%)
+      max_retries: 3  # Retry attempts for failed calculations
+      verify_results: true  # Verify calculation results against expected ranges
+
 # Metric Calculation Pipeline Configuration
 metrics:
   enabled: true  # Master switch for metric calculation features
@@ -207,6 +230,8 @@ metrics:
     temperature: 0.2   # Very conservative for deterministic field names
     max_planning_retries: 2  # Retry on validation failure before falling back
     enable_validation_logging: true  # Log detailed validation errors
+    use_legacy_llm_planner: false  # CRITICAL: Use hybrid planner (TRUE) or legacy LLM planner (FALSE). Default=false (hybrid is preferred)
+    force_hybrid_planner: true  # CRITICAL: Always use hybrid planner regardless of query_constraints availability
 
   # Multi-dimensional calculation support (NEW - Phase 1)
   multi_dimensional:

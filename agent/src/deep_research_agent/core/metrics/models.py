@@ -11,6 +11,42 @@ from pydantic import BaseModel, Field, field_validator
 from ..report_generation.models import TableSpec
 
 
+class DataPoint(BaseModel):
+    """A single extracted or calculated data point with full provenance."""
+
+    metric_id: str = Field(description="Unique identifier for this metric")
+    value: Optional[float] = Field(default=None, description="Extracted or calculated value")
+    unit: str = Field(default="", description="Unit of measurement")
+    confidence: float = Field(default=0.0, description="Confidence score (0.0-1.0)")
+    source_observations: List[str] = Field(
+        default_factory=list,
+        description="IDs of source observations"
+    )
+    extraction_method: str = Field(
+        default="unknown",
+        description="Method used to obtain value (llm_structured, calculation, etc.)"
+    )
+    extraction_metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional metadata about extraction"
+    )
+    error: Optional[str] = Field(default=None, description="Error message if extraction failed")
+
+
+class ExtractedMetric(BaseModel):
+    """Structured output for LLM-based metric extraction."""
+
+    value: Optional[float] = Field(default=None, description="Extracted numeric value")
+    unit: Optional[str] = Field(default=None, description="Unit of the extracted value")
+    confidence: float = Field(default=0.0, description="Confidence in extraction (0.0-1.0)")
+    source_text: Optional[str] = Field(
+        default=None,
+        description="The sentence/context where value was found"
+    )
+    not_found: bool = Field(default=False, description="True if metric was not found in text")
+    error: Optional[str] = Field(default=None, description="Error message if extraction failed")
+
+
 class CalculationTaskType(str, Enum):
     """Supported calculation task operations."""
 
@@ -190,6 +226,8 @@ class MetricSpecBundle:
 
 
 __all__ = [
+    "DataPoint",
+    "ExtractedMetric",
     "CalculationTaskType",
     "CalculationProvenance",
     "CalculationValidation",

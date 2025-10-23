@@ -422,7 +422,9 @@ Generate the report section content:"""
                 
                 # ENTITY VALIDATION: Check for hallucinated entities in LLM response
                 if state:
-                    requested_entities = state.get("requested_entities", [])
+                    # Get entities from query_constraints (single source of truth)
+                    constraints = state.get("query_constraints")
+                    requested_entities = constraints.entities if constraints else []
                     if requested_entities:
                         from ..core.entity_validation import EntityExtractor
                         extractor = EntityExtractor()
@@ -1132,9 +1134,10 @@ Generate the report section content:"""
         )
 
         # CRITICAL FIX: Ensure all markdown tables have proper separator rows
+        # This must run as the FINAL step before marker removal to guarantee all tables are fixed
         report_with_metadata = self._fix_markdown_tables(report_with_metadata)
 
-        # Remove TABLE_START/TABLE_END markers from final output
+        # Remove TABLE_START/TABLE_END markers from final output (AFTER fixing tables)
         # These are added by table_preprocessor but should not appear in the final report
         report_with_metadata = report_with_metadata.replace("TABLE_START\n", "")
         report_with_metadata = report_with_metadata.replace("\nTABLE_END", "")
@@ -1189,7 +1192,9 @@ Generate the report section content:"""
         citation_context = self._build_citation_context(state.get("citations", []))
         research_topic = findings.get("research_topic") or state.get("research_topic", "")
         locale = state.get("locale", "en-US")
-        requested_entities = state.get("requested_entities", [])
+        # Get entities from query_constraints (single source of truth)
+        constraints = state.get("query_constraints")
+        requested_entities = constraints.entities if constraints else []
         structured_table_text, table_info = self._build_structured_data_tables(findings)
 
         guidelines = [
@@ -1653,7 +1658,8 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         compiled = {
             "research_topic": state.get("research_topic", ""),
             "original_user_query": state.get("original_user_query", ""),
-            "requested_entities": state.get("requested_entities", []),
+            # Get entities from query_constraints (single source of truth)
+            "requested_entities": state.get("query_constraints").entities if state.get("query_constraints") else [],
             "background_context": background,
             "observations": observations,
             "completed_steps": completed_steps,
@@ -1664,7 +1670,8 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
             "factuality_score": state.get("factuality_score", 0.9),  # Default to high factuality
             "coverage_score": state.get("coverage_score", 0.7),      # Default to good coverage
             "research_quality_score": state.get("research_quality_score", 0.8),  # Default to good quality
-            "calculation_context": state.get("calculation_context")  # CRITICAL: Include calculations for table generation
+            "calculation_context": state.get("calculation_context"),  # CRITICAL: Include calculations for table generation
+            "query_constraints": state.get("query_constraints")  # CRITICAL FIX: Pass constraints to enable hybrid planner!
         }
         
         logger.info(f"Compiled {len(observations)} observations from {len(completed_steps)} steps")
@@ -3193,6 +3200,7 @@ Note: Your response must conform to the TableBlock schema provided."""
         
         # Extract entity constraints from findings if available
         original_query = findings.get("original_user_query", "")
+        # Get entities from findings (which comes from query_constraints)
         requested_entities = findings.get("requested_entities", [])
         entities_str = ", ".join(requested_entities) if requested_entities else "not specified"
         
@@ -3388,7 +3396,9 @@ Note: Your response must conform to the TableBlock schema provided."""
         
         # Extract context for entity constraints
         original_query = state.get("original_user_query", "")
-        requested_entities = state.get("requested_entities", [])
+        # Get entities from query_constraints (single source of truth)
+        constraints = state.get("query_constraints")
+        requested_entities = constraints.entities if constraints else []
         entities_str = ", ".join(requested_entities) if requested_entities else "not specified"
         
         prompt = f"""
@@ -5535,83 +5545,68 @@ Based on the available research findings, I can provide the following summary:
 
     def _fix_markdown_tables(self, markdown_text: str) -> str:
         """
-        Ensure all markdown tables have proper separator rows.
-
+        Ensure ALL markdown tables have proper separator rows.
+        This is the final safety net before output.
+        
         Tables must have format:
         | Header 1 | Header 2 |
         |----------|----------|
         | Data 1   | Data 2   |
 
-        This method detects tables and inserts missing separator rows.
+        This method aggressively detects tables and inserts missing separator rows.
         """
         if not markdown_text or '|' not in markdown_text:
             return markdown_text
 
         lines = markdown_text.split('\n')
-        fixed_lines = []
+        result = []
         i = 0
-        in_table = False
+        tables_fixed = 0
 
         while i < len(lines):
             line = lines[i]
             stripped = line.strip()
 
-            # Detect table row (starts with | and has at least 3 |)
-            is_table_row = stripped.startswith('|') and stripped.count('|') >= 3
+            # Detect table start (has pipes and enough content)
+            if stripped.startswith('|') and stripped.count('|') >= 3:
+                # Collect all consecutive table lines
+                table_lines = [line]
+                j = i + 1
+                while j < len(lines):
+                    next_stripped = lines[j].strip()
+                    if next_stripped.startswith('|') and next_stripped.count('|') >= 2:
+                        table_lines.append(lines[j])
+                        j += 1
+                    else:
+                        break
 
-            if is_table_row:
-                # Check if this is a separator row (contains ---)
-                is_separator = '-' in stripped
+                # Check if second line is separator
+                if len(table_lines) >= 2:
+                    second_line = table_lines[1].strip()
+                    # Proper separator: pipes with dashes and optional colons
+                    has_separator = bool(re.match(r'^\|[\s\-:|]+\|$', second_line))
+                    
+                    if not has_separator:
+                        # INSERT separator after header
+                        header = table_lines[0]
+                        col_count = header.count('|') - 1
+                        # Generate proper separator with spacing
+                        separator = '| ' + ' | '.join(['---'] * col_count) + ' |'
+                        table_lines.insert(1, separator)
+                        tables_fixed += 1
+                        logger.info(f"[TABLE FIX] Added missing separator to table at line {i+1}")
 
-                if not in_table:
-                    # This is the first row of a new table (header)
-                    in_table = True
-                    fixed_lines.append(line)
-
-                    # Check next line
-                    if i + 1 < len(lines):
-                        next_line = lines[i + 1].strip()
-                        # Check if next line is a proper separator (only dashes between pipes)
-                        if next_line.startswith('|') and next_line.count('|') >= 3:
-                            content = next_line.replace('|', '').replace(' ', '').replace('\t', '')
-                            next_is_separator = content and all(c == '-' for c in content)
-                        else:
-                            next_is_separator = False
-
-                        if not next_is_separator:
-                            # Next line is a data row, separator is missing!
-                            # Insert separator after header
-                            col_count = stripped.count('|') - 1
-                            separator_parts = ['---' for _ in range(col_count)]
-                            separator = '|' + '|'.join(separator_parts) + '|'
-                            fixed_lines.append(separator)
-                            logger.debug(f"[TABLE FIX] Inserted missing separator after header")
-                        # If next line is separator, it will be added in next iteration
-
-                    i += 1
-                    continue
-                else:
-                    # We're already in a table, just append this row
-                    fixed_lines.append(line)
-                    i += 1
-                    continue
+                result.extend(table_lines)
+                i = j
             else:
-                # Not a table row
-                if stripped == '':
-                    # Empty line might end the table
-                    in_table = False
-
-                fixed_lines.append(line)
+                result.append(line)
                 i += 1
 
-        fixed_text = '\n'.join(fixed_lines)
+        fixed_text = '\n'.join(result)
 
-        # Log if we made changes
-        if fixed_text != markdown_text:
-            original_separators = markdown_text.count('|---')
-            fixed_separators = fixed_text.count('|---')
-            if fixed_separators > original_separators:
-                logger.info(f"[TABLE FIX] Added {fixed_separators - original_separators} missing table separators")
+        # Log summary
+        if tables_fixed > 0:
+            logger.info(f"[TABLE FIX] Fixed {tables_fixed} tables with missing separators")
 
         return fixed_text
 

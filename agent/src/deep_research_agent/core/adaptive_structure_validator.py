@@ -236,8 +236,26 @@ class AdaptiveStructureValidator:
 
         # Handle object format (with attributes)
         if hasattr(section, 'title'):
-            title = getattr(section, 'title', '').strip()
-            purpose = getattr(section, 'purpose', '').strip()
+            # FIX: Safely extract title - handle both Pydantic models and dataclasses
+            # Pydantic models with 'title' field may return a method instead of the field value
+            title_attr = getattr(section, 'title', '')
+
+            # Check if it's callable (Pydantic conflict) and fall back to dict access
+            if callable(title_attr):
+                # This is likely a Pydantic BaseModel where 'title' conflicts with internal method
+                # Try to get it from __dict__ or model_dump()
+                if hasattr(section, 'model_dump'):
+                    section_dict = section.model_dump()
+                    title = section_dict.get('title', section_dict.get('table_title', '')).strip()
+                elif hasattr(section, '__dict__'):
+                    title = section.__dict__.get('title', section.__dict__.get('table_title', '')).strip()
+                else:
+                    title = ''
+            else:
+                title = str(title_attr).strip() if title_attr else ''
+
+            purpose_attr = getattr(section, 'purpose', '')
+            purpose = str(purpose_attr).strip() if purpose_attr and not callable(purpose_attr) else ''
 
             if not title:
                 logger.warning(f"Section {index}: Missing or empty 'title' attribute")

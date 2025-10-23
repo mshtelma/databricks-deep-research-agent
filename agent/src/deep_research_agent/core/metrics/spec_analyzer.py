@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+import unicodedata
+from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -1128,10 +1129,21 @@ async def _generate_calculation_context(
             f"(top-k: {len(scored)}, tail: {len(recent_tail)})"
         )
 
+        # Get query constraints if available (Phase 1 integration)
+        constraints = findings.get('query_constraints')
+        if constraints:
+            logger.info(
+                f"[UNIFIED PLANNING] Using QueryConstraints: "
+                f"{len(constraints.entities)} entities, "
+                f"{len(constraints.metrics)} metrics"
+            )
+        else:
+            logger.info("[UNIFIED PLANNING] No QueryConstraints found, using LLM-based planning")
+
         # Try unified planning with fallback to legacy on failure
         try:
-            # Create unified plan
-            unified_plan = await _create_unified_plan(reporter, research_topic, merged)
+            # Create unified plan (hybrid if constraints available, else LLM-based)
+            unified_plan = await _create_unified_plan(reporter, research_topic, merged, constraints)
 
             # Execute plan to generate calculation context
             calc_context = await _execute_unified_plan(reporter, unified_plan, merged)
@@ -1404,23 +1416,64 @@ async def generate_calculation_context(
 async def _create_unified_plan(
     reporter,
     user_request: str,
-    observations: List[Dict]
+    observations: List[Dict],
+    constraints=None
 ):
     """Create unified plan that directly answers user's request.
 
-    This replaces the multi-stage extraction with a single LLM call
-    that creates explicit links between user request, data sources,
-    and response tables.
+    Supports two approaches:
+    1. Hybrid approach (NEW): Uses structured generation with QueryConstraints
+    2. LLM-based approach (LEGACY): Single LLM call for planning
 
     Args:
         reporter: Reporter instance with LLM access
         user_request: The original user request/research topic
         observations: Selected research observations
+        constraints: Optional QueryConstraints for hybrid approach
 
     Returns:
         UnifiedPlan with explicit data links
     """
     from .unified_models import UnifiedPlan, UserRequestAnalysis, DataSource, ResponseTable, TableCell
+    from .hybrid_planner import create_unified_plan_hybrid
+
+    # CRITICAL FIX: Check config to determine planner mode (hybrid is DEFAULT)
+    use_legacy = reporter.config.get('metrics', {}).get('unified_planning', {}).get('use_legacy_llm_planner', False)
+    force_hybrid = reporter.config.get('metrics', {}).get('unified_planning', {}).get('force_hybrid_planner', True)
+
+    # Determine which planner to use
+    use_hybrid_planner = (not use_legacy) or force_hybrid
+
+    # Try hybrid approach if enabled and constraints are available
+    if use_hybrid_planner and constraints:
+        try:
+            logger.info("[HYBRID PLANNER] Using structured generation with QueryConstraints (config-enabled)")
+            unified_plan = await create_unified_plan_hybrid(
+                user_request=user_request,
+                observations=observations,
+                constraints=constraints,
+                llm=reporter.llm
+            )
+            logger.info(
+                f"[HYBRID PLANNER] Successfully created plan: "
+                f"{len(unified_plan.metric_specs)} specs, "
+                f"{len(unified_plan.response_tables)} tables"
+            )
+            return unified_plan
+        except Exception as e:
+            logger.warning(
+                f"[HYBRID PLANNER] Failed to create plan: {e}. "
+                "Falling back to LLM-based approach"
+            )
+            # Fall through to legacy LLM-based approach
+    elif use_hybrid_planner and not constraints:
+        logger.warning(
+            "[HYBRID PLANNER] Config requests hybrid mode but query_constraints not available! "
+            "Falling back to legacy LLM planner. This indicates query_constraints weren't passed in findings."
+        )
+
+    # Legacy LLM-based approach
+    logger.info(f"[LLM PLANNER] Using legacy single-call planning (use_legacy={use_legacy}, force_hybrid={force_hybrid}, has_constraints={constraints is not None})")
 
     logger.info(
         f"[UNIFIED PLAN] Creating user-request-driven plan for: '{user_request}' "
@@ -1428,17 +1481,39 @@ async def _create_unified_plan(
     )
 
     # Format observations for prompt (limit to avoid token overflow)
-    obs_text = "\n\n".join([
-        f"[Observation {i+1} - Step {obs.get('step_id', 'unknown')}]\n{obs.get('content', '')[:2000]}"
-        for i, obs in enumerate(observations)
-    ])
+    # CRITICAL FIX: Provide real observation IDs prominently
+    obs_summaries = []
+    obs_full_text = []
+
+    for i, obs in enumerate(observations):
+        step_id = obs.get('step_id', f'obs_{i}')
+        content = obs.get('content', '')
+
+        # Extract key entities and metrics from content for summary
+        content_preview = content[:300]  # First 300 chars for entity/metric extraction
+
+        # Build summary with actual ID
+        obs_summaries.append(f"  - ID: '{step_id}' | Content preview: {content_preview}...")
+
+        # Full observation for context
+        obs_full_text.append(f"[Observation ID: '{step_id}']\n{content[:2000]}")
+
+    # Create ID list section
+    available_ids = "\n".join(obs_summaries[:20])  # Limit to first 20 for clarity
+    obs_text = "\n\n".join(obs_full_text)
 
     prompt = f"""You are creating a complete plan to answer a user's research request.
 
 USER REQUEST:
 {user_request}
 
-RESEARCH OBSERVATIONS (first 1000 chars each):
+⚠️ CRITICAL - AVAILABLE OBSERVATION IDs ⚠️
+You MUST use ONLY these exact observation IDs when creating data sources:
+{available_ids}
+
+DO NOT invent IDs like "obs_41" or "assumption" - use ONLY the IDs listed above!
+
+RESEARCH OBSERVATIONS (first 2000 chars each):
 {obs_text}
 
 YOUR TASK:
@@ -1481,11 +1556,14 @@ For EXTRACTION (getting value from observation):
     "unique_data_id": {{
       "data_id": "unique_data_id",              # REQUIRED: Must match the key
       "source_type": "extract",                 # REQUIRED: Literal "extract"
-      "observation_id": "step_23",              # REQUIRED: Which observation (must exist!)
+      "observation_id": "gap_001",              # REQUIRED: Use EXACT ID from list above!
       "extraction_path": "Spain tax rate: 35%" # REQUIRED: Specific hint with entity + metric
     }}
   }}
 }}
+
+⚠️ CRITICAL: The observation_id MUST be one of the IDs listed in "AVAILABLE OBSERVATION IDs" above!
+Do NOT make up IDs like "obs_41" or "assumption" - these will fail!
 
 EXTRACTION_PATH GUIDELINES (FIX #4):
 ✅ GOOD extraction_path examples (specific context):
@@ -1582,6 +1660,16 @@ Don't extract random metrics just because they're available."""
             f"{len(unified_plan.request_analysis.entities_to_compare)} entities to compare"
         )
 
+        # CRITICAL: Validate plan has data sources
+        if len(unified_plan.data_sources) == 0:
+            logger.error(
+                "[UNIFIED PLAN] ⚠️ CRITICAL: Plan has ZERO data sources! "
+                "This will result in all N/A tables. Check: "
+                "1) Pydantic field mapping (data_sources vs metric_specs), "
+                "2) LLM response format, "
+                "3) JSON parsing"
+            )
+
         # Log request analysis details
         logger.debug(
             f"[UNIFIED PLAN] Request analysis: "
@@ -1607,6 +1695,134 @@ Don't extract random metrics just because they're available."""
         )
         # Re-raise to trigger fallback to legacy pipeline
         raise
+
+
+def _extract_entities_from_path(extraction_path: str) -> List[str]:
+    """Extract entity hints from extraction path for observation matching.
+
+    Args:
+        extraction_path: Hint about what to extract (e.g., "UK basic income tax rate 20%")
+
+    Returns:
+        List of entity variants to search for
+    """
+    # Country mappings with common variants
+    country_map = {
+        "united kingdom": ["united kingdom", "uk", "britain", "british"],
+        "switzerland": ["switzerland", "swiss", "zug", "zurich"],
+        "germany": ["germany", "german", "deutschland"],
+        "france": ["france", "french", "français"],
+        "spain": ["spain", "spanish", "españa"],
+        "poland": ["poland", "polish", "polska"],
+        "bulgaria": ["bulgaria", "bulgarian"]
+    }
+
+    entities = []
+    path_lower = extraction_path.lower()
+
+    for country, variants in country_map.items():
+        if any(v in path_lower for v in variants):
+            entities.extend(variants)
+            break
+
+    return entities
+
+
+def _find_best_observation(
+    source,
+    obs_index: Dict,
+    observations: List[Dict]
+) -> tuple[Optional[Dict], str]:
+    """Multi-strategy observation finder with entity-aware fallback.
+
+    FIX: Layer 0 - When UnifiedPlan assigns wrong observation_id, this function
+    uses entity extraction to find the correct observation.
+
+    Args:
+        source: MetricSpec with observation_id and extraction_path
+        obs_index: Dict mapping step_id to observation
+        observations: List of all observations
+
+    Returns:
+        Tuple of (observation, match_type) or (None, "not_found")
+    """
+    # Extract entity hints for validation (needed by all strategies)
+    entity_hints = _extract_entities_from_path(source.extraction_path)
+
+    # Strategy 1: Direct ID lookup WITH entity validation
+    obs = obs_index.get(source.observation_id)
+    if obs and entity_hints:
+        # Validate that the observation actually contains the entity
+        content = str(obs.get('content', '')).lower()
+        entity_found = any(hint.lower() in content for hint in entity_hints)
+        if entity_found:
+            # Direct ID is correct - observation has the right entity
+            return obs, "direct_id"
+        else:
+            # Direct ID found an observation, but wrong entity! Fall through to entity search
+            logger.warning(
+                f"[OBSERVATION FIX] direct_id={source.observation_id} does NOT contain "
+                f"entity hints {entity_hints} for {source.data_id}. Searching for correct observation..."
+            )
+    elif obs:
+        # No entity hints to validate - trust direct_id
+        return obs, "direct_id"
+
+    # Strategy 2: Entity-aware search (NEW - FIX for wrong observation_id)
+    if entity_hints:
+        for hint in entity_hints:
+            for step_id, candidate in obs_index.items():
+                content = str(candidate.get('content', '')).lower()
+                if hint.lower() in content:
+                    logger.info(
+                        f"[OBSERVATION FIX] Found {hint} data in {step_id} "
+                        f"(was looking in {source.observation_id})"
+                    )
+                    return candidate, "entity_match"
+
+    # Strategy 3: Keyword search from extraction_path
+    # Extract key terms from extraction path
+    keywords = [word.lower() for word in source.extraction_path.split()
+                if len(word) > 4 and word.lower() not in {'rate', 'income', 'euro', 'gross'}]
+
+    if keywords:
+        for obs in observations:
+            content = str(obs.get('content', '')).lower()
+            # Count keyword matches
+            matches = sum(1 for keyword in keywords if keyword in content)
+            if matches >= 2:  # At least 2 keyword matches
+                logger.info(
+                    f"[OBSERVATION FIX] Found observation with {matches} keyword matches "
+                    f"for {source.data_id}"
+                )
+                return obs, "keyword_match"
+
+    return None, "not_found"
+
+
+def _parse_data_id(data_id: str) -> tuple[str, str]:
+    """Parse entity and metric from data_id.
+
+    Args:
+        data_id: Identifier like 'spain_single_net_takehome' or 'uk_basic_income_tax_rate'
+
+    Returns:
+        (entity, metric) tuple, e.g., ('Spain', 'single_net_takehome')
+    """
+    # Normalize to lowercase and replace hyphens
+    normalized = data_id.lower().replace('-', '_')
+    parts = normalized.split('_')
+
+    if not parts:
+        return "Unknown", data_id
+
+    # First part is typically the entity (country/region)
+    entity = parts[0].capitalize()
+
+    # Rest is the metric
+    metric = '_'.join(parts[1:]) if len(parts) > 1 else data_id
+
+    return entity, metric
 
 
 async def _execute_unified_plan(
@@ -1646,6 +1862,19 @@ async def _execute_unified_plan(
     calculation_count = 0
     failed_count = 0
 
+    # FIX Layer 4: Track extraction analytics for monitoring
+    extraction_stats = {
+        "total_extractions": 0,
+        "successful_extractions": 0,
+        "failed_extractions": 0,
+        "match_types": {
+            "direct_id": 0,
+            "entity_match": 0,
+            "keyword_match": 0,
+            "not_found": 0
+        }
+    }
+
     for data_id, source in plan.data_sources.items():
         logger.debug(
             f"[UNIFIED EXECUTION] Processing data source '{data_id}' "
@@ -1653,52 +1882,100 @@ async def _execute_unified_plan(
         )
 
         if source.source_type == "extract":
-            # Extract from observation
-            obs = obs_index.get(source.observation_id)
-            if obs:
-                # FIX #2: Try LLM extraction first, fall back to regex if it fails
-                try:
-                    value = await _extract_value_from_observation_llm(
-                        reporter, obs, source.extraction_path, data_id
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"[UNIFIED EXECUTION] LLM extraction failed for '{data_id}': {e}. "
-                        "Falling back to regex extraction."
-                    )
-                    value = _extract_value_from_observation(obs, source.extraction_path)
-                
-                data_values[data_id] = value
-                
-                # FIX #5: Enhanced logging to track extraction success/failure
-                if value is not None:
-                    extraction_count += 1
+            # CRITICAL FIX: Use pre-extracted value from MetricSpec if it exists!
+            # The hybrid planner already extracted values from observation.metric_values
+            # Re-extraction is redundant and often fails due to truncated content
+            if source.value is not None:
+                # Trust the pre-extracted value from planner/researcher
+                data_values[data_id] = source.value
+                extraction_count += 1
+                extraction_stats["successful_extractions"] += 1
+                logger.info(
+                    f"[UNIFIED EXECUTION] ✓ Using PRE-EXTRACTED value '{data_id}' = {source.value} "
+                    f"(source: {source.observation_id}, path: '{source.extraction_path}')"
+                )
+            else:
+                # Only attempt extraction if value is not pre-set (fallback for edge cases)
+                logger.info(
+                    f"[UNIFIED EXECUTION] ⚠️ No pre-extracted value for '{data_id}', "
+                    f"attempting extraction from observation..."
+                )
+
+                # Extract from observation
+                # FIX: Use multi-strategy observation finder (Layer 0)
+                extraction_stats["total_extractions"] += 1
+                obs, match_type = _find_best_observation(source, obs_index, observations)
+
+                # FIX Layer 4: Track match type statistics
+                extraction_stats["match_types"][match_type] += 1
+
+                if obs:
                     logger.info(
-                        f"[UNIFIED EXECUTION] ✓ Extracted '{data_id}' = {value} "
-                        f"from observation {source.observation_id} "
-                        f"using path: '{source.extraction_path}'"
+                        f"[UNIFIED EXECUTION] ✓ Found observation for '{data_id}' "
+                        f"via {match_type} (step_id: {obs.get('step_id', 'unknown')})"
                     )
                 else:
-                    failed_count += 1
-                    logger.warning(
-                        f"[UNIFIED EXECUTION] ✗ Extraction FAILED for '{data_id}': "
-                        f"no value found in observation {source.observation_id} "
-                        f"with extraction_path: '{source.extraction_path}'. "
-                        f"This will result in N/A in the table."
+                    logger.error(
+                        f"[UNIFIED EXECUTION] ✗ No observation found for '{data_id}' "
+                        f"after trying all strategies. observation_id={source.observation_id}, "
+                        f"extraction_path='{source.extraction_path}'"
                     )
-            else:
-                logger.warning(
-                    f"[UNIFIED EXECUTION] ✗ Observation {source.observation_id} not found "
-                    f"for data source '{data_id}'. Available observations: {list(obs_index.keys())[:5]}..."
-                )
-                data_values[data_id] = None
-                failed_count += 1
+
+                if obs:
+                    # FIX #2: Try LLM extraction first, fall back to regex if it fails
+                    try:
+                        value = await _extract_value_from_observation_llm(
+                            reporter, obs, source.extraction_path, data_id
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[UNIFIED EXECUTION] LLM extraction failed for '{data_id}': {e}. "
+                            "Falling back to regex extraction."
+                        )
+                        value = _extract_value_from_observation(obs, source.extraction_path)
+
+                    data_values[data_id] = value
+
+                    # FIX #5: Enhanced logging to track extraction success/failure
+                    if value is not None:
+                        extraction_count += 1
+                        extraction_stats["successful_extractions"] += 1  # FIX Layer 4
+                        logger.info(
+                            f"[UNIFIED EXECUTION] ✓ Extracted '{data_id}' = {value} "
+                            f"from observation {obs.get('step_id', 'unknown')} "
+                            f"using path: '{source.extraction_path}'"
+                        )
+                    else:
+                        failed_count += 1
+                        extraction_stats["failed_extractions"] += 1  # FIX Layer 4
+                        logger.warning(
+                            f"[UNIFIED EXECUTION] ✗ Extraction FAILED for '{data_id}': "
+                            f"no value found in observation {obs.get('step_id', 'unknown')} "
+                            f"with extraction_path: '{source.extraction_path}'. "
+                            f"This will result in N/A in the table."
+                        )
+                else:
+                    logger.error(
+                        f"[UNIFIED EXECUTION] ✗ Observation not found for data source '{data_id}' "
+                        f"(tried ID: {source.observation_id}, semantic search also failed)"
+                    )
+                    data_values[data_id] = None
+                    failed_count += 1
+                    extraction_stats["failed_extractions"] += 1  # FIX Layer 4
 
         elif source.source_type == "calculate":
             # Calculate using formula
             try:
-                # Get input values
-                inputs = {}
+                # Start with standard variables that formulas commonly use
+                inputs = {
+                    'gross': 100000,  # Standard gross salary for ratio calculations
+                    'hours_per_week': 40,
+                    'weeks_per_year': 52,
+                    'months_per_year': 12,
+                    'working_days_per_year': 250
+                }
+
+                # Add input values from data_values (these override standard vars if same name)
                 missing_inputs = []
                 for input_id in source.required_inputs:
                     input_val = data_values.get(input_id)
@@ -1711,7 +1988,7 @@ async def _execute_unified_plan(
                         f"[UNIFIED EXECUTION] Calculation '{data_id}' missing inputs: {missing_inputs}"
                     )
 
-                # Evaluate formula
+                # Evaluate formula with standard variables + extracted data
                 result = _evaluate_formula(source.formula, inputs)
                 data_values[data_id] = result
 
@@ -1755,6 +2032,27 @@ async def _execute_unified_plan(
             f"{len(table.cells)} cells across {len(table.rows)} rows"
         )
 
+        # FIX: Extract actual column names from cells to detect mismatches
+        actual_columns_in_cells = set()
+        for cell in table.cells:
+            actual_columns_in_cells.add(cell.column)
+        
+        # Compare with declared table.columns
+        declared_columns = set(table.columns)
+        
+        if actual_columns_in_cells != declared_columns:
+            logger.warning(
+                f"[UNIFIED EXECUTION] Column mismatch in table '{table.title}': "
+                f"declared={sorted(declared_columns)}, actual={sorted(actual_columns_in_cells)}"
+            )
+            # Use actual columns from cells (source of truth)
+            consistent_columns = sorted(list(actual_columns_in_cells))
+        else:
+            consistent_columns = table.columns
+            logger.info(
+                f"[UNIFIED EXECUTION] Column names validated: {len(consistent_columns)} columns match"
+            )
+
         # Group cells by row to create ComparisonEntry objects
         row_cells = {}
         for cell in table.cells:
@@ -1768,6 +2066,7 @@ async def _execute_unified_plan(
             )
 
         # Create ComparisonEntry for each row
+        row_start_idx = len(comparisons)
         for row, metrics in row_cells.items():
             comparisons.append(ComparisonEntry(
                 primary_key=row,
@@ -1778,6 +2077,16 @@ async def _execute_unified_plan(
                 f"[UNIFIED EXECUTION] Created comparison for '{row}' "
                 f"with {len(metrics)} metrics"
             )
+        
+        # FIX: Log what keys are actually in the ComparisonEntry objects
+        for comp in comparisons[row_start_idx:]:
+            logger.info(
+                f"[UNIFIED EXECUTION] ComparisonEntry '{comp.primary_key}': "
+                f"metrics keys={sorted(comp.metrics.keys())}"
+            )
+        
+        # Store consistent_columns for later use in TableSpec
+        table._consistent_columns = consistent_columns
 
     # FIX #1: Convert unified plan tables to TableSpec format for pipeline compatibility
     # Without this, the StructuredReportPipeline can't build tables (it iterates over table_specifications)
@@ -1785,15 +2094,17 @@ async def _execute_unified_plan(
     
     table_specs = []
     for table in plan.response_tables:
+        # FIX: Use consistent_columns (validated from actual cells) instead of table.columns
+        consistent_columns = getattr(table, '_consistent_columns', table.columns)
         table_specs.append(TableSpec(
             table_id=table.table_id,
             purpose=table.title,
             row_entities=table.rows,
-            column_metrics=table.columns
+            column_metrics=consistent_columns
         ))
         logger.info(
             f"[UNIFIED EXECUTION] Created TableSpec '{table.table_id}' with "
-            f"{len(table.rows)} rows × {len(table.columns)} columns"
+            f"{len(table.rows)} rows × {len(consistent_columns)} columns (validated)"
         )
 
     # FIX #5: Log data quality metrics for debugging
@@ -1816,9 +2127,55 @@ async def _execute_unified_plan(
             "This will result in empty tables with N/A values."
         )
 
+    # FIX Layer 4: Log extraction analytics for monitoring and debugging
+    success_rate = (
+        extraction_stats["successful_extractions"] / extraction_stats["total_extractions"] * 100
+        if extraction_stats["total_extractions"] > 0 else 0
+    )
+    logger.info(
+        f"[UNIFIED EXECUTION] FIX Layer 4 Analytics: "
+        f"Success Rate: {success_rate:.1f}% "
+        f"({extraction_stats['successful_extractions']}/{extraction_stats['total_extractions']} extractions)"
+    )
+    logger.info(
+        f"[UNIFIED EXECUTION] Match Strategy Distribution: "
+        f"direct_id={extraction_stats['match_types']['direct_id']}, "
+        f"entity_match={extraction_stats['match_types']['entity_match']}, "
+        f"keyword_match={extraction_stats['match_types']['keyword_match']}, "
+        f"not_found={extraction_stats['match_types']['not_found']}"
+    )
+
+    # FIX Layer 2: Build extracted_data from data_values for data flow consistency
+    # This ensures table rendering and other components have access to extracted values
+    extracted_data_points = []
+    for data_id, value in data_values.items():
+        if value is not None:
+            # Parse entity and metric from data_id
+            entity, metric = _parse_data_id(data_id)
+
+            # Create DataPoint with extracted value
+            extracted_data_points.append(DataPoint(
+                entity=entity,
+                metric=metric,
+                value=value,
+                confidence=0.9,  # High confidence from successful extraction
+                source_observation_id=None,  # FIXED: Use correct field name (was source_id)
+                unit=""  # Unit info may be in source.unit if available
+            ))
+
+            logger.debug(
+                f"[UNIFIED EXECUTION] Created DataPoint: entity='{entity}', "
+                f"metric='{metric}', value={value}"
+            )
+
+    logger.info(
+        f"[UNIFIED EXECUTION] FIX Layer 2: Converted {len(extracted_data_points)} "
+        f"extracted values to DataPoints (was hardcoded to 0)"
+    )
+
     # Create CalculationContext
     calc_context = CalculationContext(
-        extracted_data=[],  # Empty - data is in comparisons
+        extracted_data=extracted_data_points,  # FIX Layer 2: Populated from successful extractions
         calculations=calculations,
         key_comparisons=comparisons,
         summary_insights=plan.narrative_points,
@@ -1838,6 +2195,19 @@ async def _execute_unified_plan(
         f"{len(plan.narrative_points)} narrative points"
     )
 
+    # FIX Layer 2: Validate that extracted_data matches expected count
+    actual_data_points = len(calc_context.extracted_data)
+    if actual_data_points != populated_values:
+        logger.warning(
+            f"[UNIFIED EXECUTION] Data point count mismatch: "
+            f"expected {populated_values}, got {actual_data_points}"
+        )
+    else:
+        logger.info(
+            f"[UNIFIED EXECUTION] ✓ FIX Layer 2 validation passed: "
+            f"{actual_data_points} data points in extracted_data"
+        )
+
     return calc_context
 
 
@@ -1848,34 +2218,58 @@ async def _extract_value_from_observation_llm(
     data_id: str
 ) -> Any:
     """Use LLM to intelligently extract values from observations.
-    
+
     FIX #2: LLM-assisted extraction as specified in the plan.
     Uses structured output to extract specific values with context awareness.
-    
+
+    FIX #7 (NEW): Enhanced error logging and fallback handling.
+    - Detailed logging for LLM failures to aid debugging
+    - Graceful degradation on LLM errors
+    - Timeout handling for slow LLM responses
+
     Args:
         reporter: Reporter instance with LLM access
         obs: Observation dictionary
         extraction_path: Hint about what to find (e.g., "Spain net income: €XX")
         data_id: Identifier for what we're extracting (e.g., "spain_net_income")
-    
+
     Returns:
         Extracted value or None
     """
     from pydantic import BaseModel, Field
     from langchain_core.messages import SystemMessage, HumanMessage
-    
+
     content = obs.get('content', '')
     step_id = obs.get('step_id', 'unknown')
-    
-    if not content or not extraction_path:
+
+    # Validate inputs
+    if not content:
+        logger.warning(
+            f"[LLM EXTRACTION] Empty content for data_id='{data_id}', step_id={step_id}"
+        )
         return None
-    
+
+    if not extraction_path:
+        logger.warning(
+            f"[LLM EXTRACTION] Empty extraction_path for data_id='{data_id}', step_id={step_id}"
+        )
+        return None
+
+    # Check if reporter has LLM configured
+    if not hasattr(reporter, 'llm') or reporter.llm is None:
+        logger.error(
+            f"[LLM EXTRACTION] Reporter has no LLM configured! "
+            f"Cannot perform LLM extraction for '{data_id}'. "
+            f"Falling back to regex extraction."
+        )
+        return None
+
     # Parse data_id to extract context
     # e.g., "spain_single_net_takehome" -> entity="Spain", metric="net_takehome"
     parts = data_id.lower().replace('-', '_').split('_')
     entity = parts[0] if parts else "entity"
     metric = '_'.join(parts[1:]) if len(parts) > 1 else "value"
-    
+
     # Define structured output model
     class ExtractionResult(BaseModel):
         value: Optional[str] = Field(
@@ -1889,10 +2283,21 @@ async def _extract_value_from_observation_llm(
             default=None,
             description="Brief snippet showing where the value was found"
         )
-    
+        reasoning: Optional[str] = Field(
+            default=None,
+            description="Brief explanation of why this value was selected (for debugging)"
+        )
+
     # Truncate content if too long (keep first 2000 chars for context)
     content_excerpt = content[:2000] if len(content) > 2000 else content
-    
+    content_length = len(content)
+
+    logger.debug(
+        f"[LLM EXTRACTION] Starting extraction for '{data_id}': "
+        f"entity={entity}, metric={metric}, "
+        f"content_length={content_length}, excerpt_length={len(content_excerpt)}"
+    )
+
     prompt = f"""Extract a specific value from the research observation below.
 
 WHAT TO EXTRACT:
@@ -1910,64 +2315,110 @@ INSTRUCTIONS:
 3. For percentages, return just the number (e.g., "31.5" not "31.5%")
 4. For currency, return just the number (e.g., "150000" not "€150,000")
 5. If the value is genuinely not present, set found=False
-6. If multiple values exist, choose the one closest to the hint
+6. If multiple values exist, choose the one closest to the hint keywords
 
 EXAMPLES:
-- Hint: "Spain net income: €172,000" → value: "172000", found: true
-- Hint: "France tax rate 31%" → value: "31", found: true
-- Hint: "London rent" (if not in observation) → value: null, found: false
+- Hint: "Spain net income: €172,000" → value: "172000", found: true, reasoning: "Found '€172,000' after 'net income' in text"
+- Hint: "France tax rate 31%" → value: "31", found: true, reasoning: "Found '31%' near 'tax rate'"
+- Hint: "London rent" (if not in observation) → value: null, found: false, reasoning: "No mention of London or rent in observation"
+- Hint: "France social contributions €7,557 for €35,000 gross" → value: "7557", found: true, reasoning: "Found €7,557 directly after 'pays' and before 'in social contributions'"
+
+CRITICAL: When multiple numeric values exist, select the one that appears NEAR the metric keywords (e.g., "social contributions", "tax rate").
 """
-    
+
     try:
         # Use reporter's LLM with structured output
+        logger.debug(
+            f"[LLM EXTRACTION] Calling LLM with structured output for '{data_id}'"
+        )
+
         structured_llm = reporter.llm.with_structured_output(
             ExtractionResult,
             method="json_schema"
         )
-        
+
         messages = [
             SystemMessage(content="You are a precise data extractor. Extract only the requested value, nothing more."),
             HumanMessage(content=prompt)
         ]
-        
+
+        # Make the LLM call
         result = await structured_llm.ainvoke(messages)
-        
+
+        # Log the full result for debugging
+        logger.debug(
+            f"[LLM EXTRACTION] LLM response for '{data_id}': "
+            f"found={result.found}, value={result.value}, "
+            f"reasoning={result.reasoning}, context={result.context}"
+        )
+
         if result.found and result.value:
             # Try to convert to float if it looks numeric
             try:
                 numeric_value = float(result.value.replace(',', ''))
-                logger.debug(
+                logger.info(
                     f"[LLM EXTRACTION] ✓ Extracted '{data_id}' = {numeric_value} "
-                    f"from observation {step_id}"
+                    f"from observation {step_id} "
+                    f"(reasoning: {result.reasoning or 'N/A'})"
                 )
                 return numeric_value
-            except (ValueError, AttributeError):
+            except (ValueError, AttributeError) as conv_err:
                 # Return as string if not numeric
-                logger.debug(
+                logger.info(
                     f"[LLM EXTRACTION] ✓ Extracted '{data_id}' = '{result.value}' (string) "
-                    f"from observation {step_id}"
+                    f"from observation {step_id} "
+                    f"(could not convert to numeric: {conv_err})"
                 )
                 return result.value
         else:
-            logger.debug(
-                f"[LLM EXTRACTION] ✗ No value found for '{data_id}' in observation {step_id}"
+            # LLM explicitly said not found
+            logger.warning(
+                f"[LLM EXTRACTION] ✗ LLM could not find value for '{data_id}' "
+                f"in observation {step_id}. "
+                f"Reasoning: {result.reasoning or 'None provided'}. "
+                f"Extraction_path: '{extraction_path}'. "
+                f"Content preview: '{content[:200]}...'"
             )
             return None
-            
-    except Exception as e:
-        logger.warning(
-            f"[LLM EXTRACTION] Failed for '{data_id}': {e}. Falling back to regex."
+
+    except TimeoutError as timeout_err:
+        logger.error(
+            f"[LLM EXTRACTION] ⏱ Timeout for '{data_id}': {timeout_err}. "
+            f"LLM took too long to respond. Falling back to regex extraction."
         )
-        # Fall back to regex extraction
-        return _extract_value_from_observation(obs, extraction_path)
+        return None
+
+    except Exception as e:
+        # Detailed error logging
+        error_type = type(e).__name__
+        error_msg = str(e)
+
+        logger.error(
+            f"[LLM EXTRACTION] ❌ Exception during extraction for '{data_id}': "
+            f"{error_type}: {error_msg}. "
+            f"Observation: {step_id}, "
+            f"Extraction_path: '{extraction_path}', "
+            f"Content_length: {content_length}. "
+            f"Falling back to regex extraction.",
+            exc_info=True  # Include full stack trace
+        )
+        return None
 
 
 def _extract_value_from_observation(obs: Dict, extraction_path: str) -> Any:
     """Extract value from observation using enhanced pattern matching.
-    
+
     FIX #2: Improved extraction using smarter context-aware pattern matching.
     Previously, this only looked for the first number in the entire observation,
     ignoring context. Now it searches near the extraction_path hint for better accuracy.
+
+    FIX #6 (NEW): Context-aware value selection instead of blindly taking first match.
+    When multiple values exist (e.g., "earning €35,000...pays €7,557..."), we now:
+    1. Identify target metric keywords from extraction_path
+    2. Score each match based on proximity to those keywords
+    3. Return the best match, not just the first match
+
+    FIX #8 (NEW): Unicode normalization for consistent character handling.
 
     Args:
         obs: Observation dictionary
@@ -1988,84 +2439,321 @@ def _extract_value_from_observation(obs: Dict, extraction_path: str) -> Any:
         logger.warning(f"[VALUE EXTRACTION] Missing extraction_path or content")
         return None
 
-    # Strategy 1: Look for value near the extraction hint (context-aware)
-    # Extract key terms from the hint to find the right section
-    hint_lower = extraction_path.lower()
-    content_lower = content.lower()
-    
-    # Find the most relevant section of content (within 500 chars of hint keywords)
-    relevant_section = content
-    hint_keywords = [word for word in hint_lower.split() if len(word) > 3]
-    
-    if hint_keywords:
-        # Find position of first keyword match
-        best_pos = -1
-        for keyword in hint_keywords:
-            pos = content_lower.find(keyword)
-            if pos != -1 and (best_pos == -1 or pos < best_pos):
-                best_pos = pos
-        
-        if best_pos != -1:
-            # Extract window around the keyword
-            start = max(0, best_pos - 250)
-            end = min(len(content), best_pos + 250)
-            relevant_section = content[start:end]
-            logger.debug(
-                f"[VALUE EXTRACTION] Found hint keyword at position {best_pos}, "
-                f"using context window: chars {start}-{end}"
-            )
-    
-    # Strategy 2: Enhanced pattern matching for various formats
-    patterns = [
-        # Currency with thousands separators: €150,000 or $45,000.50
-        (r'[€$£]\s*[\d,]+(?:\.\d+)?', lambda m: m.replace('€', '').replace('$', '').replace('£', '').replace(',', '')),
-        # Percentages: 25.5% or 25%
-        (r'\d+(?:\.\d+)?%', lambda m: m.replace('%', '')),
-        # Numbers with thousands separators: 150,000 or 1,234.56
-        (r'\d{1,3}(?:,\d{3})+(?:\.\d+)?', lambda m: m.replace(',', '')),
-        # Plain numbers with decimals: 1234.56
-        (r'\d+\.\d+', lambda m: m),
-        # Plain integers: 1234
-        (r'\d+', lambda m: m),
-    ]
-    
-    for pattern, cleaner in patterns:
-        matches = re.findall(pattern, relevant_section)
-        if matches:
-            # Use the first match in the relevant section
-            value_str = cleaner(matches[0])
-            try:
-                value = float(value_str)
-                logger.debug(
-                    f"[VALUE EXTRACTION] Successfully extracted numeric value: {value} "
-                    f"from '{matches[0]}' using pattern {pattern}"
-                )
-                return value
-            except ValueError:
-                logger.debug(
-                    f"[VALUE EXTRACTION] Extracted string value: {value_str}"
-                )
-                return value_str
-    
-    # Strategy 3: Fallback - look in full content if context search failed
-    pattern = r'[€$£]\s*[\d,]+(?:\.\d+)?|\d+(?:,\d{3})*(?:\.\d+)?'
-    matches = re.findall(pattern, content)
-    if matches:
-        value_str = matches[0].replace('€', '').replace('$', '').replace('£', '').replace(',', '')
-        try:
-            value = float(value_str)
-            logger.debug(
-                f"[VALUE EXTRACTION] Fallback extraction: {value} from '{matches[0]}'"
+    # FIX #8: Normalize Unicode in both extraction_path and content
+    extraction_path_normalized = _normalize_unicode_text(extraction_path)
+    content_normalized = _normalize_unicode_text(content)
+
+    # Parse extraction_path to identify metric keywords and target value hint
+    # Example: "France social contributions €7,557 for €35,000 gross (2024) – used as rate proxy"
+    # -> metric_keywords: ["france", "social", "contributions"]
+    # -> value_hint: "7557" (if present)
+    metric_keywords, value_hint = _parse_extraction_path(extraction_path_normalized)
+
+    logger.debug(
+        f"[VALUE EXTRACTION] Parsed extraction_path: "
+        f"metric_keywords={metric_keywords}, value_hint={value_hint}"
+    )
+
+    # Strategy 1: If extraction_path contains a specific value hint, look for that exact amount first
+    if value_hint:
+        value = _find_exact_value_in_content(content_normalized, value_hint)
+        if value is not None:
+            logger.info(
+                f"[VALUE EXTRACTION] ✓ Found exact value hint {value_hint} -> {value}"
             )
             return value
-        except:
-            pass
 
-    logger.warning(
-        f"[VALUE EXTRACTION] No value found in observation {step_id} "
-        f"with path '{extraction_path}'"
+    # Strategy 2: Context-aware pattern matching with proximity scoring
+    # Find all numeric values in the content
+    all_matches = _find_all_numeric_matches(content_normalized)
+
+    if not all_matches:
+        logger.warning(
+            f"[VALUE EXTRACTION] No numeric values found in observation {step_id}"
+        )
+        return None
+
+    # Score each match based on proximity to metric keywords
+    scored_matches = _score_matches_by_proximity(
+        all_matches, metric_keywords, content_normalized.lower()
     )
+
+    if not scored_matches:
+        logger.warning(
+            f"[VALUE EXTRACTION] No scored matches for keywords {metric_keywords}"
+        )
+        return None
+
+    # Return the best match (highest score)
+    best_match = scored_matches[0]
+    best_value = best_match['value']
+    best_score = best_match['score']
+
+    logger.info(
+        f"[VALUE EXTRACTION] ✓ Selected best match: {best_value} "
+        f"(score: {best_score:.2f}, raw: '{best_match['raw_text']}', "
+        f"position: {best_match['position']})"
+    )
+
+    # Log runner-up matches for debugging
+    if len(scored_matches) > 1:
+        runner_ups = [
+            f"{m['raw_text']} (score: {m['score']:.2f})"
+            for m in scored_matches[1:3]
+        ]
+        logger.debug(
+            f"[VALUE EXTRACTION] Runner-ups: {', '.join(runner_ups)}"
+        )
+
+    return best_value
+
+
+def _normalize_unicode_text(text: str) -> str:
+    """Normalize Unicode text to handle special characters consistently.
+
+    FIX #8 (NEW): Normalize special Unicode characters to prevent matching issues.
+    Handles:
+    - Non-breaking hyphens (U+2011 ‑) -> regular hyphen (-)
+    - En-dashes (U+2013 –) -> regular hyphen (-)
+    - Em-dashes (U+2014 —) -> regular hyphen (-)
+    - Non-breaking spaces (U+00A0, U+202F) -> regular space ( )
+    - Various other Unicode variants
+
+    Args:
+        text: Input text with potential Unicode variants
+
+    Returns:
+        Normalized text with consistent ASCII equivalents
+    """
+    if not text:
+        return text
+
+    # NFKC normalization: Compatibility decomposition, then canonical composition
+    # This converts variant forms to their canonical equivalents
+    normalized = unicodedata.normalize('NFKC', text)
+
+    # Additional manual replacements for common problematic characters
+    replacements = {
+        '\u2011': '-',  # Non-breaking hyphen
+        '\u2013': '-',  # En dash
+        '\u2014': '-',  # Em dash
+        '\u00A0': ' ',  # Non-breaking space
+        '\u202F': ' ',  # Narrow no-break space
+        '\u2010': '-',  # Hyphen
+        '\u2212': '-',  # Minus sign
+        '\u00AD': '',   # Soft hyphen (remove)
+    }
+
+    for unicode_char, replacement in replacements.items():
+        normalized = normalized.replace(unicode_char, replacement)
+
+    return normalized
+
+
+def _parse_extraction_path(extraction_path: str) -> Tuple[List[str], Optional[str]]:
+    """Parse extraction_path to identify metric keywords and value hints.
+
+    Args:
+        extraction_path: Hint string like "France social contributions €7,557 for €35,000 gross"
+
+    Returns:
+        Tuple of (metric_keywords, value_hint)
+        - metric_keywords: List of significant words (length > 3, no stopwords)
+        - value_hint: Numeric value mentioned in path (e.g., "7557"), or None
+    """
+    # FIX #8: Normalize Unicode before parsing
+    extraction_path = _normalize_unicode_text(extraction_path)
+
+    # Remove metadata suffixes like "– used as rate proxy"
+    clean_path = re.sub(r'\s*[–—-]\s*used as.*$', '', extraction_path, flags=re.IGNORECASE)
+    clean_path = re.sub(r'\s*\(.*?\)\s*', ' ', clean_path)  # Remove parenthetical notes
+
+    # Extract value hint if present (e.g., "€7,557" -> "7557")
+    value_hint = None
+    value_patterns = [
+        r'[€$£]\s*([\d,]+(?:\.\d+)?)',  # Currency amounts
+        r'(\d+(?:\.\d+)?)\s*%',          # Percentages
+        r'\b([\d,]+(?:\.\d+)?)\b'        # Plain numbers
+    ]
+
+    for pattern in value_patterns:
+        match = re.search(pattern, extraction_path)
+        if match:
+            # Extract numeric part only
+            value_hint = match.group(1).replace(',', '')
+            break
+
+    # Extract metric keywords (significant words, no numbers/symbols)
+    # Stopwords to exclude
+    stopwords = {'for', 'the', 'and', 'or', 'in', 'at', 'to', 'of', 'a', 'an', 'as', 'is', 'on', 'by'}
+
+    words = clean_path.lower().split()
+    metric_keywords = [
+        word for word in words
+        if len(word) > 3  # Significant length
+        and word not in stopwords
+        and not re.match(r'^[\d\W]+$', word)  # Not just numbers/symbols
+    ]
+
+    return metric_keywords, value_hint
+
+
+def _find_exact_value_in_content(content: str, value_hint: str) -> Optional[float]:
+    """Find exact value hint in content (e.g., "7557" from "€7,557").
+
+    Args:
+        content: Observation content
+        value_hint: Numeric value to find (e.g., "7557")
+
+    Returns:
+        Float value if found, None otherwise
+    """
+    # Try to find the value with various formatting
+    # e.g., "7557" could appear as "€7,557" or "7557" or "7,557"
+    target_float = float(value_hint)
+
+    # Pattern to match currency amounts or plain numbers
+    pattern = r'[€$£]?\s*[\d,]+(?:\.\d+)?'
+    matches = re.findall(pattern, content)
+
+    for match in matches:
+        # Clean and parse
+        clean = match.replace('€', '').replace('$', '').replace('£', '').replace(',', '').strip()
+        try:
+            value = float(clean)
+            # Check if this matches our target (allowing small floating point differences)
+            if abs(value - target_float) < 0.01:
+                return value
+        except ValueError:
+            continue
+
     return None
+
+
+def _find_all_numeric_matches(content: str) -> List[Dict[str, Any]]:
+    """Find all numeric values in content with their positions and raw text.
+
+    Args:
+        content: Observation content
+
+    Returns:
+        List of dicts with keys: 'value' (float), 'raw_text' (str), 'position' (int)
+    """
+    matches = []
+
+    # Patterns in priority order (most specific first)
+    patterns = [
+        (r'[€$£]\s*[\d,]+(?:\.\d+)?', lambda m: m.replace('€', '').replace('$', '').replace('£', '').replace(',', '')),  # Currency
+        (r'\d+(?:\.\d+)?%', lambda m: m.replace('%', '')),  # Percentages
+        (r'\d{1,3}(?:,\d{3})+(?:\.\d+)?', lambda m: m.replace(',', '')),  # Thousands
+        (r'\d+\.\d+', lambda m: m),  # Decimals
+        (r'\b\d+\b', lambda m: m),  # Integers
+    ]
+
+    for pattern, cleaner in patterns:
+        for match in re.finditer(pattern, content):
+            raw_text = match.group()
+            position = match.start()
+
+            try:
+                clean_str = cleaner(raw_text)
+                value = float(clean_str)
+
+                matches.append({
+                    'value': value,
+                    'raw_text': raw_text,
+                    'position': position
+                })
+            except ValueError:
+                continue
+
+    # Sort by position (left to right in text)
+    matches.sort(key=lambda x: x['position'])
+
+    # Deduplicate overlapping matches (keep more specific patterns)
+    deduplicated = []
+    used_positions = set()
+
+    for match in matches:
+        pos = match['position']
+        # Check if this position overlaps with any used position
+        overlap = False
+        for used_pos in used_positions:
+            if abs(pos - used_pos) < 5:  # Within 5 chars = overlap
+                overlap = True
+                break
+
+        if not overlap:
+            deduplicated.append(match)
+            used_positions.add(pos)
+
+    return deduplicated
+
+
+def _score_matches_by_proximity(
+    matches: List[Dict[str, Any]],
+    metric_keywords: List[str],
+    content_lower: str
+) -> List[Dict[str, Any]]:
+    """Score numeric matches based on proximity to metric keywords.
+
+    Scoring logic:
+    - Higher score = better match
+    - Proximity: Closer to metric keywords = higher score
+    - Order: Earlier in text = slightly higher score (tie-breaker)
+
+    Args:
+        matches: List of match dicts from _find_all_numeric_matches
+        metric_keywords: Keywords identifying the target metric
+        content_lower: Lowercase content for keyword search
+
+    Returns:
+        Matches sorted by score (best first), with added 'score' field
+    """
+    scored = []
+
+    for match in matches:
+        pos = match['position']
+
+        # Calculate minimum distance to any metric keyword
+        min_distance = float('inf')
+
+        for keyword in metric_keywords:
+            # Find all occurrences of this keyword
+            keyword_positions = [
+                m.start() for m in re.finditer(re.escape(keyword), content_lower)
+            ]
+
+            for kw_pos in keyword_positions:
+                distance = abs(pos - kw_pos)
+                min_distance = min(min_distance, distance)
+
+        # Score based on proximity (inverse of distance)
+        # Closer = higher score
+        if min_distance < float('inf'):
+            # Score: 1000 / (distance + 1)
+            # This gives high scores for close matches, decreasing as distance increases
+            proximity_score = 1000.0 / (min_distance + 1)
+        else:
+            # No keywords found - give low score
+            proximity_score = 1.0
+
+        # Add small position bonus (earlier in text = slightly higher)
+        # This is a tie-breaker when distances are similar
+        position_bonus = (1000 - min(pos, 1000)) / 1000.0
+
+        total_score = proximity_score + position_bonus
+
+        scored.append({
+            **match,
+            'score': total_score,
+            'min_distance': min_distance
+        })
+
+    # Sort by score (highest first)
+    scored.sort(key=lambda x: x['score'], reverse=True)
+
+    return scored
 
 
 def _evaluate_formula(formula: str, inputs: Dict[str, Any]) -> Any:

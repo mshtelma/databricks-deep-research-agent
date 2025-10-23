@@ -128,6 +128,7 @@ class StateCapture:
                 "section_research_results": state.get("section_research_results"),
                 "enable_grounding": state.get("enable_grounding"),
                 "citation_style": state.get("citation_style"),
+                "query_constraints": self._simplify_query_constraints(state.get("query_constraints")),  # CRITICAL: Needed for hybrid planner decision
             })
 
         elif agent_name == "planner":
@@ -138,6 +139,7 @@ class StateCapture:
                 "plan_feedback": state.get("plan_feedback"),
                 "enable_iterative_planning": state.get("enable_iterative_planning"),
                 "max_plan_iterations": state.get("max_plan_iterations"),
+                "query_constraints": self._simplify_query_constraints(state.get("query_constraints")),  # CRITICAL: Created by planner, needed by reporter
             })
 
         elif agent_name == "researcher":
@@ -334,6 +336,29 @@ class StateCapture:
             "contradicted_claims": report_dict.get("contradicted_claims"),
             "overall_factuality_score": report_dict.get("overall_factuality_score"),
             "confidence_score": report_dict.get("confidence_score"),
+        }
+
+    def _simplify_query_constraints(self, constraints: Any) -> Optional[Dict]:
+        """Simplify QueryConstraints to essential fields."""
+        if not constraints:
+            return None
+
+        # Convert to dict if it's an object
+        if hasattr(constraints, '__dict__'):
+            constraints_dict = constraints.__dict__
+        elif hasattr(constraints, 'dict'):
+            constraints_dict = constraints.dict()
+        elif isinstance(constraints, dict):
+            constraints_dict = constraints
+        else:
+            return {"_raw": str(constraints)[:200]}
+
+        return {
+            "entities": constraints_dict.get("entities", []),
+            "metrics": constraints_dict.get("metrics", []),
+            "scenarios": constraints_dict.get("scenarios", []),
+            "time_period": constraints_dict.get("time_period"),
+            "data_quality_requirements": constraints_dict.get("data_quality_requirements"),
         }
 
     def _extract_recent_messages(self, messages: List) -> List[Dict]:

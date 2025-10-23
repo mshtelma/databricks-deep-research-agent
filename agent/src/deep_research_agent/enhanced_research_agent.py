@@ -574,7 +574,8 @@ class EnhancedResearchAgent(ResponsesAgent):
         )
         workflow.add_node("planner", self.workflow_nodes.planner_node)
         workflow.add_node("researcher", self.workflow_nodes.researcher_node)
-        workflow.add_node("calculation_planning", self.workflow_nodes.calculation_planning_node)
+        workflow.add_node("calculation_planning", self.workflow_nodes.calculation_planning_node)  # OLD: Legacy metric pipeline
+        workflow.add_node("calculation_agent", self.workflow_nodes.calculation_agent_node)  # NEW: UnifiedPlan execution
         workflow.add_node("fact_checker", self.workflow_nodes.fact_checker_node)
         workflow.add_node("reporter", self.workflow_nodes.reporter_node)
         workflow.add_node("human_feedback", self.workflow_nodes.human_feedback_node)
@@ -639,6 +640,10 @@ class EnhancedResearchAgent(ResponsesAgent):
 
                 if action == "SUFFICIENT":
                     logger.info(f"[PLANNER_ROUTER] Coordination decided SUFFICIENT - routing to next phase")
+                    # NEW: Route to calculation_agent if UnifiedPlan exists
+                    if state.get("unified_plan"):
+                        return "calculation_agent"
+                    # Fallback to legacy calculation_planning if metric_capability_enabled (old path)
                     if state.get("metric_capability_enabled", False):
                         return "calculation_planning"
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
@@ -650,6 +655,10 @@ class EnhancedResearchAgent(ResponsesAgent):
 
                 else:
                     logger.warning(f"[PLANNER_ROUTER] Unexpected action '{action}' - defaulting to next phase")
+                    # NEW: Route to calculation_agent if UnifiedPlan exists
+                    if state.get("unified_plan"):
+                        return "calculation_agent"
+                    # Fallback to legacy calculation_planning if metric_capability_enabled (old path)
                     if state.get("metric_capability_enabled", False):
                         return "calculation_planning"
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
@@ -667,6 +676,8 @@ class EnhancedResearchAgent(ResponsesAgent):
             planner_router,
             {
                 "researcher": "researcher",
+                "calculation_planning": "calculation_planning",  # OLD: Legacy metric pipeline
+                "calculation_agent": "calculation_agent",  # NEW: UnifiedPlan execution
                 "fact_checker": "fact_checker",  # CRITICAL: Add this edge for coordination
                 "human_feedback": "human_feedback",
                 "reporter": "reporter",
@@ -854,18 +865,20 @@ class EnhancedResearchAgent(ResponsesAgent):
             "researcher",
             researcher_router,
             {
-                "calculation_planning": "calculation_planning",  # NEW: Route to calculation planning
+                "calculation_planning": "calculation_planning",  # OLD: Legacy metric pipeline
+                "calculation_agent": "calculation_agent",  # NEW: UnifiedPlan execution
                 "fact_checker": "fact_checker",
                 "reporter": "reporter",
                 "researcher": "researcher",  # Continue research
                 "planner": "planner",  # Re-plan if needed
             },
         )
-        
-        # Calculation planning routing
-        # Note: The calculation_planning_node returns Command(goto=...) which handles routing
+
+        # Calculation routing
+        # Note: Both nodes return Command(goto=...) which handles routing
         # So edges are implicit via Command, but we add them here for graph completeness
-        workflow.add_edge("calculation_planning", "reporter")  # Default path
+        workflow.add_edge("calculation_planning", "reporter")  # OLD: Default path
+        workflow.add_edge("calculation_agent", "reporter")  # NEW: Default path
 
         # Import routing policy for bulletproof routing decisions
         from .core.routing_policy import determine_next_node, TerminationReason

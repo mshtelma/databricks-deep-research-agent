@@ -240,6 +240,41 @@ Example response format:
         Returns:
             Tuple of (Table object, metadata)
         """
+        # 🔍 DEBUG: Log what data is available at table building time
+        logger.info(
+            f"[DEBUG_NA_BUG] 🏗️ build_table_from_data called: "
+            f"table_id={table_spec.table_id}"
+        )
+        logger.info(
+            f"[DEBUG_NA_BUG]   📦 Received {len(comparisons)} comparisons"
+        )
+        logger.info(
+            f"[DEBUG_NA_BUG]   🧮 Received {len(calculations)} calculations"
+        )
+
+        # Log sample comparison structure
+        if comparisons:
+            sample = comparisons[0]
+            logger.info(
+                f"[DEBUG_NA_BUG]   📊 Sample comparison[0]: "
+                f"primary_key='{sample.primary_key}', "
+                f"metrics keys={list(sample.metrics.keys())[:5] if sample.metrics else 'EMPTY'}..."
+            )
+        else:
+            logger.warning("[DEBUG_NA_BUG]   ⚠️ NO COMPARISONS PROVIDED!")
+
+        # Log sample calculation
+        if calculations:
+            calc_sample = calculations[0]
+            logger.info(
+                f"[DEBUG_NA_BUG]   🧮 Sample calculation[0]: "
+                f"description='{calc_sample.description}', "
+                f"result={calc_sample.result}, "
+                f"formula={getattr(calc_sample, 'formula', 'N/A')}"
+            )
+        else:
+            logger.warning("[DEBUG_NA_BUG]   ⚠️ NO CALCULATIONS PROVIDED!")
+
         # Determine which entities to include
         if table_spec.row_entities:
             target_entities = table_spec.row_entities
@@ -357,9 +392,31 @@ Example response format:
         for comp in relevant_comparisons:
             cells = [TableCell(content=comp.primary_key, alignment="left")]
 
+            # 🔍 DEBUG: Log comparison structure
+            logger.info(
+                f"[DEBUG_NA_BUG] 📊 Processing entity: '{comp.primary_key}', "
+                f"available metrics: {list(comp.metrics.keys())[:5]}... ({len(comp.metrics)} total)"
+            )
+
             for metric in columns:
                 total_cells += 1
                 value = comp.metrics.get(metric)
+
+                # 🔍 DEBUG: Log each lookup attempt
+                logger.info(
+                    f"[DEBUG_NA_BUG] 🔎 Looking up: entity='{comp.primary_key}', metric='{metric}'"
+                )
+                logger.info(
+                    f"[DEBUG_NA_BUG]   → Direct lookup result: {value}"
+                )
+                if value is None:
+                    logger.info(
+                        f"[DEBUG_NA_BUG]   ❌ NOT FOUND in comp.metrics - will try fuzzy matching"
+                    )
+                else:
+                    logger.info(
+                        f"[DEBUG_NA_BUG]   ✅ FOUND: {value}"
+                    )
 
                 # If exact match fails, try fuzzy matching by stripping scenario prefixes
                 # This handles cases where table columns have scenario prefixes

@@ -168,6 +168,29 @@ class PlannerAgent:
         # Generate plan
         plan = self._generate_plan(state, config)
 
+        # CRITICAL: Extract QueryConstraints and store in state
+        # This MUST happen here (not inside _generate_plan) so the state update persists
+        original_query = state.get("original_user_query") or state.get("research_topic", "")
+        try:
+            from ..core.constraint_system import ConstraintExtractor, set_global_constraints
+            constraint_extractor = ConstraintExtractor(self.llm)
+            constraints = constraint_extractor.extract_constraints(original_query, state)
+            set_global_constraints(constraints)
+
+            # Store in state for downstream components (reporter needs this for hybrid planner!)
+            state["query_constraints"] = constraints
+
+            logger.info(
+                f"🎯 PLANNER: Extracted constraints - "
+                f"Entities: {constraints.entities}, "
+                f"Metrics: {constraints.metrics}, "
+                f"Scenarios: {len(constraints.scenarios) if constraints.scenarios else 0}"
+            )
+        except Exception as e:
+            logger.error(f"⚠️ Constraint extraction failed: {e}. Reporter will fall back to LLM-based table generation.")
+            # Don't fail the whole planning process, just log the error
+            # Reporter will detect missing constraints and use legacy path
+
         # Assess plan quality
         quality = self._assess_plan_quality(plan, state)
         plan.quality_assessment = quality
@@ -207,10 +230,9 @@ class PlannerAgent:
             updated_state["current_plan"] = plan
             updated_state["plan_iterations"] = state["plan_iterations"] + 1
 
-            # Add entities from plan to state
-            if hasattr(plan, 'requested_entities') and plan.requested_entities:
-                updated_state["requested_entities"] = plan.requested_entities
-                logger.info(f"PLANNER: Added {len(plan.requested_entities)} entities to state: {plan.requested_entities}")
+            # REMOVED: Add entities from plan to state - Use query_constraints.entities instead
+            # if hasattr(plan, 'requested_entities') and plan.requested_entities:
+            #     updated_state["requested_entities"] = plan.requested_entities
 
             return updated_state
 
@@ -253,30 +275,17 @@ class PlannerAgent:
             # ENTITY VALIDATION: Check for hallucinated entities in LLM response
             original_query = state.get("original_user_query") or get_last_user_message(state.get("messages", []))
 
-            # NEW: Use abstract constraint system for comprehensive extraction
-            from ..core.constraint_system import (
-                ConstraintExtractor,
-                set_global_constraints,
-                QueryConstraints
-            )
-
-            try:
-                constraint_extractor = ConstraintExtractor(self.llm)
-                constraints = constraint_extractor.extract_constraints(original_query, state)
-                set_global_constraints(constraints)
-
-                # Store in state for downstream components
-                state["query_constraints"] = constraints
-                state["requested_entities"] = constraints.entities
-
-                logger.info(f"🎯 PLANNER: Extracted constraints - Entities: {constraints.entities}, "
-                           f"Metrics: {constraints.metrics}, Format: {constraints.data_format}")
-
-                # Use entities from constraints for validation
-                requested_entities = constraints.entities
-            except Exception as e:
-                logger.error(f"Constraint extraction failed: {e}, falling back to entity extraction")
+            # Get entities for validation
+            # NOTE: Full constraint extraction happens in _initial_planning() where it persists in state
+            # Here we just extract entities for hallucination detection
+            if "query_constraints" in state and state["query_constraints"]:
+                # Use already-extracted constraints if available
+                requested_entities = state["query_constraints"].entities
+                logger.info(f"Using pre-extracted entities from query_constraints: {requested_entities}")
+            else:
+                # Fallback: extract entities only (constraint extraction will happen in _initial_planning)
                 requested_entities = extract_entities_from_query(original_query, self.llm)
+                logger.info(f"Extracted entities for validation: {requested_entities}")
             
             # Handle structured responses using centralized parser
             from ..core.llm_response_parser import extract_text_from_response
@@ -379,7 +388,7 @@ When creating a plan:
 1. Assess whether you have enough context to answer immediately
 2. If not, break down the research into logical steps
 3. Each step should be specific and actionable
-4. Classify steps as 'research' (information gathering) or 'processing' (analysis/computation)
+4. Classify steps as 'research' (information gathering) or 'validation' (verification/fact-checking)
 5. Consider dependencies between steps
 6. Ensure comprehensive coverage of the topic
 
@@ -624,7 +633,7 @@ Output your plan as a JSON object with this structure:
                     "step_id": PlanIDGenerator.generate_step_id(3),
                     "title": "Synthesis",
                     "description": "Compile and analyze gathered information",
-                    "step_type": "processing",
+                    "step_type": "research",
                     "need_search": False,
                     "depends_on": [PlanIDGenerator.generate_step_id(1), PlanIDGenerator.generate_step_id(2)]
                 }
@@ -1324,7 +1333,15 @@ OUTPUT JSON:
             # Determine step type
             step_type_str = step_data.get("step_type", "research")
             if isinstance(step_type_str, str):
-                step_type = StepType.RESEARCH if step_type_str.lower() == "research" else StepType.PROCESSING
+                step_type_str_lower = step_type_str.lower()
+                if step_type_str_lower == "research":
+                    step_type = StepType.RESEARCH
+                elif step_type_str_lower == "validation":
+                    step_type = StepType.VALIDATION
+                else:
+                    # Fallback for legacy "processing"/"synthesis" or unknown types
+                    logger.warning(f"Unknown step_type '{step_type_str}', defaulting to RESEARCH")
+                    step_type = StepType.RESEARCH
             else:
                 step_type = step_type_str
 
@@ -1367,10 +1384,9 @@ OUTPUT JSON:
         updated_state["current_plan"] = plan
         updated_state["plan_iterations"] = state["plan_iterations"] + 1
 
-        # Add entities from plan to state
-        if hasattr(plan, 'requested_entities') and plan.requested_entities:
-            updated_state["requested_entities"] = plan.requested_entities
-            logger.info(f"PLANNER: Added {len(plan.requested_entities)} entities to state: {plan.requested_entities}")
+        # REMOVED: Add entities from plan to state - Use query_constraints.entities instead
+        # if hasattr(plan, 'requested_entities') and plan.requested_entities:
+        #     updated_state["requested_entities"] = plan.requested_entities
 
         return updated_state
 
@@ -2204,7 +2220,7 @@ VALIDATION REQUIREMENTS:
             step_id=step_id,
             title="Validate Collected Data",
             description="Cross-check and validate all collected data points for consistency and accuracy",
-            step_type=StepType.PROCESSING,
+            step_type=StepType.VALIDATION,
             need_search=False,
             search_queries=[],
             depends_on=[step.step_id for step in plan.steps if step.step_type == StepType.RESEARCH],
@@ -2378,8 +2394,8 @@ VALIDATION REQUIREMENTS:
     def _generate_minimal_plan(self, topic: str) -> Plan:
         """Generate minimal plan when memory is constrained."""
         plan_id = f"plan_{uuid4().hex[:8]}"
-        
-        # Just 2 essential steps
+
+        # Just 1 essential step - synthesis is handled by Reporter, not a plan step
         steps = [
             Step(
                 step_id=PlanIDGenerator.generate_step_id(1),
@@ -2389,15 +2405,6 @@ VALIDATION REQUIREMENTS:
                 need_search=True,
                 search_queries=[topic[:80]],  # Single query
                 depends_on=[],
-                status=StepStatus.PENDING
-            ),
-            Step(
-                step_id=PlanIDGenerator.generate_step_id(2),
-                title="Synthesis",
-                description="Compile findings",
-                step_type=StepType.PROCESSING,
-                need_search=False,
-                depends_on=[PlanIDGenerator.generate_step_id(1)],
                 status=StepStatus.PENDING
             )
         ]

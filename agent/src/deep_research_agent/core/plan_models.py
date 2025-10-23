@@ -21,9 +21,7 @@ logger = get_logger(__name__)
 class StepType(str, Enum):
     """Types of steps in a research plan."""
     RESEARCH = "research"
-    PROCESSING = "processing"
     VALIDATION = "validation"
-    SYNTHESIS = "synthesis"
 
 
 class StepStatus(str, Enum):
@@ -852,9 +850,9 @@ class Plan(BaseModel):
                 search_queries=["scientific evidence", "peer reviewed sources", "expert consensus"]
             )
 
-            # Add before synthesis steps
-            synthesis_index = next((i for i, s in enumerate(self.steps) if s.step_type == StepType.SYNTHESIS), len(self.steps))
-            if self.add_step_after_index(synthesis_index, verification_step, event_emitter=event_emitter):
+            # Add at the end (SYNTHESIS steps no longer exist per Phase 1)
+            # Verification should happen after all research but before reporter generates final report
+            if self.add_step_after_index(len(self.steps), verification_step, event_emitter=event_emitter):
                 steps_added += 1
 
         logger.info(f"[DYNAMIC PLAN] Added {steps_added} new steps based on gap analysis")

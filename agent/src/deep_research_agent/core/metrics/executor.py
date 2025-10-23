@@ -122,6 +122,20 @@ class CalculationExecutor:
                             f"[EXECUTOR] Added calculation: {calculation.description} "
                             f"= {calculation.result}"
                         )
+                        # 🔍 DEBUG: Track where calculation results go
+                        logger.info(
+                            f"[DEBUG_NA_BUG] ✅ Calculation created: "
+                            f"task_id={task.task_id}, "
+                            f"description={calculation.description}, "
+                            f"result={calculation.result}, "
+                            f"formula={getattr(calculation, 'formula', 'N/A')}"
+                        )
+                        logger.info(
+                            f"[DEBUG_NA_BUG] 📍 Stored in: context.calculations[{len(context.calculations)-1}]"
+                        )
+                        logger.info(
+                            f"[DEBUG_NA_BUG] ❓ Check: Are observations being updated with this value?"
+                        )
         
         # Count statistics
         success_count = sum(1 for e in events if e.status in ["computed", "existing"])
@@ -178,7 +192,9 @@ class CalculationExecutor:
         logger.debug(f"[EXECUTOR] Executing sandboxed code:\n{task.code}")
         exec_result = self._sandbox.execute(
             code=task.code,
-            context={'ctx': data_ctx}
+            # FIX: Provide both 'ctx' and 'calc_context' for backward compatibility
+            # Some generated code may reference calc_context instead of ctx
+            context={'ctx': data_ctx, 'calc_context': data_ctx}
         )
         
         if exec_result.success:

@@ -475,12 +475,6 @@ class ResearcherAgent:
             # Execute based on step type
             if current_step.step_type == StepType.RESEARCH:
                 results = self._execute_research_step(current_step, state, config)
-            elif current_step.step_type == StepType.PROCESSING:
-                # FIXED: Properly await async function (no more loop.run_until_complete!)
-                results = await self._execute_processing_step(current_step, state, config)
-            elif current_step.step_type == StepType.SYNTHESIS:
-                # FIXED: Properly await async function (no more loop.run_until_complete!)
-                results = await self._execute_synthesis_step(current_step, state, config)
             else:
                 logger.warning(f"Unknown step type: {current_step.step_type}")
                 results = None
@@ -639,9 +633,11 @@ class ResearcherAgent:
                 # Update search results with memory limits
                 if "search_results" in results:
                     # Apply entity filtering to search results
+                    constraints = state.get("query_constraints")
+                    requested_entities = constraints.entities if constraints else []
                     filtered_results = self._filter_search_results_by_entities(
-                        results["search_results"], 
-                        state.get("requested_entities", [])
+                        results["search_results"],
+                        requested_entities
                     )
                     state = StateManager.add_search_results(state, filtered_results, self.config)
                 
@@ -990,7 +986,7 @@ class ResearcherAgent:
             has_full = getattr(result, 'has_full_content', False)
             logger.info(f"Processing result {i+1}/{len(all_results)} - has_full_content={has_full}")
             try:
-                obs_from_result = self._extract_facts_from_result(result, step)
+                obs_from_result = self._extract_facts_from_result(result, step, state)
 
                 # DIAGNOSTIC: Check if full_content preserved in observations
                 obs_with_full = sum(1 for obs in obs_from_result if obs.full_content)
@@ -1186,235 +1182,7 @@ class ResearcherAgent:
             result_payload["research_quality_score"] = research_quality_score
 
         return result_payload
-    
-    async def _execute_processing_step(
-        self,
-        step: Step,
-        state: EnhancedResearchState,
-        config: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
-        """Execute a processing step involving analysis or computation."""
-        
-        # Get accumulated observations
-        raw_context = state.get("observations", [])
-        context = observations_to_text_list(raw_context)
 
-        if not context:
-            logger.warning("No observations available for processing")
-            # CRITICAL: Return empty result instead of None
-            return {
-                "synthesis": "No observations available for processing",
-                "summary": "Processing skipped - no data available",
-                "confidence": 0.0,
-                "extracted_data": {},
-                "observations": [StructuredObservation.from_string(
-                    "Processing step executed but no observations available",
-                    step_id=step.step_id
-                )]
-            }
-        
-        # Process the accumulated information
-        # Ensure context items are strings (handle both string and dict observations)
-        context_strings = observations_to_text_list(context[-10:])
-        
-        # Get context for entity constraints
-        original_query = state.get("original_user_query", "")
-        requested_entities = state.get("requested_entities", [])
-        entities_str = ', '.join(requested_entities) if requested_entities else "not specified"
-        
-        processing_prompt = f"""
-ORIGINAL REQUEST: {original_query}
-FOCUS ENTITIES: {entities_str}
-
-Based on the following observations, {step.description}:
-
-CRITICAL: Only include information about these specific entities: {entities_str}
-DO NOT mention any other countries, regions, or entities not in the list above.
-
-Observations:
-{chr(10).join(context_strings)}
-
-Provide a clear, analytical response focused ONLY on the requested entities.
-"""
-        
-        if self.use_rate_limiting and self.rate_limited_llm:
-            # NEW: Use Tier 2 (simple) for validation/processing (moves from Tier 3 to reduce 429s)
-            messages_dict = [
-                {"role": "system", "content": "You are a research analyst processing gathered information."},
-                {"role": "user", "content": processing_prompt}
-            ]
-
-            logger.info(f"🔍 LLM_PROMPT [researcher_processing/Tier2]: {processing_prompt[:500]}...")
-
-            response = await self.rate_limited_llm.ainvoke(
-                tier="simple",
-                operation="step_validation",
-                messages=messages_dict
-            )
-        elif self.llm:
-            # LEGACY: Direct LLM invocation for backward compatibility
-            messages = [
-                SystemMessage(content="You are a research analyst processing gathered information."),
-                HumanMessage(content=processing_prompt)
-            ]
-
-            logger.info(f"🔍 LLM_PROMPT [researcher_processing]: {processing_prompt[:500]}...")
-
-            response = self.llm.invoke(messages)
-        else:
-            response = None
-
-        # Process response if available
-        if response:
-            # CRITICAL FIX: Handle structured responses properly using centralized parser
-            from ..core.llm_response_parser import extract_text_from_response
-            analysis = extract_text_from_response(response)
-            analysis_text = analysis
-
-            # Log the response received from LLM
-            logger.info(f"🔍 LLM_RESPONSE [researcher_processing]: {analysis[:500]}...")
-
-            # ENTITY VALIDATION: Check for hallucinated entities in LLM response
-            if requested_entities:
-                from ..core.entity_validation import EntityExtractor
-                extractor = EntityExtractor()
-                response_entities = extractor.extract_entities(analysis_text)
-                hallucinated = response_entities - set(requested_entities)
-                if hallucinated:
-                    logger.warning(f"🚨 ENTITY_HALLUCINATION [researcher_processing]: LLM mentioned entities not in original query: {hallucinated}")
-                else:
-                    logger.info(f"✅ ENTITY_VALIDATION [researcher_processing]: Response only mentions requested entities: {response_entities & set(requested_entities)}")
-        else:
-            analysis = f"Processed: {step.description}"
-        
-        return {
-            "summary": analysis,
-            "observations": [StructuredObservation.from_string(
-                analysis,
-                step_id=step.step_id
-            )],
-            "citations": [],  # Processing steps don't generate new citations
-            "confidence": 0.9
-        }
-    
-    async def _execute_synthesis_step(
-        self,
-        step: Step,
-        state: EnhancedResearchState,
-        config: Dict[str, Any]
-    ) -> Optional[Dict[str, Any]]:
-        """Execute a synthesis step combining multiple findings."""
-        
-        # Get all relevant observations
-        raw_observations = state.get("observations", [])
-        observations = observations_to_text_list(raw_observations)
-        citations = state.get("citations", [])
-        
-        if not observations:
-            logger.warning("No observations to synthesize")
-            # CRITICAL: Return empty result instead of None
-            return {
-                "synthesis": "No observations available for synthesis",
-                "summary": "Synthesis skipped - no data available",
-                "confidence": 0.0,
-                "extracted_data": {},
-                "observations": [StructuredObservation.from_string(
-                    "Synthesis step executed but no observations available",
-                    step_id=step.step_id
-                )]
-            }
-        
-        # Create synthesis prompt
-        # Ensure observations are strings (handle both string and dict observations)
-        observation_strings = observations_to_text_list(observations[-15:])
-        
-        # Get context for entity constraints
-        original_query = state.get("original_user_query", "")
-        requested_entities = state.get("requested_entities", [])
-        entities_str = ', '.join(requested_entities) if requested_entities else "not specified"
-        
-        synthesis_prompt = f"""
-ORIGINAL REQUEST: {original_query}
-FOCUS ENTITIES: {entities_str}
-
-Synthesize the following research findings for: {step.description}
-
-CRITICAL CONSTRAINTS:
-- ONLY discuss these entities: {entities_str}
-- IGNORE any information about other countries/entities
-- If an observation mentions multiple countries, extract ONLY the parts about requested entities
-
-Key Findings:
-{chr(10).join(observation_strings)}
-
-Number of sources: {len(citations)}
-
-Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities that:
-1. Identifies key themes and patterns
-2. Highlights important insights
-3. Notes any contradictions or gaps
-4. Draws meaningful conclusions
-"""
-        
-        if self.use_rate_limiting and self.rate_limited_llm:
-            # NEW: Use Tier 3 (analytical) for core research synthesis (stays at Tier 3)
-            messages_dict = [
-                {"role": "system", "content": "You are a research synthesizer creating comprehensive summaries."},
-                {"role": "user", "content": synthesis_prompt}
-            ]
-
-            logger.info(f"🔍 LLM_PROMPT [researcher_synthesis/Tier3]: {synthesis_prompt[:500]}...")
-
-            response = await self.rate_limited_llm.ainvoke(
-                tier="analytical",
-                operation="step_synthesis",
-                messages=messages_dict
-            )
-        elif self.llm:
-            # LEGACY: Direct LLM invocation for backward compatibility
-            messages = [
-                SystemMessage(content="You are a research synthesizer creating comprehensive summaries."),
-                HumanMessage(content=synthesis_prompt)
-            ]
-
-            logger.info(f"🔍 LLM_PROMPT [researcher_synthesis]: {synthesis_prompt[:500]}...")
-
-            response = self.llm.invoke(messages)
-        else:
-            response = None
-
-        # Process response if available
-        if response:
-            # CRITICAL FIX: Handle structured responses properly
-            from ..core.llm_response_parser import extract_text_from_response
-            synthesis = extract_text_from_response(response)
-
-            # Log the response received from LLM
-            logger.info(f"🔍 LLM_RESPONSE [researcher_synthesis]: {synthesis[:500]}...")
-
-            # ENTITY VALIDATION: Check for hallucinated entities in LLM response
-            if requested_entities:
-                from ..core.entity_validation import EntityExtractor
-                extractor = EntityExtractor()
-                response_entities = extractor.extract_entities(synthesis)
-                hallucinated = response_entities - set(requested_entities)
-                if hallucinated:
-                    logger.warning(f"🚨 ENTITY_HALLUCINATION [researcher_synthesis]: LLM mentioned entities not in original query: {hallucinated}")
-                else:
-                    logger.info(f"✅ ENTITY_VALIDATION [researcher_synthesis]: Response only mentions requested entities: {response_entities & set(requested_entities)}")
-        else:
-            synthesis = f"Synthesis: {step.description}"
-        
-        # Extract key insights
-        insights = self._extract_insights(synthesis)
-        
-        return {
-            "summary": synthesis,
-            "observations": insights,
-            "citations": [],  # Synthesis uses existing citations
-            "confidence": 0.85
-        }
-    
     def _get_accumulated_context(
         self,
         state: EnhancedResearchState,
@@ -1505,7 +1273,9 @@ Provide a comprehensive synthesis focused EXCLUSIVELY on the requested entities 
         incremental_context = None
 
         if state:
-            requested_entities = state.get("requested_entities", [])
+            # Get entities from query_constraints (single source of truth)
+            constraints = state.get("query_constraints")
+            requested_entities = constraints.entities if constraints else []
             research_loops = state.get("research_loops", 0)
             incremental_context = state.get("incremental_context", {})
 
@@ -2538,7 +2308,8 @@ Output ONLY the search queries, one per line, with no additional text, numbering
     def _extract_facts_from_result(
         self,
         result: SearchResult,
-        step: Step
+        step: Step,
+        state: 'EnhancedResearchState' = None
     ) -> List[StructuredObservation]:
         """
         Extract factual observations from a single search result.
@@ -2554,7 +2325,8 @@ Output ONLY the search queries, one per line, with no additional text, numbering
             List of StructuredObservation objects, each linked to this source
         """
         from ..core.observation_models import StructuredObservation, ExtractionMethod
-        from ..core.synthesis_models import FactExtraction
+        from ..core.structured_models import FactExtractionOutput, FactWithMetadata
+        from ..core.constraint_system import QueryConstraints
         from langchain_core.messages import SystemMessage, HumanMessage
 
         # CRITICAL: Handle both dict and object SearchResults
@@ -2607,38 +2379,61 @@ Output ONLY the search queries, one per line, with no additional text, numbering
             f"✅ ACCEPTED ({len(content)} chars, quality={quality_assessment['score']:.2f}): {url[:60]}"
         )
 
-        # Prepare prompt for THIS result only
-        messages = [
-            SystemMessage(content="""Extract SPECIFIC, VERIFIABLE FACTS from this web page.
+        # Get QueryConstraints from state for metadata enrichment
+        constraints = None
+        if state:
+            constraints = state.get("query_constraints")
 
-REQUIREMENTS:
-- Extract 3-10 substantial facts (not meta-descriptions)
-- Each fact should be complete and self-contained
-- Include quantitative data, dates, entities, specifications
-- Format: '[Topic] Complete factual statement with details'
+        if not constraints:
+            logger.warning(f"No query_constraints in state for step {step.step_id}, using defaults")
+            constraints = QueryConstraints()
+
+        logger.info(
+            f"Creating observations with constraints: "
+            f"{len(constraints.entities)} entities, "
+            f"{len(constraints.metrics)} metrics, "
+            f"{len(constraints.topics)} topics"
+        )
+
+        # Prepare enhanced prompt with entity/metric context
+        system_prompt = f"""You are a fact extraction expert.
+
+Extract specific facts from web content with metadata.
+
+ENTITIES TO FOCUS ON: {', '.join(constraints.entities) if constraints.entities else 'Any relevant entities'}
+METRICS TO EXTRACT: {', '.join(constraints.metrics) if constraints.metrics else 'Any relevant metrics'}
+COMPARISON TYPE: {constraints.comparison_type}
+TOPICS: {', '.join(constraints.topics) if constraints.topics else 'General'}
+
+EXTRACTION RULES:
+1. Each fact must be a complete, standalone statement (20-200 chars)
+2. Include specific numbers, dates, and values
+3. Entity MUST be from the entities list above (or empty if not applicable)
+4. Extract numeric values for metrics (e.g., tax_rate: 35, rent: 2000)
+5. Assign confidence: 0.95 for direct facts, 0.85 for clear statements, 0.70 for inferred
 
 GOOD Examples:
-✓ "[Python 3.12] Introduced performance improvements achieving 11% faster execution compared to Python 3.11"
-✓ "[GDPR Compliance] Organizations face fines up to €20M or 4% of annual global revenue for violations"
-✓ "[React 18] Added automatic batching feature reducing unnecessary re-renders by approximately 30%"
-✓ "[Tesla Model S] Achieves 0-60 mph acceleration in 1.99 seconds with Plaid powertrain"
+✓ content: "[Spain] Personal income tax rate is 35% for high earners", entity: "Spain", metrics: {{"tax_rate": 35}}
+✓ content: "[France] Average rent in Paris is €2000/month", entity: "France", metrics: {{"rent": 2000}}
+✓ content: "[AWS] Processing cost is $0.05 per GB", entity: "AWS", metrics: {{"cost_per_gb": 0.05}}
 
-BAD Examples (DO NOT):
-✗ "Information about features"
-✗ "Has performance improvements"
-✗ "Provides details on compliance"
-✗ "Overview of specifications"
+AVOID:
+- Meta descriptions about the content
+- Vague statements without specifics
+- Facts not related to the target entities
+- Duplicate information"""
 
-"""),
-            HumanMessage(content=f"""Extract substantial facts with concrete details as JSON. 
-            
-Source: {title}
+        # Prepare messages
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=f"""Extract facts from this content:
+
+Title: {title}
 URL: {url}
-
-Content:
+Content (first 10000 chars):
 {content[:10000]}
 
-Extract 3-10 specific, substantial facts from this source.""")
+Extract 3-10 specific facts with entity and metric metadata as JSON.""")
         ]
 
         try:
@@ -2646,47 +2441,89 @@ Extract 3-10 specific, substantial facts from this source.""")
                 logger.warning("No LLM available for fact extraction, using raw content")
                 raise Exception("No LLM available")
 
-            # Use structured output for guaranteed format
-            structured_llm = self.llm.with_structured_output(FactExtraction, method="json_schema")
+            # Use structured output with FactExtractionOutput (includes metadata)
+            structured_llm = self.llm.with_structured_output(FactExtractionOutput, method="json_mode")
             extraction_result = structured_llm.invoke(messages)
 
-            if isinstance(extraction_result, FactExtraction):
-                facts = extraction_result.facts
-            elif isinstance(extraction_result, dict):
-                facts = extraction_result.get('facts', [])
-            else:
-                logger.error(f"Unexpected extraction result type: {type(extraction_result)}")
-                facts = []
+            if not isinstance(extraction_result, FactExtractionOutput):
+                logger.error(f"Unexpected extraction result type: {type(extraction_result)}, expected FactExtractionOutput")
+                raise Exception(f"Unexpected type: {type(extraction_result)}")
 
-            # Create StructuredObservation for each fact
+            fact_output = extraction_result
+
+            logger.info(
+                f"✅ Extracted {len(fact_output.facts)} facts from {url[:60]}"
+            )
+
+            # Create StructuredObservation for each fact with metadata
             observations = []
-            if facts:
-                for fact in facts:
-                    # CRITICAL FIX: Hash-based deduplication at source to prevent 70%+ duplication
-                    # Normalize content for hashing (lowercase, strip whitespace)
-                    normalized_content = fact.lower().strip()
-                    obs_hash = (normalized_content, url)  # Hash by (content, source)
+            if fact_output.facts:
+                for fact in fact_output.facts:
+                    # CRITICAL FIX: Hash-based deduplication at source
+                    normalized_content = fact.content.lower().strip()
+                    obs_hash = (normalized_content, url)
 
                     if obs_hash in self.observation_hashes:
-                        logger.debug(f"Skipping duplicate observation: {fact[:100]}... from {url}")
-                        continue  # Skip this duplicate
+                        logger.debug(f"Skipping duplicate observation: {fact.content[:100]}...")
+                        continue
 
                     # Mark as seen
                     self.observation_hashes.add(obs_hash)
 
+                    # Validate entity is in constraints if specified
+                    if fact.entity and constraints.entities:
+                        if fact.entity not in constraints.entities:
+                            # Try case-insensitive match
+                            entity_lower = fact.entity.lower()
+                            matched = False
+                            for valid_entity in constraints.entities:
+                                if valid_entity.lower() == entity_lower:
+                                    fact.entity = valid_entity  # Use canonical form
+                                    matched = True
+                                    break
+
+                            if not matched:
+                                logger.debug(f"Skipping fact with unmatched entity: {fact.entity}")
+                                continue
+
+                    # Build entity tags - simply the entity name(s)
+                    entity_tags = []
+                    if fact.entity:
+                        entity_tags = [fact.entity]  # ✅ Tag observation with entity
+
+                    # Create StructuredObservation with populated metadata
                     obs = StructuredObservation(
-                        content=fact,  # Short extracted fact
-                        full_content=full_content or content,  # Use enriched full_content if available
+                        content=fact.content,  # Fact content
+                        entity_tags=entity_tags,  # ✅ Entity name(s) from constraints
+                        metric_values=fact.metrics,  # ✅ Already validated by Pydantic
+                        full_content=full_content or content,
                         is_summarized=True,
                         original_length=len(full_content) if full_content else len(content),
                         source_id=url,
                         step_id=step.step_id,
                         section_title=step.title,
-                        confidence=0.9,
+                        confidence=fact.confidence,
                         extraction_method=ExtractionMethod.LLM
                     )
                     observations.append(obs)
-                logger.info(f"✅ Extracted {len(observations)} facts from {title[:50]}")
+
+                # Log metadata coverage - CRITICAL METRIC
+                if observations:
+                    with_tags = sum(1 for o in observations if o.entity_tags)
+                    with_metrics = sum(1 for o in observations if o.metric_values)
+
+                    coverage_tags = (with_tags / len(observations)) * 100
+                    coverage_metrics = (with_metrics / len(observations)) * 100
+
+                    logger.info(
+                        f"📊 Created {len(observations)} observations: "
+                        f"Tag coverage: {coverage_tags:.0f}%, "
+                        f"Metric coverage: {coverage_metrics:.0f}%"
+                    )
+
+                    if coverage_tags < 50:
+                        logger.warning(f"⚠️ Low tag coverage: {coverage_tags:.0f}%")
+
                 return observations
             else:
                 # Empty facts but we have content - use raw content as fallback
@@ -3296,7 +3133,9 @@ Focus on concrete facts with numbers, dates, entities, and specific details.""")
         
         # Generate search queries from instructions
         original_query = state.get("original_user_query", "")
-        requested_entities = state.get("requested_entities", [])
+        # Get entities from query_constraints (single source of truth)
+        constraints = state.get("query_constraints")
+        requested_entities = constraints.entities if constraints else []
         entities_str = ', '.join(requested_entities) if requested_entities else "not specified"
         
         research_instructions = _section_value(section_spec, "research_instructions", "")
@@ -3403,7 +3242,9 @@ Focus on concrete facts with numbers, dates, entities, and specific details.""")
         
         # Get context for entity constraints
         original_query = state.get("original_user_query", "")
-        requested_entities = state.get("requested_entities", [])
+        # Get entities from query_constraints (single source of truth)
+        constraints = state.get("query_constraints")
+        requested_entities = constraints.entities if constraints else []
         entities_str = ', '.join(requested_entities) if requested_entities else "not specified"
 
         # Synthesize with extraction focus
