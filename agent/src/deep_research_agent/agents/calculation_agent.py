@@ -213,19 +213,10 @@ class CalculationAgent:
                     "calculation_results": None
                 }
 
-            # Import the proven function from spec_analyzer
+            # Call hybrid planner directly (no router needed - config always forces hybrid mode)
             try:
-                from ..core.metrics.spec_analyzer import _create_unified_plan
+                from ..core.metrics.hybrid_planner import create_unified_plan_hybrid
 
-                # Create a minimal reporter-like object for compatibility
-                class MinimalReporter:
-                    def __init__(self, llm, config):
-                        self.llm = llm
-                        self.config = config
-
-                reporter_proxy = MinimalReporter(self.extraction_llm, self.config)
-
-                # Call the EXISTING, PROVEN function
                 # Limit observations to prevent excessive memory/token usage
                 limited_observations = observations[:100] if len(observations) > 100 else observations
 
@@ -247,16 +238,16 @@ class CalculationAgent:
                         f"  - Metrics: {[m.name if hasattr(m, 'name') else str(m) for m in (constraints.metrics if hasattr(constraints, 'metrics') else [])]}"
                     )
 
-                logger.info("🔍 [CALC AGENT] Calling _create_unified_plan() now...")
+                logger.info("🔍 [CALC AGENT] Calling create_unified_plan_hybrid() directly (simplified architecture)...")
 
-                unified_plan = await _create_unified_plan(
-                    reporter_proxy,
-                    state.get('research_topic', ''),
-                    limited_observations,
-                    constraints
+                unified_plan = await create_unified_plan_hybrid(
+                    user_request=state.get('research_topic', ''),
+                    observations=limited_observations,
+                    constraints=constraints,
+                    llm=self.extraction_llm
                 )
 
-                logger.info("🔍 [CALC AGENT] _create_unified_plan() returned successfully")
+                logger.info("🔍 [CALC AGENT] create_unified_plan_hybrid() returned successfully")
 
                 # Store in state for Reporter to use
                 state['unified_plan'] = unified_plan
@@ -269,17 +260,17 @@ class CalculationAgent:
                         f"  - data_sources: {len(unified_plan.data_sources) if hasattr(unified_plan, 'data_sources') else 'N/A'}"
                     )
                 else:
-                    logger.error("❌ [CALC AGENT] _create_unified_plan() returned None! This should NOT happen!")
+                    logger.error("❌ [CALC AGENT] create_unified_plan_hybrid() returned None! This should NOT happen!")
 
             except ImportError as e:
                 logger.error(
-                    f"❌ [CALC AGENT] CRITICAL: Cannot import spec_analyzer module!\n"
+                    f"❌ [CALC AGENT] CRITICAL: Cannot import hybrid_planner module!\n"
                     f"  - Error: {e}\n"
                     f"  - This indicates a serious code issue - the module should exist"
                 )
                 logger.warning("Proceeding without calculations - reporter will use fallback strategy")
                 return {
-                    "unified_plan": unified_plan.model_dump() if unified_plan and hasattr(unified_plan, 'model_dump') else unified_plan,
+                    "unified_plan": None,
                     "calculation_results": None
                 }
             except Exception as e:
