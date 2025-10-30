@@ -63,7 +63,7 @@ Time period: {time_period}
 Expected unit: {metric_spec.unit}
 
 Text to search:
-{observation.get('content', '')[:self.max_context]}
+{(observation.content or '')[:self.max_context]}
 
 If the metric is not found, set not_found=true.
 Return the exact numeric value found in the text.
@@ -72,9 +72,21 @@ Include the source_text (the sentence where you found the value).
 
         try:
             # Use structured generation to get ExtractedMetric
-            result: ExtractedMetric = await self.extraction_llm.invoke(
-                prompt,
-                response_format=ExtractedMetric,
+            # Import message type
+            from langchain_core.messages import HumanMessage
+
+            # Wrap LLM with structured output (uses project's custom StructuredOutputWrapper)
+            structured_llm = self.extraction_llm.with_structured_output(
+                schema=ExtractedMetric,
+                method="json_schema"  # Strict Pydantic validation
+            )
+
+            # Convert prompt string to LangChain messages
+            messages = [HumanMessage(content=prompt)]
+
+            # Call ainvoke (async) with proper interface
+            result: ExtractedMetric = await structured_llm.ainvoke(
+                messages,
                 temperature=0.0  # Deterministic extraction
             )
 
@@ -85,7 +97,8 @@ Include the source_text (the sentence where you found the value).
                     value=None,
                     unit=metric_spec.unit,
                     confidence=0.0,
-                    source_observations=[observation.get('id', observation.get('step_id', 'unknown'))],
+                    # ✅ CRITICAL FIX: Use attribute access on StructuredObservation objects
+                    source_observations=[observation.source_id or observation.step_id or 'unknown'],
                     extraction_method='llm_not_found',
                     error=result.error
                 )
@@ -95,19 +108,27 @@ Include the source_text (the sentence where you found the value).
                 value=result.value,
                 unit=result.unit or metric_spec.unit,
                 confidence=result.confidence,
-                source_observations=[observation.get('id', observation.get('step_id', 'unknown'))],
+                # ✅ CRITICAL FIX: Use attribute access on StructuredObservation objects
+                source_observations=[observation.source_id or observation.step_id or 'unknown'],
                 extraction_method='llm_structured',
                 extraction_metadata={'source_text': result.source_text}
             )
 
         except Exception as e:
-            logger.error(f"Error extracting metric {metric_spec.data_id}: {e}")
+            import traceback
+            # 🔍 DIAGNOSTIC: Log full traceback for debugging
+            logger.error(
+                f"Error extracting metric {metric_spec.data_id}: {e}\n"
+                f"Error type: {type(e).__name__}\n"
+                f"Full traceback:\n{traceback.format_exc()}"
+            )
             return DataPoint(
                 metric_id=metric_spec.data_id,
                 value=None,
                 unit=metric_spec.unit,
                 confidence=0.0,
-                source_observations=[observation.get('id', observation.get('step_id', 'unknown'))],
+                # ✅ CRITICAL FIX: Use attribute access on StructuredObservation objects
+                source_observations=[observation.source_id or observation.step_id or 'unknown'],
                 extraction_method='llm_error',
                 error=str(e)
             )
@@ -135,16 +156,18 @@ Include the source_text (the sentence where you found the value).
         # Try primary observation
         if metric_spec.observation_id:
             for obs in observations:
-                if obs.get('id') == metric_spec.observation_id or \
-                   obs.get('step_id') == metric_spec.observation_id:
+                # ✅ CRITICAL FIX: Use attribute access on StructuredObservation objects
+                if obs.source_id == metric_spec.observation_id or \
+                   obs.step_id == metric_spec.observation_id:
                     logger.debug(f"Found primary observation {metric_spec.observation_id} for {metric_spec.data_id}")
                     return obs
 
         # Try fallback observations
         for fallback_id in metric_spec.fallback_observation_ids or []:
             for obs in observations:
-                if obs.get('id') == fallback_id or \
-                   obs.get('step_id') == fallback_id:
+                # ✅ CRITICAL FIX: Use attribute access on StructuredObservation objects
+                if obs.source_id == fallback_id or \
+                   obs.step_id == fallback_id:
                     logger.debug(f"Found fallback observation {fallback_id} for {metric_spec.data_id}")
                     return obs
 
