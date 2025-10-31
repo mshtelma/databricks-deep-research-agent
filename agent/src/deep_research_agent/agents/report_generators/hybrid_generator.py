@@ -256,17 +256,27 @@ class HybridGenerator(BaseReportGenerator):
             # Initialize pipeline
             pipeline = StructuredReportPipeline(self.llm, self.config.model_dump())
 
-            # Build request dict for pipeline (it expects dict, not Pydantic)
-            pipeline_request = {
+            # Build state dict for pipeline (it expects EnhancedResearchState-like object)
+            # The pipeline's generate_report() signature is:
+            # async def generate_report(state, findings, calc_context) -> str
+            state_dict = {
                 'research_topic': request.research_topic,
                 'observations': request.observations,
-                'dynamic_sections': request.dynamic_sections or [],
-                'calculation_context': calc_context,
+                'current_plan': {
+                    'suggested_report_structure': request.dynamic_sections or []
+                } if request.dynamic_sections else None,
                 'citations': request.citations,
             }
 
-            # Generate report using pipeline
-            report = await pipeline.generate(pipeline_request)
+            # Build findings dict
+            findings = {
+                'research_topic': request.research_topic,
+                'citations': request.citations,
+                'observations': request.observations,
+            }
+
+            # Generate report using pipeline (FIXED: use generate_report, not generate)
+            report = await pipeline.generate_report(state_dict, findings, calc_context)
 
             logger.info(f"[{trace_id}] Structured pipeline complete: {len(report)} chars")
             return report

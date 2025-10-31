@@ -61,12 +61,33 @@ async def create_unified_plan_hybrid(
     4. Automatic handling of edge cases via Pydantic
     """
 
+    # ✅ CRITICAL FIX: Normalize observations to StructuredObservation objects
+    # LangGraph may serialize them to dicts between nodes, so we normalize at entry
+    from deep_research_agent.core.observation_converter import ObservationConverter
+    observations = ObservationConverter.normalize_list(observations)
+
+    # ✅ ULTRA-PROMINENT LOGGING FOR BUG 4 INVESTIGATION
+    logger.error(
+        f"\n{'#'*100}\n"
+        f"{'#'*100}\n"
+        f"🔥🔥🔥 [HYBRID PLANNER] create_unified_plan_hybrid() CALLED!!! 🔥🔥🔥\n"
+        f"{'#'*100}\n"
+        f"  - Observations: {len(observations)}\n"
+        f"  - Entities: {len(constraints.entities)} → {constraints.entities}\n"
+        f"  - Metrics: {len(constraints.metrics)} → {constraints.metrics}\n"
+        f"  - Scenarios: {len(constraints.scenarios)}\n"
+        f"  - User request: {user_request[:150]}...\n"
+        f"{'#'*100}\n"
+        f"{'#'*100}\n"
+    )
+
     logger.info(
-        f"Creating UnifiedPlan (hybrid with structured generation): "
-        f"{len(observations)} observations, "
-        f"{len(constraints.entities)} entities, "
-        f"{len(constraints.metrics)} metrics, "
-        f"{len(constraints.scenarios)} scenarios"
+        f"🔍 [HYBRID PLANNER] ===== ENTRY POINT =====\n"
+        f"  - Observations: {len(observations)}\n"
+        f"  - Entities: {len(constraints.entities)} → {constraints.entities[:5]}{'...' if len(constraints.entities) > 5 else ''}\n"
+        f"  - Metrics: {len(constraints.metrics)} → {constraints.metrics}\n"
+        f"  - Scenarios: {len(constraints.scenarios)}\n"
+        f"  - User request: {user_request[:100]}..."
     )
 
     # Validate inputs
@@ -121,12 +142,33 @@ async def create_unified_plan_hybrid(
             f"{len(constant_specs)} constant specs created"
         )
 
-    # Step 4: Expand calculations programmatically
+    # 🔥🔥🔥 Step 4: Expand calculations programmatically 🔥🔥🔥
+    logger.error(
+        f"\n{'='*120}\n"
+        f"🔥 [STEP 4] ABOUT TO CALL expand_calculations()!\n"
+        f"{'='*120}\n"
+        f"  - INPUT formulas: {len(patterns.calculation_formulas)}\n"
+        f"  - INPUT formulas list: {[f.metric for f in patterns.calculation_formulas]}\n"
+        f"  - INPUT entities: {len(constraints.entities)}\n"
+        f"  - INPUT metric_specs available: {len(metric_specs)}\n"
+        f"{'='*120}\n"
+    )
+
     calculation_specs = expand_calculations(
         patterns.calculation_formulas,  # Already validated CalculationFormula objects
         constraints,
         metric_specs
     )
+
+    logger.error(
+        f"\n{'='*120}\n"
+        f"🔥 [STEP 4] expand_calculations() RETURNED!\n"
+        f"{'='*120}\n"
+        f"  - OUTPUT calculation_specs: {len(calculation_specs)}\n"
+        f"  - OUTPUT spec IDs: {list(calculation_specs.keys())[:10]}{'...' if len(calculation_specs) > 10 else ''}\n"
+        f"{'='*120}\n"
+    )
+
     metric_specs.update(calculation_specs)
 
     # DEBUG: Log calculation expansion results
@@ -213,8 +255,9 @@ If you identify that all requested metrics can be extracted directly, list them 
     # Build context for pattern identification
     # NOTE: We truncate observations here because we only need to identify PATTERNS,
     # not extract all values. Full observations will be used in value extraction phase.
+    # ✅ CRITICAL FIX: Use attribute access after normalization (observations are StructuredObservation objects)
     obs_sample = [
-        o.get('content', '')[:OBS_CONTENT_PREVIEW]
+        (o.content or '')[:OBS_CONTENT_PREVIEW]
         for o in sample_observations[:OBS_SAMPLE_SIZE]
     ]
 
@@ -262,9 +305,10 @@ Return your analysis in JSON format."""
 
     try:
         # Use native structured generation
+        # ✅ CRITICAL FIX: Use json_schema for strict schema enforcement (was json_mode)
         structured_llm = llm.with_structured_output(
             schema=PatternExtractionOutput,
-            method="json_mode"
+            method="json_schema"
         )
 
         response = await structured_llm.ainvoke(messages)
@@ -284,7 +328,37 @@ Return your analysis in JSON format."""
 
         patterns = response
 
-        # Debug logging
+        # 🔥🔥🔥 ULTRA-DETAILED LOGGING FOR BUG #2 INVESTIGATION 🔥🔥🔥
+        logger.error(
+            f"\n{'='*120}\n"
+            f"🔥 [PATTERN EXTRACTION] LLM RESPONSE RECEIVED!\n"
+            f"{'='*120}\n"
+            f"📊 EXTRACTABLE METRICS: {len(patterns.extractable_metrics)}\n"
+            f"   → {patterns.extractable_metrics}\n"
+            f"\n"
+            f"🧮 CALCULATION FORMULAS: {len(patterns.calculation_formulas)}\n"
+        )
+
+        if patterns.calculation_formulas:
+            logger.error("   FORMULA DETAILS:")
+            for idx, formula in enumerate(patterns.calculation_formulas, 1):
+                logger.error(
+                    f"   [{idx}] {formula.metric}\n"
+                    f"       - formula: {formula.formula}\n"
+                    f"       - inputs: {formula.inputs}\n"
+                    f"       - per_scenario: {formula.per_scenario}"
+                )
+        else:
+            logger.error("   ⚠️  NO FORMULAS RETURNED BY LLM!")
+
+        logger.error(
+            f"\n"
+            f"💡 EXTRACTION HINTS: {len(patterns.extraction_hints)} metrics\n"
+            f"   → {list(patterns.extraction_hints.keys())}\n"
+            f"{'='*120}\n"
+        )
+
+        # Debug logging (original)
         logger.info(
             f"✅ Pattern extraction response: "
             f"extractable_metrics={patterns.extractable_metrics}, "
@@ -292,18 +366,45 @@ Return your analysis in JSON format."""
             f"extraction_hints keys={list(patterns.extraction_hints.keys())}"
         )
 
-        # If LLM returned empty extractable_metrics, use fallback
+        # 🔧 CRITICAL FIX: Ensure ALL metrics from constraints are extractable
+        # The LLM sometimes classifies metrics as "calculation_formulas" only,
+        # but we need to extract/derive their values first before calculating!
+        #
+        # Before fix: LLM returned extractable_metrics=['net_take_home', 'effective_tax_rate']
+        #             but calculation_formulas included all 6 metrics
+        # After fix:  extractable_metrics will include ALL 6 metrics
         if not patterns.extractable_metrics:
             logger.warning(
                 f"LLM returned empty extractable_metrics. "
                 f"Using fallback: all {len(constraints.metrics)} metrics are extractable"
             )
             patterns.extractable_metrics = constraints.metrics.copy()
+        else:
+            # Add any metrics from calculation_formulas that aren't in extractable_metrics
+            formula_metrics = {f.metric for f in patterns.calculation_formulas}
+            missing_metrics = formula_metrics - set(patterns.extractable_metrics)
+
+            if missing_metrics:
+                logger.warning(
+                    f"🔧 [BUG FIX] LLM classified {len(missing_metrics)} metrics as calculation-only "
+                    f"but they need extraction first! Adding to extractable_metrics: {missing_metrics}"
+                )
+                patterns.extractable_metrics.extend(list(missing_metrics))
+
+            # Also ensure ALL constraint metrics are extractable (defensive)
+            constraint_metrics_missing = set(constraints.metrics) - set(patterns.extractable_metrics)
+            if constraint_metrics_missing:
+                logger.warning(
+                    f"🔧 [BUG FIX] {len(constraint_metrics_missing)} constraint metrics missing from extractable! "
+                    f"Adding: {constraint_metrics_missing}"
+                )
+                patterns.extractable_metrics.extend(list(constraint_metrics_missing))
 
         logger.info(
-            f"✅ Final patterns: "
-            f"{len(patterns.extractable_metrics)} extractable metrics, "
-            f"{len(patterns.calculation_formulas)} formulas"
+            f"🔍 [HYBRID PLANNER] ===== PATTERN EXTRACTION COMPLETE =====\n"
+            f"  - Extractable metrics ({len(patterns.extractable_metrics)}): {patterns.extractable_metrics}\n"
+            f"  - Calculation formulas ({len(patterns.calculation_formulas)}): {[f.metric for f in patterns.calculation_formulas]}\n"
+            f"  - Extraction hints keys: {list(patterns.extraction_hints.keys())[:10]}"
         )
 
         return patterns
@@ -330,61 +431,52 @@ async def extract_values_structured(
 ) -> Dict[str, MetricSpec]:
     """Extract values using structured generation for each entity."""
 
+    # CRITICAL DIAGNOSTIC LOGGING - Entry point (WARNING level to ensure it shows in logs)
+    logger.warning(
+        f"\n🔍🔍🔍 [EXTRACT VALUES] ===== ENTRY POINT =====\n"
+        f"  - Observations received: {len(observations)}\n"
+        f"  - Observation types: {[type(o).__name__ for o in observations[:3]]}\n"
+        f"  - Entities to process: {len(constraints.entities)} → {constraints.entities}\n"
+        f"  - Extractable metrics: {patterns.extractable_metrics}\n"
+        f"  - Calculation formulas: {[f.metric for f in patterns.calculation_formulas]}"
+    )
+
+    # 🔍 BUG 4 DIAGNOSTIC: Verify LLM type to understand why ERROR logs aren't appearing
+    logger.error("=" * 100)
+    logger.error(f"🔍🔍🔍 [BUG 4 DIAGNOSTIC] LLM TYPE VERIFICATION")
+    logger.error(f"  - llm type: {type(llm).__name__}")
+    logger.error(f"  - llm module: {type(llm).__module__}")
+    logger.error(f"  - is RateLimitedChatModel: {'RateLimitedChatModel' in type(llm).__name__}")
+    logger.error(f"  - has with_structured_output: {hasattr(llm, 'with_structured_output')}")
+    if hasattr(llm, 'model_selector'):
+        logger.error(f"  - has model_selector: {llm.model_selector is not None}")
+    logger.error("=" * 100)
+
     metric_specs = {}
 
-    # Build metric keyword mapping for METRIC-AWARE filtering
-    metric_keyword_map = {
-        'social_contrib': ['social', 'security', 'contribution', 'ahv', 'iv', 'eo', 'mandatory'],
-        'tax_rate': ['tax', 'rate', 'income', 'personal', 'marginal', 'pit', 'bracket'],
-        'effective_tax_rate': ['effective', 'tax', 'rate', 'total', 'overall'],
-        'net_take_home': ['net', 'take-home', 'takehome', 'after tax', 'disposable'],
-        'exchange_rate': ['exchange', 'rate', 'currency', 'conversion', 'chf', 'gbp', 'eur'],
-        'daycare': ['daycare', 'child care', 'nursery', 'kindergarten', 'kita'],
-        'rent': ['rent', 'rental', 'housing', 'apartment', 'accommodation'],
-        'rsu': ['rsu', 'restricted stock', 'equity', 'vesting', 'stock option'],
-        'family_benefits': ['family', 'benefit', 'allowance', 'child benefit', 'credit'],
-        'disposable_income': ['disposable', 'income', 'after', 'expenses', 'remaining']
-    }
+    # ✅ REMOVED: Unnecessary metric keyword filtering system
+    # Observations are already tagged by researcher agent - we trust that tagging!
 
-    def _get_metric_keywords(metric_name: str) -> List[str]:
-        """Extract keywords for a metric to improve observation matching."""
-        metric_lower = metric_name.lower()
-        keywords = []
-
-        # Check predefined patterns
-        for pattern, kw_list in metric_keyword_map.items():
-            if pattern in metric_lower:
-                keywords.extend(kw_list)
-
-        # Add metric name words as keywords
-        words = metric_lower.replace('_', ' ').split()
-        keywords.extend([w for w in words if len(w) > 3])
-
-        return list(set(keywords))  # Deduplicate
-
-    for entity in constraints.entities:
+    for entity_idx, entity in enumerate(constraints.entities):
         entity_clean = entity.lower().replace(' ', '_').replace('-', '_')
 
-        # Get ALL metrics we need to extract for this entity
-        metrics_for_entity = patterns.extractable_metrics
-        all_metric_keywords = set()
-        for metric in metrics_for_entity:
-            all_metric_keywords.update(_get_metric_keywords(metric))
+        logger.warning(
+            f"\n🔍 [EXTRACT VALUES] ===== PROCESSING ENTITY {entity_idx + 1}/{len(constraints.entities)}: {entity} =====")
 
         logger.info(
-            f"[METRIC-AWARE FILTER] Entity '{entity}' needs metrics: {metrics_for_entity}. "
-            f"Metric keywords: {sorted(list(all_metric_keywords)[:10])}..."
+            f"[ENTITY FILTER] Entity '{entity}' needs {len(patterns.extractable_metrics)} metrics: {patterns.extractable_metrics}"
         )
 
-        # Filter observations for this entity WITH METRIC-AWARE scoring
-        # NOTE: For value extraction, we need MORE context than pattern extraction
+        # Filter observations for this entity by entity_tags
+        # Trust the researcher agent's tagging - no keyword filtering needed!
         entity_observations = []
         obs_id_map = {}  # Maps index -> observation_id for source tracking
 
         for obs in observations:
-            content = obs.get('content', '')
+            # ✅ Use attribute access (observations are StructuredObservation objects)
+            content = obs.content or ''
             content_lower = content.lower()
-            entity_tags = obs.get('entity_tags', [])
+            entity_tags = obs.entity_tags or []
 
             # Check if observation is tagged with this entity
             entity_match = entity in entity_tags or constraints.matches_entity(content, entity)
@@ -392,65 +484,78 @@ async def extract_values_structured(
             if not entity_match:
                 continue
 
-            # METRIC-AWARE SCORING: Check if observation contains relevant metric keywords
-            metric_score = sum(1 for kw in all_metric_keywords if kw in content_lower)
+            # ✅ CRITICAL FIX: TRUST THE ENTITY TAGS!
+            # Observations are already tagged by the researcher agent as relevant to this entity.
+            # We should NOT second-guess that tagging with keyword filtering.
+            # If an observation is tagged with an entity, it's relevant - USE IT!
 
-            # Log scoring details for debugging
-            obs_id = obs.get('step_id', obs.get('id', f'obs_{len(entity_observations)}'))
+            # Track observation ID
+            # ✅ Use attribute access (step_id or source_id)
+            obs_id = obs.step_id or obs.source_id or f'obs_{len(entity_observations)}'
+            idx = len(entity_observations)
 
-            # Only include observations with sufficient metric keyword matches
-            # OR include all if we have very few observations
-            if metric_score >= 2 or len(entity_observations) < 5:
-                idx = len(entity_observations)
+            # Track observation ID by index
+            obs_id_map[idx] = obs_id
 
-                # Track observation ID by index
-                obs_id_map[idx] = obs_id
+            entity_observations.append({
+                'index': idx,  # Include index for LLM reference
+                'content': content[:OBS_CONTENT_FOR_EXTRACTION],
+                # ✅ Use attribute access for metric_values
+                'metric_values': obs.metric_values or {},
+            })
 
-                entity_observations.append({
-                    'index': idx,  # Include index for LLM reference
-                    'content': content[:OBS_CONTENT_FOR_EXTRACTION],
-                    'metric_values': obs.get('metric_values', {}),
-                    'metric_score': metric_score  # Add score for debugging
-                })
+            logger.debug(
+                f"  ✓ Included {obs_id} for '{entity}' (entity-tagged observation)"
+            )
 
-                logger.debug(
-                    f"  ✓ Included {obs_id} for '{entity}' (metric_score={metric_score})"
-                )
-            else:
-                logger.debug(
-                    f"  ✗ Filtered out {obs_id} for '{entity}' (metric_score={metric_score} < 2) "
-                    f"- content preview: {content[:100]}..."
-                )
+        # CRITICAL DIAGNOSTIC: Log observation filtering results
+        logger.warning(
+            f"🔍🔍🔍 [EXTRACT VALUES] Observation filtering for '{entity}':\n"
+            f"  - Total observations available: {len(observations)}\n"
+            f"  - Observations matched: {len(entity_observations)}\n"
+            f"  - First 3 observation samples: {[obs.get('content', '')[:50] for obs in entity_observations[:3]]}"
+        )
 
         if not entity_observations:
-            logger.warning(f"[METRIC-AWARE FILTER] No observations found for {entity}")
+            logger.warning(
+                f"🔍 [EXTRACT VALUES] ⚠️ ZERO OBSERVATIONS matched for entity '{entity}'!\n"
+                f"  - Total observations in state: {len(observations)}\n"
+                f"  - Observations with entity_tags: {sum(1 for o in observations if o.entity_tags)}\n"
+                f"  - This entity will have NO metric_specs!"
+            )
             continue
 
-        # Log metric scores distribution
-        scores = [obs['metric_score'] for obs in entity_observations]
+        # Log selected observations count
         logger.info(
-            f"[METRIC-AWARE FILTER] Selected {len(entity_observations)} observations for '{entity}'. "
-            f"Metric scores: min={min(scores)}, max={max(scores)}, avg={sum(scores)/len(scores):.1f}"
+            f"🔍 [HYBRID PLANNER] Selected {len(entity_observations)} observations for '{entity}'\n"
+            f"  - All entity-tagged observations included (trusting researcher agent tagging)"
         )
 
         # CRITICAL: Handle large observation sets
         total_obs = len(entity_observations)
         if total_obs > MAX_OBS_PER_ENTITY:
-            # Sort by metric_score DESC to keep most relevant observations
-            entity_observations.sort(key=lambda x: x['metric_score'], reverse=True)
-
+            # Keep first MAX_OBS_PER_ENTITY observations (already filtered by entity match)
             logger.warning(
-                f"⚠️ {entity} has {total_obs} observations, keeping top {MAX_OBS_PER_ENTITY} by metric_score. "
-                f"Score range of kept observations: {entity_observations[0]['metric_score']} to {entity_observations[MAX_OBS_PER_ENTITY-1]['metric_score']}"
+                f"⚠️ {entity} has {total_obs} observations, keeping first {MAX_OBS_PER_ENTITY}. "
+                f"Consider increasing MAX_OBS_PER_ENTITY if needed."
             )
             entity_observations = entity_observations[:MAX_OBS_PER_ENTITY]
         else:
-            logger.info(f"[METRIC-AWARE FILTER] Processing {total_obs} observations for {entity}")
+            logger.info(f"[ENTITY FILTER] Processing {total_obs} observations for {entity}")
 
         # PHASE 1: Extract values from pre-existing metric_values (FAST PATH)
         # This uses values already extracted by the researcher agent
         direct_extracted_count = 0
         direct_extracted_metrics = set()
+
+        # 🔍🔍🔍 ULTRA-DIAGNOSTIC: Log right before PHASE 1 loop
+        logger.warning(
+            f"🔍🔍🔍 [EXTRACT VALUES] ===== STARTING PHASE 1 LOOP for {entity} =====\n"
+            f"  - entity_observations count: {len(entity_observations)}\n"
+            f"  - entity_observations type: {type(entity_observations)}\n"
+            f"  - patterns.extractable_metrics: {patterns.extractable_metrics}\n"
+            f"  - About to iterate over {len(patterns.extractable_metrics)} metrics..."
+        )
 
         for metric in patterns.extractable_metrics:
             best_value = None
@@ -489,20 +594,25 @@ async def extract_values_structured(
                     f"  ✅ Direct extraction: {entity}.{metric} = {best_value} from {obs_id}"
                 )
 
-        logger.info(
-            f"[FAST PATH] Directly extracted {direct_extracted_count}/{len(patterns.extractable_metrics)} "
-            f"metrics for {entity} from pre-existing metric_values"
+        logger.warning(
+            f"🔍🔍🔍 [EXTRACT VALUES] PHASE 1 (FAST PATH) COMPLETE for {entity}:\n"
+            f"  - Directly extracted: {direct_extracted_count}/{len(patterns.extractable_metrics)} metrics\n"
+            f"  - Extracted metrics: {list(direct_extracted_metrics)}\n"
+            f"  - Metric_specs created so far: {len([k for k in metric_specs.keys() if entity_clean in k])}"
         )
 
         # PHASE 2: LLM extraction for remaining metrics (SLOW PATH - only if needed)
         metrics_needing_llm = [m for m in patterns.extractable_metrics if m not in direct_extracted_metrics]
 
         if not metrics_needing_llm:
-            logger.info(f"[SKIP LLM] All metrics for {entity} were directly extracted, skipping LLM call")
+            logger.warning(f"🔍🔍🔍 [EXTRACT VALUES] SKIP LLM - All metrics for {entity} were directly extracted")
             continue
 
-        logger.info(
-            f"[LLM EXTRACTION] Need LLM for {len(metrics_needing_llm)} metrics: {metrics_needing_llm[:5]}..."
+        logger.warning(
+            f"🔍🔍🔍 [EXTRACT VALUES] PHASE 2 (SLOW PATH) STARTING for {entity}:\n"
+            f"  - Metrics needing LLM: {len(metrics_needing_llm)} → {metrics_needing_llm}\n"
+            f"  - Observations available: {len(entity_observations)}\n"
+            f"  - Calling LLM with EntityMetricsOutput schema..."
         )
 
         # Build hints from patterns
@@ -519,63 +629,156 @@ async def extract_values_structured(
                 obs_line += f"\n    Pre-extracted values: {o['metric_values']}"
             obs_lines.append(obs_line)
 
-        system_prompt = f"""Extract specific metric values for {entity}.
+        # 🔍 ULTRA DETAILED LOGGING - Log ALL observations with FULL content
+        logger.error("=" * 120)
+        logger.error(f"🔍🔍🔍 [EXTRACTION DEBUG] FULL OBSERVATIONS FOR {entity}")
+        logger.error(f"  - Total observations: {len(entity_observations)}")
+        logger.error(f"  - Metrics requested: {metrics_needing_llm}")
+        logger.error("=" * 120)
+        for i, o in enumerate(entity_observations[:5]):  # First 5 for readability
+            logger.error(f"\n[Observation {i}]:")
+            logger.error(f"  Index: {o.get('index', 'N/A')}")
+            logger.error(f"  Content length: {len(o.get('content', ''))} chars")
+            logger.error(f"  Content: {o.get('content', '')[:500]}...")  # First 500 chars
+            if o.get('metric_values'):
+                logger.error(f"  Pre-extracted values: {o['metric_values']}")
+        logger.error("=" * 120)
 
-Focus ONLY on these metrics (others were already found): {', '.join(metrics_needing_llm)}
+        system_prompt = f"""Extract metric values for {entity} from the provided observations.
+
+METRICS TO EXTRACT: {', '.join(metrics_needing_llm)}
 {hints_text}
 
-Return exact numeric values when found, null when not found.
+EXTRACTION GUIDELINES:
+1. Look for NATURAL LANGUAGE descriptions that match the metric concept:
+   - net_take_home: "net take-home", "net salary", "take-home pay", "net pay", "after-tax income"
+   - effective_tax_rate: "effective tax rate", "overall tax rate", "total tax percentage"
+   - annual_rent: "annual rent", "yearly rent", "rent per year"
+   - disposable_income: "disposable income", "after-tax income", "spending money"
+   - family_benefits: "family benefits", "child benefits", "family allowance"
+   - daycare_cost: "daycare cost", "childcare cost", "nursery fees"
 
-NOTE: Some observations include pre-extracted values. Use them if they match the metrics you need.
+2. Extract from context (e.g., "leaving a net take-home of €X" → net_take_home: X)
 
-CRITICAL: For each metric value you extract, specify which observation (by index number) it came from.
-This is essential for tracking data sources.
+3. If multiple values exist for a metric, prefer the most specific/detailed one
 
-IMPORTANT: Return your analysis in JSON format with this structure:
+4. Extract ALL metrics you can find - it's better to extract with low confidence than return null
+
+5. Return numeric values only (strip currency symbols like €, £, units, %)
+
+6. For each value, specify which observation (by index number) it came from
+
+EXAMPLES:
+- "net take-home of €2,647" → {{"net_take_home": 2647, "confidence": 0.9}}
+- "effective tax rate of 7.64%" → {{"effective_tax_rate": 7.64, "confidence": 0.9}}
+- "annual rent of €18,600" → {{"annual_rent": 18600, "confidence": 0.9}}
+
+OUTPUT FORMAT:
 {{
   "entity": "{entity}",
   "extracted_values": {{
-    "metric_name1": numeric_value_or_null,
-    "metric_name2": numeric_value_or_null
+    "metric_name": numeric_value,
+    ...
   }},
   "confidence": {{
-    "metric_name1": 0.9,
-    "metric_name2": 0.8
+    "metric_name": 0.0_to_1.0,
+    ...
   }},
   "observation_sources": {{
-    "metric_name1": 0,  // Index of observation containing this value
-    "metric_name2": 2   // Index of observation containing this value
+    "metric_name": observation_index,
+    ...
   }}
 }}
 
-If you can't determine the exact observation, use the first observation (index 0)."""
+IMPORTANT: Extract all metrics you can find. Don't leave extracted_values empty unless truly no metrics are found."""
 
-        human_prompt = f"""Extract metric values for {entity} from these observations.
+        human_prompt = f"""TASK: Extract metric values for {entity}
 
-Each observation is numbered with an index. Note which observation each value comes from.
-
-Observations:
+OBSERVATIONS (numbered with index):
 {chr(10).join(obs_lines)}
 
-Entity: {entity}
-Total observations: {len(entity_observations)}
-Metrics to extract: {', '.join(metrics_needing_llm)}
+METRICS TO EXTRACT:
+{', '.join(metrics_needing_llm)}
 
-Return extracted values with observation sources in JSON format."""
+INSTRUCTIONS:
+- Read through ALL {len(entity_observations)} observations
+- Extract EVERY metric you can find
+- Note the observation index for each extracted value
+- Return JSON with extracted_values, confidence, and observation_sources
+- Don't return empty - extract what you can find!"""
 
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=human_prompt)
         ]
 
+        # 🔍 ULTRA DETAILED LOGGING - Log FULL PROMPT being sent to LLM
+        logger.error("=" * 120)
+        logger.error(f"🔍🔍🔍 [EXTRACTION DEBUG] FULL PROMPT FOR {entity}")
+        logger.error("=" * 120)
+        logger.error("\n📋 SYSTEM PROMPT:")
+        logger.error(system_prompt)
+        logger.error("\n" + "=" * 120)
+        logger.error("\n📋 HUMAN PROMPT:")
+        logger.error(human_prompt)
+        logger.error("\n" + "=" * 120)
+        logger.error(f"\n📊 PROMPT STATS:")
+        logger.error(f"  - System prompt length: {len(system_prompt)} chars")
+        logger.error(f"  - Human prompt length: {len(human_prompt)} chars")
+        logger.error(f"  - Total observations in prompt: {len(entity_observations)}")
+        logger.error(f"  - Metrics to extract: {metrics_needing_llm}")
+        logger.error("=" * 120)
+
         try:
             # Use native structured generation
+            # ✅ CRITICAL FIX: Use json_schema for strict schema enforcement (was json_mode)
             structured_llm = llm.with_structured_output(
                 schema=EntityMetricsOutput,
-                method="json_mode"
+                method="json_schema"
             )
 
+            # 🔍 BUG 4 DIAGNOSTIC: Verify structured_llm type
+            logger.error("=" * 100)
+            logger.error(f"🔍🔍🔍 [BUG 4 DIAGNOSTIC] STRUCTURED LLM TYPE VERIFICATION for {entity}")
+            logger.error(f"  - structured_llm type: {type(structured_llm).__name__}")
+            logger.error(f"  - structured_llm module: {type(structured_llm).__module__}")
+            logger.error(f"  - is StructuredOutputWrapper: {'StructuredOutputWrapper' in type(structured_llm).__name__}")
+            logger.error(f"  - has ainvoke: {hasattr(structured_llm, 'ainvoke')}")
+            if hasattr(structured_llm, 'ainvoke'):
+                import inspect
+                try:
+                    source_file = inspect.getfile(structured_llm.ainvoke)
+                    logger.error(f"  - ainvoke source: {source_file}")
+                except Exception as e:
+                    logger.error(f"  - ainvoke source: Unable to determine ({e})")
+            logger.error("=" * 100)
+
             response = await structured_llm.ainvoke(messages)
+
+            # 🔍 ULTRA DETAILED LOGGING - Log FULL LLM RESPONSE
+            logger.error("=" * 120)
+            logger.error(f"🔍🔍🔍 [EXTRACTION DEBUG] LLM RESPONSE FOR {entity}")
+            logger.error("=" * 120)
+            logger.error(f"  Response type: {type(response)}")
+            logger.error(f"  Response: {response}")
+            if isinstance(response, EntityMetricsOutput):
+                logger.error(f"\n📊 PARSED EntityMetricsOutput:")
+                logger.error(f"  - entity: {response.entity}")
+                logger.error(f"  - extracted_values: {response.extracted_values}")
+                logger.error(f"  - confidence: {response.confidence}")
+                logger.error(f"  - observation_sources: {response.observation_sources}")
+                logger.error(f"  - Number of metrics extracted: {len(response.extracted_values)}")
+
+                # 🔍 CRITICAL: If empty, log WHY
+                if not response.extracted_values:
+                    logger.error(f"\n❌ WARNING: NO METRICS EXTRACTED for {entity}!")
+                    logger.error(f"  - This means LLM returned valid JSON but with empty extracted_values")
+                    logger.error(f"  - Possible reasons:")
+                    logger.error(f"    1. Observations don't contain the requested metrics")
+                    logger.error(f"    2. Metric names don't match observation content")
+                    logger.error(f"    3. Prompt is unclear or confusing")
+                    logger.error(f"    4. LLM is being too conservative")
+            logger.error("=" * 120)
 
             # with_structured_output() should ALWAYS return validated Pydantic model
             if not isinstance(response, EntityMetricsOutput):
@@ -626,12 +829,28 @@ Return extracted values with observation sources in JSON format."""
                     )
 
             logger.info(
-                f"Extracted {len(entity_output.extracted_values)} values for {entity}"
+                f"🔍 [HYBRID PLANNER] PHASE 2 (SLOW PATH) COMPLETE for {entity}:\n"
+                f"  - LLM extracted: {len(entity_output.extracted_values)} values\n"
+                f"  - Values: {entity_output.extracted_values}\n"
+                f"  - Confidences: {entity_output.confidence}\n"
+                f"  - Observation sources: {entity_output.observation_sources}\n"
+                f"  - Total metric_specs for this entity: {len([k for k in metric_specs.keys() if entity_clean in k])}"
             )
 
         except Exception as e:
-            logger.error(f"Failed to extract values for {entity}: {e}")
+            logger.error(
+                f"🔍 [HYBRID PLANNER] ❌ PHASE 2 FAILED for {entity}:\n"
+                f"  - Exception: {type(e).__name__}: {str(e)}\n"
+                f"  - This entity will have incomplete metric_specs!",
+                exc_info=True
+            )
             continue
+
+    logger.info(
+        f"🔍 [HYBRID PLANNER] ===== VALUE EXTRACTION COMPLETE =====\n"
+        f"  - Total metric_specs created: {len(metric_specs)}\n"
+        f"  - Metric_spec IDs: {list(metric_specs.keys())[:20]}{'...' if len(metric_specs) > 20 else ''}"
+    )
 
     return metric_specs
 
@@ -684,9 +903,37 @@ def expand_calculations(
 ) -> Dict[str, MetricSpec]:
     """Expand validated calculation formulas to all combinations."""
 
+    logger.error(
+        f"\n{'*'*120}\n"
+        f"🔥🔥🔥 [expand_calculations] FUNCTION ENTRY!\n"
+        f"{'*'*120}\n"
+        f"  - calculation_formulas LENGTH: {len(calculation_formulas)}\n"
+        f"  - calculation_formulas TYPE: {type(calculation_formulas)}\n"
+        f"  - existing_specs: {len(existing_specs)} specs available\n"
+        f"  - entities: {len(constraints.entities)}\n"
+        f"{'*'*120}\n"
+    )
+
+    if not calculation_formulas:
+        logger.error(
+            f"🔥🔥🔥 [expand_calculations] NO FORMULAS PROVIDED! "
+            f"Returning empty dict immediately."
+        )
+        return {}
+
     calculation_specs = {}
 
-    for formula_obj in calculation_formulas:
+    for idx, formula_obj in enumerate(calculation_formulas):
+        logger.error(
+            f"\n{'~'*100}\n"
+            f"🔥 [expand_calculations] PROCESSING FORMULA {idx+1}/{len(calculation_formulas)}\n"
+            f"{'~'*100}\n"
+            f"  - metric: {formula_obj.metric}\n"
+            f"  - formula: {formula_obj.formula}\n"
+            f"  - inputs: {formula_obj.inputs}\n"
+            f"  - per_scenario: {formula_obj.per_scenario}\n"
+            f"{'~'*100}\n"
+        )
         metric_name = formula_obj.metric
         formula_template = formula_obj.formula
         inputs_template = formula_obj.inputs

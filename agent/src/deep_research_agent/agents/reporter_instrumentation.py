@@ -114,12 +114,29 @@ class ReporterInstrumentation:
         return analysis
 
     def _analyze_calc_context(self, calc_context: CalculationContext) -> Dict[str, Any]:
-        """Analyze the calculation context structure."""
+        """Analyze the calculation context structure.
+
+        FIXED: Handle both CalculationContext objects and dicts.
+        """
+        # FIXED: Handle both object and dict formats
+        if isinstance(calc_context, dict):
+            # Dict format: use .get() with defaults
+            extracted_data = calc_context.get("extracted_data", [])
+            calculations = calc_context.get("calculations", [])
+            key_comparisons = calc_context.get("key_comparisons", [])
+            table_specifications = calc_context.get("table_specifications", [])
+        else:
+            # Object format: use attributes
+            extracted_data = calc_context.extracted_data
+            calculations = calc_context.calculations
+            key_comparisons = calc_context.key_comparisons
+            table_specifications = calc_context.table_specifications
+
         analysis = {
-            "data_points_count": len(calc_context.extracted_data),
-            "calculations_count": len(calc_context.calculations),
-            "comparisons_count": len(calc_context.key_comparisons),
-            "table_specs_count": len(calc_context.table_specifications),
+            "data_points_count": len(extracted_data),
+            "calculations_count": len(calculations),
+            "comparisons_count": len(key_comparisons),
+            "table_specs_count": len(table_specifications),
             "entities_in_data": set(),
             "metrics_in_data": set(),
             "entities_in_comparisons": set(),
@@ -127,15 +144,26 @@ class ReporterInstrumentation:
         }
 
         # Extract unique entities and metrics
-        for dp in calc_context.extracted_data:
-            analysis["entities_in_data"].add(dp.entity)
-            analysis["metrics_in_data"].add(dp.metric)
+        for dp in extracted_data:
+            # Handle both object and dict formats for data points
+            entity = dp.entity if hasattr(dp, 'entity') else dp.get('entity')
+            metric = dp.metric if hasattr(dp, 'metric') else dp.get('metric')
+            if entity:
+                analysis["entities_in_data"].add(entity)
+            if metric:
+                analysis["metrics_in_data"].add(metric)
 
-        for comp in calc_context.key_comparisons:
-            analysis["entities_in_comparisons"].add(comp.primary_key)
+        for comp in key_comparisons:
+            # Handle both object and dict formats for comparisons
+            primary_key = comp.primary_key if hasattr(comp, 'primary_key') else comp.get('primary_key')
+            if primary_key:
+                analysis["entities_in_comparisons"].add(primary_key)
 
-        for spec in calc_context.table_specifications:
-            analysis["table_spec_ids"].append(spec.table_id)
+        for spec in table_specifications:
+            # Handle both object and dict formats for specs
+            table_id = spec.table_id if hasattr(spec, 'table_id') else spec.get('table_id')
+            if table_id:
+                analysis["table_spec_ids"].append(table_id)
 
         # Convert sets to lists for JSON serialization
         analysis["entities_in_data"] = list(analysis["entities_in_data"])
@@ -183,17 +211,27 @@ class ReporterInstrumentation:
             )
 
         # Check table specifications alignment
-        if not calc_context.table_specifications:
+        # FIXED: Handle both dict and object formats for calc_context
+        if isinstance(calc_context, dict):
+            table_specs = calc_context.get("table_specifications", [])
+        else:
+            table_specs = calc_context.table_specifications
+
+        if not table_specs:
             results["critical_issues"].append(
                 "No table specifications found - tables cannot be generated"
             )
         else:
             # Verify each table spec has corresponding comparison data
-            for spec in calc_context.table_specifications:
-                spec_entities = set(spec.row_entities)
+            for spec in table_specs:
+                # Handle both object and dict formats for specs
+                row_entities = spec.row_entities if hasattr(spec, 'row_entities') else spec.get('row_entities', [])
+                table_id = spec.table_id if hasattr(spec, 'table_id') else spec.get('table_id', 'unknown')
+
+                spec_entities = set(row_entities) if row_entities else set()
                 if spec_entities and not spec_entities.intersection(comp_entities):
                     results["warnings"].append(
-                        f"Table spec '{spec.table_id}' references entities not in comparisons"
+                        f"Table spec '{table_id}' references entities not in comparisons"
                     )
 
         # Calculate coverage metrics
@@ -209,11 +247,18 @@ class ReporterInstrumentation:
             results["coverage"]["entity_comparison_coverage"] = 0.0
 
         # Check calculation coverage
-        if calc_context.calculations:
+        # FIXED: Handle both dict and object formats
+        if isinstance(calc_context, dict):
+            calculations = calc_context.get("calculations", [])
+        else:
+            calculations = calc_context.calculations
+
+        if calculations:
             calculated_metrics = set()
-            for calc in calc_context.calculations:
+            for calc in calculations:
                 # Extract metrics from calculation description
-                desc_lower = calc.description.lower()
+                desc = calc.description if hasattr(calc, 'description') else calc.get('description', '')
+                desc_lower = desc.lower()
                 for metric in calc_analysis["metrics_in_data"]:
                     if metric.lower() in desc_lower:
                         calculated_metrics.add(metric)
@@ -244,37 +289,53 @@ class ReporterInstrumentation:
             "first_table_spec": None
         }
 
-        if calc_context.extracted_data:
-            dp = calc_context.extracted_data[0]
+        # FIXED: Handle both dict and object formats
+        if isinstance(calc_context, dict):
+            extracted_data = calc_context.get("extracted_data", [])
+            calculations = calc_context.get("calculations", [])
+            key_comparisons = calc_context.get("key_comparisons", [])
+            table_specs = calc_context.get("table_specifications", [])
+        else:
+            extracted_data = calc_context.extracted_data
+            calculations = calc_context.calculations
+            key_comparisons = calc_context.key_comparisons
+            table_specs = calc_context.table_specifications
+
+        if extracted_data:
+            dp = extracted_data[0]
             sample["first_data_point"] = {
-                "entity": dp.entity,
-                "metric": dp.metric,
-                "value": str(dp.value),
-                "unit": dp.unit
+                "entity": dp.entity if hasattr(dp, 'entity') else dp.get('entity'),
+                "metric": dp.metric if hasattr(dp, 'metric') else dp.get('metric'),
+                "value": str(dp.value if hasattr(dp, 'value') else dp.get('value')),
+                "unit": dp.unit if hasattr(dp, 'unit') else dp.get('unit')
             }
 
-        if calc_context.calculations:
-            calc = calc_context.calculations[0]
+        if calculations:
+            calc = calculations[0]
             sample["first_calculation"] = {
-                "description": calc.description,
-                "formula": calc.formula,
-                "result": str(calc.result)
+                "description": calc.description if hasattr(calc, 'description') else calc.get('description'),
+                "formula": calc.formula if hasattr(calc, 'formula') else calc.get('formula'),
+                "result": str(calc.result if hasattr(calc, 'result') else calc.get('result'))
             }
 
-        if calc_context.key_comparisons:
-            comp = calc_context.key_comparisons[0]
+        if key_comparisons:
+            comp = key_comparisons[0]
+            primary_key = comp.primary_key if hasattr(comp, 'primary_key') else comp.get('primary_key')
+            metrics = comp.metrics if hasattr(comp, 'metrics') else comp.get('metrics', {})
             sample["first_comparison"] = {
-                "primary_key": comp.primary_key,
-                "metrics_count": len(comp.metrics)
+                "primary_key": primary_key,
+                "metrics_count": len(metrics)
             }
 
-        if calc_context.table_specifications:
-            spec = calc_context.table_specifications[0]
+        if table_specs:
+            spec = table_specs[0]
+            row_entities = spec.row_entities if hasattr(spec, 'row_entities') else spec.get('row_entities', [])
+            column_metrics = spec.column_metrics if hasattr(spec, 'column_metrics') else spec.get('column_metrics', [])
             sample["first_table_spec"] = {
-                "table_id": spec.table_id,
-                "purpose": spec.purpose,
-                "row_count": len(spec.row_entities),
-                "column_count": len(spec.column_metrics)
+                "table_id": spec.table_id if hasattr(spec, 'table_id') else spec.get('table_id'),
+                "purpose": spec.purpose if hasattr(spec, 'purpose') else spec.get('purpose'),
+                "row_count": len(row_entities),
+                "column_count": len(column_metrics)
             }
 
         return sample

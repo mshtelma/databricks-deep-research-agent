@@ -80,13 +80,37 @@ class DatabricksResponseParser:
         
         if isinstance(content, list):
             # Handle list format: [{"type": "reasoning", ...}, {"type": "text", ...}]
-            for item in content:
+            logger.debug(f"📋 DatabricksResponseParser: Processing list with {len(content)} items")
+
+            for i, item in enumerate(content):
                 if isinstance(item, dict):
-                    if item.get('type') == 'reasoning':
+                    item_type = item.get('type', 'unknown')
+                    logger.debug(f"   Item[{i}]: type={item_type}")
+
+                    if item_type == 'reasoning':
                         reasoning_text = self._extract_reasoning(item)
                         metadata['has_reasoning'] = True
-                    elif item.get('type') == 'text':
+                        logger.debug(f"   -> Extracted reasoning: {len(reasoning_text)} chars")
+
+                    elif item_type == 'text':
                         actual_content = item.get('text', '')
+                        # ✅ INFO level for successful extraction
+                        logger.info(
+                            f"📝 DatabricksResponseParser: Extracted TEXT block\n"
+                            f"   - Length: {len(actual_content)} chars\n"
+                            f"   - Preview: {actual_content[:300]}...\n"
+                            f"   - Appears to be JSON: {actual_content.strip().startswith('{')}"
+                        )
+
+                        # ✅ NEW: Validate we extracted something useful
+                        if not actual_content or len(actual_content.strip()) < 10:
+                            logger.warning(
+                                f"⚠️  DatabricksResponseParser: TEXT block is EMPTY or too short!\n"
+                                f"   - This will likely cause parsing failure\n"
+                                f"   - Full item: {item}"
+                            )
+                else:
+                    logger.warning(f"   Item[{i}]: Not a dict, type={type(item).__name__}")
                         
         elif isinstance(content, dict):
             # Handle single dict format
@@ -96,6 +120,25 @@ class DatabricksResponseParser:
             elif content.get('type') == 'text':
                 actual_content = content.get('text', '')
         
+        # ✅ NEW: Comprehensive extraction validation with DEBUG-level logging
+        logger.debug(
+            f"🔍 DatabricksResponseParser: Extraction Summary\n"
+            f"   - actual_content: {len(actual_content)} chars\n"
+            f"   - reasoning_text: {len(reasoning_text)} chars\n"
+            f"   - has_reasoning: {metadata.get('has_reasoning', False)}\n"
+            f"   - actual_content preview: {actual_content[:200] if actual_content else 'EMPTY'}...\n"
+            f"   - Extraction successful: {len(actual_content) > 0}"
+        )
+
+        if not actual_content:
+            logger.error(
+                f"❌ DatabricksResponseParser: TEXT EXTRACTION FAILED!\n"
+                f"   - No text content extracted from response\n"
+                f"   - Original response type: {type(content).__name__}\n"
+                f"   - Response structure: {type(response).__name__}\n"
+                f"   - This will cause downstream parsing to fail"
+            )
+
         # Enhanced content extraction with validation
         logger.debug(f"DatabricksResponseParser: actual_content length={len(actual_content)}, reasoning_text length={len(reasoning_text)}")
         
@@ -139,7 +182,7 @@ class DatabricksResponseParser:
             if hasattr(response, 'content') and isinstance(response.content, list):
                 has_reasoning_block = any(item.get('type') == 'reasoning' for item in response.content if isinstance(item, dict))
                 has_text_block = any(item.get('type') == 'text' for item in response.content if isinstance(item, dict))
-                logger.error(
+                logger.debug(
                     f"Response structure analysis - has_reasoning: {has_reasoning_block}, "
                     f"has_text: {has_text_block}. If reasoning=True and text=False, "
                     f"the model is not generating the required text output block."

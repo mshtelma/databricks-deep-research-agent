@@ -5,12 +5,22 @@ Based on deer-flow implementation patterns for structured planning.
 """
 
 from enum import Enum
-from typing import List, Optional, Dict, Any, Iterable, Mapping, MutableMapping, Sequence, Set
+from typing import List, Optional, Dict, Any, Iterable, Mapping, MutableMapping, Sequence, Set, Union, TYPE_CHECKING
 from pydantic import BaseModel, Field
 from datetime import datetime
 from . import get_logger
 from .id_generator import PlanIDGenerator
 from .template_generator import DynamicSection
+
+# Import StructuredObservation for type annotations
+if TYPE_CHECKING:
+    from .structured_models import StructuredObservation
+else:
+    # Runtime import to avoid circular dependencies
+    try:
+        from .structured_models import StructuredObservation
+    except ImportError:
+        StructuredObservation = None
 
 
 logger = get_logger(__name__)
@@ -58,7 +68,10 @@ class Step(BaseModel):
     
     # Results
     execution_result: Optional[str] = Field(default=None, description="Result from executing this step")
-    observations: Optional[List[str]] = Field(default=None, description="Observations made during execution")
+    observations: Optional[List['StructuredObservation']] = Field(
+        default=None,
+        description="Observations made during execution as StructuredObservation objects"
+    )
     citations: Optional[List[Dict[str, Any]]] = Field(default=None, description="Citations collected in this step")
     
     # Quality metrics

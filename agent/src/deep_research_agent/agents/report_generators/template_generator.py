@@ -466,7 +466,7 @@ Perform detailed analysis for this research topic.
         logger.debug(f"[{trace_id}] Invoking LLM for analysis")
         analysis = self.llm_manager.invoke_with_smart_retry(
             messages,
-            operation_name="template_analysis",
+            section_name="template_analysis",
             state=self._request_to_state_dict(request)
         )
 
@@ -534,7 +534,7 @@ Perform detailed analysis for this research topic.
         logger.debug(f"[{trace_id}] Invoking LLM for formatting")
         report_text = self.llm_manager.invoke_with_smart_retry(
             messages,
-            operation_name="template_formatting",
+            section_name="template_formatting",
             state=self._request_to_state_dict(request)
         )
 

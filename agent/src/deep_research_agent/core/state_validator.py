@@ -19,10 +19,11 @@ class StateValidator:
     # Critical fields that MUST be preserved during transitions
     CRITICAL_FIELDS = {
         'observations',
-        'citations', 
+        'citations',
         'search_results',
         'current_plan',
-        'research_topic'
+        'research_topic',
+        'query_constraints'  # CRITICAL: QueryConstraints for calculation agent routing
     }
     
     # Required fields for each agent

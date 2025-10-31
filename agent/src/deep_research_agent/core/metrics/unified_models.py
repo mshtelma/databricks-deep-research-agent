@@ -161,10 +161,11 @@ class ResponseTable(BaseModel):
     """Table structure that directly answers the user's request."""
 
     table_id: str = Field(description="Unique identifier for this table")
-    # FIX: Renamed from 'title' to 'table_title' to avoid Pydantic v2 reserved field conflict
+    # FIX: Renamed from 'title' to 'table_title' for consistency with other renamed fields
+    # Uses alias= (not validation_alias=) to accept BOTH 'title' and 'table_title' during validation
     table_title: str = Field(
         description="Human-readable title",
-        validation_alias="title"  # Accept 'title' as input for backward compatibility
+        alias="title"  # Backward compatibility: accept both 'title' and 'table_title'
     )
     purpose: str = Field(description="What specific question this table answers")
 
@@ -178,10 +179,15 @@ class ResponseTable(BaseModel):
         description="Context tags for this table (e.g., scenario, year, region)"
     )
 
+    # Enable both 'table_title' and 'title' during validation (matches MetricSpec pattern)
+    model_config = ConfigDict(
+        populate_by_name=True,  # Accept both 'table_title' (field name) and 'title' (alias)
+    )
+
     # Backward compatibility property for .title access
     @property
     def title(self) -> str:
-        """Backward compatibility - use table_title instead."""
+        """Backward compatibility - returns table_title value."""
         return self.table_title
 
 

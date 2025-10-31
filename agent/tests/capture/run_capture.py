@@ -370,7 +370,8 @@ async def capture_one_prompt(agent: DatabricksCompatibleAgent, prompt_id: str, p
         )
 
         # Run agent (this will trigger captures inside workflow nodes)
-        print(f"🚀 Executing workflow for '{prompt_id}'...")
+        print(f"🚀 Executing workflow for '{prompt_id}'...", flush=True)
+        # Use threading as originally intended (predict() needs it for async generator)
         response = await asyncio.to_thread(agent.predict, request)
 
         # Detect if workflow failed (agent returns error in response)

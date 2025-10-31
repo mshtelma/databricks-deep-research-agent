@@ -207,7 +207,7 @@ class MetadataBuilder:
         """
         Extract quality metrics from state.
 
-        Provides sensible defaults if metrics missing.
+        Provides sensible defaults if metrics missing or None.
 
         Args:
             state: Research state dict
@@ -215,11 +215,12 @@ class MetadataBuilder:
         Returns:
             QualityMetrics model
         """
+        # FIXED: Use 'or' to handle both missing keys and None values
         return QualityMetrics(
-            factuality_score=state.get("factuality_score", 0.9),
-            confidence_score=state.get("confidence_score", 0.8),
-            coverage_score=state.get("coverage_score", 0.7),
-            research_quality_score=state.get("research_quality_score", 0.8)
+            factuality_score=state.get("factuality_score") or 0.9,
+            confidence_score=state.get("confidence_score") or 0.8,
+            coverage_score=state.get("coverage_score") or 0.7,
+            research_quality_score=state.get("research_quality_score") or 0.8
         )
 
     @staticmethod

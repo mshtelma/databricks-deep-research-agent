@@ -6,10 +6,13 @@ constraints from user queries. It handles entities (countries, companies, produc
 metrics (numbers, rates, percentages), comparisons, and data format requirements.
 
 The system is designed to work with ANY type of query, not just specific use cases.
+
+IMPORTANT: QueryConstraints and ScenarioDefinition now live in structured_models.py as
+Pydantic models (ConstraintsOutput and ScenarioDefinition). This module provides type
+aliases for backward compatibility during migration.
 """
 
 from typing import Dict, List, Any, Optional, Set, Tuple
-from dataclasses import dataclass, field
 import logging
 import re
 import json
@@ -17,265 +20,35 @@ from .structured_output import extract_json
 from .structured_models import (
     ConstraintsOutput,
     ScenarioOutput,
+    ScenarioDefinition,
     ComparisonType
 )
 
 logger = logging.getLogger(__name__)
 
+# Type alias for backward compatibility - ConstraintsOutput is the new QueryConstraints
+QueryConstraints = ConstraintsOutput
+
 
 # ============================================================================
-# ScenarioDefinition (uses structured model output)
+# Dataclasses DELETED - Now Pydantic models in structured_models.py
+# ============================================================================
+# ScenarioDefinition → structured_models.ScenarioDefinition (Pydantic)
+# QueryConstraints → structured_models.ConstraintsOutput (Pydantic, aliased above)
+
+
+# Removed old dataclass definitions - see structured_models.py for Pydantic versions
+# This section intentionally left with comment to show what was removed
+
+
+# ============================================================================
+# ConstraintExtractor (kept, but updated to return Pydantic)
 # ============================================================================
 
-@dataclass
-class ScenarioDefinition:
-    """
-    Structured scenario with parameters extracted from user query.
-    Now created from ScenarioOutput Pydantic model.
-    """
-    id: str = field(metadata={"description": "Unique scenario identifier (s1, s2, etc.)"})
-    name: str = field(metadata={"description": "Human-readable scenario name"})
-    description: str = field(default="", metadata={"description": "Full scenario description"})
-    parameters: Dict[str, Any] = field(default_factory=dict, metadata={
-        "description": "Scenario-specific parameters (salary, RSU, etc.)"
-    })
-
-    @classmethod
-    def from_scenario_output(cls, output: ScenarioOutput) -> 'ScenarioDefinition':
-        """Create from Pydantic ScenarioOutput model."""
-        return cls(
-            id=output.id,
-            name=output.name,
-            description=output.description,
-            parameters=output.get_parameters_dict()  # Convert list of tuples to dict
-        )
-
-    def get_unique_key(self) -> str:
-        """Generate unique key for this scenario."""
-        return f"{self.id}_{self.name.replace(' ', '_').lower()}"
-
-    def get_param_value(self, param_name: str, default: float = 0.0) -> float:
-        """Get parameter value with default."""
-        return self.parameters.get(param_name, default)
-
-
-@dataclass
-class QueryConstraints:
-    """
-    Abstract representation of all constraints extracted from a user query.
-
-    Enhanced with structured scenarios and metadata helpers for observation enrichment.
-
-    This is designed to be flexible and work with any domain:
-    - Financial queries (salaries, taxes, investments)
-    - Geographic queries (countries, cities, regions)
-    - Product comparisons (features, prices, specs)
-    - Time-based queries (years, quarters, trends)
-    - Any other domain-specific constraints
-    """
-    # Core fields
-    entities: List[str] = field(default_factory=list)          # Countries, companies, products, people
-    metrics: List[str] = field(default_factory=list)           # Numbers, rates, percentages, amounts
-    scenarios: List[ScenarioDefinition] = field(default_factory=list)  # ✅ Structured scenarios!
-
-    # Enhanced fields for metadata enrichment
-    comparison_type: str = "entity"                            # country, cloud_provider, product, company
-    topics: List[str] = field(default_factory=list)           # taxation, pricing, performance
-
-    # Legacy/compatibility fields
-    comparisons: List[str] = field(default_factory=list)       # Things being compared
-    data_format: str = "text"                                  # "table", "list", "comparison", "text"
-    specifics: Dict[str, Any] = field(default_factory=dict)    # Specific values/requirements
-    time_constraints: List[str] = field(default_factory=list)  # Years, dates, periods
-    monetary_values: List[str] = field(default_factory=list)   # Specific monetary amounts mentioned
-
-    # Helper methods for metadata population (CRITICAL for Phase 2!)
-    def has_scenarios(self) -> bool:
-        """Check if query has scenarios."""
-        return bool(self.scenarios)
-
-    def get_entity_tags(self, entity: str) -> Dict[str, str]:
-        """Get metadata tags for an entity.
-
-        This is CRITICAL for populating observation metadata!
-        Used in Phase 2 to enrich observations with tags.
-        """
-        tags = {
-            'entity': entity,
-            'entity_type': self.comparison_type,
-        }
-
-        if self.topics:
-            tags['topics'] = ','.join(self.topics)
-
-        # Add entity-specific metadata based on comparison_type
-        if self.comparison_type == 'country':
-            tags['entity_category'] = 'geographic'
-        elif self.comparison_type == 'cloud_provider':
-            tags['entity_category'] = 'technology'
-        elif self.comparison_type == 'company':
-            tags['entity_category'] = 'business'
-        elif self.comparison_type == 'product':
-            tags['entity_category'] = 'product'
-
-        return tags
-
-    def matches_entity(self, text: str, entity: str) -> bool:
-        """Check if text mentions the entity.
-
-        Used for filtering observations by entity.
-        Handles common variations and abbreviations.
-        """
-        if not text or not entity:
-            return False
-
-        # Case-insensitive matching
-        text_lower = text.lower()
-        entity_lower = entity.lower()
-
-        # Direct match
-        if entity_lower in text_lower:
-            return True
-
-        # Handle common variations (e.g., "U.S." for "United States")
-        entity_parts = entity_lower.split()
-        if len(entity_parts) > 1:
-            # Check abbreviation (first letters)
-            abbrev = ''.join(p[0] for p in entity_parts)
-            if abbrev in text_lower or f"{abbrev}." in text_lower:
-                return True
-
-            # Check if all parts present
-            if all(part in text_lower for part in entity_parts):
-                return True
-
-        return False
-
-    def extract_metric_value(self, text: str, metric: str) -> Optional[float]:
-        """Extract numeric value for a metric from text.
-
-        Returns None if not found.
-        Used for extracting structured data from observations.
-        """
-        import re
-
-        # Common patterns for metrics
-        patterns = {
-            'tax_rate': r'tax.*?(\d+(?:\.\d+)?)\s*%',
-            'price': r'\$\s*(\d+(?:,\d{3})*(?:\.\d+)?)',
-            'percentage': r'(\d+(?:\.\d+)?)\s*%',
-            'number': r'(\d+(?:,\d{3})*(?:\.\d+)?)',
-        }
-
-        # Try specific pattern for metric
-        pattern = patterns.get(metric, patterns['number'])
-        match = re.search(pattern, text, re.IGNORECASE)
-
-        if match:
-            try:
-                # Remove commas and convert to float
-                value_str = match.group(1).replace(',', '')
-                return float(value_str)
-            except (ValueError, TypeError):
-                pass
-
-        return None
-
-    def get_scenario_by_id(self, scenario_id: str) -> Optional[ScenarioDefinition]:
-        """Get scenario by ID."""
-        for scenario in self.scenarios:
-            if scenario.id == scenario_id:
-                return scenario
-        return None
-
-    def validate(self) -> List[str]:
-        """Validate constraints and return any issues."""
-        issues = []
-
-        if not self.entities:
-            issues.append("No entities specified")
-
-        if not self.metrics:
-            issues.append("No metrics specified")
-
-        # Check for duplicate scenario IDs
-        if self.scenarios:
-            seen_ids = set()
-            for scenario in self.scenarios:
-                if scenario.id in seen_ids:
-                    issues.append(f"Duplicate scenario ID: {scenario.id}")
-                seen_ids.add(scenario.id)
-
-        return issues
-
-    def to_prompt_instructions(self) -> str:
-        """Convert constraints to clear, enforceable LLM instructions."""
-        instructions = []
-
-        # Entity constraints - MOST CRITICAL
-        if self.entities:
-            entities_str = ", ".join(self.entities)
-            instructions.append(f"🔴 CRITICAL ENTITY CONSTRAINT:")
-            instructions.append(f"   - ONLY include information about: {entities_str}")
-            instructions.append(f"   - DO NOT mention ANY other entities besides: {entities_str}")
-            instructions.append(f"   - If data for any of these entities is missing, explicitly say so")
-            instructions.append("")
-
-        # Metric constraints
-        if self.metrics:
-            instructions.append(f"📊 METRIC REQUIREMENTS:")
-            instructions.append(f"   - Focus on these specific values: {', '.join(self.metrics)}")
-            instructions.append(f"   - Use exact values when mentioned (not averages/medians)")
-            instructions.append("")
-
-        # Specific requirements
-        if self.specifics:
-            instructions.append(f"🎯 SPECIFIC REQUIREMENTS:")
-            for key, value in self.specifics.items():
-                instructions.append(f"   - {key}: {value}")
-            instructions.append("")
-
-        # Monetary values - CRITICAL for accuracy
-        if self.monetary_values:
-            instructions.append(f"💰 MONETARY VALUES:")
-            instructions.append(f"   - Use EXACTLY these values: {', '.join(self.monetary_values)}")
-            instructions.append(f"   - DO NOT use average, median, or example values")
-            instructions.append("")
-
-        # Scenarios
-        if self.scenarios:
-            instructions.append(f"📊 SCENARIOS REQUIRED:")
-            for scenario in self.scenarios:
-                instructions.append(f"   - {scenario}")
-            instructions.append("")
-
-        # Comparison requirements
-        if self.comparisons:
-            instructions.append(f"⚖️ COMPARISON REQUIREMENTS:")
-            instructions.append(f"   - Compare/contrast: {', '.join(self.comparisons)}")
-            instructions.append("")
-
-        # Time constraints
-        if self.time_constraints:
-            instructions.append(f"🕐 TIME CONSTRAINTS:")
-            instructions.append(f"   - Focus on: {', '.join(self.time_constraints)}")
-            instructions.append("")
-
-        # Data format requirements
-        if self.data_format == "table":
-            instructions.append(f"📋 FORMAT: Present data in a clear comparison table")
-
-        return "\n".join(instructions)
-
-    def to_validation_rules(self) -> Dict[str, Any]:
-        """Convert constraints to validation rules for content checking."""
-        return {
-            "allowed_entities": self.entities,
-            "required_metrics": self.metrics,
-            "required_comparisons": self.comparisons,
-            "forbidden_entities": [],  # Will be populated dynamically
-            "strict_mode": len(self.entities) > 0  # Strict if entities specified
-        }
+# DELETED OLD DATACLASS - START MARKER
+# (Was: @dataclass class QueryConstraints with all fields and methods)
+# Now: ConstraintsOutput in structured_models.py (Pydantic)
+# DELETED OLD DATACLASS - END MARKER
 
 
 class ConstraintExtractor:
@@ -410,11 +183,12 @@ Respond with valid JSON matching the schema above."""
         ]
 
         try:
-            # Use native structured generation with explicit json_mode method
-            # This ensures the model uses JSON mode with the schema
+            # CRITICAL FIX: Use json_schema method for strict enforcement
+            # json_schema: Full schema validation with Databricks response_format
+            # json_mode: Generic JSON object (less strict, can cause validation errors)
             response = self.llm.with_structured_output(
                 schema=ConstraintsOutput,
-                method="json_mode",  # Explicit JSON mode
+                method="json_schema",  # CHANGED: Strict schema enforcement (was json_mode)
                 include_raw=False
             ).invoke(messages)
 
@@ -436,29 +210,35 @@ Respond with valid JSON matching the schema above."""
                 f"{len(constraints_output.scenarios)} scenarios"
             )
 
-            # Convert ScenarioOutput to ScenarioDefinition
-            scenarios = [
-                ScenarioDefinition.from_scenario_output(s)
+            # Convert ScenarioOutput (LLM format) to ScenarioDefinition (internal format)
+            # This is CRITICAL: LLM returns ScenarioOutput with list parameters (Databricks-compatible)
+            # We convert to ScenarioDefinition with dict parameters (ergonomic API)
+            # NOTE: The model_validator in ConstraintsOutput may have already converted parameters to dict,
+            # in which case scenarios are already ScenarioDefinition objects. Handle both cases.
+            hydrated_scenarios = [
+                s if isinstance(s, ScenarioDefinition) else ScenarioDefinition.from_scenario_output(s)
                 for s in constraints_output.scenarios
             ]
 
-            # Create QueryConstraints from structured output
-            return QueryConstraints(
-                entities=constraints_output.entities,
-                metrics=constraints_output.metrics,
-                scenarios=scenarios,
-                comparison_type=constraints_output.comparison_type.value,
-                topics=constraints_output.topics,
-                monetary_values=constraints_output.monetary_values,
-                data_format=constraints_output.data_format,
-                # Legacy fields for backward compatibility
-                comparisons=[],
-                specifics={},
-                time_constraints=[]
-            )
+            # Return ConstraintsOutput (Pydantic) with hydrated scenarios
+            # Note: QueryConstraints is now an alias for ConstraintsOutput
+            # We use model_copy to create new instance with updated scenarios
+            return constraints_output.model_copy(update={'scenarios': hydrated_scenarios})
 
         except Exception as e:
+            # Enhanced error logging with detailed validation errors
             logger.error(f"❌ Structured generation failed: {e}")
+
+            # If it's a ValidationError from Pydantic, log the detailed errors
+            if hasattr(e, '__class__') and 'ValidationError' in e.__class__.__name__:
+                try:
+                    import json
+                    if hasattr(e, 'errors'):
+                        errors_detail = json.dumps(e.errors(), indent=2)
+                        logger.error(f"📋 Detailed validation errors:\n{errors_detail}")
+                except Exception as log_err:
+                    logger.debug(f"Could not format validation errors: {log_err}")
+
             # Use pattern-based fallback (doesn't need LLM)
             return self._create_fallback_constraints(query)
 
@@ -489,10 +269,11 @@ Respond with valid JSON matching the schema above."""
         # Deduplicate
         unique_entities = list(dict.fromkeys([e.strip().title() for e in entities if e.strip()]))[:10]
 
-        return QueryConstraints(
-            entities=unique_entities,
+        # Return Pydantic ConstraintsOutput (QueryConstraints is alias)
+        return ConstraintsOutput(
+            entities=unique_entities if unique_entities else ["Unknown"],  # Pydantic validator requires at least one
             metrics=["information"],  # Generic fallback
-            comparison_type="entity",
+            comparison_type=ComparisonType.ENTITY,  # Use enum, not string
             scenarios=[],
             topics=[],
             monetary_values=[],
@@ -550,8 +331,11 @@ Respond with valid JSON matching the schema above."""
                     parameters={}
                 ))
 
-        # Determine comparison type
-        comparison_type = "country" if any(c.lower() in ["spain", "france", "germany", "uk"] for c in entities) else "entity"
+        # Determine comparison type (use enum)
+        if any(c.lower() in ["spain", "france", "germany", "uk"] for c in entities):
+            comparison_type = ComparisonType.COUNTRY
+        else:
+            comparison_type = ComparisonType.ENTITY
 
         # Determine topics
         topics = []
@@ -562,9 +346,11 @@ Respond with valid JSON matching the schema above."""
         if "performance" in query.lower():
             topics.append("performance")
 
-        return QueryConstraints(
-            entities=entities,
-            metrics=metrics,
+        # Return Pydantic ConstraintsOutput (QueryConstraints is alias)
+        # Ensure entities list is not empty (Pydantic validator requires at least one)
+        return ConstraintsOutput(
+            entities=entities if entities else ["Unknown"],
+            metrics=metrics if metrics else ["information"],
             scenarios=scenarios,
             comparison_type=comparison_type,
             topics=topics,

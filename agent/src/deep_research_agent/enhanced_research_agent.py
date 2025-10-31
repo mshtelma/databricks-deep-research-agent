@@ -47,6 +47,7 @@ from .core.state_validator import (
     global_propagation_tracker,
 )
 from .core.validated_command import ValidatedCommand
+from .core.structured_models import ConstraintsOutput  # For query_constraints hydration
 from .workflow_nodes_enhanced import EnhancedWorkflowNodes
 from .agents import (
     CoordinatorAgent,
@@ -66,6 +67,87 @@ from .core.id_generator import PlanIDGenerator
 
 
 logger = get_logger(__name__)
+
+
+def _should_invoke_calculation_agent(state: Dict[str, Any], config: Dict[str, Any]) -> bool:
+    """
+    Determine if CalculationAgent should be invoked based on PRECONDITIONS.
+
+    CRITICAL: This checks for the INPUTS needed by CalculationAgent, not the OUTPUT.
+    - CalculationAgent creates 'unified_plan' (the output)
+    - We must check for 'query_constraints' (the input), not 'unified_plan'
+    - Checking for 'unified_plan' creates chicken-and-egg: it's created BY CalculationAgent!
+
+    Preconditions:
+    1. Metrics feature enabled in config (metrics.enabled = true)
+    2. query_constraints exists in state (created by Planner)
+    3. query_constraints has entities and metrics (non-empty)
+
+    Args:
+        state: Current workflow state
+        config: Agent configuration
+
+    Returns:
+        True if CalculationAgent should be invoked, False otherwise
+    """
+    logger.error("🔍 _should_invoke_calculation_agent DEBUG:")
+
+    # Check config flag
+    metrics_config = config.get('metrics', {})
+    metrics_enabled = metrics_config.get('enabled', False)
+    logger.error(f"  1. metrics.enabled = {metrics_enabled}")
+
+    if not metrics_enabled:
+        logger.error("  ❌ RESULT: False (metrics disabled)")
+        return False
+
+    # Check for query_constraints (created by Planner)
+    query_constraints = state.get('query_constraints')
+    logger.error(f"  2. query_constraints in state = {query_constraints is not None}")
+    logger.error(f"     query_constraints type = {type(query_constraints) if query_constraints else 'None'}")
+
+    if not query_constraints:
+        logger.error("  ❌ RESULT: False (no query_constraints)")
+        return False
+
+    # CRITICAL: Hydrate query_constraints if it's a dict (from serialization)
+    # Planner serializes with .model_dump(), but router needs Pydantic object for .entities/.metrics access
+    if query_constraints and isinstance(query_constraints, dict):
+        logger.error("  3. query_constraints is dict, attempting hydration...")
+        try:
+            query_constraints = ConstraintsOutput(**query_constraints)
+            logger.error(f"     ✅ Hydrated successfully: {len(query_constraints.entities or [])} entities, {len(query_constraints.metrics or [])} metrics")
+        except Exception as e:
+            logger.error(f"     ❌ Hydration failed: {e}")
+            return False
+
+    # Validate query_constraints has required data
+    # IMPORTANT: query_constraints is a Pydantic ConstraintsOutput object, NOT a dict!
+    entities = query_constraints.entities or []
+    metrics = query_constraints.metrics or []
+
+    logger.error(f"  4. Validating content:")
+    logger.error(f"     - entities: {len(entities)} - {entities}")
+    logger.error(f"     - metrics: {len(metrics)} - {metrics}")
+
+    if not entities or not metrics:
+        logger.error(
+            f"  ❌ RESULT: False (incomplete constraints - entities={len(entities)}, metrics={len(metrics)})"
+        )
+        logger.info(
+            f"[ROUTING] query_constraints exists but incomplete: "
+            f"{len(entities)} entities, {len(metrics)} metrics - skipping CalculationAgent"
+        )
+        return False
+
+    logger.error(
+        f"  ✅ RESULT: True - Will invoke CalculationAgent"
+    )
+    logger.info(
+        f"[ROUTING] ✅ Should invoke CalculationAgent: "
+        f"{len(entities)} entities × {len(metrics)} metrics = potential calculations"
+    )
+    return True
 
 
 # Simplified inline NoOpCheckpointSaver (replaces 175-line external file)
@@ -586,7 +668,12 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Add conditional edges for coordinator
         def coordinator_router(state):
             """Route from coordinator based on state."""
+            from .core.multi_agent_state import ensure_state_hydrated
             global logger
+
+            # HYDRATE STATE at router entry (perimeter)
+            state = ensure_state_hydrated(state)
+
             total_steps = state.get("total_workflow_steps", 0)
             logger.info(
                 f"[ROUTER] coordinator_router - step {total_steps}, research_loops={state.get('research_loops', 0)}, fact_check_loops={state.get('fact_check_loops', 0)}"
@@ -621,7 +708,12 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Add conditional edges for planner
         def planner_router(state):
             """Route from planner based on plan and settings."""
+            from .core.multi_agent_state import ensure_state_hydrated
             global logger
+
+            # HYDRATE STATE at router entry (perimeter)
+            state = ensure_state_hydrated(state)
+
             plan = state.get("current_plan")
             if not plan:
                 return END
@@ -634,15 +726,15 @@ class EnhancedResearchAgent(ResponsesAgent):
                 # SAFETY: Handle None or invalid action
                 if not action:
                     logger.warning(f"[PLANNER_ROUTER] Coordinator returned no action - defaulting to SUFFICIENT")
-                    # Route to calculation_agent if UnifiedPlan exists, otherwise to fact_checker/reporter
-                    if state.get("unified_plan"):
+                    # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
+                    if _should_invoke_calculation_agent(state, self.agent_config or {}):
                         return "calculation_agent"
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
                 if action == "SUFFICIENT":
                     logger.info(f"[PLANNER_ROUTER] Coordination decided SUFFICIENT - routing to next phase")
-                    # Route to calculation_agent if UnifiedPlan exists
-                    if state.get("unified_plan"):
+                    # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
+                    if _should_invoke_calculation_agent(state, self.agent_config or {}):
                         return "calculation_agent"
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
@@ -653,8 +745,8 @@ class EnhancedResearchAgent(ResponsesAgent):
 
                 else:
                     logger.warning(f"[PLANNER_ROUTER] Unexpected action '{action}' - defaulting to next phase")
-                    # Route to calculation_agent if UnifiedPlan exists
-                    if state.get("unified_plan"):
+                    # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
+                    if _should_invoke_calculation_agent(state, self.agent_config or {}):
                         return "calculation_agent"
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
@@ -683,6 +775,11 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Human feedback routing
         def human_feedback_router(state):
             """Route from human feedback."""
+            from .core.multi_agent_state import ensure_state_hydrated
+
+            # HYDRATE STATE at router entry (perimeter)
+            state = ensure_state_hydrated(state)
+
             # Could go back to planner or proceed
             return "researcher"
 
@@ -695,12 +792,35 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Researcher routing
         def researcher_router(state):
             """Route from researcher based on step completion."""
+            from .core.multi_agent_state import ensure_state_hydrated
             global logger
+
+            # HYDRATE STATE at router entry (perimeter) - CRITICAL FIX for AttributeError
+            state = ensure_state_hydrated(state)
 
             # DIAGNOSTIC: Track all researcher_router calls
             logger.info("🎯 [ROUTER] ===== RESEARCHER_ROUTER CALLED =====")
             logger.info(f"🎯 [ROUTER] State keys: {list(state.keys())[:30]}")
             logger.info(f"🎯 [ROUTER] State object ID: {id(state)}")
+
+            # DEBUG: Check if query_constraints propagated from planner
+            logger.error("🔍 RESEARCHER_ROUTER DEBUG:")
+            logger.error(f"  - query_constraints in state: {'query_constraints' in state}")
+            if 'query_constraints' in state:
+                qc = state['query_constraints']
+                logger.error(f"  - query_constraints type: {type(qc)}")
+                if qc:
+                    if hasattr(qc, 'entities'):
+                        logger.error(f"  - entities: {qc.entities}")
+                        logger.error(f"  - metrics: {qc.metrics}")
+                    elif isinstance(qc, dict):
+                        logger.error(f"  - entities (dict): {qc.get('entities')}")
+                        logger.error(f"  - metrics (dict): {qc.get('metrics')}")
+                else:
+                    logger.error("  ⚠️ query_constraints is None!")
+            else:
+                logger.error("  ❌ query_constraints NOT in state!")
+                logger.error("  This will cause CalculationAgent to be SKIPPED!")
 
             # SAFETY CHECK: Check for permanent error flags in state
             if state.get("permanent_failure"):
@@ -788,8 +908,8 @@ class EnhancedResearchAgent(ResponsesAgent):
                                 f"[ROUTER] Research loops limit reached ({research_loops}/{max_research_loops}) - "
                                 f"skipping coordination, routing to next phase"
                             )
-                            # Route to calculation_agent if UnifiedPlan exists
-                            if state.get("unified_plan"):
+                            # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
+                            if _should_invoke_calculation_agent(state, self.agent_config or {}):
                                 return "calculation_agent"
                             return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
@@ -820,8 +940,8 @@ class EnhancedResearchAgent(ResponsesAgent):
                         logger.info(
                             "[ROUTER] Found section results - assuming complete"
                         )
-                        # Route to calculation_agent if UnifiedPlan exists
-                        if state.get("unified_plan"):
+                        # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
+                        if _should_invoke_calculation_agent(state, self.agent_config or {}):
                             return "calculation_agent"
                         return (
                             "fact_checker"
@@ -833,8 +953,8 @@ class EnhancedResearchAgent(ResponsesAgent):
                         logger.warning(
                             "[ROUTER] Error in step checking and no section results - completing research phase"
                         )
-                        # Route to calculation_agent if UnifiedPlan exists
-                        if state.get("unified_plan"):
+                        # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
+                        if _should_invoke_calculation_agent(state, self.agent_config or {}):
                             return "calculation_agent"
                         return (
                             "fact_checker"
@@ -844,8 +964,8 @@ class EnhancedResearchAgent(ResponsesAgent):
             else:
                 # No plan - should not happen but handle gracefully
                 logger.warning("[ROUTER] No plan found - assuming complete")
-                # Route to calculation_agent if UnifiedPlan exists
-                if state.get("unified_plan"):
+                # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
+                if _should_invoke_calculation_agent(state, self.agent_config or {}):
                     return "calculation_agent"
                 return (
                     "fact_checker"
@@ -882,7 +1002,12 @@ class EnhancedResearchAgent(ResponsesAgent):
         # Fact checker routing - now bulletproof with centralized policy
         def fact_checker_router(state):
             """Route from fact checker using centralized routing policy."""
+            from .core.multi_agent_state import ensure_state_hydrated
             global logger
+
+            # HYDRATE STATE at router entry (perimeter)
+            state = ensure_state_hydrated(state)
+
             total_steps = state.get("total_workflow_steps", 0)
             fact_check_loops = state.get("fact_check_loops", 0)
             max_fact_check_loops = state.get("max_fact_check_loops", 2)

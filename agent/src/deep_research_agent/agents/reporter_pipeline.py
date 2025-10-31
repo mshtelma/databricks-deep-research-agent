@@ -31,6 +31,24 @@ from .reporter_structured import StructuredReportGenerator
 logger = logging.getLogger(__name__)
 
 
+def _get_calc_attr(calc_context: Any, attr: str, default: Any = None) -> Any:
+    """
+    Safely extract attribute from calc_context (handles both dict and object).
+
+    Args:
+        calc_context: CalculationContext object or dict
+        attr: Attribute name
+        default: Default value if not found
+
+    Returns:
+        Attribute value or default
+    """
+    if isinstance(calc_context, dict):
+        return calc_context.get(attr, default)
+    else:
+        return getattr(calc_context, attr, default)
+
+
 class StructuredReportPipeline:
     """
     Main pipeline for structured report generation.
@@ -92,23 +110,28 @@ class StructuredReportPipeline:
             logger.info("Phase 3: Building tables from data")
             tables_by_id = {}
 
+            # FIXED: Handle both dict and object formats for calc_context
+            table_specs = _get_calc_attr(calc_context, "table_specifications", [])
+            key_comparisons = _get_calc_attr(calc_context, "key_comparisons", [])
+            calculations = _get_calc_attr(calc_context, "calculations", [])
+
             # FIX #5: Log table spec availability for debugging
-            if not calc_context.table_specifications:
+            if not table_specs:
                 logger.error(
                     "[STRUCTURED PIPELINE] CRITICAL: calc_context.table_specifications is empty! "
                     "No tables will be built. This is likely due to unified planning not populating table_specs."
                 )
             else:
                 logger.info(
-                    f"[STRUCTURED PIPELINE] Found {len(calc_context.table_specifications)} table specs "
-                    f"and {len(calc_context.key_comparisons)} comparisons"
+                    f"[STRUCTURED PIPELINE] Found {len(table_specs)} table specs "
+                    f"and {len(key_comparisons)} comparisons"
                 )
 
-            for spec in calc_context.table_specifications:
+            for spec in table_specs:
                 table, metadata = self.generator.build_table_from_comparisons(
                     spec,
-                    calc_context.key_comparisons,
-                    calc_context.calculations
+                    key_comparisons,
+                    calculations
                 )
                 tables_by_id[spec.table_id] = (table, metadata)
                 logger.info(
@@ -222,24 +245,29 @@ class StructuredReportPipeline:
         key_points = []
 
         # Use summary insights if available
-        if calc_context.summary_insights:
-            key_points = calc_context.summary_insights[:5]
+        summary_insights = _get_calc_attr(calc_context, "summary_insights", [])
+        if summary_insights:
+            key_points = summary_insights[:5]
 
         # Add data quality note if issues exist
-        if calc_context.data_quality_notes:
+        data_quality_notes = _get_calc_attr(calc_context, "data_quality_notes", [])
+        if data_quality_notes:
             key_points.append(
-                f"Note: {calc_context.data_quality_notes[0]}"
+                f"Note: {data_quality_notes[0]}"
             )
 
         # Ensure we have at least 3 points
+        calculations = _get_calc_attr(calc_context, "calculations", [])
+        extracted_data = _get_calc_attr(calc_context, "extracted_data", [])
+
         while len(key_points) < 3:
-            if calc_context.calculations:
+            if calculations:
                 key_points.append(
-                    f"Analysis includes {len(calc_context.calculations)} calculations"
+                    f"Analysis includes {len(calculations)} calculations"
                 )
-            elif calc_context.extracted_data:
+            elif extracted_data:
                 key_points.append(
-                    f"Analyzed {len(calc_context.extracted_data)} data points"
+                    f"Analyzed {len(extracted_data)} data points"
                 )
             else:
                 key_points.append("Further analysis recommended")
@@ -256,14 +284,19 @@ class StructuredReportPipeline:
 
         overview = f"This report presents a comprehensive analysis of {topic}."
 
-        if calc_context.extracted_data:
+        extracted_data = _get_calc_attr(calc_context, "extracted_data", [])
+        if extracted_data:
             overview += (
-                f" The analysis is based on {len(calc_context.extracted_data)} "
+                f" The analysis is based on {len(extracted_data)} "
                 f"data points extracted from research observations."
             )
 
-        if calc_context.key_comparisons:
-            entities = set(c.primary_key for c in calc_context.key_comparisons)
+        key_comparisons = _get_calc_attr(calc_context, "key_comparisons", [])
+        if key_comparisons:
+            entities = set(
+                c.primary_key if hasattr(c, 'primary_key') else c.get('primary_key')
+                for c in key_comparisons
+            )
             if entities:
                 overview += (
                     f" Key comparisons were conducted across "
@@ -295,19 +328,20 @@ class StructuredReportPipeline:
     ) -> str:
         """Generate appendix with formula transparency and data quality notes."""
         appendix_parts = []
-        
+
         # Section 1: Calculation Formulas (NEW - Phase 4: Formula Transparency)
         formula_section = self._generate_formula_appendix(calc_context)
         if formula_section:
             appendix_parts.append(formula_section)
-        
+
         # Section 2: Data Quality Notes (existing)
-        if calc_context.data_quality_notes:
+        data_quality_notes = _get_calc_attr(calc_context, "data_quality_notes", [])
+        if data_quality_notes:
             quality_lines = ["### Data Quality Notes\n"]
-            for note in calc_context.data_quality_notes:
+            for note in data_quality_notes:
                 quality_lines.append(f"- {note}")
             appendix_parts.append("\n".join(quality_lines))
-        
+
         return "\n\n".join(appendix_parts) if appendix_parts else ""
     
     def _generate_formula_appendix(
@@ -315,21 +349,22 @@ class StructuredReportPipeline:
         calc_context: CalculationContext
     ) -> str:
         """Generate formula transparency appendix section.
-        
+
         Shows all calculation formulas with their sources for full transparency.
-        
+
         Args:
             calc_context: Calculation context with calculations
-        
+
         Returns:
             Formatted markdown section or empty string
         """
-        if not calc_context.calculations:
+        calculations = _get_calc_attr(calc_context, "calculations", [])
+        if not calculations:
             return ""
-        
+
         # Filter calculations that have formulas
         calculations_with_formulas = [
-            calc for calc in calc_context.calculations
+            calc for calc in calculations
             if hasattr(calc, 'formula') and calc.formula
         ]
         

@@ -1437,39 +1437,97 @@ async def _create_unified_plan(
     from .unified_models import UnifiedPlan, UserRequestAnalysis, DataSource, ResponseTable, TableCell
     from .hybrid_planner import create_unified_plan_hybrid
 
+    # ✅ CRITICAL FIX: Normalize observations to StructuredObservation objects
+    # This is a defensive measure - hybrid_planner also normalizes, but this ensures
+    # consistency even if called directly or from legacy code paths
+    from deep_research_agent.core.observation_converter import ObservationConverter
+    observations = ObservationConverter.normalize_list(observations)
+
+    logger.info(
+        f"🔍 [_create_unified_plan] ENTERED with:\n"
+        f"  - user_request: '{user_request}'\n"
+        f"  - observations count: {len(observations)}\n"
+        f"  - constraints: {constraints is not None}\n"
+        f"  - reporter.llm: {reporter.llm is not None if hasattr(reporter, 'llm') else 'MISSING ATTRIBUTE'}\n"
+        f"  - reporter.config: {type(reporter.config).__name__ if hasattr(reporter, 'config') else 'MISSING ATTRIBUTE'}"
+    )
+
     # CRITICAL FIX: Check config to determine planner mode (hybrid is DEFAULT)
     use_legacy = reporter.config.get('metrics', {}).get('unified_planning', {}).get('use_legacy_llm_planner', False)
     force_hybrid = reporter.config.get('metrics', {}).get('unified_planning', {}).get('force_hybrid_planner', True)
 
+    logger.info(
+        f"🔍 [_create_unified_plan] Planner mode configuration:\n"
+        f"  - use_legacy_llm_planner: {use_legacy}\n"
+        f"  - force_hybrid_planner: {force_hybrid}\n"
+        f"  - Will use hybrid: {(not use_legacy) or force_hybrid}"
+    )
+
     # Determine which planner to use
     use_hybrid_planner = (not use_legacy) or force_hybrid
+
+    # ✅ ULTRA-PROMINENT LOGGING FOR BUG 4 INVESTIGATION
+    logger.error(
+        f"\n{'*'*100}\n"
+        f"🔥🔥🔥 [_create_unified_plan] DECISION POINT 🔥🔥🔥\n"
+        f"{'*'*100}\n"
+        f"  - use_hybrid_planner: {use_hybrid_planner}\n"
+        f"  - constraints is not None: {constraints is not None}\n"
+        f"  - constraints type: {type(constraints).__name__ if constraints else 'None'}\n"
+        f"  - Will call hybrid planner: {use_hybrid_planner and constraints}\n"
+        f"{'*'*100}\n"
+    )
 
     # Try hybrid approach if enabled and constraints are available
     if use_hybrid_planner and constraints:
         try:
-            logger.info("[HYBRID PLANNER] Using structured generation with QueryConstraints (config-enabled)")
+            logger.info(
+                f"🔍 [HYBRID PLANNER] ATTEMPTING structured generation with QueryConstraints:\n"
+                f"  - Constraints type: {type(constraints).__name__}\n"
+                f"  - Entities: {len(constraints.entities) if hasattr(constraints, 'entities') else 'N/A'}\n"
+                f"  - Metrics: {len(constraints.metrics) if hasattr(constraints, 'metrics') else 'N/A'}\n"
+                f"  - LLM available: {reporter.llm is not None if hasattr(reporter, 'llm') else False}"
+            )
+
+            logger.info("🔍 [HYBRID PLANNER] Calling create_unified_plan_hybrid()...")
+
             unified_plan = await create_unified_plan_hybrid(
                 user_request=user_request,
                 observations=observations,
                 constraints=constraints,
                 llm=reporter.llm
             )
-            logger.info(
-                f"[HYBRID PLANNER] Successfully created plan: "
-                f"{len(unified_plan.metric_specs)} specs, "
-                f"{len(unified_plan.response_tables)} tables"
-            )
-            return unified_plan
+
+            logger.info("🔍 [HYBRID PLANNER] create_unified_plan_hybrid() returned successfully")
+
+            if unified_plan:
+                logger.info(
+                    f"✅ [HYBRID PLANNER] Successfully created plan:\n"
+                    f"  - metric_specs: {len(unified_plan.metric_specs)}\n"
+                    f"  - response_tables: {len(unified_plan.response_tables)}\n"
+                    f"  - data_sources: {len(unified_plan.data_sources) if hasattr(unified_plan, 'data_sources') else 'N/A'}"
+                )
+                return unified_plan
+            else:
+                logger.error("❌ [HYBRID PLANNER] create_unified_plan_hybrid() returned None!")
+                raise ValueError("Hybrid planner returned None - should have raised exception instead")
+
         except Exception as e:
-            logger.warning(
-                f"[HYBRID PLANNER] Failed to create plan: {e}. "
-                "Falling back to LLM-based approach"
+            logger.error(
+                f"❌ [HYBRID PLANNER] FAILED with exception:\n"
+                f"  - Exception type: {type(e).__name__}\n"
+                f"  - Exception message: {str(e)}\n"
+                f"  - Full traceback below:",
+                exc_info=True
             )
+            logger.warning("[HYBRID PLANNER] Falling back to legacy LLM-based approach")
             # Fall through to legacy LLM-based approach
+
     elif use_hybrid_planner and not constraints:
-        logger.warning(
-            "[HYBRID PLANNER] Config requests hybrid mode but query_constraints not available! "
-            "Falling back to legacy LLM planner. This indicates query_constraints weren't passed in findings."
+        logger.error(
+            "❌ [HYBRID PLANNER] CRITICAL: Config requests hybrid mode but query_constraints not available!\n"
+            "  - This indicates query_constraints weren't properly propagated from planner\n"
+            "  - Falling back to legacy LLM planner (inferior results expected)"
         )
 
     # Legacy LLM-based approach
@@ -1486,8 +1544,9 @@ async def _create_unified_plan(
     obs_full_text = []
 
     for i, obs in enumerate(observations):
-        step_id = obs.get('step_id', f'obs_{i}')
-        content = obs.get('content', '')
+        # ✅ CRITICAL FIX: Use attribute access (observations are StructuredObservation objects)
+        step_id = obs.step_id or f'obs_{i}'
+        content = obs.content or ''
 
         # Extract key entities and metrics from content for summary
         content_preview = content[:300]  # First 300 chars for entity/metric extraction

@@ -178,7 +178,8 @@ class PlannerAgent:
             set_global_constraints(constraints)
 
             # Store in state for downstream components (reporter needs this for hybrid planner!)
-            state["query_constraints"] = constraints
+            # CRITICAL: Serialize Pydantic object for LangGraph state propagation
+            state["query_constraints"] = constraints.model_dump() if constraints and hasattr(constraints, 'model_dump') else constraints
 
             logger.info(
                 f"🎯 PLANNER: Extracted constraints - "
@@ -187,9 +188,18 @@ class PlannerAgent:
                 f"Scenarios: {len(constraints.scenarios) if constraints.scenarios else 0}"
             )
         except Exception as e:
-            logger.error(f"⚠️ Constraint extraction failed: {e}. Reporter will fall back to LLM-based table generation.")
-            # Don't fail the whole planning process, just log the error
-            # Reporter will detect missing constraints and use legacy path
+            logger.warning(f"⚠️ Constraint extraction failed: {e}. Reporter will fall back to LLM-based table generation.")
+
+            # CRITICAL FIX: If unified planning is enabled, a failure to extract constraints
+            # is a hard failure. We cannot proceed to calculation without them.
+            # Re-raise the exception to halt the workflow and surface the error.
+            if self.config.get('metrics', {}).get('use_unified_planning', False):
+                logger.error("Unified planning is enabled, but constraint extraction failed. Halting workflow.")
+                raise e
+
+            # If unified planning is not enabled, we can fall back to the legacy path.
+            # Don't fail the whole planning process, just log the error.
+            # Reporter will detect missing constraints and use the legacy path.
 
         # Assess plan quality
         quality = self._assess_plan_quality(plan, state)
@@ -230,9 +240,32 @@ class PlannerAgent:
             updated_state["current_plan"] = plan
             updated_state["plan_iterations"] = state["plan_iterations"] + 1
 
+            # NOTE: query_constraints is kept as Pydantic object for proper LangGraph propagation
+            # LangGraph will serialize/deserialize automatically, and ensure_state_hydrated()
+            # will convert it back to Pydantic at node entry
+            # REMOVED manual .model_dump() as it was causing propagation issues
+
             # REMOVED: Add entities from plan to state - Use query_constraints.entities instead
             # if hasattr(plan, 'requested_entities') and plan.requested_entities:
             #     updated_state["requested_entities"] = plan.requested_entities
+
+            # DEBUG: Verify query_constraints is in return dict
+            logger.debug("🔍 PLANNER RETURN DEBUG (has_enough_context path):")
+            logger.debug(f"  - query_constraints in updated_state: {'query_constraints' in updated_state}")
+            logger.debug(f"  - query_constraints in original state: {'query_constraints' in state}")
+            if 'query_constraints' in updated_state:
+                qc = updated_state['query_constraints']
+                logger.debug(f"  - query_constraints type: {type(qc)}")
+                if hasattr(qc, 'entities'):
+                    logger.debug(f"  - entities: {qc.entities}")
+                    logger.debug(f"  - metrics: {qc.metrics}")
+                elif isinstance(qc, dict):
+                    logger.debug(f"  - entities (dict): {qc.get('entities')}")
+                    logger.debug(f"  - metrics (dict): {qc.get('metrics')}")
+            else:
+                logger.debug("  ⚠️ query_constraints NOT in updated_state!")
+                if 'query_constraints' in state:
+                    logger.debug("  - But it WAS in original state - dict() copy failed!")
 
             return updated_state
 
@@ -362,7 +395,7 @@ class PlannerAgent:
                 logger.warning(f"PLANNER: No entities extracted from original query: {original_query[:100]}")
                 plan.requested_entities = []
         except Exception as e:
-            logger.error(f"PLANNER: Entity extraction failed: {e}")
+            logger.warning(f"PLANNER: Entity extraction failed: {e}")
             plan.requested_entities = []
         
         logger.info(f"Generated plan with {len(plan.steps)} steps")
@@ -1384,9 +1417,32 @@ OUTPUT JSON:
         updated_state["current_plan"] = plan
         updated_state["plan_iterations"] = state["plan_iterations"] + 1
 
+        # NOTE: query_constraints is kept as Pydantic object for proper LangGraph propagation
+        # LangGraph will serialize/deserialize automatically, and ensure_state_hydrated()
+        # will convert it back to Pydantic at node entry
+        # REMOVED manual .model_dump() as it was causing propagation issues
+
         # REMOVED: Add entities from plan to state - Use query_constraints.entities instead
         # if hasattr(plan, 'requested_entities') and plan.requested_entities:
         #     updated_state["requested_entities"] = plan.requested_entities
+
+        # DEBUG: Verify query_constraints is in return dict
+        logger.debug("🔍 PLANNER RETURN DEBUG (_proceed_with_plan path):")
+        logger.debug(f"  - query_constraints in updated_state: {'query_constraints' in updated_state}")
+        logger.debug(f"  - query_constraints in original state: {'query_constraints' in state}")
+        if 'query_constraints' in updated_state:
+            qc = updated_state['query_constraints']
+            logger.debug(f"  - query_constraints type: {type(qc)}")
+            if hasattr(qc, 'entities'):
+                logger.debug(f"  - entities: {qc.entities}")
+                logger.debug(f"  - metrics: {qc.metrics}")
+            elif isinstance(qc, dict):
+                logger.debug(f"  - entities (dict): {qc.get('entities')}")
+                logger.debug(f"  - metrics (dict): {qc.get('metrics')}")
+        else:
+            logger.debug("  ⚠️ query_constraints NOT in updated_state!")
+            if 'query_constraints' in state:
+                logger.debug("  - But it WAS in original state - dict() copy failed!")
 
         return updated_state
 

@@ -14,6 +14,233 @@ Always align with official Databricks documentation:
  - https://docs.databricks.com/aws/en/generative-ai/agent-framework/author-agent
  - https://github.com/databricks-demos/dbdemos-notebooks/blob/main/product_demos/Data-Science/ai-agent/02-agent-eval/agent.py
  - https://github.com/databricks-demos/dbdemos-notebooks/tree/main/product_demos/Data-Science/ai-agent
+ - **Structured Outputs**: https://docs.databricks.com/aws/en/machine-learning/model-serving/structured-outputs
+ - **Reasoning Models**: https://docs.databricks.com/aws/en/machine-learning/model-serving/query-reason-models
+
+## Critical: Structured Outputs and Reasoning Models
+
+### Overview
+
+**IMPORTANT CONSTRAINT**: Databricks models have specific requirements when using structured outputs (Pydantic schemas) that affect how reasoning models can be used.
+
+### Reasoning Model Response Format
+
+When using reasoning models (GPT-OSS with `reasoning_effort` or Claude with extended thinking), the response format is:
+
+```python
+response.content = [
+    {'type': 'reasoning', 'summary': [...]},  # Thinking process
+    {'type': 'text', 'text': '...'}           # Actual response
+]
+```
+
+This two-element array format is **intentional and properly designated** - the system can extract the actual answer from the second element.
+
+### Structured Output Methods
+
+LangChain's `with_structured_output()` supports three methods:
+
+1. **`method="json_schema"`** - ❌ NOT COMPATIBLE with reasoning models
+   - Requires a "name" field in the JSON schema
+   - databricks_langchain doesn't provide this field automatically
+   - Error: `json_schema must have a "name" field`
+   - **Workaround**: Use models WITHOUT `reasoning_effort`
+
+2. **`method="json_mode"`** - ⚠️  REQUIRES "json" in prompt
+   - Works with reasoning models
+   - Requires the word "json" in the prompt text
+   - Error if missing: `"messages" must contain the word "json" in some form`
+   - Less strict schema validation than json_schema
+
+3. **`method="function_calling"`** - ❌ NOT COMPATIBLE with reasoning models
+   - Error: `Model output is not in expected format`
+
+### How This Project Uses Structured Outputs
+
+**CRITICAL**: This project uses a **custom implementation** that fixes bugs in vanilla `databricks_langchain`!
+
+#### Why Vanilla databricks_langchain is Broken
+
+Testing reveals that `ChatDatabricks.with_structured_output(method="json_schema")` **DOES NOT WORK**:
+
+```python
+# ❌ FAILS with ALL models (Claude, GPT-OSS) regardless of reasoning
+from databricks_langchain import ChatDatabricks
+
+llm = ChatDatabricks(endpoint="databricks-gpt-oss-120b")  # No reasoning
+structured_llm = llm.with_structured_output(schema=MySchema, method="json_schema")
+result = await structured_llm.ainvoke("...")
+# ERROR: json_schema must have a "name" field
+```
+
+**Root cause**: `databricks_langchain` doesn't add the required "name" field to the JSON schema format.
+
+#### This Project's Custom Solution
+
+**File**: `src/deep_research_agent/core/rate_limited_chat_model.py`
+
+The project implements its OWN structured output system:
+
+1. **`RateLimitedChatModel`** (line 25) - Wraps ChatDatabricks with rate limiting
+2. **`RateLimitedChatModel.with_structured_output()`** (line 382) - Returns custom wrapper
+3. **`StructuredOutputWrapper`** (line 414) - The magic happens here:
+   - `_build_response_format()` (line 511) - **Adds missing "name" field** (line 588)
+   - `ainvoke()` (line 597) - Calls underlying model with proper format
+   - Uses custom `parse_llm_response()` (line 671) - Handles reasoning traces
+
+**Key Fix** (rate_limited_chat_model.py:585-592):
+```python
+return {
+    "type": "json_schema",
+    "json_schema": {
+        "name": schema_name,      # ← This fixes the databricks_langchain bug!
+        "schema": schema_dict,
+        "strict": True
+    }
+}
+```
+
+**Configuration** (conf/base.yaml):
+```yaml
+# TIER 5: STRUCTURED - Works with custom implementation
+structured:
+  endpoints:
+    - databricks-gpt-oss-120b     # PRIMARY
+    - databricks-gpt-oss-20b      # Fallback
+  temperature: 0.3
+  max_tokens: 25000
+  # NO reasoning_effort - Keeps responses simple
+  tokens_per_minute: 50000
+```
+
+**Usage Pattern** (hybrid_planner.py, spec_analyzer.py):
+```python
+# Get RateLimitedChatModel (NOT ChatDatabricks directly!)
+llm = model_manager.get_chat_model("structured")  # Returns RateLimitedChatModel
+
+# Use custom with_structured_output (NOT databricks_langchain's)
+structured_llm = llm.with_structured_output(
+    schema=EntityMetricsOutput,
+    method="json_schema"  # Works because of custom implementation
+)
+
+response = await structured_llm.ainvoke(messages)
+# Returns validated Pydantic object
+```
+
+**IMPORTANT**: The project's structured output works because it uses `RateLimitedChatModel`, not vanilla `ChatDatabricks`!
+
+### Best Practices
+
+**✅ DO (Using Our Custom Implementation)**:
+- Use the "structured" tier for Pydantic schema generation
+- Use `method="json_schema"` for strict validation with our custom implementation
+- You CAN combine `reasoning_effort` with `method="json_schema"` when using `RateLimitedChatModel`
+- Access models through `model_manager.get_chat_model()` to get our custom wrapper
+
+**❌ DON'T (Vanilla databricks_langchain Limitations)**:
+- Use `ChatDatabricks.with_structured_output()` directly (missing "name" field bug)
+- Use `method="json_mode"` without "json" in the prompt
+- Use `method="function_calling"` with reasoning models
+- Bypass ModelManager (you'll lose the custom fixes)
+
+### Reasoning Model Usage with Structured Output
+
+**IMPORTANT**: Our custom `RateLimitedChatModel` **DOES** support reasoning + structured output!
+
+#### Option 1: Structured Output WITH Reasoning (Recommended for Complex Extraction)
+
+Our custom implementation handles the two-element reasoning trace `[reasoning, text]` automatically:
+
+```python
+# Create a tier with reasoning enabled (optional - can add to conf/base.yaml)
+config_override = {
+    "model_tiers": {
+        "structured_with_reasoning": {
+            "endpoints": ["databricks-gpt-oss-120b"],
+            "temperature": 0.3,
+            "max_tokens": 25000,
+            "reasoning_effort": "medium",  # ✅ Works with our custom implementation!
+            "tokens_per_minute": 50000
+        }
+    }
+}
+
+# Use it
+llm = model_manager.get_chat_model("structured_with_reasoning")
+structured_llm = llm.with_structured_output(
+    schema=EntityMetricsOutput,
+    method="json_schema"  # ✅ Works because we add "name" field
+)
+
+result = await structured_llm.ainvoke(messages)
+# Returns validated Pydantic object
+# Reasoning trace is automatically parsed and filtered
+```
+
+**Benefits of Reasoning + Structured Output**:
+- More thoughtful metric extraction
+- Better handling of edge cases
+- Higher quality confidence scores
+- Still returns validated Pydantic objects
+- Reasoning traces are automatically handled by `parse_llm_response()`
+
+#### Option 2: Two Separate Calls (When You Need Explicit Reasoning Access)
+
+```python
+# Step 1: Reasoning model for complex analysis
+reasoning_llm = model_manager.get_chat_model("analytical")  # Has reasoning_effort
+reasoning_response = await reasoning_llm.ainvoke(analysis_prompt)
+
+# Step 2: Structured model for schema extraction
+structured_llm = model_manager.get_chat_model("structured")  # No reasoning_effort
+structured_response = await structured_llm.with_structured_output(schema).ainvoke(extraction_prompt)
+```
+
+#### Option 3: json_mode with Vanilla databricks_langchain (Not Recommended)
+
+**Note**: This is only if you bypass ModelManager and use vanilla `ChatDatabricks` directly. Not recommended.
+
+```python
+# ⚠️ Using vanilla ChatDatabricks (bypasses our fixes)
+llm_with_reasoning = ChatDatabricks(
+    endpoint="databricks-gpt-oss-120b",
+    extra_params={"reasoning_effort": "medium"}
+)
+
+structured_llm = llm_with_reasoning.with_structured_output(
+    schema=MySchema,
+    method="json_mode"  # Less strict validation, no "name" field requirement
+)
+
+# CRITICAL: Prompt MUST contain "json"
+prompt = "Analyze this data and return JSON with the following structure..."
+response = await structured_llm.ainvoke(prompt)
+```
+
+**Why Option 1 (Reasoning + json_schema with RateLimitedChatModel) is Better**:
+- ✅ Strict Pydantic validation
+- ✅ Automatic reasoning trace parsing
+- ✅ Type-safe returns
+- ✅ Better error messages
+- ✅ Works with all Databricks models
+
+### Databricks JSON Schema Limitations
+
+From Databricks docs, JSON schemas have these constraints:
+- Maximum 64 keys in schema
+- No `pattern`, `anyOf`, `oneOf`, `allOf`, `$ref`
+- No `minProperties`, `maxProperties`, `maxLength` enforcement
+- Heavily nested schemas produce lower quality results
+- **Recommendation**: Keep schemas flat and simple
+
+### Related Files
+
+- **Configuration**: `conf/base.yaml` - "structured" tier definition
+- **Usage**: `src/deep_research_agent/core/metrics/hybrid_planner.py:607-610`
+- **Usage**: `src/deep_research_agent/core/metrics/spec_analyzer.py:1690-1693`
+- **Models**: `src/deep_research_agent/core/structured_models.py` - Pydantic schemas
+- **Model Manager**: `src/deep_research_agent/core/model_manager.py:298` - Tier validation
 
 ## Quick Commands
 
@@ -384,6 +611,141 @@ reporter:
 
 ## Important Implementation Notes
 
+### Pydantic Everywhere Architecture (StructuredObservation)
+
+**Implementation Status**: ✅ COMPLETE (as of October 2025)
+
+The codebase follows a **"Pydantic Everywhere"** strategy for handling observations. This architectural decision ensures type safety and consistency throughout the multi-agent system.
+
+#### Core Principle
+- **Internal Representation**: `StructuredObservation` Pydantic objects are used EVERYWHERE internally
+- **Serialization Boundaries**: Conversion to/from dicts happens ONLY at JSON boundaries (file I/O, LangGraph state passing)
+- **No Mixed Types**: Never mix dict access patterns (`.get()`) with object attribute access (`.content`)
+
+#### Key Components
+
+**StructuredObservation Model** (`core/structured_models.py`):
+- Primary observation representation throughout the system
+- Validated Pydantic model with fields: content, entity_tags, confidence, relevance_score, metadata, etc.
+- Methods: `from_dict()`, `to_dict()`, `from_string()`
+
+**Type Annotations** (fixed):
+```python
+# core/plan_models.py - Step class
+observations: Optional[List['StructuredObservation']] = Field(
+    default=None,
+    description="Observations made during execution as StructuredObservation objects"
+)
+
+# core/multi_agent_state.py - EnhancedResearchState
+observations: Annotated[
+    List[StructuredObservation],  # NOT List[Dict[str, Any]]
+    use_latest_value
+]
+new_observations: Annotated[
+    List[StructuredObservation],  # NOT List[Dict[str, Any]]
+    use_latest_value
+]
+```
+
+**Serialization Utilities** (`core/serialization_utils.py`):
+```python
+# Custom JSON encoder/decoder for Pydantic objects
+class ObservationJSONEncoder(json.JSONEncoder):
+    """Handles StructuredObservation → dict conversion at JSON boundaries"""
+
+class ObservationJSONDecoder:
+    """Handles dict → StructuredObservation restoration from JSON"""
+
+# Utility functions for state serialization
+serialize_state_for_json(state)      # For JSON file saving
+deserialize_state_from_json(json_str) # For JSON file loading
+serialize_for_langgraph(state)        # For LangGraph state passing
+deserialize_from_langgraph(state_dict) # For LangGraph state restoration
+```
+
+**Safe Compatibility Helper** (`core/multi_agent_state.py`):
+```python
+@staticmethod
+def safe_get_observation_content(obs: Union[Dict, StructuredObservation, str]) -> str:
+    """Extract content from observation regardless of format.
+
+    Provides compatibility during migration and handles edge cases.
+    """
+    if isinstance(obs, StructuredObservation):
+        return str(obs.content if obs.content else "")
+    elif isinstance(obs, dict):
+        return str(obs.get("content", ""))
+    elif isinstance(obs, str):
+        return obs
+    else:
+        logger.warning(f"Unexpected observation type: {type(obs)}")
+        return str(obs)
+```
+
+#### Usage Patterns
+
+**✅ CORRECT - Direct attribute access**:
+```python
+# Working with observations internally
+for obs in state["observations"]:
+    print(obs.content)           # Direct attribute access
+    print(obs.entity_tags)        # Type-safe access
+    print(obs.confidence)         # No KeyError risk
+
+# Adding new observations
+structured_obs = ensure_structured_observation(raw_data)
+state["observations"].append(structured_obs)  # Append object directly
+```
+
+**❌ WRONG - Dict access patterns**:
+```python
+# DON'T DO THIS - will cause AttributeError
+obs.get("content", "")  # StructuredObservation has no .get() method
+
+# DON'T DO THIS - unnecessary conversion
+obs_dict = structured_obs.to_dict()
+state["observations"].append(obs_dict)  # Should append object
+```
+
+#### State Serialization Flow
+
+```
+Internal Processing (Pydantic Objects)
+    ↓
+JSON Save → serialize_state_for_json() → Converts to dicts
+    ↓
+JSON File (dicts)
+    ↓
+JSON Load → deserialize_state_from_json() → Restores to objects
+    ↓
+Internal Processing (Pydantic Objects)
+```
+
+```
+LangGraph Node A (Pydantic Objects)
+    ↓
+State Pass → serialize_for_langgraph() → Converts to dicts
+    ↓
+LangGraph Transport (dicts)
+    ↓
+State Receive → deserialize_from_langgraph() → Restores to objects
+    ↓
+LangGraph Node B (Pydantic Objects)
+```
+
+#### Benefits
+1. **Type Safety**: IDE autocomplete and type checking work correctly
+2. **Validation**: Pydantic validates at object creation time
+3. **Consistency**: Single access pattern throughout codebase
+4. **Clear Boundaries**: Only 2 places need dict conversion (JSON save/load)
+5. **Better Debugging**: Objects have informative repr() for debugging
+
+#### Migration Notes
+- The `safe_get_observation_content()` helper provides backward compatibility
+- All new code should use StructuredObservation objects directly
+- Fixtures are automatically migrated using `ObservationJSONDecoder`
+
 ### Multi-Agent Mocking Pattern
 
 **CRITICAL**: Use high-level graph mocking, NOT low-level LLM mocking:
@@ -501,6 +863,8 @@ result = await calc_agent.execute_unified_plan(state)
 
 ## Documentation
 
+**Full Documentation Index**: See `docs/README.md` for complete documentation catalog
+
 **Main Docs** (`docs/`):
 - `ARCHITECTURE.md` - System architecture (needs update with Calculation Agent)
 - `CONFIGURATION_GUIDE.md` - Configuration details
@@ -508,6 +872,7 @@ result = await calc_agent.execute_unified_plan(state)
 - `METRIC_PIPELINE_GUIDE.md` - Metric calculation guide
 - `TESTING_ARCHITECTURE.md` - Testing patterns
 - `SCHEMA_REQUIREMENTS.md` - MLflow schema compliance
+- `PYDANTIC_EVERYWHERE_IMPLEMENTATION_COMPLETE.md` ✨ **NEW** - Type-safe observation handling architecture
 
 **Architecture Diagrams** (`docs/diagrams/`):
 - `system-architecture.md` - Overall system

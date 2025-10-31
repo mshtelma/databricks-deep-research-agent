@@ -31,6 +31,7 @@ from . import (
 from .observation_models import StructuredObservation
 # Legacy MetricPipelineState removed - now using calculation_results from calculation_agent
 from .metrics.unified_models import UnifiedPlan
+from .report_generation.models import CalculationContext
 
 # Initialize logger
 logger = get_logger(__name__)
@@ -82,6 +83,41 @@ def merge_dicts(left: Optional[Dict[str, Any]], right: Optional[Dict[str, Any]])
     return merged
 
 
+def ensure_state_hydrated(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ensure state is hydrated at perimeter entry points (routers and nodes).
+
+    This function provides a lightweight perimeter guard that hydrates dict representations
+    back to Pydantic models. It's idempotent - if state is already hydrated, this is a no-op.
+
+    CRITICAL: This is needed because LangGraph serializes Pydantic models to dicts when
+    propagating state between nodes. Without hydration at boundaries, downstream code
+    that expects Pydantic objects (e.g., query_constraints.entities) will crash with
+    AttributeError.
+
+    Implementation:
+    - Checks if query_constraints is a dict (needs hydration)
+    - Delegates to existing StateManager.hydrate_state() for full hydration
+    - Returns state as-is if already hydrated or not present
+
+    Args:
+        state: State dict from LangGraph (may contain serialized Pydantic objects)
+
+    Returns:
+        Hydrated state (modified in-place) with Pydantic objects restored
+    """
+    # Fast path: Only hydrate if query_constraints exists and is a dict
+    query_constraints = state.get("query_constraints")
+    if query_constraints is not None and isinstance(query_constraints, dict):
+        # State needs hydration - delegate to existing hydration logic
+        # Note: StateManager is defined later in this file, but Python resolves names at
+        # runtime, so this will work when the function is called
+        return StateManager.hydrate_state(state)
+
+    # Already hydrated or not present - no-op
+    return state
+
+
 class EnhancedResearchState(TypedDict):
     """
     Enhanced state for multi-agent research system.
@@ -108,13 +144,13 @@ class EnhancedResearchState(TypedDict):
     enable_background_investigation: Annotated[bool, use_latest_value]
     background_investigation_results: Annotated[Optional[str], use_latest_value]
     
-    # Execution state (observations stored as dicts for LangGraph serialization)
+    # Execution state (observations as Pydantic objects throughout)
     observations: Annotated[
-        List[Dict[str, Any]],  # StructuredObservation dicts (serialized at boundaries)
+        List[StructuredObservation],  # StructuredObservation objects throughout
         use_latest_value  # FIXED: Changed from merge_lists to prevent duplication
     ]  # Accumulated observations from all steps - single source of truth
     new_observations: Annotated[
-        List[Dict[str, Any]],  # Delta: new observations from current pass only
+        List[StructuredObservation],  # Delta: new observations from current pass only
         merge_lists  # Appends for tracking what each pass contributed
     ]  # Temporary holding for new observations before consolidation
     completed_steps: Annotated[List[Step], merge_lists]
@@ -154,6 +190,7 @@ class EnhancedResearchState(TypedDict):
     report_sections: Annotated[Optional[Dict[str, str]], use_latest_value]  # Section name -> content
     metric_state: Annotated[Optional[Dict[str, Any]], use_latest_value]
     unified_plan: Annotated[Optional[UnifiedPlan], use_latest_value]  # NEW: Unified plan for metric extraction/calculation
+    calculation_results: Annotated[Optional['CalculationContext'], use_latest_value]  # NEW: CalculationContext from calculation_agent (Pydantic model)
     metric_capability_enabled: Annotated[bool, use_latest_value]
     pending_calculation_research: Annotated[Optional[List[str]], use_latest_value]  # Queries needed for calculations
     
@@ -348,6 +385,7 @@ class StateManager:
             # Metric calculation and extraction (CRITICAL FIX - these fields were missing!)
             metric_state=None,
             unified_plan=None,
+            calculation_results=None,
             metric_capability_enabled=config.get("metrics", {}).get("enabled", False),
             pending_calculation_research=None,
 
@@ -655,6 +693,66 @@ class StateManager:
                 state["unified_plan"], UnifiedPlan, "unified_plan"
             )
 
+        # Single CalculationContext object (NEW: for hybrid report generation)
+        if "calculation_results" in state and isinstance(state["calculation_results"], dict):
+            try:
+                from ..core.report_generation.models import CalculationContext, DataPoint, Calculation
+
+                calc_dict = state["calculation_results"]
+                logger.debug(f"Hydrating calculation_results with keys: {list(calc_dict.keys())}")
+
+                # Convert data_points dict/list → List[DataPoint]
+                data_points_raw = calc_dict.get("data_points", {})
+                extracted_data = []
+
+                if isinstance(data_points_raw, dict):
+                    # Legacy fixture format: dict of data_point objects/strings
+                    for dp_id, dp_data in data_points_raw.items():
+                        if isinstance(dp_data, str):
+                            # Skip DataPoint repr strings from test fixtures
+                            logger.debug(f"Skipping string repr for data_point: {dp_id}")
+                            continue
+                        elif isinstance(dp_data, dict):
+                            try:
+                                extracted_data.append(DataPoint(**dp_data))
+                            except Exception as e:
+                                logger.warning(f"Could not hydrate data_point {dp_id}: {e}")
+                        elif hasattr(dp_data, 'model_dump'):
+                            # Already a DataPoint object
+                            extracted_data.append(dp_data)
+                elif isinstance(data_points_raw, list):
+                    # New format: already a list
+                    extracted_data = hydrate_pydantic_list(data_points_raw, DataPoint, "calculation_results.data_points")
+
+                # Convert calculations list (if present)
+                calculations = hydrate_pydantic_list(
+                    calc_dict.get("calculations", []),
+                    Calculation,
+                    "calculation_results.calculations"
+                )
+
+                # Create CalculationContext object
+                state["calculation_results"] = CalculationContext(
+                    extracted_data=extracted_data,
+                    calculations=calculations,
+                    key_comparisons=calc_dict.get("key_comparisons", []),
+                    metadata={
+                        "extracted_count": calc_dict.get("extracted_count", len(extracted_data)),
+                        "calculated_count": calc_dict.get("calculated_count", len(calculations)),
+                        "plan_id": calc_dict.get("plan_id")
+                    }
+                )
+
+                logger.info(
+                    f"✅ Hydrated calculation_results: "
+                    f"{len(extracted_data)} data points, {len(calculations)} calculations"
+                )
+
+            except Exception as e:
+                logger.error(f"❌ Could not hydrate calculation_results: {e}")
+                # Don't fail the entire hydration, just skip this field
+                logger.warning("Leaving calculation_results as dict (will cause TypeError if used)")
+
         # Single FactualityReport object
         if "factuality_report" in state:
             state["factuality_report"] = hydrate_pydantic(
@@ -765,19 +863,46 @@ class StateManager:
         return state
 
     @staticmethod
+    def safe_get_observation_content(obs: Union[Dict[str, Any], StructuredObservation, str]) -> str:
+        """
+        Safely extract content from observation regardless of format.
+
+        This compatibility helper handles:
+        - StructuredObservation objects (Pydantic BaseModel)
+        - Dict format (legacy JSON representation)
+        - String format (plain text observation)
+        - Any unexpected type (defensive fallback)
+
+        Provides defense-in-depth during migration to Pydantic-everywhere architecture.
+        """
+        if isinstance(obs, StructuredObservation):
+            # Pydantic object - access attribute directly
+            return str(obs.content if obs.content else "")
+        elif isinstance(obs, dict):
+            # Legacy dict format - use .get() for safety
+            return str(obs.get("content", ""))
+        elif isinstance(obs, str):
+            # Plain string observation
+            return obs
+        else:
+            # Unexpected type - defensive fallback
+            logger.warning(f"Unexpected observation type: {type(obs)}, converting to string")
+            return str(obs)
+
+    @staticmethod
     def update_plan(
-        state: EnhancedResearchState, 
+        state: EnhancedResearchState,
         new_plan: Plan
     ) -> EnhancedResearchState:
         """Update the state with a new plan."""
         state["current_plan"] = new_plan
         state["plan_iterations"] += 1
-        
+
         # Reset execution state for new plan
         state["current_step_index"] = 0
         state["completed_steps"] = []
         state["current_step"] = new_plan.get_next_step() if new_plan else None
-        
+
         return state
     
     @staticmethod
@@ -843,22 +968,26 @@ class StateManager:
 
         # CRITICAL: Set step_id for section-specific filtering in reporter
         if step:
+            old_step_id = getattr(structured_obs, 'step_id', None)
             structured_obs.step_id = step.step_id
+            if old_step_id and old_step_id != step.step_id:
+                logger.error(f"🔥 [add_observation] STEP_ID OVERWRITE: {old_step_id} → {step.step_id} (object_id={id(structured_obs)})")
+            logger.debug(f"🔍 [add_observation] Set step_id={step.step_id} on obs (object_id={id(structured_obs)})")
 
-        # FIXED: Serialize to dict before adding to state (LangGraph requires dicts)
-        obs_dict = structured_obs.to_dict()
+        # FIXED: Keep as Pydantic object (Pydantic Everywhere strategy)
+        # No conversion to dict - we use objects throughout
 
         # Add to new_observations (delta tracking for current pass)
         if "new_observations" not in state:
             state["new_observations"] = []
-        state["new_observations"].append(obs_dict)
+        state["new_observations"].append(structured_obs)
 
         # Add to complete observations with smart deduplication
         if "observations" not in state:
             state["observations"] = []
 
-        # Extract content for deduplication
-        content = str(obs_dict.get("content", "")).strip()
+        # Extract content for deduplication using safe helper
+        content = StateManager.safe_get_observation_content(structured_obs).strip()
         if not content:
             logger.debug("Skipping empty observation")
             return state
@@ -870,7 +999,7 @@ class StateManager:
             is_new = observation_index.add_observation(content, step_id)
 
             if is_new:
-                state["observations"].append(obs_dict)
+                state["observations"].append(structured_obs)
                 logger.debug(f"Added observation to state (passed index dedup): {content[:50]}...")
             else:
                 logger.debug(f"Skipped duplicate observation (detected by index): {content[:50]}...")
@@ -879,13 +1008,13 @@ class StateManager:
             content_lower = content.lower()
             obs_hash = hash(content_lower) if content_lower else 0
             existing_hashes = {
-                hash(str(o.get("content", "")).lower().strip())
+                hash(StateManager.safe_get_observation_content(o).lower().strip())
                 for o in state["observations"]
-                if str(o.get("content", "")).strip()
+                if StateManager.safe_get_observation_content(o).strip()
             }
 
             if obs_hash not in existing_hashes:
-                state["observations"].append(obs_dict)
+                state["observations"].append(structured_obs)
                 logger.debug(f"Added observation to state (hash dedup): {content[:50]}...")
             else:
                 logger.debug(f"Skipped duplicate observation (hash match): {content[:50]}...")
@@ -925,9 +1054,9 @@ class StateManager:
 
         # Build hash set of existing observations using full content
         existing_hashes = {
-            hash(str(o.get("content", "")).lower().strip())
+            hash(StateManager.safe_get_observation_content(o).lower().strip())
             for o in state["observations"]
-            if str(o.get("content", "")).strip()
+            if StateManager.safe_get_observation_content(o).strip()
         }
 
         # Add new observations that aren't duplicates
@@ -935,7 +1064,7 @@ class StateManager:
         duplicate_count = 0
 
         for new_obs in state["new_observations"]:
-            content = str(new_obs.get("content", "")).lower().strip()
+            content = StateManager.safe_get_observation_content(new_obs).lower().strip()
             obs_hash = hash(content) if content else 0
             if obs_hash not in existing_hashes:
                 state["observations"].append(new_obs)
@@ -998,9 +1127,9 @@ class StateManager:
 
         # Build hash set of existing observations
         existing_hashes = {
-            hash(str(o.get("content", "")).lower().strip())
+            hash(StateManager.safe_get_observation_content(o).lower().strip())
             for o in state["observations"]
-            if str(o.get("content", "")).strip()
+            if StateManager.safe_get_observation_content(o).strip()
         }
 
         # Process new observations
@@ -1016,11 +1145,11 @@ class StateManager:
             if step:
                 structured_obs.step_id = step.step_id
 
-            # Serialize to dict for state storage
-            obs_dict = structured_obs.to_dict()
+            # Don't convert to dict anymore - keep as Pydantic object
+            # obs_dict = structured_obs.to_dict()  # REMOVED
 
             # Check for duplication
-            content = str(obs_dict.get("content", "")).strip()
+            content = StateManager.safe_get_observation_content(structured_obs).strip()
             if not content:
                 continue
 
@@ -1033,7 +1162,7 @@ class StateManager:
                 # Count how many times this specific observation exists
                 specific_duplicate_count = sum(
                     1 for o in state["observations"]
-                    if hash(str(o.get("content", "")).lower().strip()) == obs_hash
+                    if hash(StateManager.safe_get_observation_content(o).lower().strip()) == obs_hash
                 )
                 if specific_duplicate_count >= 10 and not excessive_duplicate_warning:
                     logger.error(
@@ -1044,7 +1173,7 @@ class StateManager:
                 continue
 
             # Add unique observation
-            added.append(obs_dict)
+            added.append(structured_obs)
             existing_hashes.add(obs_hash)
 
             # Also add to step if provided

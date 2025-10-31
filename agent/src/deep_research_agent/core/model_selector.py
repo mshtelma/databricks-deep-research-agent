@@ -427,7 +427,15 @@ class ModelSelector:
                 extra_params = kwargs.get("extra_params", {})
                 extra_params["response_format"] = response_format
                 kwargs["extra_params"] = extra_params
-                logger.info(f"🔧 Structured output enabled: {response_format.get('type', 'unknown')}")
+                # ✅ CRITICAL FIX: response_format can be a Pydantic class or dict
+                # Don't call .get() on Pydantic classes - use safe type detection
+                if isinstance(response_format, dict):
+                    format_type = response_format.get('type', 'unknown')
+                elif isinstance(response_format, type):
+                    format_type = f"pydantic_model:{response_format.__name__}"
+                else:
+                    format_type = f"object:{type(response_format).__name__}"
+                logger.info(f"🔧 Structured output enabled: {format_type}")
             else:
                 # Model doesn't support response_format - log warning and skip
                 logger.warning(

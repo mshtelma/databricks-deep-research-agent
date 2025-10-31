@@ -295,7 +295,7 @@ class ModelManager:
                 )
 
         # Validate tier name
-        valid_tiers = ["simple", "analytical", "complex"]
+        valid_tiers = ["micro", "simple", "analytical", "complex", "structured"]
         if model_name not in valid_tiers:
             logger.error(f"❌ Invalid tier: {model_name}, using 'analytical'")
             model_name = "analytical"

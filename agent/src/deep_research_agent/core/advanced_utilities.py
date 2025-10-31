@@ -453,6 +453,435 @@ class LLMInvocationManager:
 
 
 # =============================================================================
+# ReporterLLMInvocationManager - Reporter-specific LLM invocation with retry
+# =============================================================================
+
+class ReporterLLMInvocationManager:
+    """
+    Reporter-specific LLM invocation with entity validation and reasoning transformation.
+
+    Extends basic LLM invocation with reporter-specific features:
+    - Entity hallucination detection
+    - Reasoning-to-report transformation
+    - Content sanitization
+    - Event emission for progress tracking
+    - Databricks-specific error classification
+    - Smart retry logic for transient errors
+
+    Extracted from reporter.py to provide reusable reporter-specific LLM logic.
+    """
+
+    def __init__(
+        self,
+        llm,
+        event_emitter=None,
+        enable_entity_validation: bool = True,
+        enable_reasoning_transform: bool = True,
+        model_tier: str = "analytical"
+    ):
+        """
+        Initialize reporter LLM invocation manager.
+
+        Args:
+            llm: Language model instance
+            event_emitter: Optional event emitter for progress tracking
+            enable_entity_validation: Whether to validate entities against query constraints
+            enable_reasoning_transform: Whether to transform reasoning to report content
+            model_tier: Model tier for temperature settings
+        """
+        self.llm = llm
+        self.event_emitter = event_emitter
+        self.enable_entity_validation = enable_entity_validation
+        self.enable_reasoning_transform = enable_reasoning_transform
+        self.model_tier = model_tier
+
+    def invoke_with_smart_retry(
+        self,
+        messages: List,
+        section_name: str,
+        state: Optional[Dict] = None,
+        max_attempts: int = 5
+    ) -> str:
+        """
+        Invoke LLM with intelligent retry for transient errors only.
+
+        Combines retry logic with reporter-specific processing:
+        - Entity validation against query_constraints
+        - Reasoning transformation if no proper content
+        - Content sanitization
+        - Event emission for progress tracking
+
+        Args:
+            messages: LLM messages to send
+            section_name: Name of the section being generated (for logging)
+            state: Optional state dict for entity validation
+            max_attempts: Maximum retry attempts
+
+        Returns:
+            str: Generated content from LLM
+
+        Raises:
+            Exception: If all retries are exhausted or permanent error encountered
+        """
+        import time
+        import random
+
+        attempt = 0
+
+        while attempt < max_attempts:
+            try:
+                # Log the prompt being sent to LLM
+                if messages and len(messages) > 0:
+                    prompt_content = ""
+                    for msg in messages:
+                        if hasattr(msg, 'content'):
+                            prompt_content += f"{msg.content}... "
+                    logger.info(f"🔍 LLM_PROMPT [reporter_{section_name}]: {prompt_content}...")
+
+                # Invoke LLM
+                response = self.llm.invoke(messages)
+                logger.info(f"🔍 LLM_RESPONSE [reporter_{section_name}]: {response.content}...")
+
+                # ENTITY VALIDATION (if enabled and state provided)
+                if self.enable_entity_validation and state:
+                    self._validate_entities(response.content, state, section_name)
+
+                # Success - log if we had retries
+                if attempt > 0:
+                    logger.info(f"LLM call succeeded for {section_name} after {attempt} retries")
+
+                # Parse response using universal response handler
+                from .response_handlers import parse_structured_response
+                parsed = parse_structured_response(response)
+
+                # Extract content and reasoning
+                content = parsed.content
+                reasoning_text = parsed.reasoning
+
+                # Log response analysis
+                logger.info(f"Section {section_name}: Using {parsed.response_type.value} content ({len(content)} chars)")
+                if reasoning_text:
+                    logger.debug(f"Section {section_name}: Reasoning available ({len(reasoning_text)} chars)")
+                if parsed.metadata:
+                    logger.debug(f"Section {section_name}: Metadata: {parsed.metadata}")
+
+                # Emit reasoning event (if enabled)
+                if reasoning_text and self.event_emitter:
+                    self._emit_reasoning_event(reasoning_text, section_name)
+
+                # Transform reasoning to report if needed (if enabled)
+                if self.enable_reasoning_transform and reasoning_text:
+                    content = self._maybe_transform_reasoning(
+                        content, reasoning_text, section_name
+                    )
+
+                # Apply content sanitization
+                if content:
+                    content = self._sanitize_content(content, section_name)
+
+                # Ensure non-empty content
+                if not content:
+                    logger.warning(f"No content extracted for {section_name}, using empty string")
+                    content = ""
+
+                return content
+
+            except Exception as e:
+                attempt += 1
+                error_str = str(e)
+
+                # Classify error (transient vs permanent)
+                is_transient, suggested_wait = self._classify_databricks_error(e)
+
+                if not is_transient:
+                    logger.error(f"Permanent error in {section_name}: {e}")
+                    raise
+
+                if attempt >= max_attempts:
+                    logger.error(f"Max retries ({max_attempts}) exceeded for {section_name}")
+                    raise
+
+                # Check for 429 (all endpoints exhausted)
+                if "429" in error_str:
+                    logger.error(
+                        f"All endpoints exhausted for {section_name} (429 errors). "
+                        "Not retrying - ModelSelector already tried all available endpoints."
+                    )
+                    raise
+
+                # Calculate wait time
+                if suggested_wait:
+                    wait_time = min(suggested_wait, 30)
+                else:
+                    wait_time = min(5 * (2 ** (attempt - 1)), 30)
+
+                # Add jitter (up to 10%)
+                jitter = random.uniform(0, wait_time * 0.1)
+                wait_time += jitter
+
+                logger.warning(
+                    f"Transient error in {section_name} generation "
+                    f"(attempt {attempt}/{max_attempts}), "
+                    f"retrying in {wait_time:.1f}s: {error_str[:100]}"
+                )
+
+                time.sleep(wait_time)
+
+        # Should never reach here
+        raise Exception(f"Retry logic error for {section_name}")
+
+    def _validate_entities(self, content: str, state: Dict, section_name: str):
+        """
+        Validate entities against query_constraints.
+
+        Args:
+            content: LLM response content
+            state: State dict containing query_constraints
+            section_name: Section name for logging
+        """
+        from .entity_validation import EntityExtractor
+
+        constraints = state.get("query_constraints")
+        requested_entities = constraints.entities if constraints else []
+
+        if requested_entities:
+            extractor = EntityExtractor()
+            response_entities = extractor.extract_entities(content)
+            hallucinated = response_entities - set(requested_entities)
+
+            if hallucinated:
+                logger.warning(
+                    f"🚨 ENTITY_HALLUCINATION [reporter_{section_name}]: "
+                    f"LLM mentioned entities not in original query: {hallucinated}"
+                )
+            else:
+                logger.info(
+                    f"✅ ENTITY_VALIDATION [reporter_{section_name}]: "
+                    f"Response only mentions requested entities: {response_entities & set(requested_entities)}"
+                )
+
+    def _emit_reasoning_event(self, reasoning_text: str, section_name: str):
+        """
+        Emit reasoning event via event emitter.
+
+        Args:
+            reasoning_text: Reasoning text from LLM
+            section_name: Section name for logging
+        """
+        try:
+            reasoning_for_event = reasoning_text[:500] if len(reasoning_text) > 500 else reasoning_text
+            self.event_emitter.emit_reasoning_reflection(
+                reasoning=reasoning_for_event,
+                options=["content_generation"],
+                confidence=0.8,
+                stage_id="reporter"
+            )
+            logger.info(f"Emitted reasoning event for {section_name} ({len(reasoning_for_event)} chars)")
+        except Exception as e:
+            logger.warning(f"Failed to emit reasoning event for {section_name}: {e}")
+
+    def _maybe_transform_reasoning(
+        self,
+        content: str,
+        reasoning_text: str,
+        section_name: str
+    ) -> str:
+        """
+        Transform reasoning to report if no proper content.
+
+        Args:
+            content: Current content
+            reasoning_text: Reasoning text
+            section_name: Section name
+
+        Returns:
+            Transformed or original content
+        """
+        if len(reasoning_text.strip()) > 100 and (not content or len(content.strip()) < 50):
+            if not section_name.endswith("_transformed"):
+                logger.warning(
+                    f"🔄 REASONING_TO_REPORT: No proper content found for {section_name}, "
+                    "transforming reasoning to report..."
+                )
+                transformed_content = self._transform_reasoning_to_report(
+                    reasoning_text, section_name
+                )
+                logger.info(
+                    f"🔄 REASONING_TO_REPORT: Transformation completed for {section_name} "
+                    f"({len(transformed_content)} chars)"
+                )
+                return transformed_content
+            else:
+                logger.warning(
+                    f"🔄 REASONING_TO_REPORT: Avoiding recursive transformation for {section_name}"
+                )
+        elif content and reasoning_text:
+            logger.info(
+                f"✅ PROPER_CONTENT: Using actual report content for {section_name} "
+                f"({len(content)} chars), ignoring reasoning ({len(reasoning_text)} chars)"
+            )
+
+        return content
+
+    def _transform_reasoning_to_report(
+        self,
+        reasoning_text: str,
+        section_name: str,
+        findings: Dict[str, Any] = None
+    ) -> str:
+        """
+        Transform reasoning text into proper report content.
+
+        Args:
+            reasoning_text: The reasoning text to transform
+            section_name: Name of the section being generated
+            findings: Research findings for fallback context
+
+        Returns:
+            str: Transformed report content
+        """
+        logger.info(f"🔄 TRANSFORMATION: Converting reasoning to report content for {section_name}")
+
+        if not self.llm:
+            logger.warning(f"No LLM available for reasoning transformation, using fallback")
+            clean_reasoning = reasoning_text.replace(
+                "I need to", "The analysis shows"
+            ).replace(
+                "Let me", ""
+            ).replace(
+                "I should", "The research indicates"
+            )
+            return f"## {section_name}\n\n{clean_reasoning}"
+
+        # Create transformation prompt
+        transform_prompt = f"""You received reasoning about a research topic. Transform it into a professional report section.
+
+Original reasoning:
+{reasoning_text}
+
+Instructions:
+1. Convert the reasoning into clear, professional report content
+2. Remove any meta-commentary like "I need to", "Let me think", "I should"
+3. Focus on the facts, analysis, and conclusions from the reasoning
+4. Use proper formatting with paragraphs and structure
+5. Write in third person, professional tone
+6. Present information as facts and analysis, not thought process
+7. Keep the substantial content but make it report-appropriate
+
+Generate the report section content:"""
+
+        try:
+            from langchain_core.messages import SystemMessage, HumanMessage
+
+            messages = [
+                SystemMessage(content="You are a professional report writer. Transform reasoning into clear, structured report content. Remove thinking process and present facts directly."),
+                HumanMessage(content=transform_prompt)
+            ]
+
+            response = self.llm.invoke(messages)
+
+            # Parse the transformation response
+            from .response_handlers import parse_structured_response
+            parsed = parse_structured_response(response)
+
+            if parsed.content and len(parsed.content.strip()) > 50:
+                logger.info(f"✅ TRANSFORMATION_SUCCESS: {section_name} ({len(parsed.content)} chars)")
+                return parsed.content.strip()
+            else:
+                logger.warning(f"⚠️ TRANSFORMATION_FAILED: {section_name} - insufficient content generated")
+                clean_reasoning = reasoning_text.replace(
+                    "I need to", "The analysis shows"
+                ).replace(
+                    "Let me", ""
+                ).replace(
+                    "I should", "The research indicates"
+                )
+                return f"## {section_name}\n\n{clean_reasoning}"
+
+        except Exception as e:
+            logger.error(f"❌ TRANSFORMATION_ERROR: {section_name} - {e}")
+            clean_reasoning = reasoning_text.replace(
+                "I need to", "The analysis shows"
+            ).replace(
+                "Let me", ""
+            ).replace(
+                "I should", "The research indicates"
+            )
+            return f"## {section_name}\n\n{clean_reasoning}"
+
+    def _sanitize_content(self, content: str, section_name: str) -> str:
+        """
+        Apply content sanitization.
+
+        Args:
+            content: Content to sanitize
+            section_name: Section name for logging
+
+        Returns:
+            Sanitized content
+        """
+        from .content_sanitizer import sanitize_agent_content
+
+        sanitization_result = sanitize_agent_content(content)
+        if sanitization_result.sanitization_applied:
+            logger.info(
+                f"Applied content sanitization to {section_name}: "
+                f"{len(content)} -> {len(sanitization_result.clean_content)} chars"
+            )
+            for warning in sanitization_result.warnings:
+                logger.warning(f"Content sanitization warning for {section_name}: {warning}")
+
+        return sanitization_result.clean_content
+
+    def _classify_databricks_error(
+        self,
+        error: Exception
+    ) -> Tuple[bool, Optional[float]]:
+        """
+        Classify Databricks errors and extract retry guidance.
+
+        Args:
+            error: Exception to classify
+
+        Returns:
+            Tuple[bool, Optional[float]]: (is_transient, suggested_wait_time)
+        """
+        import re
+
+        error_str = str(error)
+
+        # Transient errors that should be retried
+        if 'TEMPORARILY_UNAVAILABLE' in error_str or '503' in error_str:
+            # Extract wait time if provided
+            wait_time = None
+            retry_patterns = [
+                r'retry[^\d]*after[^\d]*(\d+)',  # "retry after 15"
+                r'retry[_-]after[:\s]*(\d+)',   # "Retry-After: 15"
+            ]
+            for pattern in retry_patterns:
+                match = re.search(pattern, error_str, re.I)
+                if match:
+                    wait_time = float(match.group(1))
+                    break
+            return True, wait_time
+
+        # Rate limiting
+        if '429' in error_str or 'rate_limit' in error_str.lower():
+            return True, 30.0
+
+        # Gateway errors
+        if any(code in error_str for code in ['502', '504', 'gateway']):
+            return True, 15.0
+
+        # Permanent errors
+        if any(err in error_str for err in ['401', '403', 'unauthorized', 'forbidden']):
+            return False, None
+
+        # Unknown errors - don't retry
+        return False, None
+
+
+# =============================================================================
 # ObservationProcessor - Full observation processing pipeline
 # =============================================================================
 

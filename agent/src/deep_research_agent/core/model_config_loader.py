@@ -121,6 +121,26 @@ def create_model_manager_from_config(
         # Convert to NodeModelConfiguration
         node_config = load_model_config_from_yaml(config_dict)
 
+        # 🔧 CRITICAL FIX: Auto-create ModelSelector if rate_limiting is enabled
+        # This ensures RateLimitedChatModel is ALWAYS used (bug fixes + rate limiting)
+        # Without this, we fall back to vanilla ChatDatabricks which is BROKEN!
+        if model_selector is None:
+            # Check if rate_limiting is enabled in config
+            rate_limiting_config = config_dict.get('rate_limiting', {})
+            rate_limiting_enabled = rate_limiting_config.get('enabled', False)
+
+            if rate_limiting_enabled:
+                logger.info("Rate limiting enabled in config - creating ModelSelector")
+                try:
+                    from .model_selector import ModelSelector
+                    model_selector = ModelSelector(config_dict)
+                    logger.info("✅ ModelSelector created successfully")
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to create ModelSelector despite rate_limiting.enabled=true: {e}\n"
+                        f"Falling back to vanilla ChatDatabricks (missing bug fixes!)"
+                    )
+
         # Create ModelManager WITH model_selector for rate limiting
         logger.info(
             f"Creating ModelManager | "

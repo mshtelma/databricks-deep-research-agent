@@ -20,7 +20,7 @@ from enum import Enum
 import logging
 
 from .error_handler import safe_call
-from .search_provider import SearchResult
+from .types import SearchResult  # Using unified SearchResult (single source of truth)
 
 logger = logging.getLogger(__name__)
 

@@ -36,6 +36,24 @@ from .reporter_instrumentation import ReporterInstrumentation
 logger = logging.getLogger(__name__)
 
 
+def _safe_get_attr(obj: Any, attr: str, default: Any = None) -> Any:
+    """
+    Safely get attribute from object or dict.
+
+    Args:
+        obj: Object or dict
+        attr: Attribute name
+        default: Default value if not found
+
+    Returns:
+        Attribute value or default
+    """
+    if isinstance(obj, dict):
+        return obj.get(attr, default)
+    else:
+        return getattr(obj, attr, default)
+
+
 class SectionDraftResponse(BaseModel):
     """Response model for structured section generation."""
     sections: List[SectionDraft] = Field(
@@ -97,9 +115,10 @@ class StructuredReportGenerator:
         )
 
         # Use structured output to force JSON response
+        # ✅ CRITICAL FIX: Use json_schema for strict schema enforcement (was json_mode)
         structured_llm = self.llm.with_structured_output(
             SectionDraftResponse,
-            method="json_mode"
+            method="json_schema"
         )
 
         messages = [
@@ -158,10 +177,15 @@ CRITICAL RULES:
         """Build prompt for structured generation."""
 
         # Extract table IDs
-        table_ids = [spec.table_id for spec in calc_context.table_specifications]
+        table_specs = _safe_get_attr(calc_context, 'table_specifications', [])
+        table_ids = [
+            spec.table_id if hasattr(spec, 'table_id') else spec.get('table_id', 'unknown')
+            for spec in table_specs
+        ]
 
         # Extract key insights
-        insights = calc_context.summary_insights[:5] if calc_context.summary_insights else []
+        summary_insights = _safe_get_attr(calc_context, 'summary_insights', [])
+        insights = summary_insights[:5] if summary_insights else []
 
         # Build section plan
         if dynamic_sections:
@@ -186,9 +210,9 @@ PLANNED SECTIONS:
 AVAILABLE TABLE SPECIFICATIONS (reference these by ID in table_refs):
 {', '.join(table_ids) if table_ids else 'No tables available'}
 
-AVAILABLE DATA POINTS: {len(calc_context.extracted_data)}
-CALCULATIONS PERFORMED: {len(calc_context.calculations)}
-COMPARISONS AVAILABLE: {len(calc_context.key_comparisons)}
+AVAILABLE DATA POINTS: {len(_safe_get_attr(calc_context, 'extracted_data', []))}
+CALCULATIONS PERFORMED: {len(_safe_get_attr(calc_context, 'calculations', []))}
+COMPARISONS AVAILABLE: {len(_safe_get_attr(calc_context, 'key_comparisons', []))}
 
 CRITICAL INSTRUCTIONS:
 1. Generate JSON matching SectionDraftResponse schema

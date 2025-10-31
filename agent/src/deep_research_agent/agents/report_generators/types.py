@@ -143,12 +143,29 @@ class ReportGenerationRequest(BaseModel):
         return v
 
     def has_calculation_data(self) -> bool:
-        """Check if calculation data is available."""
-        return (
-            self.calculation_context is not None and
-            hasattr(self.calculation_context, 'calculations') and
-            len(self.calculation_context.calculations) > 0
-        )
+        """
+        Check if calculation data is available.
+
+        IMPORTANT: Expects calculation_context to be a CalculationContext Pydantic object,
+        NOT a dict. If you're getting a TypeError here, ensure StateManager.hydrate_state()
+        is called at the perimeter (fixture loading, state deserialization, etc.).
+
+        This enforces "Pydantic Everywhere" architecture - dicts should only exist at
+        I/O boundaries, never in internal code.
+        """
+        if self.calculation_context is None:
+            return False
+
+        # ENFORCE: calculation_context must be CalculationContext object, not dict
+        if not hasattr(self.calculation_context, 'calculations'):
+            raise TypeError(
+                f"calculation_context must be CalculationContext object, "
+                f"got {type(self.calculation_context).__name__}. "
+                f"Ensure StateManager.hydrate_state() is called at perimeter to convert "
+                f"dicts to Pydantic models. See core/multi_agent_state.py:hydrate_state()"
+            )
+
+        return len(self.calculation_context.calculations) > 0
 
     def has_dynamic_sections(self) -> bool:
         """Check if dynamic sections are available."""

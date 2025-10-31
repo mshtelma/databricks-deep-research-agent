@@ -72,7 +72,12 @@ def with_state_capture(agent_name: str):
         if asyncio.iscoroutinefunction(func):
             async def async_wrapper(self, state: Dict[str, Any]) -> Dict[str, Any]:
                 from .core.state_capture import state_capture
+                from .core.multi_agent_state import ensure_state_hydrated
                 import traceback
+
+                # HYDRATE STATE at node entry (perimeter)
+                # Converts serialized dicts back to Pydantic models (e.g., QueryConstraints)
+                state = ensure_state_hydrated(state)
 
                 # STATE CAPTURE: Before
                 state_capture.capture_if_enabled(agent_name, state, "before")
@@ -115,7 +120,12 @@ def with_state_capture(agent_name: str):
             # Sync version
             def sync_wrapper(self, state: Dict[str, Any]) -> Dict[str, Any]:
                 from .core.state_capture import state_capture
+                from .core.multi_agent_state import ensure_state_hydrated
                 import traceback
+
+                # HYDRATE STATE at node entry (perimeter)
+                # Converts serialized dicts back to Pydantic models (e.g., QueryConstraints)
+                state = ensure_state_hydrated(state)
 
                 # STATE CAPTURE: Before
                 state_capture.capture_if_enabled(agent_name, state, "before")
@@ -236,8 +246,13 @@ class EnhancedWorkflowNodes:
         if self.model_manager:
             # Use analytical model for researcher (medium complexity)
             researcher_llm = self.model_manager.get_chat_model("analytical")
-            # Use complex model for reporter (final synthesis)
-            reporter_llm = self.model_manager.get_chat_model("complex")
+            # 🔧 BUG 4 FIX: Use "structured" tier for reporter (was "complex")
+            # Reporter calls hybrid_planner which uses EntityMetricsOutput extraction
+            # The "structured" tier guarantees:
+            # 1. RateLimitedChatModel with custom with_structured_output() (has "name" field fix)
+            # 2. No reasoning_effort (avoids [{reasoning}, {text}] format issues)
+            # 3. Strict Pydantic schema compliance
+            reporter_llm = self.model_manager.get_chat_model("structured")
             # Use analytical model for fact checker
             fact_checker_llm = self.model_manager.get_chat_model("analytical")
         else:
@@ -266,9 +281,11 @@ class EnhancedWorkflowNodes:
             embedding_manager=self.embedding_manager
         )
 
-        # NEW: Initialize calculation agent with simple model for extraction
+        # 🔧 BUG 4 FIX: Use "structured" tier for Pydantic schema compliance (no reasoning traces)
+        # The "simple" tier has reasoning_effort enabled which returns [{'type': 'reasoning', ...}]
+        # causing Pydantic serialization failures in with_structured_output()
         if self.model_manager:
-            extraction_llm = self.model_manager.get_chat_model("simple")
+            extraction_llm = self.model_manager.get_chat_model("structured")
         else:
             extraction_llm = self.llm
 
@@ -1524,12 +1541,21 @@ Output ONLY the search query, nothing else."""
                     updated_state = StateValidator.merge_command_update(state, validated_cmd.update)
                 elif isinstance(result, dict):
                     # Direct dict result - validate and merge
+                    logger.error(f"🔍 WORKFLOW: Planner returned dict with keys = {list(result.keys())}")
+                    logger.error(f"🔍 WORKFLOW: query_constraints in result = {'query_constraints' in result}")
+                    if 'query_constraints' in result:
+                        logger.error(f"🔍 WORKFLOW: query_constraints value = {result['query_constraints']}")
+
                     validated_cmd = ValidatedCommand.from_agent_output(
                         agent_name='planner',
                         agent_output=result,
                         current_state=state
                     )
+                    logger.error(f"🔍 WORKFLOW: validated_cmd.update keys = {list(validated_cmd.update.keys())}")
+                    logger.error(f"🔍 WORKFLOW: query_constraints in validated_cmd.update = {'query_constraints' in validated_cmd.update}")
+
                     updated_state = StateValidator.merge_command_update(state, validated_cmd.update)
+                    logger.error(f"🔍 WORKFLOW: After merge, query_constraints in updated_state = {'query_constraints' in updated_state}")
                 else:
                     # Fallback - return original state with warning
                     logger.warning(f"Unexpected planner return type: {type(result)}")
@@ -1651,6 +1677,26 @@ Output ONLY the search query, nothing else."""
         logger.info(f"[RESEARCHER DEBUG] Current observations count: {len(state.get('observations', []))}")
         logger.info(f"[RESEARCHER DEBUG] Search results count: {len(state.get('search_results', []))}")
         logger.info(f"[RESEARCHER DEBUG] Completed steps: {len(state.get('completed_steps', []))}")
+
+        # DEBUG: Check if query_constraints received from planner
+        logger.error("🔍 RESEARCHER_NODE ENTRY DEBUG:")
+        logger.error(f"  - query_constraints in state: {'query_constraints' in state}")
+        if 'query_constraints' in state:
+            qc = state['query_constraints']
+            logger.error(f"  - query_constraints type: {type(qc)}")
+            if qc:
+                if hasattr(qc, 'entities'):
+                    logger.error(f"  - entities: {len(qc.entities)} - {qc.entities}")
+                    logger.error(f"  - metrics: {len(qc.metrics)} - {qc.metrics}")
+                elif isinstance(qc, dict):
+                    logger.error(f"  - entities (dict): {qc.get('entities')}")
+                    logger.error(f"  - metrics (dict): {qc.get('metrics')}")
+            else:
+                logger.error("  ⚠️ query_constraints is None!")
+        else:
+            logger.error("  ❌ CRITICAL: query_constraints NOT in researcher state!")
+            logger.error("  ❌ This will prevent CalculationAgent from being invoked!")
+            logger.error("  ❌ Table generation will fall back to LLM-based mode!")
 
         # Debug state at researcher entry
         self._debug_state_transition("RESEARCHER", state)
@@ -3280,28 +3326,25 @@ Output ONLY the search query, nothing else."""
     # Removed: calculation_planning_node (legacy MetricPipeline code)
     # Calculations now handled by calculation_agent_node using UnifiedPlan
 
+    @with_state_capture("calculation_agent")
     async def calculation_agent_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
         NEW: Calculation agent node - executes UnifiedPlan for metric extraction/calculation.
 
         This node:
-        1. Retrieves UnifiedPlan from state (created by Planner)
+        1. Creates UnifiedPlan if needed (from query_constraints), or uses existing from state
         2. Uses CalculationAgent to extract/calculate all metrics
         3. Stores results in state for Reporter to use
         4. Routes directly to reporter (no feedback loop)
+
+        Note: CalculationAgent.execute() handles UnifiedPlan creation internally when needed.
         """
         logger.info("🧮 [CALCULATION AGENT] ===== ENTERING CALCULATION AGENT NODE =====")
 
         # Check if calculation agent is enabled
-        calc_agent_config = self.config.get('agents', {}).get('calculation_agent', {})
+        calc_agent_config = self.agent_config.get('agents', {}).get('calculation_agent', {})
         if not calc_agent_config.get('enabled', True):
             logger.info("[CALCULATION AGENT] Calculation agent disabled, skipping to reporter")
-            return Command(goto="reporter")
-
-        # Check if we have a UnifiedPlan
-        unified_plan = state.get('unified_plan')
-        if not unified_plan:
-            logger.info("[CALCULATION AGENT] No UnifiedPlan in state, skipping to reporter")
             return Command(goto="reporter")
 
         # Emit agent handoff event
@@ -3326,11 +3369,11 @@ Output ONLY the search query, nothing else."""
 
             if calculation_agent:
                 logger.info(
-                    f"[CALCULATION AGENT] Executing UnifiedPlan with "
-                    f"{len(unified_plan.data_sources) if hasattr(unified_plan, 'data_sources') else 0} metrics"
+                    f"[CALCULATION AGENT] Executing calculation agent "
+                    f"(will create UnifiedPlan if needed from query_constraints)"
                 )
 
-                # Execute the plan
+                # Execute the plan (CalculationAgent.execute() will create UnifiedPlan if needed)
                 results = await calculation_agent.execute(state)
 
                 # Log results

@@ -8,7 +8,7 @@ with entity/metric metadata for better table generation.
 from dataclasses import dataclass, field
 from typing import Dict, List, Any, Optional, Union, Iterable
 from enum import Enum
-from langchain_core.pydantic_v1 import BaseModel, Field
+from langchain_core.pydantic_v1 import BaseModel, Field, validator
 
 
 class ExtractionMethod(str, Enum):
@@ -48,6 +48,39 @@ class StructuredObservation(BaseModel):
     
     # Calculation feedback tracking
     feedback_source: Optional[str] = None  # Identifies if observation comes from calculation feedback (e.g., "calculation_feedback")
+
+    @validator('content', pre=True)
+    def validate_content(cls, v):
+        """
+        Validator to handle list-type content from reasoning models.
+
+        Reasoning models return: [{'type': 'reasoning'...}, {'type': 'text'...}]
+        This validator extracts the actual text from such responses.
+        """
+        if isinstance(v, list):
+            # Handle reasoning model response format
+            # Import here to avoid circular dependency
+            try:
+                from deep_research_agent.core.response_handlers import DatabricksResponseParser
+                # Create a mock message object with the list content
+                class MockMessage:
+                    def __init__(self, content):
+                        self.content = content
+
+                mock_msg = MockMessage(v)
+                parsed = DatabricksResponseParser().parse(mock_msg)
+                return parsed.content
+            except Exception as e:
+                # Fallback: convert list to string if parsing fails
+                import logging
+                logging.warning(f"Failed to parse list content with DatabricksResponseParser: {e}. Using str() fallback.")
+                return str(v)
+        elif v is None:
+            return ""
+        elif isinstance(v, str):
+            return v
+        else:
+            return str(v)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -231,7 +264,11 @@ def ensure_structured_observation(obs: Union[str, StructuredObservation, Dict]) 
     if isinstance(obs, str):
         return StructuredObservation.from_string(obs)
     elif isinstance(obs, StructuredObservation):
-        return obs
+        # ✅ FIX: Return defensive copy to prevent mutation (Pydantic v1 uses .copy())
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"🔍 [ensure_structured_observation] Creating defensive COPY (original id={id(obs)}, step_id={getattr(obs, 'step_id', 'NONE')})")
+        return obs.copy()
     elif isinstance(obs, dict):
         # Handle dict observations properly - use from_dict not str()!
         return StructuredObservation.from_dict(obs)

@@ -473,10 +473,11 @@ class ResearcherAgent:
         
         try:
             # Execute based on step type
+            logger.info(f"🔍 [STEP EXECUTION] Step {current_step.step_id} type={current_step.step_type}")
             if current_step.step_type == StepType.RESEARCH:
                 results = self._execute_research_step(current_step, state, config)
             else:
-                logger.warning(f"Unknown step type: {current_step.step_type}")
+                logger.warning(f"🔍 [STEP EXECUTION] Unknown/VALIDATION step type: {current_step.step_type} - NO EXECUTION")
                 results = None
             
             # Update step with results
@@ -485,7 +486,12 @@ class ResearcherAgent:
                 # Normalize observations to StructuredObservation objects
                 from ..core.observation_models import ensure_structured_observation
                 raw_observations = results.get("observations", [])
+                logger.info(f"🔍 [OBS CREATION] Step {current_step.step_id} created {len(raw_observations)} observations")
                 current_step.observations = [ensure_structured_observation(obs) for obs in raw_observations]
+                # Log initial step_ids
+                for i, obs in enumerate(current_step.observations[:3]):
+                    if hasattr(obs, 'step_id'):
+                        logger.info(f"🔍 [OBS CREATION] Obs {i}: step_id={obs.step_id} (object_id={id(obs)})")
                 
                 # Tag observations from calculation feedback steps
                 if current_step.metadata and current_step.metadata.get("is_feedback_step"):
@@ -563,7 +569,9 @@ class ResearcherAgent:
                     pass
                 
                 # Add observations to state (DISABLE RESTRICTIVE ENTITY VALIDATION)
-                for observation in current_step.observations:
+                logger.info(f"🔍 [OBS ADDING] Adding {len(current_step.observations)} observations from step {current_step.step_id} to state")
+                logger.info(f"🔍 [OBS ADDING] State currently has {len(state.get('observations', []))} observations")
+                for idx, observation in enumerate(current_step.observations):
                     # CRITICAL FIX: Entity validation was overly restrictive and filtering out valid observations
                     # This was causing reports to contain only references instead of actual content
                     # For now, disable entity validation to ensure observations make it to the report
@@ -583,8 +591,13 @@ class ResearcherAgent:
                         validation_result = None
                     
                     # Always add the observation regardless of validation result
+                    old_step_id = getattr(observation, 'step_id', 'NONE')
+                    logger.info(f"🔍 [OBS ADDING] Before add_observation: obs {idx} step_id={old_step_id} object_id={id(observation)}")
                     state = StateManager.add_observation(state, observation, current_step, self.config, self.observation_index)
-                    logger.info(f"Added observation to state: {observation_text[:100]}...")
+                    new_step_id = getattr(observation, 'step_id', 'NONE')
+                    if old_step_id != new_step_id:
+                        logger.error(f"🔥 [STEP_ID CHANGE] Obs {idx} step_id changed: {old_step_id} → {new_step_id}")
+                    logger.info(f"🔍 [OBS ADDING] After add_observation: obs {idx} step_id={new_step_id}")
                     
                     # Track validation info for debugging but don't block observation
                     if validation_result and not validation_result.is_valid:
@@ -2442,7 +2455,8 @@ Extract 3-10 specific facts with entity and metric metadata as JSON.""")
                 raise Exception("No LLM available")
 
             # Use structured output with FactExtractionOutput (includes metadata)
-            structured_llm = self.llm.with_structured_output(FactExtractionOutput, method="json_mode")
+            # ✅ CRITICAL FIX: Use json_schema for strict schema enforcement (was json_mode)
+            structured_llm = self.llm.with_structured_output(FactExtractionOutput, method="json_schema")
             extraction_result = structured_llm.invoke(messages)
 
             if not isinstance(extraction_result, FactExtractionOutput):

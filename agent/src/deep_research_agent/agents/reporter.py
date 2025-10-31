@@ -119,6 +119,27 @@ class ReporterAgent:
             self.data_matcher = None
             logger.info("Semantic extraction disabled or no LLM available")
 
+        # Initialize LLM invocation manager for smart retry and reporter-specific features
+        from ..core.advanced_utilities import ReporterLLMInvocationManager
+        self.llm_manager = ReporterLLMInvocationManager(
+            llm=llm,
+            event_emitter=event_emitter,
+            enable_entity_validation=True,
+            enable_reasoning_transform=True,
+            model_tier="complex"  # Reporter uses complex tier for high-quality reports
+        )
+        logger.info("Initialized ReporterLLMInvocationManager with smart retry and entity validation")
+
+        # Initialize table processor for markdown table fixing
+        from ..core.table_processor import TableProcessor
+        self.table_processor = TableProcessor()
+        logger.info("Initialized TableProcessor for markdown table fixing")
+
+        # Initialize observation filter for section-specific filtering
+        from ..core.observation_filter import ObservationFilter
+        self.observation_filter = ObservationFilter()
+        logger.info("Initialized ObservationFilter for section-specific observation filtering")
+
         # Initialize debug logger if REPORTER_DEBUG environment variable is set
         if os.getenv("REPORTER_DEBUG", "").lower() in ("true", "1", "yes"):
             from .reporter_debug import ReportDebugLogger
@@ -127,6 +148,60 @@ class ReporterAgent:
         else:
             self.debug_logger = None
 
+        # Initialize report generator factory for strategy selection
+        # Factory manages all three generation strategies (Hybrid, Section-by-Section, Template)
+        try:
+            from .report_generators.factory import ReportGeneratorFactory
+            from .report_generators.types import ReporterConfig, GenerationMode
+            from .report_generators.utilities import ReporterUtilities
+
+            # Build typed config from dict config
+            reporter_config_dict = self.config.get('agents', {}).get('reporter', {})
+
+            # Map generation_mode string to enum
+            generation_mode_str = reporter_config_dict.get('generation_mode', 'section_by_section')
+            try:
+                generation_mode = GenerationMode(generation_mode_str)
+            except ValueError:
+                logger.warning(f"Unknown generation_mode '{generation_mode_str}', defaulting to section_by_section")
+                generation_mode = GenerationMode.SECTION_BY_SECTION
+
+            reporter_config = ReporterConfig(
+                generation_mode=generation_mode,
+                use_structured_pipeline=reporter_config_dict.get('use_structured_pipeline', True),
+                enable_structured_generation=reporter_config_dict.get('enable_structured_generation', True),
+                hybrid_enabled=reporter_config_dict.get('hybrid_enabled', True),
+                hybrid_fallback_enabled=reporter_config_dict.get('hybrid_settings', {}).get('fallback_on_empty_observations', True),
+                calc_selector_top_k=reporter_config_dict.get('hybrid_settings', {}).get('calc_selector_top_k', 60),
+                calc_recent_tail=reporter_config_dict.get('hybrid_settings', {}).get('calc_recent_tail', 20),
+                max_calc_prompt_chars=reporter_config_dict.get('hybrid_settings', {}).get('max_calc_prompt_chars', 60000),
+                max_observations_per_section=reporter_config_dict.get('max_observations_per_section', 30),
+                entity_aware_filtering=reporter_config_dict.get('entity_aware_filtering', True),
+                two_step_process_enabled=reporter_config_dict.get('two_step_process_enabled', True),
+                default_style=report_config.get('default_style', 'default'),
+                include_citations=report_config.get('include_citations', True),
+                include_grounding_markers=report_config.get('include_grounding_markers', True),
+            )
+
+            utilities = ReporterUtilities()
+
+            self.report_factory = ReportGeneratorFactory(
+                llm=llm,
+                config=reporter_config,
+                utilities=utilities
+            )
+            self.factory_enabled = True
+            logger.info("✅ Report generator factory initialized successfully")
+
+        except ImportError as e:
+            logger.warning(f"Report generator factory not available: {e}. Using legacy generation.")
+            self.report_factory = None
+            self.factory_enabled = False
+        except Exception as e:
+            logger.error(f"Failed to initialize report generator factory: {e}. Using legacy generation.", exc_info=True)
+            self.report_factory = None
+            self.factory_enabled = False
+
         # Note: Legacy metric pipeline code removed (MetricPipeline/MetricPipelineState deleted)
         # Metric calculations now handled by CalculationAgent using UnifiedPlan architecture
 
@@ -134,273 +209,159 @@ class ReporterAgent:
     # Removed: _get_calculation_context (legacy MetricPipeline code)
     # Calculations now handled by CalculationAgent with calculation_results in state
 
-    def _classify_databricks_error(self, error: Exception) -> Tuple[bool, Optional[float]]:
-        """
-        Classify Databricks errors and extract retry guidance.
-        
-        Returns:
-            Tuple[bool, Optional[float]]: (is_transient, suggested_wait_time)
-        """
-        error_str = str(error)
-        
-        # Transient errors that should be retried
-        if 'TEMPORARILY_UNAVAILABLE' in error_str or '503' in error_str:
-            # Extract wait time if provided - look for "retry after X" or "Retry-After: X"
-            wait_time = None
-            retry_patterns = [
-                r'retry[^\d]*after[^\d]*(\d+)',  # "retry after 15"
-                r'retry[_-]after[:\s]*(\d+)',   # "Retry-After: 15"
-            ]
-            for pattern in retry_patterns:
-                match = re.search(pattern, error_str, re.I)
-                if match:
-                    wait_time = float(match.group(1))
-                    break
-            return True, wait_time
-        
-        # Rate limiting
-        if '429' in error_str or 'rate_limit' in error_str.lower():
-            return True, 30.0  # Default 30s for rate limits
-        
-        # Gateway errors
-        if any(code in error_str for code in ['502', '504', 'gateway']):
-            return True, 15.0  # Gateway issues often resolve quickly
-        
-        # Permanent errors
-        if any(err in error_str for err in ['401', '403', 'unauthorized', 'forbidden']):
-            return False, None
-        
-        # Unknown errors - don't retry
-        return False, None
-    
-    # NOTE: _extract_content_from_reasoning method has been removed as it's replaced
-    # by the universal response handler in _invoke_llm_with_smart_retry
+    # Removed: _classify_databricks_error (extracted to ReporterLLMInvocationManager)
+    # Removed: _transform_reasoning_to_report (extracted to ReporterLLMInvocationManager)
+    # Removed: _invoke_llm_with_smart_retry (extracted to ReporterLLMInvocationManager)
+    # All LLM invocation logic now handled by self.llm_manager
 
-    def _transform_reasoning_to_report(self, reasoning_text: str, section_name: str, findings: Dict[str, Any] = None) -> str:
+    async def _generate_report_with_factory(
+        self,
+        state: EnhancedResearchState
+    ) -> Command[Literal["end"]]:
         """
-        Transform reasoning text into proper report content.
-        
+        Generate report using the factory-based strategy selection system.
+
+        This is the NEW generation path that uses the refactored strategy pattern.
+        It replaces the old ad-hoc if/else selection logic with intelligent
+        capability-based selection and graceful fallback.
+
         Args:
-            reasoning_text: The reasoning text to transform
-            section_name: Name of the section being generated
-            findings: Research findings for fallback context
-            
+            state: Current research state
+
         Returns:
-            str: Transformed report content
+            Command to end workflow with final report
+
+        Raises:
+            GenerationError: If all strategies fail (should never happen - Template is final fallback)
         """
-        logger.info(f"🔄 TRANSFORMATION: Converting reasoning to report content for {section_name}")
-        
-        if not self.llm:
-            logger.warning(f"No LLM available for reasoning transformation, using fallback")
-            # Clean the reasoning text and return full content
-            clean_reasoning = reasoning_text.replace("I need to", "The analysis shows").replace("Let me", "").replace("I should", "The research indicates")
-            return f"## {section_name}\n\n{clean_reasoning}"
-        
-        # Create transformation prompt
-        transform_prompt = f"""You received reasoning about a research topic. Transform it into a professional report section.
+        from .report_generators import (
+            ReportGenerationRequest,
+            GenerationMode,
+        )
 
-Original reasoning:
-{reasoning_text}
+        logger.info("=" * 80)
+        logger.info("FACTORY-BASED REPORT GENERATION")
+        logger.info("=" * 80)
 
-Instructions:
-1. Convert the reasoning into clear, professional report content
-2. Remove any meta-commentary like "I need to", "Let me think", "I should"
-3. Focus on the facts, analysis, and conclusions from the reasoning
-4. Use proper formatting with paragraphs and structure
-5. Write in third person, professional tone
-6. Present information as facts and analysis, not thought process
-7. Keep the substantial content but make it report-appropriate
+        # Build typed request from state
+        current_plan = state.get("current_plan")
 
-Generate the report section content:"""
+        # Extract dynamic_sections (handle both Plan object and dict)
+        if current_plan:
+            if hasattr(current_plan, "dynamic_sections"):
+                dynamic_sections = current_plan.dynamic_sections
+            elif isinstance(current_plan, dict):
+                dynamic_sections = current_plan.get("dynamic_sections")
+            else:
+                dynamic_sections = None
+        else:
+            dynamic_sections = None
+
+        # Extract report_template (handle both Plan object and dict)
+        if current_plan:
+            if hasattr(current_plan, "report_template"):
+                report_template = current_plan.report_template
+            elif isinstance(current_plan, dict):
+                report_template = current_plan.get("report_template")
+            else:
+                report_template = None
+        else:
+            report_template = None
+
+        request = ReportGenerationRequest(
+            research_topic=state.get("research_topic", "Research Report"),
+            observations=state.get("observations", []),
+            citations=state.get("citations", []),
+            dynamic_sections=dynamic_sections,
+            calculation_context=state.get("calculation_results"),
+            unified_plan=state.get("unified_plan"),
+            query_constraints=state.get("query_constraints"),
+            report_template=report_template,
+            report_style=str(state.get("report_style", "default")),
+            factuality_score=state.get("factuality_score"),
+            confidence_scores=state.get("confidence_scores", {}),
+        )
+
+        # DIAGNOSTIC: Log what data is available for strategy selection
+        logger.info(
+            f"📊 Reporter state check: "
+            f"observations={len(state.get('observations', []))}, "
+            f"dynamic_sections={len(dynamic_sections) if dynamic_sections else 0}, "
+            f"has_unified_plan={state.get('unified_plan') is not None}, "
+            f"has_calc_results={state.get('calculation_results') is not None}, "
+            f"has_query_constraints={state.get('query_constraints') is not None}"
+        )
+
+        # Select optimal strategy
+        selection = self.report_factory.select_strategy(request)
+
+        logger.info(
+            f"✅ Strategy selected: {selection.strategy_name} "
+            f"(confidence={selection.confidence:.1%})"
+        )
+        logger.info(f"Selection reason: {selection.reason}")
+
+        if selection.fallback_available:
+            logger.info(f"Fallback chain: {' → '.join(selection.fallback_chain)}")
+
+        # Create generator and generate report
+        generator = self.report_factory.create_generator(selection.strategy_name)
+
+        logger.info(f"Generating report with {selection.strategy_name} strategy...")
 
         try:
-            messages = [
-                SystemMessage(content="You are a professional report writer. Transform reasoning into clear, structured report content. Remove thinking process and present facts directly."),
-                HumanMessage(content=transform_prompt)
-            ]
-            
-            response = self.llm.invoke(messages)
-            
-            # Parse the transformation response
-            from ..core.response_handlers import parse_structured_response
-            parsed = parse_structured_response(response)
-            
-            if parsed.content and len(parsed.content.strip()) > 50:
-                logger.info(f"✅ TRANSFORMATION_SUCCESS: {section_name} ({len(parsed.content)} chars)")
-                return parsed.content.strip()
-            else:
-                logger.warning(f"⚠️ TRANSFORMATION_FAILED: {section_name} - insufficient content generated")
-                # Return clean version of original reasoning without truncation
-                clean_reasoning = reasoning_text.replace("I need to", "The analysis shows").replace("Let me", "").replace("I should", "The research indicates")
-                return f"## {section_name}\n\n{clean_reasoning}"
-                
-        except Exception as e:
-            logger.error(f"❌ TRANSFORMATION_ERROR: {section_name} - {e}")
-            # Return cleaned version of reasoning as fallback without truncation
-            clean_reasoning = reasoning_text.replace("I need to", "The analysis shows").replace("Let me", "").replace("I should", "The research indicates")
-            return f"## {section_name}\n\n{clean_reasoning}"
+            result = await generator.generate(request, self.report_factory.config)
 
-    def _invoke_llm_with_smart_retry(self, messages: List, section_name: str, state: EnhancedResearchState = None) -> str:
-        """
-        Invoke LLM with intelligent retry for transient errors only.
-        
-        Args:
-            messages: LLM messages to send
-            section_name: Name of the section being generated (for logging)
-            
-        Returns:
-            str: Generated content from LLM
-            
-        Raises:
-            Exception: If all retries are exhausted or permanent error encountered
-        """
-        max_attempts = 5
-        attempt = 0
-        
-        while attempt < max_attempts:
+            logger.info(
+                f"✅ Report generated: {len(result.final_report)} chars, "
+                f"{result.total_sections} sections, {result.total_tables} tables, "
+                f"quality={result.quality.value}"
+            )
+
+            # Build metadata for state update
+            report_metadata = {
+                'generation_mode': result.generation_mode.value,
+                'table_mode': result.table_mode.value,
+                'quality': result.quality.value,
+                'total_sections': result.total_sections,
+                'total_tables': result.total_tables,
+                'total_citations': result.total_citations,
+                'observations_used': result.observations_used,
+                'calculations_used': result.calculations_used,
+                'generation_time_ms': result.generation_time_ms,
+                'llm_calls': result.llm_calls,
+                'fallback_used': result.fallback_used,
+                'fallback_reason': result.fallback_reason,
+                'warnings': result.warnings,
+            }
+
+            # Log factory stats
+            stats = self.report_factory.get_selection_stats()
+            logger.info(
+                f"Factory stats: {stats['total_selections']} selections, "
+                f"fallback rate={stats['fallback_rate']:.1%}"
+            )
+
+            # Finalize state (if possible - may fail with mock states in tests)
             try:
-                # Log the prompt being sent to LLM (messages may contain system + human messages)
-                if messages and len(messages) > 0:
-                    prompt_content = ""
-                    for msg in messages:
-                        if hasattr(msg, 'content'):
-                            prompt_content += f"{msg.content}... "
-                    logger.info(f"🔍 LLM_PROMPT [reporter_{section_name}]: {prompt_content}...")
-                
-                response = self.llm.invoke(messages)
-                
-                # Log the response received from LLM
-                logger.info(f"🔍 LLM_RESPONSE [reporter_{section_name}]: {response.content}...")
-                
-                # ENTITY VALIDATION: Check for hallucinated entities in LLM response
-                if state:
-                    # Get entities from query_constraints (single source of truth)
-                    constraints = state.get("query_constraints")
-                    requested_entities = constraints.entities if constraints else []
-                    if requested_entities:
-                        from ..core.entity_validation import EntityExtractor
-                        extractor = EntityExtractor()
-                        response_entities = extractor.extract_entities(response.content)
-                        hallucinated = response_entities - set(requested_entities)
-                        if hallucinated:
-                            logger.warning(f"🚨 ENTITY_HALLUCINATION [reporter_{section_name}]: LLM mentioned entities not in original query: {hallucinated}")
-                        else:
-                            logger.info(f"✅ ENTITY_VALIDATION [reporter_{section_name}]: Response only mentions requested entities: {response_entities & set(requested_entities)}")
-                
-                # Success - log if we had retries
-                if attempt > 0:
-                    logger.info(f"LLM call succeeded for {section_name} after {attempt} retries")
-                
-                # Parse response using the universal response handler
-                parsed = parse_structured_response(response)
-                
-                # Extract content and reasoning
-                content = parsed.content
-                reasoning_text = parsed.reasoning
-                
-                # Log response analysis
-                logger.info(f"Section {section_name}: Using {parsed.response_type.value} content ({len(content)} chars)")
-                if reasoning_text:
-                    logger.debug(f"Section {section_name}: Reasoning available ({len(reasoning_text)} chars)")
-                if parsed.metadata:
-                    logger.debug(f"Section {section_name}: Metadata: {parsed.metadata}")
-                
-                # Emit reasoning event if available
-                if reasoning_text and self.event_emitter:
-                    try:
-                        # Truncate reasoning for events to avoid sending full reports as reasoning
-                        reasoning_for_event = reasoning_text[:500] if len(reasoning_text) > 500 else reasoning_text
-                        self.event_emitter.emit_reasoning_reflection(
-                            reasoning=reasoning_for_event,
-                            options=["content_generation"],
-                            confidence=0.8,
-                            stage_id="reporter"
-                        )
-                        logger.info(f"Emitted reasoning event for {section_name} ({len(reasoning_for_event)} chars)")
-                    except Exception as e:
-                        logger.warning(f"Failed to emit reasoning event for {section_name}: {e}")
-                
-                # FIXED: Only transform reasoning to report if we have NO proper content
-                if reasoning_text and len(reasoning_text.strip()) > 100 and (not content or len(content.strip()) < 50):
-                    logger.warning(f"🔄 REASONING_TO_REPORT: No proper content found for {section_name}, transforming reasoning to report...")
-                    
-                    # Avoid infinite recursion by checking if this is already a transformation
-                    if not section_name.endswith("_transformed"):
-                        transformed_content = self._transform_reasoning_to_report(reasoning_text, section_name)
-                        logger.info(f"🔄 REASONING_TO_REPORT: Transformation completed for {section_name} ({len(transformed_content)} chars)")
-                        content = transformed_content
-                    else:
-                        logger.warning(f"🔄 REASONING_TO_REPORT: Avoiding recursive transformation for {section_name}")
-                        # Keep existing content if we have it, otherwise use cleaned reasoning
-                elif content and reasoning_text:
-                    logger.info(f"✅ PROPER_CONTENT: Using actual report content for {section_name} ({len(content)} chars), ignoring reasoning ({len(reasoning_text)} chars)")
-                
-                # Apply content sanitization as final cleanup before returning
-                from ..core.content_sanitizer import sanitize_agent_content
-                
-                if content:
-                    sanitization_result = sanitize_agent_content(content)
-                    if sanitization_result.sanitization_applied:
-                        logger.info(f"Applied content sanitization to {section_name}: {len(content)} -> {len(sanitization_result.clean_content)} chars")
-                        for warning in sanitization_result.warnings:
-                            logger.warning(f"Content sanitization warning for {section_name}: {warning}")
-                    content = sanitization_result.clean_content
-                
-                # Ensure we never return None or empty content
-                if not content:
-                    logger.warning(f"No content extracted for {section_name}, using empty string")
-                    content = ""
-                
-                return content
-                
+                state = StateManager.finalize_state(state)
             except Exception as e:
-                attempt += 1
-                error_str = str(e)
-                
-                # Classify the error
-                is_transient, suggested_wait = self._classify_databricks_error(e)
-                
-                if not is_transient:
-                    # Permanent error - fail immediately
-                    logger.error(f"Permanent error in {section_name}: {e}")
-                    raise
-                
-                if attempt >= max_attempts:
-                    # Max retries exceeded
-                    logger.error(f"Max retries ({max_attempts}) exceeded for {section_name}")
-                    raise
-                
-                # Check if this is a 429 error - if so, ModelSelector already tried all endpoints
-                if "429" in error_str:
-                    logger.error(
-                        f"All endpoints exhausted for {section_name} (429 errors). "
-                        "Not retrying - ModelSelector already tried all available endpoints."
-                    )
-                    raise  # Fail fast - no point retrying
+                logger.warning(f"Could not finalize state: {e}")
 
-                # Calculate wait time for non-429 transient errors
-                if suggested_wait:
-                    # Use suggested wait time from error (e.g., 503 with Retry-After)
-                    wait_time = min(suggested_wait, 30)  # Cap at 30s
-                else:
-                    # Exponential backoff: 5, 10, 20, 30 seconds (changed from 10, 15, 22.5...)
-                    wait_time = min(5 * (2 ** (attempt - 1)), 30)
+            return Command(
+                goto="end",
+                update={
+                    "final_report": result.final_report,
+                    "report_metadata": report_metadata,
+                    "citations": state.get("citations", []),
+                }
+            )
 
-                # Add jitter to prevent thundering herd (up to 10% of wait time)
-                jitter = random.uniform(0, wait_time * 0.1)
-                wait_time += jitter
+        except Exception as e:
+            logger.error(f"Factory-based generation failed: {e}", exc_info=True)
+            raise
 
-                logger.warning(
-                    f"Transient error in {section_name} generation "
-                    f"(attempt {attempt}/{max_attempts}), "
-                    f"retrying in {wait_time:.1f}s: {error_str[:100]}"
-                )
 
-                time.sleep(wait_time)
-        
-        # Should never reach here
-        raise Exception(f"Retry logic error for {section_name}")
-    
     async def __call__(
         self,
         state: EnhancedResearchState,
@@ -440,6 +401,15 @@ Generate the report section content:"""
         logger.info(f"Observations: {len(state.get('observations', []))}")
         logger.info(f"Search results: {len(state.get('search_results', []))}")
         logger.info(f"Section research: {list(state.get('section_research_results', {}).keys())}")
+
+        # === FACTORY-BASED GENERATION (NEW) ===
+        # Route to factory-based generation if enabled
+        if self.factory_enabled and self.report_factory is not None:
+            logger.info("🏭 Using factory-based report generation (refactored strategy pattern)")
+            return await self._generate_report_with_factory(state)
+
+        # === LEGACY GENERATION (FALLBACK) ===
+        logger.info("⚠️ Using legacy report generation (factory not available)")
 
         # === PERIMETER DESERIALIZATION ===
         # Convert dict state to proper objects at entry point (not scattered throughout)
@@ -660,7 +630,7 @@ Generate the report section content:"""
                 self._emit_hybrid_metrics(metrics=metadata)
 
                 # CRITICAL FIX: Ensure all markdown tables have proper separator rows
-                final_report = self._fix_markdown_tables(final_report)
+                final_report = self.table_processor.fix_markdown_tables(final_report)
 
                 logger.info(f"[HYBRID MODE] Report generation complete: {len(final_report)} characters")
 
@@ -973,7 +943,7 @@ Generate the report section content:"""
 
         # CRITICAL FIX: Ensure all markdown tables have proper separator rows
         # This must run as the FINAL step before marker removal to guarantee all tables are fixed
-        report_with_metadata = self._fix_markdown_tables(report_with_metadata)
+        report_with_metadata = self.table_processor.fix_markdown_tables(report_with_metadata)
 
         # Remove TABLE_START/TABLE_END markers from final output (AFTER fixing tables)
         # These are added by table_preprocessor but should not appear in the final report
@@ -1099,8 +1069,8 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
             HumanMessage(content=template_prompt),
         ]
 
-        # First, get reasoning and analysis 
-        analysis_content = self._invoke_llm_with_smart_retry(messages, "template_analysis")
+        # First, get reasoning and analysis
+        analysis_content = self.llm_manager.invoke_with_smart_retry(messages, "template_analysis", state)
         
         # Second, format the analysis into the template structure
         formatting_prompt = f"""You have completed detailed analysis for a research report. Now format this analysis into the provided template structure.
@@ -1127,7 +1097,7 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
             HumanMessage(content=formatting_prompt)
         ]
         
-        report_content = self._invoke_llm_with_smart_retry(formatting_messages, "template_report")
+        report_content = self.llm_manager.invoke_with_smart_retry(formatting_messages, "template_report", state)
         metadata = {
             "observation_count": len(findings.get("observations", [])),
             "observations_truncated": truncated,
@@ -1532,115 +1502,6 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
         
         return compiled
 
-    def _filter_observations_for_section(
-        self,
-        section_name: str,
-        all_observations: List[Dict[str, Any]],
-        state: EnhancedResearchState
-    ) -> List[Dict[str, Any]]:
-        """
-        Filter observations by step_id using direct references from DynamicSection.
-
-        NO MORE STRING MATCHING! Uses section.step_ids for direct lookup.
-
-        Args:
-            section_name: The section we're generating
-            all_observations: All observations from research
-            state: Current research state with plan
-
-        Returns:
-            Filtered list of observations relevant to this section
-        """
-        plan = state.get("current_plan")
-
-        if not plan:
-            logger.warning(f"No plan found in state, returning subset of observations")
-            return all_observations[:30]
-
-        # Find the section by name using direct reference (no string matching with template_section_title)
-        matching_section = None
-        if hasattr(plan, 'dynamic_sections') and plan.dynamic_sections:
-            for section in plan.dynamic_sections:
-                if section.title == section_name:
-                    matching_section = section
-                    break
-
-        if not matching_section:
-            logger.error(f"❌ Section '{section_name}' not found in plan.dynamic_sections!")
-            return all_observations[:30]
-
-        # Use direct step_ids from section (NO STRING MATCHING!)
-        if not matching_section.step_ids:
-            logger.warning(f"⚠️ Section '{section_name}' has no step_ids assigned")
-            return all_observations[:30]
-
-        logger.info(f"🎯 Section '{section_name}' filtering by step_ids: {matching_section.step_ids}")
-
-        # Filter observations by step_id - direct membership check
-        filtered_observations = []
-        observations_without_step_id = 0
-
-        for obs in all_observations:
-            # Get step_id from observation
-            if isinstance(obs, dict):
-                obs_step_id = obs.get("step_id")
-            else:
-                obs_step_id = getattr(obs, "step_id", None)
-
-            # Direct membership check - no string matching!
-            if obs_step_id:
-                if obs_step_id in matching_section.step_ids:
-                    filtered_observations.append(obs)
-            else:
-                observations_without_step_id += 1
-
-        if observations_without_step_id > 0:
-            logger.warning(f"  ⚠️ {observations_without_step_id} observations missing step_id")
-
-        logger.info(f"✅ Filtered {len(filtered_observations)}/{len(all_observations)} observations by step_id for section '{section_name}'")
-
-        # STRICT FILTER: Only keep observations with full_content (real fetched content)
-        with_content = []
-        snippet_only = 0
-
-        for obs in filtered_observations:
-            has_full = False
-            if isinstance(obs, dict):
-                has_full = bool(obs.get("full_content"))
-            else:
-                has_full = bool(getattr(obs, "full_content", None))
-
-            if has_full:
-                with_content.append(obs)
-            else:
-                snippet_only += 1
-
-        if snippet_only > 0:
-            logger.info(f"⏭️  Filtered out {snippet_only} snippet-only observations for '{section_name}'")
-
-        logger.info(f"✅ Section '{section_name}': {len(with_content)} observations with full_content")
-
-        # If no observations with content, return None to signal skip
-        if not with_content:
-            logger.warning(
-                f"❌ Section '{section_name}' has NO observations with fetched content. "
-                f"This means web fetching failed for all sources. Section will be skipped."
-            )
-            return None
-
-        # Debug: Log first observation
-        if with_content:
-            first_obs = with_content[0]
-            if isinstance(first_obs, dict):
-                content_preview = str(first_obs.get("content", ""))[:100]
-                step_id = first_obs.get("step_id", "NONE")
-            else:
-                content_preview = str(getattr(first_obs, "content", ""))[:100]
-                step_id = getattr(first_obs, "step_id", "NONE")
-            logger.info(f"  📝 First obs (step_id={step_id}): {content_preview}...")
-
-        return with_content
-
     def _generate_report_sections(
         self,
         findings: Dict[str, Any],
@@ -1891,7 +1752,7 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
 
         # FILTER OBSERVATIONS BY SECTION MAPPING
         # This is the key fix: only use observations from steps mapped to this section
-        filtered_observations = self._filter_observations_for_section(
+        filtered_observations = self.observation_filter.filter_for_section(
             section_name,
             observations,
             state
@@ -2006,7 +1867,7 @@ Perform detailed analysis and calculations for this research topic. Focus on gen
             ]
 
             # Use smart retry for transient error handling
-            content = self._invoke_llm_with_smart_retry(messages, section_name)
+            content = self.llm_manager.invoke_with_smart_retry(messages, section_name, state)
         else:
             # Fallback content generation
             content = self._generate_fallback_section(
@@ -2759,7 +2620,7 @@ Write a paragraph that provides context for the data table that follows:"""
             HumanMessage(content=prompt)
         ]
 
-        response = self._invoke_llm_with_smart_retry(messages, f"paragraph_{section_name}")
+        response = self.llm_manager.invoke_with_smart_retry(messages, f"paragraph_{section_name}", state)
 
         # SAFETY: Strip any markdown tables that LLM generated despite explicit instructions
         # This is a defense-in-depth measure that shouldn't be necessary if prompts work correctly
@@ -3676,10 +3537,11 @@ Return your analysis as valid JSON in this exact format:
 Focus on factual content rather than stylistic repetition."""
 
         try:
-            response = self._invoke_llm_with_smart_retry(
+            response = self.llm_manager.invoke_with_smart_retry(
                 [SystemMessage("You are a report quality analyzer. Return only valid JSON."),
                  HumanMessage(prompt)],
-                "redundancy_detection"
+                "redundancy_detection",
+                state
             )
             
             # Try to parse JSON response
@@ -3738,10 +3600,11 @@ Return the enhanced sections as valid JSON with the same keys as input.
 Focus on eliminating factual redundancy while preserving readability."""
 
         try:
-            response = self._invoke_llm_with_smart_retry(
+            response = self.llm_manager.invoke_with_smart_retry(
                 [SystemMessage("You are a report editor specializing in clarity and conciseness. Return only valid JSON."),
                  HumanMessage(prompt)],
-                "redundancy_elimination"
+                "redundancy_elimination",
+                state
             )
             
             # Try to parse JSON response
@@ -3805,10 +3668,11 @@ Rules:
 Return reorganized sections as valid JSON using the target structure section names."""
 
         try:
-            response = self._invoke_llm_with_smart_retry(
+            response = self.llm_manager.invoke_with_smart_retry(
                 [SystemMessage(f"You are an expert {style.value} style writer. Return only valid JSON."),
                  HumanMessage(prompt)],
-                "structure_optimization"
+                "structure_optimization",
+                state
             )
             
             # Try to parse JSON response
@@ -5381,72 +5245,8 @@ Based on the available research findings, I can provide the following summary:
 
         return table_specs
 
-    def _fix_markdown_tables(self, markdown_text: str) -> str:
-        """
-        Ensure ALL markdown tables have proper separator rows.
-        This is the final safety net before output.
-        
-        Tables must have format:
-        | Header 1 | Header 2 |
-        |----------|----------|
-        | Data 1   | Data 2   |
-
-        This method aggressively detects tables and inserts missing separator rows.
-        """
-        if not markdown_text or '|' not in markdown_text:
-            return markdown_text
-
-        lines = markdown_text.split('\n')
-        result = []
-        i = 0
-        tables_fixed = 0
-
-        while i < len(lines):
-            line = lines[i]
-            stripped = line.strip()
-
-            # Detect table start (has pipes and enough content)
-            if stripped.startswith('|') and stripped.count('|') >= 3:
-                # Collect all consecutive table lines
-                table_lines = [line]
-                j = i + 1
-                while j < len(lines):
-                    next_stripped = lines[j].strip()
-                    if next_stripped.startswith('|') and next_stripped.count('|') >= 2:
-                        table_lines.append(lines[j])
-                        j += 1
-                    else:
-                        break
-
-                # Check if second line is separator
-                if len(table_lines) >= 2:
-                    second_line = table_lines[1].strip()
-                    # Proper separator: pipes with dashes and optional colons
-                    has_separator = bool(re.match(r'^\|[\s\-:|]+\|$', second_line))
-                    
-                    if not has_separator:
-                        # INSERT separator after header
-                        header = table_lines[0]
-                        col_count = header.count('|') - 1
-                        # Generate proper separator with spacing
-                        separator = '| ' + ' | '.join(['---'] * col_count) + ' |'
-                        table_lines.insert(1, separator)
-                        tables_fixed += 1
-                        logger.info(f"[TABLE FIX] Added missing separator to table at line {i+1}")
-
-                result.extend(table_lines)
-                i = j
-            else:
-                result.append(line)
-                i += 1
-
-        fixed_text = '\n'.join(result)
-
-        # Log summary
-        if tables_fixed > 0:
-            logger.info(f"[TABLE FIX] Fixed {tables_fixed} tables with missing separators")
-
-        return fixed_text
+    # Removed: _fix_markdown_tables (extracted to TableProcessor)
+    # All table fixing logic now handled by self.table_processor
 
     async def _generate_report_with_structured_pipeline(
         self,

@@ -181,6 +181,8 @@ class SearchResult:
     result_type: SearchResultType = SearchResultType.WEB
     source_type: SearchResultType = SearchResultType.WEB  # Alias for tests
     has_full_content: bool = False  # Track if full content was fetched (vs snippet only)
+    full_content: Optional[str] = None  # Full article content (enriched during web fetching)
+    score: float = 0.0  # Relevance/quality score from search provider (0.0-1.0)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -192,6 +194,10 @@ class SearchResult:
         # Mirror result_type and source_type
         if not self.result_type and self.source_type:
             self.result_type = self.source_type
+
+        # Normalize score to 0-1 range for consistency with search_provider.py
+        if self.score is not None:
+            self.score = max(0.0, min(1.0, float(self.score)))
 
 
 @dataclass

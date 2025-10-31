@@ -14,7 +14,7 @@ import time
 import json
 from copy import deepcopy
 
-from .search_provider import SearchResult
+from .types import SearchResult  # Using unified SearchResult (single source of truth)
 from .error_handler import safe_call
 
 T = TypeVar('T', bound='ImmutableState')
@@ -524,7 +524,8 @@ class ResearchState(ImmutableState):
             search_results = []
             for result_data in data.get("search_results", []):
                 if isinstance(result_data, dict):
-                    search_results.append(SearchResult.from_dict(result_data))
+                    # Direct dataclass instantiation (unified SearchResult from types.py)
+                    search_results.append(SearchResult(**result_data))
             
             # Parse citations
             citations = []

@@ -31,53 +31,9 @@ class SearchProviderType(Enum):
     HYBRID = "hybrid"
 
 
-@dataclass
-class SearchResult:
-    """Standardized search result format across all providers."""
-    
-    title: str
-    url: str
-    content: str
-    score: float = 0.0
-    published_date: Optional[str] = None
-    source: str = ""
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    
-    def __post_init__(self):
-        """Validate and clean search result data."""
-        self.title = str(self.title).strip()
-        self.url = str(self.url).strip()
-        self.content = str(self.content).strip()
-        self.score = max(0.0, min(1.0, float(self.score)))  # Normalize to 0-1
-        
-        # Ensure metadata is not None
-        if self.metadata is None:
-            self.metadata = {}
-    
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary format for serialization."""
-        return {
-            "title": self.title,
-            "url": self.url,
-            "content": self.content,
-            "score": self.score,
-            "published_date": self.published_date,
-            "source": self.source,
-            "metadata": self.metadata
-        }
-    
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'SearchResult':
-        """Create SearchResult from dictionary."""
-        return cls(
-            title=data.get("title", ""),
-            url=data.get("url", ""),
-            content=data.get("content", ""),
-            score=data.get("score", 0.0),
-            published_date=data.get("published_date"),
-            source=data.get("source", ""),
-            metadata=data.get("metadata", {})
-        )
+# Import unified SearchResult from types.py (single source of truth)
+# This eliminates duplicate class definitions that caused schema drift bugs
+from .types import SearchResult
 
 
 @dataclass

@@ -115,12 +115,36 @@ class StructuredOutputParser:
                 f"Parsed data (first 500 chars): {str(parsed)[:500]}"
             )
 
+        # ✅ NEW: Log parsed data structure before validation (DEBUG level for diagnostic)
+        logger.debug(
+            f"🔍 STRUCTURED VALIDATION | Schema: {schema.__name__}\n"
+            f"   - Parsed type: {type(parsed).__name__}\n"
+            f"   - Parsed keys: {list(parsed.keys()) if isinstance(parsed, dict) else 'N/A'}\n"
+            f"   - Parsed preview: {str(parsed)[:300]}..."
+        )
+
         # Step 5: Validate against schema (strict validation, no normalization)
         try:
             validated = schema(**parsed)
-            logger.debug(f"✅ Validated against schema: {schema.__name__}")
+            logger.info(f"✅ VALIDATION SUCCESS | Schema: {schema.__name__}")
+
+            # ✅ NEW: Log EntityMetricsOutput specifics
+            if hasattr(validated, 'extracted_values'):
+                extracted = getattr(validated, 'extracted_values', {})
+                entity = getattr(validated, 'entity', 'unknown')
+                logger.info(
+                    f"   -> EntityMetricsOutput validated: entity={entity}, "
+                    f"metrics={len(extracted)}, keys={list(extracted.keys())[:10]}"
+                )
+
             return validated
         except Exception as e:
+            logger.error(
+                f"❌ VALIDATION FAILED | Schema: {schema.__name__}\n"
+                f"   - Error: {type(e).__name__}: {str(e)[:200]}\n"
+                f"   - Parsed data type: {type(parsed).__name__}\n"
+                f"   - Parsed keys: {list(parsed.keys()) if isinstance(parsed, dict) else 'N/A'}"
+            )
             raise ValueError(
                 f"Schema validation failed for {schema.__name__}: {e}\n"
                 f"Parsed data type: {type(parsed)}\n"

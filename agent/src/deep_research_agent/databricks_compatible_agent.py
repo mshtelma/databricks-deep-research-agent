@@ -260,9 +260,23 @@ class DatabricksCompatibleAgent(ResponsesAgent):
                 message_dict = message.model_dump()
             else:
                 # Fallback for messages without model_dump
+                # Handle reasoning model responses (list format) vs regular responses (string)
+                if hasattr(message, 'content'):
+                    content = message.content
+                    if isinstance(content, list):
+                        # Reasoning model response: [{'type': 'reasoning'...}, {'type': 'text'...}]
+                        # Use DatabricksResponseParser to extract actual text
+                        from .core.response_handlers import DatabricksResponseParser
+                        parsed = DatabricksResponseParser().parse(message)
+                        content = parsed.content
+                    else:
+                        content = str(content)
+                else:
+                    content = str(message)
+
                 message_dict = {
                     "type": message.__class__.__name__.lower().replace("message", ""),
-                    "content": str(message.content) if hasattr(message, 'content') else str(message)
+                    "content": content
                 }
             
             role = message_dict.get("type", "")

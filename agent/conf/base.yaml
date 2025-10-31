@@ -68,15 +68,23 @@ models:
 
   # TIER 5: STRUCTURED - Specialized for complex structured output (JSON schema compliance)
   # Use for: Pydantic model generation, complex nested schemas, strict field name compliance
+  # SUPPORTS: Both Claude and GPT-OSS with reasoning! Our custom RateLimitedChatModel handles it.
+  # NOTE: reasoning_effort improves extraction quality for complex/ambiguous metrics
   structured:
     endpoints:
-      - databricks-claude-sonnet-4      # Best at following complex schemas
+      - databricks-claude-sonnet-4      # PRIMARY: Claude Sonnet 4.5 - better at extraction
       - databricks-claude-3-7-sonnet    # Fallback Claude
-      - databricks-gpt-oss-120b         # Final fallback to GPT
+      - databricks-gpt-oss-120b         # GPT-OSS fallback
+      - databricks-gpt-oss-20b          # Additional fallback
     temperature: 0.3  # Lower temperature for deterministic schema following
     max_tokens: 25000
-    reasoning_effort: high  # Enable reasoning for schema understanding
-    reasoning_budget: 12000  # Increased budget (vs 8000) for complex schema planning
+    reasoning_effort: high              # ✅ CRITICAL! Deep reasoning needed for metric extraction
+    reasoning_budget: 12000             # ✅ Increased budget (vs 8000) for complex schema planning
+    # Our custom with_structured_output() in rate_limited_chat_model.py:
+    # 1. Adds missing "name" field (fixes databricks_langchain bug)
+    # 2. parse_llm_response() handles two-element [reasoning, text] format
+    # 3. Returns validated Pydantic object with reasoning filtered out
+    # Using reasoning_effort improves extraction quality for complex metrics!
     tokens_per_minute: 50000
     rotation_strategy: priority
     fallback_on_429: true

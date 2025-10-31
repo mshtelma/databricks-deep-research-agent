@@ -172,6 +172,17 @@ class StateCapture:
                 "messages": self._extract_recent_messages(state.get("messages", [])),
             })
 
+        elif agent_name == "calculation_agent":
+            # Calculation agent needs query constraints (input) and unified plan (output)
+            # CRITICAL: These fields are required for reporter testing with Tier 1 Hybrid mode
+            essential.update({
+                "query_constraints": self._simplify_query_constraints(state.get("query_constraints")),  # INPUT from planner
+                "unified_plan": self._simplify_unified_plan(state.get("unified_plan")),  # OUTPUT from calculation
+                "calculation_results": state.get("calculation_results"),  # Execution results
+                "observations": self._extract_observations(state.get("observations", [])),  # Context for calculations
+                "current_plan": self._simplify_plan(state.get("current_plan")),  # Reference plan
+            })
+
         return essential
 
     def _extract_observations(self, observations: List) -> List[Dict]:

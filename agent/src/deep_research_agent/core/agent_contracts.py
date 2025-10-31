@@ -94,18 +94,20 @@ class PlannerOutput:
     suggested_report_structure: Optional[List[str]] = None
     section_specifications: Optional[List[Any]] = None
     observations: List[Any] = field(default_factory=list)  # Preserve
-    
+    query_constraints: Optional[Any] = None  # CRITICAL: QueryConstraints for calculation agent
+
     def validate(self) -> bool:
         if not self.current_plan:
             raise ValueError("Planner must output current_plan")
         return True
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "current_plan": self.current_plan,
             "suggested_report_structure": self.suggested_report_structure,
             "section_specifications": self.section_specifications,
-            "observations": self.observations
+            "observations": self.observations,
+            "query_constraints": self.query_constraints  # CRITICAL: Must propagate to researcher
         }
 
 

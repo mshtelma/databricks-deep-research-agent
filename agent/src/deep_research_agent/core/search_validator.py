@@ -51,8 +51,8 @@ class SearchValidator:
         # Check if any search tool is available
         any_available = any(results.values())
         if not any_available:
-            logger.critical("NO SEARCH TOOLS AVAILABLE - This will cause research failures!")
-            logger.critical("Please set BRAVE_API_KEY or TAVILY_API_KEY environment variable")
+            logger.error("NO SEARCH TOOLS AVAILABLE - This will cause research failures!")
+            logger.error("Please set BRAVE_API_KEY or TAVILY_API_KEY environment variable")
         
         self.validation_results = results
         return results
