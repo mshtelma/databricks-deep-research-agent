@@ -693,65 +693,38 @@ class StateManager:
                 state["unified_plan"], UnifiedPlan, "unified_plan"
             )
 
-        # Single CalculationContext object (NEW: for hybrid report generation)
-        if "calculation_results" in state and isinstance(state["calculation_results"], dict):
+        # Single CalculationContext object
+        # CRITICAL FIX (Bug #4): Now that calculation agent returns correct schema,
+        # we can hydrate calculation_results like other Pydantic objects.
+        # Previous issue was schema mismatch (data_points vs extracted_data), now resolved.
+        # See: agents/calculation_agent.py:404-419 for updated return structure
+        if "calculation_results" in state and state["calculation_results"] is not None:
             try:
-                from ..core.report_generation.models import CalculationContext, DataPoint, Calculation
+                # Import CalculationContext
+                from ..core.report_generation.models import CalculationContext
 
-                calc_dict = state["calculation_results"]
-                logger.debug(f"Hydrating calculation_results with keys: {list(calc_dict.keys())}")
-
-                # Convert data_points dict/list → List[DataPoint]
-                data_points_raw = calc_dict.get("data_points", {})
-                extracted_data = []
-
-                if isinstance(data_points_raw, dict):
-                    # Legacy fixture format: dict of data_point objects/strings
-                    for dp_id, dp_data in data_points_raw.items():
-                        if isinstance(dp_data, str):
-                            # Skip DataPoint repr strings from test fixtures
-                            logger.debug(f"Skipping string repr for data_point: {dp_id}")
-                            continue
-                        elif isinstance(dp_data, dict):
-                            try:
-                                extracted_data.append(DataPoint(**dp_data))
-                            except Exception as e:
-                                logger.warning(f"Could not hydrate data_point {dp_id}: {e}")
-                        elif hasattr(dp_data, 'model_dump'):
-                            # Already a DataPoint object
-                            extracted_data.append(dp_data)
-                elif isinstance(data_points_raw, list):
-                    # New format: already a list
-                    extracted_data = hydrate_pydantic_list(data_points_raw, DataPoint, "calculation_results.data_points")
-
-                # Convert calculations list (if present)
-                calculations = hydrate_pydantic_list(
-                    calc_dict.get("calculations", []),
-                    Calculation,
-                    "calculation_results.calculations"
-                )
-
-                # Create CalculationContext object
-                state["calculation_results"] = CalculationContext(
-                    extracted_data=extracted_data,
-                    calculations=calculations,
-                    key_comparisons=calc_dict.get("key_comparisons", []),
-                    metadata={
-                        "extracted_count": calc_dict.get("extracted_count", len(extracted_data)),
-                        "calculated_count": calc_dict.get("calculated_count", len(calculations)),
-                        "plan_id": calc_dict.get("plan_id")
-                    }
-                )
-
-                logger.info(
-                    f"✅ Hydrated calculation_results: "
-                    f"{len(extracted_data)} data points, {len(calculations)} calculations"
-                )
-
+                # Hydrate using standard pattern
+                if isinstance(state["calculation_results"], dict):
+                    state["calculation_results"] = CalculationContext.model_validate(
+                        state["calculation_results"]
+                    )
+                    logger.info(
+                        f"✅ Hydrated calculation_results: "
+                        f"{len(state['calculation_results'].extracted_data)} data points, "
+                        f"{len(state['calculation_results'].calculations)} calculations"
+                    )
+                elif not isinstance(state["calculation_results"], CalculationContext):
+                    logger.warning(
+                        f"⚠️ calculation_results has unexpected type: "
+                        f"{type(state['calculation_results'])}"
+                    )
             except Exception as e:
-                logger.error(f"❌ Could not hydrate calculation_results: {e}")
-                # Don't fail the entire hydration, just skip this field
-                logger.warning("Leaving calculation_results as dict (will cause TypeError if used)")
+                logger.error(
+                    f"❌ Failed to hydrate calculation_results: {e}\n"
+                    f"  Dict keys: {list(state['calculation_results'].keys()) if isinstance(state['calculation_results'], dict) else 'N/A'}",
+                    exc_info=True
+                )
+                # Don't fail hard, leave as dict for reporter to handle gracefully
 
         # Single FactualityReport object
         if "factuality_report" in state:

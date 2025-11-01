@@ -401,12 +401,21 @@ class CalculationAgent:
         )
         failed_count = len(all_data) - extracted_count - calculated_count
 
+        # CRITICAL FIX (Bug #4): Return structure matching CalculationContext schema
+        # This enables StateManager.hydrate_state() to convert dict → CalculationContext object
+        # See: core/report_generation/models.py:CalculationContext for schema definition
         return {
-            "data_points": all_data,
-            "extracted_count": extracted_count,
-            "calculated_count": calculated_count,
-            "failed_count": failed_count,
-            "plan_id": getattr(plan, 'plan_id', 'unknown'),
+            "extracted_data": all_data,      # Changed from "data_points" to match CalculationContext
+            "calculations": [],              # Required field (formulas/derived calculations)
+            "key_comparisons": [],           # Required field (comparison entries for tables)
+            "summary_insights": [],          # Required field (high-level insights)
+            "data_quality_notes": [],        # Required field (data quality warnings)
+            "metadata": {                    # Move stats to metadata dict
+                "extracted_count": extracted_count,
+                "calculated_count": calculated_count,
+                "failed_count": failed_count,
+                "plan_id": getattr(plan, 'plan_id', 'unknown'),
+            }
         }
 
     async def _extract_metrics(

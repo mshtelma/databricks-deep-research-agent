@@ -3444,6 +3444,46 @@ Output ONLY the search query, nothing else."""
         logger.info(f"🎯 [REPORTER] State object ID: {id(state)}")
         logger.info("Executing reporter node")
 
+        # ===== CRITICAL FIX (Bug #4): HYDRATE STATE IMMEDIATELY =====
+        # LangGraph serializes Pydantic objects to dicts during inter-node transport.
+        # StateManager.hydrate_state() converts dicts back to Pydantic objects.
+        # Without this, calculation_results will be dict instead of CalculationContext,
+        # causing TypeError in reporter.py:161
+        try:
+            from deep_research_agent.core.multi_agent_state import StateManager
+
+            # Log before hydration
+            calc_results_type = type(state.get('calculation_results')).__name__ if 'calculation_results' in state else 'None'
+            unified_plan_type = type(state.get('unified_plan')).__name__ if 'unified_plan' in state else 'None'
+            logger.info(f"[REPORTER] Pre-hydration: calculation_results type = {calc_results_type}")
+            logger.info(f"[REPORTER] Pre-hydration: unified_plan type = {unified_plan_type}")
+
+            # HYDRATE STATE - Convert dicts back to Pydantic objects
+            state = StateManager.hydrate_state(state)
+
+            # Verify hydration worked
+            if 'calculation_results' in state and state['calculation_results'] is not None:
+                calc_results_type = type(state['calculation_results']).__name__
+                logger.info(f"[REPORTER] Post-hydration: calculation_results type = {calc_results_type}")
+
+                if calc_results_type == 'dict':
+                    logger.error("❌ HYDRATION FAILED: calculation_results still a dict!")
+                else:
+                    logger.info(f"✅ HYDRATION SUCCESS: calculation_results is now {calc_results_type}")
+
+            if 'unified_plan' in state and state['unified_plan'] is not None:
+                unified_plan_type = type(state['unified_plan']).__name__
+                logger.info(f"[REPORTER] Post-hydration: unified_plan type = {unified_plan_type}")
+
+            logger.info("✅ [REPORTER] State hydration complete")
+
+        except ImportError as e:
+            logger.error(f"❌ [REPORTER] Failed to import StateManager: {e}")
+            logger.error("Reporter will continue but may crash if calculation_results is dict")
+        except Exception as e:
+            logger.error(f"❌ [REPORTER] State hydration failed: {e}", exc_info=True)
+            logger.error("Reporter will continue but may crash if calculation_results is dict")
+
         # CRITICAL: Debug what reporter is receiving
         logger.info(f"[REPORTER DEBUG] Received observations: {len(state.get('observations', []))}")
         logger.info(f"[REPORTER DEBUG] Search results: {len(state.get('search_results', []))}")

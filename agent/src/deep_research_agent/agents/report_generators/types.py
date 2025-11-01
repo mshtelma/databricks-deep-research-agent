@@ -156,16 +156,23 @@ class ReportGenerationRequest(BaseModel):
         if self.calculation_context is None:
             return False
 
-        # ENFORCE: calculation_context must be CalculationContext object, not dict
-        if not hasattr(self.calculation_context, 'calculations'):
+        # PRAGMATIC: Allow both CalculationContext object OR dict with 'calculations' key
+        # (Needed due to schema mismatch between metrics.models.DataPoint and report_generation.models.DataPoint)
+        has_calculations_attr = hasattr(self.calculation_context, 'calculations')
+        has_calculations_key = isinstance(self.calculation_context, dict) and 'calculations' in self.calculation_context
+
+        if not (has_calculations_attr or has_calculations_key):
             raise TypeError(
-                f"calculation_context must be CalculationContext object, "
+                f"calculation_context must be CalculationContext object or dict with 'calculations' key, "
                 f"got {type(self.calculation_context).__name__}. "
                 f"Ensure StateManager.hydrate_state() is called at perimeter to convert "
                 f"dicts to Pydantic models. See core/multi_agent_state.py:hydrate_state()"
             )
 
-        return len(self.calculation_context.calculations) > 0
+        # Access calculations safely (works for both object and dict)
+        calculations = (self.calculation_context.calculations if has_calculations_attr
+                        else self.calculation_context.get('calculations', []))
+        return len(calculations) > 0
 
     def has_dynamic_sections(self) -> bool:
         """Check if dynamic sections are available."""

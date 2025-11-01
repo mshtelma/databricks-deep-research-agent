@@ -727,15 +727,27 @@ class EnhancedResearchAgent(ResponsesAgent):
                 if not action:
                     logger.warning(f"[PLANNER_ROUTER] Coordinator returned no action - defaulting to SUFFICIENT")
                     # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
-                    if _should_invoke_calculation_agent(state, self.agent_config or {}):
+                    logger.error("🔥🔥🔥 [PLANNER_ROUTER] CALLING _should_invoke_calculation_agent (no action path)")
+                    should_invoke = _should_invoke_calculation_agent(state, self.agent_config or {})
+                    logger.error(f"🔥🔥🔥 [PLANNER_ROUTER] _should_invoke_calculation_agent returned: {should_invoke}")
+                    if should_invoke:
+                        logger.error("🔥🔥🔥 [PLANNER_ROUTER] ✅ ROUTING TO CALCULATION_AGENT!")
                         return "calculation_agent"
+                    else:
+                        logger.error("🔥🔥🔥 [PLANNER_ROUTER] ❌ NOT routing to calculation_agent, going to fact_checker/reporter")
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
                 if action == "SUFFICIENT":
                     logger.info(f"[PLANNER_ROUTER] Coordination decided SUFFICIENT - routing to next phase")
                     # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
-                    if _should_invoke_calculation_agent(state, self.agent_config or {}):
+                    logger.error("🔥🔥🔥 [PLANNER_ROUTER] CALLING _should_invoke_calculation_agent (SUFFICIENT path)")
+                    should_invoke = _should_invoke_calculation_agent(state, self.agent_config or {})
+                    logger.error(f"🔥🔥🔥 [PLANNER_ROUTER] _should_invoke_calculation_agent returned: {should_invoke}")
+                    if should_invoke:
+                        logger.error("🔥🔥🔥 [PLANNER_ROUTER] ✅ ROUTING TO CALCULATION_AGENT!")
                         return "calculation_agent"
+                    else:
+                        logger.error("🔥🔥🔥 [PLANNER_ROUTER] ❌ NOT routing to calculation_agent, going to fact_checker/reporter")
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
                 elif action in ["EXTEND", "VERIFY"]:
@@ -746,8 +758,14 @@ class EnhancedResearchAgent(ResponsesAgent):
                 else:
                     logger.warning(f"[PLANNER_ROUTER] Unexpected action '{action}' - defaulting to next phase")
                     # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
-                    if _should_invoke_calculation_agent(state, self.agent_config or {}):
+                    logger.error("🔥🔥🔥 [PLANNER_ROUTER] CALLING _should_invoke_calculation_agent (unexpected action fallback)")
+                    should_invoke = _should_invoke_calculation_agent(state, self.agent_config or {})
+                    logger.error(f"🔥🔥🔥 [PLANNER_ROUTER] _should_invoke_calculation_agent returned: {should_invoke}")
+                    if should_invoke:
+                        logger.error("🔥🔥🔥 [PLANNER_ROUTER] ✅ ROUTING TO CALCULATION_AGENT!")
                         return "calculation_agent"
+                    else:
+                        logger.error("🔥🔥🔥 [PLANNER_ROUTER] ❌ NOT routing to calculation_agent, going to fact_checker/reporter")
                     return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
             if state.get("enable_human_feedback") and not state.get("auto_accept_plan"):
@@ -909,8 +927,14 @@ class EnhancedResearchAgent(ResponsesAgent):
                                 f"skipping coordination, routing to next phase"
                             )
                             # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
-                            if _should_invoke_calculation_agent(state, self.agent_config or {}):
+                            logger.error("🔥🔥🔥 [ROUTER] CALLING _should_invoke_calculation_agent (research loops limit reached path)")
+                            should_invoke = _should_invoke_calculation_agent(state, self.agent_config or {})
+                            logger.error(f"🔥🔥🔥 [ROUTER] _should_invoke_calculation_agent returned: {should_invoke}")
+                            if should_invoke:
+                                logger.error("🔥🔥🔥 [ROUTER] ✅ ROUTING TO CALCULATION_AGENT!")
                                 return "calculation_agent"
+                            else:
+                                logger.error("🔥🔥🔥 [ROUTER] ❌ NOT routing to calculation_agent, going to fact_checker/reporter")
                             return "fact_checker" if state.get("enable_grounding", True) else "reporter"
 
                         # Under loop limit - planner will coordinate
@@ -941,8 +965,14 @@ class EnhancedResearchAgent(ResponsesAgent):
                             "[ROUTER] Found section results - assuming complete"
                         )
                         # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
-                        if _should_invoke_calculation_agent(state, self.agent_config or {}):
+                        logger.error("🔥🔥🔥 [RESEARCHER_ROUTER] CALLING _should_invoke_calculation_agent (exception + section results path)")
+                        should_invoke = _should_invoke_calculation_agent(state, self.agent_config or {})
+                        logger.error(f"🔥🔥🔥 [RESEARCHER_ROUTER] _should_invoke_calculation_agent returned: {should_invoke}")
+                        if should_invoke:
+                            logger.error("🔥🔥🔥 [RESEARCHER_ROUTER] ✅ ROUTING TO CALCULATION_AGENT!")
                             return "calculation_agent"
+                        else:
+                            logger.error("🔥🔥🔥 [RESEARCHER_ROUTER] ❌ NOT routing to calculation_agent, going to fact_checker/reporter")
                         return (
                             "fact_checker"
                             if state.get("enable_grounding", True)
@@ -954,8 +984,14 @@ class EnhancedResearchAgent(ResponsesAgent):
                             "[ROUTER] Error in step checking and no section results - completing research phase"
                         )
                         # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
-                        if _should_invoke_calculation_agent(state, self.agent_config or {}):
+                        logger.error("🔥🔥🔥 [RESEARCHER_ROUTER] CALLING _should_invoke_calculation_agent (exception + no section results path)")
+                        should_invoke = _should_invoke_calculation_agent(state, self.agent_config or {})
+                        logger.error(f"🔥🔥🔥 [RESEARCHER_ROUTER] _should_invoke_calculation_agent returned: {should_invoke}")
+                        if should_invoke:
+                            logger.error("🔥🔥🔥 [RESEARCHER_ROUTER] ✅ ROUTING TO CALCULATION_AGENT!")
                             return "calculation_agent"
+                        else:
+                            logger.error("🔥🔥🔥 [RESEARCHER_ROUTER] ❌ NOT routing to calculation_agent, going to fact_checker/reporter")
                         return (
                             "fact_checker"
                             if state.get("enable_grounding", True)
@@ -965,8 +1001,14 @@ class EnhancedResearchAgent(ResponsesAgent):
                 # No plan - should not happen but handle gracefully
                 logger.warning("[ROUTER] No plan found - assuming complete")
                 # Route to calculation_agent if preconditions met (query_constraints + metrics enabled)
-                if _should_invoke_calculation_agent(state, self.agent_config or {}):
+                logger.error("🔥🔥🔥 [RESEARCHER_ROUTER] CALLING _should_invoke_calculation_agent (no plan path)")
+                should_invoke = _should_invoke_calculation_agent(state, self.agent_config or {})
+                logger.error(f"🔥🔥🔥 [RESEARCHER_ROUTER] _should_invoke_calculation_agent returned: {should_invoke}")
+                if should_invoke:
+                    logger.error("🔥🔥🔥 [RESEARCHER_ROUTER] ✅ ROUTING TO CALCULATION_AGENT!")
                     return "calculation_agent"
+                else:
+                    logger.error("🔥🔥🔥 [RESEARCHER_ROUTER] ❌ NOT routing to calculation_agent, going to fact_checker/reporter")
                 return (
                     "fact_checker"
                     if state.get("enable_grounding", True)
