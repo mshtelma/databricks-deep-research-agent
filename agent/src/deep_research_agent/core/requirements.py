@@ -6,7 +6,7 @@ extracted from natural language instructions.
 """
 
 from typing import List, Dict, Any, Optional, Union, Literal
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, validator, field_validator
 from enum import Enum
 import logging
 
@@ -82,31 +82,58 @@ class TableSpecification(BaseModel):
 
 class NarrativeSpecification(BaseModel):
     """Detailed specification for narrative requirements."""
-    
+
     word_limit: Optional[int] = Field(
         default=None,
-        description="Maximum number of words allowed"
+        description="Maximum number of words allowed (numeric value only, e.g., 300 not ≤300)"
     )
-    
+
     required_sections: List[str] = Field(
         default_factory=list,
         description="Sections that must be included"
     )
-    
+
     style: str = Field(
         default="professional",
         description="Writing style (professional, academic, casual, etc.)"
     )
-    
+
     must_highlight: List[str] = Field(
         default_factory=list,
         description="Key points that must be highlighted"
     )
-    
+
     numbered_format: bool = Field(
         default=False,
         description="Whether to use numbered format"
     )
+
+    @field_validator('word_limit', mode='before')
+    @classmethod
+    def parse_word_limit(cls, v):
+        """Parse word_limit, handling comparison operators like ≤300, <=300, <300."""
+        if v is None:
+            return None
+
+        if isinstance(v, int):
+            return v
+
+        if isinstance(v, str):
+            import re
+            # Remove comparison operators and clean the string
+            cleaned = v.strip()
+            for op in ['≤', '<=', '≥', '>=', '<', '>', '=', '~']:
+                cleaned = cleaned.replace(op, '').strip()
+
+            # Try to extract just the number
+            match = re.search(r'\d+', cleaned)
+            if match:
+                return int(match.group())
+
+            # If we can't parse it, return None (optional field)
+            return None
+
+        return v
 
 
 class VisualizationSpecification(BaseModel):

@@ -153,13 +153,22 @@ class ReportGenerationRequest(BaseModel):
         This enforces "Pydantic Everywhere" architecture - dicts should only exist at
         I/O boundaries, never in internal code.
         """
+        # AGGRESSIVE LOGGING for debugging
+        from ...core import get_logger
+        logger = get_logger(__name__)
+
         if self.calculation_context is None:
+            logger.error("🔥 [CALC DATA CHECK] calculation_context is None -> has_calc=False")
             return False
 
         # PRAGMATIC: Allow both CalculationContext object OR dict with 'calculations' key
         # (Needed due to schema mismatch between metrics.models.DataPoint and report_generation.models.DataPoint)
         has_calculations_attr = hasattr(self.calculation_context, 'calculations')
         has_calculations_key = isinstance(self.calculation_context, dict) and 'calculations' in self.calculation_context
+
+        logger.error(f"🔥 [CALC DATA CHECK] calculation_context type: {type(self.calculation_context).__name__}")
+        logger.error(f"🔥 [CALC DATA CHECK] has_calculations_attr: {has_calculations_attr}")
+        logger.error(f"🔥 [CALC DATA CHECK] has_calculations_key: {has_calculations_key}")
 
         if not (has_calculations_attr or has_calculations_key):
             raise TypeError(
@@ -170,9 +179,43 @@ class ReportGenerationRequest(BaseModel):
             )
 
         # Access calculations safely (works for both object and dict)
-        calculations = (self.calculation_context.calculations if has_calculations_attr
-                        else self.calculation_context.get('calculations', []))
-        return len(calculations) > 0
+        if has_calculations_attr:
+            calculations = self.calculation_context.calculations or []
+        elif has_calculations_key:
+            calculations = self.calculation_context.get('calculations', [])
+        else:
+            calculations = []
+
+        # CRITICAL FIX: Also check extracted_data! The calculation agent puts data points in extracted_data
+        # even when there are no formulas. Hybrid mode should work with EITHER calculated formulas OR
+        # extracted metric values - both provide structured data for table generation.
+        if hasattr(self.calculation_context, 'extracted_data'):
+            extracted_data = self.calculation_context.extracted_data or []
+        elif isinstance(self.calculation_context, dict):
+            extracted_data = self.calculation_context.get('extracted_data', [])
+        else:
+            extracted_data = []
+
+        # Legacy field name support
+        if hasattr(self.calculation_context, 'data_points'):
+            data_points = self.calculation_context.data_points or []
+        elif isinstance(self.calculation_context, dict):
+            data_points = self.calculation_context.get('data_points', [])
+        else:
+            data_points = []
+
+        logger.error(f"🔥 [CALC DATA CHECK] calculations count: {len(calculations)}")
+        logger.error(f"🔥 [CALC DATA CHECK] extracted_data count: {len(extracted_data)}")
+        logger.error(f"🔥 [CALC DATA CHECK] data_points count: {len(data_points)}")
+
+        # Accept EITHER formulas (calculations) OR extracted metric values (extracted_data/data_points)
+        has_formulas = len(calculations) > 0
+        has_data = len(extracted_data) > 0 or len(data_points) > 0
+
+        logger.error(f"🔥 [CALC DATA CHECK] has_formulas: {has_formulas}, has_data: {has_data}")
+        logger.error(f"🔥 [CALC DATA CHECK] RESULT: has_calc={has_formulas or has_data}")
+
+        return has_formulas or has_data
 
     def has_dynamic_sections(self) -> bool:
         """Check if dynamic sections are available."""

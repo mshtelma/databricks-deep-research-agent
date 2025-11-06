@@ -26,6 +26,18 @@ from .structured_models import (
 
 logger = logging.getLogger(__name__)
 
+# DIAGNOSTIC: Verify implementation version is loaded
+logger.error("="*100)
+logger.error("🔥 CONSTRAINT_SYSTEM MODULE LOADED - IMPLEMENTATION V2 (2025-11-03)")
+logger.error("  - ScenarioParameterValidator: ACTIVE")
+logger.error("  - LLM Correction Loop: ACTIVE (MAX_RETRY_ATTEMPTS=2)")
+logger.error("="*100)
+print("="*100)
+print("🔥 CONSTRAINT_SYSTEM MODULE LOADED - IMPLEMENTATION V2 (2025-11-03)")
+print("  - ScenarioParameterValidator: ACTIVE")
+print("  - LLM Correction Loop: ACTIVE (MAX_RETRY_ATTEMPTS=2)")
+print("="*100)
+
 # Type alias for backward compatibility - ConstraintsOutput is the new QueryConstraints
 QueryConstraints = ConstraintsOutput
 
@@ -51,11 +63,90 @@ QueryConstraints = ConstraintsOutput
 # DELETED OLD DATACLASS - END MARKER
 
 
+class ScenarioParameterValidator:
+    """Validates scenario parameters without performing extraction.
+    
+    This validator DETECTS whether numeric values should be present,
+    but does NOT extract them. Extraction is done by LLM only.
+    """
+    
+    @staticmethod
+    def contains_numeric_mentions(text: str) -> bool:
+        """
+        Detect if text contains numeric patterns that should be extracted.
+        This is detection only - does NOT extract values.
+        
+        Returns:
+            True if text likely contains extractable numerics
+        """
+        # Patterns indicating numbers (detection, not extraction)
+        patterns = [
+            r'[€$£¥]\s*\d+[,\d]*',  # Currency amounts
+            r'\d+[,\d]*\s*[€$£¥]',  # Amounts with trailing currency
+            r'\d+k\b',  # Shorthand like 150k
+            r'\d+\s*child',  # Child counts
+            r'\d+\s*bedroom',  # Property details
+            r'\d+/month',  # Monthly amounts
+            r'annual.*?\d+',  # Annual amounts
+            r'salary.*?\d+|\d+.*?salary',  # Salary mentions
+        ]
+        
+        text_lower = text.lower()
+        for pattern in patterns:
+            if re.search(pattern, text_lower, re.IGNORECASE):
+                return True
+        return False
+    
+    @staticmethod
+    def validate_scenario(scenario) -> dict:  # Remove type hint to accept both types
+        """
+        Validate scenario parameters against description.
+        
+        Handles both ScenarioOutput (list parameters) and ScenarioDefinition (dict parameters).
+        
+        Returns:
+            dict with keys: 'valid', 'has_numerics', 'has_parameters', 'warning'
+        """
+        has_numerics = ScenarioParameterValidator.contains_numeric_mentions(
+            scenario.description
+        )
+        
+        # Handle both list (ScenarioOutput) and dict (ScenarioDefinition) parameters
+        if isinstance(scenario.parameters, list):
+            has_parameters = bool(scenario.parameters and len(scenario.parameters) > 0)
+        elif isinstance(scenario.parameters, dict):
+            has_parameters = bool(scenario.parameters and len(scenario.parameters) > 0)
+        else:
+            # Unknown type - log error
+            logger.error(f"[validate_scenario] Unknown parameters type: {type(scenario.parameters)}")
+            has_parameters = False
+        
+        valid = True
+        warning = None
+        
+        if has_numerics and not has_parameters:
+            valid = False
+            warning = (
+                f"Scenario '{scenario.name}' description contains numeric values "
+                f"but parameters are empty. Description: {scenario.description[:100]}"
+            )
+        
+        return {
+            'valid': valid,
+            'has_numerics': has_numerics,
+            'has_parameters': has_parameters,
+            'warning': warning,
+            'param_type': type(scenario.parameters).__name__,  # For debugging
+            'param_value': str(scenario.parameters)[:100]  # For debugging
+        }
+
+
 class ConstraintExtractor:
     """Extract constraints from user queries using LLM or pattern matching."""
 
-    def __init__(self, llm=None):
+    def __init__(self, llm=None, config=None):
         self.llm = llm
+        self.config = config or {}
         self.entity_patterns = self._build_entity_patterns()
 
     def _build_entity_patterns(self) -> Dict[str, re.Pattern]:
@@ -91,17 +182,47 @@ class ConstraintExtractor:
         Returns:
             QueryConstraints object with all extracted constraints
         """
+        # DIAGNOSTIC: Entry point logging
+        print("="*100)
+        print(f"🔍 [EXTRACT_CONSTRAINTS] ENTRY POINT")
+        print(f"  - query length: {len(query) if query else 0}")
+        print(f"  - self.llm: {self.llm}")
+        print(f"  - self.llm type: {type(self.llm)}")
+        print("="*100)
+        logger.error("="*100)
+        logger.error("🔍 [EXTRACT_CONSTRAINTS] ENTRY POINT")
+        logger.error(f"  - query length: {len(query) if query else 0}")
+        logger.error(f"  - self.llm: {self.llm}")
+        logger.error(f"  - self.llm type: {type(self.llm)}")
+        logger.error("="*100)
+        
         if not query:
+            print("❌ [EXTRACT_CONSTRAINTS] Query is empty, returning empty constraints")
+            logger.error("❌ [EXTRACT_CONSTRAINTS] Query is empty, returning empty constraints")
             return QueryConstraints()
 
         # Try LLM extraction first for best results
         if self.llm:
+            print(f"✅ [EXTRACT_CONSTRAINTS] LLM is set, calling _extract_with_llm()")
+            logger.error(f"✅ [EXTRACT_CONSTRAINTS] LLM is set, calling _extract_with_llm()")
             try:
-                return self._extract_with_llm(query, state)
+                result = self._extract_with_llm(query, state)
+                print(f"✅ [EXTRACT_CONSTRAINTS] _extract_with_llm() returned successfully")
+                logger.error(f"✅ [EXTRACT_CONSTRAINTS] _extract_with_llm() returned successfully")
+                return result
             except Exception as e:
+                print(f"❌ [EXTRACT_CONSTRAINTS] _extract_with_llm() raised exception: {type(e).__name__}: {e}")
+                logger.error(f"❌ [EXTRACT_CONSTRAINTS] _extract_with_llm() raised exception: {type(e).__name__}: {e}")
                 logger.warning(f"LLM constraint extraction failed: {e}, using fallback")
+                import traceback
+                traceback.print_exc()
+        else:
+            print("❌ [EXTRACT_CONSTRAINTS] self.llm is None, using pattern-based fallback")
+            logger.error("❌ [EXTRACT_CONSTRAINTS] self.llm is None, using pattern-based fallback")
 
         # Fallback to pattern-based extraction
+        print("🔄 [EXTRACT_CONSTRAINTS] Using pattern-based extraction fallback")
+        logger.error("🔄 [EXTRACT_CONSTRAINTS] Using pattern-based extraction fallback")
         return self._extract_with_patterns(query)
 
     def _extract_with_llm(self, query: str, state: Dict = None) -> QueryConstraints:
@@ -114,65 +235,131 @@ class ConstraintExtractor:
         4. Automatic validation - Pydantic handles types
         5. Less overhead than function calling
         """
+        print("🔍 [_EXTRACT_WITH_LLM] ENTERED")
+        logger.error("🔍 [_EXTRACT_WITH_LLM] ENTERED")
+
+        # Import json locally to avoid UnboundLocalError
+        import json as json_module
         from langchain_core.messages import SystemMessage, HumanMessage
 
-        system_prompt = """You are a constraint extraction expert. Extract ALL constraints from user queries.
+        system_prompt = """You are a constraint extraction expert analyzing research queries.
 
-CRITICAL: Identify what the user wants to COMPARE, not technical details ABOUT the comparison.
+TASK: Extract ALL entities, metrics, and scenarios with COMPLETE numeric parameters.
 
-ENTITIES - What is being compared:
-✓ Countries: "Spain", "France", "Germany", "United Kingdom"
-✓ Companies: "Apple", "Google", "Microsoft"
-✓ Products: "iPhone 15", "Galaxy S24", "Pixel 8"
-✓ Services: "Netflix", "Disney+", "Amazon Prime"
-✗ NOT technical concepts: "At Vest", "Sale", "Ordinary Income", "Capital Gains"
-✗ NOT descriptions: "Compare Spain", "France Tax", "Upper-middle-class"
+════════════════════════════════════════════════════════════════
+🚨 CRITICAL: EXTRACT ALL SCENARIOS FROM THE QUERY 🚨
+════════════════════════════════════════════════════════════════
 
-METRICS - What to measure about each entity:
-✓ Measurable outcomes: "tax_rate", "net_take_home", "effective_tax_rate", "price", "rent"
-✓ Derived values: "disposable_income", "daycare_cost", "family_benefits"
-✗ NOT generic: "information", "data", "details"
-✗ NOT technical terms: "RSU_treatment", "tax_rules" (these are implementation details)
+The query may contain MULTIPLE scenarios in various formats:
+- Numbered lists (1. Single 2. Married)
+- Bulleted lists (• Single • Married)
+- Descriptive text (single person... married couple...)
 
-SCENARIOS - Specific cases with parameters:
-✓ With financial amounts: "Single: €150,000 salary + €100,000 RSUs"
-✓ With family details: "Married, 1 child"
-✗ Empty if just mentioned as "3 scenarios" without details
+YOU MUST EXTRACT EVERY SCENARIO MENTIONED!
 
-CRITICAL: Scenario parameters should be NUMERIC values (salary, rsu, rent, etc.).
-Descriptive attributes (marital_status, employment_type) should go in name/description, NOT parameters.
+Common scenario patterns to look for:
+- "1. single: ..." AND "2. married: ..." → Extract BOTH scenarios
+- "Single earner" AND "Married couple" → Extract BOTH scenarios
+- "first scenario" AND "second scenario" → Extract BOTH scenarios
 
-GOOD scenario:
-  "name": "Married with 1 child",
-  "description": "Married couple with one child, primary earner €150k salary",
-  "parameters": [["salary", 150000], ["children", 1]]
+════════════════════════════════════════════════════════════════
+PART 1: SCENARIOS WITH NUMERIC PARAMETERS (HIGHEST PRIORITY)
+════════════════════════════════════════════════════════════════
 
-BAD scenario:
-  "parameters": [["marital_status", "married"], ["employment_type", "full-time"]]
+🚨🚨🚨 CRITICAL REQUIREMENTS:
+1. Extract ALL scenarios mentioned (not just the first one!)
+2. Extract ALL numeric parameters from each scenario
+3. Parameters MUST be list of [key, value] pairs: [["salary", 150000]]
 
-REQUIRED OUTPUT FORMAT (JSON):
+📋 PARAMETER EXTRACTION RULES:
+
+For EACH scenario, extract these parameters:
+1. Salary/Income → [["salary", <number>]]
+2. RSU/Stock/Bonus → [["rsu", <number>]]
+3. Spouse income → [["salary_spouse", <number>]]
+4. Children count → [["children", <number>]]
+5. Rent → [["rent_monthly", <number>]]
+
+📐 NUMBER CONVERSION (CRITICAL):
+- "€150,000" or "€150k" → 150000
+- "€100,000" or "€100k" → 100000
+- "$350,000" or "$350k" → 350000
+- "2 children" → 2
+- "€2000/month" → 2000
+
+✅ COMPLETE EXAMPLE - Tax comparison with 2 scenarios:
+
+Query: "Compare taxes between Spain and Poland for:
+1. single: €150,000 annual gross salary + €100,000 annual RSUs
+2. married, no child: same primary earner (€150k + €100k RSUs) + spouse with €100,000 salary"
+
+CORRECT Output (BOTH scenarios with parameters):
 {
-  "entities": ["Spain", "France", "Germany"],  // Clean names of things being compared
-  "metrics": ["net_take_home", "effective_tax_rate", "rent"],  // Measurable values
+  "entities": ["Spain", "Poland"],
+  "metrics": ["net_take_home", "effective_tax_rate", "disposable_income"],
   "scenarios": [
     {
       "id": "s1",
       "name": "Single",
-      "description": "Single earner with €150k salary + €100k RSUs",
-      "parameters": [["salary", 150000], ["rsu", 100000]]  // Numeric values only
+      "description": "Single earner with €150,000 annual gross salary plus €100,000 annual RSUs",
+      "parameters": [["salary", 150000], ["rsu", 100000]]
+    },
+    {
+      "id": "s2",
+      "name": "Married, no child",
+      "description": "Married couple with no children; primary earner €150,000 salary + €100,000 RSUs, spouse €100,000 salary",
+      "parameters": [["salary", 150000], ["rsu", 100000], ["salary_spouse", 100000]]
     }
   ],
-  "comparison_type": "country",  // Type of entities (country/product/company/service)
-  "topics": ["taxation", "after-tax finances"],  // General themes
-  "monetary_values": ["€150000", "€100000"],  // Amounts mentioned
-  "data_format": "table"  // "table" if comparative table requested, else "text"
+  "comparison_type": "country",
+  "topics": ["taxation"],
+  "monetary_values": ["€150000", "€100000"],
+  "data_format": "table"
 }
 
-Convert shorthand: "€150k" → "€150000", "$100K" → "$100000"
+❌ WRONG - Only extracting first scenario:
+{
+  "scenarios": [
+    {"id": "s1", "name": "Single", "parameters": [["salary", 150000]]}
+  ]
+  // MISSING THE MARRIED SCENARIO!
+}
+
+❌ WRONG - Empty parameters when numbers present:
+{
+  "scenarios": [
+    {"id": "s1", "name": "Single", "description": "€150k salary", "parameters": []}
+  ]
+  // PARAMETERS CANNOT BE EMPTY WHEN NUMBERS ARE IN DESCRIPTION!
+}
+
+════════════════════════════════════════════════════════════════
+PART 2: ENTITIES (What to compare)
+════════════════════════════════════════════════════════════════
+
+Extract ALL countries, cities, companies mentioned for comparison
+
+════════════════════════════════════════════════════════════════
+PART 3: METRICS (What to measure)
+════════════════════════════════════════════════════════════════
+
+Extract measurable values: tax_rate, net_take_home, rent, disposable_income
+
+════════════════════════════════════════════════════════════════
+REMEMBER:
+1. Extract ALL scenarios (not just the first one)
+2. Parameters as list of [key, value] pairs
+3. Convert currency shorthand (€150k → 150000)
+════════════════════════════════════════════════════════════════
 """
 
         human_prompt = f"""Extract all constraints from this query:
 "{query}"
+
+CRITICAL REMINDERS:
+1. Extract ALL scenarios (e.g., if query mentions "1. single" AND "2. married", extract BOTH)
+2. Extract numeric parameters for EACH scenario as [["key", value]] pairs
+3. Look for numbered lists, bullet points, or any mention of different cases/scenarios
 
 Be comprehensive - extract ALL entities, metrics, and scenarios mentioned.
 Respond with valid JSON matching the schema above."""
@@ -182,15 +369,42 @@ Respond with valid JSON matching the schema above."""
             HumanMessage(content=human_prompt)
         ]
 
+        # DEBUG: Log the prompt being sent to LLM
+        logger.error("="*100)
+        logger.error("🔍 [CONSTRAINT EXTRACTION] SENDING INITIAL PROMPT TO LLM")
+        logger.error(f"  Query length: {len(query)}")
+        logger.error(f"  Query preview: {query[:200]}...")
+        logger.error(f"  System prompt length: {len(system_prompt)}")
+        logger.error(f"  Human prompt length: {len(human_prompt)}")
+        logger.error("="*100)
+        print("="*100)
+        print("🔍 [CONSTRAINT EXTRACTION] SENDING INITIAL PROMPT TO LLM")
+        print(f"  Query: {query[:200]}...")
+        print("="*100)
+
         try:
             # CRITICAL FIX: Use json_schema method for strict enforcement
             # json_schema: Full schema validation with Databricks response_format
             # json_mode: Generic JSON object (less strict, can cause validation errors)
+            logger.error("🔍 [CONSTRAINT EXTRACTION] Calling LLM.with_structured_output()...")
+            print("🔍 [CONSTRAINT EXTRACTION] Calling LLM.with_structured_output()...")
+
             response = self.llm.with_structured_output(
                 schema=ConstraintsOutput,
                 method="json_schema",  # CHANGED: Strict schema enforcement (was json_mode)
                 include_raw=False
             ).invoke(messages)
+
+            logger.error(f"🔍 [CONSTRAINT EXTRACTION] LLM returned response type: {type(response)}")
+            print(f"🔍 [CONSTRAINT EXTRACTION] LLM returned response type: {type(response)}")
+
+            # AGGRESSIVE LOGGING: Log the actual response
+            if isinstance(response, ConstraintsOutput):
+                logger.error(f"🔍 [CONSTRAINT EXTRACTION] Response scenarios count: {len(response.scenarios)}")
+                print(f"🔍 [CONSTRAINT EXTRACTION] Response scenarios count: {len(response.scenarios)}")
+                for i, scenario in enumerate(response.scenarios):
+                    logger.error(f"  Scenario {i}: {scenario.name} - params: {scenario.parameters}")
+                    print(f"  Scenario {i}: {scenario.name} - params: {scenario.parameters}")
 
             # with_structured_output() should ALWAYS return a validated Pydantic model
             # If not, something is seriously wrong (not a JSON formatting issue)
@@ -210,6 +424,237 @@ Respond with valid JSON matching the schema above."""
                 f"{len(constraints_output.scenarios)} scenarios"
             )
 
+            # DIAGNOSTIC: Log scenarios before validation
+            logger.error("="*100)
+            logger.error(f"🔍 [DIAGNOSTIC] SCENARIOS BEFORE VALIDATION (count={len(constraints_output.scenarios)})")
+            print("="*100)
+            print(f"🔍 [DIAGNOSTIC] SCENARIOS BEFORE VALIDATION (count={len(constraints_output.scenarios)})")
+            for idx, scenario in enumerate(constraints_output.scenarios):
+                logger.error(f"  Scenario {idx}: {type(scenario).__name__}")
+                logger.error(f"    - name: {scenario.name}")
+                logger.error(f"    - description: {scenario.description[:80]}...")
+                logger.error(f"    - parameters type: {type(scenario.parameters)}")
+                logger.error(f"    - parameters value: {scenario.parameters}")
+                logger.error(f"    - parameters len: {len(scenario.parameters) if hasattr(scenario.parameters, '__len__') else 'N/A'}")
+                logger.error(f"    - parameters bool: {bool(scenario.parameters)}")
+                print(f"  Scenario {idx}: {type(scenario).__name__}, name={scenario.name}, param_type={type(scenario.parameters)}, param_len={len(scenario.parameters) if hasattr(scenario.parameters, '__len__') else 'N/A'}, params={scenario.parameters}")
+            logger.error("="*100)
+            print("="*100)
+
+            # NEW: Validate and retry if needed
+            # Get MAX_RETRY_ATTEMPTS from config (default to 3 if not set)
+            MAX_RETRY_ATTEMPTS = self.config.get('metrics', {}).get('scenario_parameter_correction', {}).get('max_retry_attempts', 3)
+            logger.error(f"🔥🔥🔥 [CORRECTION] MAX_RETRY_ATTEMPTS from config = {MAX_RETRY_ATTEMPTS}")
+            print(f"🔥🔥🔥 [CORRECTION] MAX_RETRY_ATTEMPTS from config = {MAX_RETRY_ATTEMPTS}")
+
+            validator = ScenarioParameterValidator()
+            retry_needed = []
+
+            for scenario in constraints_output.scenarios:
+                validation = validator.validate_scenario(scenario)
+                logger.error(f"[DIAGNOSTIC] Validation result for '{scenario.name}': {validation}")
+                print(f"[DIAGNOSTIC] Validation result for '{scenario.name}': {validation}")
+                if not validation['valid']:
+                    retry_needed.append({
+                        'scenario': scenario,
+                        'warning': validation['warning']
+                    })
+                    logger.error(f"❌ [extract_constraints] Validation FAILED: {validation['warning']}")
+                    logger.error(f"   - has_numerics: {validation['has_numerics']}")
+                    logger.error(f"   - has_parameters: {validation['has_parameters']}")
+                    logger.error(f"   - param_type: {validation.get('param_type', 'unknown')}")
+                    print(f"❌ [extract_constraints] Validation FAILED: {validation['warning']}")
+                    print(f"   - has_numerics: {validation['has_numerics']}, has_parameters: {validation['has_parameters']}, param_type: {validation.get('param_type', 'unknown')}")
+
+            # CRITICAL DEBUG: Log retry_needed state BEFORE condition check
+            logger.error("="*100)
+            logger.error(f"🔥🔥🔥 [CORRECTION] BEFORE CONDITION CHECK:")
+            logger.error(f"  - retry_needed length: {len(retry_needed)}")
+            logger.error(f"  - retry_needed bool: {bool(retry_needed)}")
+            logger.error(f"  - MAX_RETRY_ATTEMPTS: {MAX_RETRY_ATTEMPTS}")
+            logger.error(f"  - MAX_RETRY_ATTEMPTS > 0: {MAX_RETRY_ATTEMPTS > 0}")
+            logger.error(f"  - Combined condition: {bool(retry_needed) and MAX_RETRY_ATTEMPTS > 0}")
+            if retry_needed:
+                logger.error(f"  - retry_needed scenarios: {[item['scenario'].name for item in retry_needed]}")
+            logger.error("="*100)
+            print("="*100)
+            print(f"🔥🔥🔥 [CORRECTION] retry_needed={len(retry_needed)}, MAX_RETRY_ATTEMPTS={MAX_RETRY_ATTEMPTS}, will_enter_loop={bool(retry_needed) and MAX_RETRY_ATTEMPTS > 0}")
+            print("="*100)
+
+            # Retry loop for invalid scenarios
+            if retry_needed and MAX_RETRY_ATTEMPTS > 0:
+                logger.error("🔥🔥🔥 [CORRECTION] ✅ ENTERING CORRECTION LOOP!")
+                print("🔥🔥🔥 [CORRECTION] ✅ ENTERING CORRECTION LOOP!")
+                logger.info(
+                    f"[extract_constraints] {len(retry_needed)} scenario(s) need parameter correction. "
+                    f"Attempting targeted retry..."
+                )
+                
+                for attempt in range(MAX_RETRY_ATTEMPTS):
+                    logger.error(f"🔥 [CORRECTION] Loop iteration {attempt + 1}/{MAX_RETRY_ATTEMPTS}")
+                    print(f"🔥 [CORRECTION] Loop iteration {attempt + 1}/{MAX_RETRY_ATTEMPTS}")
+
+                    if not retry_needed:
+                        logger.error(f"🔥 [CORRECTION] retry_needed is now empty, breaking out of loop")
+                        print(f"🔥 [CORRECTION] retry_needed is now empty, breaking out of loop")
+                        break
+
+                    logger.error(f"🔥 [CORRECTION] Attempting to fix {len(retry_needed)} scenarios")
+                    print(f"🔥 [CORRECTION] Attempting to fix {len(retry_needed)} scenarios")
+
+                    # Build correction prompt
+                    scenarios_to_fix = [item['scenario'] for item in retry_needed]
+
+                    # Prepare JSON strings outside f-string to avoid UnboundLocalError
+                    entities_json = json_module.dumps(constraints_output.entities)
+                    metrics_json = json_module.dumps(constraints_output.metrics)
+                    scenarios_info = [{'name': s.name, 'description': s.description, 'parameters': s.parameters} for s in scenarios_to_fix]
+
+                    correction_prompt = f"""
+The following scenarios were extracted but are missing numeric parameters.
+
+Original query: "{query}"
+
+Already extracted entities: {entities_json}
+Already extracted metrics: {metrics_json}
+
+Scenarios needing correction:
+{scenarios_info}
+
+TASK: For EACH scenario above, extract the numeric parameters mentioned in the description.
+
+CRITICAL PARAMETER FORMAT - Use list of [key, value] pairs:
+- "€150,000 annual gross salary" → [["salary", 150000]]
+- "€100,000 annual RSUs" → [["rsu", 100000]]
+- "spouse with €100,000 salary" → [["salary_spouse", 100000]]
+- "1 child" → [["children", 1]]
+- "€2000/month rent" → [["rent_monthly", 2000]]
+
+COMPLETE EXAMPLE - Look at the descriptions and extract ALL numeric values:
+
+For "Single earner with €150,000 annual gross salary plus €100,000 annual RSUs":
+parameters: [["salary", 150000], ["rsu", 100000]]
+
+For "Married couple; primary €150,000 salary + €100,000 RSUs, spouse €100,000 salary":
+parameters: [["salary", 150000], ["rsu", 100000], ["salary_spouse", 100000]]
+
+Return the complete ConstraintsOutput in JSON format:
+{{
+  "entities": {entities_json},
+  "metrics": {metrics_json},
+  "scenarios": [
+    {{"id": "s1", "name": "Single", "description": "...", "parameters": [["salary", 150000], ["rsu", 100000]]}},
+    {{"id": "s2", "name": "Married, no child", "description": "...", "parameters": [["salary", 150000], ["rsu", 100000], ["salary_spouse", 100000]]}}
+  ]
+}}
+"""
+
+                    logger.error(f"🔥 [CORRECTION] Sending correction prompt to LLM...")
+                    print(f"🔥 [CORRECTION] Sending correction prompt to LLM...")
+
+                    correction_messages = [
+                        SystemMessage(content="""You are a numeric parameter extraction specialist.
+Your task is to extract numeric values from scenario descriptions and return a complete ConstraintsOutput.
+
+CRITICAL RULES:
+1. Parameters MUST be a list of [key, value] pairs: [["salary", 150000], ["rsu", 100000]]
+2. Extract ALL numeric values mentioned in descriptions
+3. Convert currency shorthand: €150k → 150000, €100k → 100000
+4. Use standard keys: salary, rsu, salary_spouse, rsu_spouse, children
+5. Values must be numbers, not strings: 150000 not "150000"
+
+Example scenario extraction:
+"Single earner with €150,000 annual gross salary plus €100,000 annual RSUs"
+→ parameters: [["salary", 150000], ["rsu", 100000]]
+
+"Married couple; primary €150k salary + €100k RSUs, spouse €100k"
+→ parameters: [["salary", 150000], ["rsu", 100000], ["salary_spouse", 100000]]"""),
+                        HumanMessage(content=correction_prompt)
+                    ]
+
+                    try:
+                        logger.error(f"🔥 [CORRECTION] Calling LLM with structured output...")
+                        print(f"🔥 [CORRECTION] Calling LLM with structured output...")
+
+                        # Retry extraction with focused prompt
+                        correction_response = self.llm.with_structured_output(
+                            schema=ConstraintsOutput,  # Reuse schema
+                            method="json_schema",
+                            include_raw=False
+                        ).invoke(correction_messages)
+
+                        logger.error(f"🔥 [CORRECTION] LLM returned response with {len(correction_response.scenarios)} scenarios")
+                        print(f"🔥 [CORRECTION] LLM returned response with {len(correction_response.scenarios)} scenarios")
+                        
+                        # Replace scenarios with corrected versions
+                        corrected_count = 0
+                        still_invalid = []
+                        
+                        for i, original_scenario in enumerate(constraints_output.scenarios):
+                            # Find matching corrected scenario
+                            corrected = next(
+                                (s for s in correction_response.scenarios if s.id == original_scenario.id),
+                                None
+                            )
+                            
+                            if corrected:
+                                # Validate correction
+                                validation = validator.validate_scenario(corrected)
+                                if validation['valid'] or validation['has_parameters']:
+                                    constraints_output.scenarios[i] = corrected
+                                    corrected_count += 1
+                                    logger.info(
+                                        f"[extract_constraints] Corrected scenario '{corrected.name}': "
+                                        f"parameters={dict(corrected.parameters) if hasattr(corrected, 'parameters') else corrected.parameters}"
+                                    )
+                                else:
+                                    still_invalid.append({'scenario': corrected, 'warning': validation['warning']})
+                        
+                        retry_needed = still_invalid
+                        
+                        logger.info(
+                            f"[extract_constraints] Retry attempt {attempt + 1}: "
+                            f"Corrected {corrected_count}, still invalid {len(still_invalid)}"
+                        )
+                        
+                    except Exception as e:
+                        logger.error(f"[extract_constraints] Correction attempt {attempt + 1} failed: {e}")
+                        logger.error(f"[extract_constraints] Exception details: {type(e).__name__}: {str(e)}")
+                        logger.error(f"🔥 [CORRECTION] Exception during correction: {e}")
+                        print(f"🔥 [CORRECTION] Exception during correction: {e}")
+
+                        # Enhanced debugging for entity validation errors
+                        if "entities" in str(e) and "at least one entity" in str(e).lower():
+                            logger.error(f"🔥 [CORRECTION] Schema validation failed - LLM returned empty entities")
+                            logger.error(f"🔥 [CORRECTION] Original entities passed to LLM: {constraints_output.entities}")
+                            logger.error(f"🔥 [CORRECTION] Original metrics passed to LLM: {constraints_output.metrics}")
+                            logger.error(f"🔥 [CORRECTION] Check correction_prompt includes entities/metrics correctly")
+
+                        break
+            else:
+                # Log when correction loop is NOT entered
+                logger.error("🔥🔥🔥 [CORRECTION] ❌ NOT ENTERING CORRECTION LOOP!")
+                logger.error(f"  Reason: retry_needed={bool(retry_needed)} ({len(retry_needed)} items), MAX_RETRY_ATTEMPTS={MAX_RETRY_ATTEMPTS}")
+                print("🔥🔥🔥 [CORRECTION] ❌ NOT ENTERING CORRECTION LOOP!")
+                print(f"  Reason: retry_needed={bool(retry_needed)} ({len(retry_needed)} items), MAX_RETRY_ATTEMPTS={MAX_RETRY_ATTEMPTS}")
+
+            # Final validation logging
+            final_invalid = []
+            for scenario in constraints_output.scenarios:
+                validation = validator.validate_scenario(scenario)
+                if not validation['valid']:
+                    final_invalid.append(scenario.name)
+                    logger.error(
+                        f"[extract_constraints] FINAL: Scenario '{scenario.name}' still has empty parameters "
+                        f"after {MAX_RETRY_ATTEMPTS} retry attempts. Description: {scenario.description[:100]}"
+                    )
+
+            if final_invalid:
+                logger.warning(
+                    f"[extract_constraints] Parameter extraction incomplete for {len(final_invalid)} scenario(s): "
+                    f"{final_invalid}. Downstream formula discovery may be limited."
+                )
+
             # Convert ScenarioOutput (LLM format) to ScenarioDefinition (internal format)
             # This is CRITICAL: LLM returns ScenarioOutput with list parameters (Databricks-compatible)
             # We convert to ScenarioDefinition with dict parameters (ergonomic API)
@@ -227,19 +672,26 @@ Respond with valid JSON matching the schema above."""
 
         except Exception as e:
             # Enhanced error logging with detailed validation errors
+            print(f"❌ [_EXTRACT_WITH_LLM] Exception occurred: {type(e).__name__}: {e}")
+            logger.error(f"❌ [_EXTRACT_WITH_LLM] Exception occurred: {type(e).__name__}: {e}")
             logger.error(f"❌ Structured generation failed: {e}")
+            
+            import traceback
+            traceback.print_exc()
 
             # If it's a ValidationError from Pydantic, log the detailed errors
             if hasattr(e, '__class__') and 'ValidationError' in e.__class__.__name__:
                 try:
-                    import json
                     if hasattr(e, 'errors'):
-                        errors_detail = json.dumps(e.errors(), indent=2)
+                        errors_detail = json_module.dumps(e.errors(), indent=2)
                         logger.error(f"📋 Detailed validation errors:\n{errors_detail}")
+                        print(f"📋 Detailed validation errors:\n{errors_detail}")
                 except Exception as log_err:
                     logger.debug(f"Could not format validation errors: {log_err}")
 
             # Use pattern-based fallback (doesn't need LLM)
+            print("🔄 [_EXTRACT_WITH_LLM] Returning fallback constraints")
+            logger.error("🔄 [_EXTRACT_WITH_LLM] Returning fallback constraints")
             return self._create_fallback_constraints(query)
 
     def _create_fallback_constraints(self, query: str) -> QueryConstraints:

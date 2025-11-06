@@ -12,38 +12,83 @@ from typing import List, Dict, Any, Union, Optional
 
 class DataPoint(BaseModel):
     """
-    A single extracted data point from research observations.
+    Universal data point for extraction, calculation, and reporting.
 
-    Represents a quantitative or qualitative fact that can be used
-    in calculations or comparisons.
+    Combines technical provenance (for debugging/auditing) with
+    presentation metadata (for human-readable reports).
+
+    This unified model serves both:
+    - Metrics pipeline (extraction, calculation, provenance)
+    - Reporter (presentation, table generation, citations)
     """
+    # === Core Identity (REQUIRED) ===
     entity: str = Field(
         ...,
-        description="Abstract entity this data describes (e.g., 'Country A', 'Product X')"
+        description="What this describes (e.g., 'Spain', 'Product X')"
     )
     metric: str = Field(
         ...,
-        description="What attribute is measured (e.g., 'tax rate', 'market share')"
+        description="Human-readable metric name (e.g., 'effective tax rate')"
     )
-    value: Union[float, str] = Field(
-        ...,
-        description="Numeric or categorical value"
+
+    # === Value (Optional to support extraction failures) ===
+    value: Optional[Union[float, int, str]] = Field(
+        default=None,
+        description="The actual data value (None if extraction failed)"
     )
+
+    # === Presentation Metadata ===
     unit: str = Field(
         default="unitless",
-        description="Unit of measurement (e.g., 'USD', 'percent', 'count')"
-    )
-    source_observation_id: Optional[str] = Field(
-        default=None,
-        description="Traceability to source observation for citation"
+        description="Display unit (%, €, USD, etc.)"
     )
     confidence: float = Field(
         default=0.8,
-        description="Confidence level in this value based on source quality (0.0-1.0)"
+        ge=0.0,
+        le=1.0,
+        description="Confidence score [0.0-1.0]"
+    )
+
+    # === Technical Provenance (Optional - for metrics pipeline) ===
+    metric_id: Optional[str] = Field(
+        default=None,
+        description="Technical identifier from MetricSpec (e.g., 'net_take_home_spain')"
+    )
+    source_observations: List[str] = Field(
+        default_factory=list,
+        description="List of observation IDs used for extraction"
+    )
+    source_observation_id: Optional[str] = Field(
+        default=None,
+        description="Primary source observation ID (for single-source data)"
+    )
+    extraction_method: Optional[str] = Field(
+        default=None,
+        description="How extracted: 'pattern_match', 'llm_extract', 'calculate', 'pre_extracted'"
+    )
+    extraction_metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Detailed extraction metadata (llm_used, query, confidence_breakdown)"
+    )
+    error: Optional[str] = Field(
+        default=None,
+        description="Error message if extraction/calculation failed"
+    )
+
+    # === Reporter Fields (Optional) ===
+    source: Optional[str] = Field(
+        default=None,
+        description="Human-readable source description for citations"
+    )
+    notes: Optional[str] = Field(
+        default=None,
+        description="Additional context for humans"
     )
 
     class Config:
-        extra = "forbid"
+        # Changed from "forbid" to allow flexibility
+        # All fields are explicitly defined above
+        extra = "allow"
 
     @field_validator('confidence')
     @classmethod

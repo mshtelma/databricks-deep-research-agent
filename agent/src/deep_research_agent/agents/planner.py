@@ -39,6 +39,7 @@ from ..core.entity_validation import extract_entities_from_query, EntityValidato
 from ..core.message_utils import get_last_user_message
 from ..core.observation_models import observations_to_text_list
 from ..core.response_handlers import extract_text_from_response
+from ..core.llm_coverage_validator import LLMCoverageValidator
 from pydantic import BaseModel, Field
 
 
@@ -104,7 +105,18 @@ class PlannerAgent:
         # Initialize instruction analysis components
         self.instruction_analyzer = InstructionAnalyzer(llm=self.llm)
         self.requirement_validator = RequirementValidator()
-        
+
+        # Initialize coverage validator for Reflexion-based query refinement
+        query_coverage_config = self.config.get('query_coverage_validation', {})
+        self.coverage_validator = LLMCoverageValidator(
+            llm=self.llm,  # Use same LLM as planner (analytical tier)
+            config=query_coverage_config
+        )
+
+        # Reflexion configuration
+        self.enable_query_reflexion = query_coverage_config.get('enable_query_reflexion', True)
+        self.max_reflexion_iterations = query_coverage_config.get('max_reflexion_iterations', 2)
+
         # Memory tracking for circuit breaker
         self._initial_memory_mb = None
     
@@ -166,14 +178,40 @@ class PlannerAgent:
             return self._proceed_with_plan(state)
 
         # Generate plan
-        plan = self._generate_plan(state, config)
+        plan = await self._generate_plan(state, config)
 
         # CRITICAL: Extract QueryConstraints and store in state
         # This MUST happen here (not inside _generate_plan) so the state update persists
         original_query = state.get("original_user_query") or state.get("research_topic", "")
         try:
             from ..core.constraint_system import ConstraintExtractor, set_global_constraints
-            constraint_extractor = ConstraintExtractor(self.llm)
+
+            # CRITICAL FIX: Use structured LLM for constraint extraction
+            # The planner uses "analytical" tier but constraint extraction needs "structured" tier
+            # for better schema compliance (Claude Sonnet 4 vs GPT-OSS)
+            structured_llm = None
+            try:
+                # Try to get the structured tier LLM from model_manager if available
+                if hasattr(self, 'model_manager') and self.model_manager:
+                    structured_llm = self.model_manager.get_chat_model("structured")
+                    logger.info("🎯 PLANNER: Using structured tier LLM for constraint extraction")
+                elif 'model_manager' in state:
+                    # Try to get from state if passed there
+                    structured_llm = state['model_manager'].get_chat_model("structured")
+                    logger.info("🎯 PLANNER: Using structured tier LLM from state for constraint extraction")
+                else:
+                    # Try to create one from config
+                    from ..core.model_config_loader import create_model_manager_from_config
+                    temp_model_manager = create_model_manager_from_config()
+                    structured_llm = temp_model_manager.get_chat_model("structured")
+                    logger.info("🎯 PLANNER: Created structured tier LLM for constraint extraction")
+            except Exception as e:
+                logger.warning(f"Could not get structured LLM for constraint extraction: {e}, falling back to planner LLM")
+                structured_llm = self.llm
+
+            # Use structured LLM if available, otherwise fall back to planner's LLM
+            extraction_llm = structured_llm if structured_llm else self.llm
+            constraint_extractor = ConstraintExtractor(extraction_llm, config=self.config)
             constraints = constraint_extractor.extract_constraints(original_query, state)
             set_global_constraints(constraints)
 
@@ -272,7 +310,7 @@ class PlannerAgent:
         # Proceed with research
         return self._proceed_with_plan(state, plan)
     
-    def _generate_plan(
+    async def _generate_plan(
         self,
         state: EnhancedResearchState,
         config: Dict[str, Any]
@@ -342,7 +380,12 @@ class PlannerAgent:
         else:
             # Fallback to simple plan generation
             plan_dict = self._generate_simple_plan(state["research_topic"])
-        
+
+        # REFLEXION: Apply query coverage validation and refinement
+        # This happens AFTER initial plan generation but BEFORE creating Plan object
+        # Validates that search queries comprehensively cover all requirements
+        plan_dict = await self._apply_query_reflexion(plan_dict, state)
+
         # Create Plan object
         plan = self._dict_to_plan(plan_dict, state["research_topic"])
         
@@ -2775,3 +2818,469 @@ VALIDATION REQUIREMENTS:
 
         # Return best section only if score is above threshold
         return best_section if best_score > 0.1 else None
+
+    def _filter_country_entities(self, entities: List[str]) -> List[str]:
+        """
+        Filter entity list to keep only countries, exclude cities/orgs/concepts.
+
+        Heuristic filtering:
+        - Exclude known cities (Madrid, Paris, London, Frankfurt, Warsaw, Sofia, Zug)
+        - Exclude organizations (contains "Bank", "Central", "Organization")
+        - Exclude concepts (RSU, stock-related terms)
+        - Keep capitalized entities that look like countries
+
+        Args:
+            entities: Raw entity list from constraint extraction
+
+        Returns:
+            Filtered list containing only country-like entities
+        """
+        CITY_NAMES = {
+            "Madrid", "Paris", "London", "Frankfurt", "Warsaw", "Sofia",
+            "Zug", "Berlin", "Rome", "Brussels", "Amsterdam", "Vienna",
+            "Milan", "Munich", "Hamburg", "Barcelona", "Lyon", "Marseille"
+        }
+
+        ORGANIZATION_KEYWORDS = {"Bank", "Central", "Organization", "Corporation", "Company"}
+        CONCEPT_KEYWORDS = {"RSU", "Stock", "Equity", "Option", "Options", "Bonus"}
+
+        filtered = []
+        removed = []
+
+        for entity in entities:
+            # Skip empty or None entities
+            if not entity or not isinstance(entity, str):
+                continue
+
+            entity_stripped = entity.strip()
+
+            # Skip cities
+            if entity_stripped in CITY_NAMES:
+                removed.append(f"{entity_stripped} (city)")
+                continue
+
+            # Skip organizations
+            if any(kw in entity_stripped for kw in ORGANIZATION_KEYWORDS):
+                removed.append(f"{entity_stripped} (organization)")
+                continue
+
+            # Skip concepts
+            if entity_stripped in CONCEPT_KEYWORDS:
+                removed.append(f"{entity_stripped} (concept)")
+                continue
+
+            # Keep everything else (likely countries or valid entities)
+            filtered.append(entity_stripped)
+
+        logger.info(
+            f"🔍 Entity filtering: {len(entities)} → {len(filtered)} entities"
+        )
+        if removed:
+            logger.debug(f"Removed entities: {removed}")
+
+        return filtered
+
+    async def _apply_query_reflexion(
+        self,
+        plan_dict: Dict[str, Any],
+        state: EnhancedResearchState
+    ) -> Dict[str, Any]:
+        """
+        Apply Reflexion-based query refinement to plan steps.
+
+        Uses LLM-as-a-Judge pattern with instructional feedback to iteratively
+        improve search query coverage. Each step's queries are validated and
+        refined until they comprehensively cover all requirements.
+
+        Args:
+            plan_dict: Plan dictionary with steps and queries
+            state: Current research state (for constraint extraction)
+
+        Returns:
+            Updated plan_dict with refined queries
+
+        Raises:
+            ValueError: If constraint extraction is required but fails
+        """
+        if not self.enable_query_reflexion:
+            logger.info("Query reflexion disabled, skipping coverage validation")
+            return plan_dict
+
+        logger.info(
+            f"🔄 REFLEXION: Starting query refinement for {len(plan_dict.get('steps', []))} steps"
+        )
+
+        # Extract constraints if available (for entity/metric information)
+        entities = []
+        metrics = []
+
+        if "query_constraints" in state and state["query_constraints"]:
+            constraints = state["query_constraints"]
+            if hasattr(constraints, 'entities'):
+                raw_entities = constraints.entities
+                metrics = constraints.metrics
+            elif isinstance(constraints, dict):
+                raw_entities = constraints.get('entities', [])
+                metrics = constraints.get('metrics', [])
+        else:
+            # Try to extract entities from original query
+            original_query = state.get("original_user_query") or state.get("research_topic", "")
+            raw_entities = extract_entities_from_query(original_query, self.llm)
+            logger.info(f"🔍 REFLEXION: Extracted {len(raw_entities)} entities from query: {raw_entities}")
+
+        # Filter entities to keep only countries (exclude cities, orgs, concepts)
+        entities = self._filter_country_entities(raw_entities) if raw_entities else []
+
+        if not entities:
+            logger.warning("⚠️ REFLEXION: No valid country entities found after filtering, skipping coverage validation")
+            return plan_dict
+
+        # Apply reflexion to each step with queries
+        refined_steps = []
+        total_iterations = 0
+        total_refinements = 0
+
+        for step_idx, step in enumerate(plan_dict.get('steps', [])):
+            step_queries = step.get('search_queries', [])
+            step_description = step.get('description', '')
+
+            if not step_queries or not step.get('need_search', True):
+                logger.info(f"🔄 REFLEXION: Skipping step {step_idx+1} (no search needed)")
+                refined_steps.append(step)
+                continue
+
+            logger.info(
+                f"🔄 REFLEXION: Refining step {step_idx+1}/{len(plan_dict['steps'])}: "
+                f"{step.get('title', 'Untitled')[:50]}..."
+            )
+
+            # Apply reflexion loop to this step's queries
+            refined_result = await self._refine_step_queries_with_reflexion(
+                step_description=step_description,
+                current_queries=step_queries,
+                entities=entities,
+                metrics=metrics,
+                step_title=step.get('title', ''),
+                max_iterations=self.max_reflexion_iterations
+            )
+
+            # Update step with refined queries
+            step['search_queries'] = refined_result['queries']
+            refined_steps.append(step)
+
+            # Track statistics
+            total_iterations += refined_result['iterations']
+            if refined_result['was_refined']:
+                total_refinements += 1
+
+            logger.info(
+                f"  ✅ Step {step_idx+1} refined in {refined_result['iterations']} iteration(s), "
+                f"coverage_score={refined_result['final_coverage']:.2f}"
+            )
+
+        # Update plan with refined steps
+        plan_dict['steps'] = refined_steps
+
+        logger.info(
+            f"🎯 REFLEXION COMPLETE: Refined {total_refinements}/{len(refined_steps)} steps "
+            f"in {total_iterations} total iterations"
+        )
+
+        return plan_dict
+
+    async def _refine_step_queries_with_reflexion(
+        self,
+        step_description: str,
+        current_queries: List[str],
+        entities: List[str],
+        metrics: Optional[List[str]],
+        step_title: str,
+        max_iterations: int = 2
+    ) -> Dict[str, Any]:
+        """
+        Refine step queries using Reflexion loop.
+
+        Iteration loop:
+        1. Validate current queries with LLM-as-a-Judge
+        2. If coverage complete → done
+        3. If coverage incomplete → regenerate queries using feedback
+        4. Repeat until complete or max iterations
+
+        Args:
+            step_description: Full step description with requirements
+            current_queries: Current search queries to validate
+            entities: List of entities to cover
+            metrics: Optional list of metrics/topics
+            step_title: Step title for context
+            max_iterations: Maximum refinement iterations
+
+        Returns:
+            Dict with:
+                - queries: Final refined queries
+                - iterations: Number of iterations used
+                - was_refined: Whether queries were modified
+                - final_coverage: Final coverage score
+        """
+        iteration = 0
+        was_refined = False
+        final_coverage = 0.0
+
+        while iteration < max_iterations:
+            iteration += 1
+
+            logger.info(
+                f"  🔍 REFLEXION ITERATION {iteration}/{max_iterations}: "
+                f"Validating {len(current_queries)} queries..."
+            )
+
+            # Validate coverage
+            validation_result = await self.coverage_validator.validate_coverage(
+                step_description=step_description,
+                search_queries=current_queries,
+                entities=entities,
+                metrics=metrics
+            )
+
+            final_coverage = validation_result.coverage_score
+
+            if validation_result.is_complete:
+                logger.info(
+                    f"  ✅ Coverage complete (score={final_coverage:.2f}), "
+                    f"refinement finished in {iteration} iteration(s)"
+                )
+                break
+
+            # Coverage incomplete - regenerate queries using feedback
+            logger.info(
+                f"  ⚠️ Coverage incomplete (score={final_coverage:.2f}), "
+                f"regenerating queries with feedback..."
+            )
+
+            # Regenerate queries with instructional feedback
+            regenerated_queries = await self._regenerate_queries_with_feedback(
+                step_description=step_description,
+                current_queries=current_queries,
+                validation_result=validation_result,
+                entities=entities,
+                metrics=metrics,
+                step_title=step_title
+            )
+
+            # Update current queries for next iteration
+            current_queries = regenerated_queries
+            was_refined = True
+
+            logger.info(f"  🔄 Regenerated {len(regenerated_queries)} improved queries")
+
+        return {
+            'queries': current_queries,
+            'iterations': iteration,
+            'was_refined': was_refined,
+            'final_coverage': final_coverage
+        }
+
+    async def _regenerate_queries_with_feedback(
+        self,
+        step_description: str,
+        current_queries: List[str],
+        validation_result,  # CoverageValidationResult
+        entities: List[str],
+        metrics: Optional[List[str]],
+        step_title: str
+    ) -> List[str]:
+        """
+        Regenerate ALL queries using instructional feedback from judge.
+
+        This implements the Reflexion pattern: use feedback to regenerate
+        holistically, not just patch gaps.
+
+        Args:
+            step_description: Full step description
+            current_queries: Current queries that had coverage gaps
+            validation_result: Validation result with feedback
+            entities: List of entities
+            metrics: Optional metrics
+            step_title: Step title for context
+
+        Returns:
+            List of regenerated queries with better coverage
+        """
+        # Build refinement prompt with instructional feedback
+        prompt = self._build_refinement_prompt(
+            step_description=step_description,
+            current_queries=current_queries,
+            validation_result=validation_result,
+            entities=entities,
+            metrics=metrics,
+            step_title=step_title
+        )
+
+        # Call LLM to regenerate queries
+        messages = [
+            SystemMessage(content=self._get_regeneration_system_prompt()),
+            HumanMessage(content=prompt)
+        ]
+
+        logger.info(f"🔍 LLM_PROMPT [query_regeneration]: {prompt[:500]}...")
+
+        response = await self.llm.ainvoke(messages)
+
+        logger.info(f"🔍 LLM_RESPONSE [query_regeneration]: {str(response.content)[:500]}...")
+
+        # Parse response to extract queries
+        regenerated_queries = self._parse_regenerated_queries(response.content)
+
+        return regenerated_queries
+
+    def _get_regeneration_system_prompt(self) -> str:
+        """System prompt for query regeneration."""
+        return """You are a research query refinement specialist.
+
+Your role is to regenerate search queries based on instructional feedback from a coverage validator.
+
+Principles:
+1. **Learn from Feedback**: Understand WHY current queries are incomplete
+2. **Holistic Regeneration**: Regenerate ALL queries, don't just patch gaps
+3. **Follow Patterns**: Apply the recommended query patterns from feedback
+4. **Entity Coverage**: Ensure every entity has queries for every required topic
+5. **Specificity**: Make queries focused and actionable
+6. **Searchability**: Use terms that will actually find the needed information
+
+Output Format:
+Return a JSON object with a "queries" array containing the regenerated search queries:
+{
+  "queries": ["query 1", "query 2", ...]
+}
+
+Aim for 2-5 focused queries per entity-topic combination for critical requirements.
+"""
+
+    def _build_refinement_prompt(
+        self,
+        step_description: str,
+        current_queries: List[str],
+        validation_result,  # CoverageValidationResult
+        entities: List[str],
+        metrics: Optional[List[str]],
+        step_title: str
+    ) -> str:
+        """Build prompt for query regeneration with feedback."""
+
+        metrics_text = ""
+        if metrics:
+            metrics_text = f"\n**Required Metrics/Topics**: {', '.join(metrics)}\n"
+
+        current_queries_text = "\n".join([f"{i+1}. {q}" for i, q in enumerate(current_queries)])
+
+        gaps_text = ""
+        if validation_result.gaps:
+            gaps_text = "\n**COVERAGE GAPS**:\n"
+            for gap in validation_result.gaps[:5]:  # Show first 5 gaps
+                gaps_text += f"- Entity: {gap.entity}, Missing Topic: {gap.missing_topic}\n"
+                gaps_text += f"  Explanation: {gap.explanation}\n"
+                gaps_text += f"  Suggested: {gap.suggested_query}\n"
+
+        feedback_text = f"""
+**VALIDATOR FEEDBACK**:
+
+Overall: {validation_result.overall_feedback}
+
+Specific Improvements:
+{chr(10).join([f"- {imp}" for imp in validation_result.specific_improvements])}
+
+Pattern to Follow: {validation_result.pattern_to_follow}
+
+Example Correct Queries:
+{chr(10).join([f"- {ex}" for ex in validation_result.example_correct_queries])}
+"""
+
+        prompt = f"""Regenerate search queries for this research step based on coverage validation feedback.
+
+**STEP TITLE**: {step_title}
+
+**STEP DESCRIPTION**:
+{step_description}
+
+**ENTITIES TO COVER**: {', '.join(entities)}
+{metrics_text}
+**CURRENT QUERIES** (Coverage Score: {validation_result.coverage_score:.2f}):
+{current_queries_text}
+{gaps_text}
+{feedback_text}
+
+**YOUR TASK**:
+
+1. **Understand the Gaps**: Review why current queries are incomplete
+2. **Learn from Examples**: Study the example correct queries provided
+3. **Apply Pattern**: Follow the recommended query pattern
+4. **Regenerate ALL Queries**: Create a complete new set (don't just add to existing)
+5. **Ensure Coverage**: Every entity × topic combination must be covered
+
+**OUTPUT FORMAT** (JSON):
+{{
+  "queries": [
+    "regenerated query 1",
+    "regenerated query 2",
+    ...
+  ]
+}}
+
+Generate comprehensive queries that will find ALL required information for ALL entities.
+"""
+        return prompt
+
+    def _parse_regenerated_queries(self, response_content: Any) -> List[str]:
+        """Parse LLM response to extract regenerated queries."""
+        import json
+        import re
+
+        # Handle structured responses (reasoning models return [reasoning, text])
+        from ..core.llm_response_parser import extract_text_from_response
+        text = extract_text_from_response(response_content)
+
+        # Try to find JSON in code block
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if json_match:
+            text = json_match.group(1)
+
+        # Clean up text
+        text = text.strip()
+        if text.startswith('```json'):
+            text = text.replace('```json', '').replace('```', '').strip()
+        elif text.startswith('```'):
+            text = text.replace('```', '').strip()
+
+        try:
+            data = json.loads(text)
+            queries = data.get('queries', [])
+
+            # Validate queries
+            if not queries:
+                logger.warning("Regenerated queries list is empty, using fallback")
+                return self._fallback_queries()
+
+            # Clean queries (remove newlines, excessive whitespace)
+            cleaned_queries = []
+            for q in queries:
+                cleaned = ' '.join(q.split())  # Remove all excessive whitespace
+                if cleaned and len(cleaned) < 200:  # Reasonable length
+                    cleaned_queries.append(cleaned)
+
+            if not cleaned_queries:
+                logger.warning("No valid queries after cleaning, using fallback")
+                return self._fallback_queries()
+
+            return cleaned_queries
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse regenerated queries as JSON: {e}")
+            logger.error(f"Response text: {text[:500]}...")
+            return self._fallback_queries()
+
+    def _fallback_queries(self) -> List[str]:
+        """Generate fallback queries when parsing fails."""
+        return [
+            "research topic overview 2025",
+            "recent developments 2025",
+            "key findings 2025"
+        ]

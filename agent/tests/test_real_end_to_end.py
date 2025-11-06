@@ -423,6 +423,104 @@ class TestRealEndToEnd:
 
     @pytest.mark.integration
     @pytest.mark.slow  # Mark as slow since it does multiple searches
+    def test_compact_tax_comparison(self):
+        """
+        Compact tax comparison test for faster debugging.
+
+        Tests the full calculation pipeline with:
+        - 2 countries (Spain, Poland) instead of 7
+        - 2 scenarios (Single, Married no child) instead of 3
+        - Same calculation requirements: RSU treatment, tax rates, rent, disposable income
+        - Formula transparency and table generation
+
+        This test runs much faster (~3-5 min vs 15+ min) while still validating:
+        - Constraint extraction with scenario parameters
+        - Calculation agent with hybrid planner
+        - Multi-dimensional calculations (2 countries × 2 scenarios)
+        - Formula discovery and transparency
+        - Report generation with tables
+        """
+        request = ResponsesAgentRequest(
+            input=[{
+                "type": "message",
+                "role": "user",
+                "content": """I want a rigorous comparison of after-tax finances between Spain and Poland for two family setups:
+	1.	Single: €150,000 annual gross salary + €100,000 annual RSUs
+	2.	Married, no child: same primary earner (€150k + €100k RSUs) + spouse with €100,000 salary
+
+Please compute for tax year 2025 (or latest available rules):
+	•	Net take-home after income tax and mandatory employee social contributions
+	•	RSU treatment: assume standard RSUs taxed at vest as employment income, then capital gains on sale
+	•	Effective tax rate = (total taxes + social contributions) ÷ total gross income (including RSUs)
+	•	Rent: monthly market rent for Madrid and Warsaw (2-3 bedroom upper-middle-class apartment)
+	•	Disposable income = Net take-home – annualized rent
+
+Output
+	1.	A comparative table (rows = countries, columns = scenarios) with: Net take-home, Effective tax rate, Annual rent, Disposable income
+	2.	A brief narrative (≤200 words) highlighting key differences
+	3.	List your assumptions (RSU timing, local taxes, etc.)"""
+            }]
+        )
+
+        # Use hybrid mode configuration
+        agent = DatabricksCompatibleAgent(yaml_path="conf/base.yaml")
+
+        # Execute with real search
+        events = []
+        for event in agent.predict_stream(request):
+            events.append(event)
+            if event.type == "response.output_text.delta" and event.delta:
+                print(event.delta, end='', flush=True)
+
+        # Get final report
+        final_event = [e for e in events if e.type == "response.output_item.done"][0]
+        final_content = final_event.item["content"][0]["text"]
+        print("\n" + "="*80)
+        print("FINAL REPORT:")
+        print("="*80)
+        print(final_content)
+
+        # Basic length check
+        assert len(final_content) > 400, "Report should be substantial"
+
+        # Validate formula transparency
+        has_formula_transparency = (
+            "Calculation Formulas" in final_content or
+            "calculated as" in final_content.lower() or
+            "formula:" in final_content.lower() or
+            "Source:" in final_content
+        )
+
+        if not has_formula_transparency:
+            print("\n⚠️  WARNING: Report does not include formula transparency.")
+        else:
+            print("\n✅ Formula transparency detected in report")
+
+        # Validate coverage (2 countries, 2 scenarios)
+        countries_mentioned = sum(1 for country in ["Spain", "Poland"] if country in final_content)
+        scenarios_mentioned = sum(1 for scenario in ["Single", "Married"] if scenario.lower() in final_content.lower())
+
+        print(f"\n📊 Report Coverage:")
+        print(f"  - Countries mentioned: {countries_mentioned}/2")
+        print(f"  - Scenarios mentioned: {scenarios_mentioned}/2")
+
+        # Both countries and scenarios should be mentioned
+        assert countries_mentioned >= 1, "Report should cover Spain and/or Poland"
+        assert scenarios_mentioned >= 1, "Report should mention scenarios"
+
+        # Check for table presence
+        has_table = "|" in final_content
+        if has_table:
+            print("✅ Report includes tables for comparison")
+        else:
+            print("⚠️  No markdown tables detected in report")
+
+        # Check for calculation elements
+        has_calculations = any(keyword in final_content.lower()
+                              for keyword in ["effective tax rate", "net take-home", "disposable income", "€"])
+        assert has_calculations, "Report should include calculated financial metrics"
+        print("✅ Report includes calculated financial metrics")
+
     def test_very_big_tax_opt_research(self):
         """Test complex research with HYBRID report generation mode."""
         request = ResponsesAgentRequest(

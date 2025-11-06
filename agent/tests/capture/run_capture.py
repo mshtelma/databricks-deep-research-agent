@@ -116,6 +116,25 @@ PROMPTS: List[Tuple[str, str, str]] = [
      2) married couple with one child (3 years old)""",
      "complex"),
 
+    # COMPACT tax comparison - 2 countries, 2 scenarios (faster debugging)
+    ("tax_comparison_compact",
+     """I want a rigorous comparison of after-tax finances between Spain and Poland for two family setups:
+	1.	Single: €150,000 annual gross salary + €100,000 annual RSUs
+	2.	Married, no child: same primary earner (€150k + €100k RSUs) + spouse with €100,000 salary
+
+Please compute for tax year 2025 (or latest available rules):
+	•	Net take-home after income tax and mandatory employee social contributions
+	•	RSU treatment: assume standard RSUs taxed at vest as employment income, then capital gains on sale
+	•	Effective tax rate = (total taxes + social contributions) ÷ total gross income (including RSUs)
+	•	Rent: monthly market rent for Madrid and Warsaw (2-3 bedroom upper-middle-class apartment)
+	•	Disposable income = Net take-home – annualized rent
+
+Output
+	1.	A comparative table (rows = countries, columns = scenarios) with: Net take-home, Effective tax rate, Annual rent, Disposable income
+	2.	A brief narrative (≤200 words) highlighting key differences
+	3.	List your assumptions (RSU timing, local taxes, etc.)""",
+     "complex"),
+
     # VERY BIG real-world tax comparison - 7 countries, 3 scenarios, extremely detailed
     ("tax_comparison_europe_very_big",
      """I want a rigorous, apples-to-apples comparison of after-tax finances across Spain, France, United Kingdom, Switzerland (low-tax canton such as Zug), Germany, Poland, and Bulgaria for three family setups:

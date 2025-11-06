@@ -107,6 +107,15 @@ agents:
     quality_threshold: 0.5
     enable_deep_thinking: false
 
+    # Query Coverage Validation - Reflexion-based query refinement
+    # Uses LLM-as-a-Judge pattern with instructional feedback to ensure
+    # search queries comprehensively cover all requirements from step descriptions
+    query_coverage_validation:
+      enable_query_reflexion: true  # Enable Reflexion loop for query refinement
+      max_reflexion_iterations: 2   # Max iterations per step (validation → refinement)
+      min_coverage_score: 0.90      # Minimum coverage score to accept queries
+      enable_query_coverage_validation: true  # Master switch for validation
+
   researcher:
     enabled: true
     model: analytical  # Use analytical model for research
@@ -241,6 +250,11 @@ metrics:
     use_legacy_llm_planner: false  # CRITICAL: Use hybrid planner (TRUE) or legacy LLM planner (FALSE). Default=false (hybrid is preferred)
     force_hybrid_planner: true  # CRITICAL: Always use hybrid planner regardless of query_constraints availability
 
+  # Scenario parameter correction (NEW - automated parameter extraction retry)
+  scenario_parameter_correction:
+    max_retry_attempts: 3  # Number of LLM retry attempts when scenario parameters are empty/incomplete
+    enable_correction: true  # Master switch for automated parameter correction
+
   # Multi-dimensional calculation support (NEW - Phase 1)
   multi_dimensional:
     enabled: true  # Enable multi-dimensional calculations (e.g., country × scenario × metric)
@@ -264,6 +278,11 @@ metrics:
     use_llm_extraction: true  # Tier 2: LLM-based formula extraction
     use_synthesis: true  # Tier 3: Formula synthesis from examples
     min_confidence_threshold: 0.5  # Minimum confidence to use extracted formula
+    # NEW: Iterative Multi-Pass Discovery Configuration
+    enable_iterative: true  # Feature flag for iterative discovery (rollback: set to false)
+    max_iterations: 3  # Maximum iterations for formula discovery
+    iteration_timeout_seconds: 30  # Timeout for entire discovery process
+    detailed_logging: true  # Enable detailed iteration logging (disable in prod for less verbosity)
 
   # Dedicated code-generation model and repair settings
   codegen:

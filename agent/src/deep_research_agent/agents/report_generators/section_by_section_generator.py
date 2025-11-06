@@ -41,6 +41,59 @@ from .utilities import ReporterUtilities
 logger = get_logger(__name__)
 
 
+# === CRITICAL TABLE FORMATTING INSTRUCTIONS ===
+# Added to address markdown table rendering issues (section-by-section fallback)
+# When hybrid mode unavailable, LLM-generated tables need explicit formatting guidance
+
+TABLE_FORMAT_REQUIREMENTS = """
+═══════════════════════════════════════════════════════════════════════
+⚠️  CRITICAL: MARKDOWN TABLE FORMATTING REQUIREMENT ⚠️
+═══════════════════════════════════════════════════════════════════════
+
+When presenting tabular data, you MUST use proper markdown table syntax.
+Tables without correct pipe delimiters will NOT render correctly!
+
+✅ CORRECT FORMAT (will render properly):
+┌─────────────────────────────────────────────────────────────────────┐
+│ | Country | Net Take-Home (€) | Effective Tax Rate | Annual Rent |  │
+│ |---------|-------------------|-----------------------|-------------|  │
+│ | Spain   | 162,750          | 34.9%                | 23,400      |  │
+│ | France  | 158,200          | 36.7%                | 28,800      |  │
+│ | Germany | 155,400          | 37.8%                | 31,200      |  │
+└─────────────────────────────────────────────────────────────────────┘
+
+❌ INCORRECT FORMAT (will NOT render - looks like plain text):
+┌─────────────────────────────────────────────────────────────────────┐
+│ Country  Net Take-Home (€)  Effective Tax Rate  Annual Rent         │
+│ Spain    162,750            34.9%               23,400               │
+│ France   158,200            36.7%               28,800               │
+│ Germany  155,400            37.8%               31,200               │
+└─────────────────────────────────────────────────────────────────────┘
+
+MANDATORY RULES:
+1. Start and end EVERY row with pipe character (|)
+2. Separate columns with single pipe (|)
+3. Add separator row with dashes after header row
+4. Example separator: |----------|----------|----------|
+5. Align pipes vertically for readability (optional but recommended)
+
+EXAMPLE CONSTRUCTION PROCESS:
+Step 1: Write header row with pipes
+   | Header 1 | Header 2 | Header 3 |
+
+Step 2: Add separator row (CRITICAL - must have dashes between pipes)
+   |----------|----------|----------|
+
+Step 3: Add data rows with pipes
+   | Data 1   | Data 2   | Data 3   |
+   | Data 4   | Data 5   | Data 6   |
+
+IMPORTANT: If you include ANY tables in your response, they MUST follow
+this format exactly. Tables are only useful if they render correctly!
+═══════════════════════════════════════════════════════════════════════
+""".strip()
+
+
 class SectionBySectionGenerator(BaseReportGenerator):
     """
     Tier 2: Section-by-section report generation.
@@ -512,9 +565,10 @@ class SectionBySectionGenerator(BaseReportGenerator):
         # Build section-specific instructions
         instructions = [
             f"Generate comprehensive content for the '{section_name}' section",
+            "⚠️  CRITICAL: If you create ANY tables, use markdown pipe format with separator row (see detailed requirements above)",
             "Use all available observations and data",
             "Create tables for comparisons or quantitative data",
-            "Ensure all tables have proper markdown syntax (| --- | separator)",
+            "Every table MUST start rows with | and have |---|---| separator after header",
             "Cite sources where appropriate",
             "Be specific and data-driven",
         ]
@@ -568,8 +622,8 @@ class SectionBySectionGenerator(BaseReportGenerator):
                 content=(
                     "You are a research report writer. Generate comprehensive, well-structured "
                     "section content with proper markdown formatting. Use tables to present "
-                    "comparative data. Cite sources. Be specific and data-driven. "
-                    "Ensure all tables have proper markdown syntax with separator rows (| --- |)."
+                    "comparative data. Cite sources. Be specific and data-driven.\n\n"
+                    f"{TABLE_FORMAT_REQUIREMENTS}"
                 )
             ),
             HumanMessage(content=prompt)

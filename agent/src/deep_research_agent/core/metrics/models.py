@@ -8,29 +8,13 @@ from typing import Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel, Field, field_validator
 
-from ..report_generation.models import TableSpec
+from ..report_generation.models import TableSpec, DataPoint  # Import unified DataPoint
 
-
-class DataPoint(BaseModel):
-    """A single extracted or calculated data point with full provenance."""
-
-    metric_id: str = Field(description="Unique identifier for this metric")
-    value: Optional[float] = Field(default=None, description="Extracted or calculated value")
-    unit: str = Field(default="", description="Unit of measurement")
-    confidence: float = Field(default=0.0, description="Confidence score (0.0-1.0)")
-    source_observations: List[str] = Field(
-        default_factory=list,
-        description="IDs of source observations"
-    )
-    extraction_method: str = Field(
-        default="unknown",
-        description="Method used to obtain value (llm_structured, calculation, etc.)"
-    )
-    extraction_metadata: Dict[str, Any] = Field(
-        default_factory=dict,
-        description="Additional metadata about extraction"
-    )
-    error: Optional[str] = Field(default=None, description="Error message if extraction failed")
+# NOTE: DataPoint class removed - now using unified DataPoint from report_generation.models
+# The unified DataPoint supports BOTH metrics pipeline AND reporter needs:
+# - Metrics fields: metric_id, source_observations, extraction_method, extraction_metadata, error
+# - Reporter fields: entity, metric, unit, confidence, source, notes
+# All fields are Optional except entity and metric (which must be populated by calculation_agent)
 
 
 class ExtractedMetric(BaseModel):

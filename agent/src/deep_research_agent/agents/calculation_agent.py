@@ -6,6 +6,7 @@ during planning and executing it to extract/calculate all required metrics.
 """
 
 import logging
+import asyncio
 from typing import Dict, Any, List, Optional, Union
 
 from ..core import get_logger
@@ -23,6 +24,106 @@ from ..core.metrics import (
 )
 
 logger = get_logger(__name__)
+
+
+def _parse_entity_and_metric(spec: MetricSpec) -> tuple[str, str]:
+    """
+    Extract entity and metric from MetricSpec.
+
+    Args:
+        spec: MetricSpec with data_id in format "{metric}_{entity}"
+              or tags containing entity info
+
+    Returns:
+        Tuple of (entity, metric_name)
+
+    Examples:
+        "net_income_spain" -> ("Spain", "net income")
+        "effective_tax_rate_france" -> ("France", "effective tax rate")
+    """
+    # Try extracting from tags first (most reliable)
+    if spec.tags:
+        # Look for entity-related tags
+        entity = (
+            spec.tags.get('country') or
+            spec.tags.get('entity') or
+            spec.tags.get('region') or
+            spec.tags.get('company')
+        )
+        metric = spec.tags.get('metric')
+
+        if entity and metric:
+            return entity.title(), metric.replace('_', ' ')
+
+    # Fallback: Parse data_id (format: "{metric}_{entity}")
+    # Find last underscore to split entity from metric
+    data_id = spec.data_id
+    parts = data_id.rsplit('_', 1)  # Split from right, max 1 split
+
+    if len(parts) == 2:
+        metric_part, entity_part = parts
+        # Clean up formatting
+        entity = entity_part.replace('_', ' ').title()
+        metric = metric_part.replace('_', ' ')
+        return entity, metric
+
+    # Last resort: use data_id as metric, "Unknown" as entity
+    return "Unknown", data_id.replace('_', ' ')
+
+
+def parse_scenario_string(scenario_str: str) -> Dict[str, Any]:
+    """
+    Parse a scenario string representation back into a dictionary.
+
+    Example input:
+    "id='s1' name='Single' description='...' parameters={'salary': 150000, 'rsu': 100000}"
+
+    Returns properly structured dict with parameters as list of [key, value] pairs.
+    """
+    import re
+    import ast
+
+    result = {}
+
+    # Extract id
+    id_match = re.search(r"id='([^']+)'", scenario_str)
+    if id_match:
+        result['id'] = id_match.group(1)
+
+    # Extract name
+    name_match = re.search(r"name='([^']+)'", scenario_str)
+    if name_match:
+        result['name'] = name_match.group(1)
+
+    # Extract description
+    desc_match = re.search(r"description='((?:[^'\\]|\\.)*)'", scenario_str)
+    if desc_match:
+        result['description'] = desc_match.group(1)
+
+    # Extract parameters - THE CRITICAL PART!
+    params_dict_match = re.search(r"parameters=(\{[^}]+\})", scenario_str)
+    params_list_match = re.search(r"parameters=(\[\[.*?\]\])", scenario_str)
+
+    if params_dict_match:
+        # Dictionary format: {'salary': 150000, 'rsu': 100000}
+        params_str = params_dict_match.group(1)
+        try:
+            params = ast.literal_eval(params_str)
+            # Convert dict to list format for consistency
+            result['parameters'] = [[k, v] for k, v in params.items()]
+        except (ValueError, SyntaxError):
+            result['parameters'] = []
+    elif params_list_match:
+        # List format: [['salary', 150000], ['rsu', 100000]]
+        params_str = params_list_match.group(1)
+        try:
+            result['parameters'] = ast.literal_eval(params_str)
+        except (ValueError, SyntaxError):
+            result['parameters'] = []
+    else:
+        result['parameters'] = []
+
+    return result
 
 
 def _ensure_pydantic_constraints(constraints: Union[Dict, ConstraintsOutput, None]) -> Optional[ConstraintsOutput]:
@@ -56,17 +157,39 @@ def _ensure_pydantic_constraints(constraints: Union[Dict, ConstraintsOutput, Non
                 f"  - scenarios: {constraints.get('scenarios', [])}"
             )
 
-            # Handle scenarios field - may be strings in fixtures, need to be dicts/objects
+            # Handle scenarios field - parse strings instead of discarding!
             scenarios = constraints.get('scenarios', [])
             if scenarios and isinstance(scenarios, list) and len(scenarios) > 0:
                 # Check if first element is string (fixture artifact)
                 if isinstance(scenarios[0], str):
-                    logger.warning(
-                        f"⚠️ [PERIMETER] scenarios field contains strings (fixture artifact), "
-                        f"converting to empty list. Scenarios can be reconstructed from observations."
-                    )
+                    logger.info(f"📝 [PERIMETER] Parsing {len(scenarios)} scenario strings from fixture")
+
+                    # Parse each scenario string
+                    parsed_scenarios = []
+                    for scenario_str in scenarios:
+                        parsed = parse_scenario_string(scenario_str)
+
+                        # Log what we extracted
+                        logger.info(
+                            f"  ✅ Parsed scenario '{parsed.get('name', 'Unknown')}': "
+                            f"{len(parsed.get('parameters', []))} parameters"
+                        )
+
+                        if parsed.get('parameters'):
+                            for param in parsed['parameters']:
+                                if isinstance(param, list) and len(param) >= 2:
+                                    logger.debug(f"    - {param[0]}: {param[1]}")
+
+                        parsed_scenarios.append(parsed)
+
+                    # Replace string scenarios with parsed dicts
                     constraints_copy = dict(constraints)
-                    constraints_copy['scenarios'] = []
+                    constraints_copy['scenarios'] = parsed_scenarios
+
+                    logger.info(
+                        f"✅ [PERIMETER] Successfully parsed {len(parsed_scenarios)} scenarios "
+                        f"with parameters intact!"
+                    )
                 else:
                     constraints_copy = constraints
             else:
@@ -238,7 +361,21 @@ class CalculationAgent:
                         f"  - Metrics: {[m.name if hasattr(m, 'name') else str(m) for m in (constraints.metrics if hasattr(constraints, 'metrics') else [])]}"
                     )
 
+                logger.error(
+                    f"\n{'='*150}\n"
+                    f"🚨🚨🚨 [CALC AGENT] ABOUT TO CALL create_unified_plan_hybrid() 🚨🚨🚨\n"
+                    f"{'='*150}\n"
+                    f"  - Function: {create_unified_plan_hybrid}\n"
+                    f"  - Function module: {create_unified_plan_hybrid.__module__}\n"
+                    f"  - Function file: {create_unified_plan_hybrid.__code__.co_filename if hasattr(create_unified_plan_hybrid, '__code__') else 'N/A'}\n"
+                    f"  - Is coroutine: {asyncio.iscoroutinefunction(create_unified_plan_hybrid)}\n"
+                    f"{'='*150}\n"
+                )
                 logger.info("🔍 [CALC AGENT] Calling create_unified_plan_hybrid() directly (simplified architecture)...")
+
+                print("\n" + "="*150)
+                print("🚨 CRITICAL: About to await create_unified_plan_hybrid()")
+                print("="*150 + "\n")
 
                 unified_plan = await create_unified_plan_hybrid(
                     user_request=state.get('research_topic', ''),
@@ -247,6 +384,18 @@ class CalculationAgent:
                     llm=self.extraction_llm
                 )
 
+                print("\n" + "="*150)
+                print(f"🚨 CRITICAL: create_unified_plan_hybrid() RETURNED: {type(unified_plan)}")
+                print("="*150 + "\n")
+
+                logger.error(
+                    f"\n{'='*150}\n"
+                    f"🚨🚨🚨 [CALC AGENT] create_unified_plan_hybrid() RETURNED 🚨🚨🚨\n"
+                    f"{'='*150}\n"
+                    f"  - Return type: {type(unified_plan)}\n"
+                    f"  - Has metric_specs: {hasattr(unified_plan, 'metric_specs')}\n"
+                    f"{'='*150}\n"
+                )
                 logger.info("🔍 [CALC AGENT] create_unified_plan_hybrid() returned successfully")
 
                 # Store in state for Reporter to use
@@ -405,7 +554,7 @@ class CalculationAgent:
         # This enables StateManager.hydrate_state() to convert dict → CalculationContext object
         # See: core/report_generation/models.py:CalculationContext for schema definition
         return {
-            "extracted_data": all_data,      # Changed from "data_points" to match CalculationContext
+            "extracted_data": [dp.model_dump() for dp in all_data.values()],  # ✅ FIX: Convert DataPoint objects to dicts
             "calculations": [],              # Required field (formulas/derived calculations)
             "key_comparisons": [],           # Required field (comparison entries for tables)
             "summary_insights": [],          # Required field (high-level insights)
@@ -446,11 +595,17 @@ class CalculationAgent:
                     )
 
                     # Create DataPoint from pre-extracted value
+                    entity, metric = _parse_entity_and_metric(spec)
                     results[spec.data_id] = DataPoint(
-                        metric_id=spec.data_id,
+                        # REQUIRED fields for reporter schema
+                        entity=entity,
+                        metric=metric,
                         value=spec.value,
-                        unit=spec.unit or "",
+                        # Presentation metadata
+                        unit=spec.unit or "unitless",
                         confidence=spec.confidence,
+                        # Technical provenance (optional)
+                        metric_id=spec.data_id,
                         source_observations=[spec.observation_id] if spec.observation_id else [],
                         extraction_method='pre_extracted',
                         extraction_metadata={
@@ -486,11 +641,17 @@ class CalculationAgent:
                 else:
                     # No suitable observation found
                     logger.warning(f"No observation found for {spec.data_id}")
+                    entity, metric = _parse_entity_and_metric(spec)
                     results[spec.data_id] = DataPoint(
-                        metric_id=spec.data_id,
+                        # REQUIRED fields
+                        entity=entity,
+                        metric=metric,
                         value=None,
-                        unit=spec.unit,
+                        # Presentation metadata
+                        unit=spec.unit or "unitless",
                         confidence=0.0,
+                        # Technical provenance
+                        metric_id=spec.data_id,
                         source_observations=[],
                         extraction_method='no_observation',
                         error="No suitable observation found"
@@ -498,11 +659,17 @@ class CalculationAgent:
 
             except Exception as e:
                 logger.error(f"Error extracting {spec.data_id}: {e}", exc_info=True)
+                entity, metric = _parse_entity_and_metric(spec)
                 results[spec.data_id] = DataPoint(
-                    metric_id=spec.data_id,
+                    # REQUIRED fields
+                    entity=entity,
+                    metric=metric,
                     value=None,
-                    unit=spec.unit,
+                    # Presentation metadata
+                    unit=spec.unit or "unitless",
                     confidence=0.0,
+                    # Technical provenance
+                    metric_id=spec.data_id,
                     source_observations=[],
                     extraction_method='error',
                     error=str(e)
@@ -533,11 +700,17 @@ class CalculationAgent:
                     logger.warning(
                         f"Calculate spec {spec.data_id} has no formula, skipping"
                     )
+                    entity, metric = _parse_entity_and_metric(spec)
                     results[spec.data_id] = DataPoint(
-                        metric_id=spec.data_id,
+                        # REQUIRED fields
+                        entity=entity,
+                        metric=metric,
                         value=None,
-                        unit=spec.unit,
+                        # Presentation metadata
+                        unit=spec.unit or "unitless",
                         confidence=0.0,
+                        # Technical provenance
+                        metric_id=spec.data_id,
                         source_observations=[],
                         extraction_method='missing_formula',
                         error="No formula provided"
@@ -568,11 +741,17 @@ class CalculationAgent:
                     logger.warning(
                         f"Cannot calculate {spec.data_id}: missing inputs {missing_inputs}"
                     )
+                    entity, metric = _parse_entity_and_metric(spec)
                     results[spec.data_id] = DataPoint(
-                        metric_id=spec.data_id,
+                        # REQUIRED fields
+                        entity=entity,
+                        metric=metric,
                         value=None,
-                        unit=spec.unit,
+                        # Presentation metadata
+                        unit=spec.unit or "unitless",
                         confidence=0.0,
+                        # Technical provenance
+                        metric_id=spec.data_id,
                         source_observations=[],
                         extraction_method='missing_inputs',
                         error=f"Missing inputs: {missing_inputs}"
@@ -591,11 +770,17 @@ class CalculationAgent:
                         elif input_id in results:
                             source_obs.extend(results[input_id].source_observations)
 
+                    entity, metric = _parse_entity_and_metric(spec)
                     results[spec.data_id] = DataPoint(
-                        metric_id=spec.data_id,
+                        # REQUIRED fields
+                        entity=entity,
+                        metric=metric,
                         value=evaluation.value,
-                        unit=spec.unit,
+                        # Presentation metadata
+                        unit=spec.unit or "unitless",
                         confidence=0.95,  # High confidence for successful calculation
+                        # Technical provenance
+                        metric_id=spec.data_id,
                         source_observations=list(set(source_obs)),  # Deduplicate
                         extraction_method='calculation',
                         extraction_metadata={
@@ -612,11 +797,17 @@ class CalculationAgent:
                     logger.error(
                         f"Calculation failed for {spec.data_id}: {evaluation.error}"
                     )
+                    entity, metric = _parse_entity_and_metric(spec)
                     results[spec.data_id] = DataPoint(
-                        metric_id=spec.data_id,
+                        # REQUIRED fields
+                        entity=entity,
+                        metric=metric,
                         value=None,
-                        unit=spec.unit,
+                        # Presentation metadata
+                        unit=spec.unit or "unitless",
                         confidence=0.0,
+                        # Technical provenance
+                        metric_id=spec.data_id,
                         source_observations=[],
                         extraction_method='calculation_failed',
                         error=evaluation.error
@@ -627,11 +818,17 @@ class CalculationAgent:
                     f"Error calculating {spec.data_id}: {e}",
                     exc_info=True
                 )
+                entity, metric = _parse_entity_and_metric(spec)
                 results[spec.data_id] = DataPoint(
-                    metric_id=spec.data_id,
+                    # REQUIRED fields
+                    entity=entity,
+                    metric=metric,
                     value=None,
-                    unit=spec.unit,
+                    # Presentation metadata
+                    unit=spec.unit or "unitless",
                     confidence=0.0,
+                    # Technical provenance
+                    metric_id=spec.data_id,
                     source_observations=[],
                     extraction_method='error',
                     error=str(e)
