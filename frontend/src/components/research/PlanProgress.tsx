@@ -1,3 +1,4 @@
+import * as React from 'react';
 import { cn } from '@/lib/utils';
 
 interface PlanStep {
@@ -5,37 +6,93 @@ interface PlanStep {
   title: string;
   description?: string;
   status: 'pending' | 'in_progress' | 'completed' | 'skipped';
+  step_type?: 'research' | 'analysis';
+  needs_search?: boolean;
+  observation?: string | null;
 }
 
 interface Plan {
   title?: string;
   reasoning?: string;
+  thought?: string;
   steps: PlanStep[];
+  iteration?: number;
 }
 
 interface PlanProgressProps {
   plan: Plan | null;
   currentStepIndex?: number;
+  showDetails?: boolean;
   className?: string;
 }
 
 export function PlanProgress({
   plan,
   currentStepIndex = -1,
+  showDetails = false,
   className,
 }: PlanProgressProps) {
+  const [expandedSteps, setExpandedSteps] = React.useState<Set<number>>(new Set());
+
   if (!plan || plan.steps.length === 0) {
     return null;
   }
 
+  const toggleStep = (index: number) => {
+    setExpandedSteps((prev) => {
+      const next = new Set(prev);
+      if (next.has(index)) {
+        next.delete(index);
+      } else {
+        next.add(index);
+      }
+      return next;
+    });
+  };
+
+  // Calculate progress
+  const completedCount = plan.steps.filter((s) => s.status === 'completed').length;
+  const progressPercent = (completedCount / plan.steps.length) * 100;
+
   return (
     <div data-testid="reasoning-panel" className={cn('rounded-lg border bg-card p-4', className)}>
-      <h3 data-testid="research-status" className="font-semibold text-sm mb-3 flex items-center gap-2">
-        <PlanIcon className="w-4 h-4" />
-        Research Plan
-        {plan.title && <span className="font-normal text-muted-foreground">- {plan.title}</span>}
-      </h3>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <h3 data-testid="research-status" className="font-semibold text-sm flex items-center gap-2">
+          <PlanIcon className="w-4 h-4" />
+          Research Plan
+          {plan.iteration && plan.iteration > 1 && (
+            <span className="text-xs font-normal text-muted-foreground">
+              (Iteration {plan.iteration})
+            </span>
+          )}
+        </h3>
+        <span className="text-xs text-muted-foreground">
+          {completedCount}/{plan.steps.length}
+        </span>
+      </div>
 
+      {/* Progress bar */}
+      <div className="h-1.5 bg-muted rounded-full overflow-hidden mb-3">
+        <div
+          className="h-full bg-primary transition-all duration-300"
+          style={{ width: `${progressPercent}%` }}
+        />
+      </div>
+
+      {/* Plan title and reasoning */}
+      {(plan.title || plan.reasoning || plan.thought) && showDetails && (
+        <div className="mb-3 p-2 bg-muted/50 rounded text-xs">
+          {plan.title && <p className="font-medium">{plan.title}</p>}
+          {(plan.reasoning || plan.thought) && (
+            <p className="text-muted-foreground mt-1 line-clamp-3">
+              {plan.reasoning || plan.thought}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Steps */}
       <div className="space-y-2">
         {plan.steps.map((step, index) => (
           <StepItem
@@ -43,6 +100,9 @@ export function PlanProgress({
             step={step}
             stepIndex={index}
             isActive={index === currentStepIndex}
+            isExpanded={expandedSteps.has(index)}
+            onToggle={() => toggleStep(index)}
+            showDetails={showDetails}
           />
         ))}
       </div>
@@ -54,34 +114,80 @@ interface StepItemProps {
   step: PlanStep;
   stepIndex: number;
   isActive: boolean;
+  isExpanded: boolean;
+  onToggle: () => void;
+  showDetails: boolean;
 }
 
-function StepItem({ step, stepIndex, isActive }: StepItemProps) {
+function StepItem({ step, stepIndex, isActive, isExpanded, onToggle, showDetails }: StepItemProps) {
+  const hasExpandableContent = showDetails && (step.description || step.observation);
+
   return (
     <div
       data-testid={`reasoning-step-${stepIndex}`}
       className={cn(
-        'flex items-start gap-3 p-2 rounded-md transition-colors',
-        isActive && 'bg-primary/5 border border-primary/20'
+        'rounded-md transition-colors',
+        isActive && 'bg-primary/5 border border-primary/20',
+        !isActive && 'hover:bg-muted/50'
       )}
     >
-      <StepStatusIcon status={step.status} isActive={isActive} />
-      <div className="flex-1 min-w-0">
-        <p
-          className={cn(
-            'text-sm font-medium',
-            step.status === 'completed' && 'text-muted-foreground line-through',
-            step.status === 'skipped' && 'text-muted-foreground'
-          )}
-        >
-          {step.title}
-        </p>
-        {step.description && (
-          <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">
-            {step.description}
-          </p>
+      <button
+        type="button"
+        onClick={onToggle}
+        disabled={!hasExpandableContent}
+        className={cn(
+          'w-full flex items-start gap-3 p-2 text-left',
+          hasExpandableContent && 'cursor-pointer'
         )}
-      </div>
+      >
+        <StepStatusIcon status={step.status} isActive={isActive} stepType={step.step_type} needsSearch={step.needs_search} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <p
+              className={cn(
+                'text-sm font-medium',
+                step.status === 'completed' && 'text-muted-foreground',
+                step.status === 'skipped' && 'text-muted-foreground'
+              )}
+            >
+              {step.title}
+            </p>
+            {step.needs_search && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+                Search
+              </span>
+            )}
+          </div>
+          {!isExpanded && step.description && showDetails && (
+            <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">
+              {step.description}
+            </p>
+          )}
+        </div>
+        {hasExpandableContent && (
+          <ChevronIcon
+            className={cn(
+              'w-4 h-4 text-muted-foreground transition-transform flex-shrink-0 mt-0.5',
+              isExpanded && 'rotate-180'
+            )}
+          />
+        )}
+      </button>
+
+      {/* Expanded content */}
+      {isExpanded && hasExpandableContent && (
+        <div className="px-2 pb-2 pt-0 ml-8 border-l-2 border-muted">
+          {step.description && (
+            <p className="text-xs text-muted-foreground mb-2">{step.description}</p>
+          )}
+          {step.observation && (
+            <div className="bg-muted/50 p-2 rounded text-xs">
+              <p className="font-medium text-muted-foreground mb-1">Observation:</p>
+              <p className="text-foreground">{step.observation}</p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -89,12 +195,14 @@ function StepItem({ step, stepIndex, isActive }: StepItemProps) {
 interface StepStatusIconProps {
   status: PlanStep['status'];
   isActive: boolean;
+  stepType?: string;
+  needsSearch?: boolean;
 }
 
-function StepStatusIcon({ status, isActive }: StepStatusIconProps) {
+function StepStatusIcon({ status, isActive, needsSearch }: StepStatusIconProps) {
   if (isActive && status !== 'completed') {
     return (
-      <div className="w-5 h-5 rounded-full border-2 border-primary flex items-center justify-center">
+      <div className="w-5 h-5 rounded-full border-2 border-primary flex items-center justify-center flex-shrink-0">
         <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
       </div>
     );
@@ -103,22 +211,31 @@ function StepStatusIcon({ status, isActive }: StepStatusIconProps) {
   switch (status) {
     case 'completed':
       return (
-        <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center">
+        <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center flex-shrink-0">
           <CheckIcon className="w-3 h-3 text-white" />
         </div>
       );
     case 'skipped':
       return (
-        <div className="w-5 h-5 rounded-full bg-muted flex items-center justify-center">
+        <div className="w-5 h-5 rounded-full bg-muted flex items-center justify-center flex-shrink-0">
           <MinusIcon className="w-3 h-3 text-muted-foreground" />
         </div>
       );
     default:
+      if (needsSearch) {
+        return (
+          <div className="w-5 h-5 rounded-full border-2 border-blue-300 flex items-center justify-center flex-shrink-0">
+            <SearchIcon className="w-3 h-3 text-blue-400" />
+          </div>
+        );
+      }
       return (
-        <div className="w-5 h-5 rounded-full border-2 border-muted-foreground/30" />
+        <div className="w-5 h-5 rounded-full border-2 border-muted-foreground/30 flex-shrink-0" />
       );
   }
 }
+
+// Icons
 
 function PlanIcon({ className }: { className?: string }) {
   return (
@@ -173,6 +290,41 @@ function MinusIcon({ className }: { className?: string }) {
       className={className}
     >
       <path d="M5 12h14" />
+    </svg>
+  );
+}
+
+function SearchIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.3-4.3" />
+    </svg>
+  );
+}
+
+function ChevronIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="m6 9 6 6 6-6" />
     </svg>
   );
 }

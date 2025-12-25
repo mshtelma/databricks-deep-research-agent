@@ -18,7 +18,6 @@ from uuid import uuid4
 import pytest
 
 # Note: .env is loaded by conftest.py
-
 from src.agent.orchestrator import (
     OrchestrationConfig,
     run_research,
@@ -26,14 +25,11 @@ from src.agent.orchestrator import (
 )
 from src.agent.tools.web_crawler import WebCrawler
 from src.schemas.streaming import (
-    AgentCompletedEvent,
-    AgentStartedEvent,
     ResearchCompletedEvent,
     SynthesisProgressEvent,
 )
 from src.services.llm.client import LLMClient
 from src.services.search.brave import BraveSearchClient
-
 
 # ---------------------------------------------------------------------------
 # Credential Checks
@@ -131,7 +127,7 @@ async def test_deep_research_initial_query(
         ),
     )
 
-    print(f"\nFinal report:")
+    print("\nFinal report:")
     print(result.state.final_report)
 
     # Verify research completed successfully
@@ -153,7 +149,7 @@ async def test_deep_research_initial_query(
     # Verify query was classified
     assert result.state.query_classification is not None, "Query should be classified"
 
-    print(f"\n✅ Research completed successfully!")
+    print("\n✅ Research completed successfully!")
     print(f"   - Duration: {result.total_duration_ms / 1000:.1f}s")
     print(f"   - Steps executed: {result.steps_executed}")
     print(f"   - Sources found: {len(result.state.sources)}")
@@ -195,7 +191,7 @@ async def test_followup_with_conversation_history(
     assert initial_result.state.final_report, "Initial research should produce a report"
     print(f"   ✅ Initial research complete ({len(initial_result.state.final_report)} chars)")
 
-    print(f"\nFinal report:")
+    print("\nFinal report:")
     print(initial_result.state.final_report)
 
     # Step 2: Build conversation history
@@ -220,7 +216,7 @@ async def test_followup_with_conversation_history(
         ),
     )
 
-    print(f"\nFollow-up report:")
+    print("\nFollow-up report:")
     print(followup_result.state.final_report)
 
     # Verify follow-up completed
@@ -239,7 +235,7 @@ async def test_followup_with_conversation_history(
     ), "Follow-up should reference quantum concepts from context"
 
     print(f"   ✅ Follow-up complete ({len(followup_result.state.final_report)} chars)")
-    print(f"\n✅ Conversation flow test passed!")
+    print("\n✅ Conversation flow test passed!")
     print(f"   - Initial query sources: {len(initial_result.state.sources)}")
     print(f"   - Follow-up sources: {len(followup_result.state.sources)}")
 
@@ -274,7 +270,7 @@ async def test_simple_query_detection(
     # Simple queries typically don't need full research steps
     assert result.steps_executed == 0, "Simple query should not need research steps"
 
-    print(f"\n✅ Simple query test passed!")
+    print("\n✅ Simple query test passed!")
     print(f"   - Is simple: {result.state.is_simple_query}")
     print(f"   - Response: {response}")
     print(f"   - Steps executed: {result.steps_executed}")
@@ -341,7 +337,7 @@ async def test_streaming_research_events(
     completion = completion_events[0]
     assert completion.total_duration_ms > 0, "Should track duration"
 
-    print(f"\n✅ Streaming test passed!")
+    print("\n✅ Streaming test passed!")
     print(f"   - Total events: {len(events)}")
     print(f"   - Synthesis chunks: {len(synthesis_chunks)}")
     print(f"   - Synthesis length: {len(full_synthesis)} chars")
@@ -385,7 +381,7 @@ async def test_research_with_complex_query(
     assert "solar" in report_lower, "Report should discuss solar energy"
     assert "wind" in report_lower, "Report should discuss wind energy"
 
-    print(f"\n✅ Complex query test passed!")
+    print("\n✅ Complex query test passed!")
     print(f"   - Report length: {len(result.state.final_report)} chars")
     print(f"   - Sources used: {len(result.state.sources)}")
     print(f"   - Steps executed: {result.steps_executed}")

@@ -142,10 +142,22 @@ class TestSendMessage:
         """Test sending a message successfully."""
         chat_id = mock_message.chat_id
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.create = AsyncMock(return_value=mock_message)
-            MockService.return_value = mock_service
+        # Create a mock Chat for ownership verification
+        mock_chat = MagicMock()
+        mock_chat.id = chat_id
+
+        with (
+            patch("src.api.v1.messages.MessageService") as MockMessageService,
+            patch("src.api.v1.messages.ChatService") as MockChatService,
+        ):
+            mock_message_service = MagicMock()
+            mock_message_service.create = AsyncMock(return_value=mock_message)
+            MockMessageService.return_value = mock_message_service
+
+            mock_chat_service = MagicMock()
+            mock_chat_service.get = AsyncMock(return_value=mock_chat)
+            mock_chat_service.update_title_from_message = AsyncMock(return_value=None)
+            MockChatService.return_value = mock_chat_service
 
             response = client.post(
                 f"/api/v1/chats/{chat_id}/messages",

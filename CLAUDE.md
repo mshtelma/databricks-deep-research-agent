@@ -276,6 +276,21 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
 - Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
 
 ## Recent Changes
+- 001-deep-research-agent: Cross-cutting backend services (2025-12-25)
+  - Added `PreferencesService` for managing user preferences (get/update)
+  - Added `FeedbackService` for message feedback with MLflow trace correlation
+  - Added `ExportService` for chat export to Markdown/JSON formats
+  - Added system_instructions support in ResearchState and OrchestrationConfig
+  - System instructions from user preferences now applied to all agent prompts
+  - Added `build_system_prompt()` utility for consistent instruction injection
+  - Updated research API endpoints to fetch and pass user preferences
+
+- 001-deep-research-agent: LLM context truncation (2025-12-25)
+  - Added `src/services/llm/truncation.py` with intelligent message truncation
+  - Preserves system prompt and recent messages when context exceeds limits
+  - `truncate_messages()` and `truncate_text()` with configurable limits
+  - `get_context_window_for_request()` for endpoint-aware truncation
+
 - 001-deep-research-agent: Researcher validation error resilience (2025-12-25)
   - Added default value to ResearcherOutput.observation field for validation resilience
   - Enhanced researcher prompt with explicit "ALWAYS REQUIRED" observation guidance

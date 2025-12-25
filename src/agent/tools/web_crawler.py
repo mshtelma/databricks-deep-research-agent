@@ -1,6 +1,8 @@
 """Web crawler tool for fetching and parsing web pages."""
 
 import asyncio
+import ipaddress
+import socket
 import time
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -29,6 +31,48 @@ USER_AGENT = (
     "Mozilla/5.0 (compatible; DeepResearchBot/1.0; "
     "+https://databricks.com/deep-research-agent)"
 )
+
+# Private IP ranges for SSRF protection
+PRIVATE_IP_RANGES = [
+    ipaddress.ip_network("127.0.0.0/8"),      # Loopback
+    ipaddress.ip_network("10.0.0.0/8"),       # Private Class A
+    ipaddress.ip_network("172.16.0.0/12"),    # Private Class B
+    ipaddress.ip_network("192.168.0.0/16"),   # Private Class C
+    ipaddress.ip_network("169.254.0.0/16"),   # Link-local
+    ipaddress.ip_network("::1/128"),          # IPv6 loopback
+    ipaddress.ip_network("fc00::/7"),         # IPv6 unique local
+    ipaddress.ip_network("fe80::/10"),        # IPv6 link-local
+]
+
+
+def _is_private_ip(hostname: str) -> bool:
+    """Check if hostname resolves to a private/internal IP address.
+
+    Args:
+        hostname: The hostname to check.
+
+    Returns:
+        True if the hostname resolves to a private IP, False otherwise.
+    """
+    try:
+        # Resolve hostname to IP addresses
+        addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC)
+        for family, _, _, _, sockaddr in addr_info:
+            ip_str = sockaddr[0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+                # Check if IP is in any private range
+                if any(ip in network for network in PRIVATE_IP_RANGES):
+                    return True
+                # Also check is_private property (catches some edge cases)
+                if ip.is_private or ip.is_loopback or ip.is_link_local:
+                    return True
+            except ValueError:
+                continue
+        return False
+    except socket.gaierror:
+        # DNS resolution failed - allow the request to fail naturally
+        return False
 
 
 @dataclass
@@ -86,6 +130,19 @@ class WebCrawler:
                         content="",
                         success=False,
                         error="Invalid URL scheme",
+                    )
+
+                # SSRF protection: reject requests to private/internal IPs
+                hostname = parsed.hostname
+                if hostname and _is_private_ip(hostname):
+                    error = ValueError("Access to private IP ranges is not allowed")
+                    log_crawl_error(logger, url=url, error=error)
+                    return CrawlResult(
+                        url=url,
+                        title=None,
+                        content="",
+                        success=False,
+                        error="Access to private IP ranges is not allowed",
                     )
 
                 # Fetch page

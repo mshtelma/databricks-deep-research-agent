@@ -9,6 +9,7 @@ from src.agent.prompts.synthesizer import (
     SYNTHESIZER_SYSTEM_PROMPT,
     SYNTHESIZER_USER_PROMPT,
 )
+from src.agent.prompts.utils import build_system_prompt
 from src.agent.state import ResearchState
 from src.core.logging_utils import get_logger, truncate
 from src.services.llm.client import LLMClient
@@ -63,8 +64,14 @@ async def run_synthesizer(state: ResearchState, llm: LLMClient) -> ResearchState
     if state.query_classification:
         depth_label = state.query_classification.recommended_depth
 
+    # Build system prompt with user's custom instructions if available
+    system_prompt = build_system_prompt(
+        SYNTHESIZER_SYSTEM_PROMPT,
+        state.system_instructions,
+    )
+
     messages = [
-        {"role": "system", "content": SYNTHESIZER_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": SYNTHESIZER_USER_PROMPT.format(
@@ -135,8 +142,14 @@ async def stream_synthesis(state: ResearchState, llm: LLMClient) -> AsyncGenerat
         title = source.title or "Untitled"
         sources_list += f"- [{title}]({source.url})\n"
 
+    # Build system prompt with user's custom instructions if available
+    system_prompt = build_system_prompt(
+        STREAMING_SYNTHESIZER_SYSTEM_PROMPT,
+        state.system_instructions,
+    )
+
     messages = [
-        {"role": "system", "content": STREAMING_SYNTHESIZER_SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {
             "role": "user",
             "content": f"""Create a comprehensive research report.

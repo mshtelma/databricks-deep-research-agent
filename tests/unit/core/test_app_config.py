@@ -17,7 +17,6 @@ from src.core.app_config import (
     PlannerConfig,
     ReasoningEffort,
     ResearcherConfig,
-    SearchConfig,
     SelectionStrategy,
     SynthesizerConfig,
     TruncationConfig,

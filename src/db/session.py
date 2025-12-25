@@ -18,8 +18,8 @@ from src.db.lakebase_auth import LakebaseCredentialProvider
 logger = logging.getLogger(__name__)
 
 # Module-level state
-_engine = None
-_async_session_maker = None
+_engine: AsyncEngine | None = None
+_async_session_maker: async_sessionmaker[AsyncSession] | None = None
 _credential_provider: LakebaseCredentialProvider | None = None
 
 

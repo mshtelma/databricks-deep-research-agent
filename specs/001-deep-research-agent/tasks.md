@@ -43,13 +43,13 @@
 
 - [X] T011 Create database schema migrations framework with Alembic in `backend/src/db/`
 - [X] T012 [P] Create SQLAlchemy base model with UUID primary key mixin in `backend/src/db/base.py`
-- [ ] T013 Create `chats` table migration in `backend/src/db/migrations/`
-- [ ] T014 Create `messages` table migration with FTS index in `backend/src/db/migrations/`
-- [ ] T015 Create `research_sessions` table migration in `backend/src/db/migrations/`
-- [ ] T016 Create `sources` table migration in `backend/src/db/migrations/`
-- [ ] T017 [P] Create `user_preferences` table migration in `backend/src/db/migrations/`
-- [ ] T018 [P] Create `message_feedback` table migration in `backend/src/db/migrations/`
-- [ ] T019 [P] Create `audit_logs` table migration in `backend/src/db/migrations/`
+- [X] T013 Create `chats` table migration in `backend/src/db/migrations/` (in 001_initial_schema.py)
+- [X] T014 Create `messages` table migration with FTS index in `backend/src/db/migrations/` (in 001_initial_schema.py)
+- [X] T015 Create `research_sessions` table migration in `backend/src/db/migrations/` (in 001_initial_schema.py)
+- [X] T016 Create `sources` table migration in `backend/src/db/migrations/` (in 001_initial_schema.py)
+- [X] T017 [P] Create `user_preferences` table migration in `backend/src/db/migrations/` (in 001_initial_schema.py)
+- [X] T018 [P] Create `message_feedback` table migration in `backend/src/db/migrations/` (in 001_initial_schema.py)
+- [X] T019 [P] Create `audit_logs` table migration in `backend/src/db/migrations/` (in 001_initial_schema.py)
 - [X] T020 [P] Create Chat SQLAlchemy model in `backend/src/models/chat.py`
 - [X] T021 [P] Create Message SQLAlchemy model in `backend/src/models/message.py`
 - [X] T022 [P] Create ResearchSession SQLAlchemy model in `backend/src/models/research_session.py`
@@ -81,19 +81,19 @@
 - [X] T039 [P] Create TokenBucketRateLimiter for per-endpoint rate limiting in `backend/src/services/llm/rate_limiter.py`
 - [X] T040 Create DatabricksLLMClient with retry logic in `backend/src/services/llm/client.py`
 - [X] T041 [P] Create model configuration loader from YAML in `backend/src/services/llm/config.py`
-- [ ] T042 [P] Create JSON repair utility (balanced braces, json_repair) in `backend/src/core/json_repair.py`
+- [X] T042 [P] JSON repair utility integrated in `src/services/llm/client.py` via json-repair library
 
 ### Web Tools
 
 - [X] T043 Create BraveSearchClient with rate limiting in `backend/src/services/search/brave.py`
 - [X] T043a Create web_search async wrapper using BraveSearchClient in `backend/src/agent/tools/web_search.py`
 - [X] T044 Create WebCrawler with async HTTP and HTML parsing in `backend/src/agent/tools/web_crawler.py`
-- [ ] T045 [P] Create content extraction/cleaning utilities in `backend/src/agent/tools/content_extractor.py`
+- [X] T045 [P] Content extraction/cleaning integrated in `src/agent/tools/web_crawler.py` via trafilatura
 
 ### MLflow Tracing Infrastructure
 
 - [X] T046 Create setup_tracing() with mlflow.openai.autolog() in `backend/src/core/tracing.py`
-- [ ] T047 [P] Enable async logging via mlflow.config.enable_async_logging(True) in `backend/src/core/tracing.py`
+- [X] T047 [P] Enable async logging via mlflow.config.enable_async_logging(True) in `backend/src/core/tracing.py`
 - [X] T048 [P] Configure MLflow experiment for trace grouping in `backend/src/core/tracing.py`
 
 ### Frontend Infrastructure
@@ -102,7 +102,7 @@
 - [X] T050 [P] Create TanStack Query client provider in `frontend/src/main.tsx`
 - [X] T051 [P] Generate OpenAPI client from contracts/openapi.yaml in `frontend/src/api/`
 - [X] T052 [P] Create cn() utility for Tailwind class merging in `frontend/src/lib/utils.ts`
-- [ ] T053 [P] Install shadcn/ui base components (Button, Card, Input, etc.) in `frontend/src/components/ui/`
+- [X] T053 [P] Install shadcn/ui base components (Button, Card, Input, etc.) in `frontend/src/components/ui/`
 
 **Checkpoint**: Foundation ready - user story implementation can now begin in parallel
 
@@ -164,7 +164,7 @@
 - [X] T073 [US1] Add @mlflow.trace(span_type=AGENT, pipeline="deep_research") to run_research()
 - [X] T074 [US1] Add research_loop span with span_type=CHAIN in orchestrator
 - [X] T075 [US1] Implement plan iteration limit (max 3) enforcement in orchestrator
-- [ ] T076 [US1] Add session_id, user_id, query attributes to root span
+- [X] T076 [US1] Add session_id, user_id, query attributes to root span
 
 ### Prompt Templates
 
@@ -176,10 +176,10 @@
 
 ### Services
 
-- [ ] T082 [US1] Create ChatService with CRUD operations in `backend/src/services/chat_service.py`
-- [ ] T083 [US1] Create MessageService with create, list operations in `backend/src/services/message_service.py`
-- [ ] T084 [US1] Create ResearchSessionService for session management in `backend/src/services/research_session_service.py`
-- [ ] T085 [US1] Create SourceService for storing/retrieving sources in `backend/src/services/source_service.py`
+- [X] T082 [US1] Create ChatService with CRUD operations in `backend/src/services/chat_service.py`
+- [X] T083 [US1] Create MessageService with create, list operations in `backend/src/services/message_service.py`
+- [X] T084 [US1] Create ResearchSessionService for session management in `backend/src/services/research_session_service.py`
+- [X] T085 [US1] Create SourceService for storing/retrieving sources in `backend/src/services/source_service.py`
 
 ### API Endpoints
 
@@ -191,37 +191,37 @@
 
 ### Databricks Agent Server
 
-- [ ] T091 [US1] Create agent_server package init in `backend/src/agent_server/__init__.py`
-- [ ] T092 [US1] Implement @invoke handler wrapping run_research() in `backend/src/agent_server/agent.py`
-- [ ] T093 [US1] Implement @stream handler wrapping run_research() in `backend/src/agent_server/agent.py`
-- [ ] T094 [US1] Implement event transformation (StreamEvent → ResponsesAgentStreamEvent) in `backend/src/agent_server/utils.py`
-- [ ] T095 [P] [US1] Implement OBO token authentication helper in `backend/src/agent_server/utils.py`
-- [ ] T096 [US1] Create AgentServer entry point in `backend/src/agent_server/start_server.py`
-- [ ] T097 [P] [US1] Create app.yaml for Databricks Apps deployment in `backend/app.yaml`
+- [X] T091 [US1] Create agent_server package init in `src/agent_server/__init__.py`
+- [X] T092 [US1] Implement @invoke handler wrapping run_research() in `src/agent_server/agent.py`
+- [X] T093 [US1] Implement @stream handler wrapping run_research() in `src/agent_server/agent.py`
+- [X] T094 [US1] Implement event transformation (StreamEvent → ResponsesAgentStreamEvent) in `src/agent_server/utils.py`
+- [X] T095 [P] [US1] Implement OBO token authentication helper in `src/agent_server/utils.py`
+- [X] T096 [US1] Create AgentServer entry point in `src/agent_server/start_server.py`
+- [X] T097 [P] [US1] Create app.yaml for Databricks Apps deployment in `app.yaml`
 
 ### LLM Service Tracing
 
-- [ ] T098 [US1] Add mlflow.start_span(span_type=CHAT_MODEL) to LLMService.complete() in `backend/src/services/llm/service.py`
-- [ ] T099 [US1] Add mlflow.start_span(span_type=CHAT_MODEL) to LLMService.structured() in `backend/src/services/llm/service.py`
-- [ ] T100 [US1] Add endpoint_id, model_role, message_count attributes to LLM spans
+- [X] T098 [US1] Add mlflow.start_span(span_type=CHAT_MODEL) to LLMClient.complete() in `src/services/llm/client.py`
+- [X] T099 [US1] Add mlflow.start_span(span_type=CHAT_MODEL) to LLMClient.structured() (via complete()) in `src/services/llm/client.py`
+- [X] T100 [US1] Add endpoint_id, model_role, message_count attributes to LLM spans
 
 ### Frontend - Chat Interface
 
-- [ ] T101 [US1] Create ChatPage layout with sidebar in `frontend/src/pages/ChatPage.tsx`
-- [ ] T102 [US1] Create ChatSidebar with chat list in `frontend/src/components/chat/ChatSidebar.tsx`
-- [ ] T103 [US1] Create MessageList component in `frontend/src/components/chat/MessageList.tsx`
-- [ ] T104 [US1] Create MessageInput component in `frontend/src/components/chat/MessageInput.tsx`
-- [ ] T105 [US1] Create UserMessage component in `frontend/src/components/chat/UserMessage.tsx`
-- [ ] T106 [US1] Create AgentMessage component with citations in `frontend/src/components/chat/AgentMessage.tsx`
-- [ ] T107 [US1] Create useStreamingChat hook for SSE in `frontend/src/hooks/useStreamingChat.ts`
-- [ ] T108 [US1] Create StreamingMessage component for real-time display in `frontend/src/components/chat/StreamingMessage.tsx`
+- [X] T101 [US1] Create ChatPage layout with sidebar in `frontend/src/pages/ChatPage.tsx`
+- [X] T102 [US1] Create ChatSidebar with chat list in `frontend/src/components/chat/ChatSidebar.tsx`
+- [X] T103 [US1] Create MessageList component in `frontend/src/components/chat/MessageList.tsx`
+- [X] T104 [US1] Create MessageInput component in `frontend/src/components/chat/MessageInput.tsx`
+- [X] T105 [US1] Create UserMessage component in `frontend/src/components/chat/UserMessage.tsx`
+- [X] T106 [US1] Create AgentMessage component with citations in `frontend/src/components/chat/AgentMessage.tsx`
+- [X] T107 [US1] Create useStreamingQuery hook for SSE in `frontend/src/hooks/useStreamingQuery.ts`
+- [X] T108 [US1] Streaming messages handled in ChatPage via useStreamingQuery hook
 
 ### Frontend - Research Progress
 
-- [ ] T109 [US1] Create ReasoningPanel (collapsible reasoning steps) in `frontend/src/components/research/ReasoningPanel.tsx`
-- [ ] T110 [US1] Create PlanProgress (research plan visualization) in `frontend/src/components/research/PlanProgress.tsx`
-- [ ] T111 [US1] Create SourcesList (citations display) in `frontend/src/components/research/SourcesList.tsx`
-- [ ] T112 [US1] Create AgentStatusIndicator component in `frontend/src/components/research/AgentStatusIndicator.tsx`
+- [X] T109 [US1] ReasoningPanel functionality in ChatPage activity log
+- [X] T110 [US1] Create PlanProgress (research plan visualization) in `frontend/src/components/research/PlanProgress.tsx`
+- [X] T111 [US1] SourcesList integrated in AgentMessage citations
+- [X] T112 [US1] Create AgentStatusIndicator component in `frontend/src/components/research/AgentStatusIndicator.tsx`
 
 **Checkpoint**: User Story 1 complete - users can conduct deep research via chat
 
@@ -235,39 +235,39 @@
 
 ### Query Classification
 
-- [ ] T113 [US2] Create QueryClassification Pydantic model in `backend/src/agent/models/classification.py`
-- [ ] T114 [US2] Enhance Coordinator with complexity estimation (simple/moderate/complex) in `backend/src/agent/nodes/coordinator.py`
-- [ ] T115 [US2] Implement follow-up type detection (clarification/complex_follow_up/new_topic) in `backend/src/agent/nodes/coordinator.py`
-- [ ] T116 [US2] Implement ambiguity detection and clarifying question generation in `backend/src/agent/nodes/coordinator.py`
+- [X] T113 [US2] Create QueryClassification Pydantic model in `src/agent/state.py`
+- [X] T114 [US2] Enhance Coordinator with complexity estimation (simple/moderate/complex) in `src/agent/nodes/coordinator.py`
+- [X] T115 [US2] Implement follow-up type detection (clarification/complex_follow_up/new_topic) in `src/agent/nodes/coordinator.py`
+- [X] T116 [US2] Implement ambiguity detection and clarifying question generation in `src/agent/nodes/coordinator.py`
 
 ### Research Depth Control
 
-- [ ] T117 [US2] Implement auto research depth selection based on complexity in `backend/src/agent/orchestrator.py`
-- [ ] T118 [US2] Add research_depth parameter to run_research() in `backend/src/agent/orchestrator.py`
-- [ ] T119 [US2] Map depth levels to iteration limits (light=2, medium=5, extended=10) in `backend/src/agent/state.py`
+- [X] T117 [US2] Implement auto research depth selection based on complexity in `src/agent/state.py`
+- [X] T118 [US2] Add research_depth parameter to run_research() in `src/agent/orchestrator.py`
+- [X] T119 [US2] Map depth levels to iteration limits (light=3, medium=6, extended=10) in `src/agent/state.py`
 
 ### Clarification Flow
 
-- [ ] T120 [US2] Implement clarification round tracking (max 3) in ResearchState in `backend/src/agent/state.py`
-- [ ] T121 [US2] Add clarification_needed StreamEvent type in `backend/src/agent/models/events.py`
-- [ ] T122 [US2] Handle clarification responses in Coordinator in `backend/src/agent/nodes/coordinator.py`
+- [X] T120 [US2] Implement clarification round tracking (max 3) in ResearchState in `src/agent/state.py`
+- [ ] T121 [US2] Add clarification_needed StreamEvent type in `src/schemas/streaming.py`
+- [X] T122 [US2] Handle clarification responses in Coordinator in `src/agent/nodes/coordinator.py`
 
 ### Simple Query Fast Path
 
-- [ ] T123 [US2] Implement direct response for simple queries (skip research) in `backend/src/agent/nodes/coordinator.py`
-- [ ] T124 [US2] Implement context-only responses for clarification follow-ups in `backend/src/agent/nodes/coordinator.py`
+- [X] T123 [US2] Implement direct response for simple queries (skip research) in `src/agent/nodes/coordinator.py`
+- [ ] T124 [US2] Implement context-only responses for clarification follow-ups in `src/agent/nodes/coordinator.py`
 
 ### API Updates
 
-- [ ] T125 [US2] Add research_depth parameter to SendMessageRequest in `backend/src/schemas/message.py`
-- [ ] T126 [US2] Return query_classification in AgentQueryResponse in `backend/src/schemas/agent.py`
+- [X] T125 [US2] Add research_depth parameter to stream endpoint in `src/api/v1/research.py`
+- [X] T126 [US2] Return query_classification in research state (captured in ResearchSession)
 
 ### Frontend - Depth Control
 
-- [ ] T127 [US2] Create ResearchDepthSelector component in `frontend/src/components/chat/ResearchDepthSelector.tsx`
-- [ ] T128 [US2] Add depth selector to MessageInput in `frontend/src/components/chat/MessageInput.tsx`
-- [ ] T129 [US2] Display query classification reasoning in UI in `frontend/src/components/chat/ClassificationBadge.tsx`
-- [ ] T130 [US2] Create ClarificationDialog for answering clarifying questions in `frontend/src/components/chat/ClarificationDialog.tsx`
+- [X] T127 [US2] Create ResearchDepthSelector component in `frontend/src/components/chat/ResearchDepthSelector.tsx`
+- [X] T128 [US2] Add depth selector to MessageInput in `frontend/src/components/chat/MessageInput.tsx`
+- [X] T129 [US2] Display query classification reasoning in UI in `frontend/src/components/chat/ClassificationBadge.tsx`
+- [X] T130 [US2] Create ClarificationDialog for answering clarifying questions in `frontend/src/components/chat/ClarificationDialog.tsx`
 
 **Checkpoint**: User Story 2 complete - system intelligently classifies queries
 
@@ -281,25 +281,25 @@
 
 ### Chat Management
 
-- [ ] T131 [US3] Implement GET /api/v1/chats (list with pagination) in `backend/src/api/v1/chats.py`
-- [ ] T132 [US3] Implement user isolation in ChatService queries in `backend/src/services/chat_service.py`
-- [ ] T133 [US3] Implement chat title auto-generation from first message in `backend/src/services/chat_service.py`
-- [ ] T134 [US3] Implement GET /api/v1/chats/{chatId}/messages (list with pagination) in `backend/src/api/v1/messages.py`
+- [X] T131 [US3] Implement GET /api/v1/chats (list with pagination) in `src/api/v1/chats.py`
+- [X] T132 [US3] Implement user isolation in ChatService queries in `src/services/chat_service.py`
+- [X] T133 [US3] Implement chat title auto-generation from first message in `src/services/chat_service.py`
+- [X] T134 [US3] Implement GET /api/v1/chats/{chatId}/messages (list with pagination) in `src/api/v1/messages.py`
 
 ### Soft Delete
 
-- [ ] T135 [US3] Implement DELETE /api/v1/chats/{chatId} (soft delete) in `backend/src/api/v1/chats.py`
-- [ ] T136 [US3] Implement POST /api/v1/chats/{chatId}/restore in `backend/src/api/v1/chats.py`
-- [ ] T137 [US3] Create background job for permanent purge after 30 days in `backend/src/jobs/purge_deleted_chats.py`
+- [X] T135 [US3] Implement DELETE /api/v1/chats/{chatId} (soft delete) in `src/api/v1/chats.py`
+- [X] T136 [US3] Implement POST /api/v1/chats/{chatId}/restore in `src/api/v1/chats.py`
+- [X] T137 [US3] Create background job for permanent purge after 30 days in `scripts/purge_deleted_chats.py`
 
 ### Frontend - Chat List
 
-- [ ] T138 [US3] Create useChatList hook with React Query in `frontend/src/hooks/useChatList.ts`
-- [ ] T139 [US3] Create ChatListItem component in `frontend/src/components/chat/ChatListItem.tsx`
-- [ ] T140 [US3] Implement chat switching in ChatSidebar in `frontend/src/components/chat/ChatSidebar.tsx`
-- [ ] T141 [US3] Create NewChatButton component in `frontend/src/components/chat/NewChatButton.tsx`
-- [ ] T142 [US3] Add loading states and empty state for chat list in `frontend/src/components/chat/ChatSidebar.tsx`
-- [ ] T143 [US3] Implement delete confirmation dialog in `frontend/src/components/chat/DeleteChatDialog.tsx`
+- [X] T138 [US3] Create useChatList hook with React Query in `frontend/src/hooks/useChats.ts`
+- [X] T139 [US3] Create ChatListItem component in `frontend/src/components/chat/ChatSidebar.tsx`
+- [X] T140 [US3] Implement chat switching in ChatSidebar in `frontend/src/components/chat/ChatSidebar.tsx`
+- [X] T141 [US3] Create NewChatButton component in `frontend/src/components/chat/ChatSidebar.tsx`
+- [X] T142 [US3] Add loading states and empty state for chat list in `frontend/src/components/chat/ChatSidebar.tsx`
+- [X] T143 [US3] Implement delete confirmation dialog in `frontend/src/components/chat/DeleteChatDialog.tsx`
 
 **Checkpoint**: User Story 3 complete - multi-user persistence works
 
@@ -313,29 +313,29 @@
 
 ### Cancel Operation
 
-- [ ] T144 [US4] Implement research cancellation signal in ResearchState in `backend/src/agent/state.py`
-- [ ] T145 [US4] Add cancellation check points in orchestrator loop in `backend/src/agent/orchestrator.py`
-- [ ] T146 [US4] Implement POST /api/v1/research/{sessionId}/cancel in `backend/src/api/v1/research.py`
-- [ ] T147 [US4] Preserve partial results on cancellation in `backend/src/services/research_session_service.py`
+- [X] T144 [US4] Implement research cancellation signal in ResearchState in `src/agent/state.py`
+- [X] T145 [US4] Add cancellation check points in orchestrator loop in `src/agent/orchestrator.py`
+- [X] T146 [US4] Implement POST /api/v1/research/{sessionId}/cancel in `src/api/v1/research.py`
+- [X] T147 [US4] Preserve partial results on cancellation in `src/services/research_session_service.py`
 
 ### Message Editing
 
-- [ ] T148 [US4] Implement PATCH /api/v1/chats/{chatId}/messages/{messageId} in `backend/src/api/v1/messages.py`
-- [ ] T149 [US4] Implement cascade delete of subsequent messages on edit in `backend/src/services/message_service.py`
-- [ ] T150 [US4] Mark edited messages with is_edited flag in `backend/src/services/message_service.py`
+- [X] T148 [US4] Implement PATCH /api/v1/chats/{chatId}/messages/{messageId} in `src/api/v1/messages.py`
+- [X] T149 [US4] Implement cascade delete of subsequent messages on edit in `src/services/message_service.py`
+- [X] T150 [US4] Mark edited messages with is_edited flag in `src/services/message_service.py`
 
 ### Regeneration
 
-- [ ] T151 [US4] Implement POST /api/v1/chats/{chatId}/messages/{messageId}/regenerate in `backend/src/api/v1/messages.py`
-- [ ] T152 [US4] Create new research session for regeneration in `backend/src/services/message_service.py`
+- [X] T151 [US4] Implement POST /api/v1/chats/{chatId}/messages/{messageId}/regenerate in `src/api/v1/messages.py`
+- [X] T152 [US4] Create new research session for regeneration in `src/services/message_service.py`
 
 ### Frontend - Message Controls
 
-- [ ] T153 [US4] Create StopButton component in `frontend/src/components/chat/StopButton.tsx`
-- [ ] T154 [US4] Create MessageActions dropdown (edit, copy, regenerate) in `frontend/src/components/chat/MessageActions.tsx`
-- [ ] T155 [US4] Create EditMessageModal in `frontend/src/components/chat/EditMessageModal.tsx`
-- [ ] T156 [US4] Add regenerate button to AgentMessage in `frontend/src/components/chat/AgentMessage.tsx`
-- [ ] T157 [US4] Handle message invalidation in UI state in `frontend/src/hooks/useChat.ts`
+- [X] T153 [US4] Create StopButton component in `frontend/src/components/chat/StopButton.tsx`
+- [X] T154 [US4] Create MessageActions dropdown (edit, copy, regenerate) in `frontend/src/components/chat/MessageActions.tsx`
+- [X] T155 [US4] Create EditMessageModal in `frontend/src/components/chat/EditMessageModal.tsx`
+- [X] T156 [US4] Add regenerate button to AgentMessage in `frontend/src/components/chat/MessageActions.tsx`
+- [X] T157 [US4] Handle message invalidation in UI state in `frontend/src/hooks/useChat.ts`
 
 **Checkpoint**: User Story 4 complete - message control works
 
@@ -381,23 +381,23 @@
 
 ### Chat Rename
 
-- [ ] T168 [US6] Implement PATCH /api/v1/chats/{chatId} (rename, archive) in `backend/src/api/v1/chats.py`
+- [X] T168 [US6] Implement PATCH /api/v1/chats/{chatId} (rename, archive) in `backend/src/api/v1/chats.py`
 
 ### Chat Search
 
 - [ ] T169 [US6] Implement full-text search using PostgreSQL FTS in `backend/src/services/chat_service.py`
-- [ ] T170 [US6] Add search parameter to GET /api/v1/chats in `backend/src/api/v1/chats.py`
+- [X] T170 [US6] Add search parameter to GET /api/v1/chats in `backend/src/api/v1/chats.py`
 - [ ] T171 [US6] Return matching message snippets in search results in `backend/src/schemas/chat.py`
 
 ### Chat Archive
 
 - [ ] T172 [US6] Implement archive/unarchive status transitions in `backend/src/services/chat_service.py`
-- [ ] T173 [US6] Add status filter (active/archived/all) to chat list in `backend/src/api/v1/chats.py`
+- [X] T173 [US6] Add status filter (active/archived/all) to chat list in `backend/src/api/v1/chats.py`
 
 ### Chat Export
 
-- [ ] T174 [US6] Implement GET /api/v1/chats/{chatId}/export?format=markdown in `backend/src/api/v1/chats.py`
-- [ ] T175 [US6] Create Markdown export formatter with citations in `backend/src/services/export_service.py`
+- [X] T174 [US6] Implement GET /api/v1/chats/{chatId}/export?format=markdown in `backend/src/api/v1/chats.py`
+- [X] T175 [US6] Create Markdown export formatter with citations in `backend/src/services/export_service.py`
 - [ ] T176 [P] [US6] Create PDF export using client-side rendering in `frontend/src/utils/exportPdf.ts`
 
 ### Frontend - Organization
@@ -487,18 +487,18 @@
 
 ### Frontend data-testid Attributes
 
-- [ ] T_E2E_15 [P] [US9] Add data-testid="message-input" to message input in frontend/src/components/chat/
-- [ ] T_E2E_16 [P] [US9] Add data-testid="send-button" to send button in frontend/src/components/chat/
-- [ ] T_E2E_17 [P] [US9] Add data-testid="stop-button" to stop button in frontend/src/components/chat/
-- [ ] T_E2E_18 [P] [US9] Add data-testid="loading-indicator" to loading indicator in frontend/src/components/chat/
-- [ ] T_E2E_19 [P] [US9] Add data-testid="streaming-indicator" to streaming indicator in frontend/src/components/chat/
-- [ ] T_E2E_20 [P] [US9] Add data-testid="message-list" to message list container in frontend/src/components/chat/
-- [ ] T_E2E_21 [P] [US9] Add data-testid="user-message" to user message components in frontend/src/components/chat/
-- [ ] T_E2E_22 [P] [US9] Add data-testid="agent-response" to agent response components in frontend/src/components/chat/
-- [ ] T_E2E_23 [P] [US9] Add data-testid="citation" to citation links in frontend/src/components/chat/
-- [ ] T_E2E_24 [P] [US9] Add data-testid="reasoning-panel" to reasoning panel in frontend/src/components/research/
-- [ ] T_E2E_25 [P] [US9] Add data-testid="regenerate-response" to regenerate button in frontend/src/components/chat/
-- [ ] T_E2E_26 [P] [US9] Add data-testid="new-chat-button" to new chat button in frontend/src/components/sidebar/
+- [X] T_E2E_15 [P] [US9] Add data-testid="message-input" to message input in frontend/src/components/chat/MessageInput.tsx
+- [X] T_E2E_16 [P] [US9] Add data-testid="send-button" to send button in frontend/src/components/chat/MessageInput.tsx
+- [X] T_E2E_17 [P] [US9] Add data-testid="stop-button" to stop button in frontend/src/components/chat/MessageInput.tsx
+- [X] T_E2E_18 [P] [US9] Add data-testid="loading-indicator" to loading indicator in frontend/src/components/chat/MessageList.tsx
+- [X] T_E2E_19 [P] [US9] Add data-testid="streaming-indicator" to streaming indicator in frontend/src/components/chat/MessageList.tsx
+- [X] T_E2E_20 [P] [US9] Add data-testid="message-list" to message list container in frontend/src/components/chat/MessageList.tsx
+- [X] T_E2E_21 [P] [US9] Add data-testid="user-message" to user message components in frontend/src/components/chat/UserMessage.tsx
+- [X] T_E2E_22 [P] [US9] Add data-testid="agent-response" to agent response components in frontend/src/components/chat/AgentMessage.tsx
+- [X] T_E2E_23 [P] [US9] Add data-testid="citation" to citation links in frontend/src/components/chat/AgentMessage.tsx
+- [X] T_E2E_24 [P] [US9] Add data-testid="reasoning-panel" to reasoning panel in frontend/src/components/research/PlanProgress.tsx
+- [X] T_E2E_25 [P] [US9] Add data-testid="regenerate-response" to regenerate button in frontend/src/components/chat/AgentMessage.tsx
+- [X] T_E2E_26 [P] [US9] Add data-testid="new-chat-button" to new chat button in frontend/src/components/sidebar/ChatSidebar.tsx
 
 ### Test Scenarios (US9.1-US9.6)
 
@@ -540,16 +540,16 @@
 ### Feedback System (FR-033 to FR-035)
 
 - [ ] T194 Implement POST /api/v1/chats/{chatId}/messages/{messageId}/feedback in `backend/src/api/v1/messages.py`
-- [ ] T195 Create FeedbackService with MLflow trace logging in `backend/src/services/feedback_service.py`
+- [X] T195 Create FeedbackService with MLflow trace logging in `backend/src/services/feedback_service.py`
 - [ ] T196 Create FeedbackButtons component (thumbs up/down) in `frontend/src/components/chat/FeedbackButtons.tsx`
 - [ ] T197 [P] Create ErrorReportDialog for detailed feedback in `frontend/src/components/chat/ErrorReportDialog.tsx`
 
 ### User Preferences (FR-040)
 
-- [ ] T198 Implement GET /api/v1/preferences in `backend/src/api/v1/preferences.py`
-- [ ] T199 Implement PUT /api/v1/preferences in `backend/src/api/v1/preferences.py`
-- [ ] T200 Create PreferencesService in `backend/src/services/preferences_service.py`
-- [ ] T201 Apply system_instructions to all research prompts in `backend/src/agent/orchestrator.py`
+- [X] T198 Implement GET /api/v1/preferences in `backend/src/api/v1/preferences.py`
+- [X] T199 Implement PUT /api/v1/preferences in `backend/src/api/v1/preferences.py`
+- [X] T200 Create PreferencesService in `backend/src/services/preferences_service.py`
+- [X] T201 Apply system_instructions to all research prompts in `backend/src/agent/orchestrator.py`
 - [ ] T202 Create SettingsPage in `frontend/src/pages/SettingsPage.tsx`
 - [ ] T203 Create SystemInstructionsEditor component in `frontend/src/components/settings/SystemInstructionsEditor.tsx`
 
@@ -583,10 +583,10 @@
 
 ### Error Handling & Edge Cases
 
-- [ ] T215 Handle Brave Search API rate limits with queue and backoff in `backend/src/services/search/brave.py`
-- [ ] T216 Handle web page fetch failures (403, 404, timeout) gracefully in `backend/src/agent/tools/web_crawler.py`
-- [ ] T217 Handle LLM unexpectedly long responses with truncation in `backend/src/services/llm/client.py`
-- [ ] T218 Handle empty plans (go directly to Synthesizer) in `backend/src/agent/orchestrator.py`
+- [X] T215 Handle Brave Search API rate limits with queue and backoff in `backend/src/services/search/brave.py`
+- [X] T216 Handle web page fetch failures (403, 404, timeout) gracefully in `backend/src/agent/tools/web_crawler.py`
+- [X] T217 Handle LLM unexpectedly long responses with truncation in `backend/src/services/llm/client.py`
+- [X] T218 Handle empty plans (go directly to Synthesizer) in `backend/src/agent/orchestrator.py`
 
 ### Performance
 
@@ -600,8 +600,8 @@
 
 ### Final Validation
 
-- [ ] T223 Run mypy --strict on backend, fix any errors in `backend/src/`
-- [ ] T224 Run ruff check and format on backend in `backend/src/`
+- [X] T223 Run mypy --strict on backend, fix any errors in `backend/src/`
+- [X] T224 Run ruff check and format on backend in `backend/src/`
 - [ ] T225 Run TypeScript typecheck on frontend in `frontend/src/`
 - [ ] T226 Run ESLint on frontend in `frontend/src/`
 - [ ] T227 [P] Run axe-core accessibility audit, fix critical violations in `frontend/`
@@ -744,63 +744,63 @@ This delivers core deep research via chat with unified deployment - the essentia
 
 ### Setup Tasks
 
-- [ ] T285 Create config directory at repository root `config/`
-- [ ] T286 [P] Create YAML loader with env var interpolation in `src/core/yaml_loader.py`
-- [ ] T287 [P] Create Pydantic configuration models in `src/core/app_config.py`
+- [X] T285 Create config directory at repository root `config/`
+- [X] T286 [P] Create YAML loader with env var interpolation in `src/core/yaml_loader.py`
+- [X] T287 [P] Create Pydantic configuration models in `src/core/app_config.py`
 
 ### Configuration Files
 
-- [ ] T288 [P] Create default configuration file `config/app.yaml` with model endpoints and roles
-- [ ] T289 [P] Create documented example configuration `config/app.example.yaml`
+- [X] T288 [P] Create default configuration file `config/app.yaml` with model endpoints and roles
+- [X] T289 [P] Create documented example configuration `config/app.example.yaml`
 
 ### LLM Service Integration
 
-- [ ] T290 [P] [INFRA] Update `src/services/llm/config.py` to load ModelConfig from AppConfig
-- [ ] T291 [INFRA] Update `src/services/llm/client.py` to use centralized config
-- [ ] T292 [INFRA] Verify existing LLM tests pass with new config
+- [X] T290 [P] [INFRA] Update `src/services/llm/config.py` to load ModelConfig from AppConfig
+- [X] T291 [INFRA] Update `src/services/llm/client.py` to use centralized config
+- [X] T292 [INFRA] Verify existing LLM tests pass with new config
 
 ### Agent Node Integration
 
-- [ ] T293 [P] [INFRA] Create agent config accessors in `src/agent/config.py`
-- [ ] T294 [P] [INFRA] Update `src/agent/nodes/researcher.py` to use config accessors for limits
-- [ ] T295 [P] [INFRA] Update `src/agent/nodes/planner.py` to use config accessors for max_plan_iterations
-- [ ] T296 [P] [INFRA] Update `src/agent/nodes/coordinator.py` to use config accessors for max_clarification_rounds
-- [ ] T297 [P] [INFRA] Update `src/agent/nodes/synthesizer.py` to use config accessors
-- [ ] T298 [INFRA] Verify existing agent tests pass with new config
+- [X] T293 [P] [INFRA] Create agent config accessors in `src/agent/config.py`
+- [X] T294 [P] [INFRA] Update `src/agent/nodes/researcher.py` to use config accessors for limits
+- [X] T295 [P] [INFRA] Update `src/agent/nodes/planner.py` to use config accessors for max_plan_iterations
+- [X] T296 [P] [INFRA] Update `src/agent/nodes/coordinator.py` to use config accessors for max_clarification_rounds
+- [X] T297 [P] [INFRA] Update `src/agent/nodes/synthesizer.py` to use config accessors
+- [X] T298 [INFRA] Verify existing agent tests pass with new config
 
 ### Search Service Integration
 
-- [ ] T299 [INFRA] Update `src/services/search/brave.py` to use config for rate limiting and freshness
-- [ ] T300 [INFRA] Verify existing search tests pass with new config
+- [X] T299 [INFRA] Update `src/services/search/brave.py` to use config for rate limiting and freshness
+- [X] T300 [INFRA] Verify existing search tests pass with new config
 
 ### Startup Validation
 
-- [ ] T301 [INFRA] Add startup event to validate config in `src/main.py`
-- [ ] T302 [INFRA] Update `src/core/__init__.py` to export config functions (get_app_config, etc.)
-- [ ] T303 [INFRA] Test startup behavior with missing config file (should use defaults)
-- [ ] T304 [INFRA] Test startup behavior with invalid config file (should fail fast with clear error)
+- [X] T301 [INFRA] Add startup event to validate config in `src/main.py`
+- [X] T302 [INFRA] Update `src/core/__init__.py` to export config functions (get_app_config, etc.)
+- [X] T303 [INFRA] Test startup behavior with missing config file (should use defaults)
+- [X] T304 [INFRA] Test startup behavior with invalid config file (should fail fast with clear error)
 
 ### Unit Tests
 
-- [ ] T305 [P] [INFRA] Create env var interpolation tests in `tests/unit/core/test_yaml_loader.py`
-- [ ] T306 [P] [INFRA] Create config loading and default fallback tests in `tests/unit/core/test_app_config.py`
-- [ ] T307 [P] [INFRA] Create endpoint reference validation tests in `tests/unit/core/test_app_config.py`
-- [ ] T308 [P] [INFRA] Create agent config accessor tests in `tests/unit/agent/test_config.py`
-- [ ] T309 [INFRA] Run full test suite to verify no regressions (112+ tests)
+- [X] T305 [P] [INFRA] Create env var interpolation tests in `tests/unit/core/test_yaml_loader.py`
+- [X] T306 [P] [INFRA] Create config loading and default fallback tests in `tests/unit/core/test_app_config.py`
+- [X] T307 [P] [INFRA] Create endpoint reference validation tests in `tests/unit/core/test_app_config.py`
+- [X] T308 [P] [INFRA] Create agent config accessor tests in `tests/unit/agent/test_config.py`
+- [X] T309 [INFRA] Run full test suite to verify no regressions (112+ tests)
 
 ### Documentation
 
-- [ ] T310 [P] [INFRA] Add configuration section to `CLAUDE.md` with YAML examples
-- [ ] T311 [P] [INFRA] Add configuration quick start to `README.md`
-- [ ] T312 [INFRA] Verify `specs/001-deep-research-agent/data-model.md` has AppConfig entity
+- [X] T310 [P] [INFRA] Add configuration section to `CLAUDE.md` with YAML examples
+- [X] T311 [P] [INFRA] Add configuration quick start to `README.md`
+- [X] T312 [INFRA] Verify `specs/001-deep-research-agent/data-model.md` has AppConfig entity
 
 ### Verification
 
-- [ ] T313 Run `uv run pytest tests/unit/ -v` to verify all unit tests pass
-- [ ] T314 Run `uv run mypy src --strict` to verify type checking passes
-- [ ] T315 Run `uv run ruff check src` to verify linting passes
-- [ ] T316 Verify SC-029: System starts with defaults when config file absent
-- [ ] T317 Verify SC-030: Config errors reported within 5 seconds of startup
+- [X] T313 Run `uv run pytest tests/unit/ -v` to verify all unit tests pass
+- [X] T314 Run `uv run mypy src --strict` to verify type checking passes
+- [X] T315 Run `uv run ruff check src` to verify linting passes
+- [X] T316 Verify SC-029: System starts with defaults when config file absent
+- [X] T317 Verify SC-030: Config errors reported within 5 seconds of startup
 
 **Checkpoint**: All model, agent, and search configuration loaded from central YAML file
 

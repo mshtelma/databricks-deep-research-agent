@@ -40,9 +40,9 @@ def log_trace_event(
         # Lists/tuples are serialized as JSON strings since protobuf can't handle Python lists
         safe_attrs: dict[str, str | bool | int | float] = {}
         for k, v in (attributes or {}).items():
-            if isinstance(v, (str, bool, int, float)):
+            if isinstance(v, str | bool | int | float):
                 safe_attrs[k] = v
-            elif isinstance(v, (list, tuple)):
+            elif isinstance(v, list | tuple):
                 # Convert list/tuple to JSON string - protobuf can't handle Python lists
                 safe_attrs[k] = json.dumps([str(item) for item in v])
             else:

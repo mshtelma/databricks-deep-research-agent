@@ -22,6 +22,7 @@ from src.schemas.message import (
     SendMessageResponse,
 )
 from src.services.chat_service import ChatService
+from src.services.feedback_service import FeedbackService
 from src.services.message_service import MessageService
 
 router = APIRouter()
@@ -242,21 +243,35 @@ async def submit_feedback(
     # Verify user owns the chat
     await _verify_chat_ownership(chat_id, user.user_id, db)
 
-    service = MessageService(db)
+    message_service = MessageService(db)
 
     # Verify message exists
-    message = await service.get_with_chat(message_id, chat_id)
+    message = await message_service.get_with_chat(message_id, chat_id)
     if not message:
         raise NotFoundError("Message", str(message_id))
 
-    # TODO: Create actual feedback record
+    # Create actual feedback record
+    feedback_service = FeedbackService(db)
+    try:
+        feedback = await feedback_service.create_feedback(
+            message_id=message_id,
+            user_id=user.user_id,
+            rating=request.rating,
+            feedback_text=request.feedback_text,
+            feedback_category=request.feedback_category,
+        )
+        await db.commit()
+    except ValueError as e:
+        await db.rollback()
+        raise NotFoundError("Feedback", str(e)) from e
+
     return FeedbackResponse(
-        id=uuid4(),
-        message_id=message_id,
-        rating=request.rating,
-        feedback_text=request.feedback_text,
-        feedback_category=request.feedback_category,
-        created_at=datetime.now(UTC),
+        id=feedback.id,
+        message_id=feedback.message_id,
+        rating=feedback.rating.value,
+        feedback_text=feedback.feedback_text,
+        feedback_category=feedback.feedback_category,
+        created_at=feedback.created_at,
     )
 
 

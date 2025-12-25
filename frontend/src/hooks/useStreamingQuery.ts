@@ -36,7 +36,7 @@ interface UseStreamingQueryReturn {
   agentStatus: AgentStatus;
   currentPlan: Plan | null;
   currentStepIndex: number;
-  sendQuery: (query: string, conversationHistory?: ConversationMessage[]) => void;
+  sendQuery: (query: string) => void;
   stopStream: () => void;
   error: Error | null;
   /** The completed messages from this session (for tracking conversation) */
@@ -68,7 +68,7 @@ export function useStreamingQuery(chatId?: string): UseStreamingQueryReturn {
   }, []);
 
   const sendQuery = useCallback(
-    (query: string, _conversationHistory?: ConversationMessage[]) => {
+    (query: string) => {
       if (!chatId) {
         console.error('No chat ID provided');
         return;

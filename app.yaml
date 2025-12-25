@@ -1,0 +1,55 @@
+# Databricks Apps deployment configuration
+# https://docs.databricks.com/en/dev-tools/databricks-apps/index.html
+
+name: deep-research-agent
+description: Deep Research Agent with 5-agent architecture
+
+# Application entry point
+command:
+  - python
+  - -m
+  - src.agent_server.start_server
+
+# Environment variables
+env:
+  # Runtime settings
+  - name: PORT
+    value: "8080"
+  - name: HOST
+    value: "0.0.0.0"
+
+  # Serve static frontend
+  - name: SERVE_STATIC
+    value: "true"
+
+  # MLflow tracing
+  - name: MLFLOW_EXPERIMENT_NAME
+    value: "/Shared/deep-research-agent"
+
+  # Auth (uses workspace-managed credentials)
+  - name: DATABRICKS_CONFIG_PROFILE
+    valueFrom:
+      secretKeyRef:
+        name: databricks-config-profile
+        key: profile
+        optional: true
+
+# Resource requirements
+resources:
+  cpu: "2"
+  memory: "4Gi"
+
+# Health check
+healthCheck:
+  path: /health
+  port: 8080
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# Scaling configuration
+scaling:
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 70

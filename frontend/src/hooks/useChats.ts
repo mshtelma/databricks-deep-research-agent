@@ -70,3 +70,26 @@ export function useRestoreChat() {
     },
   })
 }
+
+export function useExportChat() {
+  return useMutation({
+    mutationFn: async ({ chatId, format }: { chatId: string; format: 'markdown' | 'json' }) => {
+      const { content, filename } = await chatsApi.export(chatId, format)
+
+      // Trigger download
+      const blob = new Blob([content], {
+        type: format === 'markdown' ? 'text/markdown' : 'application/json',
+      })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+
+      return { filename }
+    },
+  })
+}

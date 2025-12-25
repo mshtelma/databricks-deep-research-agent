@@ -66,7 +66,7 @@ def format_log_dict(data: dict[str, Any]) -> str:
             # Quote strings, truncate if long
             truncated = truncate(value, 80)
             parts.append(f'{key}="{truncated}"')
-        elif isinstance(value, (list, tuple)):
+        elif isinstance(value, list | tuple):
             # Show first few items of lists
             if len(value) <= 3:
                 parts.append(f"{key}={value}")

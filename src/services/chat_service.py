@@ -1,15 +1,18 @@
 """Chat service - CRUD operations for chats."""
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.chat import Chat, ChatStatus
 
 logger = logging.getLogger(__name__)
+
+# Number of days before soft-deleted chats are permanently purged
+PURGE_AFTER_DAYS = 30
 
 
 class ChatService:
@@ -217,3 +220,41 @@ class ChatService:
             chat.title = title
             chat.updated_at = datetime.now(UTC)
             await self._session.flush()
+
+    async def purge_deleted_chats(self, days_old: int = PURGE_AFTER_DAYS) -> int:
+        """Permanently delete chats that were soft-deleted more than N days ago.
+
+        This is a background job method that should be called periodically.
+        It permanently removes chats and their associated messages.
+
+        Args:
+            days_old: Number of days after soft-delete before permanent purge.
+
+        Returns:
+            Number of chats permanently deleted.
+        """
+        cutoff_date = datetime.now(UTC) - timedelta(days=days_old)
+
+        # Find chats to purge
+        result = await self._session.execute(
+            select(Chat.id).where(
+                and_(
+                    Chat.deleted_at.is_not(None),
+                    Chat.deleted_at < cutoff_date,
+                )
+            )
+        )
+        chat_ids = [row[0] for row in result.all()]
+
+        if not chat_ids:
+            logger.info("No chats to purge")
+            return 0
+
+        # Delete chats (cascade will handle messages)
+        await self._session.execute(
+            delete(Chat).where(Chat.id.in_(chat_ids))
+        )
+        await self._session.flush()
+
+        logger.info(f"Permanently purged {len(chat_ids)} deleted chats")
+        return len(chat_ids)

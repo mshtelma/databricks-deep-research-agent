@@ -119,6 +119,31 @@ export const chatsApi = {
     request<import('../types').Chat>(`/chats/${chatId}/restore`, {
       method: 'POST',
     }),
+
+  export: async (chatId: string, format: 'markdown' | 'json'): Promise<{ content: string; filename: string }> => {
+    const url = `${API_BASE_URL}/chats/${chatId}/export?format=${format}`
+    const response = await fetch(url, {
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!response.ok) {
+      let errorData: { code?: string; message?: string }
+      try {
+        errorData = await response.json()
+      } catch {
+        errorData = { code: 'UNKNOWN', message: response.statusText }
+      }
+      throw new ApiError(
+        response.status,
+        errorData.code || 'UNKNOWN',
+        errorData.message || 'Export failed'
+      )
+    }
+    const content = await response.text()
+    const contentDisposition = response.headers.get('Content-Disposition') || ''
+    const filenameMatch = contentDisposition.match(/filename="([^"]+)"/)
+    const filename = filenameMatch?.[1] ?? `chat-${chatId}.${format === 'markdown' ? 'md' : 'json'}`
+    return { content, filename }
+  },
 }
 
 // Messages API

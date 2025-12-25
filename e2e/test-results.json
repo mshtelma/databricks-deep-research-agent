@@ -114,7 +114,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:42:20.663Z",
+                      "startTime": "2025-12-25T08:29:20.014Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -166,7 +166,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:42:20.666Z",
+                      "startTime": "2025-12-25T08:29:20.016Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -218,7 +218,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:42:20.667Z",
+                      "startTime": "2025-12-25T08:29:20.016Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -270,7 +270,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:42:20.667Z",
+                      "startTime": "2025-12-25T08:29:20.017Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -325,12 +325,12 @@
                       "workerIndex": 0,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 253,
+                      "duration": 395,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:42:20.937Z",
+                      "startTime": "2025-12-25T08:29:20.282Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -359,12 +359,12 @@
                       "workerIndex": 0,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 10269,
+                      "duration": 10832,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:42:21.575Z",
+                      "startTime": "2025-12-25T08:29:21.349Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -393,12 +393,12 @@
                       "workerIndex": 0,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 95715,
+                      "duration": 48710,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:42:31.849Z",
+                      "startTime": "2025-12-25T08:29:32.185Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -427,12 +427,12 @@
                       "workerIndex": 0,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 24065,
+                      "duration": 62278,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:44:07.569Z",
+                      "startTime": "2025-12-25T08:30:20.899Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -460,32 +460,29 @@
                     {
                       "workerIndex": 0,
                       "parallelIndex": 0,
-                      "status": "failed",
-                      "duration": 120356,
+                      "status": "timedOut",
+                      "duration": 180054,
                       "error": {
-                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n",
-                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\n    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts:104:5",
-                        "location": {
-                          "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
-                          "column": 67,
-                          "line": 60
-                        },
-                        "snippet": "\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m"
+                        "message": "\u001b[31mTest timeout of 180000ms exceeded.\u001b[39m",
+                        "stack": "\u001b[31mTest timeout of 180000ms exceeded.\u001b[39m"
                       },
                       "errors": [
+                        {
+                          "message": "\u001b[31mTest timeout of 180000ms exceeded.\u001b[39m"
+                        },
                         {
                           "location": {
                             "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
                             "column": 67,
                             "line": 60
                           },
-                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n\n\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m\n\u001b[2m    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\u001b[22m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts:104:5\u001b[22m"
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 180000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n\n\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m\n\u001b[2m    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\u001b[22m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts:104:5\u001b[22m"
                         }
                       ],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:44:31.640Z",
+                      "startTime": "2025-12-25T08:31:23.182Z",
                       "annotations": [],
                       "attachments": [
                         {
@@ -503,42 +500,34 @@
                           "contentType": "text/markdown",
                           "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/error-handling-Error-Handl-52ef6-cial-characters-in-messages-chromium/error-context.md"
                         }
-                      ],
-                      "errorLocation": {
-                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
-                        "column": 67,
-                        "line": 60
-                      }
+                      ]
                     },
                     {
                       "workerIndex": 1,
                       "parallelIndex": 0,
-                      "status": "failed",
-                      "duration": 120661,
+                      "status": "timedOut",
+                      "duration": 180600,
                       "error": {
-                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n",
-                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\n    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts:104:5",
-                        "location": {
-                          "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
-                          "column": 67,
-                          "line": 60
-                        },
-                        "snippet": "\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m"
+                        "message": "\u001b[31mTest timeout of 180000ms exceeded.\u001b[39m",
+                        "stack": "\u001b[31mTest timeout of 180000ms exceeded.\u001b[39m"
                       },
                       "errors": [
+                        {
+                          "message": "\u001b[31mTest timeout of 180000ms exceeded.\u001b[39m"
+                        },
                         {
                           "location": {
                             "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
                             "column": 67,
                             "line": 60
                           },
-                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n\n\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m\n\u001b[2m    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\u001b[22m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts:104:5\u001b[22m"
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 180000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 180000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n\n\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m\n\u001b[2m    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\u001b[22m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts:104:5\u001b[22m"
                         }
                       ],
                       "stdout": [],
                       "stderr": [],
                       "retry": 1,
-                      "startTime": "2025-12-24T17:46:32.292Z",
+                      "startTime": "2025-12-25T08:34:23.808Z",
                       "annotations": [],
                       "attachments": [
                         {
@@ -561,12 +550,7 @@
                           "contentType": "application/zip",
                           "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/error-handling-Error-Handl-52ef6-cial-characters-in-messages-chromium-retry1/trace.zip"
                         }
-                      ],
-                      "errorLocation": {
-                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
-                        "column": 67,
-                        "line": 60
-                      }
+                      ]
                     }
                   ],
                   "status": "unexpected"
@@ -593,12 +577,12 @@
                       "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 65205,
+                      "duration": 103316,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:48:33.983Z",
+                      "startTime": "2025-12-25T08:37:25.595Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -627,12 +611,12 @@
                       "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 128306,
+                      "duration": 26160,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:49:39.511Z",
+                      "startTime": "2025-12-25T08:39:09.172Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -692,7 +676,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:51:47.822Z",
+                      "startTime": "2025-12-25T08:39:35.338Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -744,7 +728,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:51:47.822Z",
+                      "startTime": "2025-12-25T08:39:35.338Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -796,7 +780,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:51:47.823Z",
+                      "startTime": "2025-12-25T08:39:35.338Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -848,7 +832,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:51:47.823Z",
+                      "startTime": "2025-12-25T08:39:35.338Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -900,7 +884,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:51:47.823Z",
+                      "startTime": "2025-12-25T08:39:35.338Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -952,7 +936,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:51:47.823Z",
+                      "startTime": "2025-12-25T08:39:35.338Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -1021,7 +1005,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:51:47.825Z",
+                      "startTime": "2025-12-25T08:39:35.341Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -1073,7 +1057,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:51:47.826Z",
+                      "startTime": "2025-12-25T08:39:35.342Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -1111,12 +1095,12 @@
                       "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 160332,
+                      "duration": 166449,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:51:47.826Z",
+                      "startTime": "2025-12-25T08:39:35.342Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -1159,7 +1143,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:54:28.163Z",
+                      "startTime": "2025-12-25T08:42:21.803Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -1214,12 +1198,12 @@
                       "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 136,
+                      "duration": 1040,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:54:28.166Z",
+                      "startTime": "2025-12-25T08:42:21.806Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -1248,12 +1232,12 @@
                       "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 933,
+                      "duration": 930,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:54:28.307Z",
+                      "startTime": "2025-12-25T08:42:22.850Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -1281,69 +1265,18 @@
                     {
                       "workerIndex": 2,
                       "parallelIndex": 0,
-                      "status": "timedOut",
-                      "duration": 120053,
-                      "error": {
-                        "message": "\u001b[31mTest timeout of 120000ms exceeded.\u001b[39m",
-                        "stack": "\u001b[31mTest timeout of 120000ms exceeded.\u001b[39m"
-                      },
-                      "errors": [
-                        {
-                          "message": "\u001b[31mTest timeout of 120000ms exceeded.\u001b[39m"
-                        },
-                        {
-                          "location": {
-                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
-                            "column": 67,
-                            "line": 60
-                          },
-                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n\n\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m\n\u001b[2m    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\u001b[22m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/smoke.spec.ts:41:5\u001b[22m"
-                        }
-                      ],
-                      "stdout": [],
-                      "stderr": [],
-                      "retry": 0,
-                      "startTime": "2025-12-24T17:54:29.244Z",
-                      "annotations": [],
-                      "attachments": [
-                        {
-                          "name": "screenshot",
-                          "contentType": "image/png",
-                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/smoke-Smoke-Tests-can-send-simple-message-chromium/test-failed-1.png"
-                        },
-                        {
-                          "name": "video",
-                          "contentType": "video/webm",
-                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/smoke-Smoke-Tests-can-send-simple-message-chromium/video.webm"
-                        },
-                        {
-                          "name": "error-context",
-                          "contentType": "text/markdown",
-                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/smoke-Smoke-Tests-can-send-simple-message-chromium/error-context.md"
-                        }
-                      ]
-                    },
-                    {
-                      "workerIndex": 3,
-                      "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 62484,
+                      "duration": 118773,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
-                      "retry": 1,
-                      "startTime": "2025-12-24T17:56:29.643Z",
+                      "retry": 0,
+                      "startTime": "2025-12-25T08:42:23.783Z",
                       "annotations": [],
-                      "attachments": [
-                        {
-                          "name": "trace",
-                          "contentType": "application/zip",
-                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/smoke-Smoke-Tests-can-send-simple-message-chromium-retry1/trace.zip"
-                        }
-                      ]
+                      "attachments": []
                     }
                   ],
-                  "status": "flaky"
+                  "status": "expected"
                 }
               ],
               "id": "4219922fea2e2bd3c691-71fe18f11ae21bb41aa0",
@@ -1364,15 +1297,15 @@
                   "projectName": "chromium",
                   "results": [
                     {
-                      "workerIndex": 3,
+                      "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 131,
+                      "duration": 245,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:57:32.443Z",
+                      "startTime": "2025-12-25T08:44:22.562Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -1398,15 +1331,15 @@
                   "projectName": "chromium",
                   "results": [
                     {
-                      "workerIndex": 3,
+                      "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 1890,
+                      "duration": 894,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:57:32.579Z",
+                      "startTime": "2025-12-25T08:44:22.811Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -1449,15 +1382,15 @@
                   "projectName": "chromium",
                   "results": [
                     {
-                      "workerIndex": 3,
+                      "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 4725,
+                      "duration": 4791,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:57:34.476Z",
+                      "startTime": "2025-12-25T08:44:23.712Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -1483,15 +1416,15 @@
                   "projectName": "chromium",
                   "results": [
                     {
-                      "workerIndex": 3,
+                      "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 12977,
+                      "duration": 93640,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:57:39.205Z",
+                      "startTime": "2025-12-25T08:44:28.508Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -1517,15 +1450,15 @@
                   "projectName": "chromium",
                   "results": [
                     {
-                      "workerIndex": 3,
+                      "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 3034,
+                      "duration": 5174,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:57:52.186Z",
+                      "startTime": "2025-12-25T08:46:02.154Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -1560,7 +1493,7 @@
                   "projectName": "chromium",
                   "results": [
                     {
-                      "workerIndex": 3,
+                      "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "skipped",
                       "duration": 0,
@@ -1568,7 +1501,7 @@
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:57:55.225Z",
+                      "startTime": "2025-12-25T08:46:07.332Z",
                       "annotations": [
                         {
                           "type": "skip",
@@ -1603,15 +1536,15 @@
                   "projectName": "chromium",
                   "results": [
                     {
-                      "workerIndex": 3,
+                      "workerIndex": 2,
                       "parallelIndex": 0,
                       "status": "passed",
-                      "duration": 7015,
+                      "duration": 7316,
                       "errors": [],
                       "stdout": [],
                       "stderr": [],
                       "retry": 0,
-                      "startTime": "2025-12-24T17:57:55.225Z",
+                      "startTime": "2025-12-25T08:46:07.332Z",
                       "annotations": [],
                       "attachments": []
                     }
@@ -1631,11 +1564,11 @@
   ],
   "errors": [],
   "stats": {
-    "startTime": "2025-12-24T17:42:15.626Z",
-    "duration": 946666.835,
-    "expected": 15,
+    "startTime": "2025-12-25T08:29:14.945Z",
+    "duration": 1019736.505,
+    "expected": 16,
     "skipped": 14,
     "unexpected": 1,
-    "flaky": 1
+    "flaky": 0
   }
 }

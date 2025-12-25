@@ -1,17 +1,15 @@
 """User preferences endpoints."""
 
-from datetime import UTC, datetime
-
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.session import get_db
 from src.middleware.auth import CurrentUser
-from src.models.research_session import ResearchDepth
 from src.schemas.preferences import (
     UpdatePreferencesRequest,
     UserPreferencesResponse,
 )
+from src.services.preferences_service import PreferencesService
 
 router = APIRouter()
 
@@ -22,13 +20,14 @@ async def get_preferences(
     db: AsyncSession = Depends(get_db),
 ) -> UserPreferencesResponse:
     """Get user preferences."""
-    # TODO: Implement with PreferencesService
+    service = PreferencesService(db)
+    preferences = await service.get_preferences(user.user_id)
     return UserPreferencesResponse(
-        system_instructions=None,
-        default_research_depth=ResearchDepth.AUTO,
-        theme="system",
-        notifications_enabled=True,
-        updated_at=datetime.now(UTC),
+        system_instructions=preferences.system_instructions,
+        default_research_depth=preferences.default_research_depth,
+        theme=preferences.theme,
+        notifications_enabled=preferences.notifications_enabled,
+        updated_at=preferences.updated_at,
     )
 
 
@@ -39,11 +38,19 @@ async def update_preferences(
     db: AsyncSession = Depends(get_db),
 ) -> UserPreferencesResponse:
     """Update user preferences."""
-    # TODO: Implement with PreferencesService
-    return UserPreferencesResponse(
+    service = PreferencesService(db)
+    preferences = await service.update_preferences(
+        user_id=user.user_id,
         system_instructions=request.system_instructions,
-        default_research_depth=request.default_research_depth or ResearchDepth.AUTO,
-        theme=request.theme or "system",
-        notifications_enabled=request.notifications_enabled if request.notifications_enabled is not None else True,
-        updated_at=datetime.now(UTC),
+        default_research_depth=request.default_research_depth,
+        theme=request.theme,
+        notifications_enabled=request.notifications_enabled,
+    )
+    await db.commit()
+    return UserPreferencesResponse(
+        system_instructions=preferences.system_instructions,
+        default_research_depth=preferences.default_research_depth,
+        theme=preferences.theme,
+        notifications_enabled=preferences.notifications_enabled,
+        updated_at=preferences.updated_at,
     )

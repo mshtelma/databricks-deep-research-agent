@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.models.message import Message, MessageRole
+from src.models.message import MessageRole
 from src.services.message_service import MessageService
 
 

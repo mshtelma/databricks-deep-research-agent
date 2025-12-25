@@ -312,7 +312,7 @@ class LLMClient:
                 if structured_output:
                     try:
                         structured = structured_output.model_validate_json(content)
-                    except Exception as e:
+                    except (json.JSONDecodeError, ValueError) as e:
                         logger.warning(
                             "Structured output parse failed, attempting repair",
                             error=str(e)[:100],

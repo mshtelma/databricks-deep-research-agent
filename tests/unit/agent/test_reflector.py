@@ -274,7 +274,7 @@ class TestRunReflector:
     ):
         """Test that uppercase decision values are normalized to lowercase."""
         # Arrange - LLM returns uppercase decision (edge case we're fixing)
-        reflector_output = ReflectorOutput(
+        ReflectorOutput(
             decision="continue",  # Pydantic validates as lowercase
             reasoning="Should continue with research.",
             suggested_changes=None,

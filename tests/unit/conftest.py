@@ -8,9 +8,8 @@ These fixtures provide mocked versions of:
 - UserIdentity (Authentication)
 """
 
-from datetime import UTC, datetime
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -19,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.auth import UserIdentity
 from src.models.chat import Chat, ChatStatus
 from src.models.message import Message, MessageRole
-
 
 # ---------------------------------------------------------------------------
 # Database Session Mocks

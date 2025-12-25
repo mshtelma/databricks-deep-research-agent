@@ -65,6 +65,8 @@ class OrchestrationConfig:
     enable_background_investigation: bool = True
     enable_clarification: bool = True
     timeout_seconds: int = 300  # 5 minutes
+    research_depth: str = "auto"  # auto, light, medium, extended
+    system_instructions: str | None = None  # User's custom system instructions
 
 
 @dataclass
@@ -114,6 +116,8 @@ async def run_research(
         conversation_history=conversation_history or [],
         max_plan_iterations=config.max_plan_iterations,
         enable_clarification=config.enable_clarification,
+        research_depth=config.research_depth,
+        system_instructions=config.system_instructions,
     )
     if session_id:
         state.session_id = session_id
@@ -464,6 +468,8 @@ async def stream_research(
         conversation_history=conversation_history or [],
         max_plan_iterations=config.max_plan_iterations,
         enable_clarification=config.enable_clarification,
+        research_depth=config.research_depth,
+        system_instructions=config.system_instructions,
     )
     if session_id:
         state.session_id = session_id

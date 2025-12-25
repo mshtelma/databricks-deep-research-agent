@@ -3,20 +3,21 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.exceptions import NotFoundError
 from src.db.session import get_db
 from src.middleware.auth import CurrentUser
-from src.models.chat import ChatStatus
+from src.models.chat import Chat, ChatStatus
 from src.schemas.chat import (
     ChatCreate,
     ChatListResponse,
     ChatResponse,
     ChatUpdate,
 )
-from src.models.chat import Chat
 from src.services.chat_service import ChatService
+from src.services.export_service import ExportService
 
 router = APIRouter()
 
@@ -144,11 +145,51 @@ async def export_chat(
     chat_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
-    format: str = Query(..., pattern="^(markdown|pdf)$"),
-) -> None:
-    """Export chat as Markdown or PDF."""
-    # TODO: Implement with ExportService
-    raise NotFoundError("Chat", str(chat_id))
+    format: str = Query(..., pattern="^(markdown|json)$"),
+) -> PlainTextResponse:
+    """Export chat as Markdown or JSON.
+
+    For PDF export, use client-side rendering with the JSON or Markdown output.
+
+    Args:
+        chat_id: Chat ID to export.
+        format: Export format (markdown or json).
+
+    Returns:
+        PlainTextResponse with exported content.
+    """
+    export_service = ExportService(db)
+
+    try:
+        if format == "markdown":
+            content = await export_service.export_markdown(
+                chat_id=chat_id,
+                user_id=user.user_id,
+            )
+            return PlainTextResponse(
+                content=content,
+                media_type="text/markdown",
+                headers={
+                    "Content-Disposition": f'attachment; filename="chat-{chat_id}.md"'
+                },
+            )
+        else:  # json
+            import json as json_module
+
+            data = await export_service.export_json(
+                chat_id=chat_id,
+                user_id=user.user_id,
+            )
+            content = json_module.dumps(data, indent=2)
+            return PlainTextResponse(
+                content=content,
+                media_type="application/json",
+                headers={
+                    "Content-Disposition": f'attachment; filename="chat-{chat_id}.json"'
+                },
+            )
+    except ValueError as e:
+        raise NotFoundError("Chat", str(chat_id)) from e
 
 
 def _chat_to_response(chat: "Chat") -> ChatResponse:

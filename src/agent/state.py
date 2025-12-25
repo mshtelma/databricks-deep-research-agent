@@ -66,7 +66,7 @@ class Plan:
     steps: list[PlanStep]
     has_enough_context: bool = False
     iteration: int = 1
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -142,6 +142,30 @@ class SourceInfo:
         }
 
 
+class ResearchDepth(str, Enum):
+    """Research depth levels controlling thoroughness."""
+
+    AUTO = "auto"  # Automatically determined based on query complexity
+    LIGHT = "light"  # 1-2 search iterations, quick answers
+    MEDIUM = "medium"  # 3-5 search iterations, balanced research
+    EXTENDED = "extended"  # 6-10 search iterations, thorough analysis
+
+
+# Mapping from depth levels to max research steps
+DEPTH_TO_STEPS: dict[str, tuple[int, int]] = {
+    "light": (1, 3),  # min 1, max 3 steps
+    "medium": (3, 6),  # min 3, max 6 steps
+    "extended": (5, 10),  # min 5, max 10 steps
+}
+
+# Mapping from query complexity to default depth
+COMPLEXITY_TO_DEPTH: dict[str, str] = {
+    "simple": "light",
+    "moderate": "medium",
+    "complex": "extended",
+}
+
+
 @dataclass
 class ResearchState:
     """Runtime state for multi-agent research workflow.
@@ -153,6 +177,13 @@ class ResearchState:
     query: str
     conversation_history: list[dict[str, str]] = field(default_factory=list)
     session_id: UUID = field(default_factory=uuid4)
+
+    # User preferences
+    system_instructions: str | None = None  # Custom instructions from user preferences
+
+    # Research depth configuration
+    research_depth: str = "auto"  # auto, light, medium, extended
+    effective_depth: str | None = None  # Resolved depth after auto selection
 
     # Clarification (Coordinator phase)
     enable_clarification: bool = True
@@ -190,7 +221,7 @@ class ResearchState:
     final_report: str = ""
 
     # Timing
-    started_at: datetime = field(default_factory=datetime.utcnow)
+    started_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     completed_at: datetime | None = None
 
     # Cancellation support
@@ -236,6 +267,52 @@ class ResearchState:
         """Mark research as cancelled."""
         self.is_cancelled = True
         self.completed_at = datetime.now(UTC)
+
+    def resolve_depth(self) -> str:
+        """Resolve effective research depth.
+
+        If research_depth is 'auto', determines depth based on query complexity.
+        Otherwise returns the explicitly set depth.
+
+        Returns:
+            Effective depth string (light, medium, or extended).
+        """
+        if self.effective_depth:
+            return self.effective_depth
+
+        if self.research_depth != "auto":
+            self.effective_depth = self.research_depth
+            return self.effective_depth
+
+        # Auto-determine based on query complexity
+        if self.query_classification:
+            complexity = self.query_classification.complexity
+            self.effective_depth = COMPLEXITY_TO_DEPTH.get(complexity, "medium")
+        else:
+            # Default to medium if no classification available
+            self.effective_depth = "medium"
+
+        return self.effective_depth
+
+    def get_max_steps(self) -> int:
+        """Get maximum number of research steps for current depth.
+
+        Returns:
+            Maximum number of steps to execute.
+        """
+        depth = self.resolve_depth()
+        min_steps, max_steps = DEPTH_TO_STEPS.get(depth, (3, 6))
+        return max_steps
+
+    def get_min_steps(self) -> int:
+        """Get minimum number of research steps for current depth.
+
+        Returns:
+            Minimum number of steps before early completion is allowed.
+        """
+        depth = self.resolve_depth()
+        min_steps, max_steps = DEPTH_TO_STEPS.get(depth, (3, 6))
+        return min_steps
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""

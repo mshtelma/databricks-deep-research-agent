@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.orchestrator import stream_research
+from src.agent.orchestrator import OrchestrationConfig, stream_research
 from src.agent.tools.web_crawler import WebCrawler
 from src.core.exceptions import NotFoundError
 from src.db.session import get_db
@@ -22,6 +22,8 @@ from src.schemas.research import CancelResearchResponse
 from src.schemas.streaming import StreamEvent
 from src.services.chat_service import ChatService
 from src.services.llm.client import LLMClient
+from src.services.preferences_service import PreferencesService
+from src.services.research_session_service import ResearchSessionService
 from src.services.search.brave import BraveSearchClient
 
 router = APIRouter()
@@ -51,6 +53,7 @@ async def stream_research_endpoint(
     chat_id: UUID,
     user: CurrentUser,
     query: str = Query(default=""),
+    research_depth: str = Query(default="auto", pattern="^(auto|light|medium|extended)$"),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """Stream research progress (SSE).
@@ -104,6 +107,16 @@ async def stream_research_endpoint(
         # If we can't load history (e.g., table doesn't exist), continue without it
         logger.warning(f"Could not load conversation history: {e}")
 
+    # Get user's system instructions from preferences
+    system_instructions: str | None = None
+    try:
+        preferences_service = PreferencesService(db)
+        system_instructions = await preferences_service.get_system_instructions(
+            user.user_id
+        )
+    except Exception as e:
+        logger.warning(f"Could not load user preferences: {e}")
+
     async def generate_sse_events() -> AsyncGenerator[str, None]:
         """Generate SSE events from the research orchestrator."""
 
@@ -118,6 +131,12 @@ async def stream_research_endpoint(
                 return f"data: {json.dumps(event_dict)}\n\n"
 
         try:
+            # Create orchestration config with research depth and system instructions
+            config = OrchestrationConfig(
+                research_depth=research_depth,
+                system_instructions=system_instructions,
+            )
+
             async for event in stream_research(
                 query=query,
                 llm=llm,
@@ -126,6 +145,7 @@ async def stream_research_endpoint(
                 conversation_history=conversation_history,
                 user_id=user.user_id,
                 chat_id=str(chat_id),
+                config=config,
             ):
                 yield format_event(event)
 
@@ -192,6 +212,7 @@ async def stream_research_with_history(
     chat_id: UUID,
     user: CurrentUser,
     query: str = Query(default=""),
+    research_depth: str = Query(default="auto", pattern="^(auto|light|medium|extended)$"),
     history: list[ConversationMessage] | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
@@ -215,6 +236,16 @@ async def stream_research_with_history(
             {"role": msg.role, "content": msg.content} for msg in history
         ]
 
+    # Get user's system instructions from preferences
+    system_instructions: str | None = None
+    try:
+        preferences_service = PreferencesService(db)
+        system_instructions = await preferences_service.get_system_instructions(
+            user.user_id
+        )
+    except Exception as e:
+        logger.warning(f"Could not load user preferences: {e}")
+
     async def generate_sse_events() -> AsyncGenerator[str, None]:
         """Generate SSE events from the research orchestrator."""
 
@@ -226,6 +257,12 @@ async def stream_research_with_history(
                 return f"data: {json.dumps(event_dict)}\n\n"
 
         try:
+            # Create orchestration config with research depth and system instructions
+            config = OrchestrationConfig(
+                research_depth=research_depth,
+                system_instructions=system_instructions,
+            )
+
             async for event in stream_research(
                 query=query,
                 llm=llm,
@@ -234,6 +271,7 @@ async def stream_research_with_history(
                 conversation_history=conversation_history,
                 user_id=user.user_id,
                 chat_id=str(chat_id),
+                config=config,
             ):
                 yield format_event(event)
 
@@ -268,5 +306,24 @@ async def cancel_research(
 
     Stops the research operation within 2 seconds. Partial results are preserved.
     """
-    # TODO: Implement with ResearchSessionService
-    raise NotFoundError("ResearchSession", str(session_id))
+    service = ResearchSessionService(db)
+    session = await service.cancel(session_id)
+
+    if not session:
+        raise NotFoundError("ResearchSession", str(session_id))
+
+    # Get partial results if available
+    partial_results = None
+    if session.observations:
+        # Join all observations collected so far
+        partial_results = "\n\n".join(
+            obs.get("observation", "") for obs in session.observations if obs.get("observation")
+        )
+
+    await db.commit()
+
+    return CancelResearchResponse(
+        session_id=session_id,
+        status="cancelled",
+        partial_results=partial_results if partial_results else None,
+    )
