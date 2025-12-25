@@ -1,0 +1,187 @@
+# Deep Research Agent - Build and Development Commands
+#
+# Development:
+#   make dev            - Run backend with hot reload
+#   make dev-frontend   - Run frontend with hot reload (Vite)
+#
+# Production:
+#   make build          - Build frontend to static/
+#   make prod           - Build and run unified server
+#
+# E2E Testing:
+#   make e2e            - Build + run E2E tests (auto-starts server)
+#   make e2e-ui         - Run E2E tests with Playwright UI
+#
+# Utilities:
+#   make clean          - Remove build artifacts
+#   make clean_db       - Delete all chats/messages from database
+#   make typecheck      - Run type checking (backend + frontend)
+#   make lint           - Run linting (backend + frontend)
+
+.PHONY: dev dev-frontend build prod clean clean_db typecheck lint install e2e e2e-ui e2e-debug test test-frontend
+
+# =============================================================================
+# Development
+# =============================================================================
+
+dev:
+	@echo "Starting backend with hot reload on :8000..."
+	uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+
+dev-frontend:
+	@echo "Starting frontend with hot reload on :5173..."
+	cd frontend && npm run dev
+
+dev-help:
+	@echo "Development mode requires two terminals:"
+	@echo "  Terminal 1: make dev"
+	@echo "  Terminal 2: make dev-frontend"
+	@echo ""
+	@echo "Then access: http://localhost:5173"
+
+# =============================================================================
+# Production Build
+# =============================================================================
+
+build:
+	@echo "Building frontend..."
+	cd frontend && npm ci && npm run build
+	@echo ""
+	@echo "Frontend built to static/"
+	@ls -la static/
+
+prod: build
+	@echo "Starting production server on :8000..."
+	SERVE_STATIC=true uv run uvicorn src.main:app --host 0.0.0.0 --port 8000
+
+# =============================================================================
+# Installation
+# =============================================================================
+
+install:
+	@echo "Installing backend dependencies..."
+	uv sync
+	@echo "Installing frontend dependencies..."
+	cd frontend && npm ci
+	@echo "Installing E2E dependencies..."
+	cd e2e && npm ci && npx playwright install
+	@echo "Done!"
+
+install-dev:
+	@echo "Installing backend dependencies (dev)..."
+	uv sync
+	@echo "Installing frontend dependencies..."
+	cd frontend && npm install
+	@echo "Installing E2E dependencies..."
+	cd e2e && npm install && npx playwright install
+	@echo "Done!"
+
+# =============================================================================
+# Quality Checks
+# =============================================================================
+
+typecheck:
+	@echo "Type checking backend..."
+	uv run mypy src --strict
+	@echo "Type checking frontend..."
+	cd frontend && npm run typecheck
+
+lint:
+	@echo "Linting backend..."
+	uv run ruff check src
+	@echo "Linting frontend..."
+	cd frontend && npm run lint
+
+format:
+	@echo "Formatting backend..."
+	uv run ruff format src
+	@echo "Formatting frontend..."
+	cd frontend && npm run format 2>/dev/null || true
+
+# =============================================================================
+# Testing
+# =============================================================================
+
+test:
+	uv run pytest tests -v
+
+test-frontend:
+	cd frontend && npm run test
+
+test-all: test test-frontend
+
+# =============================================================================
+# Database (local development via Docker)
+# =============================================================================
+
+db:
+	@echo "Starting PostgreSQL via docker compose..."
+	docker compose up -d postgres
+	@echo "Waiting for PostgreSQL to be ready..."
+	@sleep 3
+	@echo "Running migrations..."
+	DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/deep_research \
+		LAKEBASE_INSTANCE_NAME= \
+		uv run alembic upgrade head || echo "Note: Run migrations manually if needed"
+
+db-stop:
+	docker compose down
+
+clean_db:
+	@echo "Cleaning all chats, messages, and research data from database..."
+	uv run ./scripts/clean-db.sh
+	@echo "Done!"
+
+# =============================================================================
+# E2E Testing with Playwright
+# Auto-starts server if not running (webServer in playwright.config.ts)
+# Requires: docker compose up -d postgres (or run 'make db' first)
+# =============================================================================
+
+e2e:
+	@echo "Stopping any existing server on port 8000..."
+	@./scripts/kill-server.sh 8000 || true
+	@echo "Running E2E tests with Playwright..."
+	@echo "Note: Requires PostgreSQL running (make db)"
+	@[ -f static/index.html ] || make build
+	cd e2e && npm test
+
+e2e-ui:
+	@echo "Stopping any existing server on port 8000..."
+	@./scripts/kill-server.sh 8000 || true
+	@echo "Opening Playwright UI..."
+	@[ -f static/index.html ] || make build
+	cd e2e && npm run test:ui
+
+e2e-debug:
+	@echo "Stopping any existing server on port 8000..."
+	@./scripts/kill-server.sh 8000 || true
+	@echo "Running E2E tests in debug mode..."
+	@[ -f static/index.html ] || make build
+	cd e2e && npm run test:debug
+
+# =============================================================================
+# Cleanup
+# =============================================================================
+
+clean:
+	@echo "Cleaning build artifacts..."
+	rm -rf static/
+	rm -rf frontend/dist/
+	rm -rf frontend/node_modules/.vite/
+	rm -rf e2e/test-results/
+	rm -rf e2e/playwright-report/
+	@echo "Done!"
+
+clean-all: clean
+	rm -rf frontend/node_modules/
+	rm -rf e2e/node_modules/
+	rm -rf .venv/
+
+# =============================================================================
+# Databricks Deployment
+# =============================================================================
+
+deploy: build
+	@echo "Deploying to Databricks Apps..."
+	databricks apps deploy .

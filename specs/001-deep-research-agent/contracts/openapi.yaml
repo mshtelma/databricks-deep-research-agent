@@ -1,0 +1,1297 @@
+openapi: 3.1.0
+info:
+  title: Deep Research Agent API
+  description: |
+    REST API for the Deep Research Agent. Provides endpoints for chat management,
+    research queries, and user preferences. Compatible with Databricks chat agent patterns.
+  version: 1.0.0
+  contact:
+    name: Deep Research Agent Team
+
+servers:
+  - url: /api/v1
+    description: API v1
+
+security:
+  - databricksAuth: []
+
+tags:
+  - name: Chats
+    description: Chat conversation management
+  - name: Messages
+    description: Message operations within chats
+  - name: Research
+    description: Research query and streaming
+  - name: Preferences
+    description: User preferences management
+  - name: Agent
+    description: Databricks-compatible agent endpoint
+
+paths:
+  # ============================================================================
+  # AGENT ENDPOINT (Databricks Chat Agent Pattern)
+  # ============================================================================
+  /agent/query:
+    post:
+      tags: [Agent]
+      operationId: queryAgent
+      summary: Submit a research query (Databricks agent pattern)
+      description: |
+        Databricks-compatible agent endpoint. Accepts a query with optional
+        conversation context and returns a research response. Supports streaming
+        via SSE when Accept header includes text/event-stream.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentQueryRequest'
+      responses:
+        '200':
+          description: Research response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentQueryResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE stream of reasoning steps and final response
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  # ============================================================================
+  # CHAT ENDPOINTS
+  # ============================================================================
+  /chats:
+    get:
+      tags: [Chats]
+      operationId: listChats
+      summary: List user's chats
+      description: Returns paginated list of user's chats, sorted by most recent activity.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, archived, all]
+            default: active
+        - name: search
+          in: query
+          description: Full-text search across chat messages
+          schema:
+            type: string
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: List of chats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      tags: [Chats]
+      operationId: createChat
+      summary: Create a new chat
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChatRequest'
+      responses:
+        '201':
+          description: Chat created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Chat'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /chats/{chatId}:
+    parameters:
+      - $ref: '#/components/parameters/chatId'
+
+    get:
+      tags: [Chats]
+      operationId: getChat
+      summary: Get chat details with messages
+      parameters:
+        - name: includeMessages
+          in: query
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: Chat details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatWithMessages'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags: [Chats]
+      operationId: updateChat
+      summary: Update chat (rename, archive)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateChatRequest'
+      responses:
+        '200':
+          description: Chat updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Chat'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Chats]
+      operationId: deleteChat
+      summary: Delete chat (soft delete)
+      description: Soft deletes the chat. Recoverable for 30 days.
+      responses:
+        '204':
+          description: Chat deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /chats/{chatId}/restore:
+    parameters:
+      - $ref: '#/components/parameters/chatId'
+
+    post:
+      tags: [Chats]
+      operationId: restoreChat
+      summary: Restore deleted chat
+      description: Restores a soft-deleted chat within the 30-day recovery window.
+      responses:
+        '200':
+          description: Chat restored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Chat'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: Chat permanently deleted (past 30-day window)
+
+  /chats/{chatId}/export:
+    parameters:
+      - $ref: '#/components/parameters/chatId'
+
+    get:
+      tags: [Chats]
+      operationId: exportChat
+      summary: Export chat as Markdown or PDF
+      parameters:
+        - name: format
+          in: query
+          required: true
+          schema:
+            type: string
+            enum: [markdown, pdf]
+      responses:
+        '200':
+          description: Exported file
+          content:
+            text/markdown:
+              schema:
+                type: string
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================================
+  # MESSAGE ENDPOINTS
+  # ============================================================================
+  /chats/{chatId}/messages:
+    parameters:
+      - $ref: '#/components/parameters/chatId'
+
+    get:
+      tags: [Messages]
+      operationId: listMessages
+      summary: List messages in a chat
+      parameters:
+        - $ref: '#/components/parameters/limit'
+        - $ref: '#/components/parameters/offset'
+      responses:
+        '200':
+          description: List of messages
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      tags: [Messages]
+      operationId: sendMessage
+      summary: Send a message and get agent response
+      description: |
+        Sends a user message and triggers agent research. Returns immediately
+        with message IDs. Use SSE endpoint to stream the agent response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '201':
+          description: Message sent, research initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SendMessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /chats/{chatId}/messages/{messageId}:
+    parameters:
+      - $ref: '#/components/parameters/chatId'
+      - $ref: '#/components/parameters/messageId'
+
+    get:
+      tags: [Messages]
+      operationId: getMessage
+      summary: Get message details
+      parameters:
+        - name: includeResearchSession
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Message details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageWithSession'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags: [Messages]
+      operationId: editMessage
+      summary: Edit a user message
+      description: |
+        Edits a user message content. Invalidates (removes) all subsequent
+        messages in the conversation thread.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EditMessageRequest'
+      responses:
+        '200':
+          description: Message edited, subsequent messages removed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EditMessageResponse'
+        '400':
+          description: Cannot edit agent messages
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /chats/{chatId}/messages/{messageId}/regenerate:
+    parameters:
+      - $ref: '#/components/parameters/chatId'
+      - $ref: '#/components/parameters/messageId'
+
+    post:
+      tags: [Messages]
+      operationId: regenerateMessage
+      summary: Regenerate agent response
+      description: |
+        Regenerates the agent response for the preceding user message.
+        Creates a new agent message with fresh research results.
+      responses:
+        '201':
+          description: Regeneration initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegenerateResponse'
+        '400':
+          description: Can only regenerate agent messages
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /chats/{chatId}/messages/{messageId}/feedback:
+    parameters:
+      - $ref: '#/components/parameters/chatId'
+      - $ref: '#/components/parameters/messageId'
+
+    post:
+      tags: [Messages]
+      operationId: submitFeedback
+      summary: Submit feedback on agent message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeedbackRequest'
+      responses:
+        '201':
+          description: Feedback submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageFeedback'
+        '400':
+          description: Can only provide feedback on agent messages
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /chats/{chatId}/messages/{messageId}/copy:
+    parameters:
+      - $ref: '#/components/parameters/chatId'
+      - $ref: '#/components/parameters/messageId'
+
+    get:
+      tags: [Messages]
+      operationId: getMessageContent
+      summary: Get message content for clipboard
+      description: Returns plain text content suitable for copying to clipboard.
+      responses:
+        '200':
+          description: Message content
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================================
+  # RESEARCH STREAMING ENDPOINTS
+  # ============================================================================
+  /chats/{chatId}/stream:
+    parameters:
+      - $ref: '#/components/parameters/chatId'
+
+    get:
+      tags: [Research]
+      operationId: streamResearch
+      summary: Stream research progress (SSE)
+      description: |
+        Server-Sent Events stream for real-time multi-agent research progress.
+
+        **Event Flow (5-Agent Architecture)**:
+        ```
+        agent_started (coordinator)
+        → agent_completed (coordinator)
+        → [clarification_needed]?       # If query is ambiguous
+        → agent_started (background_investigator)
+        → agent_completed (background_investigator)
+        → agent_started (planner)
+        → plan_created                  # Research plan with steps
+        → agent_completed (planner)
+        → [RESEARCH LOOP]:
+            → step_started
+            → agent_started (researcher)
+            → agent_completed (researcher)
+            → step_completed
+            → agent_started (reflector)
+            → reflection_decision       # CONTINUE, ADJUST, or COMPLETE
+            → agent_completed (reflector)
+            → [If ADJUST: back to planner]
+            → [If COMPLETE: break loop]
+            → [If CONTINUE: next step]
+        → synthesis_started
+        → agent_started (synthesizer)
+        → synthesis_progress*           # Streaming content chunks
+        → agent_completed (synthesizer)
+        → research_completed
+        ```
+
+        **Event Format**: `event: <event_type>\ndata: <json_payload>\n\n`
+
+        See StreamEvent schemas for event payload definitions.
+      responses:
+        '200':
+          description: SSE stream of multi-agent events
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/StreamEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /research/{sessionId}/cancel:
+    parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    post:
+      tags: [Research]
+      operationId: cancelResearch
+      summary: Cancel in-progress research
+      description: Stops the research operation within 2 seconds. Partial results are preserved.
+      responses:
+        '200':
+          description: Research cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CancelResearchResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Research already completed or cancelled
+
+  # ============================================================================
+  # USER PREFERENCES ENDPOINTS
+  # ============================================================================
+  /preferences:
+    get:
+      tags: [Preferences]
+      operationId: getPreferences
+      summary: Get user preferences
+      responses:
+        '200':
+          description: User preferences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPreferences'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    put:
+      tags: [Preferences]
+      operationId: updatePreferences
+      summary: Update user preferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePreferencesRequest'
+      responses:
+        '200':
+          description: Preferences updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPreferences'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+components:
+  securitySchemes:
+    databricksAuth:
+      type: http
+      scheme: bearer
+      description: Databricks workspace OAuth token
+
+  parameters:
+    chatId:
+      name: chatId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    messageId:
+      name: messageId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+
+    offset:
+      name: offset
+      in: query
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
+
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds to wait before retrying
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    # ============================================================================
+    # AGENT SCHEMAS (Databricks Pattern)
+    # ============================================================================
+    AgentQueryRequest:
+      type: object
+      required:
+        - query
+      properties:
+        query:
+          type: string
+          description: The research query
+        conversation_id:
+          type: string
+          format: uuid
+          description: Optional chat ID for context
+        messages:
+          type: array
+          description: Previous messages for context (alternative to conversation_id)
+          items:
+            $ref: '#/components/schemas/ContextMessage'
+        research_depth:
+          type: string
+          enum: [auto, light, medium, extended]
+          default: auto
+
+    ContextMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum: [user, agent]
+        content:
+          type: string
+
+    AgentQueryResponse:
+      type: object
+      properties:
+        response:
+          type: string
+          description: The synthesized research response
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
+        query_classification:
+          $ref: '#/components/schemas/QueryClassification'
+        research_session_id:
+          type: string
+          format: uuid
+
+    # ============================================================================
+    # CHAT SCHEMAS
+    # ============================================================================
+    Chat:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [active, archived, deleted]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        message_count:
+          type: integer
+
+    ChatWithMessages:
+      allOf:
+        - $ref: '#/components/schemas/Chat'
+        - type: object
+          properties:
+            messages:
+              type: array
+              items:
+                $ref: '#/components/schemas/Message'
+
+    ChatListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Chat'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    CreateChatRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 200
+
+    UpdateChatRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 200
+        status:
+          type: string
+          enum: [active, archived]
+
+    # ============================================================================
+    # MESSAGE SCHEMAS
+    # ============================================================================
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        chat_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, agent, system]
+        content:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        is_edited:
+          type: boolean
+
+    MessageWithSession:
+      allOf:
+        - $ref: '#/components/schemas/Message'
+        - type: object
+          properties:
+            research_session:
+              $ref: '#/components/schemas/ResearchSession'
+              nullable: true
+
+    MessageListResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    SendMessageRequest:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          minLength: 1
+        research_depth:
+          type: string
+          enum: [auto, light, medium, extended]
+          default: auto
+
+    SendMessageResponse:
+      type: object
+      properties:
+        user_message:
+          $ref: '#/components/schemas/Message'
+        agent_message_id:
+          type: string
+          format: uuid
+          description: ID of the placeholder agent message (content will stream)
+        research_session_id:
+          type: string
+          format: uuid
+
+    EditMessageRequest:
+      type: object
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          minLength: 1
+
+    EditMessageResponse:
+      type: object
+      properties:
+        message:
+          $ref: '#/components/schemas/Message'
+        removed_message_count:
+          type: integer
+          description: Number of subsequent messages removed
+
+    RegenerateResponse:
+      type: object
+      properties:
+        new_message_id:
+          type: string
+          format: uuid
+        research_session_id:
+          type: string
+          format: uuid
+
+    # ============================================================================
+    # RESEARCH SCHEMAS
+    # ============================================================================
+    ResearchSession:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        query_classification:
+          $ref: '#/components/schemas/QueryClassification'
+          nullable: true
+        research_depth:
+          type: string
+          enum: [auto, light, medium, extended]
+        reasoning_steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReasoningStep'
+        status:
+          type: string
+          enum: [pending, classifying, clarifying, planning, researching, reflecting, synthesizing, completed, cancelled, failed]
+          description: |
+            Multi-agent workflow status:
+            - pending: Waiting to start
+            - classifying: Coordinator analyzing query
+            - clarifying: Awaiting user clarification
+            - planning: Planner creating research plan
+            - researching: Researcher executing steps
+            - reflecting: Reflector evaluating step results
+            - synthesizing: Synthesizer generating report
+            - completed/cancelled/failed: Terminal states
+        current_agent:
+          type: string
+          enum: [coordinator, background_investigator, planner, researcher, reflector, synthesizer]
+          nullable: true
+          description: Currently active agent
+        plan:
+          $ref: '#/components/schemas/ResearchPlan'
+          nullable: true
+        current_step_index:
+          type: integer
+          nullable: true
+        plan_iterations:
+          type: integer
+          description: Number of times plan was revised (1 = original, 2+ = replanned)
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
+
+    ResearchPlan:
+      type: object
+      description: Structured research plan created by Planner agent
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        thought:
+          type: string
+          description: Planning rationale
+        steps:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResearchPlanStep'
+        iteration:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    ResearchPlanStep:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+        step_type:
+          type: string
+          enum: [research, analysis]
+        needs_search:
+          type: boolean
+        status:
+          type: string
+          enum: [pending, in_progress, completed, skipped]
+        observation:
+          type: string
+          nullable: true
+          description: Research findings from this step
+
+    QueryClassification:
+      type: object
+      properties:
+        complexity:
+          type: string
+          enum: [simple, moderate, complex]
+        follow_up_type:
+          type: string
+          enum: [new_topic, clarification, complex_follow_up]
+        is_ambiguous:
+          type: boolean
+        clarifying_questions:
+          type: array
+          items:
+            type: string
+        reasoning:
+          type: string
+
+    ReasoningStep:
+      type: object
+      properties:
+        step_number:
+          type: integer
+        action:
+          type: string
+          enum: [search, fetch, reflect, synthesize]
+        input_summary:
+          type: string
+        output_summary:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    # ============================================================================
+    # MULTI-AGENT STREAMING EVENT SCHEMAS
+    # ============================================================================
+    StreamEvent:
+      type: object
+      description: |
+        SSE event for multi-agent research progress. Events are sent as:
+        `event: <event_type>\ndata: <json_payload>\n\n`
+      discriminator:
+        propertyName: event_type
+      required:
+        - event_type
+        - timestamp
+      properties:
+        event_type:
+          type: string
+          enum:
+            - agent_started
+            - agent_completed
+            - clarification_needed
+            - plan_created
+            - step_started
+            - step_completed
+            - reflection_decision
+            - synthesis_started
+            - synthesis_progress
+            - research_completed
+            - error
+        timestamp:
+          type: string
+          format: date-time
+
+    AgentStartedEvent:
+      allOf:
+        - $ref: '#/components/schemas/StreamEvent'
+        - type: object
+          properties:
+            agent:
+              type: string
+              enum: [coordinator, background_investigator, planner, researcher, reflector, synthesizer]
+            model_tier:
+              type: string
+              enum: [simple, analytical, complex]
+
+    AgentCompletedEvent:
+      allOf:
+        - $ref: '#/components/schemas/StreamEvent'
+        - type: object
+          properties:
+            agent:
+              type: string
+              enum: [coordinator, background_investigator, planner, researcher, reflector, synthesizer]
+            duration_ms:
+              type: integer
+
+    ClarificationNeededEvent:
+      allOf:
+        - $ref: '#/components/schemas/StreamEvent'
+        - type: object
+          properties:
+            questions:
+              type: array
+              items:
+                type: string
+            round:
+              type: integer
+              description: Current clarification round (1-3)
+
+    PlanCreatedEvent:
+      allOf:
+        - $ref: '#/components/schemas/StreamEvent'
+        - type: object
+          properties:
+            plan_id:
+              type: string
+              format: uuid
+            title:
+              type: string
+            thought:
+              type: string
+              description: Planning rationale
+            steps:
+              type: array
+              items:
+                $ref: '#/components/schemas/PlanStepSummary'
+            iteration:
+              type: integer
+              description: Plan iteration (1 = first plan, 2+ = replanned)
+
+    PlanStepSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        step_type:
+          type: string
+          enum: [research, analysis]
+        needs_search:
+          type: boolean
+
+    StepStartedEvent:
+      allOf:
+        - $ref: '#/components/schemas/StreamEvent'
+        - type: object
+          properties:
+            step_index:
+              type: integer
+            step_id:
+              type: string
+            step_title:
+              type: string
+            step_type:
+              type: string
+              enum: [research, analysis]
+
+    StepCompletedEvent:
+      allOf:
+        - $ref: '#/components/schemas/StreamEvent'
+        - type: object
+          properties:
+            step_index:
+              type: integer
+            step_id:
+              type: string
+            observation_summary:
+              type: string
+              description: Brief summary of what was found
+            sources_found:
+              type: integer
+
+    ReflectionDecisionEvent:
+      allOf:
+        - $ref: '#/components/schemas/StreamEvent'
+        - type: object
+          properties:
+            decision:
+              type: string
+              enum: [continue, adjust, complete]
+              description: |
+                - continue: Proceed to next step
+                - adjust: Return to planner for replanning
+                - complete: Skip remaining steps, go to synthesizer
+            reasoning:
+              type: string
+            suggested_changes:
+              type: array
+              items:
+                type: string
+              nullable: true
+              description: Hints for planner when decision is 'adjust'
+
+    SynthesisStartedEvent:
+      allOf:
+        - $ref: '#/components/schemas/StreamEvent'
+        - type: object
+          properties:
+            total_observations:
+              type: integer
+            total_sources:
+              type: integer
+
+    SynthesisProgressEvent:
+      allOf:
+        - $ref: '#/components/schemas/StreamEvent'
+        - type: object
+          properties:
+            content_chunk:
+              type: string
+              description: Streaming content chunk for real-time display
+
+    ResearchCompletedEvent:
+      allOf:
+        - $ref: '#/components/schemas/StreamEvent'
+        - type: object
+          properties:
+            session_id:
+              type: string
+              format: uuid
+            total_steps_executed:
+              type: integer
+            total_steps_skipped:
+              type: integer
+            plan_iterations:
+              type: integer
+            total_duration_ms:
+              type: integer
+
+    StreamErrorEvent:
+      allOf:
+        - $ref: '#/components/schemas/StreamEvent'
+        - type: object
+          properties:
+            error_code:
+              type: string
+            error_message:
+              type: string
+            recoverable:
+              type: boolean
+
+    Source:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        url:
+          type: string
+          format: uri
+        title:
+          type: string
+          nullable: true
+        snippet:
+          type: string
+          nullable: true
+        relevance_score:
+          type: number
+          format: float
+          nullable: true
+
+    CancelResearchResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [cancelled]
+        partial_results:
+          type: string
+          nullable: true
+          description: Any partial research gathered before cancellation
+
+    # ============================================================================
+    # FEEDBACK SCHEMAS
+    # ============================================================================
+    FeedbackRequest:
+      type: object
+      required:
+        - rating
+      properties:
+        rating:
+          type: integer
+          enum: [-1, 1]
+          description: -1 for negative, 1 for positive
+        error_report:
+          type: string
+          maxLength: 5000
+          description: Description of factual errors or issues
+
+    MessageFeedback:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        message_id:
+          type: string
+          format: uuid
+        rating:
+          type: integer
+        error_report:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    # ============================================================================
+    # PREFERENCES SCHEMAS
+    # ============================================================================
+    UserPreferences:
+      type: object
+      properties:
+        system_instructions:
+          type: string
+          nullable: true
+          maxLength: 10000
+        default_depth:
+          type: string
+          enum: [auto, light, medium, extended]
+        ui_preferences:
+          type: object
+          additionalProperties: true
+        updated_at:
+          type: string
+          format: date-time
+
+    UpdatePreferencesRequest:
+      type: object
+      properties:
+        system_instructions:
+          type: string
+          maxLength: 10000
+        default_depth:
+          type: string
+          enum: [auto, light, medium, extended]
+        ui_preferences:
+          type: object
+          additionalProperties: true
+
+    # ============================================================================
+    # ERROR SCHEMA
+    # ============================================================================
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true

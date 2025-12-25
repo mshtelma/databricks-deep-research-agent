@@ -1,0 +1,1641 @@
+{
+  "config": {
+    "configFile": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/playwright.config.ts",
+    "rootDir": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests",
+    "forbidOnly": false,
+    "fullyParallel": false,
+    "globalSetup": null,
+    "globalTeardown": null,
+    "globalTimeout": 0,
+    "grep": {},
+    "grepInvert": null,
+    "maxFailures": 0,
+    "metadata": {
+      "actualWorkers": 1
+    },
+    "preserveOutput": "always",
+    "reporter": [
+      [
+        "html",
+        {
+          "open": "never"
+        }
+      ],
+      [
+        "list",
+        null
+      ],
+      [
+        "json",
+        {
+          "outputFile": "test-results.json"
+        }
+      ]
+    ],
+    "reportSlowTests": {
+      "max": 5,
+      "threshold": 300000
+    },
+    "quiet": false,
+    "projects": [
+      {
+        "outputDir": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results",
+        "repeatEach": 1,
+        "retries": 1,
+        "metadata": {
+          "actualWorkers": 1
+        },
+        "id": "chromium",
+        "name": "chromium",
+        "testDir": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests",
+        "testIgnore": [],
+        "testMatch": [
+          "**/*.@(spec|test).?(c|m)[jt]s?(x)"
+        ],
+        "timeout": 120000
+      }
+    ],
+    "shard": null,
+    "tags": [],
+    "updateSnapshots": "missing",
+    "updateSourceMethod": "patch",
+    "version": "1.57.0",
+    "workers": 1,
+    "webServer": {
+      "command": "cd .. && SERVE_STATIC=true uv run uvicorn src.main:app --host 0.0.0.0 --port 8000",
+      "url": "http://localhost:8000/health",
+      "reuseExistingServer": true,
+      "timeout": 120000,
+      "stdout": "pipe",
+      "stderr": "pipe"
+    }
+  },
+  "suites": [
+    {
+      "title": "edit-message.spec.ts",
+      "file": "edit-message.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Edit Message",
+          "file": "edit-message.spec.ts",
+          "line": 18,
+          "column": 6,
+          "specs": [
+            {
+              "title": "invalidates subsequent messages on edit",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                        "line": 21,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:42:20.663Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                            "line": 21,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "d1d693ab1861008a17b1-c2d63bbe19634e20cba9",
+              "file": "edit-message.spec.ts",
+              "line": 21,
+              "column": 8
+            },
+            {
+              "title": "edit triggers new response generation",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                        "line": 45,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:42:20.666Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                            "line": 45,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "d1d693ab1861008a17b1-a6d79c70d894f80c900e",
+              "file": "edit-message.spec.ts",
+              "line": 45,
+              "column": 8
+            },
+            {
+              "title": "edited message shows edit indicator",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                        "line": 69,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:42:20.667Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                            "line": 69,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "d1d693ab1861008a17b1-9d5f3c1ee7cd5bf2fa96",
+              "file": "edit-message.spec.ts",
+              "line": 69,
+              "column": 8
+            },
+            {
+              "title": "can edit message multiple times",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                        "line": 90,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:42:20.667Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                            "line": 90,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "d1d693ab1861008a17b1-430fb13a33bd31b26619",
+              "file": "edit-message.spec.ts",
+              "line": 90,
+              "column": 8
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "error-handling.spec.ts",
+      "file": "error-handling.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Error Handling",
+          "file": "error-handling.spec.ts",
+          "line": 9,
+          "column": 6,
+          "specs": [
+            {
+              "title": "handles empty message gracefully",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 253,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:42:20.937Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "1a72721d9ac5c938e1fe-8549edbe7043bdd399e1",
+              "file": "error-handling.spec.ts",
+              "line": 12,
+              "column": 7
+            },
+            {
+              "title": "recovers from network interruption",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 10269,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:42:21.575Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "1a72721d9ac5c938e1fe-abf64d242fd9ebca0a6f",
+              "file": "error-handling.spec.ts",
+              "line": 34,
+              "column": 7
+            },
+            {
+              "title": "app remains stable after normal operation",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 95715,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:42:31.849Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "1a72721d9ac5c938e1fe-1c8b5894d1c1a06861b5",
+              "file": "error-handling.spec.ts",
+              "line": 60,
+              "column": 7
+            },
+            {
+              "title": "handles very long messages",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 24065,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:44:07.569Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "1a72721d9ac5c938e1fe-70eb01abb604156b66b3",
+              "file": "error-handling.spec.ts",
+              "line": 76,
+              "column": 7
+            },
+            {
+              "title": "handles special characters in messages",
+              "ok": false,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 120356,
+                      "error": {
+                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n",
+                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\n    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts:104:5",
+                        "location": {
+                          "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
+                          "column": 67,
+                          "line": 60
+                        },
+                        "snippet": "\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
+                            "column": 67,
+                            "line": 60
+                          },
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n\n\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m\n\u001b[2m    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\u001b[22m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts:104:5\u001b[22m"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:44:31.640Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/error-handling-Error-Handl-52ef6-cial-characters-in-messages-chromium/test-failed-1.png"
+                        },
+                        {
+                          "name": "video",
+                          "contentType": "video/webm",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/error-handling-Error-Handl-52ef6-cial-characters-in-messages-chromium/video.webm"
+                        },
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/error-handling-Error-Handl-52ef6-cial-characters-in-messages-chromium/error-context.md"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
+                        "column": 67,
+                        "line": 60
+                      }
+                    },
+                    {
+                      "workerIndex": 1,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 120661,
+                      "error": {
+                        "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n",
+                        "stack": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\n    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts:104:5",
+                        "location": {
+                          "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
+                          "column": 67,
+                          "line": 60
+                        },
+                        "snippet": "\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
+                            "column": 67,
+                            "line": 60
+                          },
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nTimeout: 120000ms\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n\n\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m\n\u001b[2m    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\u001b[22m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts:104:5\u001b[22m"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 1,
+                      "startTime": "2025-12-24T17:46:32.292Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/error-handling-Error-Handl-52ef6-cial-characters-in-messages-chromium-retry1/test-failed-1.png"
+                        },
+                        {
+                          "name": "video",
+                          "contentType": "video/webm",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/error-handling-Error-Handl-52ef6-cial-characters-in-messages-chromium-retry1/video.webm"
+                        },
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/error-handling-Error-Handl-52ef6-cial-characters-in-messages-chromium-retry1/error-context.md"
+                        },
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/error-handling-Error-Handl-52ef6-cial-characters-in-messages-chromium-retry1/trace.zip"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
+                        "column": 67,
+                        "line": 60
+                      }
+                    }
+                  ],
+                  "status": "unexpected"
+                }
+              ],
+              "id": "1a72721d9ac5c938e1fe-50fe4079f94eb033202b",
+              "file": "error-handling.spec.ts",
+              "line": 99,
+              "column": 7
+            },
+            {
+              "title": "handles rapid message sending",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 65205,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:48:33.983Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "1a72721d9ac5c938e1fe-6db4cfbc1033a1cde5f3",
+              "file": "error-handling.spec.ts",
+              "line": 111,
+              "column": 7
+            },
+            {
+              "title": "handles unicode and emoji in messages",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 128306,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:49:39.511Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "1a72721d9ac5c938e1fe-1c2d4f5ce49b28071f64",
+              "file": "error-handling.spec.ts",
+              "line": 132,
+              "column": 7
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "regenerate.spec.ts",
+      "file": "regenerate.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Regenerate Response",
+          "file": "regenerate.spec.ts",
+          "line": 17,
+          "column": 6,
+          "specs": [
+            {
+              "title": "generates new response for same query",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                        "line": 20,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:51:47.822Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 20,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "5a8d1d43ba59360ead0c-fb9b87dc64a57fe7e7bb",
+              "file": "regenerate.spec.ts",
+              "line": 20,
+              "column": 8
+            },
+            {
+              "title": "regenerate button appears after response",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                        "line": 43,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:51:47.822Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 43,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "5a8d1d43ba59360ead0c-0f35bb2efc095199fee8",
+              "file": "regenerate.spec.ts",
+              "line": 43,
+              "column": 8
+            },
+            {
+              "title": "regenerate triggers loading state",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                        "line": 52,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:51:47.823Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 52,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "5a8d1d43ba59360ead0c-c3bf875ea25ba74583c8",
+              "file": "regenerate.spec.ts",
+              "line": 52,
+              "column": 8
+            },
+            {
+              "title": "can regenerate multiple times",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                        "line": 73,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:51:47.823Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 73,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "5a8d1d43ba59360ead0c-619a91fc5a55a77a5ae7",
+              "file": "regenerate.spec.ts",
+              "line": 73,
+              "column": 8
+            },
+            {
+              "title": "regenerate preserves user message",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                        "line": 97,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:51:47.823Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 97,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "5a8d1d43ba59360ead0c-25c5e2d1e829afd2f37f",
+              "file": "regenerate.spec.ts",
+              "line": 97,
+              "column": 8
+            },
+            {
+              "title": "regenerate replaces previous response",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 180000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                        "line": 119,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:51:47.823Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 119,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "5a8d1d43ba59360ead0c-7d1cd4e5580409d69cd5",
+              "file": "regenerate.spec.ts",
+              "line": 119,
+              "column": 8
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "research-flow.spec.ts",
+      "file": "research-flow.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Research Flow",
+          "file": "research-flow.spec.ts",
+          "line": 13,
+          "column": 6,
+          "specs": [
+            {
+              "title": "submits query and receives response with citations",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                        "line": 18,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:51:47.825Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 18,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "881bd250e687ada36c0b-20f313799ee11d681405",
+              "file": "research-flow.spec.ts",
+              "line": 18,
+              "column": 8
+            },
+            {
+              "title": "streaming indicator appears during research",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                        "line": 43,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:51:47.826Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 43,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "881bd250e687ada36c0b-6ff26f29ab784e9c5ead",
+              "file": "research-flow.spec.ts",
+              "line": 43,
+              "column": 8
+            },
+            {
+              "title": "response contains meaningful content",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 160332,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:51:47.826Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "881bd250e687ada36c0b-934c77a0f238de3d200d",
+              "file": "research-flow.spec.ts",
+              "line": 61,
+              "column": 7
+            },
+            {
+              "title": "multiple citations are retrievable",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                        "line": 88,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:54:28.163Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 88,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "881bd250e687ada36c0b-61e694086932cf68e41e",
+              "file": "research-flow.spec.ts",
+              "line": 88,
+              "column": 8
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "smoke.spec.ts",
+      "file": "smoke.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Smoke Tests",
+          "file": "smoke.spec.ts",
+          "line": 10,
+          "column": 6,
+          "specs": [
+            {
+              "title": "app loads successfully",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 136,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:54:28.166Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "4219922fea2e2bd3c691-31c7e8d52c56bca05474",
+              "file": "smoke.spec.ts",
+              "line": 11,
+              "column": 7
+            },
+            {
+              "title": "can create new chat",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 933,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:54:28.307Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "4219922fea2e2bd3c691-2f3290f40584ae766987",
+              "file": "smoke.spec.ts",
+              "line": 22,
+              "column": 7
+            },
+            {
+              "title": "can send simple message",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "timedOut",
+                      "duration": 120053,
+                      "error": {
+                        "message": "\u001b[31mTest timeout of 120000ms exceeded.\u001b[39m",
+                        "stack": "\u001b[31mTest timeout of 120000ms exceeded.\u001b[39m"
+                      },
+                      "errors": [
+                        {
+                          "message": "\u001b[31mTest timeout of 120000ms exceeded.\u001b[39m"
+                        },
+                        {
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts",
+                            "column": 67,
+                            "line": 60
+                          },
+                          "message": "Error: \u001b[2mexpect(\u001b[22m\u001b[31mlocator\u001b[39m\u001b[2m).\u001b[22mtoBeVisible\u001b[2m(\u001b[22m\u001b[2m)\u001b[22m failed\n\nLocator: getByTestId('agent-response').first()\nExpected: visible\nError: element(s) not found\n\nCall log:\n\u001b[2m  - Expect \"toBeVisible\" with timeout 120000ms\u001b[22m\n\u001b[2m  - waiting for getByTestId('agent-response').first()\u001b[22m\n\n\n\u001b[90m   at \u001b[39m../pages/chat.page.ts:60\n\n\u001b[0m \u001b[90m 58 |\u001b[39m\n \u001b[90m 59 |\u001b[39m     \u001b[90m// Verify at least one agent response exists\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 60 |\u001b[39m     \u001b[36mawait\u001b[39m expect(\u001b[36mthis\u001b[39m\u001b[33m.\u001b[39mpage\u001b[33m.\u001b[39mgetByTestId(\u001b[32m'agent-response'\u001b[39m)\u001b[33m.\u001b[39mfirst())\u001b[33m.\u001b[39mtoBeVisible({ timeout })\u001b[33m;\u001b[39m\n \u001b[90m    |\u001b[39m                                                                   \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 61 |\u001b[39m   }\n \u001b[90m 62 |\u001b[39m\n \u001b[90m 63 |\u001b[39m   \u001b[90m/**\u001b[39m\u001b[0m\n\u001b[2m    at ChatPage.waitForAgentResponse (/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/pages/chat.page.ts:60:67)\u001b[22m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/smoke.spec.ts:41:5\u001b[22m"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:54:29.244Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/smoke-Smoke-Tests-can-send-simple-message-chromium/test-failed-1.png"
+                        },
+                        {
+                          "name": "video",
+                          "contentType": "video/webm",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/smoke-Smoke-Tests-can-send-simple-message-chromium/video.webm"
+                        },
+                        {
+                          "name": "error-context",
+                          "contentType": "text/markdown",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/smoke-Smoke-Tests-can-send-simple-message-chromium/error-context.md"
+                        }
+                      ]
+                    },
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 62484,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 1,
+                      "startTime": "2025-12-24T17:56:29.643Z",
+                      "annotations": [],
+                      "attachments": [
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/smoke-Smoke-Tests-can-send-simple-message-chromium-retry1/trace.zip"
+                        }
+                      ]
+                    }
+                  ],
+                  "status": "flaky"
+                }
+              ],
+              "id": "4219922fea2e2bd3c691-71fe18f11ae21bb41aa0",
+              "file": "smoke.spec.ts",
+              "line": 34,
+              "column": 7
+            },
+            {
+              "title": "message input is focused after load",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 131,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:57:32.443Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "4219922fea2e2bd3c691-1e0777fc64f7ac628b83",
+              "file": "smoke.spec.ts",
+              "line": 48,
+              "column": 7
+            },
+            {
+              "title": "send button is disabled when input is empty",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 1890,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:57:32.579Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "4219922fea2e2bd3c691-73072178684d48cab45b",
+              "file": "smoke.spec.ts",
+              "line": 60,
+              "column": 7
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "title": "stop-cancel.spec.ts",
+      "file": "stop-cancel.spec.ts",
+      "column": 0,
+      "line": 0,
+      "specs": [],
+      "suites": [
+        {
+          "title": "Stop/Cancel",
+          "file": "stop-cancel.spec.ts",
+          "line": 13,
+          "column": 6,
+          "specs": [
+            {
+              "title": "stops operation within 2 seconds",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 4725,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:57:34.476Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "f28535ca9fa2c6407630-1cca43c89fc8bf81a12a",
+              "file": "stop-cancel.spec.ts",
+              "line": 14,
+              "column": 7
+            },
+            {
+              "title": "application remains in stable state after stop",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 300000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 12977,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:57:39.205Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "f28535ca9fa2c6407630-9423f93c82ecc512abb5",
+              "file": "stop-cancel.spec.ts",
+              "line": 33,
+              "column": 7
+            },
+            {
+              "title": "stop button is visible during operation",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3034,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:57:52.186Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "f28535ca9fa2c6407630-be09edb6929a2712fb1e",
+              "file": "stop-cancel.spec.ts",
+              "line": 61,
+              "column": 7
+            },
+            {
+              "title": "stop button hides after operation completes or stops",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [
+                    {
+                      "type": "skip",
+                      "location": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                        "line": 75,
+                        "column": 8
+                      }
+                    }
+                  ],
+                  "expectedStatus": "skipped",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 0,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:57:55.225Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 75,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "skipped"
+                }
+              ],
+              "id": "f28535ca9fa2c6407630-afc25c75b866f6ca7bae",
+              "file": "stop-cancel.spec.ts",
+              "line": 75,
+              "column": 8
+            },
+            {
+              "title": "partial results are preserved after stop",
+              "ok": true,
+              "tags": [],
+              "tests": [
+                {
+                  "timeout": 120000,
+                  "annotations": [],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 3,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 7015,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2025-12-24T17:57:55.225Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
+                }
+              ],
+              "id": "f28535ca9fa2c6407630-8486a9723d28b1d1a9a9",
+              "file": "stop-cancel.spec.ts",
+              "line": 98,
+              "column": 7
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": [],
+  "stats": {
+    "startTime": "2025-12-24T17:42:15.626Z",
+    "duration": 946666.835,
+    "expected": 15,
+    "skipped": 14,
+    "unexpected": 1,
+    "flaky": 1
+  }
+}

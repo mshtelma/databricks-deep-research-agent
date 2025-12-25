@@ -1,0 +1,183 @@
+# Deep Research Agent - Configuration Example
+# Copy this file to app.yaml and customize for your environment.
+#
+# Environment Variable Interpolation:
+# - ${VAR}         - Required variable, fails if not set
+# - ${VAR:-default} - Optional with default value
+#
+# Example: endpoint_identifier: ${MODEL_ENDPOINT:-databricks-llama-70b}
+
+# Default model role used when no specific role is requested
+# Options: simple, analytical, complex (or any custom role defined below)
+default_role: analytical
+
+# =============================================================================
+# MODEL ENDPOINTS
+# =============================================================================
+# Define all available model endpoints here.
+# Each endpoint is referenced by its key name in the models section.
+#
+# Required fields:
+# - endpoint_identifier: Databricks serving endpoint name
+# - max_context_window: Maximum input tokens (for truncation)
+# - tokens_per_minute: Rate limit for this endpoint
+#
+# Optional fields:
+# - temperature: Override role default (0.0 - 2.0)
+# - max_tokens: Override role default output limit
+# - reasoning_effort: low | medium | high
+# - reasoning_budget: For extended thinking models
+# - supports_structured_output: true if JSON mode supported
+
+endpoints:
+  # Example: GPT-OSS 20B - Fast, lightweight
+  databricks-gpt-oss-20b:
+    endpoint_identifier: databricks-gpt-oss-20b
+    max_context_window: 32000
+    tokens_per_minute: 200000
+    supports_structured_output: true
+
+  # Example: GPT-OSS 120B - Powerful, slower
+  databricks-gpt-oss-120b:
+    endpoint_identifier: databricks-gpt-oss-120b
+    max_context_window: 128000
+    tokens_per_minute: 200000
+    supports_structured_output: true
+
+  # Example: Llama 4 Maverick - Balanced
+  databricks-llama-4-maverick:
+    endpoint_identifier: databricks-meta-llama-4-maverick
+    max_context_window: 128000
+    tokens_per_minute: 200000
+
+  # Example: Claude Sonnet - High quality
+  databricks-claude-sonnet-4:
+    endpoint_identifier: databricks-claude-sonnet-4
+    max_context_window: 200000
+    tokens_per_minute: 50000
+    temperature: 0.5  # Override for this endpoint
+
+  # Example: Gemma 3 12B - Ultra-lightweight
+  databricks-gemma-3-12b:
+    endpoint_identifier: databricks-gemma-3-12b
+    max_context_window: 32000
+    tokens_per_minute: 300000
+
+# =============================================================================
+# MODEL ROLES (TIERS)
+# =============================================================================
+# Roles define capability tiers with default parameters.
+# Endpoints are tried in priority order (first = highest priority).
+#
+# Required fields:
+# - endpoints: List of endpoint keys (must exist in endpoints section)
+#
+# Optional fields (with defaults):
+# - temperature: 0.7
+# - max_tokens: 8000
+# - reasoning_effort: low | medium | high (default: low)
+# - reasoning_budget: For extended thinking (default: null)
+# - tokens_per_minute: Role-level rate limit (default: 100000)
+# - rotation_strategy: priority | round_robin (default: priority)
+# - fallback_on_429: true | false (default: true)
+
+models:
+  # TIER 1: MICRO - Ultra-lightweight (pattern matching, entity extraction)
+  micro:
+    endpoints:
+      - databricks-gpt-oss-20b
+      - databricks-gemma-3-12b
+    temperature: 0.5
+    max_tokens: 4000
+    tokens_per_minute: 200000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  # TIER 2: SIMPLE - Lightweight (query gen, claim extraction, validation)
+  simple:
+    endpoints:
+      - databricks-gpt-oss-20b
+      - databricks-llama-4-maverick
+    temperature: 0.5
+    max_tokens: 8000
+    reasoning_effort: low
+    tokens_per_minute: 200000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  # TIER 3: ANALYTICAL - Medium (research synthesis, fact checking, planning)
+  analytical:
+    endpoints:
+      - databricks-gpt-oss-120b
+      - databricks-gpt-oss-20b
+    temperature: 0.7
+    max_tokens: 12000
+    reasoning_effort: medium
+    tokens_per_minute: 200000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  # TIER 4: COMPLEX - Heavy (report generation, complex synthesis)
+  complex:
+    endpoints:
+      - databricks-gpt-oss-120b
+      - databricks-claude-sonnet-4
+    temperature: 0.7
+    max_tokens: 25000
+    reasoning_effort: high
+    reasoning_budget: 8000
+    tokens_per_minute: 50000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+# =============================================================================
+# AGENT CONFIGURATION
+# =============================================================================
+# Configure limits for each agent in the research pipeline.
+
+agents:
+  # Researcher agent - performs web searches and content extraction
+  researcher:
+    max_search_queries: 2         # Max queries per step (1-10)
+    max_search_results: 10        # Results per query (1-50)
+    max_urls_to_crawl: 3          # URLs to fetch per step (1-20)
+    content_preview_length: 3000  # Chars for LLM context (100+)
+    content_storage_length: 10000 # Chars to store (1000+)
+    max_previous_observations: 3  # History for context (1-10)
+    page_contents_limit: 8000     # Max content per page (1000+)
+    max_generated_queries: 3      # Auto-generated queries (1-10)
+
+  # Planner agent - creates research plans
+  planner:
+    max_plan_iterations: 3        # Replanning attempts (1-10)
+
+  # Coordinator agent - manages query understanding
+  coordinator:
+    max_clarification_rounds: 3   # Clarification attempts (0-5)
+    enable_clarification: true    # Allow clarifying questions
+
+  # Synthesizer agent - generates final reports
+  synthesizer:
+    max_report_length: 50000      # Max report chars (1000+)
+
+# =============================================================================
+# SEARCH CONFIGURATION
+# =============================================================================
+# Configure external search services.
+
+search:
+  brave:
+    requests_per_second: 1.0      # Rate limit (0.1-10)
+    default_result_count: 10      # Results per search (1-50)
+    freshness: pm                 # pd=day, pw=week, pm=month, py=year
+
+# =============================================================================
+# TRUNCATION LIMITS
+# =============================================================================
+# Consistent truncation limits across the codebase.
+
+truncation:
+  log_preview: 200                # Log message preview (10+)
+  error_message: 500              # Error message display (50+)
+  query_display: 100              # Query display length (10+)
+  source_snippet: 300             # Source snippet preview (50+)

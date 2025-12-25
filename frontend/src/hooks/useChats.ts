@@ -1,0 +1,72 @@
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { chatsApi } from '../api/client'
+import type { ChatStatus } from '../types'
+
+const CHATS_KEY = ['chats']
+
+export function useChats(params?: {
+  status?: ChatStatus | 'all'
+  search?: string
+  limit?: number
+  offset?: number
+}) {
+  return useQuery({
+    queryKey: [...CHATS_KEY, params],
+    queryFn: () => chatsApi.list(params),
+  })
+}
+
+export function useChat(chatId: string | undefined) {
+  return useQuery({
+    queryKey: [...CHATS_KEY, chatId],
+    queryFn: () => (chatId ? chatsApi.get(chatId) : null),
+    enabled: !!chatId,
+  })
+}
+
+export function useCreateChat() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (data?: { title?: string }) => chatsApi.create(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: CHATS_KEY })
+    },
+  })
+}
+
+export function useUpdateChat() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: ({ chatId, data }: { chatId: string; data: { title?: string; status?: string } }) =>
+      chatsApi.update(chatId, data),
+    onSuccess: (_, { chatId }) => {
+      queryClient.invalidateQueries({ queryKey: CHATS_KEY })
+      queryClient.invalidateQueries({ queryKey: [...CHATS_KEY, chatId] })
+    },
+  })
+}
+
+export function useDeleteChat() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (chatId: string) => chatsApi.delete(chatId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: CHATS_KEY })
+    },
+  })
+}
+
+export function useRestoreChat() {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (chatId: string) => chatsApi.restore(chatId),
+    onSuccess: (_, chatId) => {
+      queryClient.invalidateQueries({ queryKey: CHATS_KEY })
+      queryClient.invalidateQueries({ queryKey: [...CHATS_KEY, chatId] })
+    },
+  })
+}

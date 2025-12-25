@@ -1,0 +1,107 @@
+# Deep Research Agent - Central Configuration
+# This file configures model endpoints, roles, agent limits, and search settings.
+# Secrets should use environment variables: ${ENV_VAR} or ${ENV_VAR:-default}
+
+# Default model role used when no specific role is requested
+default_role: analytical
+
+# Model endpoint definitions
+# Each endpoint must have: endpoint_identifier, max_context_window, tokens_per_minute
+endpoints:
+  haiku:
+    endpoint_identifier: databricks-claude-haiku-4-5
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+
+  sonnet:
+    endpoint_identifier: databricks-claude-sonnet-4-5
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+
+# Model roles (tiers) with priority-ordered endpoints
+# Endpoints are tried in order; fallback occurs on 429 or 5xx errors
+models:
+  # TIER 1: SIMPLE - Lightweight operations (query gen, validation)
+  simple:
+    endpoints:
+      - haiku
+    temperature: 0.7
+    max_tokens: 4000
+    reasoning_effort: low
+    tokens_per_minute: 200000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  # TIER 2: ANALYTICAL - Medium operations (research, planning)
+  analytical:
+    endpoints:
+      - haiku
+    temperature: 0.7
+    max_tokens: 8000
+    reasoning_effort: medium
+    tokens_per_minute: 200000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  # TIER 3: COMPLEX - Heavy operations (synthesis, reports)
+  complex:
+    endpoints:
+      - sonnet
+    temperature: 0.7
+    max_tokens: 32000
+    reasoning_effort: high
+    reasoning_budget: 8000
+    tokens_per_minute: 100000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+# Agent configuration
+agents:
+  researcher:
+    max_search_queries: 2
+    max_search_results: 10
+    max_urls_to_crawl: 3
+    content_preview_length: 3000
+    content_storage_length: 10000
+    max_previous_observations: 3
+    page_contents_limit: 8000
+    max_generated_queries: 3
+
+  planner:
+    max_plan_iterations: 3
+
+  coordinator:
+    max_clarification_rounds: 3
+    enable_clarification: true
+
+  synthesizer:
+    max_report_length: 50000
+
+  background:
+    max_search_queries: 2
+    max_results_per_query: 3
+    max_total_results: 5
+
+# Search configuration
+search:
+  brave:
+    requests_per_second: 1.0
+    default_result_count: 10
+    freshness: pm  # pd=day, pw=week, pm=month, py=year
+
+# Rate limiting and retry configuration
+rate_limiting:
+  max_retries: 3                    # Max retry attempts before failing
+  base_delay_seconds: 2.0           # Initial backoff delay
+  max_delay_seconds: 60.0           # Maximum backoff delay
+  backoff_strategy: exponential     # "exponential" (2^n) or "linear" (+n)
+  jitter: true                      # Add random jitter to prevent thundering herd
+
+# Truncation limits for consistency
+truncation:
+  log_preview: 200
+  error_message: 500
+  query_display: 100
+  source_snippet: 300
