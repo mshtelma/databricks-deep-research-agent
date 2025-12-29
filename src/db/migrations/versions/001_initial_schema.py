@@ -103,9 +103,26 @@ def upgrade() -> None:
         ),
         sa.Column("plan", postgresql.JSONB, nullable=True),
         sa.Column("observations", postgresql.JSONB, nullable=True),
-        sa.Column("reasoning_steps", postgresql.JSONB, nullable=True),
-        sa.Column("research_depth", sa.String(20), nullable=True),
+        sa.Column("reasoning_steps", postgresql.JSONB, nullable=False, server_default="[]"),
+        sa.Column("research_depth", sa.String(20), nullable=False, server_default="auto"),
         sa.Column("query_classification", postgresql.JSONB, nullable=True),
+        # Execution state columns
+        sa.Column("current_step_index", sa.Integer, nullable=True),
+        sa.Column("plan_iterations", sa.Integer, nullable=False, server_default="1"),
+        sa.Column("current_agent", sa.String(50), nullable=True),
+        # Timestamp columns (from TimestampMixin in BaseModel)
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.Column(
             "started_at",
             sa.DateTime(timezone=True),

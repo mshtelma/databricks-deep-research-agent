@@ -6,12 +6,12 @@ import random
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import mlflow
-from databricks.sdk import WorkspaceClient
 from mlflow.entities import SpanType
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, AsyncStream
+from openai.types.chat import ChatCompletionChunk
 from pydantic import BaseModel
 
 from src.core.config import get_settings
@@ -24,6 +24,7 @@ from src.core.logging_utils import (
     log_llm_request,
     log_llm_response,
 )
+from src.services.llm.auth import LLMCredentialProvider
 from src.services.llm.config import ModelConfig
 from src.services.llm.types import (
     EndpointHealth,
@@ -31,6 +32,9 @@ from src.services.llm.types import (
     ModelEndpoint,
     ModelRole,
     ModelTier,
+    StreamWithToolsChunk,
+    ToolCall,
+    ToolCallChunk,
 )
 
 logger = get_logger(__name__)
@@ -49,24 +53,54 @@ class LLMClient:
         self._config = config or ModelConfig()
         self._health: dict[str, EndpointHealth] = {}
 
-        # Get token - either from env or from WorkspaceClient
+        # Auth mode tracking
+        self._credential_provider: LLMCredentialProvider | None = None
+        self._current_token: str | None = None
+
+        # Get token - either from env or from WorkspaceClient (with refresh support)
         token = settings.databricks_token
-        base_url = f"{settings.databricks_host}/serving-endpoints"
+        self._base_url = f"{settings.databricks_host}/serving-endpoints"
 
         if not token and settings.databricks_config_profile:
-            w = WorkspaceClient(profile=settings.databricks_config_profile)
-            w.config.authenticate()
-            token = w.config.oauth_token().access_token
-            base_url = f"{w.config.host}/serving-endpoints"
+            # Profile-based OAuth auth with refresh support
+            self._credential_provider = LLMCredentialProvider(
+                profile=settings.databricks_config_profile
+            )
+            credential = self._credential_provider.get_credential()
+            token = credential.token
+            self._base_url = self._credential_provider.get_base_url()
 
         if not token:
             raise ValueError("No Databricks token available")
 
+        self._current_token = token
+
         # Initialize OpenAI client for Databricks
         self._client = AsyncOpenAI(
             api_key=token,
-            base_url=base_url,
+            base_url=self._base_url,
         )
+
+    def _ensure_fresh_client(self) -> None:
+        """Ensure the OpenAI client has a fresh OAuth token.
+
+        For profile-based OAuth auth, checks if token is expired and
+        refreshes if needed. For direct token auth, this is a no-op.
+        """
+        if self._credential_provider is None:
+            # Direct token auth - no refresh needed
+            return
+
+        credential = self._credential_provider.get_credential()
+
+        if credential.token != self._current_token:
+            # Token was refreshed - recreate client
+            logger.info("LLM_TOKEN_REFRESHED", provider="oauth")
+            self._current_token = credential.token
+            self._client = AsyncOpenAI(
+                api_key=credential.token,
+                base_url=self._base_url,
+            )
 
     def _get_health(self, endpoint_id: str) -> EndpointHealth:
         """Get or create health state for endpoint."""
@@ -101,11 +135,20 @@ class LLMClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
     ) -> dict[str, Any]:
-        """Merge role and endpoint configuration."""
-        return {
-            "temperature": temperature or endpoint.temperature or role.temperature,
+        """Merge role and endpoint configuration.
+
+        Note: Some models (e.g., GPT-5) don't support temperature parameter.
+        The supports_temperature flag controls whether it's included.
+        """
+        config: dict[str, Any] = {
             "max_tokens": max_tokens or endpoint.max_tokens or role.max_tokens,
         }
+
+        # Only include temperature if the endpoint supports it
+        if endpoint.supports_temperature:
+            config["temperature"] = temperature or endpoint.temperature or role.temperature
+
+        return config
 
     def _get_earliest_endpoint_available(self, role: ModelRole) -> float:
         """Get seconds until the earliest endpoint becomes available.
@@ -231,6 +274,9 @@ class LLMClient:
         Returns:
             LLMResponse with content and metadata.
         """
+        # Ensure fresh OAuth token before request
+        self._ensure_fresh_client()
+
         # Estimate tokens (rough: ~4 chars per token)
         estimated_input = sum(len(m.get("content", "")) for m in messages) // 4
         estimated_tokens = estimated_input + (max_tokens or role.max_tokens)
@@ -258,7 +304,7 @@ class LLMClient:
             (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
-        log_llm_prompt(logger, system_prompt=system_msg, user_prompt=user_msg)
+        log_llm_prompt(logger, system_prompt=system_msg, user_prompt=user_msg or "")
 
         # Wrap LLM call in MLflow span for tracing
         with mlflow.start_span(
@@ -526,6 +572,9 @@ class LLMClient:
         Yields:
             Content chunks as they arrive.
         """
+        # Ensure fresh OAuth token before request
+        self._ensure_fresh_client()
+
         estimated_tokens = sum(len(m.get("content", "")) for m in messages) // 4
         endpoint, health = self._select_endpoint(role, estimated_tokens + 4000)
         config = self._merge_config(role, endpoint, temperature, max_tokens)
@@ -547,18 +596,21 @@ class LLMClient:
             (m.get("content") for m in reversed(messages) if m.get("role") == "user"),
             "",
         )
-        log_llm_prompt(logger, system_prompt=system_msg, user_prompt=user_msg)
+        log_llm_prompt(logger, system_prompt=system_msg, user_prompt=user_msg or "")
 
         start_time = time.perf_counter()
         chunk_count = 0
         total_content_len = 0
 
         try:
-            stream = await self._client.chat.completions.create(
-                model=endpoint.endpoint_identifier,
-                messages=messages,
-                stream=True,
-                **config,
+            stream = cast(
+                AsyncStream[ChatCompletionChunk],
+                await self._client.chat.completions.create(
+                    model=endpoint.endpoint_identifier,
+                    messages=cast(Any, messages),
+                    stream=True,
+                    **config,
+                ),
             )
 
             async for chunk in stream:
@@ -599,6 +651,252 @@ class LLMClient:
             )
 
             # Convert 429 errors to RateLimitError for retry wrapper
+            if is_rate_limit:
+                raise RateLimitError(retry_after=30) from e
+
+            raise LLMError(str(e), endpoint=endpoint.id) from e
+
+    async def stream_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tier: ModelTier,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[StreamWithToolsChunk]:
+        """Stream a chat completion with tool calling support.
+
+        This method supports the OpenAI function calling format for ReAct-style
+        agent loops. The LLM can decide to call tools or output content.
+
+        Args:
+            messages: Chat messages (may include tool role for results).
+            tools: OpenAI-format tool definitions.
+            tier: Model tier.
+            temperature: Optional temperature override.
+            max_tokens: Optional max tokens override.
+
+        Yields:
+            StreamWithToolsChunk with content and/or tool calls.
+
+        Raises:
+            RateLimitError: If all retries are exhausted.
+            LLMError: For other LLM errors.
+        """
+        from src.core.app_config import get_app_config
+
+        rate_config = get_app_config().rate_limiting
+        role = self._config.get_role(tier.value)
+
+        last_error: Exception | None = None
+
+        for attempt in range(rate_config.max_retries + 1):
+            try:
+                async for chunk in self._stream_with_tools_impl(
+                    messages, tools, tier, role, temperature, max_tokens
+                ):
+                    yield chunk
+                return  # Success
+            except RateLimitError as e:
+                last_error = e
+
+                if attempt >= rate_config.max_retries:
+                    logger.warning(
+                        "LLM_RATE_LIMIT_EXHAUSTED",
+                        tier=tier.value,
+                        attempts=attempt + 1,
+                        streaming=True,
+                        with_tools=True,
+                    )
+                    raise
+
+                endpoint_wait = self._get_earliest_endpoint_available(role)
+                backoff_wait = rate_config.calculate_delay(attempt)
+                delay = max(endpoint_wait, backoff_wait)
+
+                if rate_config.jitter:
+                    delay += random.uniform(0, 1)
+
+                logger.warning(
+                    "LLM_RATE_LIMIT_RETRY",
+                    tier=tier.value,
+                    attempt=attempt + 1,
+                    max_retries=rate_config.max_retries,
+                    delay_seconds=round(delay, 2),
+                    streaming=True,
+                    with_tools=True,
+                )
+
+                await asyncio.sleep(delay)
+
+        raise last_error or RateLimitError(retry_after=30)
+
+    async def _stream_with_tools_impl(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tier: ModelTier,
+        role: ModelRole,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[StreamWithToolsChunk]:
+        """Internal implementation of stream_with_tools.
+
+        Handles streaming responses with tool calls, accumulating tool call
+        arguments across chunks.
+
+        Args:
+            messages: Chat messages.
+            tools: OpenAI-format tool definitions.
+            tier: Model tier.
+            role: Model role configuration.
+            temperature: Optional temperature override.
+            max_tokens: Optional max tokens override.
+
+        Yields:
+            StreamWithToolsChunk with content and/or tool calls.
+        """
+        # Ensure fresh OAuth token before request
+        self._ensure_fresh_client()
+
+        estimated_tokens = sum(
+            len(str(m.get("content", ""))) for m in messages
+        ) // 4
+        endpoint, health = self._select_endpoint(role, estimated_tokens + 4000)
+        config = self._merge_config(role, endpoint, temperature, max_tokens)
+
+        logger.info(
+            "LLM_STREAM_WITH_TOOLS_START",
+            endpoint=endpoint.endpoint_identifier,
+            tier=tier.value,
+            messages=len(messages),
+            tools_count=len(tools),
+            est_tokens=estimated_tokens,
+        )
+
+        start_time = time.perf_counter()
+
+        # Track tool call accumulation across chunks
+        tool_call_chunks: dict[int, ToolCallChunk] = {}
+
+        try:
+            stream = cast(
+                AsyncStream[ChatCompletionChunk],
+                await self._client.chat.completions.create(
+                    model=endpoint.endpoint_identifier,
+                    messages=cast(Any, messages),
+                    tools=cast(Any, tools if tools else None),
+                    stream=True,
+                    **config,
+                ),
+            )
+
+            accumulated_content = ""
+
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+
+                delta = chunk.choices[0].delta
+                finish_reason = chunk.choices[0].finish_reason
+
+                # Handle content
+                content = ""
+                if delta.content:
+                    content = delta.content
+                    accumulated_content += content
+
+                # Handle tool calls (accumulated across chunks)
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+
+                        # Initialize or update tool call accumulator
+                        if idx not in tool_call_chunks:
+                            tool_call_chunks[idx] = ToolCallChunk(index=idx)
+
+                        tcc = tool_call_chunks[idx]
+
+                        if tc.id:
+                            tcc.id = tc.id
+                        if tc.function and tc.function.name:
+                            tcc.name = tc.function.name
+                        if tc.function and tc.function.arguments:
+                            tcc.arguments_json += tc.function.arguments
+
+                # Yield content chunks as they come
+                if content:
+                    yield StreamWithToolsChunk(content=content)
+
+                # Check if stream is done
+                if finish_reason:
+                    # Finalize tool calls
+                    completed_tool_calls = []
+                    for tcc in tool_call_chunks.values():
+                        if tcc.id and tcc.name:
+                            try:
+                                args = json.loads(tcc.arguments_json) if tcc.arguments_json else {}
+                            except json.JSONDecodeError:
+                                # Try to repair JSON
+                                from json_repair import repair_json
+                                try:
+                                    repaired = repair_json(tcc.arguments_json)
+                                    args = json.loads(repaired)
+                                except Exception:
+                                    args = {}
+                                    logger.warning(
+                                        "TOOL_CALL_ARGS_PARSE_FAILED",
+                                        tool=tcc.name,
+                                        raw_args=tcc.arguments_json[:100],
+                                    )
+
+                            completed_tool_calls.append(
+                                ToolCall(
+                                    id=tcc.id,
+                                    name=tcc.name,
+                                    arguments=args,
+                                )
+                            )
+
+                    # Yield final chunk with tool calls (if any)
+                    yield StreamWithToolsChunk(
+                        content="",
+                        tool_calls=completed_tool_calls if completed_tool_calls else None,
+                        is_done=True,
+                    )
+
+                    health.mark_success()
+
+                    duration_ms = (time.perf_counter() - start_time) * 1000
+                    logger.info(
+                        "LLM_STREAM_WITH_TOOLS_END",
+                        endpoint=endpoint.endpoint_identifier,
+                        duration_ms=round(duration_ms, 1),
+                        content_len=len(accumulated_content),
+                        tool_calls=len(completed_tool_calls),
+                        finish_reason=finish_reason,
+                    )
+
+                    return  # Stream is done
+
+        except RateLimitError:
+            raise
+
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            error_str = str(e)
+            is_rate_limit = "429" in error_str or "rate" in error_str.lower()
+
+            health.mark_failure(rate_limited=is_rate_limit)
+
+            log_llm_error(
+                logger,
+                endpoint=endpoint.endpoint_identifier,
+                error=e,
+                is_rate_limit=is_rate_limit,
+                will_fallback=False,
+            )
+
             if is_rate_limit:
                 raise RateLimitError(retry_after=30) from e
 

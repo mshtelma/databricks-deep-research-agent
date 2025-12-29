@@ -4,13 +4,14 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import DateTime, Float, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, UUIDMixin
 
 if TYPE_CHECKING:
+    from src.models.evidence_span import EvidenceSpan
     from src.models.research_session import ResearchSession
 
 
@@ -64,10 +65,29 @@ class Source(Base, UUIDMixin):
         nullable=False,
     )
 
-    # Relationship
+    # Source location metadata (for citation UX)
+    total_pages: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    detected_sections: Mapped[str | None] = mapped_column(
+        Text,  # JSON string of section headings
+        nullable=True,
+    )
+    content_type: Mapped[str | None] = mapped_column(
+        String(50),  # pdf, html, text, etc.
+        nullable=True,
+    )
+
+    # Relationships
     session: Mapped["ResearchSession"] = relationship(
         "ResearchSession",
         back_populates="sources",
+    )
+    evidence_spans: Mapped[list["EvidenceSpan"]] = relationship(
+        "EvidenceSpan",
+        back_populates="source",
+        cascade="all, delete-orphan",
     )
 
     def set_content(self, content: str | None = None) -> None:

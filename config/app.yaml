@@ -14,6 +14,26 @@ endpoints:
     tokens_per_minute: 50000
     supports_structured_output: true
 
+  gpt5nano:
+    endpoint_identifier: databricks-gpt-5-nano
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+    supports_temperature: false  # GPT-5 models don't support temperature parameter
+
+  gpt5mini:
+    endpoint_identifier: databricks-gpt-5-mini
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+    supports_temperature: false  # GPT-5 models don't support temperature parameter
+
+  gemini3flash:
+    endpoint_identifier: databricks-gemini-3-flash
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+
   sonnet:
     endpoint_identifier: databricks-claude-sonnet-4-5
     max_context_window: 128000
@@ -27,6 +47,8 @@ models:
   simple:
     endpoints:
       - haiku
+      - gpt5mini
+      - gemini3flash
     temperature: 0.7
     max_tokens: 4000
     reasoning_effort: low
@@ -38,6 +60,8 @@ models:
   analytical:
     endpoints:
       - haiku
+      - gpt5mini
+      - gemini3flash
     temperature: 0.7
     max_tokens: 8000
     reasoning_effort: medium
@@ -61,11 +85,11 @@ models:
 agents:
   researcher:
     max_search_queries: 2
-    max_search_results: 10
-    max_urls_to_crawl: 3
+    max_search_results: 15      # Increased from 10 - more URL options
+    max_urls_to_crawl: 8        # Increased from 3 - more content for citations
     content_preview_length: 3000
-    content_storage_length: 10000
-    max_previous_observations: 3
+    content_storage_length: 15000  # Increased from 10000 - store more content
+    max_previous_observations: 10
     page_contents_limit: 8000
     max_generated_queries: 3
 
@@ -91,6 +115,33 @@ search:
     default_result_count: 10
     freshness: pm  # pd=day, pw=week, pm=month, py=year
 
+  # Domain whitelist/blacklist filtering
+  # Supports wildcard patterns: *.gov, *.edu, news.*, *.example.*
+  # Modes: "include" (whitelist only), "exclude" (blacklist only), "both" (whitelist + blacklist)
+  domain_filter:
+    mode: exclude  # Default: exclude (blacklist mode)
+
+    # Domains to include (whitelist) - only used when mode is "include" or "both"
+    # If set in include/both mode, ONLY these domains are allowed
+    # include_domains:
+    #   - "*.gov"
+    #   - "*.edu"
+    #   - "reuters.com"
+    #   - "bbc.com"
+    #   - "*.wikipedia.org"
+    #   - "arxiv.org"
+
+    # Domains to exclude (blacklist) - used when mode is "exclude" or "both"
+    # These domains are always blocked
+    exclude_domains: []
+      # Examples of domains you might want to block:
+      # - "*.ru"           # Russian domains
+      # - "*.cn"           # Chinese domains
+      # - "spam-site.com"  # Known spam sites
+
+    # Log filtered URLs for debugging (default: false)
+    log_filtered: false
+
 # Rate limiting and retry configuration
 rate_limiting:
   max_retries: 3                    # Max retry attempts before failing
@@ -105,3 +156,85 @@ truncation:
   error_message: 500
   query_display: 100
   source_snippet: 300
+
+# Citation verification configuration (6-stage pipeline)
+citation_verification:
+  # Master toggle for the feature
+  enabled: true
+
+  # Generation mode for research reports
+  # - "classical": Free-form prose with inline [Title](url) links
+  #                Best text quality, uses existing synthesizer
+  #                Skips verification stages 3-6 (no claim markers to verify)
+  # - "natural": Light-touch [N] citations, balanced quality + verification
+  #              Good text quality while maintaining verifiable citations
+  #              Runs full verification pipeline (stages 3-6)
+  # - "strict": Heavy [N] constraints, maximum citations (DEFAULT)
+  #             Current behavior, every claim must cite evidence
+  #             Runs full verification pipeline (stages 3-6)
+  generation_mode: natural
+
+  # Stage toggles (only apply to "natural" and "strict" modes)
+  enable_evidence_preselection: true
+  enable_interleaved_generation: true
+  enable_confidence_classification: true
+  enable_citation_correction: true
+  enable_numeric_qa_verification: true
+  enable_verification_retrieval: false  # Optional additional search
+
+  # Stage 1: Evidence Pre-Selection
+  evidence_preselection:
+    max_spans_per_source: 10
+    min_span_length: 50
+    max_span_length: 500
+    relevance_threshold: 0.3
+    numeric_content_boost: 0.2
+    relevance_computation_method: hybrid  # semantic | keyword | hybrid
+    # Chunking config for long sources (research papers, long articles)
+    chunk_size: 8000           # Target size per chunk in characters
+    chunk_overlap: 1000        # Overlap between chunks to avoid missing spans at boundaries
+    max_chunks_per_source: 5   # Max chunks to process per source (limits LLM calls)
+
+  # Stage 2: Interleaved Generation
+  interleaved_generation:
+    max_claims_per_section: 50
+    min_evidence_similarity: 0.5
+    retry_on_entailment_failure: true
+    max_retries: 3
+
+  # Stage 3: Confidence Classification
+  confidence_classification:
+    high_threshold: 0.6
+    low_threshold: 0.50
+    quote_match_bonus: 0.3
+    hedging_word_penalty: 0.2
+    estimation_method: embedding_similarity  # linguistic | embedding_similarity | hybrid
+
+  # Stage 4: Isolated Verification
+  isolated_verification:
+    enable_nei_verdict: true
+    verification_model_tier: analytical
+    quick_verification_tier: simple
+
+  # Stage 5: Citation Correction
+  citation_correction:
+    correction_method: keyword_semantic_hybrid
+    lambda_weight: 0.8
+    correction_threshold: 0.6
+    allow_alternate_citations: true
+
+  # Stage 6: Numeric QA Verification
+  numeric_qa_verification:
+    rounding_tolerance: 0.05
+    answer_comparison_method: f1  # exact_match | f1 | lerc
+    require_unit_match: true
+    require_entity_match: true
+
+  # Verification retrieval (when enabled)
+  verification_retrieval:
+    trigger_on_verdicts: [unsupported, nei]
+    max_additional_searches: 2
+    search_timeout_seconds: 3
+
+  # Warning thresholds
+  unsupported_claim_warning_threshold: 0.20

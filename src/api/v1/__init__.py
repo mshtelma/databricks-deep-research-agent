@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from src.api.v1 import agent, chats, health, messages, preferences, research
+from src.api.v1 import agent, chats, citations, health, messages, preferences, research
 
 router = APIRouter()
 
@@ -14,3 +14,5 @@ router.include_router(messages.router, tags=["Messages"])
 # Research routes are mounted under /chats to match frontend expectations
 router.include_router(research.router, prefix="/chats", tags=["Research"])
 router.include_router(preferences.router, prefix="/preferences", tags=["Preferences"])
+# Citation verification routes
+router.include_router(citations.router, tags=["Citations"])

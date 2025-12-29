@@ -2,6 +2,7 @@ import * as React from 'react';
 import { Message } from '@/types';
 import { UserMessage } from './UserMessage';
 import { AgentMessage } from './AgentMessage';
+import { AgentMessageWithCitations } from './AgentMessageWithCitations';
 import { cn } from '@/lib/utils';
 
 interface MessageListProps {
@@ -47,7 +48,7 @@ export function MessageList({
         message.role === 'user' ? (
           <UserMessage key={message.id} message={message} />
         ) : (
-          <AgentMessage key={message.id} message={message} />
+          <AgentMessageWithCitations key={message.id} message={message} />
         )
       )}
 

@@ -93,11 +93,11 @@ export function ChatSidebar({
       {/* Chat list */}
       <div data-testid="chat-list" className="flex-1 overflow-y-auto p-2 space-y-1">
         {isLoading ? (
-          <div className="p-4 text-center text-muted-foreground">
+          <div data-testid="chat-list-loading" className="p-4 text-center text-muted-foreground">
             Loading chats...
           </div>
         ) : filteredChats.length === 0 ? (
-          <div className="p-4 text-center text-muted-foreground">
+          <div data-testid="chat-list-empty" className="p-4 text-center text-muted-foreground">
             {searchQuery ? 'No matching chats' : statusFilter === 'archived' ? 'No archived chats' : 'No chats yet'}
           </div>
         ) : (
@@ -130,6 +130,7 @@ function StatusFilterTab({ label, isActive, onClick }: StatusFilterTabProps) {
   return (
     <button
       type="button"
+      data-testid={`status-filter-${label.toLowerCase()}`}
       onClick={onClick}
       className={cn(
         'flex-1 px-2 py-1 text-xs font-medium rounded transition-colors',
@@ -238,6 +239,7 @@ function ChatListItem({
       <button
         ref={buttonRef}
         type="button"
+        data-testid={`chat-menu-trigger-${chat.id}`}
         onClick={(e) => {
           e.stopPropagation();
           setShowMenu(!showMenu);
@@ -271,6 +273,7 @@ function ChatListItem({
         >
           {onRename && (
             <ContextMenuItem
+              data-testid="chat-action-rename"
               icon={<EditIcon className="w-4 h-4" />}
               label="Rename"
               onClick={() => {
@@ -285,6 +288,7 @@ function ChatListItem({
           )}
           {onExport && (
             <ContextMenuItem
+              data-testid="chat-action-export"
               icon={<ExportIcon className="w-4 h-4" />}
               label="Export"
               onClick={() => handleMenuAction(onExport)}
@@ -293,6 +297,7 @@ function ChatListItem({
           {isArchived ? (
             onRestore && (
               <ContextMenuItem
+                data-testid="chat-action-restore"
                 icon={<RestoreIcon className="w-4 h-4" />}
                 label="Unarchive"
                 onClick={() => handleMenuAction(onRestore)}
@@ -301,6 +306,7 @@ function ChatListItem({
           ) : (
             onArchive && (
               <ContextMenuItem
+                data-testid="chat-action-archive"
                 icon={<ArchiveIcon className="w-4 h-4" />}
                 label="Archive"
                 onClick={() => handleMenuAction(onArchive)}
@@ -311,6 +317,7 @@ function ChatListItem({
             <>
               <div className="my-1 h-px bg-border" />
               <ContextMenuItem
+                data-testid="chat-action-delete"
                 icon={<TrashIcon className="w-4 h-4" />}
                 label="Delete"
                 onClick={() => handleMenuAction(onDelete)}
@@ -329,12 +336,14 @@ interface ContextMenuItemProps {
   label: string;
   onClick: () => void;
   variant?: 'default' | 'destructive';
+  'data-testid'?: string;
 }
 
-function ContextMenuItem({ icon, label, onClick, variant = 'default' }: ContextMenuItemProps) {
+function ContextMenuItem({ icon, label, onClick, variant = 'default', 'data-testid': dataTestId }: ContextMenuItemProps) {
   return (
     <button
       type="button"
+      data-testid={dataTestId}
       onClick={onClick}
       className={cn(
         'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm',

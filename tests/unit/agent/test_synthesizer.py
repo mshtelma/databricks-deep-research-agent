@@ -182,7 +182,7 @@ class TestRunSynthesizer:
     async def test_uses_complex_model_tier(
         self, research_state_with_observations: ResearchState, mock_llm_client: AsyncMock
     ):
-        """Test that synthesizer uses the COMPLEX model tier."""
+        """Test that synthesizer uses the COMPLEX model tier with depth-appropriate tokens."""
         # Arrange
         from src.services.llm.types import ModelTier
 
@@ -202,7 +202,9 @@ class TestRunSynthesizer:
         mock_llm_client.complete.assert_called_once()
         call_kwargs = mock_llm_client.complete.call_args.kwargs
         assert call_kwargs["tier"] == ModelTier.COMPLEX
-        assert call_kwargs["max_tokens"] == 4000
+        # max_tokens is now dynamic based on depth: light=1000, medium=2000, extended=4000
+        # Default depth is "medium" = 2000 tokens
+        assert call_kwargs["max_tokens"] == 2000
 
     @pytest.mark.asyncio
     async def test_includes_sources_in_prompt(

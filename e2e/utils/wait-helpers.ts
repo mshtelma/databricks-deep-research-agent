@@ -93,3 +93,92 @@ export async function waitForCondition(
 
   throw new Error(`Condition not met within ${timeout}ms`);
 }
+
+// ==================== Citation Wait Helpers ====================
+
+/**
+ * Wait for citation markers to appear in the response.
+ *
+ * @param page The Playwright page object
+ * @param minCount Minimum number of citation markers expected
+ * @param timeout Maximum wait time in milliseconds
+ */
+export async function waitForCitationMarkers(
+  page: Page,
+  minCount: number = 1,
+  timeout: number = 30000
+): Promise<void> {
+  const markers = page.locator('[data-testid^="citation-marker-"]');
+  await expect(markers).toHaveCount({ minimum: minCount }, { timeout });
+}
+
+/**
+ * Wait for evidence card to be visible.
+ *
+ * @param page The Playwright page object
+ * @param timeout Maximum wait time in milliseconds
+ */
+export async function waitForEvidenceCard(page: Page, timeout: number = 10000): Promise<void> {
+  const evidenceCard = page.getByTestId('evidence-card');
+  await expect(evidenceCard).toBeVisible({ timeout });
+}
+
+/**
+ * Wait for evidence card to be hidden.
+ *
+ * @param page The Playwright page object
+ * @param timeout Maximum wait time in milliseconds
+ */
+export async function waitForEvidenceCardHidden(page: Page, timeout: number = 5000): Promise<void> {
+  const evidenceCard = page.getByTestId('evidence-card');
+  await expect(evidenceCard).toBeHidden({ timeout });
+}
+
+/**
+ * Wait for verification summary section to be visible.
+ *
+ * @param page The Playwright page object
+ * @param timeout Maximum wait time in milliseconds
+ */
+export async function waitForVerificationSection(page: Page, timeout: number = 10000): Promise<void> {
+  const verificationSection = page.getByTestId('verification-summary-section');
+  await expect(verificationSection).toBeVisible({ timeout });
+}
+
+/**
+ * Wait for numeric chips to appear in the response.
+ *
+ * @param page The Playwright page object
+ * @param minCount Minimum number of numeric chips expected
+ * @param timeout Maximum wait time in milliseconds
+ */
+export async function waitForNumericChips(
+  page: Page,
+  minCount: number = 1,
+  timeout: number = 30000
+): Promise<void> {
+  const chips = page.getByTestId('numeric-chip');
+  await expect(chips).toHaveCount({ minimum: minCount }, { timeout });
+}
+
+/**
+ * Wait for numeric details panel to be visible.
+ *
+ * @param page The Playwright page object
+ * @param timeout Maximum wait time in milliseconds
+ */
+export async function waitForNumericDetails(page: Page, timeout: number = 5000): Promise<void> {
+  const numericDetails = page.getByTestId('numeric-details');
+  await expect(numericDetails).toBeVisible({ timeout });
+}
+
+/**
+ * Wait for claims list to be visible.
+ *
+ * @param page The Playwright page object
+ * @param timeout Maximum wait time in milliseconds
+ */
+export async function waitForClaimsList(page: Page, timeout: number = 10000): Promise<void> {
+  const claimsList = page.getByTestId('claims-list');
+  await expect(claimsList).toBeVisible({ timeout });
+}

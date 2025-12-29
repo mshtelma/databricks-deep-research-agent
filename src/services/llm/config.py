@@ -41,6 +41,7 @@ class ModelConfig:
                 reasoning_effort=reasoning_effort,
                 reasoning_budget=ep_config.reasoning_budget,
                 supports_structured_output=ep_config.supports_structured_output,
+                supports_temperature=ep_config.supports_temperature,
             )
 
         # Convert role configs to ModelRole

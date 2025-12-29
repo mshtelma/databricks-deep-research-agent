@@ -1,11 +1,18 @@
-"""Research streaming endpoints."""
+"""Research streaming endpoints.
+
+Key Design: Deferred Database Materialization
+- UUIDs are generated in memory when streaming starts
+- NO database writes occur until synthesis completes successfully
+- All data is persisted atomically in the orchestrator
+- Benefits: No orphaned records, no cleanup needed on failure
+"""
 
 import contextlib
 import json
 import logging
 from collections.abc import AsyncGenerator
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import mlflow
 from fastapi import APIRouter, Depends, Query, Request
@@ -25,6 +32,10 @@ from src.services.llm.client import LLMClient
 from src.services.preferences_service import PreferencesService
 from src.services.research_session_service import ResearchSessionService
 from src.services.search.brave import BraveSearchClient
+
+# Note: MessageService and ResearchSessionService are still imported for:
+# - MessageService: get_conversation_history()
+# - ResearchSessionService: cancel_research()
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -117,8 +128,21 @@ async def stream_research_endpoint(
     except Exception as e:
         logger.warning(f"Could not load user preferences: {e}")
 
+    # DEFERRED PERSISTENCE: Generate UUIDs in memory but DON'T persist yet
+    # Database writes happen in orchestrator only AFTER synthesis succeeds
+    agent_message_id = uuid4()
+    research_session_id = uuid4()
+
+    logger.info(
+        f"Starting research with pre-generated IDs: message={agent_message_id} session={research_session_id}"
+    )
+
     async def generate_sse_events() -> AsyncGenerator[str, None]:
-        """Generate SSE events from the research orchestrator."""
+        """Generate SSE events from the research orchestrator.
+
+        Persistence is handled by the orchestrator after synthesis completes.
+        This function only handles event streaming.
+        """
 
         def format_event(event: StreamEvent | str) -> str:
             """Format an event for SSE."""
@@ -131,12 +155,23 @@ async def stream_research_endpoint(
                 return f"data: {json.dumps(event_dict)}\n\n"
 
         try:
-            # Create orchestration config with research depth and system instructions
+            # Emit research_started with pre-generated IDs for frontend optimistic updates
+            research_started_event = {
+                "event_type": "research_started",
+                "message_id": str(agent_message_id),
+                "research_session_id": str(research_session_id),
+            }
+            yield f"data: {json.dumps(research_started_event)}\n\n"
+
+            # Create orchestration config with pre-generated UUIDs
             config = OrchestrationConfig(
                 research_depth=research_depth,
                 system_instructions=system_instructions,
+                message_id=agent_message_id,
+                research_session_id=research_session_id,
             )
 
+            # Stream events - orchestrator handles persistence on success
             async for event in stream_research(
                 query=query,
                 llm=llm,
@@ -146,11 +181,15 @@ async def stream_research_endpoint(
                 user_id=user.user_id,
                 chat_id=str(chat_id),
                 config=config,
+                db=db,
             ):
                 yield format_event(event)
 
+            # Orchestrator persists data on success - nothing to do here
+
         except Exception as e:
             logger.exception(f"Error during research stream: {e}")
+            # No cleanup needed - nothing was written to DB
             error_event = {
                 "event_type": "error",
                 "error_code": "STREAM_ERROR",
@@ -246,8 +285,21 @@ async def stream_research_with_history(
     except Exception as e:
         logger.warning(f"Could not load user preferences: {e}")
 
+    # DEFERRED PERSISTENCE: Generate UUIDs in memory but DON'T persist yet
+    # Database writes happen in orchestrator only AFTER synthesis succeeds
+    agent_message_id = uuid4()
+    research_session_id = uuid4()
+
+    logger.info(
+        f"Starting research (with history) with pre-generated IDs: "
+        f"message={agent_message_id} session={research_session_id}"
+    )
+
     async def generate_sse_events() -> AsyncGenerator[str, None]:
-        """Generate SSE events from the research orchestrator."""
+        """Generate SSE events from the research orchestrator.
+
+        Persistence is handled by the orchestrator after synthesis completes.
+        """
 
         def format_event(event: StreamEvent | str) -> str:
             if isinstance(event, str):
@@ -257,12 +309,23 @@ async def stream_research_with_history(
                 return f"data: {json.dumps(event_dict)}\n\n"
 
         try:
-            # Create orchestration config with research depth and system instructions
+            # Emit research_started with pre-generated IDs for frontend
+            research_started_event = {
+                "event_type": "research_started",
+                "message_id": str(agent_message_id),
+                "research_session_id": str(research_session_id),
+            }
+            yield f"data: {json.dumps(research_started_event)}\n\n"
+
+            # Create orchestration config with pre-generated UUIDs
             config = OrchestrationConfig(
                 research_depth=research_depth,
                 system_instructions=system_instructions,
+                message_id=agent_message_id,
+                research_session_id=research_session_id,
             )
 
+            # Stream events - orchestrator handles persistence on success
             async for event in stream_research(
                 query=query,
                 llm=llm,
@@ -272,11 +335,15 @@ async def stream_research_with_history(
                 user_id=user.user_id,
                 chat_id=str(chat_id),
                 config=config,
+                db=db,
             ):
                 yield format_event(event)
 
+            # Orchestrator persists data on success - nothing to do here
+
         except Exception as e:
             logger.exception(f"Error during research stream: {e}")
+            # No cleanup needed - nothing was written to DB
             error_event = {
                 "event_type": "error",
                 "error_code": "STREAM_ERROR",

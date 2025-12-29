@@ -6,7 +6,7 @@ import mlflow
 from pydantic import BaseModel
 
 from src.agent.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT
-from src.agent.state import Plan, PlanStep, ResearchState, StepType
+from src.agent.state import Plan, PlanStep, ResearchState, StepStatus, StepType
 from src.core.logging_utils import get_logger, truncate
 from src.services.llm.client import LLMClient
 from src.services.llm.types import ModelTier
@@ -22,6 +22,7 @@ class PlanStepOutput(BaseModel):
     description: str
     step_type: str
     needs_search: bool
+    status: str = "pending"  # For preserving completed step status
 
 
 class PlanOutput(BaseModel):
@@ -62,6 +63,22 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
         )
         return state
 
+    # Get completed steps from previous plan (for preservation during ADJUST)
+    completed_steps: list[PlanStep] = []
+    if state.current_plan:
+        completed_steps = state.get_completed_steps()
+
+    # Format completed steps for prompt
+    completed_steps_str = ""
+    if completed_steps:
+        completed_steps_str = "\n".join(
+            f"- [{s.id}] {s.title} (COMPLETED)"
+            for s in completed_steps
+        )
+        completed_steps_str += f"\n\nNOTE: {len(completed_steps)} step(s) already completed. Only output NEW steps."
+    else:
+        completed_steps_str = "(No completed steps - this is the initial plan)"
+
     # Format previous observations
     observations_str = ""
     if state.all_observations:
@@ -93,6 +110,7 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
                 query=state.query,
                 background_results=state.background_investigation_results
                 or "(No background investigation)",
+                completed_steps=completed_steps_str,
                 all_observations=observations_str,
                 reflector_feedback=reflector_feedback or "(First planning iteration)",
                 iteration=state.plan_iterations,
@@ -112,37 +130,45 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
         else:
             output = PlanOutput.model_validate_json(response.content)
 
-        # Convert to Plan
-        steps = [
+        # Convert LLM output to new steps, skipping any that match completed step IDs
+        completed_ids = {s.id for s in completed_steps}
+        new_steps = [
             PlanStep(
                 id=step.id,
                 title=step.title,
                 description=step.description,
                 step_type=StepType(step.step_type),
                 needs_search=step.needs_search,
+                status=StepStatus(step.status) if step.status != "pending" else StepStatus.PENDING,
             )
             for step in output.steps
+            if step.id not in completed_ids  # Don't duplicate completed steps
         ]
+
+        # Merge: completed steps (preserved) + new steps from LLM
+        final_steps = completed_steps + new_steps
 
         state.current_plan = Plan(
             id=output.id or str(uuid4()),
             title=output.title,
             thought=output.thought,
-            steps=steps,
+            steps=final_steps,
             has_enough_context=output.has_enough_context,
             iteration=state.plan_iterations,
         )
 
-        # Reset step index for new plan
-        state.current_step_index = 0
+        # Set step index to first non-completed step (resume from where we left off)
+        state.current_step_index = len(completed_steps)
 
         # Log step details
-        step_summaries = [f"{s.step_type}:{truncate(s.title, 30)}" for s in steps[:5]]
+        step_summaries = [f"{s.step_type.value}:{truncate(s.title, 30)}" for s in final_steps[:5]]
         logger.info(
             "PLAN_CREATED",
             title=truncate(output.title, 60),
             thought=truncate(output.thought, 100),
-            steps=len(steps),
+            total_steps=len(final_steps),
+            preserved_steps=len(completed_steps),
+            new_steps=len(new_steps),
             step_summaries=step_summaries,
             has_enough_context=output.has_enough_context,
         )

@@ -1,8 +1,7 @@
 """Background Investigator agent - quick context gathering before planning."""
 
-import json
-
 import mlflow
+from pydantic import BaseModel, Field
 
 from src.agent.config import get_background_config
 from src.agent.prompts.background import (
@@ -18,6 +17,16 @@ from src.services.llm.types import ModelTier
 from src.services.search.brave import BraveSearchClient
 
 logger = get_logger(__name__)
+
+
+# Pydantic models for structured LLM output
+class BackgroundQueriesOutput(BaseModel):
+    """Output from background search query generation."""
+
+    queries: list[str] = Field(
+        default_factory=list,
+        description="List of 2-3 focused search queries"
+    )
 
 
 async def _generate_search_queries(
@@ -44,20 +53,12 @@ async def _generate_search_queries(
             messages=messages,
             tier=ModelTier.SIMPLE,
             max_tokens=200,
+            structured_output=BackgroundQueriesOutput,
         )
 
-        # Parse JSON array from response
-        content = response.content.strip()
-        # Handle potential markdown code blocks
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-
-        queries = json.loads(content)
-        if isinstance(queries, list):
-            result = [q for q in queries[:max_queries] if isinstance(q, str) and q.strip()]
+        if response.structured:
+            output: BackgroundQueriesOutput = response.structured
+            result = [q for q in output.queries[:max_queries] if q.strip()]
             if result:
                 logger.info(
                     "BACKGROUND_QUERIES_GENERATED",
@@ -65,7 +66,8 @@ async def _generate_search_queries(
                     queries=[truncate(q, 60) for q in result],
                 )
                 return result
-    except (json.JSONDecodeError, Exception) as e:
+
+    except Exception as e:
         logger.warning(
             "BACKGROUND_QUERY_GEN_FAILED",
             error_type=type(e).__name__,

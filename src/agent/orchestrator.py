@@ -11,10 +11,15 @@ from src.agent.config import get_coordinator_config, get_planner_config
 from src.agent.nodes.background import run_background_investigator
 from src.agent.nodes.coordinator import handle_simple_query, run_coordinator
 from src.agent.nodes.planner import run_planner
+from src.agent.nodes.react_researcher import ReactResearchEvent, run_react_researcher
 from src.agent.nodes.reflector import run_reflector
 from src.agent.nodes.researcher import run_researcher
+from src.agent.nodes.citation_synthesizer import (
+    run_citation_synthesizer,
+    stream_synthesis_with_citations,
+)
 from src.agent.nodes.synthesizer import run_synthesizer, stream_synthesis
-from src.agent.state import ReflectionDecision, ResearchState
+from src.agent.state import ReflectionDecision, ReflectionResult, ResearchState
 from src.agent.tools.web_crawler import WebCrawler
 from src.core.logging_utils import (
     get_logger,
@@ -22,11 +27,12 @@ from src.core.logging_utils import (
     log_agent_transition,
     truncate,
 )
+from src.schemas.research import PlanStepSummary
 from src.schemas.streaming import (
     AgentCompletedEvent,
     AgentStartedEvent,
+    ClaimVerifiedEvent,
     PlanCreatedEvent,
-    PlanStepSummary,
     ReflectionDecisionEvent,
     ResearchCompletedEvent,
     StepCompletedEvent,
@@ -35,9 +41,18 @@ from src.schemas.streaming import (
     StreamEvent,
     SynthesisProgressEvent,
     SynthesisStartedEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    VerificationSummaryEvent,
 )
 from src.services.llm.client import LLMClient
 from src.services.search.brave import BraveSearchClient
+
+# Import database session type for persistence (optional dependency)
+try:
+    from sqlalchemy.ext.asyncio import AsyncSession
+except ImportError:
+    AsyncSession = None  # type: ignore[misc, assignment]
 
 logger = get_logger(__name__)
 
@@ -67,6 +82,9 @@ class OrchestrationConfig:
     timeout_seconds: int = 300  # 5 minutes
     research_depth: str = "auto"  # auto, light, medium, extended
     system_instructions: str | None = None  # User's custom system instructions
+    # Persistence context (for claim/citation storage)
+    message_id: UUID | None = None  # Agent message ID for claims
+    research_session_id: UUID | None = None  # Research session ID for sources
 
 
 @dataclass
@@ -277,7 +295,7 @@ async def run_research(
                         # Emit step started
                         events.append(_step_started(state))
 
-                        # Research step
+                        # Research step - use ReAct researcher with agentic tool use
                         log_agent_transition(
                             logger,
                             from_agent="planner",
@@ -287,7 +305,33 @@ async def run_research(
                         events.append(_agent_started("researcher", "analytical"))
                         agent_start = time.perf_counter()
 
-                        state = await run_researcher(state, llm, crawler, brave_client)
+                        # Run ReAct researcher and collect events
+                        async for react_event in run_react_researcher(
+                            state, llm, crawler, brave_client
+                        ):
+                            if react_event.event_type == "tool_call":
+                                events.append(
+                                    ToolCallEvent(
+                                        tool_name=react_event.data.get("tool", ""),
+                                        tool_args=react_event.data.get("args", {}),
+                                        call_number=react_event.data.get("call_number", 0),
+                                    )
+                                )
+                            elif react_event.event_type == "tool_result":
+                                events.append(
+                                    ToolResultEvent(
+                                        tool_name=react_event.data.get("tool", ""),
+                                        result_preview=react_event.data.get("result_preview", "")[:200],
+                                        sources_crawled=react_event.data.get("high_quality_count", 0),
+                                    )
+                                )
+                            elif react_event.event_type == "research_complete":
+                                logger.info(
+                                    "REACT_RESEARCH_COMPLETE",
+                                    reason=react_event.data.get("reason", ""),
+                                    tool_calls=react_event.data.get("tool_calls", 0),
+                                    high_quality=react_event.data.get("high_quality_sources", 0),
+                                )
 
                         researcher_ms = (time.perf_counter() - agent_start) * 1000
                         log_agent_phase(
@@ -329,16 +373,38 @@ async def run_research(
                             events.append(_reflection_decision(state))
 
                             if state.last_reflection.decision == ReflectionDecision.COMPLETE:
-                                # Mark remaining steps as skipped
-                                while state.has_more_steps():
-                                    state.advance_step()
-                                    steps_skipped += 1
-                                logger.info("EARLY_COMPLETION", steps_skipped=steps_skipped)
-                                break
+                                # Check minimum steps enforcement
+                                min_steps = state.get_min_steps()
+                                completed = len(state.get_completed_steps())
+
+                                if completed < min_steps:
+                                    # Override early completion - minimum steps not reached
+                                    logger.warning(
+                                        "OVERRIDE_EARLY_COMPLETE",
+                                        completed=completed,
+                                        minimum=min_steps,
+                                        reason="Minimum steps not reached",
+                                    )
+                                    state.last_reflection = ReflectionResult(
+                                        decision=ReflectionDecision.CONTINUE,
+                                        reasoning=f"Override: {completed}/{min_steps} minimum steps completed",
+                                    )
+                                else:
+                                    # Allow completion - mark remaining steps as skipped
+                                    while state.has_more_steps():
+                                        state.advance_step()
+                                        steps_skipped += 1
+                                    logger.info("EARLY_COMPLETION", steps_skipped=steps_skipped)
+                                    break
 
                             if state.last_reflection.decision == ReflectionDecision.ADJUST:
-                                logger.info("ADJUSTING_PLAN", reason="reflection_decision")
-                                # Go back to planning
+                                preserved_count = len(state.get_completed_steps())
+                                logger.info(
+                                    "ADJUSTING_PLAN",
+                                    reason="reflection_decision",
+                                    preserving_completed_steps=preserved_count,
+                                )
+                                # Go back to planning (completed steps will be preserved)
                                 break
 
                         # Advance to next step
@@ -369,7 +435,11 @@ async def run_research(
             events.append(_agent_started("synthesizer", "complex"))
             agent_start = time.perf_counter()
 
-            state = await run_synthesizer(state, llm)
+            # Use citation-aware synthesizer if enabled
+            if state.enable_citation_verification:
+                state = await run_citation_synthesizer(state, llm)
+            else:
+                state = await run_synthesizer(state, llm)
 
             synthesis_ms = (time.perf_counter() - agent_start) * 1000
             log_agent_phase(
@@ -442,6 +512,7 @@ async def stream_research(
     user_id: str | None = None,
     chat_id: str | None = None,
     config: OrchestrationConfig | None = None,
+    db: "AsyncSession | None" = None,
 ) -> AsyncGenerator[StreamEvent | str, None]:
     """Stream the research workflow with real-time events.
 
@@ -455,6 +526,7 @@ async def stream_research(
         user_id: Optional user ID for MLflow trace grouping.
         chat_id: Optional chat ID for MLflow trace session grouping.
         config: Orchestration configuration.
+        db: Optional database session for persisting claims/citations.
 
     Yields:
         StreamEvent objects and synthesis content chunks.
@@ -572,7 +644,31 @@ async def stream_research(
                         )
                         yield _agent_started("researcher", "analytical")
                         agent_start = time.perf_counter()
-                        state = await run_researcher(state, llm, crawler, brave_client)
+
+                        # Run ReAct researcher with agentic tool use
+                        async for react_event in run_react_researcher(
+                            state, llm, crawler, brave_client
+                        ):
+                            if react_event.event_type == "tool_call":
+                                yield ToolCallEvent(
+                                    tool_name=react_event.data.get("tool", ""),
+                                    tool_args=react_event.data.get("args", {}),
+                                    call_number=react_event.data.get("call_number", 0),
+                                )
+                            elif react_event.event_type == "tool_result":
+                                yield ToolResultEvent(
+                                    tool_name=react_event.data.get("tool", ""),
+                                    result_preview=react_event.data.get("result_preview", "")[:200],
+                                    sources_crawled=react_event.data.get("high_quality_count", 0),
+                                )
+                            elif react_event.event_type == "research_complete":
+                                logger.info(
+                                    "REACT_RESEARCH_COMPLETE",
+                                    reason=react_event.data.get("reason", ""),
+                                    tool_calls=react_event.data.get("tool_calls", 0),
+                                    high_quality=react_event.data.get("high_quality_sources", 0),
+                                )
+
                         yield _agent_completed("researcher", agent_start)
                         steps_executed += 1
 
@@ -594,6 +690,12 @@ async def stream_research(
                                 break
 
                             if state.last_reflection.decision == ReflectionDecision.ADJUST:
+                                preserved_count = len(state.get_completed_steps())
+                                logger.info(
+                                    "ADJUSTING_PLAN",
+                                    reason="reflection_decision",
+                                    preserving_completed_steps=preserved_count,
+                                )
                                 break
 
                         state.advance_step()
@@ -612,10 +714,69 @@ async def stream_research(
             yield _agent_started("synthesizer", "complex")
             agent_start = time.perf_counter()
 
-            async for chunk in stream_synthesis(state, llm):
-                yield SynthesisProgressEvent(content_chunk=chunk)
+            # Use citation-aware synthesizer if enabled
+            # Collect content chunks for persistence
+            content_chunks: list[str] = []
+            if state.enable_citation_verification:
+                async for event in stream_synthesis_with_citations(state, llm):
+                    event_type = event.get("type", "")
+                    if event_type == "content":
+                        chunk = event.get("chunk", "")
+                        content_chunks.append(chunk)
+                        yield SynthesisProgressEvent(content_chunk=chunk)
+                    # Log verification events (frontend fetches claims via API)
+                    elif event_type in ("claim_verified", "verification_summary", "citation_corrected"):
+                        logger.debug(
+                            f"CITATION_EVENT_{event_type.upper()}",
+                            **{k: str(v)[:50] for k, v in event.items() if k != "type"},
+                        )
+            else:
+                async for chunk in stream_synthesis(state, llm):
+                    content_chunks.append(chunk)
+                    yield SynthesisProgressEvent(content_chunk=chunk)
+
+            # Aggregate content and update state
+            if content_chunks:
+                final_content = "".join(content_chunks)
+                state.complete(final_content)
 
             yield _agent_completed("synthesizer", agent_start)
+
+            # Persist all research data if db session available and we have content
+            if (
+                db is not None
+                and config.message_id is not None
+                and config.research_session_id is not None
+                and state.final_report
+                and chat_id is not None
+            ):
+                try:
+                    from src.agent.persistence import persist_complete_research
+
+                    counts = await persist_complete_research(
+                        db=db,
+                        chat_id=UUID(chat_id) if isinstance(chat_id, str) else chat_id,
+                        user_query=query,
+                        message_id=config.message_id,
+                        research_session_id=config.research_session_id,
+                        research_depth=config.research_depth,
+                        state=state,
+                    )
+                    logger.info(
+                        "RESEARCH_DATA_PERSISTED",
+                        message_id=str(config.message_id),
+                        research_session_id=str(config.research_session_id),
+                        report_len=len(state.final_report),
+                        claims=counts.get("claims", 0),
+                        citations=counts.get("citations", 0),
+                        sources=counts.get("sources", 0),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "RESEARCH_PERSISTENCE_FAILED",
+                        error=str(e)[:200],
+                        message_id=str(config.message_id) if config.message_id else None,
+                    )
 
     except Exception as e:
         logger.exception(

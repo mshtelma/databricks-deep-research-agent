@@ -17,6 +17,7 @@ from src.core.logging_utils import (
     log_search_response,
     truncate,
 )
+from src.services.search.domain_filter import DomainFilter
 
 logger = get_logger(__name__)
 
@@ -67,10 +68,14 @@ class BraveSearchClient:
             logger.warning("Brave API key not configured")
 
         # Load defaults from central config
-        brave_config = get_app_config().search.brave
+        search_config = get_app_config().search
+        brave_config = search_config.brave
         self._requests_per_second = requests_per_second or brave_config.requests_per_second
         self._default_result_count = default_result_count or brave_config.default_result_count
         self._default_freshness = default_freshness or brave_config.freshness
+
+        # Domain filtering
+        self._domain_filter = DomainFilter(search_config.domain_filter)
 
         # Rate limiting
         self._last_request: datetime | None = None
@@ -173,6 +178,20 @@ class BraveSearchClient:
                         relevance_score=1.0 - (i * 0.1) if i < 10 else 0.1,
                     )
                 )
+
+            # Apply domain filtering
+            filtered_count = len(results)
+            if self._domain_filter.is_active:
+                results = [
+                    r for r in results if self._domain_filter.is_allowed(r.url).allowed
+                ]
+                filtered_count = filtered_count - len(results)
+                if filtered_count > 0:
+                    logger.debug(
+                        "SEARCH_RESULTS_FILTERED",
+                        filtered_count=filtered_count,
+                        remaining_count=len(results),
+                    )
 
             # Log the response
             urls = [r.url for r in results]

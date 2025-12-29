@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import mlflow
 
+from src.agent.tools.url_registry import UrlRegistry
 from src.core.logging_utils import get_logger, truncate
 from src.services.search.brave import BraveSearchClient
 
@@ -87,3 +88,38 @@ async def web_search(
         query=query,
         total_results=len(results),
     )
+
+
+def format_search_results_indexed(
+    output: WebSearchOutput,
+    registry: UrlRegistry,
+) -> str:
+    """Format search results for LLM with indices (no URLs).
+
+    This is a security feature - URLs are hidden from the LLM.
+    The LLM sees only indices which are resolved internally.
+
+    Args:
+        output: Search output with results
+        registry: URL registry to register results
+
+    Returns:
+        Formatted string with indexed results (no URLs)
+    """
+    if not output.results:
+        return "No search results found. Try a different query."
+
+    formatted = []
+    for result in output.results:
+        # Register URL and get index
+        index = registry.register(
+            url=result.url,
+            title=result.title,
+            snippet=result.snippet,
+            relevance_score=result.relevance_score,
+        )
+
+        # Format WITHOUT URL - only index, title, snippet
+        formatted.append(f"[{index}] **{result.title}**\n    {result.snippet}")
+
+    return "\n\n".join(formatted)

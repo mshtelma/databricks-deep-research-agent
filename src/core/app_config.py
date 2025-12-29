@@ -1,6 +1,7 @@
 """Central application configuration loaded from YAML."""
 
 import logging
+import os
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -40,6 +41,14 @@ class BackoffStrategy(str, Enum):
     LINEAR = "linear"  # delay = base * (attempt + 1)
 
 
+class DomainFilterMode(str, Enum):
+    """Domain filter operation mode."""
+
+    INCLUDE = "include"  # Whitelist only - only listed domains allowed
+    EXCLUDE = "exclude"  # Blacklist only - listed domains blocked
+    BOTH = "both"  # Whitelist then blacklist - must be in include AND not in exclude
+
+
 class EndpointConfig(BaseModel):
     """Configuration for a single model endpoint."""
 
@@ -53,6 +62,8 @@ class EndpointConfig(BaseModel):
     reasoning_effort: ReasoningEffort | None = None
     reasoning_budget: int | None = Field(default=None, gt=0)
     supports_structured_output: bool = False
+    # Some models (e.g., GPT-5) don't support temperature parameter
+    supports_temperature: bool = True
 
     model_config = {"frozen": True}
 
@@ -144,10 +155,34 @@ class BraveSearchConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class DomainFilterConfig(BaseModel):
+    """Configuration for domain whitelist/blacklist filtering.
+
+    Supports wildcard patterns:
+    - "*.gov" - matches any .gov domain (cdc.gov, www.nasa.gov)
+    - "*.edu" - matches any .edu domain
+    - "news.*" - matches news.com, news.org, etc.
+    - "exact.com" - exact match only
+
+    Filter modes:
+    - include: Only domains matching include_domains are allowed
+    - exclude: Domains matching exclude_domains are blocked
+    - both: Must match include_domains AND not match exclude_domains
+    """
+
+    mode: DomainFilterMode = DomainFilterMode.EXCLUDE
+    include_domains: list[str] = Field(default_factory=list)
+    exclude_domains: list[str] = Field(default_factory=list)
+    log_filtered: bool = False
+
+    model_config = {"frozen": True}
+
+
 class SearchConfig(BaseModel):
     """Configuration for search services."""
 
     brave: BraveSearchConfig = Field(default_factory=BraveSearchConfig)
+    domain_filter: DomainFilterConfig = Field(default_factory=DomainFilterConfig)
 
     model_config = {"frozen": True}
 
@@ -159,6 +194,186 @@ class TruncationConfig(BaseModel):
     error_message: int = Field(default=500, ge=50)
     query_display: int = Field(default=100, ge=10)
     source_snippet: int = Field(default=300, ge=50)
+
+    model_config = {"frozen": True}
+
+
+class RelevanceMethod(str, Enum):
+    """Method for computing relevance scores."""
+
+    SEMANTIC = "semantic"
+    KEYWORD = "keyword"
+    HYBRID = "hybrid"
+
+
+class AnswerComparisonMethod(str, Enum):
+    """Method for comparing answers in numeric QA verification."""
+
+    EXACT_MATCH = "exact_match"
+    F1 = "f1"
+    LERC = "lerc"
+
+
+class ConfidenceEstimationMethod(str, Enum):
+    """Method for estimating confidence levels."""
+
+    LINGUISTIC = "linguistic"
+    EMBEDDING_SIMILARITY = "embedding_similarity"
+    HYBRID = "hybrid"
+
+
+class CorrectionMethod(str, Enum):
+    """Method for citation correction."""
+
+    KEYWORD_SEMANTIC_HYBRID = "keyword_semantic_hybrid"
+    KEYWORD_ONLY = "keyword_only"
+    SEMANTIC_ONLY = "semantic_only"
+
+
+class GenerationMode(str, Enum):
+    """Generation mode for research reports.
+
+    - CLASSICAL: Free-form prose with inline [Title](url) links. Best text quality.
+                 Uses existing stream_synthesis(). Skips verification stages 3-6.
+    - NATURAL: Light-touch [N] citations with balanced quality + verification.
+               Uses NATURAL_GENERATION_PROMPT. Runs verification stages 3-6.
+    - STRICT: Heavy [N] constraints. Current behavior with maximum citations.
+              Uses INTERLEAVED_GENERATION_PROMPT. Runs verification stages 3-6.
+    """
+
+    CLASSICAL = "classical"
+    NATURAL = "natural"
+    STRICT = "strict"
+
+
+class EvidencePreselectionConfig(BaseModel):
+    """Configuration for Stage 1: Evidence Pre-Selection."""
+
+    max_spans_per_source: int = Field(default=10, ge=1, le=50)
+    min_span_length: int = Field(default=50, ge=10)
+    max_span_length: int = Field(default=500, ge=50)
+    relevance_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    numeric_content_boost: float = Field(default=0.2, ge=0.0, le=1.0)
+    relevance_computation_method: RelevanceMethod = RelevanceMethod.HYBRID
+
+    # Chunking config for long sources (backward compatible defaults)
+    chunk_size: int = Field(default=8000, ge=1000, le=20000)
+    chunk_overlap: int = Field(default=1000, ge=0, le=5000)
+    max_chunks_per_source: int = Field(default=5, ge=1, le=10)
+
+    model_config = {"frozen": True}
+
+
+class InterleavedGenerationConfig(BaseModel):
+    """Configuration for Stage 2: Interleaved Generation."""
+
+    max_claims_per_section: int = Field(default=10, ge=1, le=50)
+    min_evidence_similarity: float = Field(default=0.5, ge=0.0, le=1.0)
+    retry_on_entailment_failure: bool = True
+    max_retries: int = Field(default=3, ge=0, le=10)
+
+    model_config = {"frozen": True}
+
+
+class ConfidenceClassificationConfig(BaseModel):
+    """Configuration for Stage 3: Confidence Classification."""
+
+    high_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    low_threshold: float = Field(default=0.50, ge=0.0, le=1.0)
+    quote_match_bonus: float = Field(default=0.3, ge=0.0, le=1.0)
+    hedging_word_penalty: float = Field(default=0.2, ge=0.0, le=1.0)
+    estimation_method: ConfidenceEstimationMethod = ConfidenceEstimationMethod.LINGUISTIC
+
+    model_config = {"frozen": True}
+
+
+class IsolatedVerificationConfig(BaseModel):
+    """Configuration for Stage 4: Isolated Verification."""
+
+    enable_nei_verdict: bool = True
+    verification_model_tier: str = Field(default="analytical")
+    quick_verification_tier: str = Field(default="simple")
+
+    model_config = {"frozen": True}
+
+
+class CitationCorrectionConfig(BaseModel):
+    """Configuration for Stage 5: Citation Correction."""
+
+    correction_method: CorrectionMethod = CorrectionMethod.KEYWORD_SEMANTIC_HYBRID
+    lambda_weight: float = Field(default=0.8, ge=0.0, le=1.0)
+    correction_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
+    allow_alternate_citations: bool = True
+
+    model_config = {"frozen": True}
+
+
+class NumericQAVerificationConfig(BaseModel):
+    """Configuration for Stage 6: Numeric QA Verification."""
+
+    rounding_tolerance: float = Field(default=0.05, ge=0.0, le=0.5)
+    answer_comparison_method: AnswerComparisonMethod = AnswerComparisonMethod.F1
+    require_unit_match: bool = True
+    require_entity_match: bool = True
+
+    model_config = {"frozen": True}
+
+
+class VerificationRetrievalConfig(BaseModel):
+    """Configuration for optional verification retrieval."""
+
+    trigger_on_verdicts: list[str] = Field(default_factory=lambda: ["unsupported", "nei"])
+    max_additional_searches: int = Field(default=2, ge=0, le=10)
+    search_timeout_seconds: int = Field(default=3, ge=1, le=30)
+
+    model_config = {"frozen": True}
+
+
+class CitationVerificationConfig(BaseModel):
+    """Configuration for the 6-stage citation verification pipeline."""
+
+    # Master toggle
+    enabled: bool = True
+
+    # Generation mode: controls synthesis approach and verification stages
+    # - "classical": Free-form prose with [Title](url) links, skips verification
+    # - "natural": Light-touch [N] citations, runs full verification
+    # - "strict": Heavy [N] constraints (current behavior), runs full verification
+    generation_mode: GenerationMode = GenerationMode.STRICT
+
+    # Stage toggles (only apply to "natural" and "strict" modes)
+    enable_evidence_preselection: bool = True
+    enable_interleaved_generation: bool = True
+    enable_confidence_classification: bool = True
+    enable_citation_correction: bool = True
+    enable_numeric_qa_verification: bool = True
+    enable_verification_retrieval: bool = False
+
+    # Stage configurations
+    evidence_preselection: EvidencePreselectionConfig = Field(
+        default_factory=EvidencePreselectionConfig
+    )
+    interleaved_generation: InterleavedGenerationConfig = Field(
+        default_factory=InterleavedGenerationConfig
+    )
+    confidence_classification: ConfidenceClassificationConfig = Field(
+        default_factory=ConfidenceClassificationConfig
+    )
+    isolated_verification: IsolatedVerificationConfig = Field(
+        default_factory=IsolatedVerificationConfig
+    )
+    citation_correction: CitationCorrectionConfig = Field(
+        default_factory=CitationCorrectionConfig
+    )
+    numeric_qa_verification: NumericQAVerificationConfig = Field(
+        default_factory=NumericQAVerificationConfig
+    )
+    verification_retrieval: VerificationRetrievalConfig = Field(
+        default_factory=VerificationRetrievalConfig
+    )
+
+    # Warning thresholds
+    unsupported_claim_warning_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
 
     model_config = {"frozen": True}
 
@@ -201,6 +416,9 @@ class AppConfig(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     truncation: TruncationConfig = Field(default_factory=TruncationConfig)
     rate_limiting: RateLimitingConfig = Field(default_factory=RateLimitingConfig)
+    citation_verification: CitationVerificationConfig = Field(
+        default_factory=CitationVerificationConfig
+    )
 
     @model_validator(mode="after")
     def validate_endpoint_references(self) -> "AppConfig":
@@ -305,7 +523,11 @@ def get_app_config() -> AppConfig:
     """Get the cached application configuration.
 
     This is the primary entry point for accessing configuration.
+    Supports APP_CONFIG_PATH environment variable to override default config path.
     """
+    config_path_str = os.getenv("APP_CONFIG_PATH")
+    if config_path_str:
+        return load_app_config(Path(config_path_str))
     return load_app_config()
 
 

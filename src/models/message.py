@@ -13,8 +13,10 @@ from src.db.base import BaseModel
 
 if TYPE_CHECKING:
     from src.models.chat import Chat
+    from src.models.claim import Claim
     from src.models.message_feedback import MessageFeedback
     from src.models.research_session import ResearchSession
+    from src.models.verification_summary import VerificationSummary
 
 
 class MessageRole(str, Enum):
@@ -77,6 +79,17 @@ class Message(BaseModel):
         "MessageFeedback",
         back_populates="message",
         uselist=False,
+    )
+    claims: Mapped[list["Claim"]] = relationship(
+        "Claim",
+        back_populates="message",
+        cascade="all, delete-orphan",
+    )
+    verification_summary: Mapped["VerificationSummary | None"] = relationship(
+        "VerificationSummary",
+        back_populates="message",
+        uselist=False,
+        cascade="all, delete-orphan",
     )
 
     # Indexes

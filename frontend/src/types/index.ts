@@ -123,15 +123,24 @@ export interface PaginatedResponse<T> {
 export type StreamEventType =
   | 'agent_started'
   | 'agent_completed'
+  | 'research_started'
   | 'clarification_needed'
   | 'plan_created'
   | 'step_started'
   | 'step_completed'
+  | 'tool_call'
+  | 'tool_result'
   | 'reflection_decision'
   | 'synthesis_started'
   | 'synthesis_progress'
   | 'research_completed'
   | 'error'
+  // Citation verification events
+  | 'claim_generated'
+  | 'claim_verified'
+  | 'citation_corrected'
+  | 'numeric_claim_detected'
+  | 'verification_summary'
 
 export interface BaseStreamEvent {
   event_type: StreamEventType
@@ -148,6 +157,12 @@ export interface AgentCompletedEvent extends BaseStreamEvent {
   event_type: 'agent_completed'
   agent: string
   duration_ms: number
+}
+
+export interface ResearchStartedEvent extends BaseStreamEvent {
+  event_type: 'research_started'
+  message_id: string
+  research_session_id: string
 }
 
 export interface ClarificationNeededEvent extends BaseStreamEvent {
@@ -179,6 +194,20 @@ export interface StepCompletedEvent extends BaseStreamEvent {
   step_id: string
   observation_summary: string
   sources_found: number
+}
+
+export interface ToolCallEvent extends BaseStreamEvent {
+  event_type: 'tool_call'
+  tool_name: string // 'web_search' | 'web_crawl'
+  tool_args: Record<string, unknown>
+  call_number: number
+}
+
+export interface ToolResultEvent extends BaseStreamEvent {
+  event_type: 'tool_result'
+  tool_name: string
+  result_preview: string
+  sources_crawled: number
 }
 
 export interface ReflectionDecisionEvent extends BaseStreamEvent {
@@ -215,15 +244,43 @@ export interface StreamErrorEvent extends BaseStreamEvent {
   recoverable: boolean
 }
 
+// Re-export citation stream events from citation types
+export type {
+  ClaimGeneratedEvent,
+  ClaimVerifiedEvent,
+  CitationCorrectedEvent,
+  NumericClaimDetectedEvent,
+  VerificationSummaryEvent,
+  CitationStreamEvent,
+} from './citation';
+
+// Import citation event types for use in StreamEvent union
+import type {
+  ClaimGeneratedEvent,
+  ClaimVerifiedEvent,
+  CitationCorrectedEvent,
+  NumericClaimDetectedEvent,
+  VerificationSummaryEvent,
+} from './citation';
+
 export type StreamEvent =
   | AgentStartedEvent
   | AgentCompletedEvent
+  | ResearchStartedEvent
   | ClarificationNeededEvent
   | PlanCreatedEvent
   | StepStartedEvent
   | StepCompletedEvent
+  | ToolCallEvent
+  | ToolResultEvent
   | ReflectionDecisionEvent
   | SynthesisStartedEvent
   | SynthesisProgressEvent
   | ResearchCompletedEvent
   | StreamErrorEvent
+  // Citation verification events
+  | ClaimGeneratedEvent
+  | ClaimVerifiedEvent
+  | CitationCorrectedEvent
+  | NumericClaimDetectedEvent
+  | VerificationSummaryEvent

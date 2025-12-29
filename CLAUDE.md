@@ -20,6 +20,8 @@ Deep research agent with **5-agent architecture** (Coordinator, Planner, Researc
 - Mocked (unit tests), Real PostgreSQL/Lakebase (integration tests optional) (001-deep-research-agent)
 - Python 3.11+ + PyYAML, Pydantic v2, FastAPI (001-deep-research-agent)
 - YAML file (`config/app.yaml`), Pydantic models for validation (001-deep-research-agent)
+- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, AsyncOpenAI, Pydantic v2, React 18, TanStack Query (003-claim-level-citations)
+- Databricks Lakebase (PostgreSQL) via asyncpg, existing schema extensions (003-claim-level-citations)
 
 | Component | Technology | Version |
 |-----------|------------|---------|
@@ -83,7 +85,19 @@ e2e/                            # Playwright E2E tests (full-stack)
 ├── fixtures/                   # Test fixtures
 └── playwright.config.ts
 
-tests/                          # Python unit tests
+tests/                          # Python backend tests (3-tier architecture)
+├── unit/                       # Fast tests with mocks (no credentials needed)
+│   ├── agent/
+│   ├── api/
+│   └── services/
+├── integration/                # Real LLM/Brave tests (uses config/app.test.yaml)
+│   ├── conftest.py            # Shared fixtures, test config
+│   ├── test_e2e_research.py
+│   └── test_citation_pipeline.py
+└── complex/                    # Long-running tests (uses production config)
+    ├── conftest.py
+    └── test_complex_research.py
+
 static/                         # Built frontend (gitignored, created by `make build`)
 ```
 
@@ -107,8 +121,18 @@ make e2e-ui                      # Run E2E tests with Playwright UI
 # Quality checks
 make typecheck                   # Type check backend + frontend
 make lint                        # Lint backend + frontend
-make test                        # Run Python tests
-make test-frontend               # Run frontend tests
+
+# Testing (3-tier architecture)
+make test                        # Unit tests only (fast, no credentials)
+make test-integration            # Integration tests (real LLM/Brave, test config)
+make test-complex                # Complex long-running tests (production config)
+make test-all                    # All Python + Frontend tests
+make test-frontend               # Run frontend tests only
+
+# Direct pytest with markers
+uv run pytest -m "unit"          # Unit tests
+uv run pytest -m "integration"   # Integration tests
+uv run pytest -m "complex"       # Complex tests
 
 # Individual tools (if needed)
 uv run mypy src --strict
@@ -156,8 +180,9 @@ cd frontend && npm run typecheck
 ## Key Files
 
 - `config/app.yaml` - Central configuration (endpoints, models, agents, search)
+- `config/app.test.yaml` - Test-specific config (minimal iterations, fast models)
 - `config/app.example.yaml` - Documented example configuration
-- `src/core/app_config.py` - Pydantic configuration models
+- `src/core/app_config.py` - Pydantic configuration models (supports APP_CONFIG_PATH env var)
 - `specs/001-deep-research-agent/spec.md` - Feature specification
 - `specs/001-deep-research-agent/plan.md` - Implementation plan
 - `specs/001-deep-research-agent/data-model.md` - Entity definitions
@@ -276,6 +301,37 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
 - Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
 
 ## Recent Changes
+- 003-claim-level-citations: Test Infrastructure Re-Architecture (2025-12-28)
+  - Implemented 3-tier test hierarchy: unit, integration, complex
+  - Created `config/app.test.yaml` for integration tests (minimal iterations, fast models)
+  - Added `APP_CONFIG_PATH` env var support in `src/core/app_config.py`
+  - Moved mocked citation pipeline test to `tests/unit/services/citation/`
+  - Created `tests/integration/test_citation_pipeline.py` with real LLM tests
+  - Created `tests/complex/` directory with long-running research tests
+  - Updated Makefile with `test-unit`, `test-integration`, `test-complex` targets
+  - Added pytest markers: `unit`, `integration`, `complex`
+  - Integration tests use test config; complex tests use production config
+  - Key files: `config/app.test.yaml`, `tests/integration/conftest.py`, `tests/complex/conftest.py`
+
+- 001-deep-research-agent: Plan Preservation During ADJUST (2025-12-26)
+  - When reflector triggers ADJUST, completed steps are now preserved in the plan
+  - Added `get_completed_steps()` method to `ResearchState` in `src/agent/state.py`
+  - Updated planner prompt to include completed steps section (not duplicated by LLM)
+  - Planner merges completed steps with new LLM-generated steps automatically
+  - `current_step_index` now resumes from first non-completed step instead of resetting to 0
+  - Enhanced logging shows `preserving_completed_steps` count during ADJUST
+  - Benefits: Visual progress preserved, no redundant re-execution, better UX
+  - Key files: `src/agent/state.py`, `src/agent/nodes/planner.py`, `src/agent/prompts/planner.py`, `src/agent/orchestrator.py`
+
+- 003-claim-level-citations: Deferred Database Materialization (2025-12-26)
+  - Database records (messages, research_session) are no longer created before streaming
+  - UUIDs are pre-generated in memory, passed to orchestrator via `OrchestrationConfig`
+  - All data persisted atomically in `persist_complete_research()` after synthesis succeeds
+  - New `research_started` SSE event broadcasts pre-generated IDs to frontend
+  - Benefits: No orphaned records, no cleanup on failure, single atomic transaction
+  - Key files: `src/api/v1/research.py`, `src/agent/persistence.py`, `src/agent/orchestrator.py`
+
+- 003-claim-level-citations: Added Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, AsyncOpenAI, Pydantic v2, React 18, TanStack Query
 - 001-deep-research-agent: Cross-cutting backend services (2025-12-25)
   - Added `PreferencesService` for managing user preferences (get/update)
   - Added `FeedbackService` for message feedback with MLflow trace correlation
@@ -291,14 +347,12 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - `truncate_messages()` and `truncate_text()` with configurable limits
   - `get_context_window_for_request()` for endpoint-aware truncation
 
-- 001-deep-research-agent: Researcher validation error resilience (2025-12-25)
   - Added default value to ResearcherOutput.observation field for validation resilience
   - Enhanced researcher prompt with explicit "ALWAYS REQUIRED" observation guidance
   - Added instructions for handling limited/empty search results
   - Updated output schema comments to emphasize observation is required
   - Fixes: LLM validation errors when search results are limited or empty
 
-- 001-deep-research-agent: Multi-entity query decomposition (2025-12-25)
   - Enhanced planner prompt with entity-by-entity decomposition guidance
   - Added "Multi-Entity Query Handling" section with CRITICAL RULE to never bundle entities
   - Increased step limit from 2-8 to 2-15 for multi-entity comparisons
@@ -306,7 +360,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Enhanced SEARCH_QUERY_PROMPT with entity isolation rules and diverse examples
   - Fixes: broad multi-entity queries now decomposed into focused entity-specific steps
 
-- 001-deep-research-agent: MLflow 3.8+ upgrade and streaming trace fix (2025-12-25)
   - Upgraded MLflow from 2.10+ to 3.8+ for production-grade tracing support
   - Added `@mlflow.trace` decorator to `stream_research()` in orchestrator.py
   - Fixed traces not appearing from web app - `stream_research()` now has root span like `run_research()`
@@ -315,7 +368,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Added `mlflow.flush_trace_async_logging()` after streaming completes in API layer
   - Fixes: orphan traces, context propagation issues, traces not flushed before response ends
 
-- 001-deep-research-agent: LLM rate limit retry with configurable backoff (2025-12-25)
   - Added automatic retry with backoff when rate limits are hit at the LLM client layer
   - All agents benefit automatically without code changes
   - Configurable via `rate_limiting` section in `config/app.yaml`
@@ -324,26 +376,22 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - New `RateLimitingConfig` model with `calculate_delay()` method
   - Refactored `LLMClient.complete()` and `LLMClient.stream()` with retry wrappers
 
-- 001-deep-research-agent: MLflow trace session grouping (2025-12-24)
   - Added `user_id` and `chat_id` parameters to `run_research()` and `stream_research()` functions
   - Traces from the same chat conversation are now grouped together via `mlflow.update_current_trace()`
   - Uses `mlflow.trace.user` (user_id) and `mlflow.trace.session` (chat_id) metadata
   - API layer passes user context to orchestrator for trace correlation
   - New FR-099 in spec.md documenting the requirement
 
-- 001-deep-research-agent: MLflow tracing fixes (2025-12-24)
   - Enabled async logging via `mlflow.config.enable_async_logging(True)` for FastAPI context
   - Added MLflow spans to `LLMClient.complete()` with tier, endpoint, and token metrics
   - Added root span attributes (session_id, query, max_iterations) in orchestrator
   - LLM calls now visible in MLflow traces as `llm_simple`, `llm_analytical`, `llm_complex` spans
 
-- 001-deep-research-agent: Chat UX improvements (2025-12-24)
   - Auto-select first chat or create new one when navigating to home page without a chat
   - Changed "Untitled Chat" label to "New chat..." with italic/muted styling
   - Fixed plan step status flickering by clearing currentStepIndex on step completion
   - New FR-093, FR-094, FR-095 in spec.md
 
-- 001-deep-research-agent: LLM-based search query generation in Background Investigator (2025-12-24)
   - Fixed HTTP 422 errors from Brave Search when user queries are too long
   - Added `BACKGROUND_SEARCH_PROMPT` in `src/agent/prompts/background.py`
   - Background Investigator now uses LLM to generate 2-3 focused search queries
@@ -352,7 +400,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Fallback to truncated query (200 chars) if LLM query generation fails
   - New FR-092 in spec.md documenting the requirement
 
-- 001-deep-research-agent: Markdown rendering in agent messages (2025-12-24)
   - Added `frontend/src/components/common/MarkdownRenderer.tsx` - reusable markdown component
   - Uses `react-markdown` with `remark-gfm` for GitHub Flavored Markdown support
   - Added `react-syntax-highlighter` for code block syntax highlighting (vscDarkPlus/vs themes)
@@ -361,13 +408,11 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Links open in new tabs with `target="_blank" rel="noopener noreferrer"`
   - Streaming content renders as markdown in real-time
 
-- 001-deep-research-agent: Research Activity panel improvements (2025-12-24)
   - Added `frontend/src/utils/activityLabels.ts` with event formatting utilities
   - `formatActivityLabel()`: Converts raw event types to human-readable labels with emojis
   - `getActivityColor()`: Returns Tailwind color classes (green/amber/blue/red) by event status
   - Updated `ChatPage.tsx` to use the new formatters for the activity log
 
-- 001-deep-research-agent: Central YAML configuration (2025-12-24)
   - Added `config/app.yaml` for all model endpoints, roles, agents, and search settings
   - Environment variable interpolation: `${VAR}` and `${VAR:-default}`
   - Pydantic v2 models for configuration validation in `src/core/app_config.py`
@@ -375,7 +420,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Startup validation fails fast if config is invalid
   - All hardcoded values removed from agent nodes and services
 
-- 001-deep-research-agent: Critical codebase review and fixes (2025-12-24)
   - **Security**: Added authorization checks to all 9 API endpoints (messages.py, research.py)
   - **Data integrity**: Fixed model/migration column name mismatches (Source, UserPreferences, MessageFeedback, AuditLog)
   - **Transaction safety**: Added flush after delete operations, rollback on errors
@@ -384,7 +428,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - **Deprecations**: Replaced all datetime.utcnow() with datetime.now(UTC) across codebase
   - **Schema updates**: FeedbackRating now uses string values ("positive"/"negative") matching migration
 
-- 001-deep-research-agent: Added Python 3.11+ (backend), TypeScript 5.x (frontend, E2E)
   - Moved `backend/src/` to `/src/` (Python at root)
   - Moved `backend/tests/` to `/tests/`
   - Moved `frontend/e2e/` to `/e2e/` (full-stack E2E tests at root)

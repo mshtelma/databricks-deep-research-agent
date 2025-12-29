@@ -46,6 +46,8 @@ class ModelEndpoint:
     reasoning_effort: ReasoningEffort | None = None
     reasoning_budget: int | None = None
     supports_structured_output: bool = False
+    # Some models (e.g., GPT-5) don't support temperature parameter
+    supports_temperature: bool = True
 
 
 @dataclass
@@ -129,3 +131,38 @@ class LLMResponse:
     endpoint_id: str
     duration_ms: float
     structured: Any | None = None
+
+
+@dataclass
+class ToolCall:
+    """A tool call from an LLM response (OpenAI format)."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
+class ToolCallChunk:
+    """Accumulated streaming data for a single tool call."""
+
+    index: int
+    id: str | None = None
+    name: str | None = None
+    arguments_json: str = ""
+
+    def is_complete(self) -> bool:
+        """Check if we have all required fields."""
+        return bool(self.id and self.name and self.arguments_json)
+
+
+@dataclass
+class StreamWithToolsChunk:
+    """A chunk from streaming with tools - either content or tool calls."""
+
+    # Content text (may be empty)
+    content: str = ""
+    # Tool calls detected in this chunk
+    tool_calls: list[ToolCall] | None = None
+    # Is this the final chunk (LLM finished)?
+    is_done: bool = False

@@ -11,12 +11,14 @@ import httpx
 import mlflow
 from trafilatura import bare_extraction
 
+from src.core.app_config import get_app_config
 from src.core.logging_utils import (
     get_logger,
     log_crawl_error,
     log_crawl_request,
     log_crawl_response,
 )
+from src.services.search.domain_filter import DomainFilter
 
 logger = get_logger(__name__)
 
@@ -112,6 +114,10 @@ class WebCrawler:
             headers={"User-Agent": USER_AGENT},
         )
 
+        # Domain filtering (second line of defense after search filtering)
+        search_config = get_app_config().search
+        self._domain_filter = DomainFilter(search_config.domain_filter)
+
     async def _fetch_url(self, url: str) -> CrawlResult:
         """Fetch and parse a single URL."""
         async with self._semaphore:
@@ -119,6 +125,23 @@ class WebCrawler:
             start_time = time.perf_counter()
 
             try:
+                # Domain filter check (second line of defense)
+                if self._domain_filter.is_active:
+                    match_result = self._domain_filter.is_allowed(url)
+                    if not match_result.allowed:
+                        logger.warning(
+                            "CRAWL_DOMAIN_BLOCKED",
+                            url=url[:80],
+                            reason=match_result.reason,
+                        )
+                        return CrawlResult(
+                            url=url,
+                            title=None,
+                            content="",
+                            success=False,
+                            error=f"Domain not allowed: {match_result.reason}",
+                        )
+
                 # Validate URL
                 parsed = urlparse(url)
                 if parsed.scheme not in ("http", "https"):

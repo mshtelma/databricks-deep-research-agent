@@ -103,6 +103,9 @@ test.describe('Error Handling', () => {
 
     await chatPage.sendMessage(specialMessage);
 
+    // Wait for user message to appear first (it should appear immediately as pending)
+    await expect(page.getByTestId('user-message').first()).toBeVisible({ timeout: 10000 });
+
     // Wait for either a response or verify the app handles it gracefully
     // Use shorter timeout since simple queries should respond quickly
     const responseAppeared = await chatPage
@@ -118,7 +121,7 @@ test.describe('Error Handling', () => {
       const response = await chatPage.getLastAgentResponse();
       expect(response.length).toBeGreaterThan(0);
     } else {
-      // If no response, at least verify the user message was displayed correctly
+      // User message should still be displayed correctly even if no agent response
       const userMessages = await chatPage.getUserMessages();
       expect(userMessages.length).toBeGreaterThan(0);
     }

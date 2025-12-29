@@ -1,5 +1,23 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import type { StreamEvent, PlanCreatedEvent, StepStartedEvent, StepCompletedEvent, SynthesisProgressEvent, StreamErrorEvent, ReflectionDecisionEvent } from '../types';
+import type {
+  StreamEvent,
+  PlanCreatedEvent,
+  StepStartedEvent,
+  StepCompletedEvent,
+  ToolCallEvent,
+  ToolResultEvent,
+  SynthesisProgressEvent,
+  StreamErrorEvent,
+  ReflectionDecisionEvent,
+  ClaimVerifiedEvent,
+  VerificationSummaryEvent,
+  ResearchStartedEvent,
+} from '../types';
+import type {
+  VerificationSummary,
+  VerificationVerdict,
+  ConfidenceLevel,
+} from '../types/citation';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1';
 
@@ -10,6 +28,7 @@ type AgentStatus =
   | 'researching'
   | 'reflecting'
   | 'synthesizing'
+  | 'verifying'
   | 'complete'
   | 'error';
 
@@ -29,6 +48,26 @@ interface ConversationMessage {
   content: string;
 }
 
+/** Streaming claim data (partial, built from events) */
+interface StreamingClaim {
+  id: string;
+  claimText: string;
+  positionStart: number;
+  positionEnd: number;
+  verificationVerdict: VerificationVerdict | null;
+  confidenceLevel: ConfidenceLevel | null;
+  evidencePreview: string;
+  reasoning: string | null;
+}
+
+/** Current tool activity during ReAct research loop */
+export interface ToolActivity {
+  toolName: 'web_search' | 'web_crawl' | null;
+  toolArgs: Record<string, unknown>;
+  callNumber: number;
+  sourcesCrawled: number;
+}
+
 interface UseStreamingQueryReturn {
   isStreaming: boolean;
   events: StreamEvent[];
@@ -41,9 +80,28 @@ interface UseStreamingQueryReturn {
   error: Error | null;
   /** The completed messages from this session (for tracking conversation) */
   completedMessages: ConversationMessage[];
+  /** Claims verified during streaming */
+  streamingClaims: StreamingClaim[];
+  /** Verification summary from stream */
+  streamingVerificationSummary: VerificationSummary | null;
+  /** Number of citation corrections made */
+  citationCorrectionCount: number;
+  /** The agent message UUID from backend (for citation fetching) */
+  agentMessageId: string | null;
+  /** Current tool activity during ReAct research loop */
+  toolActivity: ToolActivity | null;
 }
 
-export function useStreamingQuery(chatId?: string): UseStreamingQueryReturn {
+interface UseStreamingQueryOptions {
+  /** Callback invoked when streaming completes successfully */
+  onStreamComplete?: () => void;
+}
+
+export function useStreamingQuery(
+  chatId?: string,
+  options?: UseStreamingQueryOptions
+): UseStreamingQueryReturn {
+  const { onStreamComplete } = options ?? {};
   const [isStreaming, setIsStreaming] = useState(false);
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [streamingContent, setStreamingContent] = useState('');
@@ -56,6 +114,17 @@ export function useStreamingQuery(chatId?: string): UseStreamingQueryReturn {
   const [completedMessages, setCompletedMessages] = useState<ConversationMessage[]>([]);
   // Track the current query for adding to completed messages
   const currentQueryRef = useRef<string>('');
+
+  // Citation verification state
+  const [streamingClaims, setStreamingClaims] = useState<StreamingClaim[]>([]);
+  const [streamingVerificationSummary, setStreamingVerificationSummary] = useState<VerificationSummary | null>(null);
+  const [citationCorrectionCount, setCitationCorrectionCount] = useState(0);
+
+  // Agent message UUID from backend (for citation fetching with real IDs)
+  const [agentMessageId, setAgentMessageId] = useState<string | null>(null);
+
+  // Tool activity state for ReAct research loop
+  const [toolActivity, setToolActivity] = useState<ToolActivity | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -89,6 +158,13 @@ export function useStreamingQuery(chatId?: string): UseStreamingQueryReturn {
       setCurrentStepIndex(-1);
       setIsStreaming(true);
 
+      // Reset citation state
+      setStreamingClaims([]);
+      setStreamingVerificationSummary(null);
+      setCitationCorrectionCount(0);
+      setAgentMessageId(null);
+      setToolActivity(null);
+
       // Build stream URL with query parameter
       // The backend will load history from DB, or we can pass it via POST
       const streamUrl = `${API_BASE_URL}/chats/${chatId}/stream?query=${encodeURIComponent(query)}`;
@@ -115,12 +191,20 @@ export function useStreamingQuery(chatId?: string): UseStreamingQueryReturn {
                 else if (agent === 'researcher') setAgentStatus('researching');
                 else if (agent === 'reflector') setAgentStatus('reflecting');
                 else if (agent === 'synthesizer') setAgentStatus('synthesizing');
+                else if (agent === 'verifier') setAgentStatus('verifying');
               }
               break;
 
             case 'agent_completed':
               // Agent completed, continue with flow
               break;
+
+            case 'research_started': {
+              // Capture the real agent message UUID from backend for citation fetching
+              const startedEvent = data as ResearchStartedEvent;
+              setAgentMessageId(startedEvent.message_id);
+              break;
+            }
 
             case 'plan_created': {
               setAgentStatus('researching');
@@ -173,6 +257,29 @@ export function useStreamingQuery(chatId?: string): UseStreamingQueryReturn {
               // FIX: Clear currentStepIndex so completed step is no longer "active"
               // The next step_started event will set it to the correct value
               setCurrentStepIndex(-1);
+              // Clear tool activity when step completes
+              setToolActivity(null);
+              break;
+            }
+
+            case 'tool_call': {
+              const toolEvent = data as ToolCallEvent;
+              setToolActivity({
+                toolName: toolEvent.tool_name as 'web_search' | 'web_crawl',
+                toolArgs: toolEvent.tool_args,
+                callNumber: toolEvent.call_number,
+                sourcesCrawled: 0,
+              });
+              break;
+            }
+
+            case 'tool_result': {
+              const toolEvent = data as ToolResultEvent;
+              setToolActivity((prev) => prev ? {
+                ...prev,
+                toolName: null, // Clear active tool
+                sourcesCrawled: toolEvent.sources_crawled,
+              } : null);
               break;
             }
 
@@ -206,6 +313,60 @@ export function useStreamingQuery(chatId?: string): UseStreamingQueryReturn {
               break;
             }
 
+            // Citation verification events
+            case 'claim_verified': {
+              const claimEvent = data as unknown as ClaimVerifiedEvent;
+              setAgentStatus('verifying');
+              setStreamingClaims((prev) => {
+                // Check if claim already exists (update) or is new (add)
+                const existingIndex = prev.findIndex(c => c.id === claimEvent.claimId);
+                const newClaim: StreamingClaim = {
+                  id: claimEvent.claimId,
+                  claimText: claimEvent.claimText,
+                  positionStart: claimEvent.positionStart,
+                  positionEnd: claimEvent.positionEnd,
+                  verificationVerdict: claimEvent.verdict,
+                  confidenceLevel: claimEvent.confidenceLevel,
+                  evidencePreview: claimEvent.evidencePreview,
+                  reasoning: claimEvent.reasoning,
+                };
+
+                if (existingIndex >= 0) {
+                  const updated = [...prev];
+                  updated[existingIndex] = newClaim;
+                  return updated;
+                }
+                return [...prev, newClaim];
+              });
+              break;
+            }
+
+            case 'citation_corrected': {
+              // Citation was corrected - increment counter
+              setCitationCorrectionCount((prev) => prev + 1);
+              break;
+            }
+
+            case 'verification_summary': {
+              const summaryEvent = data as unknown as VerificationSummaryEvent;
+              setStreamingVerificationSummary({
+                totalClaims: summaryEvent.totalClaims,
+                supportedCount: summaryEvent.supported,
+                partialCount: summaryEvent.partial,
+                unsupportedCount: summaryEvent.unsupported,
+                contradictedCount: summaryEvent.contradicted,
+                abstainedCount: summaryEvent.abstainedCount,
+                unsupportedRate: summaryEvent.totalClaims > 0
+                  ? summaryEvent.unsupported / summaryEvent.totalClaims
+                  : 0,
+                contradictedRate: summaryEvent.totalClaims > 0
+                  ? summaryEvent.contradicted / summaryEvent.totalClaims
+                  : 0,
+                warning: summaryEvent.warning,
+              });
+              break;
+            }
+
             case 'research_completed':
               setAgentStatus('complete');
 
@@ -219,6 +380,16 @@ export function useStreamingQuery(chatId?: string): UseStreamingQueryReturn {
               }
 
               stopStream();
+
+              // Notify parent that streaming is complete - allows message refetch
+              // This enables citation rendering after persistence
+              onStreamComplete?.();
+
+              // Clear streaming content after a short delay to allow message refetch
+              // This prevents duplicate rendering of streaming placeholder and persisted message
+              setTimeout(() => {
+                setStreamingContent('');
+              }, 150);
               break;
 
             case 'error': {
@@ -267,6 +438,11 @@ export function useStreamingQuery(chatId?: string): UseStreamingQueryReturn {
     setCurrentStepIndex(-1);
     setError(null);
     setCompletedMessages([]);
+    setStreamingClaims([]);
+    setStreamingVerificationSummary(null);
+    setCitationCorrectionCount(0);
+    setAgentMessageId(null);
+    setToolActivity(null);
   }, [chatId]);
 
   return {
@@ -280,5 +456,10 @@ export function useStreamingQuery(chatId?: string): UseStreamingQueryReturn {
     stopStream,
     error,
     completedMessages,
+    streamingClaims,
+    streamingVerificationSummary,
+    citationCorrectionCount,
+    agentMessageId,
+    toolActivity,
   };
 }

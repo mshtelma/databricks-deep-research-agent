@@ -8,6 +8,12 @@
 #   make build          - Build frontend to static/
 #   make prod           - Build and run unified server
 #
+# Testing:
+#   make test           - Run unit tests only (fast, no credentials)
+#   make test-integration - Run integration tests (requires credentials)
+#   make test-complex   - Run complex long-running tests (requires credentials)
+#   make test-all       - Run all tests (Python + Frontend)
+#
 # E2E Testing:
 #   make e2e            - Build + run E2E tests (auto-starts server)
 #   make e2e-ui         - Run E2E tests with Playwright UI
@@ -15,10 +21,11 @@
 # Utilities:
 #   make clean          - Remove build artifacts
 #   make clean_db       - Delete all chats/messages from database
+#   make db-reset       - Reset database schema (downgrade + upgrade)
 #   make typecheck      - Run type checking (backend + frontend)
 #   make lint           - Run linting (backend + frontend)
 
-.PHONY: dev dev-frontend build prod clean clean_db typecheck lint install e2e e2e-ui e2e-debug test test-frontend
+.PHONY: dev dev-frontend build prod clean clean_db db-reset typecheck lint install e2e e2e-ui e2e-debug test test-unit test-integration test-complex test-all-python test-frontend test-all
 
 # =============================================================================
 # Development
@@ -102,13 +109,30 @@ format:
 # Testing
 # =============================================================================
 
+# Unit tests (fast, mocked, no credentials needed)
 test:
-	uv run pytest tests -v
+	uv run pytest tests/unit -v
 
+test-unit: test
+
+# Integration tests (real LLM/Brave, test config, requires credentials)
+test-integration:
+	uv run pytest tests/integration -v --tb=short
+
+# Complex tests (long-running, production config, requires credentials)
+test-complex:
+	uv run pytest tests/complex -v --tb=short --timeout=600
+
+# All Python tests
+test-all-python:
+	uv run pytest tests -v --tb=short
+
+# Frontend tests
 test-frontend:
 	cd frontend && npm run test
 
-test-all: test test-frontend
+# All tests (Python + Frontend)
+test-all: test-all-python test-frontend
 
 # =============================================================================
 # Database (local development via Docker)
@@ -131,6 +155,13 @@ clean_db:
 	@echo "Cleaning all chats, messages, and research data from database..."
 	uv run ./scripts/clean-db.sh
 	@echo "Done!"
+
+db-reset:
+	@echo "Resetting database schema (drops all tables and recreates)..."
+	@echo "This will delete ALL data. Use clean_db to preserve schema."
+	uv run alembic downgrade base
+	uv run alembic upgrade head
+	@echo "Database schema reset complete!"
 
 # =============================================================================
 # E2E Testing with Playwright

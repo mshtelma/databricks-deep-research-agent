@@ -1,8 +1,21 @@
 import * as React from 'react';
+import {
+  useFloating,
+  autoUpdate,
+  offset,
+  flip,
+  shift,
+  useDismiss,
+  useInteractions,
+  FloatingPortal,
+  useTransitionStyles,
+} from '@floating-ui/react';
 import { Message, Source, ResearchPlan } from '@/types';
 import { cn } from '@/lib/utils';
 import { Card, CardContent } from '@/components/ui/card';
-import { MarkdownRenderer } from '@/components/common';
+import { MarkdownRenderer, CitationContext } from '@/components/common';
+import { EvidenceCard, SourceGroupedCitations } from '@/components/citations';
+import type { Claim, VerificationSummary } from '@/types/citation';
 
 interface ReasoningSummary {
   planTitle?: string;
@@ -21,6 +34,12 @@ interface AgentMessageProps {
   isStreaming?: boolean;
   onRegenerate?: () => void;
   className?: string;
+  /** Claims with citations for this message */
+  claims?: Claim[];
+  /** Verification summary for this message */
+  verificationSummary?: VerificationSummary | null;
+  /** Enable claim-level citation display */
+  enableCitations?: boolean;
 }
 
 export function AgentMessage({
@@ -31,23 +50,231 @@ export function AgentMessage({
   isStreaming = false,
   onRegenerate,
   className,
+  claims = [],
+  verificationSummary,
+  enableCitations = false,
 }: AgentMessageProps) {
   const [showSources, setShowSources] = React.useState(false);
   const [showReasoning, setShowReasoning] = React.useState(false);
+  const [showVerification, setShowVerification] = React.useState(false);
+  const [activeCitationKey, setActiveCitationKey] = React.useState<string | null>(null);
+  const [popoverClaim, setPopoverClaim] = React.useState<Claim | null>(null);
+
+  // Virtual reference element for floating positioning
+  const [virtualRef, setVirtualRef] = React.useState<{ x: number; y: number } | null>(null);
 
   const hasReasoning = reasoning || (plan && plan.steps && plan.steps.length > 0);
+  const hasCitations = enableCitations && claims.length > 0;
+
+  // Floating UI setup for smart popover positioning
+  const isPopoverOpen = popoverClaim !== null && popoverClaim.citations[0] !== undefined;
+
+  const { refs, floatingStyles, context } = useFloating({
+    open: isPopoverOpen,
+    onOpenChange: (open) => {
+      if (!open) {
+        setPopoverClaim(null);
+        setActiveCitationKey(null);
+      }
+    },
+    placement: 'bottom-start',
+    middleware: [
+      offset(8),
+      flip({ padding: 8, fallbackAxisSideDirection: 'end' }),
+      shift({ padding: 8, crossAxis: true }),
+    ],
+    whileElementsMounted: autoUpdate,
+  });
+
+  // Update virtual element position when it changes
+  React.useEffect(() => {
+    if (virtualRef) {
+      refs.setReference({
+        getBoundingClientRect: () => ({
+          x: virtualRef.x,
+          y: virtualRef.y,
+          width: 0,
+          height: 0,
+          top: virtualRef.y,
+          right: virtualRef.x,
+          bottom: virtualRef.y,
+          left: virtualRef.x,
+        }),
+      });
+    }
+  }, [virtualRef, refs]);
+
+  const dismiss = useDismiss(context, {
+    escapeKey: true,
+    outsidePress: true,
+  });
+
+  const { getFloatingProps } = useInteractions([dismiss]);
+
+  const { isMounted, styles: transitionStyles } = useTransitionStyles(context, {
+    duration: 150,
+    initial: { opacity: 0, transform: 'scale(0.95)' },
+  });
+
+  // Build citation data map for MarkdownRenderer using citationKey
+  const citationData = React.useMemo(() => {
+    if (!enableCitations || claims.length === 0) return undefined;
+
+    const map = new Map<string, CitationContext>();
+    claims.forEach((claim) => {
+      // Use citationKey from the claim (e.g., "Arxiv", "Zhipu", "Github-2")
+      const key = claim.citationKey;
+      if (!key) return; // Skip claims without citation keys
+
+      // Extract URL from the primary citation's evidence span
+      const primaryCitation = claim.citations[0];
+      const url = primaryCitation?.evidenceSpan?.source?.url ||
+                  (primaryCitation?.evidenceSpan as { sourceUrl?: string })?.sourceUrl;
+
+      map.set(key, {
+        claim,
+        verdict: claim.verificationVerdict,
+        url,
+      });
+    });
+    return map;
+  }, [claims, enableCitations]);
+
+  // Handle citation click - open source URL in new tab
+  // Uses citationKey to look up the claim
+  const handleCitationClick = React.useCallback((citationKey: string) => {
+    const context = citationData?.get(citationKey);
+    const claim = context?.claim;
+    if (!claim) return;
+
+    // Try both paths: source.url (denormalized) and sourceUrl (direct)
+    const sourceUrl = claim.citations[0]?.evidenceSpan?.source?.url ||
+                      (claim.citations[0]?.evidenceSpan as { sourceUrl?: string })?.sourceUrl;
+    if (sourceUrl) {
+      // Open source URL in new tab
+      window.open(sourceUrl, '_blank', 'noopener,noreferrer');
+    }
+  }, [citationData]);
+
+  // Track mouse position for virtual popover reference
+  const mousePositionRef = React.useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+
+  React.useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      mousePositionRef.current = { x: e.clientX, y: e.clientY };
+    };
+    document.addEventListener('mousemove', handleMouseMove);
+    return () => document.removeEventListener('mousemove', handleMouseMove);
+  }, []);
+
+  // Handle citation hover - show evidence card popover
+  // Uses citationKey to look up the claim
+  const handleCitationHover = React.useCallback((citationKey: string | null) => {
+    if (citationKey === null) {
+      // Mouse left - hide popover (after delay to allow moving to popover)
+      setTimeout(() => {
+        setPopoverClaim(null);
+        setActiveCitationKey(null);
+        setVirtualRef(null);
+      }, 100);
+    } else {
+      // Mouse entered - show popover at current mouse position
+      const context = citationData?.get(citationKey);
+      const claim = context?.claim;
+      if (claim) {
+        setActiveCitationKey(citationKey);
+        setPopoverClaim(claim);
+        setVirtualRef({ ...mousePositionRef.current });
+      }
+    }
+  }, [citationData]);
+
+  // Note: click-outside and escape key are handled by useDismiss from floating-ui
 
   return (
     <div data-testid="agent-response" className={cn('flex justify-start', className)}>
       <Card className="max-w-[90%] bg-muted">
         <CardContent className="p-4">
-          {/* Message content with markdown rendering */}
+          {/* Message content with markdown rendering and citation support */}
           <div className="relative">
-            <MarkdownRenderer content={message.content} />
+            <MarkdownRenderer
+              content={message.content}
+              enableCitations={enableCitations || !isStreaming}
+              citationMode={claims.length > 0 ? 'numeric' : 'link'}
+              citationData={citationData}
+              onCitationClick={handleCitationClick}
+              onCitationHover={handleCitationHover}
+              activeCitationKey={activeCitationKey}
+            />
             {isStreaming && (
               <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 align-text-bottom" />
             )}
+
+            {/* Evidence card popover with smart positioning */}
+            {isMounted && popoverClaim && popoverClaim.citations[0] && (
+              <FloatingPortal>
+                <div
+                  ref={refs.setFloating}
+                  style={{ ...floatingStyles, ...transitionStyles }}
+                  {...getFloatingProps()}
+                  className="z-50"
+                >
+                  <EvidenceCard
+                    citation={popoverClaim.citations[0]}
+                    claimText={popoverClaim.claimText}
+                    verdict={popoverClaim.verificationVerdict}
+                    isPopover={true}
+                    onClose={() => {
+                      setPopoverClaim(null);
+                      setActiveCitationKey(null);
+                      setVirtualRef(null);
+                    }}
+                  />
+                </div>
+              </FloatingPortal>
+            )}
           </div>
+
+          {/* Sources & Citations - Unified source-centric display */}
+          {hasCitations && !isStreaming && (
+            <div data-testid="sources-citations-section" className="mt-4 pt-4 border-t">
+              <button
+                data-testid="sources-citations-toggle"
+                onClick={() => setShowVerification(!showVerification)}
+                aria-expanded={showVerification}
+                aria-label="View sources and citations"
+                className="text-sm text-muted-foreground hover:text-foreground flex items-center gap-2 w-full"
+              >
+                <ShieldIcon className="w-4 h-4" />
+                <span>Sources & Citations</span>
+                {verificationSummary && (
+                  <VerificationSummaryBadges summary={verificationSummary} />
+                )}
+                <ChevronIcon
+                  className={cn(
+                    'w-4 h-4 transition-transform ml-auto',
+                    showVerification && 'rotate-180'
+                  )}
+                />
+              </button>
+
+              {showVerification && (
+                <div className="mt-3">
+                  {/* Warning if high unsupported/contradicted rate */}
+                  {verificationSummary?.warning && (
+                    <div data-testid="verification-summary-warning" className="bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg p-2 text-xs text-amber-800 dark:text-amber-200 mb-3">
+                      Some claims could not be fully verified. Please check the citations for details.
+                    </div>
+                  )}
+                  <SourceGroupedCitations
+                    claims={claims}
+                    verificationSummary={verificationSummary}
+                    onClaimClick={handleCitationClick}
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Reasoning section */}
           {hasReasoning && !isStreaming && (
@@ -145,8 +372,8 @@ export function AgentMessage({
             </div>
           )}
 
-          {/* Sources section */}
-          {sources.length > 0 && (
+          {/* Sources section - only show when no claim-level citations (fallback) */}
+          {sources.length > 0 && !hasCitations && (
             <div className={cn('mt-4 pt-4 border-t', hasReasoning && !showReasoning && 'pt-4')}>
               <button
                 onClick={() => setShowSources(!showSources)}
@@ -193,6 +420,37 @@ export function AgentMessage({
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+interface VerificationSummaryBadgesProps {
+  summary: VerificationSummary;
+}
+
+function VerificationSummaryBadges({ summary }: VerificationSummaryBadgesProps) {
+  return (
+    <div data-testid="verification-summary-badges" className="flex items-center gap-1 text-xs">
+      {summary.supportedCount > 0 && (
+        <span className="text-green-600 bg-green-50 dark:bg-green-900/20 px-1.5 py-0.5 rounded">
+          {summary.supportedCount}
+        </span>
+      )}
+      {summary.partialCount > 0 && (
+        <span className="text-amber-600 bg-amber-50 dark:bg-amber-900/20 px-1.5 py-0.5 rounded">
+          {summary.partialCount}
+        </span>
+      )}
+      {summary.unsupportedCount > 0 && (
+        <span className="text-red-600 bg-red-50 dark:bg-red-900/20 px-1.5 py-0.5 rounded">
+          {summary.unsupportedCount}
+        </span>
+      )}
+      {summary.contradictedCount > 0 && (
+        <span className="text-purple-600 bg-purple-50 dark:bg-purple-900/20 px-1.5 py-0.5 rounded">
+          {summary.contradictedCount}
+        </span>
+      )}
     </div>
   );
 }
@@ -257,6 +515,24 @@ function SourceCard({ source, index }: { source: Source; index: number }) {
 }
 
 // Icons
+
+function ShieldIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10" />
+      <path d="m9 12 2 2 4-4" />
+    </svg>
+  );
+}
 
 function BrainIcon({ className }: { className?: string }) {
   return (

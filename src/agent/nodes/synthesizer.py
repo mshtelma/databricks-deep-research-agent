@@ -64,6 +64,13 @@ async def run_synthesizer(state: ResearchState, llm: LLMClient) -> ResearchState
     if state.query_classification:
         depth_label = state.query_classification.recommended_depth
 
+    # Word count and token limits by depth
+    depth_to_words = {"light": 300, "medium": 600, "extended": 1200}
+    depth_to_tokens = {"light": 1000, "medium": 2000, "extended": 4000}
+
+    target_word_count = depth_to_words.get(depth_label, 600)
+    max_tokens = depth_to_tokens.get(depth_label, 2000)
+
     # Build system prompt with user's custom instructions if available
     system_prompt = build_system_prompt(
         SYNTHESIZER_SYSTEM_PROMPT,
@@ -82,6 +89,7 @@ async def run_synthesizer(state: ResearchState, llm: LLMClient) -> ResearchState
                 sources_count=len(state.sources),
                 all_observations=observations_str,
                 sources_list=sources_list or "(No sources collected)",
+                target_word_count=target_word_count,
             ),
         },
     ]
@@ -90,7 +98,7 @@ async def run_synthesizer(state: ResearchState, llm: LLMClient) -> ResearchState
         response = await llm.complete(
             messages=messages,
             tier=ModelTier.COMPLEX,
-            max_tokens=4000,
+            max_tokens=max_tokens,
         )
 
         state.complete(response.content)
@@ -142,9 +150,21 @@ async def stream_synthesis(state: ResearchState, llm: LLMClient) -> AsyncGenerat
         title = source.title or "Untitled"
         sources_list += f"- [{title}]({source.url})\n"
 
+    # Determine research depth label
+    depth_label = "medium"
+    if state.query_classification:
+        depth_label = state.query_classification.recommended_depth
+
+    # Word count and token limits by depth
+    depth_to_words = {"light": 300, "medium": 600, "extended": 1200}
+    depth_to_tokens = {"light": 1000, "medium": 2000, "extended": 4000}
+
+    target_word_count = depth_to_words.get(depth_label, 600)
+    max_tokens = depth_to_tokens.get(depth_label, 2000)
+
     # Build system prompt with user's custom instructions if available
     system_prompt = build_system_prompt(
-        STREAMING_SYNTHESIZER_SYSTEM_PROMPT,
+        STREAMING_SYNTHESIZER_SYSTEM_PROMPT.format(target_word_count=target_word_count),
         state.system_instructions,
     )
 
@@ -152,7 +172,7 @@ async def stream_synthesis(state: ResearchState, llm: LLMClient) -> AsyncGenerat
         {"role": "system", "content": system_prompt},
         {
             "role": "user",
-            "content": f"""Create a comprehensive research report.
+            "content": f"""Create a research report in {target_word_count} words or less.
 
 ## Query
 {state.query}
@@ -163,7 +183,7 @@ async def stream_synthesis(state: ResearchState, llm: LLMClient) -> AsyncGenerat
 ## Available Sources
 {sources_list}
 
-Provide a well-structured markdown response with inline citations.""",
+Be concise. Cite inline as [Title](url).""",
         },
     ]
 
@@ -172,7 +192,7 @@ Provide a well-structured markdown response with inline citations.""",
         async for chunk in llm.stream(
             messages=messages,
             tier=ModelTier.COMPLEX,
-            max_tokens=4000,
+            max_tokens=max_tokens,
         ):
             full_content += chunk
             yield chunk
