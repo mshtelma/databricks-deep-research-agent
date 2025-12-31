@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.models.message import Message, MessageRole
 
@@ -116,9 +117,10 @@ class MessageService:
         count_result = await self._session.execute(count_query)
         total = count_result.scalar() or 0
 
-        # Get messages ordered by creation time
+        # Get messages ordered by creation time, with research_session eager loaded
         query = (
             select(Message)
+            .options(selectinload(Message.research_session))
             .where(and_(*conditions))
             .order_by(Message.created_at.asc())
             .limit(limit)

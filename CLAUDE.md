@@ -106,13 +106,19 @@ static/                         # Built frontend (gitignored, created by `make b
 ## Commands
 
 ```bash
-# Development (two terminals)
-make dev                         # Terminal 1: Backend with hot reload (:8000)
-make dev-frontend                # Terminal 2: Frontend with hot reload (:5173)
+# Development (single command - runs both backend and frontend)
+make dev                         # Backend (:8000) + Frontend (:5173) → UI at localhost:5173
+make dev-backend                 # Backend only (:8000)
+make dev-frontend                # Frontend only (:5173)
 
 # Production build
 make build                       # Build frontend to static/
 make prod                        # Run unified server on :8000
+
+# Log files (auto-created by make dev/prod)
+# /tmp/deep-research-dev.log     # Dev server logs
+# /tmp/deep-research-prod.log    # Prod server logs
+tail -f /tmp/deep-research-dev.log  # Monitor logs in real-time
 
 # E2E Testing (single command!)
 make e2e                         # Build + start server + run Playwright tests
@@ -234,6 +240,57 @@ search:
     default_result_count: 10
 ```
 
+### Research Type Profiles (FR-100)
+
+Research types (light, medium, extended) are configured in `research_types` section:
+
+```yaml
+research_types:
+  light:
+    steps:
+      min: 1
+      max: 3
+      prompt_guidance: "Quick overview with 1-3 focused steps."
+    report_limits:
+      min_words: 800
+      max_words: 1200
+      max_tokens: 2000
+    researcher:
+      mode: classic  # "react" or "classic"
+      max_search_queries: 2
+      max_urls_to_crawl: 3
+      max_tool_calls: 8
+    citation_verification:
+      generation_mode: natural
+      enable_numeric_qa_verification: false
+
+  medium:
+    steps: {min: 3, max: 6}
+    report_limits: {min_words: 1200, max_words: 2000, max_tokens: 4000}
+    researcher: {mode: react, max_tool_calls: 12}
+
+  extended:
+    steps: {min: 5, max: 10}
+    report_limits: {min_words: 1500, max_words: 3200, max_tokens: 8000}
+    researcher: {mode: react, max_tool_calls: 20}
+    citation_verification: {generation_mode: strict, enable_numeric_qa_verification: true}
+```
+
+**Researcher Modes**:
+- `classic`: Single-pass researcher with fixed searches/crawls per step (faster)
+- `react`: ReAct loop where LLM controls tool calls with budget limit (more intelligent)
+
+**Config Accessors**:
+```python
+from src.agent.config import (
+    get_research_type_config,  # Full config for a depth
+    get_step_limits,           # StepLimits (min, max, prompt_guidance)
+    get_report_limits,         # ReportLimitConfig (min_words, max_words, max_tokens)
+    get_researcher_config_for_depth,  # ResearcherTypeConfig (mode, limits)
+    get_citation_config_for_depth,    # CitationVerificationConfig overrides
+)
+```
+
 ### Environment Variable Interpolation
 
 ```yaml
@@ -301,6 +358,46 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
 - Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
 
 ## Recent Changes
+- 003-claim-level-citations: Research Type Profiles Configuration (2025-12-31)
+  - **NEW FEATURE**: Consolidated `research_types` configuration in app.yaml
+  - Each depth (light/medium/extended) now has unified settings:
+    - `steps`: min, max, and optional `prompt_guidance` for planner
+    - `report_limits`: min_words, max_words, max_tokens
+    - `researcher`: mode (react/classic), max_tool_calls, max_search_queries, max_urls_to_crawl
+    - `citation_verification`: per-type overrides (generation_mode, enable_numeric_qa_verification)
+  - Added `ResearcherMode` enum for switching between classic and react researcher
+  - Orchestrator now dynamically selects researcher based on per-depth config
+  - Removed hardcoded `DEPTH_TO_STEPS` from state.py
+  - Key files: `src/core/app_config.py`, `src/agent/config.py`, `src/agent/orchestrator.py`
+  - Config accessors: `get_research_type_config()`, `get_step_limits()`, `get_report_limits()`,
+    `get_researcher_config_for_depth()`, `get_citation_config_for_depth()`
+
+- 003-claim-level-citations: Citation Position Mismatch Fix (2025-12-30)
+  - **CRITICAL BUG FIX**: Claims were parsed from original content with numeric markers `[0]`, `[1]`
+  - But final_report stored in DB had human-readable keys `[Arxiv]`, `[Zhipu-2]` (different lengths)
+  - This caused position_start/position_end mismatch, making citations unresolvable in frontend
+  - **Root cause**: `_parse_interleaved_content()` parsed from pre-replacement content
+  - **Fix**: Parse claims from `content_with_keys` (after replacement) instead of original `content`
+  - Added `reverse_key_map` to lookup evidence_index from citation keys
+  - Updated regex to match human-readable keys `\[([A-Za-z][A-Za-z0-9-]*(?:-\d+)?)\]`
+  - Key files: `src/services/citation/claim_generator.py` (lines 346-477)
+  - **Related issue**: This is similar to snake_case vs camelCase mismatch fixed in SSE events
+  - **Testing**: All 162 citation unit tests pass
+
+- 003-claim-level-citations: Frontend Cache & Draft Persistence Fix (2025-12-30)
+  - **BUG**: Phantom chats appeared after DB clean due to localStorage drafts and stale cache
+  - Reduced TanStack Query `staleTime` from 5 minutes to 30 seconds
+  - Enabled `refetchOnWindowFocus` for fresh data on tab switch
+  - Added `clearStaleDrafts()` function to sync localStorage with API state
+  - Removed drafts older than 60 seconds that don't exist in API response
+  - Key files: `frontend/src/main.tsx`, `frontend/src/hooks/useDraftChats.ts`, `frontend/src/pages/ChatPage.tsx`
+
+- 003-claim-level-citations: SSE Event snake_case vs camelCase Mismatch (2025-12-30)
+  - **BUG**: Frontend event handlers accessed snake_case properties but runtime SSE had camelCase
+  - Fixed all event handlers in `useStreamingQuery.ts` to check camelCase first
+  - Added `formatToolCall()` and `formatToolResult()` to activityLabels.ts
+  - Key files: `frontend/src/hooks/useStreamingQuery.ts`, `frontend/src/utils/activityLabels.ts`
+
 - 003-claim-level-citations: Test Infrastructure Re-Architecture (2025-12-28)
   - Implemented 3-tier test hierarchy: unit, integration, complex
   - Created `config/app.test.yaml` for integration tests (minimal iterations, fast models)

@@ -16,6 +16,16 @@ Use markdown formatting:
 - Bold for critical terms only
 - Inline citations as [Source Title](url)
 
+## Tables
+When comparative data is requested, use proper markdown tables:
+| Header 1 | Header 2 | Header 3 |
+|----------|----------|----------|
+| Value 1  | Value 2  | Value 3  |
+
+- Use tables for side-by-side comparisons, not structured lists
+- Keep tables readable with consistent column widths
+- Include units in headers, not every cell
+
 ## Writing Rules
 
 - Lead with the answer, not background
@@ -23,6 +33,10 @@ Use markdown formatting:
 - No "it's important to note" or similar filler
 - Skip obvious caveats (e.g., "more research needed")
 - Cite after the claim, not before: "Fact X [Source]"
+- NO meta-commentary about the report itself
+- NO offers for follow-up work ("I can also...", "Would you like...")
+- NO conversational endings or invitations for clarification
+- End with substantive content, not engagement prompts
 
 ## Citation Format
 
@@ -32,9 +46,7 @@ Cite inline using markdown links:
 
 ## Word Limits (STRICT)
 
-- Light: 300 words maximum
-- Medium: 600 words maximum
-- Extended: 1200 words maximum
+Follow the target word range provided in the user prompt. Aim for the upper bound when content warrants it.
 """
 
 SYNTHESIZER_USER_PROMPT = """Create a research report based on the gathered observations.
@@ -55,10 +67,10 @@ SYNTHESIZER_USER_PROMPT = """Create a research report based on the gathered obse
 {sources_list}
 
 ## STRICT Length Requirement
-- Target length: {target_word_count} words
-- DO NOT exceed this limit
+- Target: {min_words}-{max_words} words
+- Aim for the upper bound if content warrants it
+- DO NOT exceed {max_words} words
 - Be direct, concise, and information-dense
-- Remove filler phrases and unnecessary elaboration
 
 ## Instructions
 Create a well-structured markdown report that:
@@ -76,10 +88,13 @@ Output markdown directly:
 - ## for 2-3 main sections
 - Bullet lists for facts
 - Inline citations as [Title](url)
+- Use markdown tables for comparisons: | Col | Col |
 
 Rules:
 - Lead with the answer
 - One fact per sentence
 - No filler phrases
 - Cite after claims: "Fact [Source]"
-- Stay under {target_word_count} words"""
+- No meta-commentary or follow-up offers
+- End with content, not engagement prompts
+- Target: {min_words}-{max_words} words (aim for upper bound if content warrants)"""

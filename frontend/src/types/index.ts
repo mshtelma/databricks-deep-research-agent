@@ -31,6 +31,7 @@ export interface Message {
   content: string
   created_at: string
   is_edited: boolean
+  research_session?: ResearchSession | null
 }
 
 export interface Source {
@@ -141,6 +142,8 @@ export type StreamEventType =
   | 'citation_corrected'
   | 'numeric_claim_detected'
   | 'verification_summary'
+  // Persistence events
+  | 'persistence_completed'
 
 export interface BaseStreamEvent {
   event_type: StreamEventType
@@ -244,6 +247,16 @@ export interface StreamErrorEvent extends BaseStreamEvent {
   recoverable: boolean
 }
 
+export interface PersistenceCompletedEvent extends BaseStreamEvent {
+  event_type: 'persistence_completed'
+  chat_id: string
+  message_id: string
+  research_session_id: string
+  chat_title: string
+  was_draft: boolean
+  counts: Record<string, number>
+}
+
 // Re-export citation stream events from citation types
 export type {
   ClaimGeneratedEvent,
@@ -284,3 +297,5 @@ export type StreamEvent =
   | CitationCorrectedEvent
   | NumericClaimDetectedEvent
   | VerificationSummaryEvent
+  // Persistence events
+  | PersistenceCompletedEvent

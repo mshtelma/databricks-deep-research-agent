@@ -25,26 +25,46 @@
 #   make typecheck      - Run type checking (backend + frontend)
 #   make lint           - Run linting (backend + frontend)
 
-.PHONY: dev dev-frontend build prod clean clean_db db-reset typecheck lint install e2e e2e-ui e2e-debug test test-unit test-integration test-complex test-all-python test-frontend test-all
+.PHONY: dev dev-backend dev-frontend build prod clean clean_db db-reset typecheck lint install e2e e2e-ui e2e-debug test test-unit test-integration test-complex test-all-python test-frontend test-all
 
 # =============================================================================
 # Development
 # =============================================================================
 
 dev:
-	@echo "Starting backend with hot reload on :8000..."
-	uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
+	@echo "Starting backend (:8000) and frontend (:5173)..."
+	@echo "Backend logs: /tmp/deep-research-dev.log"
+	@echo "Access UI at: http://localhost:5173"
+	@echo "Press Ctrl+C to stop both servers"
+	@bash -c '\
+		cleanup() { \
+			echo ""; \
+			echo "Stopping servers..."; \
+			lsof -ti:8000 | xargs kill -9 2>/dev/null || true; \
+			lsof -ti:5173 | xargs kill -9 2>/dev/null || true; \
+			echo "Servers stopped."; \
+		}; \
+		trap cleanup EXIT INT TERM; \
+		(uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-dev.log) & \
+		(cd frontend && npm run dev) & \
+		wait'
+
+dev-backend:
+	@echo "Starting backend only with hot reload on :8000..."
+	@echo "Logs: /tmp/deep-research-dev.log"
+	uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-dev.log
 
 dev-frontend:
 	@echo "Starting frontend with hot reload on :5173..."
 	cd frontend && npm run dev
 
 dev-help:
-	@echo "Development mode requires two terminals:"
-	@echo "  Terminal 1: make dev"
-	@echo "  Terminal 2: make dev-frontend"
+	@echo "Development commands:"
+	@echo "  make dev           - Run both backend and frontend (recommended)"
+	@echo "  make dev-backend   - Run backend only (:8000)"
+	@echo "  make dev-frontend  - Run frontend only (:5173)"
 	@echo ""
-	@echo "Then access: http://localhost:5173"
+	@echo "Access UI at: http://localhost:5173"
 
 # =============================================================================
 # Production Build
@@ -59,7 +79,8 @@ build:
 
 prod: build
 	@echo "Starting production server on :8000..."
-	SERVE_STATIC=true uv run uvicorn src.main:app --host 0.0.0.0 --port 8000
+	@echo "Logs: /tmp/deep-research-prod.log"
+	SERVE_STATIC=true uv run uvicorn src.main:app --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-prod.log
 
 # =============================================================================
 # Installation
@@ -172,23 +193,26 @@ db-reset:
 e2e:
 	@echo "Stopping any existing server on port 8000..."
 	@./scripts/kill-server.sh 8000 || true
+	@echo "Building frontend (ensures fresh static files)..."
+	@make build
 	@echo "Running E2E tests with Playwright..."
 	@echo "Note: Requires PostgreSQL running (make db)"
-	@[ -f static/index.html ] || make build
 	cd e2e && npm test
 
 e2e-ui:
 	@echo "Stopping any existing server on port 8000..."
 	@./scripts/kill-server.sh 8000 || true
+	@echo "Building frontend (ensures fresh static files)..."
+	@make build
 	@echo "Opening Playwright UI..."
-	@[ -f static/index.html ] || make build
 	cd e2e && npm run test:ui
 
 e2e-debug:
 	@echo "Stopping any existing server on port 8000..."
 	@./scripts/kill-server.sh 8000 || true
+	@echo "Building frontend (ensures fresh static files)..."
+	@make build
 	@echo "Running E2E tests in debug mode..."
-	@[ -f static/index.html ] || make build
 	cd e2e && npm run test:debug
 
 # =============================================================================

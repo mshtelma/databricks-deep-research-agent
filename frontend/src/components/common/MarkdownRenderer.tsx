@@ -29,8 +29,8 @@ interface MarkdownRendererProps {
   citationData?: Map<string, CitationContext>;
   /** Callback when a citation is clicked */
   onCitationClick?: (citationKey: string, info?: LinkCitationInfo) => void;
-  /** Callback when a citation is hovered */
-  onCitationHover?: (citationKey: string | null, info?: LinkCitationInfo | null) => void;
+  /** Callback when a citation is hovered - includes element for positioning */
+  onCitationHover?: (citationKey: string | null, element?: HTMLElement | null) => void;
   /** Currently active citation key */
   activeCitationKey?: string | null;
 }
@@ -158,7 +158,7 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
               url={href}
               isActive={activeCitationKey === citationKey}
               onClick={() => onCitationClick?.(citationKey, info)}
-              onMouseEnter={() => onCitationHover?.(citationKey, info)}
+              onMouseEnter={(e) => onCitationHover?.(citationKey, e.currentTarget)}
               onMouseLeave={() => onCitationHover?.(null, null)}
             />
           );
@@ -196,16 +196,20 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
         const verdict = citationContext?.verdict ?? null;
         const url = citationContext?.url;
 
+        // Track if citation data is missing (claims not yet loaded or no match found)
+        const isUnresolved = !citationContext;
+
         return (
           <CitationMarker
             citationKey={citationKey}
             index={index}
             verdict={verdict}
             url={url}
+            isUnresolved={isUnresolved}
             isActive={activeCitationKey === citationKey}
             onClick={() => onCitationClick?.(citationKey)}
-            onMouseEnter={() => onCitationHover?.(citationKey)}
-            onMouseLeave={() => onCitationHover?.(null)}
+            onMouseEnter={(e) => onCitationHover?.(citationKey, e.currentTarget)}
+            onMouseLeave={() => onCitationHover?.(null, null)}
           />
         );
       };

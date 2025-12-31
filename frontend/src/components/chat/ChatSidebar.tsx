@@ -5,9 +5,10 @@ import { cn } from '@/lib/utils';
 import { ChatSearchInput } from './ChatSearchInput';
 
 type StatusFilter = 'active' | 'archived' | 'all';
+type ChatListEntry = Chat & { isDraft?: boolean };
 
 interface ChatSidebarProps {
-  chats: Chat[];
+  chats: ChatListEntry[];
   currentChatId?: string;
   onSelectChat: (chatId: string) => void;
   onNewChat: () => void;
@@ -16,6 +17,10 @@ interface ChatSidebarProps {
   onRestoreChat?: (chatId: string) => void;
   onDeleteChat?: (chatId: string) => void;
   onExportChat?: (chatId: string) => void;
+  searchQuery: string;
+  onSearchQueryChange: (query: string) => void;
+  statusFilter: StatusFilter;
+  onStatusFilterChange: (status: StatusFilter) => void;
   isLoading?: boolean;
   className?: string;
 }
@@ -30,12 +35,13 @@ export function ChatSidebar({
   onRestoreChat,
   onDeleteChat,
   onExportChat,
+  searchQuery,
+  onSearchQueryChange,
+  statusFilter,
+  onStatusFilterChange,
   isLoading = false,
   className,
 }: ChatSidebarProps) {
-  const [searchQuery, setSearchQuery] = React.useState('');
-  const [statusFilter, setStatusFilter] = React.useState<StatusFilter>('active');
-
   // Filter chats by status and search query
   const filteredChats = React.useMemo(() => {
     return chats.filter((chat) => {
@@ -66,7 +72,7 @@ export function ChatSidebar({
 
         <ChatSearchInput
           value={searchQuery}
-          onChange={setSearchQuery}
+          onChange={onSearchQueryChange}
           placeholder="Search chats..."
         />
 
@@ -75,17 +81,17 @@ export function ChatSidebar({
           <StatusFilterTab
             label="Active"
             isActive={statusFilter === 'active'}
-            onClick={() => setStatusFilter('active')}
+            onClick={() => onStatusFilterChange('active')}
           />
           <StatusFilterTab
             label="Archived"
             isActive={statusFilter === 'archived'}
-            onClick={() => setStatusFilter('archived')}
+            onClick={() => onStatusFilterChange('archived')}
           />
           <StatusFilterTab
             label="All"
             isActive={statusFilter === 'all'}
-            onClick={() => setStatusFilter('all')}
+            onClick={() => onStatusFilterChange('all')}
           />
         </div>
       </div>
@@ -107,11 +113,21 @@ export function ChatSidebar({
               chat={chat}
               isSelected={chat.id === currentChatId}
               onClick={() => onSelectChat(chat.id)}
-              onRename={onRenameChat ? (title) => onRenameChat(chat.id, title) : undefined}
-              onArchive={onArchiveChat ? () => onArchiveChat(chat.id) : undefined}
-              onRestore={onRestoreChat ? () => onRestoreChat(chat.id) : undefined}
-              onDelete={onDeleteChat ? () => onDeleteChat(chat.id) : undefined}
-              onExport={onExportChat ? () => onExportChat(chat.id) : undefined}
+              onRename={
+                !chat.isDraft && onRenameChat ? (title) => onRenameChat(chat.id, title) : undefined
+              }
+              onArchive={
+                !chat.isDraft && onArchiveChat ? () => onArchiveChat(chat.id) : undefined
+              }
+              onRestore={
+                !chat.isDraft && onRestoreChat ? () => onRestoreChat(chat.id) : undefined
+              }
+              onDelete={
+                !chat.isDraft && onDeleteChat ? () => onDeleteChat(chat.id) : undefined
+              }
+              onExport={
+                !chat.isDraft && onExportChat ? () => onExportChat(chat.id) : undefined
+              }
             />
           ))
         )}
@@ -145,7 +161,7 @@ function StatusFilterTab({ label, isActive, onClick }: StatusFilterTabProps) {
 }
 
 interface ChatListItemProps {
-  chat: Chat;
+  chat: ChatListEntry;
   isSelected: boolean;
   onClick: () => void;
   onRename?: (newTitle: string) => void;
@@ -205,6 +221,7 @@ function ChatListItem({
   };
 
   const isArchived = chat.status === 'archived';
+  const isDraft = !!chat.isDraft;
 
   return (
     <div className="relative group">
@@ -227,6 +244,11 @@ function ChatListItem({
           <span className="text-xs text-muted-foreground">
             {new Date(chat.updated_at).toLocaleDateString()}
           </span>
+          {isDraft && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+              Draft
+            </span>
+          )}
           {isArchived && (
             <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
               Archived
@@ -236,27 +258,29 @@ function ChatListItem({
       </button>
 
       {/* Context menu trigger */}
-      <button
-        ref={buttonRef}
-        type="button"
-        data-testid={`chat-menu-trigger-${chat.id}`}
-        onClick={(e) => {
-          e.stopPropagation();
-          setShowMenu(!showMenu);
-        }}
-        className={cn(
-          'absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded',
-          'opacity-0 group-hover:opacity-100 focus:opacity-100',
-          'hover:bg-accent text-muted-foreground hover:text-foreground',
-          'transition-opacity'
-        )}
-        aria-label="Chat options"
-        aria-haspopup="menu"
-        aria-expanded={showMenu}
-        aria-controls={`chat-menu-${chat.id}`}
-      >
-        <MoreIcon className="w-4 h-4" />
-      </button>
+      {!isDraft && (
+        <button
+          ref={buttonRef}
+          type="button"
+          data-testid={`chat-menu-trigger-${chat.id}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowMenu(!showMenu);
+          }}
+          className={cn(
+            'absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded',
+            'opacity-0 group-hover:opacity-100 focus:opacity-100',
+            'hover:bg-accent text-muted-foreground hover:text-foreground',
+            'transition-opacity'
+          )}
+          aria-label="Chat options"
+          aria-haspopup="menu"
+          aria-expanded={showMenu}
+          aria-controls={`chat-menu-${chat.id}`}
+        >
+          <MoreIcon className="w-4 h-4" />
+        </button>
+      )}
 
       {/* Context menu */}
       {showMenu && (

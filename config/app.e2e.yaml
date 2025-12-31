@@ -1,0 +1,224 @@
+# Deep Research Agent - E2E Test Configuration
+# Lightweight settings for fast E2E tests with realistic ReAct behavior
+# Used by: e2e/ tests (set via APP_CONFIG_PATH in playwright.config.ts)
+
+# Use faster model tier by default
+default_role: simple
+
+# Model endpoint definitions (same as test config)
+endpoints:
+  haiku:
+    endpoint_identifier: databricks-claude-haiku-4-5
+    max_context_window: 32000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+
+  gpt5nano:
+    endpoint_identifier: databricks-gpt-5-nano
+    max_context_window: 32000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+    supports_temperature: false
+
+  gemini3flash:
+    endpoint_identifier: databricks-gemini-3-flash
+    max_context_window: 32000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+
+# Model roles - optimized for E2E test speed
+models:
+  simple:
+    endpoints:
+      - haiku
+      - gpt5nano
+      - gemini3flash
+    temperature: 0.3
+    max_tokens: 2000
+    reasoning_effort: low
+    tokens_per_minute: 50000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  analytical:
+    endpoints:
+      - haiku
+      - gpt5nano
+      - gemini3flash
+    temperature: 0.3
+    max_tokens: 4000
+    reasoning_effort: medium
+    tokens_per_minute: 50000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  complex:
+    endpoints:
+      - haiku
+    temperature: 0.3
+    max_tokens: 6000
+    reasoning_effort: medium
+    tokens_per_minute: 50000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+# Agent configuration - minimal for E2E tests
+agents:
+  researcher:
+    max_search_queries: 2
+    max_search_results: 5
+    max_urls_to_crawl: 2
+    content_preview_length: 1000
+    content_storage_length: 5000
+    max_previous_observations: 2
+    page_contents_limit: 3000
+    max_generated_queries: 2
+
+  planner:
+    max_plan_iterations: 1
+
+  coordinator:
+    max_clarification_rounds: 1
+    enable_clarification: false
+
+  synthesizer:
+    max_report_length: 8000
+
+  background:
+    max_search_queries: 1
+    max_results_per_query: 2
+    max_total_results: 3
+
+# Research Type Profiles - E2E optimized with ReAct mode
+# Realistic but fast settings for end-to-end testing
+research_types:
+  light:
+    steps:
+      min: 1
+      max: 2
+      prompt_guidance: "Quick overview with 1-2 focused steps."
+    report_limits:
+      min_words: 300
+      max_words: 600
+      max_tokens: 1200
+    researcher:
+      mode: react
+      max_search_queries: 2
+      max_urls_to_crawl: 2
+      max_tool_calls: 5
+    citation_verification:
+      generation_mode: natural
+      enable_numeric_qa_verification: false
+
+  medium:
+    steps:
+      min: 2
+      max: 3
+      prompt_guidance: "Balanced research, 2-3 steps."
+    report_limits:
+      min_words: 500
+      max_words: 1000
+      max_tokens: 2000
+    researcher:
+      mode: react
+      max_search_queries: 3
+      max_urls_to_crawl: 3
+      max_tool_calls: 8
+    citation_verification:
+      generation_mode: natural
+
+  extended:
+    steps:
+      min: 3
+      max: 4
+      prompt_guidance: "Thorough research for E2E testing."
+    report_limits:
+      min_words: 800
+      max_words: 1500
+      max_tokens: 3000
+    researcher:
+      mode: react
+      max_search_queries: 4
+      max_urls_to_crawl: 4
+      max_tool_calls: 12
+    citation_verification:
+      generation_mode: natural
+
+# Search configuration
+search:
+  brave:
+    requests_per_second: 1.0
+    default_result_count: 5
+    freshness: pm
+
+# Rate limiting
+rate_limiting:
+  max_retries: 2
+  base_delay_seconds: 1.0
+  max_delay_seconds: 30.0
+  backoff_strategy: exponential
+  jitter: true
+
+# Truncation limits
+truncation:
+  log_preview: 200
+  error_message: 500
+  query_display: 100
+  source_snippet: 300
+
+# Citation verification - enabled with minimal settings
+citation_verification:
+  enabled: true
+  generation_mode: natural
+
+  enable_evidence_preselection: true
+  enable_interleaved_generation: true
+  enable_confidence_classification: true
+  enable_citation_correction: true
+  enable_numeric_qa_verification: false
+  enable_verification_retrieval: false
+
+  evidence_preselection:
+    max_spans_per_source: 5
+    min_span_length: 50
+    max_span_length: 300
+    relevance_threshold: 0.3
+    numeric_content_boost: 0.2
+    relevance_computation_method: hybrid
+
+  interleaved_generation:
+    max_claims_per_section: 5
+    min_evidence_similarity: 0.5
+    retry_on_entailment_failure: false
+    max_retries: 1
+
+  confidence_classification:
+    high_threshold: 0.85
+    low_threshold: 0.50
+    quote_match_bonus: 0.3
+    hedging_word_penalty: 0.2
+    estimation_method: linguistic
+
+  isolated_verification:
+    enable_nei_verdict: true
+    verification_model_tier: simple
+    quick_verification_tier: simple
+
+  citation_correction:
+    correction_method: keyword_semantic_hybrid
+    lambda_weight: 0.8
+    correction_threshold: 0.6
+    allow_alternate_citations: true
+
+  numeric_qa_verification:
+    rounding_tolerance: 0.05
+    answer_comparison_method: f1
+    require_unit_match: true
+    require_entity_match: true
+
+  verification_retrieval:
+    trigger_on_verdicts: [unsupported, nei]
+    max_additional_searches: 1
+    search_timeout_seconds: 2
+
+  unsupported_claim_warning_threshold: 0.20

@@ -24,6 +24,9 @@ export const test = base.extend<ChatFixtures>({
 
   sidebarPage: async ({ page }, use) => {
     const sidebarPage = new SidebarPage(page);
+    // Navigate to the app and wait for sidebar to be ready
+    await page.goto('/');
+    await sidebarPage.newChatButton.waitFor({ state: 'visible', timeout: 30000 });
     await use(sidebarPage);
   },
 

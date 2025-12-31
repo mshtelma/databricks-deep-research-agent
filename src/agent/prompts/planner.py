@@ -112,6 +112,10 @@ PLANNER_USER_PROMPT = """Create a research plan for the following:
 ## Query
 {query}
 
+## Research Depth Guidance
+Target: {min_steps} to {max_steps} research steps
+{step_prompt_guidance}
+
 ## Background Investigation
 {background_results}
 

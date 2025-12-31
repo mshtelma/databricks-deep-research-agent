@@ -1,5 +1,7 @@
 """Message-related Pydantic schemas."""
 
+from __future__ import annotations
+
 from datetime import datetime
 from uuid import UUID
 
@@ -8,6 +10,7 @@ from pydantic import Field
 from src.models.message import MessageRole
 from src.models.research_session import ResearchDepth
 from src.schemas.common import BaseSchema
+from src.schemas.research import ResearchSession as ResearchSessionSchema
 
 
 class MessageBase(BaseSchema):
@@ -37,6 +40,7 @@ class MessageResponse(BaseSchema):
     content: str
     created_at: datetime
     is_edited: bool
+    research_session: ResearchSessionSchema | None = None
 
 
 class SendMessageResponse(BaseSchema):

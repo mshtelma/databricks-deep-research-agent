@@ -29,6 +29,9 @@ export class SidebarPage {
   readonly actionRestore: Locator;
   readonly actionDelete: Locator;
 
+  // Delete confirmation dialog
+  readonly deleteDialogConfirm: Locator;
+
   constructor(page: Page) {
     this.page = page;
     this.chatList = page.getByTestId('chat-list');
@@ -53,6 +56,9 @@ export class SidebarPage {
     this.actionArchive = page.getByTestId('chat-action-archive');
     this.actionRestore = page.getByTestId('chat-action-restore');
     this.actionDelete = page.getByTestId('chat-action-delete');
+
+    // Delete confirmation dialog - find the destructive button in the dialog
+    this.deleteDialogConfirm = page.locator('[role="dialog"]').getByRole('button', { name: 'Delete' });
   }
 
   /**
@@ -218,10 +224,14 @@ export class SidebarPage {
 
   /**
    * Delete a chat.
+   * Opens context menu, clicks delete, then confirms in the dialog.
    */
   async deleteChat(chatId: string): Promise<void> {
     await this.openChatMenu(chatId);
     await this.actionDelete.click();
+    // Wait for dialog to appear and click confirm
+    await this.deleteDialogConfirm.waitFor({ state: 'visible' });
+    await this.deleteDialogConfirm.click();
   }
 
   /**

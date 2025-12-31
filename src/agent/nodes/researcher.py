@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import mlflow
 from pydantic import BaseModel, Field
 
-from src.agent.config import get_researcher_config
+from src.agent.config import get_researcher_config, get_researcher_config_for_depth
 from src.agent.prompts.researcher import (
     RESEARCHER_SYSTEM_PROMPT,
     RESEARCHER_USER_PROMPT,
@@ -66,8 +66,12 @@ async def run_researcher(
     Returns:
         Updated state with step observation.
     """
-    # Load configuration
+    # Load global researcher configuration
     config = get_researcher_config()
+
+    # Get per-depth researcher settings (max_search_queries, max_urls_to_crawl)
+    depth = state.resolve_depth()
+    depth_config = get_researcher_config_for_depth(depth)
 
     step = state.get_current_step()
     if not step:
@@ -98,9 +102,9 @@ async def run_researcher(
             # Log generated queries
             log_search_queries_generated(logger, step_title=step.title, queries=search_queries)
 
-            # Perform searches
+            # Perform searches (limit from per-depth config)
             all_results = []
-            for query in search_queries[: config.max_search_queries]:
+            for query in search_queries[: depth_config.max_search_queries]:
                 try:
                     log_tool_call(logger, tool_name="web_search", params={"query": query, "count": 5})
                     results = await web_search(query=query, count=5, client=brave_client)
@@ -130,8 +134,8 @@ async def run_researcher(
                         )
                     )
 
-                # Crawl top URLs for content
-                top_urls = [r.url for r in all_results[: config.max_urls_to_crawl]]
+                # Crawl top URLs for content (limit from per-depth config)
+                top_urls = [r.url for r in all_results[: depth_config.max_urls_to_crawl]]
                 log_urls_selected(
                     logger, purpose="crawl", urls=top_urls, from_total=len(all_results)
                 )
@@ -155,6 +159,16 @@ async def run_researcher(
                         urls=len(top_urls),
                         error=str(e)[:100],
                     )
+
+                # Log source content statistics for debugging citation pipeline issues
+                sources_with_content = sum(1 for s in state.sources if s.content)
+                sample_content_lengths = [len(s.content or "") for s in state.sources[:5]]
+                logger.info(
+                    "RESEARCHER_CRAWL_COMPLETE",
+                    total_sources=len(state.sources),
+                    sources_with_content=sources_with_content,
+                    sample_content_lengths=sample_content_lengths,
+                )
 
         # Format previous observations
         prev_observations = ""

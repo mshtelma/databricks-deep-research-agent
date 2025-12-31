@@ -5,6 +5,7 @@ from uuid import uuid4
 import mlflow
 from pydantic import BaseModel
 
+from src.agent.config import get_step_limits
 from src.agent.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT
 from src.agent.state import Plan, PlanStep, ResearchState, StepStatus, StepType
 from src.core.logging_utils import get_logger, truncate
@@ -101,6 +102,11 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
                 + "\n".join(f"- {c}" for c in state.last_reflection.suggested_changes)
             )
 
+    # Get step limits and guidance from per-depth config
+    depth = state.resolve_depth()
+    step_limits = get_step_limits(depth)
+    step_guidance = step_limits.prompt_guidance or ""
+
     # Build messages
     messages = [
         {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
@@ -108,6 +114,9 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
             "role": "user",
             "content": PLANNER_USER_PROMPT.format(
                 query=state.query,
+                min_steps=step_limits.min,
+                max_steps=step_limits.max,
+                step_prompt_guidance=step_guidance,
                 background_results=state.background_investigation_results
                 or "(No background investigation)",
                 completed_steps=completed_steps_str,

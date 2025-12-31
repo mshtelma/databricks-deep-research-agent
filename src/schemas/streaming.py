@@ -196,6 +196,23 @@ class VerificationSummaryEvent(BaseStreamEvent):
     warning: bool
 
 
+class PersistenceCompletedEvent(BaseStreamEvent):
+    """Emitted after successful database persistence.
+
+    This event signals that the chat and all research data have been
+    persisted to the database. For draft chats, this indicates the
+    chat is now "real" and should be reflected in the UI.
+    """
+
+    event_type: Literal["persistence_completed"] = "persistence_completed"
+    chat_id: str  # UUID as string for JSON serialization
+    message_id: str
+    research_session_id: str
+    chat_title: str
+    was_draft: bool  # True if chat was created, False if already existed
+    counts: dict[str, int]  # Entity counts from persistence
+
+
 # Union type for all stream events
 StreamEvent = (
     AgentStartedEvent
@@ -217,4 +234,6 @@ StreamEvent = (
     | CitationCorrectedEvent
     | NumericClaimDetectedEvent
     | VerificationSummaryEvent
+    # Persistence events
+    | PersistenceCompletedEvent
 )

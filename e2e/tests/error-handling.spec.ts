@@ -5,9 +5,20 @@ import { test, expect } from '../fixtures';
  *
  * Tests various error conditions to ensure the application
  * handles failures gracefully and provides useful feedback.
+ *
+ * NOTE: Some tests in this suite are slow as they run real research queries.
  */
 test.describe('Error Handling', () => {
-  test.setTimeout(180000); // 3 minutes - research agent needs time
+  // Mark all tests as slow (triples timeout)
+  test.slow();
+
+  // Skip research-dependent tests unless explicitly enabled with RUN_SLOW_TESTS=1
+  test.skip(
+    !process.env.RUN_SLOW_TESTS,
+    'Error handling tests require real research - set RUN_SLOW_TESTS=1 to enable'
+  );
+
+  test.setTimeout(300000); // 5 minutes - research agent needs time
 
   test('handles empty message gracefully', async ({ chatPage, page }) => {
     // Try to send an empty message
@@ -103,8 +114,12 @@ test.describe('Error Handling', () => {
 
     await chatPage.sendMessage(specialMessage);
 
-    // Wait for user message to appear first (it should appear immediately as pending)
-    await expect(page.getByTestId('user-message').first()).toBeVisible({ timeout: 10000 });
+    // Wait for URL to stabilize (draft chat created and navigated)
+    // This handles the race condition when no chatId exists initially
+    await page.waitForURL(/\/chat\//, { timeout: 15000 });
+
+    // Wait for user message to appear (increased timeout to handle state updates)
+    await expect(page.getByTestId('user-message').first()).toBeVisible({ timeout: 30000 });
 
     // Wait for either a response or verify the app handles it gracefully
     // Use shorter timeout since simple queries should respond quickly

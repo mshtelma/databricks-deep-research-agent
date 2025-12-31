@@ -7,7 +7,12 @@ from uuid import UUID
 
 import mlflow
 
-from src.agent.config import get_coordinator_config, get_planner_config
+from src.agent.config import (
+    get_coordinator_config,
+    get_planner_config,
+    get_researcher_config_for_depth,
+)
+from src.core.app_config import ResearcherMode
 from src.agent.nodes.background import run_background_investigator
 from src.agent.nodes.coordinator import handle_simple_query, run_coordinator
 from src.agent.nodes.planner import run_planner
@@ -31,7 +36,10 @@ from src.schemas.research import PlanStepSummary
 from src.schemas.streaming import (
     AgentCompletedEvent,
     AgentStartedEvent,
+    CitationCorrectedEvent,
     ClaimVerifiedEvent,
+    NumericClaimDetectedEvent,
+    PersistenceCompletedEvent,
     PlanCreatedEvent,
     ReflectionDecisionEvent,
     ResearchCompletedEvent,
@@ -85,6 +93,8 @@ class OrchestrationConfig:
     # Persistence context (for claim/citation storage)
     message_id: UUID | None = None  # Agent message ID for claims
     research_session_id: UUID | None = None  # Research session ID for sources
+    # Draft chat support - True if chat doesn't exist in DB yet
+    is_draft: bool = False
 
 
 @dataclass
@@ -295,7 +305,7 @@ async def run_research(
                         # Emit step started
                         events.append(_step_started(state))
 
-                        # Research step - use ReAct researcher with agentic tool use
+                        # Research step - switch between modes based on depth config
                         log_agent_transition(
                             logger,
                             from_agent="planner",
@@ -305,33 +315,43 @@ async def run_research(
                         events.append(_agent_started("researcher", "analytical"))
                         agent_start = time.perf_counter()
 
-                        # Run ReAct researcher and collect events
-                        async for react_event in run_react_researcher(
-                            state, llm, crawler, brave_client
-                        ):
-                            if react_event.event_type == "tool_call":
-                                events.append(
-                                    ToolCallEvent(
-                                        tool_name=react_event.data.get("tool", ""),
-                                        tool_args=react_event.data.get("args", {}),
-                                        call_number=react_event.data.get("call_number", 0),
+                        # Get researcher mode for current depth
+                        depth = state.resolve_depth()
+                        researcher_config = get_researcher_config_for_depth(depth)
+
+                        if researcher_config.mode == ResearcherMode.REACT:
+                            # ReAct mode: LLM controls the research loop
+                            async for react_event in run_react_researcher(
+                                state, llm, crawler, brave_client
+                            ):
+                                if react_event.event_type == "tool_call":
+                                    events.append(
+                                        ToolCallEvent(
+                                            tool_name=react_event.data.get("tool", ""),
+                                            tool_args=react_event.data.get("args", {}),
+                                            call_number=react_event.data.get("call_number", 0),
+                                        )
                                     )
-                                )
-                            elif react_event.event_type == "tool_result":
-                                events.append(
-                                    ToolResultEvent(
-                                        tool_name=react_event.data.get("tool", ""),
-                                        result_preview=react_event.data.get("result_preview", "")[:200],
-                                        sources_crawled=react_event.data.get("high_quality_count", 0),
+                                elif react_event.event_type == "tool_result":
+                                    events.append(
+                                        ToolResultEvent(
+                                            tool_name=react_event.data.get("tool", ""),
+                                            result_preview=react_event.data.get("result_preview", "")[:200],
+                                            sources_crawled=react_event.data.get("high_quality_count", 0),
+                                        )
                                     )
-                                )
-                            elif react_event.event_type == "research_complete":
-                                logger.info(
-                                    "REACT_RESEARCH_COMPLETE",
-                                    reason=react_event.data.get("reason", ""),
-                                    tool_calls=react_event.data.get("tool_calls", 0),
-                                    high_quality=react_event.data.get("high_quality_sources", 0),
-                                )
+                                elif react_event.event_type == "research_complete":
+                                    logger.info(
+                                        "REACT_RESEARCH_COMPLETE",
+                                        reason=react_event.data.get("reason", ""),
+                                        tool_calls=react_event.data.get("tool_calls", 0),
+                                        high_quality=react_event.data.get("high_quality_sources", 0),
+                                    )
+                        else:
+                            # Classic mode: single-pass fixed searches/crawls
+                            state = await run_researcher(
+                                state, llm, crawler, brave_client
+                            )
 
                         researcher_ms = (time.perf_counter() - agent_start) * 1000
                         log_agent_phase(
@@ -645,29 +665,39 @@ async def stream_research(
                         yield _agent_started("researcher", "analytical")
                         agent_start = time.perf_counter()
 
-                        # Run ReAct researcher with agentic tool use
-                        async for react_event in run_react_researcher(
-                            state, llm, crawler, brave_client
-                        ):
-                            if react_event.event_type == "tool_call":
-                                yield ToolCallEvent(
-                                    tool_name=react_event.data.get("tool", ""),
-                                    tool_args=react_event.data.get("args", {}),
-                                    call_number=react_event.data.get("call_number", 0),
-                                )
-                            elif react_event.event_type == "tool_result":
-                                yield ToolResultEvent(
-                                    tool_name=react_event.data.get("tool", ""),
-                                    result_preview=react_event.data.get("result_preview", "")[:200],
-                                    sources_crawled=react_event.data.get("high_quality_count", 0),
-                                )
-                            elif react_event.event_type == "research_complete":
-                                logger.info(
-                                    "REACT_RESEARCH_COMPLETE",
-                                    reason=react_event.data.get("reason", ""),
-                                    tool_calls=react_event.data.get("tool_calls", 0),
-                                    high_quality=react_event.data.get("high_quality_sources", 0),
-                                )
+                        # Get researcher mode for current depth
+                        depth = state.resolve_depth()
+                        researcher_config = get_researcher_config_for_depth(depth)
+
+                        if researcher_config.mode == ResearcherMode.REACT:
+                            # ReAct mode: LLM controls the research loop
+                            async for react_event in run_react_researcher(
+                                state, llm, crawler, brave_client
+                            ):
+                                if react_event.event_type == "tool_call":
+                                    yield ToolCallEvent(
+                                        tool_name=react_event.data.get("tool", ""),
+                                        tool_args=react_event.data.get("args", {}),
+                                        call_number=react_event.data.get("call_number", 0),
+                                    )
+                                elif react_event.event_type == "tool_result":
+                                    yield ToolResultEvent(
+                                        tool_name=react_event.data.get("tool", ""),
+                                        result_preview=react_event.data.get("result_preview", "")[:200],
+                                        sources_crawled=react_event.data.get("high_quality_count", 0),
+                                    )
+                                elif react_event.event_type == "research_complete":
+                                    logger.info(
+                                        "REACT_RESEARCH_COMPLETE",
+                                        reason=react_event.data.get("reason", ""),
+                                        tool_calls=react_event.data.get("tool_calls", 0),
+                                        high_quality=react_event.data.get("high_quality_sources", 0),
+                                    )
+                        else:
+                            # Classic mode: single-pass fixed searches/crawls
+                            state = await run_researcher(
+                                state, llm, crawler, brave_client
+                            )
 
                         yield _agent_completed("researcher", agent_start)
                         steps_executed += 1
@@ -724,11 +754,56 @@ async def stream_research(
                         chunk = event.get("chunk", "")
                         content_chunks.append(chunk)
                         yield SynthesisProgressEvent(content_chunk=chunk)
-                    # Log verification events (frontend fetches claims via API)
-                    elif event_type in ("claim_verified", "verification_summary", "citation_corrected"):
+                    # Yield verification events to frontend for real-time display
+                    elif event_type == "claim_verified":
+                        yield ClaimVerifiedEvent(
+                            claim_id=_to_claim_uuid(event.get("claim_id")),
+                            claim_text=event.get("claim_text", ""),
+                            position_start=event.get("position_start", 0),
+                            position_end=event.get("position_end", 0),
+                            verdict=event.get("verdict", ""),
+                            confidence_level=event.get("confidence_level", ""),
+                            evidence_preview=event.get("evidence_preview", ""),
+                            reasoning=event.get("reasoning"),
+                        )
+                    elif event_type == "verification_summary":
+                        yield VerificationSummaryEvent(
+                            message_id=config.message_id or UUID(int=0),
+                            total_claims=event.get("total_claims", 0),
+                            supported=event.get("supported", 0),
+                            partial=event.get("partial", 0),
+                            unsupported=event.get("unsupported", 0),
+                            contradicted=event.get("contradicted", 0),
+                            abstained_count=event.get("abstained_count", 0),
+                            citation_corrections=event.get("citation_corrections", 0),
+                            warning=event.get("warning", False),
+                        )
+                    elif event_type == "citation_corrected":
+                        yield CitationCorrectedEvent(
+                            claim_id=_to_claim_uuid(event.get("claim_id")),
+                            correction_type=event.get("correction_type", ""),
+                            reasoning=event.get("reasoning"),
+                        )
+                    elif event_type == "numeric_claim_detected":
+                        # Convert normalized_value to string - schema expects str, not float
+                        raw_normalized = event.get("normalized_value")
+                        normalized_str = str(raw_normalized) if raw_normalized is not None else None
+                        yield NumericClaimDetectedEvent(
+                            claim_id=_to_claim_uuid(event.get("claim_id")),
+                            raw_value=event.get("raw_value", ""),
+                            normalized_value=normalized_str,
+                            unit=event.get("unit"),
+                            derivation_type=event.get("derivation_type", "direct"),
+                            qa_verified=event.get("qa_verified", False),
+                        )
+                    elif event_type == "correction_metrics":
+                        # Log metrics, no need to send to frontend
                         logger.debug(
-                            f"CITATION_EVENT_{event_type.upper()}",
-                            **{k: str(v)[:50] for k, v in event.items() if k != "type"},
+                            "CITATION_CORRECTION_METRICS",
+                            total_corrected=event.get("total_corrected", 0),
+                            kept=event.get("kept", 0),
+                            replaced=event.get("replaced", 0),
+                            removed=event.get("removed", 0),
                         )
             else:
                 async for chunk in stream_synthesis(state, llm):
@@ -749,13 +824,16 @@ async def stream_research(
                 and config.research_session_id is not None
                 and state.final_report
                 and chat_id is not None
+                and user_id is not None
             ):
                 try:
                     from src.agent.persistence import persist_complete_research
 
+                    chat_id_uuid = UUID(chat_id) if isinstance(chat_id, str) else chat_id
                     counts = await persist_complete_research(
                         db=db,
-                        chat_id=UUID(chat_id) if isinstance(chat_id, str) else chat_id,
+                        chat_id=chat_id_uuid,
+                        user_id=user_id,
                         user_query=query,
                         message_id=config.message_id,
                         research_session_id=config.research_session_id,
@@ -767,9 +845,21 @@ async def stream_research(
                         message_id=str(config.message_id),
                         research_session_id=str(config.research_session_id),
                         report_len=len(state.final_report),
+                        chat_created=counts.get("chat_created", 0),
                         claims=counts.get("claims", 0),
                         citations=counts.get("citations", 0),
                         sources=counts.get("sources", 0),
+                    )
+
+                    # Emit persistence_completed event for frontend to finalize draft
+                    chat_title = query[:47] + "..." if len(query) > 50 else query
+                    yield PersistenceCompletedEvent(
+                        chat_id=str(chat_id_uuid),
+                        message_id=str(config.message_id),
+                        research_session_id=str(config.research_session_id),
+                        chat_title=chat_title,
+                        was_draft=config.is_draft,
+                        counts=counts,
                     )
                 except Exception as e:
                     logger.warning(
@@ -821,6 +911,23 @@ def _plan_id_to_uuid(plan_id: str) -> UUID:
         # Convert non-UUID string to deterministic UUID using uuid5
         from uuid import NAMESPACE_DNS, uuid5
         return uuid5(NAMESPACE_DNS, plan_id)
+
+
+def _to_claim_uuid(value: int | str | UUID | None) -> UUID:
+    """Convert claim_id (may be int, str, or UUID) to UUID.
+
+    The citation pipeline uses id(claim) which returns a Python object ID (integer).
+    This function converts any such identifier to a deterministic UUID for the
+    event schema which expects UUID type.
+    """
+    from uuid import NAMESPACE_DNS, uuid5
+
+    if isinstance(value, UUID):
+        return value
+    if value is None:
+        return UUID(int=0)
+    # Convert int or str to deterministic UUID
+    return uuid5(NAMESPACE_DNS, str(value))
 
 
 def _plan_created(state: ResearchState) -> PlanCreatedEvent:

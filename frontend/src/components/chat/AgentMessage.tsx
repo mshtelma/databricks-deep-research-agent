@@ -60,14 +60,11 @@ export function AgentMessage({
   const [activeCitationKey, setActiveCitationKey] = React.useState<string | null>(null);
   const [popoverClaim, setPopoverClaim] = React.useState<Claim | null>(null);
 
-  // Virtual reference element for floating positioning
-  const [virtualRef, setVirtualRef] = React.useState<{ x: number; y: number } | null>(null);
-
   const hasReasoning = reasoning || (plan && plan.steps && plan.steps.length > 0);
   const hasCitations = enableCitations && claims.length > 0;
 
   // Floating UI setup for smart popover positioning
-  const isPopoverOpen = popoverClaim !== null && popoverClaim.citations[0] !== undefined;
+  const isPopoverOpen = popoverClaim !== null;
 
   const { refs, floatingStyles, context } = useFloating({
     open: isPopoverOpen,
@@ -86,24 +83,6 @@ export function AgentMessage({
     whileElementsMounted: autoUpdate,
   });
 
-  // Update virtual element position when it changes
-  React.useEffect(() => {
-    if (virtualRef) {
-      refs.setReference({
-        getBoundingClientRect: () => ({
-          x: virtualRef.x,
-          y: virtualRef.y,
-          width: 0,
-          height: 0,
-          top: virtualRef.y,
-          right: virtualRef.x,
-          bottom: virtualRef.y,
-          left: virtualRef.x,
-        }),
-      });
-    }
-  }, [virtualRef, refs]);
-
   const dismiss = useDismiss(context, {
     escapeKey: true,
     outsidePress: true,
@@ -116,26 +95,30 @@ export function AgentMessage({
     initial: { opacity: 0, transform: 'scale(0.95)' },
   });
 
-  // Build citation data map for MarkdownRenderer using citationKey
+  // Build citation data map for MarkdownRenderer using ALL citation keys
+  // This allows multi-marker sentences like "[Arxiv][Arxiv-2]" to resolve correctly
   const citationData = React.useMemo(() => {
     if (!enableCitations || claims.length === 0) return undefined;
 
     const map = new Map<string, CitationContext>();
     claims.forEach((claim) => {
-      // Use citationKey from the claim (e.g., "Arxiv", "Zhipu", "Github-2")
-      const key = claim.citationKey;
-      if (!key) return; // Skip claims without citation keys
+      // Get all keys: prefer citationKeys array, fallback to single citationKey
+      const keys = claim.citationKeys || (claim.citationKey ? [claim.citationKey] : []);
+      if (keys.length === 0) return; // Skip claims without citation keys
 
       // Extract URL from the primary citation's evidence span
       const primaryCitation = claim.citations[0];
       const url = primaryCitation?.evidenceSpan?.source?.url ||
                   (primaryCitation?.evidenceSpan as { sourceUrl?: string })?.sourceUrl;
 
-      map.set(key, {
-        claim,
-        verdict: claim.verificationVerdict,
-        url,
-      });
+      // Map ALL keys to the same claim context
+      for (const key of keys) {
+        map.set(key, {
+          claim,
+          verdict: claim.verificationVerdict,
+          url,
+        });
+      }
     });
     return map;
   }, [claims, enableCitations]);
@@ -156,38 +139,32 @@ export function AgentMessage({
     }
   }, [citationData]);
 
-  // Track mouse position for virtual popover reference
-  const mousePositionRef = React.useRef<{ x: number; y: number }>({ x: 0, y: 0 });
-
-  React.useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      mousePositionRef.current = { x: e.clientX, y: e.clientY };
-    };
-    document.addEventListener('mousemove', handleMouseMove);
-    return () => document.removeEventListener('mousemove', handleMouseMove);
-  }, []);
-
   // Handle citation hover - show evidence card popover
-  // Uses citationKey to look up the claim
-  const handleCitationHover = React.useCallback((citationKey: string | null) => {
+  // Uses citationKey to look up the claim, element to position popover
+  const handleCitationHover = React.useCallback((
+    citationKey: string | null,
+    element?: HTMLElement | null
+  ) => {
     if (citationKey === null) {
       // Mouse left - hide popover (after delay to allow moving to popover)
       setTimeout(() => {
         setPopoverClaim(null);
         setActiveCitationKey(null);
-        setVirtualRef(null);
       }, 100);
     } else {
-      // Mouse entered - show popover at current mouse position
+      // Mouse entered - show popover anchored to the citation marker element
       const context = citationData?.get(citationKey);
       const claim = context?.claim;
       if (claim) {
         setActiveCitationKey(citationKey);
         setPopoverClaim(claim);
-        setVirtualRef({ ...mousePositionRef.current });
+        // Use the marker element as the floating reference
+        if (element) {
+          refs.setReference(element);
+        }
       }
     }
-  }, [citationData]);
+  }, [citationData, refs]);
 
   // Note: click-outside and escape key are handled by useDismiss from floating-ui
 
@@ -200,7 +177,11 @@ export function AgentMessage({
             <MarkdownRenderer
               content={message.content}
               enableCitations={enableCitations || !isStreaming}
-              citationMode={claims.length > 0 ? 'numeric' : 'link'}
+              // IMPORTANT:
+              // - When we have verified claims, force numeric/key parsing so [Arxiv] / [1] markers become interactive.
+              // - When we DON'T have claims yet (e.g., deferred persistence / slow DB), use 'auto' so we still
+              //   parse numeric markers OR link citations depending on what the model produced.
+              citationMode={claims.length > 0 ? 'numeric' : 'auto'}
               citationData={citationData}
               onCitationClick={handleCitationClick}
               onCitationHover={handleCitationHover}
@@ -211,7 +192,7 @@ export function AgentMessage({
             )}
 
             {/* Evidence card popover with smart positioning */}
-            {isMounted && popoverClaim && popoverClaim.citations[0] && (
+            {isMounted && popoverClaim && (
               <FloatingPortal>
                 <div
                   ref={refs.setFloating}
@@ -227,7 +208,6 @@ export function AgentMessage({
                     onClose={() => {
                       setPopoverClaim(null);
                       setActiveCitationKey(null);
-                      setVirtualRef(null);
                     }}
                   />
                 </div>

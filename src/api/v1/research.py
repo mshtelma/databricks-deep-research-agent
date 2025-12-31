@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.orchestrator import OrchestrationConfig, stream_research
 from src.agent.tools.web_crawler import WebCrawler
-from src.core.exceptions import NotFoundError
+from src.core.exceptions import AuthorizationError, NotFoundError
 from src.db.session import get_db
 from src.middleware.auth import CurrentUser
 from src.schemas.research import CancelResearchResponse
@@ -41,10 +41,54 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+async def _verify_chat_access(
+    chat_id: UUID, user_id: str, db: AsyncSession
+) -> bool:
+    """Verify user can access this chat for streaming.
+
+    Authorization logic for draft chat support:
+    - If chat doesn't exist: allow (draft chat flow) -> return True
+    - If chat exists and owned by user: allow -> return False
+    - If chat exists but owned by another user: reject with 403
+
+    Args:
+        chat_id: Chat UUID to check.
+        user_id: Current user's ID.
+        db: Database session.
+
+    Returns:
+        True if chat is a draft (doesn't exist), False if persisted.
+
+    Raises:
+        AuthorizationError: If chat exists but belongs to another user.
+    """
+    chat_service = ChatService(db)
+    chat = await chat_service.get_by_id(chat_id)
+
+    if chat is None:
+        # Chat doesn't exist - this is a draft, allow streaming
+        logger.info(f"Chat {chat_id} is a draft (not in DB), allowing stream")
+        return True
+
+    if chat.user_id != user_id:
+        # Chat exists but belongs to another user - reject
+        logger.warning(
+            f"User {user_id} attempted to access chat {chat_id} owned by {chat.user_id}"
+        )
+        raise AuthorizationError(f"Access denied to chat {chat_id}")
+
+    # Chat exists and user owns it
+    return False
+
+
 async def _verify_chat_ownership(
     chat_id: UUID, user_id: str, db: AsyncSession
 ) -> None:
-    """Verify user owns the chat. Raises NotFoundError if not."""
+    """Verify user owns the chat. Raises NotFoundError if not.
+
+    DEPRECATED: Use _verify_chat_access() for stream endpoints.
+    Kept for backwards compatibility with other endpoints.
+    """
     chat_service = ChatService(db)
     chat = await chat_service.get(chat_id, user_id)
     if not chat:
@@ -93,9 +137,10 @@ async def stream_research_endpoint(
     - synthesis_progress* (streaming content chunks)
     - agent_completed (synthesizer)
     - research_completed
+    - persistence_completed (after successful DB write)
     """
-    # Verify user owns the chat
-    await _verify_chat_ownership(chat_id, user.user_id, db)
+    # Verify user can access chat (returns True if draft, False if persisted)
+    is_draft = await _verify_chat_access(chat_id, user.user_id, db)
 
     # Get services from app state
     llm: LLMClient = request.app.state.llm_client
@@ -169,6 +214,7 @@ async def stream_research_endpoint(
                 system_instructions=system_instructions,
                 message_id=agent_message_id,
                 research_session_id=research_session_id,
+                is_draft=is_draft,
             )
 
             # Stream events - orchestrator handles persistence on success
@@ -214,7 +260,7 @@ def _event_to_dict(event: StreamEvent) -> dict[str, Any]:
     from datetime import datetime
 
     # Get the event type from the class name or event_type field
-    event_dict = event.model_dump()
+    event_dict = event.model_dump(by_alias=True)
 
     # Ensure event_type is set
     if "event_type" not in event_dict:
@@ -260,8 +306,8 @@ async def stream_research_with_history(
     This endpoint allows the frontend to pass conversation history
     directly instead of loading from database.
     """
-    # Verify user owns the chat
-    await _verify_chat_ownership(chat_id, user.user_id, db)
+    # Verify user can access chat (returns True if draft, False if persisted)
+    is_draft = await _verify_chat_access(chat_id, user.user_id, db)
 
     # Get services from app state
     llm: LLMClient = request.app.state.llm_client
@@ -323,6 +369,7 @@ async def stream_research_with_history(
                 system_instructions=system_instructions,
                 message_id=agent_message_id,
                 research_session_id=research_session_id,
+                is_draft=is_draft,
             )
 
             # Stream events - orchestrator handles persistence on success

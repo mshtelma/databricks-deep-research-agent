@@ -193,7 +193,8 @@ class ClaimInfo:
     verification_verdict: str | None = None  # "supported", "partial", "unsupported", "contradicted"
     verification_reasoning: str | None = None
     abstained: bool = False
-    citation_key: str | None = None  # Human-readable key like "Arxiv", "Zhipu"
+    citation_key: str | None = None  # Primary key like "Arxiv", "Zhipu"
+    citation_keys: list[str] | None = None  # All keys for multi-marker sentences
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -208,6 +209,7 @@ class ClaimInfo:
             "verification_reasoning": self.verification_reasoning,
             "abstained": self.abstained,
             "citation_key": self.citation_key,
+            "citation_keys": self.citation_keys,
         }
 
 
@@ -253,13 +255,6 @@ class ResearchDepth(str, Enum):
     MEDIUM = "medium"  # 3-5 search iterations, balanced research
     EXTENDED = "extended"  # 6-10 search iterations, thorough analysis
 
-
-# Mapping from depth levels to max research steps
-DEPTH_TO_STEPS: dict[str, tuple[int, int]] = {
-    "light": (1, 3),  # min 1, max 3 steps
-    "medium": (3, 6),  # min 3, max 6 steps
-    "extended": (5, 10),  # min 5, max 10 steps
-}
 
 # Mapping from query complexity to default depth
 COMPLEXITY_TO_DEPTH: dict[str, str] = {
@@ -416,22 +411,30 @@ class ResearchState:
     def get_max_steps(self) -> int:
         """Get maximum number of research steps for current depth.
 
+        Uses centralized research_types configuration from app.yaml.
+
         Returns:
             Maximum number of steps to execute.
         """
+        from src.agent.config import get_step_limits
+
         depth = self.resolve_depth()
-        min_steps, max_steps = DEPTH_TO_STEPS.get(depth, (3, 6))
-        return max_steps
+        step_limits = get_step_limits(depth)
+        return step_limits.max
 
     def get_min_steps(self) -> int:
         """Get minimum number of research steps for current depth.
 
+        Uses centralized research_types configuration from app.yaml.
+
         Returns:
             Minimum number of steps before early completion is allowed.
         """
+        from src.agent.config import get_step_limits
+
         depth = self.resolve_depth()
-        min_steps, max_steps = DEPTH_TO_STEPS.get(depth, (3, 6))
-        return min_steps
+        step_limits = get_step_limits(depth)
+        return step_limits.min
 
     def add_evidence(self, evidence: EvidenceInfo) -> None:
         """Add an evidence span to the pool."""

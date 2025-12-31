@@ -12,6 +12,8 @@ import type {
   ClaimVerifiedEvent,
   VerificationSummaryEvent,
   ResearchStartedEvent,
+  PersistenceCompletedEvent,
+  ResearchSession,
 } from '../types';
 import type {
   VerificationSummary,
@@ -68,6 +70,9 @@ export interface ToolActivity {
   sourcesCrawled: number;
 }
 
+/** @deprecated Use ResearchSession from '../types' instead */
+export type PersistedResearchSession = ResearchSession;
+
 interface UseStreamingQueryReturn {
   isStreaming: boolean;
   events: StreamEvent[];
@@ -90,6 +95,12 @@ interface UseStreamingQueryReturn {
   agentMessageId: string | null;
   /** Current tool activity during ReAct research loop */
   toolActivity: ToolActivity | null;
+  /** Persistence result when draft chat becomes real */
+  persistenceResult: PersistenceCompletedEvent | null;
+  /** Whether persistence failed (for retry UI) */
+  persistenceFailed: boolean;
+  /** Hydrate state from persisted research session (for page reload) */
+  hydrateFromSession: (session: ResearchSession) => void;
 }
 
 interface UseStreamingQueryOptions {
@@ -126,6 +137,10 @@ export function useStreamingQuery(
   // Tool activity state for ReAct research loop
   const [toolActivity, setToolActivity] = useState<ToolActivity | null>(null);
 
+  // Persistence state for draft chat support
+  const [persistenceResult, setPersistenceResult] = useState<PersistenceCompletedEvent | null>(null);
+  const [persistenceFailed, setPersistenceFailed] = useState(false);
+
   const eventSourceRef = useRef<EventSource | null>(null);
 
   const stopStream = useCallback(() => {
@@ -134,6 +149,53 @@ export function useStreamingQuery(
       eventSourceRef.current = null;
     }
     setIsStreaming(false);
+  }, []);
+
+  /**
+   * Hydrate state from a persisted research session (for page reload).
+   * This restores the research panel from data loaded via API.
+   */
+  const hydrateFromSession = useCallback((session: ResearchSession) => {
+    // Only hydrate if we have plan data
+    if (!session.plan?.steps) {
+      console.log('[Hydrate] No plan steps to hydrate');
+      return;
+    }
+
+    // Handle camelCase runtime keys for session-level properties
+    const currentStepIdx = (session as unknown as { currentStepIndex?: number }).currentStepIndex ?? session.current_step_index;
+
+    console.log('[Hydrate] Session:', {
+      status: session.status,
+      planSteps: session.plan.steps.length,
+      stepsWithStatus: session.plan.steps.map(s => ({ title: s.title, status: s.status })),
+      currentStepIndex: currentStepIdx,
+    });
+
+    // Convert persisted plan to UI plan format
+    // Default to 'pending' if status is missing - safer than assuming 'completed'
+    const plan: Plan = {
+      title: session.plan.title,
+      reasoning: session.plan.thought,
+      steps: session.plan.steps.map((s, i) => ({
+        index: i,
+        title: s.title,
+        description: s.description,
+        status: (s.status as 'pending' | 'in_progress' | 'completed' | 'skipped') || 'pending',
+      })),
+    };
+
+    setCurrentPlan(plan);
+    setCurrentStepIndex(currentStepIdx ?? -1);
+
+    // Set agent status based on session status
+    if (session.status === 'completed') {
+      setAgentStatus('complete');
+    } else if (session.status === 'failed' || session.status === 'cancelled') {
+      setAgentStatus('error');
+    } else {
+      setAgentStatus('idle');
+    }
   }, []);
 
   const sendQuery = useCallback(
@@ -165,6 +227,10 @@ export function useStreamingQuery(
       setAgentMessageId(null);
       setToolActivity(null);
 
+      // Reset persistence state
+      setPersistenceResult(null);
+      setPersistenceFailed(false);
+
       // Build stream URL with query parameter
       // The backend will load history from DB, or we can pass it via POST
       const streamUrl = `${API_BASE_URL}/chats/${chatId}/stream?query=${encodeURIComponent(query)}`;
@@ -178,6 +244,7 @@ export function useStreamingQuery(
       eventSource.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data) as StreamEvent;
+          console.log('[SSE] Event received:', data.event_type, data);
           setEvents((prev) => [...prev, data]);
 
           // Update state based on event type
@@ -195,20 +262,35 @@ export function useStreamingQuery(
               }
               break;
 
-            case 'agent_completed':
+            case 'agent_completed': {
               // Agent completed, continue with flow
+              const completedEvent = data as { agent: string; duration_ms?: number };
+              console.log('[SSE] agent_completed:', {
+                agent: completedEvent.agent,
+                duration_ms: completedEvent.duration_ms,
+                hasValidDuration: typeof completedEvent.duration_ms === 'number',
+              });
               break;
+            }
 
             case 'research_started': {
               // Capture the real agent message UUID from backend for citation fetching
               const startedEvent = data as ResearchStartedEvent;
-              setAgentMessageId(startedEvent.message_id);
+              // Handle camelCase runtime keys
+              const messageId = (startedEvent as unknown as { messageId?: string }).messageId ?? startedEvent.message_id;
+              console.log('[SSE] research_started:', { messageId });
+              setAgentMessageId(messageId);
               break;
             }
 
             case 'plan_created': {
               setAgentStatus('researching');
               const planEvent = data as PlanCreatedEvent;
+              console.log('[SSE] plan_created:', {
+                title: planEvent.title,
+                steps: planEvent.steps.length,
+                stepTitles: planEvent.steps.map(s => s.title),
+              });
               setCurrentPlan({
                 title: planEvent.title,
                 reasoning: planEvent.thought,
@@ -224,13 +306,17 @@ export function useStreamingQuery(
 
             case 'step_started': {
               const stepEvent = data as StepStartedEvent;
-              setCurrentStepIndex(stepEvent.step_index);
+              // Handle camelCase runtime keys (stepIndex instead of step_index)
+              const stepIndex = (stepEvent as unknown as { stepIndex?: number }).stepIndex ?? stepEvent.step_index;
+              const stepTitle = (stepEvent as unknown as { stepTitle?: string }).stepTitle ?? stepEvent.step_title;
+              console.log('[SSE] step_started:', { stepIndex, stepTitle });
+              setCurrentStepIndex(stepIndex);
               setCurrentPlan((prev) => {
                 if (!prev) return prev;
                 const steps = [...prev.steps];
-                const step = steps[stepEvent.step_index];
+                const step = steps[stepIndex];
                 if (step) {
-                  steps[stepEvent.step_index] = {
+                  steps[stepIndex] = {
                     ...step,
                     status: 'in_progress',
                   };
@@ -242,15 +328,24 @@ export function useStreamingQuery(
 
             case 'step_completed': {
               const stepEvent = data as StepCompletedEvent;
+              // Handle camelCase runtime keys
+              const stepIndex = (stepEvent as unknown as { stepIndex?: number }).stepIndex ?? stepEvent.step_index;
+              const sourcesFound = (stepEvent as unknown as { sourcesFound?: number }).sourcesFound ?? stepEvent.sources_found;
+              console.log('[SSE] step_completed:', { stepIndex, sourcesFound });
               setCurrentPlan((prev) => {
                 if (!prev) return prev;
                 const steps = [...prev.steps];
-                const step = steps[stepEvent.step_index];
+                const step = steps[stepIndex];
                 if (step) {
-                  steps[stepEvent.step_index] = {
+                  steps[stepIndex] = {
                     ...step,
                     status: 'completed',
                   };
+                  console.log('[State] Step marked completed:', {
+                    stepIndex,
+                    stepTitle: step.title,
+                    newStatus: 'completed',
+                  });
                 }
                 return { ...prev, steps };
               });
@@ -264,10 +359,14 @@ export function useStreamingQuery(
 
             case 'tool_call': {
               const toolEvent = data as ToolCallEvent;
+              // Handle camelCase runtime keys
+              const toolName = (toolEvent as unknown as { toolName?: string }).toolName ?? toolEvent.tool_name;
+              const toolArgs = (toolEvent as unknown as { toolArgs?: Record<string, unknown> }).toolArgs ?? toolEvent.tool_args;
+              const callNumber = (toolEvent as unknown as { callNumber?: number }).callNumber ?? toolEvent.call_number;
               setToolActivity({
-                toolName: toolEvent.tool_name as 'web_search' | 'web_crawl',
-                toolArgs: toolEvent.tool_args,
-                callNumber: toolEvent.call_number,
+                toolName: toolName as 'web_search' | 'web_crawl',
+                toolArgs,
+                callNumber,
                 sourcesCrawled: 0,
               });
               break;
@@ -275,10 +374,12 @@ export function useStreamingQuery(
 
             case 'tool_result': {
               const toolEvent = data as ToolResultEvent;
+              // Handle camelCase runtime keys
+              const sourcesCrawled = (toolEvent as unknown as { sourcesCrawled?: number }).sourcesCrawled ?? toolEvent.sources_crawled;
               setToolActivity((prev) => prev ? {
                 ...prev,
                 toolName: null, // Clear active tool
-                sourcesCrawled: toolEvent.sources_crawled,
+                sourcesCrawled,
               } : null);
               break;
             }
@@ -308,8 +409,10 @@ export function useStreamingQuery(
 
             case 'synthesis_progress': {
               const progressEvent = data as SynthesisProgressEvent;
-              accumulatedContent += progressEvent.content_chunk;
-              setStreamingContent((prev) => prev + progressEvent.content_chunk);
+              // Handle camelCase runtime keys
+              const contentChunk = (progressEvent as unknown as { contentChunk?: string }).contentChunk ?? progressEvent.content_chunk;
+              accumulatedContent += contentChunk;
+              setStreamingContent((prev) => prev + contentChunk);
               break;
             }
 
@@ -392,10 +495,21 @@ export function useStreamingQuery(
               }, 150);
               break;
 
+            case 'persistence_completed': {
+              // Database persistence succeeded - draft chat is now real
+              const persistEvent = data as PersistenceCompletedEvent;
+              setPersistenceResult(persistEvent);
+              setPersistenceFailed(false);
+              break;
+            }
+
             case 'error': {
               const errorEvent = data as StreamErrorEvent;
+              // Handle camelCase runtime keys
+              const errorMessage = (errorEvent as unknown as { errorMessage?: string }).errorMessage ?? errorEvent.error_message;
+              console.log('[SSE] error:', { errorMessage, recoverable: errorEvent.recoverable });
               if (!errorEvent.recoverable) {
-                const err = new Error(errorEvent.error_message || 'Research failed');
+                const err = new Error(errorMessage || 'Research failed');
                 setError(err);
                 setAgentStatus('error');
                 stopStream();
@@ -443,6 +557,8 @@ export function useStreamingQuery(
     setCitationCorrectionCount(0);
     setAgentMessageId(null);
     setToolActivity(null);
+    setPersistenceResult(null);
+    setPersistenceFailed(false);
   }, [chatId]);
 
   return {
@@ -461,5 +577,8 @@ export function useStreamingQuery(
     citationCorrectionCount,
     agentMessageId,
     toolActivity,
+    persistenceResult,
+    persistenceFailed,
+    hydrateFromSession,
   };
 }

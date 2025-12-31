@@ -49,6 +49,13 @@ class DomainFilterMode(str, Enum):
     BOTH = "both"  # Whitelist then blacklist - must be in include AND not in exclude
 
 
+class ResearcherMode(str, Enum):
+    """Researcher implementation mode for research type profiles."""
+
+    REACT = "react"  # ReAct loop with LLM-controlled tool calls
+    CLASSIC = "classic"  # Single-pass with fixed searches/crawls per step
+
+
 class EndpointConfig(BaseModel):
     """Configuration for a single model endpoint."""
 
@@ -115,10 +122,27 @@ class CoordinatorConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class ReportLimitConfig(BaseModel):
+    """Word/token limits for a single research depth level."""
+
+    min_words: int = Field(ge=50)
+    max_words: int = Field(ge=100)
+    max_tokens: int = Field(ge=500)
+
+    model_config = {"frozen": True}
+
+
 class SynthesizerConfig(BaseModel):
     """Configuration for the Synthesizer agent."""
 
     max_report_length: int = Field(default=50000, ge=1000)
+    report_limits: dict[str, ReportLimitConfig] = Field(
+        default_factory=lambda: {
+            "light": ReportLimitConfig(min_words=200, max_words=400, max_tokens=1000),
+            "medium": ReportLimitConfig(min_words=400, max_words=800, max_tokens=2000),
+            "extended": ReportLimitConfig(min_words=800, max_words=1500, max_tokens=4000),
+        }
+    )
 
     model_config = {"frozen": True}
 
@@ -406,6 +430,112 @@ class RateLimitingConfig(BaseModel):
         return min(delay, self.max_delay_seconds)
 
 
+# =============================================================================
+# Research Type Profiles (FR-100)
+# =============================================================================
+
+
+class StepLimits(BaseModel):
+    """Step limits for a research type profile."""
+
+    min: int = Field(ge=1, le=20, description="Minimum steps before early completion")
+    max: int = Field(ge=1, le=30, description="Maximum steps to execute")
+    prompt_guidance: str | None = Field(
+        default=None,
+        description="Optional guidance text for planner prompt to shape step generation",
+    )
+
+    model_config = {"frozen": True}
+
+    @model_validator(mode="after")
+    def validate_min_max(self) -> "StepLimits":
+        """Ensure min does not exceed max."""
+        if self.min > self.max:
+            raise ValueError(f"min ({self.min}) cannot exceed max ({self.max})")
+        return self
+
+
+class ResearcherTypeConfig(BaseModel):
+    """Researcher configuration for a specific research type profile.
+
+    Supports two modes:
+    - classic: Single-pass researcher with fixed searches/crawls per step
+    - react: ReAct loop where LLM controls tool calls within a budget
+    """
+
+    mode: ResearcherMode = Field(
+        default=ResearcherMode.CLASSIC,
+        description="Researcher implementation: 'react' or 'classic'",
+    )
+    # Classic mode settings
+    max_search_queries: int = Field(
+        default=3, ge=1, le=10, description="Max search queries per step (classic mode)"
+    )
+    max_urls_to_crawl: int = Field(
+        default=5, ge=1, le=20, description="Max URLs to crawl per step (classic mode)"
+    )
+    # ReAct mode settings
+    max_tool_calls: int = Field(
+        default=15, ge=1, le=50, description="Max tool calls in ReAct loop (react mode)"
+    )
+
+    model_config = {"frozen": True}
+
+
+class ResearchTypeConfig(BaseModel):
+    """Complete configuration for a single research type (light/medium/extended).
+
+    This consolidates all research-type-specific settings in one place:
+    - Step limits and planner guidance
+    - Report word/token limits
+    - Researcher mode and limits
+    - Citation verification overrides
+    """
+
+    steps: StepLimits
+    report_limits: ReportLimitConfig
+    researcher: ResearcherTypeConfig = Field(default_factory=ResearcherTypeConfig)
+    citation_verification: CitationVerificationConfig | None = Field(
+        default=None,
+        description="Optional per-type overrides for citation verification",
+    )
+
+    model_config = {"frozen": True}
+
+
+class ResearchTypesConfig(BaseModel):
+    """Container for all research type profiles (light/medium/extended)."""
+
+    light: ResearchTypeConfig
+    medium: ResearchTypeConfig
+    extended: ResearchTypeConfig
+
+    model_config = {"frozen": True}
+
+    def get(self, depth: str) -> ResearchTypeConfig:
+        """Get configuration for a research depth.
+
+        Args:
+            depth: One of 'light', 'medium', 'extended'
+
+        Returns:
+            ResearchTypeConfig for the specified depth
+
+        Raises:
+            ValueError: If depth is not a valid research type
+        """
+        if depth == "light":
+            return self.light
+        elif depth == "medium":
+            return self.medium
+        elif depth == "extended":
+            return self.extended
+        else:
+            raise ValueError(
+                f"Invalid research depth: '{depth}'. Must be 'light', 'medium', or 'extended'"
+            )
+
+
 class AppConfig(BaseModel):
     """Central application configuration loaded from YAML."""
 
@@ -418,6 +548,11 @@ class AppConfig(BaseModel):
     rate_limiting: RateLimitingConfig = Field(default_factory=RateLimitingConfig)
     citation_verification: CitationVerificationConfig = Field(
         default_factory=CitationVerificationConfig
+    )
+    # Research type profiles (FR-100) - optional, falls back to legacy if not set
+    research_types: ResearchTypesConfig | None = Field(
+        default=None,
+        description="Research type profiles for light/medium/extended. If not set, uses legacy scattered configs.",
     )
 
     @model_validator(mode="after")
