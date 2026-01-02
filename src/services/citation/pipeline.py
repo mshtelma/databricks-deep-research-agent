@@ -9,15 +9,25 @@ This service coordinates the entire citation verification workflow:
 6. Numeric QA Verification (for numeric claims)
 """
 
+from __future__ import annotations
+
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import mlflow
 
 from src.agent.config import get_citation_config_for_depth
 from src.agent.state import ClaimInfo, EvidenceInfo, ResearchState, SourceInfo
-from src.core.app_config import CitationVerificationConfig, GenerationMode, get_app_config
+
+if TYPE_CHECKING:
+    from src.agent.nodes.react_synthesizer import ParsedContent
+from src.core.app_config import (
+    CitationVerificationConfig,
+    GenerationMode,
+    SynthesisMode,
+    get_app_config,
+)
 from src.core.logging_utils import get_logger, truncate
 from src.services.citation.citation_corrector import CitationCorrector, CorrectionType
 from src.services.citation.claim_generator import InterleavedClaim, InterleavedGenerator
@@ -116,7 +126,8 @@ class CitationVerificationPipeline:
         # Filter sources by content quality - discard abstract-only, paywalled, low-quality
         high_quality_sources = []
         for source in source_dicts:
-            quality = evaluate_content_quality(source.get("content", ""), query)
+            content = source.get("content") or ""
+            quality = evaluate_content_quality(content, query)
             # Accept sources with score >= 0.5 that aren't abstract-only
             if quality.score >= 0.5 and not quality.is_abstract_only:
                 high_quality_sources.append(source)
@@ -645,15 +656,19 @@ class CitationVerificationPipeline:
                     "contradicted": 0,
                     "abstained_count": 0,
                     "citation_corrections": 0,
-                    "warning": None,
+                    "warning": False,
                 },
             )
             return
+
+        # Check synthesis mode: ReAct or Interleaved
+        synthesis_mode = self.config.synthesis_mode
 
         # Natural/Strict modes: run full verification pipeline
         logger.info(
             "CITATION_PIPELINE_MODE",
             mode=generation_mode.value,
+            synthesis_mode=synthesis_mode.value,
             action="running_verification_pipeline",
         )
 
@@ -697,7 +712,7 @@ class CitationVerificationPipeline:
                     "unsupported": 0,
                     "contradicted": 0,
                     "abstained_count": 0,
-                    "warning": None,
+                    "warning": False,
                 },
             )
             return
@@ -716,7 +731,22 @@ class CitationVerificationPipeline:
                 )
             )
 
-        # Stage 2: Generate with interleaved claims
+        # Route based on synthesis mode
+        if synthesis_mode == SynthesisMode.REACT:
+            logger.info(
+                "CITATION_PIPELINE_REACT_MODE",
+                evidence_count=len(evidence_pool),
+                action="using_react_synthesis",
+            )
+            async for event in self._run_react_synthesis(
+                state=state,
+                evidence_pool=evidence_pool,
+                max_tokens=max_tokens,
+            ):
+                yield event
+            return
+
+        # Stage 2: Generate with interleaved claims (INTERLEAVED mode)
         # Stream raw LLM content first (preserving markdown), then collect claims
         generated_claims: list[ClaimInfo] = []
         full_content = ""
@@ -798,3 +828,367 @@ class CitationVerificationPipeline:
             verified=sum(1 for c in generated_claims if c.verification_verdict),
             supported=sum(1 for c in generated_claims if c.verification_verdict == "supported"),
         )
+
+    async def _run_react_synthesis(
+        self,
+        state: ResearchState,
+        evidence_pool: list[RankedEvidence],
+        max_tokens: int = 2000,
+    ) -> AsyncGenerator[VerificationEvent | str, None]:
+        """Run ReAct-based synthesis with grounded generation.
+
+        Uses tools to retrieve evidence before making claims, then runs
+        verification on extracted claims.
+
+        Args:
+            state: Current research state.
+            evidence_pool: Pre-selected evidence from Stage 1.
+            max_tokens: Maximum tokens for generation.
+
+        Yields:
+            Content chunks (str) and VerificationEvents.
+        """
+        from src.agent.nodes.react_synthesizer import (
+            ReactSynthesisEvent,
+            run_react_synthesis,
+            run_react_synthesis_sectioned,
+        )
+
+        react_config = self.config.react_synthesis
+
+        logger.info(
+            "REACT_SYNTHESIS_START",
+            evidence_pool_size=len(evidence_pool),
+            max_tool_calls=react_config.max_tool_calls,
+            sectioned=react_config.use_sectioned_synthesis,
+        )
+
+        # Choose synthesis function based on config
+        if react_config.use_sectioned_synthesis:
+            synthesis_gen = run_react_synthesis_sectioned(
+                state=state,
+                llm=self.llm,
+                evidence_pool=evidence_pool,
+                tool_budget_per_section=react_config.tool_budget_per_section,
+                retrieval_window_size=react_config.retrieval_window_size,
+            )
+        else:
+            synthesis_gen = run_react_synthesis(
+                state=state,
+                llm=self.llm,
+                evidence_pool=evidence_pool,
+                max_tool_calls=react_config.max_tool_calls,
+                retrieval_window_size=react_config.retrieval_window_size,
+            )
+
+        # Stream ReAct events and collect content
+        full_content = ""
+        tool_call_count = 0
+        parsed_blocks: list[ParsedContent] | None = None
+
+        async for event in synthesis_gen:
+            if event.event_type == "content":
+                chunk = event.data.get("chunk", "")
+                full_content += chunk
+                yield chunk  # Stream to client
+
+            elif event.event_type == "tool_call":
+                tool_call_count += 1
+                yield VerificationEvent(
+                    event_type="react_tool_call",
+                    data={
+                        "tool": event.data.get("tool"),
+                        "args": event.data.get("args"),
+                        "call_number": tool_call_count,
+                    },
+                )
+
+            elif event.event_type == "section_start":
+                yield VerificationEvent(
+                    event_type="section_start",
+                    data={"section": event.data.get("section")},
+                )
+
+            elif event.event_type == "section_complete":
+                yield VerificationEvent(
+                    event_type="section_complete",
+                    data=event.data,
+                )
+
+            elif event.event_type == "synthesis_complete":
+                # Capture parsed_blocks from Hybrid ReClaim for claim extraction
+                parsed_blocks = event.data.get("parsed_blocks")
+                logger.info(
+                    "REACT_SYNTHESIS_DONE",
+                    reason=event.data.get("reason"),
+                    tool_calls=event.data.get("tool_calls", 0),
+                    content_len=len(full_content),
+                    parsed_blocks_count=len(parsed_blocks) if parsed_blocks else 0,
+                )
+
+            elif event.event_type == "grounding_warning":
+                yield VerificationEvent(
+                    event_type="grounding_warning",
+                    data=event.data,
+                )
+
+            elif event.event_type == "error":
+                logger.error(
+                    "REACT_SYNTHESIS_ERROR",
+                    error=event.data.get("error"),
+                )
+
+        # Extract claims from generated content
+        # Uses parsed blocks from Hybrid ReClaim when available, falls back to regex
+        generated_claims = self._extract_claims_from_react_content(
+            full_content, evidence_pool, parsed_blocks
+        )
+
+        logger.info(
+            "REACT_CLAIMS_EXTRACTED",
+            claims_count=len(generated_claims),
+            content_len=len(full_content),
+        )
+
+        # Add claims to state
+        for claim_info in generated_claims:
+            state.add_claim(claim_info)
+
+            # Stage 3: Classify confidence
+            claim_info.confidence_level = self.classify_confidence(claim_info)
+
+        # Stage 4: Verify all claims
+        async for event in self.verify_claims(generated_claims):
+            yield event
+
+        # Stage 5: Correct citations if needed
+        correction_count = 0
+        async for event in self.correct_citations(generated_claims, evidence_pool):
+            if event.event_type == "correction_metrics":
+                correction_count = event.data.get("total_corrected", 0)
+            yield event
+
+        # Update verification summary
+        state.update_verification_summary()
+
+        if state.verification_summary:
+            yield VerificationEvent(
+                event_type="verification_summary",
+                data={
+                    "message_id": str(state.session_id),
+                    "synthesis_mode": "react",
+                    "tool_calls": tool_call_count,
+                    "total_claims": state.verification_summary.total_claims,
+                    "supported": state.verification_summary.supported_count,
+                    "partial": state.verification_summary.partial_count,
+                    "unsupported": state.verification_summary.unsupported_count,
+                    "contradicted": state.verification_summary.contradicted_count,
+                    "abstained_count": state.verification_summary.abstained_count,
+                    "citation_corrections": correction_count,
+                    "warning": state.verification_summary.warning,
+                },
+            )
+
+        # Complete state with full content
+        state.complete(full_content)
+
+        logger.info(
+            "REACT_PIPELINE_COMPLETE",
+            claims=len(generated_claims),
+            verified=sum(1 for c in generated_claims if c.verification_verdict),
+            supported=sum(1 for c in generated_claims if c.verification_verdict == "supported"),
+            tool_calls=tool_call_count,
+        )
+
+    def _extract_claims_from_react_content(
+        self,
+        content: str,
+        evidence_pool: list[RankedEvidence],
+        parsed_blocks: list[ParsedContent] | None = None,
+    ) -> list[ClaimInfo]:
+        """Extract claims from ReAct-generated content.
+
+        Uses parsed blocks from Hybrid ReClaim when available, otherwise falls
+        back to regex-based extraction finding sentences with [Key] markers.
+
+        Args:
+            content: Generated content with [Key] citation markers.
+            evidence_pool: Evidence pool for linking citations.
+            parsed_blocks: Optional parsed blocks from Hybrid ReClaim (XML tags).
+
+        Returns:
+            List of extracted ClaimInfo objects.
+        """
+        import re
+
+        claims: list[ClaimInfo] = []
+
+        # Build citation key to evidence map
+        # Keys must match what EvidenceRegistry.build_citation_key() produces
+        key_to_evidence: dict[str, RankedEvidence] = {}
+        for idx, ev in enumerate(evidence_pool):
+            key = self._build_citation_key(idx, ev.source_url or "", evidence_pool)
+            key_to_evidence[key] = ev
+
+        logger.debug(
+            "REACT_CLAIM_EXTRACTION_KEY_MAP",
+            key_count=len(key_to_evidence),
+            keys=list(key_to_evidence.keys()),
+        )
+
+        # Use parsed blocks from Hybrid ReClaim if available
+        if parsed_blocks:
+            position = 0
+            for block in parsed_blocks:
+                if block.tag_type == "cite" and block.citation_key:
+                    # Grounded claim with citation
+                    evidence = key_to_evidence.get(block.citation_key)
+                    claim_text = f"{block.text} [{block.citation_key}]"
+                    claim_info = ClaimInfo(
+                        claim_text=claim_text,
+                        claim_type="numeric" if evidence and evidence.has_numeric_content else "general",
+                        position_start=position,
+                        position_end=position + len(claim_text),
+                        evidence=EvidenceInfo(
+                            source_url=evidence.source_url or "",
+                            quote_text=evidence.quote_text,
+                            start_offset=evidence.start_offset,
+                            end_offset=evidence.end_offset,
+                            section_heading=evidence.section_heading,
+                            relevance_score=evidence.relevance_score,
+                            has_numeric_content=evidence.has_numeric_content,
+                        ) if evidence else None,
+                        citation_key=block.citation_key,
+                    )
+                    claims.append(claim_info)
+                elif block.tag_type == "unverified":
+                    # Uncertain claim - will be verified in Stage 4-5
+                    claim_info = ClaimInfo(
+                        claim_text=block.text,
+                        claim_type="general",
+                        position_start=position,
+                        position_end=position + len(block.text),
+                        evidence=None,  # No evidence - needs verification
+                    )
+                    claims.append(claim_info)
+                # Note: "free" blocks are structural content, not claims
+                position += len(block.text) + 2  # +2 for paragraph spacing
+
+            logger.info(
+                "REACT_CLAIM_EXTRACTION_FROM_BLOCKS",
+                parsed_blocks_count=len(parsed_blocks),
+                cite_blocks=len([b for b in parsed_blocks if b.tag_type == "cite"]),
+                unverified_blocks=len([b for b in parsed_blocks if b.tag_type == "unverified"]),
+                claims_count=len(claims),
+            )
+            return claims
+
+        # Fallback: regex-based extraction for legacy content
+        # Find sentences with citation markers
+        # Pattern: sentence ending with [Key] or [Key-N]
+        citation_pattern = r'\[([A-Za-z][A-Za-z0-9-]*(?:-\d+)?)\]'
+
+        # Split into sentences (simple approach)
+        sentences = re.split(r'(?<=[.!?])\s+', content)
+
+        position = 0
+        for sentence in sentences:
+            # Find all citation markers in this sentence
+            markers = re.findall(citation_pattern, sentence)
+
+            if markers:
+                # This sentence has citations - it's a claim
+                claim_text = sentence.strip()
+                position_start = content.find(claim_text, position)
+                position_end = position_start + len(claim_text) if position_start != -1 else position
+
+                # Get evidence for primary citation
+                primary_key = markers[0]
+                evidence = key_to_evidence.get(primary_key)
+
+                claim_info = ClaimInfo(
+                    claim_text=claim_text,
+                    claim_type="numeric" if evidence and evidence.has_numeric_content else "general",
+                    position_start=position_start if position_start != -1 else position,
+                    position_end=position_end,
+                    evidence=EvidenceInfo(
+                        source_url=evidence.source_url or "",
+                        quote_text=evidence.quote_text,
+                        start_offset=evidence.start_offset,
+                        end_offset=evidence.end_offset,
+                        section_heading=evidence.section_heading,
+                        relevance_score=evidence.relevance_score,
+                        has_numeric_content=evidence.has_numeric_content,
+                    ) if evidence else None,
+                    citation_key=primary_key,
+                    citation_keys=markers if len(markers) > 1 else None,
+                )
+                claims.append(claim_info)
+
+            position = content.find(sentence, position)
+            if position != -1:
+                position += len(sentence)
+
+        # Log extraction summary with matched/unmatched markers
+        all_markers_in_content = set(re.findall(citation_pattern, content))
+        matched_keys = {c.citation_key for c in claims if c.citation_key}
+        unmatched = all_markers_in_content - matched_keys
+
+        if unmatched:
+            logger.warning(
+                "REACT_CLAIM_EXTRACTION_UNMATCHED_MARKERS",
+                unmatched_markers=list(unmatched),
+                available_keys=list(key_to_evidence.keys()),
+            )
+
+        logger.info(
+            "REACT_CLAIM_EXTRACTION_COMPLETE",
+            claims_count=len(claims),
+            content_len=len(content),
+            key_map_size=len(key_to_evidence),
+            matched_count=len(matched_keys),
+            unmatched_count=len(unmatched),
+        )
+
+        return claims
+
+    def _build_citation_key(
+        self, index: int, url: str, evidence_pool: list[RankedEvidence]
+    ) -> str:
+        """Build citation key matching EvidenceRegistry.build_citation_key() logic.
+
+        Must produce IDENTICAL keys to what LLM sees during synthesis.
+        Uses duplicate-detection: suffix is based on how many same-domain URLs
+        appear BEFORE this index, not on the index itself.
+
+        Args:
+            index: Evidence index in the pool.
+            url: Source URL for this evidence.
+            evidence_pool: Full evidence pool for duplicate detection.
+
+        Returns:
+            Citation key like "Arxiv", "Github", "Arxiv-2", etc.
+        """
+        from urllib.parse import urlparse
+
+        # Extract domain key for this URL
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc.replace("www.", "")
+            key = domain.split(".")[0].capitalize()
+        except Exception:
+            key = "Source"
+
+        # Count duplicates BEFORE this index (same as EvidenceRegistry)
+        count = 0
+        for idx, ev in enumerate(evidence_pool[:index]):
+            try:
+                other_parsed = urlparse(ev.source_url or "")
+                other_domain = other_parsed.netloc.replace("www.", "")
+                other_key = other_domain.split(".")[0].capitalize()
+                if other_key == key:
+                    count += 1
+            except Exception:
+                pass
+
+        return f"{key}-{count + 1}" if count > 0 else key

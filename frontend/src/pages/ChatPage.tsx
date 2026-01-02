@@ -179,7 +179,7 @@ export default function ChatPage() {
 
   // Wrapped sendQuery that also sets the pending user message
   const sendQuery = useCallback(
-    (query: string) => {
+    (query: string, researchDepth?: string) => {
       // Track query for retry functionality
       setLastQuery(query);
 
@@ -195,7 +195,7 @@ export default function ChatPage() {
 
       // The hook now automatically tracks conversation history
       // and the backend loads history from DB
-      originalSendQuery(query);
+      originalSendQuery(query, researchDepth);
     },
     [chatId, originalSendQuery]
   );
@@ -204,9 +204,10 @@ export default function ChatPage() {
   useEffect(() => {
     if (chatId && location.state?.pendingQuery) {
       const query = location.state.pendingQuery;
+      const researchDepth = location.state.researchDepth as string | undefined;
       // Clear state immediately to prevent re-sending on refresh
       window.history.replaceState({}, document.title);
-      sendQuery(query);
+      sendQuery(query, researchDepth);
     }
   }, [chatId, location.state?.pendingQuery, sendQuery]);
 
@@ -274,15 +275,15 @@ export default function ChatPage() {
   }, [chatId, chats, isLoadingChats, navigate, location.state?.newChat]);
 
   // Send message - for draft chats, backend will persist chat on success
-  const handleSendMessage = async (content: string) => {
+  const handleSendMessage = async (content: string, researchDepth?: string) => {
     if (!chatId) {
       // No chat selected - create a draft and navigate
       const draft = createDraft();
-      navigate(`/chat/${draft.id}?draft=1`, { state: { pendingQuery: content } });
+      navigate(`/chat/${draft.id}?draft=1`, { state: { pendingQuery: content, researchDepth } });
     } else {
       // Chat exists (draft or real) - just send the query
       // Backend handles persistence for drafts via deferred materialization
-      sendQuery(content);
+      sendQuery(content, researchDepth);
     }
   };
 

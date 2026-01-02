@@ -2,14 +2,19 @@
 
 Extracts minimal, relevant evidence spans from source documents
 BEFORE generation to enable claim-level citations.
+
+Supports optional embedding computation for hybrid search in ReAct synthesis.
 """
+
+from __future__ import annotations
 
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+import numpy as np
 from pydantic import BaseModel, Field
 
 from src.agent.prompts.citation.evidence_selection import (
@@ -18,6 +23,11 @@ from src.agent.prompts.citation.evidence_selection import (
 from src.core.app_config import get_app_config
 from src.services.llm.client import LLMClient
 from src.services.llm.types import ModelTier
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
+
+    from src.services.llm.embedder import GteEmbedder
 
 logger = logging.getLogger(__name__)
 
@@ -526,3 +536,86 @@ class EvidencePreSelector:
                 )
 
         return evidence
+
+
+async def compute_evidence_embeddings(
+    evidence_pool: list[RankedEvidence],
+    embedder: GteEmbedder,
+) -> NDArray[np.float32]:
+    """Compute embeddings for all evidence spans.
+
+    Used for hybrid search in ReAct synthesis. Computes embeddings
+    in batches for efficiency.
+
+    Args:
+        evidence_pool: List of RankedEvidence from pre-selection.
+        embedder: GTE embedder client.
+
+    Returns:
+        2D numpy array of shape (n_evidence, embed_dim).
+    """
+    if not evidence_pool:
+        return np.array([], dtype=np.float32).reshape(0, 0)
+
+    texts = [ev.quote_text for ev in evidence_pool]
+
+    logger.info(f"Computing embeddings for {len(texts)} evidence spans")
+
+    embeddings = await embedder.embed_batch(texts)
+
+    logger.info(
+        f"Computed embeddings: shape={embeddings.shape}, "
+        f"dtype={embeddings.dtype}"
+    )
+
+    return embeddings
+
+
+@dataclass
+class EvidenceWithEmbeddings:
+    """Evidence pool with pre-computed embeddings for hybrid search."""
+
+    evidence: list[RankedEvidence]
+    embeddings: NDArray[np.float32]
+
+    @property
+    def has_embeddings(self) -> bool:
+        """Check if embeddings are available."""
+        return self.embeddings.size > 0
+
+
+async def preselect_evidence_with_embeddings(
+    query: str,
+    sources: list[dict[str, Any]],
+    llm_client: LLMClient,
+    embedder: GteEmbedder | None = None,
+    max_spans_per_source: int | None = None,
+) -> EvidenceWithEmbeddings:
+    """Pre-select evidence and optionally compute embeddings.
+
+    Convenience function that combines evidence pre-selection and
+    embedding computation for ReAct synthesis.
+
+    Args:
+        query: Research query.
+        sources: List of source dicts with url, title, content.
+        llm_client: LLM client for evidence extraction.
+        embedder: Optional GTE embedder for hybrid search.
+        max_spans_per_source: Max spans per source.
+
+    Returns:
+        EvidenceWithEmbeddings containing evidence and optional embeddings.
+    """
+    selector = EvidencePreSelector(llm_client)
+    evidence = await selector.select_evidence_spans(
+        query=query,
+        sources=sources,
+        max_spans_per_source=max_spans_per_source,
+    )
+
+    if embedder is not None and evidence:
+        embeddings = await compute_evidence_embeddings(evidence, embedder)
+    else:
+        embeddings = np.array([], dtype=np.float32).reshape(0, 0)
+
+    return EvidenceWithEmbeddings(evidence=evidence, embeddings=embeddings)

@@ -358,6 +358,13 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
 - Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
 
 ## Recent Changes
+- 003-claim-level-citations: Per-Depth Config Merge Fix (2026-01-01)
+  - **BUG FIX**: Per-depth `citation_verification` configs were replacing global config instead of merging
+  - Root cause: `get_citation_config_for_depth()` returned per-type config directly without inheriting global values
+  - Fix: Deep merge per-type with global - fields explicitly set in per-type override, unset fields inherit from global
+  - Affected: `synthesis_mode`, `react_synthesis`, and other fields not specified per-type were using Pydantic defaults
+  - Key file: `src/agent/config.py` (get_citation_config_for_depth function)
+
 - 003-claim-level-citations: Research Type Profiles Configuration (2025-12-31)
   - **NEW FEATURE**: Consolidated `research_types` configuration in app.yaml
   - Each depth (light/medium/extended) now has unified settings:

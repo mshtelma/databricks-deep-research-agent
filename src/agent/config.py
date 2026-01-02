@@ -170,21 +170,50 @@ def get_researcher_config_for_depth(depth: str) -> ResearcherTypeConfig:
 def get_citation_config_for_depth(depth: str) -> CitationVerificationConfig:
     """Get citation verification config for a research depth.
 
-    If the research type has per-type citation_verification overrides,
-    returns those. Otherwise returns the global citation_verification config.
+    Merges per-depth overrides with global config. Fields defined in
+    per-depth override global; unspecified fields inherit from global.
+
+    The merge logic:
+    1. Start with global config as base
+    2. For each field in per-type config:
+       - If it differs from Pydantic default → it was explicitly set → use it
+       - If it matches Pydantic default → inherit from global
 
     Args:
         depth: One of 'light', 'medium', 'extended'
 
     Returns:
-        CitationVerificationConfig (per-type if defined, else global)
+        Merged CitationVerificationConfig
     """
     config = get_app_config()
+    global_config = config.citation_verification
     type_config = get_research_type_config(depth)
 
-    # If per-type config exists, use it
-    if type_config.citation_verification is not None:
-        return type_config.citation_verification
+    # If no per-type overrides, return global config
+    if type_config.citation_verification is None:
+        return global_config
 
-    # Otherwise use global config
-    return config.citation_verification
+    per_type = type_config.citation_verification
+
+    # Deep merge: global as base, per-type overrides on top
+    # model_dump() with exclude_unset=True would be ideal but Pydantic
+    # doesn't track which fields were explicitly set in YAML vs defaulted
+    #
+    # Solution: Start with global, then update with per-type values that
+    # differ from Pydantic defaults (meaning they were explicitly set)
+    global_dict = global_config.model_dump()
+    per_type_dict = per_type.model_dump()
+
+    # Get default config to compare against
+    defaults = CitationVerificationConfig()
+    defaults_dict = defaults.model_dump()
+
+    # Merge: start with global, override with non-default per-type values
+    merged = global_dict.copy()
+    for key, per_type_value in per_type_dict.items():
+        default_value = defaults_dict.get(key)
+        # If per-type value differs from default, it was explicitly set
+        if per_type_value != default_value:
+            merged[key] = per_type_value
+
+    return CitationVerificationConfig(**merged)

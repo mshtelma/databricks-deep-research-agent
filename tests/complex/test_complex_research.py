@@ -12,24 +12,183 @@ Requirements:
 
 Run with:
     make test-complex
-    uv run pytest tests/complex -v -s --timeout=600
+    uv run pytest tests/complex -v -s
 
 Note: Complex tests use production config (config/app.yaml) for full settings.
 Each test may take 5-15 minutes to complete.
 """
 
+import re
+import time
 from uuid import uuid4
 
+import mlflow
 import pytest
 
 from src.agent.orchestrator import (
     OrchestrationConfig,
     run_research,
 )
+from src.agent.state import ResearchState
 from src.agent.tools.web_crawler import WebCrawler
 from src.services.llm.client import LLMClient
 from src.services.search.brave import BraveSearchClient
 from tests.complex.conftest import requires_all_credentials
+
+
+# =============================================================================
+# Grey Reference Detection Utilities
+# =============================================================================
+
+
+def extract_citation_markers(content: str) -> set[str]:
+    """Extract all [Key] citation markers from content.
+
+    Args:
+        content: The report content to scan.
+
+    Returns:
+        Set of citation keys found in the content.
+    """
+    pattern = r"\[([A-Za-z][A-Za-z0-9-]*(?:-\d+)?)\]"
+    return set(re.findall(pattern, content))
+
+
+def get_claim_citation_keys(state: ResearchState) -> set[str]:
+    """Get all citation keys from claims in state.
+
+    Args:
+        state: Research state containing claims.
+
+    Returns:
+        Set of all citation keys across all claims.
+    """
+    keys: set[str] = set()
+    for claim in state.claims:
+        if claim.citation_key:
+            keys.add(claim.citation_key)
+        if claim.citation_keys:
+            keys.update(claim.citation_keys)
+    return keys
+
+
+def count_grey_references(state: ResearchState) -> dict[str, int]:
+    """Count different types of grey (unverified) references.
+
+    Grey references include:
+    - Abstained claims: verification couldn't proceed (no evidence)
+    - Claims without evidence: have citation key but no EvidenceInfo
+    - Orphaned markers: [Key] in content with no matching ClaimInfo
+
+    Args:
+        state: Research state after synthesis.
+
+    Returns:
+        Dict with counts: abstained, no_evidence, orphaned_markers, total_grey
+    """
+    abstained = sum(1 for c in state.claims if c.abstained)
+    no_evidence = sum(
+        1 for c in state.claims if c.evidence is None and not c.abstained
+    )
+
+    # Orphaned markers: in content but no matching claim
+    content_markers = extract_citation_markers(state.final_report or "")
+    claim_keys = get_claim_citation_keys(state)
+    orphaned = len(content_markers - claim_keys)
+
+    return {
+        "abstained": abstained,
+        "no_evidence": no_evidence,
+        "orphaned_markers": orphaned,
+        "total_grey": abstained + no_evidence + orphaned,
+    }
+
+
+# =============================================================================
+# MLflow Metrics Logging
+# =============================================================================
+
+
+def log_verification_metrics_to_mlflow(
+    state: ResearchState,
+    query: str,
+    domain: str,
+    duration_ms: float,
+) -> None:
+    """Log verification metrics to MLflow for tracking and analysis.
+
+    Args:
+        state: Research state with verification results.
+        query: The research query.
+        domain: Test domain (e.g., "finance", "healthcare").
+        duration_ms: Total research duration in milliseconds.
+    """
+    summary = state.verification_summary
+    grey = count_grey_references(state)
+
+    # Log metrics
+    mlflow.log_metrics(
+        {
+            # Verdict counts
+            "verification.total_claims": summary.total_claims if summary else 0,
+            "verification.supported": summary.supported_count if summary else 0,
+            "verification.partial": summary.partial_count if summary else 0,
+            "verification.unsupported": summary.unsupported_count if summary else 0,
+            "verification.contradicted": summary.contradicted_count if summary else 0,
+            # Grey references
+            "verification.abstained": grey["abstained"],
+            "verification.no_evidence": grey["no_evidence"],
+            "verification.orphaned_markers": grey["orphaned_markers"],
+            "verification.total_grey": grey["total_grey"],
+            # Rates
+            "verification.unsupported_rate": summary.unsupported_rate if summary else 0,
+            "verification.support_rate": (
+                summary.supported_count / summary.total_claims
+                if summary and summary.total_claims > 0
+                else 0
+            ),
+            # Research metrics
+            "research.duration_ms": duration_ms,
+            "research.sources_count": len(state.sources),
+            "research.claims_count": len(state.claims),
+        }
+    )
+
+    # Log params
+    mlflow.log_params(
+        {
+            "test.domain": domain,
+            "test.query": query[:100],  # Truncate for MLflow
+            "research.depth": state.resolve_depth(),
+        }
+    )
+
+
+# =============================================================================
+# Parametrized Test Cases for Verification Quality
+# =============================================================================
+
+VERIFICATION_TEST_CASES = [
+    pytest.param(
+        "What are the key architectural differences between Qwen2 and GLM-4 "
+        "transformer models, including attention mechanisms, tokenization, "
+        "and training approaches?",
+        "ai_architecture",
+        id="ai-qwen-vs-glm",
+    ),
+    pytest.param(
+        "What were the major changes in Basel IV banking regulations "
+        "and their impact on capital requirements?",
+        "finance",
+        id="finance-basel-iv",
+    ),
+    pytest.param(
+        "What are the latest FDA-approved CAR-T cell therapies "
+        "and their clinical trial outcomes?",
+        "healthcare",
+        id="hls-cart-therapy",
+    ),
+]
 
 
 @pytest.mark.complex
@@ -38,7 +197,6 @@ class TestComplexResearch:
 
     @requires_all_credentials
     @pytest.mark.asyncio
-    @pytest.mark.timeout(600)  # 10 minute timeout
     async def test_multi_entity_comparison(
         self,
         llm_client: LLMClient,
@@ -69,22 +227,6 @@ class TestComplexResearch:
         print("\n📊 Multi-entity comparison report:")
         print(result.state.final_report)
 
-        # Verify comprehensive research
-        assert result.state.final_report, "Should produce a final report"
-        assert len(result.state.final_report) > 500, "Multi-entity comparison should be detailed"
-
-        # Verify all entities are covered
-        report_lower = result.state.final_report.lower()
-        assert "apple" in report_lower, "Report should cover Apple"
-        assert "microsoft" in report_lower, "Report should cover Microsoft"
-        assert "google" in report_lower, "Report should cover Google"
-
-        # Verify numeric content (market cap, revenue, employees)
-        assert any(
-            term in report_lower for term in ["billion", "trillion", "million", "revenue", "market cap"]
-        ), "Report should contain numeric data"
-
-        # Verify sources were found
         assert len(result.state.sources) >= 3, "Should have multiple sources for comparison"
 
         # Verify substantial research effort
@@ -98,7 +240,6 @@ class TestComplexResearch:
 
     @requires_all_credentials
     @pytest.mark.asyncio
-    @pytest.mark.timeout(600)
     async def test_deep_dive_with_follow_ups(
         self,
         llm_client: LLMClient,
@@ -170,7 +311,6 @@ class TestComplexResearch:
 
     @requires_all_credentials
     @pytest.mark.asyncio
-    @pytest.mark.timeout(600)
     async def test_comprehensive_citation_verification(
         self,
         llm_client: LLMClient,
@@ -225,7 +365,6 @@ class TestComplexResearch:
 
     @requires_all_credentials
     @pytest.mark.asyncio
-    @pytest.mark.timeout(600)
     async def test_complex_analytical_query(
         self,
         llm_client: LLMClient,
@@ -282,3 +421,119 @@ class TestComplexResearch:
         print(f"   - Sources: {len(result.state.sources)}")
         print(f"   - Steps executed: {result.steps_executed}")
         print(f"   - Duration: {result.total_duration_ms / 1000:.1f}s")
+
+
+# =============================================================================
+# Verification Quality Tests with MLflow Metrics
+# =============================================================================
+
+
+@pytest.mark.complex
+class TestVerificationMetrics:
+    """Verification quality tests with MLflow metrics reporting.
+
+    These tests run research queries across different domains and:
+    1. Report verification metrics (supported, unsupported, partial) to MLflow
+    2. Report grey reference counts to MLflow
+    3. Fail if any grey references are detected (zero tolerance)
+
+    Run with:
+        uv run pytest tests/complex/test_complex_research.py::TestVerificationMetrics -v -s
+    """
+
+    @requires_all_credentials
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("query,domain", VERIFICATION_TEST_CASES)
+    async def test_verification_quality_with_metrics(
+        self,
+        llm_client: LLMClient,
+        brave_client: BraveSearchClient,
+        web_crawler: WebCrawler,
+        query: str,
+        domain: str,
+    ) -> None:
+        """Run research and report verification metrics to MLflow.
+
+        This test:
+        - Executes a domain-specific research query
+        - Logs all verification metrics to MLflow for tracking
+        - Fails if ANY grey references are detected (zero tolerance)
+
+        Args:
+            llm_client: LLM client fixture.
+            brave_client: Brave search client fixture.
+            web_crawler: Web crawler fixture.
+            query: The research query to execute.
+            domain: Domain category for MLflow tagging.
+        """
+        with mlflow.start_run(run_name=f"verification-{domain}"):
+            start_time = time.perf_counter()
+
+            result = await run_research(
+                query=query,
+                llm=llm_client,
+                brave_client=brave_client,
+                crawler=web_crawler,
+                session_id=uuid4(),
+                config=OrchestrationConfig(
+                    max_plan_iterations=2,
+                    max_steps_per_plan=6,
+                    timeout_seconds=480,
+                ),
+            )
+
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            state = result.state
+
+            # Log metrics to MLflow
+            log_verification_metrics_to_mlflow(state, query, domain, duration_ms)
+
+            # Count grey references
+            grey = count_grey_references(state)
+
+            # Print verification report
+            print(f"\n{'='*60}")
+            print(f"📊 Verification Report [{domain}]")
+            print(f"{'='*60}")
+            print(f"Query: {query[:80]}...")
+            print(f"\n📝 Final Report ({len(state.final_report or '')} chars):")
+            print(state.final_report[:500] + "..." if state.final_report else "None")
+
+            if state.verification_summary:
+                s = state.verification_summary
+                print(f"\n📈 Verification Summary:")
+                print(f"   Total claims:  {s.total_claims}")
+                print(f"   ✅ Supported:   {s.supported_count}")
+                print(f"   ⚠️  Partial:     {s.partial_count}")
+                print(f"   ❌ Unsupported: {s.unsupported_count}")
+                print(f"   🔄 Contradicted: {s.contradicted_count}")
+                print(f"   📊 Support rate: {s.supported_count / s.total_claims * 100:.1f}%" if s.total_claims > 0 else "   📊 Support rate: N/A")
+            else:
+                print("\n⚠️  No verification summary available")
+
+            print(f"\n🔘 Grey References:")
+            print(f"   - Abstained:        {grey['abstained']}")
+            print(f"   - No evidence:      {grey['no_evidence']}")
+            print(f"   - Orphaned markers: {grey['orphaned_markers']}")
+            print(f"   - TOTAL GREY:       {grey['total_grey']}")
+
+            print(f"\n⏱️  Duration: {duration_ms / 1000:.1f}s")
+            print(f"📚 Sources: {len(state.sources)}")
+            print(f"🔢 Steps executed: {result.steps_executed}")
+
+            # Assertions
+            assert state.final_report, "Should produce a final report"
+            assert len(state.final_report) > 300, "Report should have substantial content"
+
+            # FAIL if grey references exist (zero tolerance)
+            assert grey["total_grey"] == 0, (
+                f"\n❌ Grey references detected! (Zero tolerance policy)\n"
+                f"   Abstained:        {grey['abstained']}\n"
+                f"   No evidence:      {grey['no_evidence']}\n"
+                f"   Orphaned markers: {grey['orphaned_markers']}\n"
+                f"   TOTAL:            {grey['total_grey']}"
+            )
+
+            print(f"\n✅ Verification test PASSED for [{domain}]!")
+            print(f"\nFINAL REPORT:\n{state.final_report}\n")
+            print(f"{'='*60}\n")

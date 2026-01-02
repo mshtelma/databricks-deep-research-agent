@@ -23,11 +23,77 @@ Run with:
 
 import os
 
+import mlflow
 import pytest
 
 from src.agent.tools.web_crawler import WebCrawler
 from src.services.llm.client import LLMClient
 from src.services.search.brave import BraveSearchClient
+
+
+# ---------------------------------------------------------------------------
+# MLflow Configuration
+# ---------------------------------------------------------------------------
+
+# Default experiment path for complex tests (matches app.yaml deployment config)
+DEFAULT_MLFLOW_EXPERIMENT = "/Shared/deep-research-agent"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def setup_mlflow_tracking() -> None:
+    """Configure MLflow to log to remote Databricks workspace.
+
+    This fixture sets up MLflow tracking BEFORE any tests run:
+    1. Sets tracking URI to 'databricks' (uses DATABRICKS_HOST + auth)
+    2. Sets experiment from MLFLOW_EXPERIMENT_NAME env var or default
+
+    Required environment:
+    - DATABRICKS_HOST or DATABRICKS_CONFIG_PROFILE for authentication
+    - Optional: MLFLOW_EXPERIMENT_NAME to override default experiment
+
+    If Databricks credentials are not available, falls back to local tracking.
+    """
+    # Get experiment name from env or use default
+    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", DEFAULT_MLFLOW_EXPERIMENT)
+
+    # Check if we have Databricks credentials
+    has_databricks = bool(
+        os.getenv("DATABRICKS_TOKEN") or os.getenv("DATABRICKS_CONFIG_PROFILE")
+    )
+
+    if has_databricks:
+        # Set tracking URI to Databricks
+        mlflow.set_tracking_uri("databricks")
+        print(f"\n📊 MLflow: Tracking to Databricks workspace")
+    else:
+        # Fall back to local tracking if no credentials
+        print("\n⚠️  MLflow: No Databricks credentials, using local tracking")
+
+    # Set or create the experiment
+    try:
+        mlflow.set_experiment(experiment_name)
+        print(f"📊 MLflow: Experiment = {experiment_name}")
+    except Exception as e:
+        # If experiment creation fails (e.g., permissions), log warning
+        print(f"⚠️  MLflow: Could not set experiment '{experiment_name}': {e}")
+
+    yield
+
+    # No cleanup needed - MLflow handles connection lifecycle
+
+
+@pytest.fixture(autouse=True)
+def cleanup_mlflow_run() -> None:
+    """Ensure MLflow runs are properly ended after each test.
+
+    This fixture prevents stale runs from leaking between tests.
+    Some tests intentionally create MLflow runs to wrap research calls,
+    and this ensures they're properly closed even if a test fails.
+    """
+    yield
+    # End any active runs after each test to prevent leakage
+    while mlflow.active_run():
+        mlflow.end_run()
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ minimal iterations and smaller token limits for faster execution.
 import os
 from collections.abc import AsyncGenerator
 
+import mlflow
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,6 +77,18 @@ def use_test_config() -> None:
     if "APP_CONFIG_PATH" in os.environ:
         del os.environ["APP_CONFIG_PATH"]
     clear_config_cache()
+
+
+@pytest.fixture(autouse=True)
+def cleanup_mlflow_run() -> None:
+    """Ensure MLflow runs are properly ended after each test.
+
+    This fixture prevents stale runs from leaking between tests.
+    """
+    yield
+    # End any active runs after each test to prevent leakage
+    while mlflow.active_run():
+        mlflow.end_run()
 
 
 # ---------------------------------------------------------------------------

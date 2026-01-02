@@ -171,6 +171,35 @@ truncation:
 citation_verification:
   enabled: true
 
+  # Synthesis mode: controls the overall synthesis approach
+  # - "interleaved": Current approach - evidence in context, [N] markers
+  # - "react": ReAct-based - LLM uses tools to retrieve evidence before claims
+  synthesis_mode: react
+
+  # Generation mode for research reports (only applies when synthesis_mode=interleaved)
+  # - "classical": Free-form prose with inline [Title](url) links
+  #                Best text quality, uses existing synthesizer
+  #                Skips verification stages 3-6 (no claim markers to verify)
+  # - "natural": Light-touch [N] citations, balanced quality + verification
+  #              Good text quality while maintaining verifiable citations
+  #              Runs full verification pipeline (stages 3-6)
+  # - "strict": Heavy [N] constraints, maximum citations (DEFAULT)
+  #             Current behavior, every claim must cite evidence
+  #             Runs full verification pipeline (stages 3-6)
+  generation_mode: natural
+
+  # ReAct synthesis configuration (only applies when synthesis_mode=react)
+  react_synthesis:
+    max_tool_calls: 40              # Total tool call budget
+    tool_budget_per_section: 10     # Budget per research step section
+    retrieval_window_size: 3        # Sliding window for grounding inference
+    grounding_threshold: 0.6        # Minimum similarity for grounded claim
+    embedding_high_threshold: 0.7   # Auto-grounded above this
+    embedding_low_threshold: 0.4    # Auto-ungrounded below this
+    use_llm_judge_for_borderline: true  # Use LLM for 0.4-0.7 range
+    enable_post_processing: true    # Polish pass for coherence
+    use_sectioned_synthesis: false  # Disabled to use XML tag parsing in run_react_synthesis()
+
   enable_evidence_preselection: true
   enable_interleaved_generation: true
   enable_confidence_classification: true

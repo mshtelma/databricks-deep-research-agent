@@ -92,10 +92,18 @@ class LLMCredentialProvider:
 
         Returns:
             Fresh LLM credential.
+
+        Raises:
+            RuntimeError: If token generation returns empty token.
         """
         client = self._get_workspace_client()
         client.config.authenticate()
         token = client.config.oauth_token().access_token
+
+        # Validate token is not empty
+        if not token:
+            logger.error("LLM_CREDENTIAL_EMPTY", profile=self._profile)
+            raise RuntimeError("OAuth token generation returned empty token")
 
         # Calculate expiration (OAuth tokens are typically 1 hour)
         expires_at = datetime.now(UTC) + TOKEN_LIFETIME

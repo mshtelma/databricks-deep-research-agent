@@ -9,10 +9,11 @@ from datetime import UTC, datetime
 from typing import Any, cast
 
 import mlflow
+import openai
 from mlflow.entities import SpanType
 from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletionChunk
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError as PydanticValidationError
 
 from src.core.config import get_settings
 from src.core.exceptions import LLMError, RateLimitError
@@ -40,6 +41,45 @@ from src.services.llm.types import (
 logger = get_logger(__name__)
 
 
+def _normalize_content(raw_content: str | list[Any] | None) -> str:
+    """Normalize LLM response content to a string.
+
+    Some models (e.g., Databricks Gemini) return content as a list of
+    content parts instead of a plain string. This function handles both
+    formats uniformly.
+
+    Args:
+        raw_content: The raw content from message.content - can be:
+            - str: Plain text response
+            - list: List of content parts [{"type": "text", "text": "..."}]
+            - None: No content
+
+    Returns:
+        Normalized string content.
+    """
+    if raw_content is None:
+        return ""
+    if isinstance(raw_content, str):
+        return raw_content
+    if isinstance(raw_content, list):
+        # Handle list of content parts (Gemini-style response)
+        parts: list[str] = []
+        for part in raw_content:
+            if isinstance(part, dict):
+                # ContentPart format: {"type": "text", "text": "..."}
+                text = part.get("text", "")
+                if text:
+                    parts.append(text)
+            elif isinstance(part, str):
+                parts.append(part)
+            else:
+                # Fallback: convert to string
+                parts.append(str(part))
+        return " ".join(parts)
+    # Fallback for unexpected types
+    return str(raw_content)
+
+
 class LLMClient:
     """Unified LLM client with model routing and health tracking."""
 
@@ -56,6 +96,10 @@ class LLMClient:
         # Auth mode tracking
         self._credential_provider: LLMCredentialProvider | None = None
         self._current_token: str | None = None
+
+        # Auth retry tracking (prevents infinite loops on persistent auth failures)
+        self._auth_retry_count: int = 0
+        self._refresh_lock = asyncio.Lock()
 
         # Get token - either from env or from WorkspaceClient (with refresh support)
         token = settings.databricks_token
@@ -101,6 +145,56 @@ class LLMClient:
                 api_key=credential.token,
                 base_url=self._base_url,
             )
+
+    async def _force_refresh_token(self) -> bool:
+        """Force refresh OAuth token after authentication error.
+
+        Uses async lock to prevent race conditions when multiple
+        concurrent requests encounter auth errors simultaneously.
+
+        Returns:
+            True if token was refreshed and retry should proceed, False otherwise.
+        """
+        if self._credential_provider is None:
+            return False
+
+        async with self._refresh_lock:
+            # Prevent infinite auth retry loop (max 2 retries)
+            self._auth_retry_count += 1
+            if self._auth_retry_count > 2:
+                logger.error("LLM_AUTH_RETRY_EXHAUSTED", max_retries=2)
+                self._auth_retry_count = 0
+                return False
+
+            # Check if another coroutine already refreshed while we waited
+            credential = self._credential_provider.get_credential()
+            if credential.token != self._current_token:
+                # Token was already refreshed by another coroutine
+                logger.info("LLM_TOKEN_ALREADY_REFRESHED", by="concurrent_request")
+                self._current_token = credential.token
+                self._client = AsyncOpenAI(
+                    api_key=credential.token,
+                    base_url=self._base_url,
+                )
+                return True
+
+            # Force refresh the token
+            logger.warning(
+                "LLM_TOKEN_FORCE_REFRESH",
+                reason="auth_error",
+                attempt=self._auth_retry_count,
+            )
+            credential = self._credential_provider.get_credential(force_refresh=True)
+            self._current_token = credential.token
+            self._client = AsyncOpenAI(
+                api_key=credential.token,
+                base_url=self._base_url,
+            )
+            return True
+
+    def _reset_auth_retry_count(self) -> None:
+        """Reset auth retry count after successful request."""
+        self._auth_retry_count = 0
 
     def _get_health(self, endpoint_id: str) -> EndpointHealth:
         """Get or create health state for endpoint."""
@@ -317,6 +411,8 @@ class LLMClient:
                 "llm.max_tokens": config.get("max_tokens"),
                 "llm.temperature": config.get("temperature"),
             })
+            # Capture input messages for tracing visibility
+            span.set_inputs({"messages": messages})
 
             start_time = time.perf_counter()
 
@@ -351,14 +447,15 @@ class LLMClient:
                     raise LLMError(
                         "Empty response from model (no choices)", endpoint=endpoint.id
                     )
-                content = response.choices[0].message.content or ""
+                # Normalize content: handles both string and list formats (Gemini)
+                content = _normalize_content(response.choices[0].message.content)
 
                 # Parse structured output if requested
                 structured = None
                 if structured_output:
                     try:
                         structured = structured_output.model_validate_json(content)
-                    except (json.JSONDecodeError, ValueError) as e:
+                    except (json.JSONDecodeError, ValueError, PydanticValidationError) as e:
                         logger.warning(
                             "Structured output parse failed, attempting repair",
                             error=str(e)[:100],
@@ -410,6 +507,12 @@ class LLMClient:
                     ),
                 )
 
+                # Capture output for tracing visibility
+                span.set_outputs({"content": content, "usage": usage})
+
+                # Reset auth retry count on successful request
+                self._reset_auth_retry_count()
+
                 return LLMResponse(
                     content=content,
                     usage=usage,
@@ -419,27 +522,58 @@ class LLMClient:
                 )
 
             except RateLimitError:
-                # Re-raise to be handled by retry wrapper
+                # Re-raise our own RateLimitError to be handled by retry wrapper
                 raise
 
-            except Exception as e:
+            except (openai.AuthenticationError, openai.PermissionDeniedError) as e:
+                # OAuth token invalid/expired - force refresh and retry once
+                # Note: Databricks returns 403 PermissionDeniedError for expired tokens
                 duration_ms = (time.perf_counter() - start_time) * 1000
-                error_str = str(e)
-                is_rate_limit = "429" in error_str or "rate" in error_str.lower()
+                health.mark_failure(rate_limited=False)
 
-                health.mark_failure(rate_limited=is_rate_limit)
-
-                # Add error info to span
                 span.set_attributes({
                     "llm.error": True,
                     "llm.error_type": type(e).__name__,
-                    "llm.is_rate_limit": is_rate_limit,
+                    "llm.auth_retry": True,
+                })
+
+                logger.warning(
+                    "LLM_AUTH_ERROR",
+                    endpoint=endpoint.endpoint_identifier,
+                    status_code=getattr(e, "status_code", None),
+                    will_retry=self._credential_provider is not None,
+                )
+
+                if await self._force_refresh_token():
+                    # Retry with refreshed token
+                    return await self._complete_impl(
+                        messages,
+                        tier,
+                        role,
+                        temperature,
+                        max_tokens,
+                        structured_output,
+                    )
+
+                raise LLMError(
+                    f"Authentication failed: {e}", endpoint=endpoint.id
+                ) from e
+
+            except openai.RateLimitError as e:
+                # Proper rate limit detection via exception type
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                health.mark_failure(rate_limited=True)
+
+                span.set_attributes({
+                    "llm.error": True,
+                    "llm.error_type": "RateLimitError",
+                    "llm.is_rate_limit": True,
                 })
 
                 # Check if we can fallback to another endpoint
                 can_fallback = False
                 fallback_endpoint_id = None
-                if is_rate_limit and role.fallback_on_429:
+                if role.fallback_on_429:
                     for fallback_endpoint in self._config.get_endpoints_for_role(
                         role.name
                     ):
@@ -451,12 +585,11 @@ class LLMClient:
                             fallback_endpoint_id = fallback_endpoint.id
                             break
 
-                # Log the error
                 log_llm_error(
                     logger,
                     endpoint=endpoint.endpoint_identifier,
                     error=e,
-                    is_rate_limit=is_rate_limit,
+                    is_rate_limit=True,
                     will_fallback=can_fallback,
                 )
 
@@ -465,9 +598,8 @@ class LLMClient:
                         logger,
                         from_endpoint=endpoint.endpoint_identifier,
                         to_endpoint=fallback_endpoint_id,
-                        reason="rate_limit" if is_rate_limit else "error",
+                        reason="rate_limit",
                     )
-                    # Recursive call - this will be caught by the retry wrapper
                     return await self._complete_impl(
                         messages,
                         tier,
@@ -477,9 +609,72 @@ class LLMClient:
                         structured_output,
                     )
 
-                # Convert 429 errors to RateLimitError for retry wrapper
+                raise RateLimitError(retry_after=30) from e
+
+            except openai.APIStatusError as e:
+                # Other API errors with status codes
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                is_rate_limit = e.status_code == 429
+                health.mark_failure(rate_limited=is_rate_limit)
+
+                span.set_attributes({
+                    "llm.error": True,
+                    "llm.error_type": type(e).__name__,
+                    "llm.status_code": e.status_code,
+                    "llm.is_rate_limit": is_rate_limit,
+                })
+
+                log_llm_error(
+                    logger,
+                    endpoint=endpoint.endpoint_identifier,
+                    error=e,
+                    is_rate_limit=is_rate_limit,
+                    will_fallback=False,
+                )
+
                 if is_rate_limit:
                     raise RateLimitError(retry_after=30) from e
+                raise LLMError(str(e), endpoint=endpoint.id) from e
+
+            except openai.APIConnectionError as e:
+                # Connection errors (network, timeout)
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                health.mark_failure(rate_limited=False)
+
+                span.set_attributes({
+                    "llm.error": True,
+                    "llm.error_type": "APIConnectionError",
+                })
+
+                log_llm_error(
+                    logger,
+                    endpoint=endpoint.endpoint_identifier,
+                    error=e,
+                    is_rate_limit=False,
+                    will_fallback=False,
+                )
+
+                raise LLMError(
+                    f"Connection error: {e}", endpoint=endpoint.id
+                ) from e
+
+            except Exception as e:
+                # Fallback for unexpected errors
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                health.mark_failure(rate_limited=False)
+
+                span.set_attributes({
+                    "llm.error": True,
+                    "llm.error_type": type(e).__name__,
+                })
+
+                log_llm_error(
+                    logger,
+                    endpoint=endpoint.endpoint_identifier,
+                    error=e,
+                    is_rate_limit=False,
+                    will_fallback=False,
+                )
 
                 raise LLMError(str(e), endpoint=endpoint.id) from e
 
@@ -572,6 +767,8 @@ class LLMClient:
         Yields:
             Content chunks as they arrive.
         """
+        from src.services.llm.tracing import traced_stream
+
         # Ensure fresh OAuth token before request
         self._ensure_fresh_client()
 
@@ -598,63 +795,148 @@ class LLMClient:
         )
         log_llm_prompt(logger, system_prompt=system_msg, user_prompt=user_msg or "")
 
-        start_time = time.perf_counter()
-        chunk_count = 0
-        total_content_len = 0
+        # Inner generator for actual streaming
+        async def _inner_stream() -> AsyncIterator[str]:
+            start_time = time.perf_counter()
+            chunk_count = 0
+            total_content_len = 0
 
-        try:
-            stream = cast(
-                AsyncStream[ChatCompletionChunk],
-                await self._client.chat.completions.create(
-                    model=endpoint.endpoint_identifier,
-                    messages=cast(Any, messages),
-                    stream=True,
-                    **config,
-                ),
-            )
+            try:
+                stream = cast(
+                    AsyncStream[ChatCompletionChunk],
+                    await self._client.chat.completions.create(
+                        model=endpoint.endpoint_identifier,
+                        messages=cast(Any, messages),
+                        stream=True,
+                        **config,
+                    ),
+                )
 
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    content = chunk.choices[0].delta.content
-                    chunk_count += 1
-                    total_content_len += len(content)
-                    yield content
+                async for chunk in stream:
+                    if chunk.choices and chunk.choices[0].delta.content:
+                        # Normalize content: handles both string and list formats (Gemini)
+                        content = _normalize_content(chunk.choices[0].delta.content)
+                        if content:
+                            chunk_count += 1
+                            total_content_len += len(content)
+                            yield content
 
-            health.mark_success()
+                health.mark_success()
+                self._reset_auth_retry_count()
 
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            logger.info(
-                "LLM_STREAM_END",
-                endpoint=endpoint.endpoint_identifier,
-                duration_ms=round(duration_ms, 1),
-                chunks=chunk_count,
-                content_len=total_content_len,
-            )
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                logger.info(
+                    "LLM_STREAM_END",
+                    endpoint=endpoint.endpoint_identifier,
+                    duration_ms=round(duration_ms, 1),
+                    chunks=chunk_count,
+                    content_len=total_content_len,
+                )
 
-        except RateLimitError:
-            # Re-raise to be handled by retry wrapper
-            raise
+            except RateLimitError:
+                # Re-raise our own RateLimitError to be handled by retry wrapper
+                raise
 
-        except Exception as e:
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            error_str = str(e)
-            is_rate_limit = "429" in error_str or "rate" in error_str.lower()
+            except (openai.AuthenticationError, openai.PermissionDeniedError) as e:
+                # OAuth token invalid/expired - force refresh and retry
+                # Note: Databricks returns 403 PermissionDeniedError for expired tokens
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                health.mark_failure(rate_limited=False)
 
-            health.mark_failure(rate_limited=is_rate_limit)
+                logger.warning(
+                    "LLM_STREAM_AUTH_ERROR",
+                    endpoint=endpoint.endpoint_identifier,
+                    status_code=getattr(e, "status_code", None),
+                    will_retry=self._credential_provider is not None,
+                )
 
-            log_llm_error(
-                logger,
-                endpoint=endpoint.endpoint_identifier,
-                error=e,
-                is_rate_limit=is_rate_limit,
-                will_fallback=False,
-            )
+                if await self._force_refresh_token():
+                    # Retry by re-yielding from a new stream
+                    async for retry_chunk in self._stream_impl(
+                        messages, tier, role, temperature, max_tokens
+                    ):
+                        yield retry_chunk
+                    return
 
-            # Convert 429 errors to RateLimitError for retry wrapper
-            if is_rate_limit:
+                raise LLMError(
+                    f"Authentication failed: {e}", endpoint=endpoint.id
+                ) from e
+
+            except openai.RateLimitError as e:
+                # Proper rate limit detection via exception type
+                health.mark_failure(rate_limited=True)
+
+                log_llm_error(
+                    logger,
+                    endpoint=endpoint.endpoint_identifier,
+                    error=e,
+                    is_rate_limit=True,
+                    will_fallback=False,
+                )
+
                 raise RateLimitError(retry_after=30) from e
 
-            raise LLMError(str(e), endpoint=endpoint.id) from e
+            except openai.APIStatusError as e:
+                # Other API errors with status codes
+                is_rate_limit = e.status_code == 429
+                health.mark_failure(rate_limited=is_rate_limit)
+
+                log_llm_error(
+                    logger,
+                    endpoint=endpoint.endpoint_identifier,
+                    error=e,
+                    is_rate_limit=is_rate_limit,
+                    will_fallback=False,
+                )
+
+                if is_rate_limit:
+                    raise RateLimitError(retry_after=30) from e
+                raise LLMError(str(e), endpoint=endpoint.id) from e
+
+            except openai.APIConnectionError as e:
+                # Connection errors (network, timeout)
+                health.mark_failure(rate_limited=False)
+
+                log_llm_error(
+                    logger,
+                    endpoint=endpoint.endpoint_identifier,
+                    error=e,
+                    is_rate_limit=False,
+                    will_fallback=False,
+                )
+
+                raise LLMError(
+                    f"Connection error: {e}", endpoint=endpoint.id
+                ) from e
+
+            except Exception as e:
+                # Fallback for unexpected errors
+                health.mark_failure(rate_limited=False)
+
+                log_llm_error(
+                    logger,
+                    endpoint=endpoint.endpoint_identifier,
+                    error=e,
+                    is_rate_limit=False,
+                    will_fallback=False,
+                )
+
+                raise LLMError(str(e), endpoint=endpoint.id) from e
+
+        # Wrap with MLflow tracing
+        traced = traced_stream(
+            inner=_inner_stream(),
+            tier=tier,
+            endpoint=endpoint.endpoint_identifier,
+            message_count=len(messages),
+            max_tokens=config.get("max_tokens"),
+            temperature=config.get("temperature"),
+            messages=messages,
+        )
+
+        # Yield from traced iterator
+        async for chunk in traced:
+            yield chunk
 
     async def stream_with_tools(
         self,
@@ -756,6 +1038,8 @@ class LLMClient:
         Yields:
             StreamWithToolsChunk with content and/or tool calls.
         """
+        from src.services.llm.tracing import traced_stream_with_tools
+
         # Ensure fresh OAuth token before request
         self._ensure_fresh_client()
 
@@ -774,133 +1058,223 @@ class LLMClient:
             est_tokens=estimated_tokens,
         )
 
-        start_time = time.perf_counter()
+        # Inner generator for actual streaming with tools
+        async def _inner_stream() -> AsyncIterator[StreamWithToolsChunk]:
+            start_time = time.perf_counter()
 
-        # Track tool call accumulation across chunks
-        tool_call_chunks: dict[int, ToolCallChunk] = {}
+            # Track tool call accumulation across chunks
+            tool_call_chunks: dict[int, ToolCallChunk] = {}
 
-        try:
-            stream = cast(
-                AsyncStream[ChatCompletionChunk],
-                await self._client.chat.completions.create(
-                    model=endpoint.endpoint_identifier,
-                    messages=cast(Any, messages),
-                    tools=cast(Any, tools if tools else None),
-                    stream=True,
-                    **config,
-                ),
-            )
+            try:
+                stream = cast(
+                    AsyncStream[ChatCompletionChunk],
+                    await self._client.chat.completions.create(
+                        model=endpoint.endpoint_identifier,
+                        messages=cast(Any, messages),
+                        tools=cast(Any, tools if tools else None),
+                        stream=True,
+                        **config,
+                    ),
+                )
 
-            accumulated_content = ""
+                accumulated_content = ""
 
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
+                async for chunk in stream:
+                    if not chunk.choices:
+                        continue
 
-                delta = chunk.choices[0].delta
-                finish_reason = chunk.choices[0].finish_reason
+                    delta = chunk.choices[0].delta
+                    finish_reason = chunk.choices[0].finish_reason
 
-                # Handle content
-                content = ""
-                if delta.content:
-                    content = delta.content
-                    accumulated_content += content
+                    # Handle content
+                    # Normalize content: handles both string and list formats (Gemini)
+                    content = _normalize_content(delta.content) if delta.content else ""
+                    if content:
+                        accumulated_content += content
 
-                # Handle tool calls (accumulated across chunks)
-                if delta.tool_calls:
-                    for tc in delta.tool_calls:
-                        idx = tc.index
+                    # Handle tool calls (accumulated across chunks)
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index
 
-                        # Initialize or update tool call accumulator
-                        if idx not in tool_call_chunks:
-                            tool_call_chunks[idx] = ToolCallChunk(index=idx)
+                            # Initialize or update tool call accumulator
+                            if idx not in tool_call_chunks:
+                                tool_call_chunks[idx] = ToolCallChunk(index=idx)
 
-                        tcc = tool_call_chunks[idx]
+                            tcc = tool_call_chunks[idx]
 
-                        if tc.id:
-                            tcc.id = tc.id
-                        if tc.function and tc.function.name:
-                            tcc.name = tc.function.name
-                        if tc.function and tc.function.arguments:
-                            tcc.arguments_json += tc.function.arguments
+                            if tc.id:
+                                tcc.id = tc.id
+                            if tc.function and tc.function.name:
+                                tcc.name = tc.function.name
+                            if tc.function and tc.function.arguments:
+                                tcc.arguments_json += tc.function.arguments
 
-                # Yield content chunks as they come
-                if content:
-                    yield StreamWithToolsChunk(content=content)
+                    # Yield content chunks as they come
+                    if content:
+                        yield StreamWithToolsChunk(content=content)
 
-                # Check if stream is done
-                if finish_reason:
-                    # Finalize tool calls
-                    completed_tool_calls = []
-                    for tcc in tool_call_chunks.values():
-                        if tcc.id and tcc.name:
-                            try:
-                                args = json.loads(tcc.arguments_json) if tcc.arguments_json else {}
-                            except json.JSONDecodeError:
-                                # Try to repair JSON
-                                from json_repair import repair_json
+                    # Check if stream is done
+                    if finish_reason:
+                        # Finalize tool calls
+                        completed_tool_calls = []
+                        for tcc in tool_call_chunks.values():
+                            if tcc.id and tcc.name:
                                 try:
-                                    repaired = repair_json(tcc.arguments_json)
-                                    args = json.loads(repaired)
-                                except Exception:
-                                    args = {}
-                                    logger.warning(
-                                        "TOOL_CALL_ARGS_PARSE_FAILED",
-                                        tool=tcc.name,
-                                        raw_args=tcc.arguments_json[:100],
+                                    args = (
+                                        json.loads(tcc.arguments_json)
+                                        if tcc.arguments_json
+                                        else {}
                                     )
+                                except json.JSONDecodeError:
+                                    # Try to repair JSON
+                                    from json_repair import repair_json
 
-                            completed_tool_calls.append(
-                                ToolCall(
-                                    id=tcc.id,
-                                    name=tcc.name,
-                                    arguments=args,
+                                    try:
+                                        repaired = repair_json(tcc.arguments_json)
+                                        args = json.loads(repaired)
+                                    except Exception:
+                                        args = {}
+                                        logger.warning(
+                                            "TOOL_CALL_ARGS_PARSE_FAILED",
+                                            tool=tcc.name,
+                                            raw_args=tcc.arguments_json[:100],
+                                        )
+
+                                completed_tool_calls.append(
+                                    ToolCall(
+                                        id=tcc.id,
+                                        name=tcc.name,
+                                        arguments=args,
+                                    )
                                 )
-                            )
 
-                    # Yield final chunk with tool calls (if any)
-                    yield StreamWithToolsChunk(
-                        content="",
-                        tool_calls=completed_tool_calls if completed_tool_calls else None,
-                        is_done=True,
-                    )
+                        # Yield final chunk with tool calls (if any)
+                        yield StreamWithToolsChunk(
+                            content="",
+                            tool_calls=completed_tool_calls if completed_tool_calls else None,
+                            is_done=True,
+                        )
 
-                    health.mark_success()
+                        health.mark_success()
+                        self._reset_auth_retry_count()
 
-                    duration_ms = (time.perf_counter() - start_time) * 1000
-                    logger.info(
-                        "LLM_STREAM_WITH_TOOLS_END",
-                        endpoint=endpoint.endpoint_identifier,
-                        duration_ms=round(duration_ms, 1),
-                        content_len=len(accumulated_content),
-                        tool_calls=len(completed_tool_calls),
-                        finish_reason=finish_reason,
-                    )
+                        duration_ms = (time.perf_counter() - start_time) * 1000
+                        logger.info(
+                            "LLM_STREAM_WITH_TOOLS_END",
+                            endpoint=endpoint.endpoint_identifier,
+                            duration_ms=round(duration_ms, 1),
+                            content_len=len(accumulated_content),
+                            tool_calls=len(completed_tool_calls),
+                            finish_reason=finish_reason,
+                        )
 
-                    return  # Stream is done
+                        return  # Stream is done
 
-        except RateLimitError:
-            raise
+            except RateLimitError:
+                # Re-raise our own RateLimitError to be handled by retry wrapper
+                raise
 
-        except Exception as e:
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            error_str = str(e)
-            is_rate_limit = "429" in error_str or "rate" in error_str.lower()
+            except (openai.AuthenticationError, openai.PermissionDeniedError) as e:
+                # OAuth token invalid/expired - force refresh and retry
+                # Note: Databricks returns 403 PermissionDeniedError for expired tokens
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                health.mark_failure(rate_limited=False)
 
-            health.mark_failure(rate_limited=is_rate_limit)
+                logger.warning(
+                    "LLM_STREAM_WITH_TOOLS_AUTH_ERROR",
+                    endpoint=endpoint.endpoint_identifier,
+                    status_code=getattr(e, "status_code", None),
+                    will_retry=self._credential_provider is not None,
+                )
 
-            log_llm_error(
-                logger,
-                endpoint=endpoint.endpoint_identifier,
-                error=e,
-                is_rate_limit=is_rate_limit,
-                will_fallback=False,
-            )
+                if await self._force_refresh_token():
+                    # Retry by re-yielding from a new stream
+                    async for retry_chunk in self._stream_with_tools_impl(
+                        messages, tools, tier, role, temperature, max_tokens
+                    ):
+                        yield retry_chunk
+                    return
 
-            if is_rate_limit:
+                raise LLMError(
+                    f"Authentication failed: {e}", endpoint=endpoint.id
+                ) from e
+
+            except openai.RateLimitError as e:
+                # Proper rate limit detection via exception type
+                health.mark_failure(rate_limited=True)
+
+                log_llm_error(
+                    logger,
+                    endpoint=endpoint.endpoint_identifier,
+                    error=e,
+                    is_rate_limit=True,
+                    will_fallback=False,
+                )
+
                 raise RateLimitError(retry_after=30) from e
 
-            raise LLMError(str(e), endpoint=endpoint.id) from e
+            except openai.APIStatusError as e:
+                # Other API errors with status codes
+                is_rate_limit = e.status_code == 429
+                health.mark_failure(rate_limited=is_rate_limit)
+
+                log_llm_error(
+                    logger,
+                    endpoint=endpoint.endpoint_identifier,
+                    error=e,
+                    is_rate_limit=is_rate_limit,
+                    will_fallback=False,
+                )
+
+                if is_rate_limit:
+                    raise RateLimitError(retry_after=30) from e
+                raise LLMError(str(e), endpoint=endpoint.id) from e
+
+            except openai.APIConnectionError as e:
+                # Connection errors (network, timeout)
+                health.mark_failure(rate_limited=False)
+
+                log_llm_error(
+                    logger,
+                    endpoint=endpoint.endpoint_identifier,
+                    error=e,
+                    is_rate_limit=False,
+                    will_fallback=False,
+                )
+
+                raise LLMError(
+                    f"Connection error: {e}", endpoint=endpoint.id
+                ) from e
+
+            except Exception as e:
+                # Fallback for unexpected errors
+                health.mark_failure(rate_limited=False)
+
+                log_llm_error(
+                    logger,
+                    endpoint=endpoint.endpoint_identifier,
+                    error=e,
+                    is_rate_limit=False,
+                    will_fallback=False,
+                )
+
+                raise LLMError(str(e), endpoint=endpoint.id) from e
+
+        # Wrap with MLflow tracing
+        traced = traced_stream_with_tools(
+            inner=_inner_stream(),
+            tier=tier,
+            endpoint=endpoint.endpoint_identifier,
+            message_count=len(messages),
+            max_tokens=config.get("max_tokens"),
+            temperature=config.get("temperature"),
+            messages=messages,
+        )
+
+        # Yield from traced iterator
+        async for chunk in traced:
+            yield chunk
 
     async def close(self) -> None:
         """Close the underlying HTTP client.

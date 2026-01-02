@@ -80,7 +80,7 @@ interface UseStreamingQueryReturn {
   agentStatus: AgentStatus;
   currentPlan: Plan | null;
   currentStepIndex: number;
-  sendQuery: (query: string) => void;
+  sendQuery: (query: string, researchDepth?: string) => void;
   stopStream: () => void;
   error: Error | null;
   /** The completed messages from this session (for tracking conversation) */
@@ -199,7 +199,7 @@ export function useStreamingQuery(
   }, []);
 
   const sendQuery = useCallback(
-    (query: string) => {
+    (query: string, researchDepth?: string) => {
       if (!chatId) {
         console.error('No chat ID provided');
         return;
@@ -231,9 +231,11 @@ export function useStreamingQuery(
       setPersistenceResult(null);
       setPersistenceFailed(false);
 
-      // Build stream URL with query parameter
-      // The backend will load history from DB, or we can pass it via POST
-      const streamUrl = `${API_BASE_URL}/chats/${chatId}/stream?query=${encodeURIComponent(query)}`;
+      // Build stream URL with query and research_depth parameters
+      let streamUrl = `${API_BASE_URL}/chats/${chatId}/stream?query=${encodeURIComponent(query)}`;
+      if (researchDepth && researchDepth !== 'auto') {
+        streamUrl += `&research_depth=${encodeURIComponent(researchDepth)}`;
+      }
 
       const eventSource = new EventSource(streamUrl);
       eventSourceRef.current = eventSource;

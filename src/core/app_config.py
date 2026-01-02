@@ -270,6 +270,65 @@ class GenerationMode(str, Enum):
     STRICT = "strict"
 
 
+class SynthesisMode(str, Enum):
+    """Synthesis approach for report generation.
+
+    - INTERLEAVED: Current approach - dump evidence into context, LLM generates
+                   with [N] markers, claims parsed post-hoc.
+    - REACT: ReAct-based synthesis - LLM uses tools to retrieve evidence
+             before each factual claim. Enforces grounded generation.
+    """
+
+    INTERLEAVED = "interleaved"
+    REACT = "react"
+
+
+class ReactSynthesisConfig(BaseModel):
+    """Configuration for ReAct-based synthesis mode."""
+
+    # Tool budget
+    max_tool_calls: int = Field(default=40, ge=5, le=150)
+    tool_budget_per_section: int = Field(default=10, ge=3, le=50)
+
+    # Grounding settings
+    retrieval_window_size: int = Field(
+        default=3, ge=1, le=10,
+        description="Size of sliding window for grounding inference"
+    )
+    grounding_threshold: float = Field(
+        default=0.6, ge=0.0, le=1.0,
+        description="Minimum similarity for claim to be considered grounded"
+    )
+
+    # Hybrid grounding check thresholds
+    embedding_high_threshold: float = Field(
+        default=0.7, ge=0.0, le=1.0,
+        description="Similarity above this is automatically grounded"
+    )
+    embedding_low_threshold: float = Field(
+        default=0.4, ge=0.0, le=1.0,
+        description="Similarity below this is automatically ungrounded"
+    )
+    use_llm_judge_for_borderline: bool = Field(
+        default=True,
+        description="Use LLM judge for borderline similarity cases"
+    )
+
+    # Post-processing
+    enable_post_processing: bool = Field(
+        default=True,
+        description="Run coherence polish pass after section generation"
+    )
+
+    # Section-based synthesis
+    use_sectioned_synthesis: bool = Field(
+        default=True,
+        description="Process research steps as separate sections"
+    )
+
+    model_config = {"frozen": True}
+
+
 class EvidencePreselectionConfig(BaseModel):
     """Configuration for Stage 1: Evidence Pre-Selection."""
 
@@ -359,11 +418,22 @@ class CitationVerificationConfig(BaseModel):
     # Master toggle
     enabled: bool = True
 
+    # Synthesis mode: controls the overall synthesis approach
+    # - "interleaved": Current approach - evidence in context, [N] markers
+    # - "react": ReAct-based - LLM uses tools to retrieve evidence before claims
+    synthesis_mode: SynthesisMode = SynthesisMode.INTERLEAVED
+
     # Generation mode: controls synthesis approach and verification stages
     # - "classical": Free-form prose with [Title](url) links, skips verification
     # - "natural": Light-touch [N] citations, runs full verification
     # - "strict": Heavy [N] constraints (current behavior), runs full verification
+    # NOTE: Only applies when synthesis_mode=INTERLEAVED
     generation_mode: GenerationMode = GenerationMode.STRICT
+
+    # ReAct synthesis configuration (only applies when synthesis_mode=REACT)
+    react_synthesis: ReactSynthesisConfig = Field(
+        default_factory=ReactSynthesisConfig
+    )
 
     # Stage toggles (only apply to "natural" and "strict" modes)
     enable_evidence_preselection: bool = True

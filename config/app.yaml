@@ -205,6 +205,9 @@ research_types:
     citation_verification:
       generation_mode: strict
       enable_numeric_qa_verification: true
+      react_synthesis:
+        max_tool_calls: 125          # Higher budget for comprehensive extended reports
+        tool_budget_per_section: 20  # More budget per section
 
 # Search configuration
 search:
@@ -256,11 +259,21 @@ truncation:
   source_snippet: 300
 
 # Citation verification configuration (6-stage pipeline)
+#
+# Per-depth overrides in research_types.*.citation_verification inherit from this
+# global config. Only explicitly set fields override; unset fields inherit.
+# Example: setting only `generation_mode: natural` in per-type inherits
+# `synthesis_mode: react` from global.
 citation_verification:
   # Master toggle for the feature
   enabled: true
 
-  # Generation mode for research reports
+  # Synthesis mode: controls the overall synthesis approach
+  # - "interleaved": Current approach - evidence in context, [N] markers
+  # - "react": ReAct-based - LLM uses tools to retrieve evidence before claims
+  synthesis_mode: react
+
+  # Generation mode for research reports (only applies when synthesis_mode=interleaved)
   # - "classical": Free-form prose with inline [Title](url) links
   #                Best text quality, uses existing synthesizer
   #                Skips verification stages 3-6 (no claim markers to verify)
@@ -271,6 +284,18 @@ citation_verification:
   #             Current behavior, every claim must cite evidence
   #             Runs full verification pipeline (stages 3-6)
   generation_mode: natural
+
+  # ReAct synthesis configuration (only applies when synthesis_mode=react)
+  react_synthesis:
+    max_tool_calls: 75              # Total tool call budget (increased from 40)
+    tool_budget_per_section: 15     # Budget per research step section
+    retrieval_window_size: 3        # Sliding window for grounding inference
+    grounding_threshold: 0.6        # Minimum similarity for grounded claim
+    embedding_high_threshold: 0.7   # Auto-grounded above this
+    embedding_low_threshold: 0.4    # Auto-ungrounded below this
+    use_llm_judge_for_borderline: true  # Use LLM for 0.4-0.7 range
+    enable_post_processing: true    # Polish pass for coherence
+    use_sectioned_synthesis: false  # Disabled to use XML tag parsing in run_react_synthesis()
 
   # Stage toggles (only apply to "natural" and "strict" modes)
   enable_evidence_preselection: true

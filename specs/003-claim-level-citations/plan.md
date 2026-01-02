@@ -528,6 +528,37 @@ claims = self._parse_interleaved_content(content_with_keys, evidence_pool, rever
 
 ---
 
+### Issue #4: ReAct Content Capture Bug (Fixed 2026-01-02)
+
+**Location**: ReAct synthesis loop (`src/agent/nodes/react_synthesizer.py`)
+
+**Problem**: All LLM streaming text was accumulated into `full_content`, including planning thoughts ("I'll write the X section..."). The ReAct prompt lacked anti-meta-commentary rules, so meta-commentary like "I'll search for evidence about X" was captured as the final report instead of actual content.
+
+**Symptoms**:
+- `state.final_report` contained "I'll write..." instead of actual synthesis
+- No verification summary available (no claims to verify)
+- Grey references = 0 (test passes incorrectly because no claims)
+
+**Solution**: Implemented Hybrid ReClaim pattern with XML tags:
+- `<cite key="Key">claim</cite>` for grounded claims (ReClaim pattern)
+- `<free>text</free>` for structural content (headers, transitions)
+- `<unverified>claim</unverified>` for uncertain claims (post-hoc verification)
+- Unmarked text treated as scratchpad (ignored in final report)
+
+**Key Insight**: XML tags preferred over `>>>` markers or structured output because:
+1. Structured output is blocked (can't mix with `tools=` in API)
+2. XML tags work naturally with tool-use mode
+3. Multi-line claims handled naturally (explicit close tags)
+4. High LLM familiarity (XML patterns common in training data)
+
+**Files Modified**:
+- `src/agent/nodes/react_synthesizer.py` (prompt + `parse_tagged_content()` + loop changes)
+- `src/agent/tools/synthesis_tools.py` (updated `format_snippet()`)
+
+**Related FR**: FR-027 (Hybrid ReClaim Pattern)
+
+---
+
 ## Appendix A: Key Algorithms Reference
 
 ### A.1 Evidence Pre-Selection (Stage 1)

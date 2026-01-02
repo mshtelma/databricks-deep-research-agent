@@ -83,6 +83,16 @@ def setup_tracing() -> None:
         # Enable tracing
         mlflow.tracing.enable()
 
+        # Enable automatic tracing for OpenAI SDK calls
+        # This captures all streaming calls automatically
+        try:
+            import mlflow.openai
+
+            mlflow.openai.autolog()
+            logger.info("MLflow OpenAI autolog enabled")
+        except Exception as e:
+            logger.warning(f"Could not enable OpenAI autolog: {e}")
+
         logger.info(
             f"MLflow tracing enabled (async): {settings.mlflow_tracking_uri} / "
             f"{settings.mlflow_experiment_name}"
@@ -240,3 +250,87 @@ def log_feedback(
         )
     except Exception as e:
         logger.warning(f"Failed to log feedback: {e}")
+
+
+def log_research_config(depth: str) -> None:
+    """Log research configuration to MLflow run.
+
+    Uses mlflow.log_params() for searchable run-level attributes.
+    Uses mlflow.log_dict() for full config artifact.
+
+    Logs:
+    - Research type config (depth, synthesis_mode, generation_mode)
+    - Citation verification settings
+    - Researcher config (mode, limits)
+    - Full config as JSON artifact
+
+    Args:
+        depth: Research depth (light, medium, extended).
+    """
+    from src.agent.config import get_citation_config_for_depth, get_research_type_config
+    from src.core.app_config import get_app_config
+
+    try:
+        app_config = get_app_config()
+
+        # Get depth-specific config
+        research_type = get_research_type_config(depth)
+        citation_config = get_citation_config_for_depth(depth)
+
+        # Log as RUN PARAMS (searchable/filterable in MLflow UI)
+        params: dict[str, str | int | float] = {
+            # Research type
+            "config.research_depth": depth,
+            "config.researcher_mode": research_type.researcher.mode.value,
+            "config.max_tool_calls": research_type.researcher.max_tool_calls,
+            # Steps and report limits
+            "config.steps_min": research_type.steps.min,
+            "config.steps_max": research_type.steps.max,
+            "config.report_max_words": research_type.report_limits.max_words,
+            "config.report_max_tokens": research_type.report_limits.max_tokens,
+            # Citation verification core
+            "config.citation_enabled": str(citation_config.enabled),
+            "config.synthesis_mode": citation_config.synthesis_mode.value,
+            "config.generation_mode": citation_config.generation_mode.value,
+            # Stage toggles
+            "config.cv_evidence_preselection": str(
+                citation_config.enable_evidence_preselection
+            ),
+            "config.cv_interleaved_generation": str(
+                citation_config.enable_interleaved_generation
+            ),
+            "config.cv_confidence_classification": str(
+                citation_config.enable_confidence_classification
+            ),
+            "config.cv_citation_correction": str(
+                citation_config.enable_citation_correction
+            ),
+            "config.cv_numeric_qa_verification": str(
+                citation_config.enable_numeric_qa_verification
+            ),
+            "config.cv_verification_retrieval": str(
+                citation_config.enable_verification_retrieval
+            ),
+            # Model config
+            "config.default_role": app_config.default_role,
+        }
+
+        mlflow.log_params(params)
+
+        # Log full config as JSON artifact
+        config_dict = {
+            "research_type": research_type.model_dump(mode="json"),
+            "citation_verification": citation_config.model_dump(mode="json"),
+            "default_role": app_config.default_role,
+            "endpoints": {
+                k: v.model_dump(mode="json") for k, v in app_config.endpoints.items()
+            },
+            "models": {
+                k: v.model_dump(mode="json") for k, v in app_config.models.items()
+            },
+        }
+        mlflow.log_dict(config_dict, "config/research_config.json")
+
+    except Exception as e:
+        # Don't fail research if config logging fails
+        logger.warning(f"Failed to log research config: {e}")

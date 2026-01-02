@@ -180,6 +180,22 @@ A user wants to start a new research conversation immediately without waiting fo
 - **FR-023**: System MUST retain cached evidence spans (source quotes and metadata) for the lifetime of the associated chat session
 - **FR-024**: When a chat session is deleted, associated cached evidence spans MUST be deleted
 
+#### Configuration Inheritance
+
+- **FR-026**: Per-depth `citation_verification` config MUST merge with global config, not replace it
+- **FR-026.1**: Fields explicitly set in per-depth config MUST override global values
+- **FR-026.2**: Fields not set in per-depth config MUST inherit from global config
+- **FR-026.3**: Detection of "explicitly set" MUST compare against Pydantic defaults, not global values
+
+#### Hybrid ReClaim Pattern (ReAct Synthesis)
+
+- **FR-027**: ReAct synthesis MUST use XML tags to separate grounded content from LLM reasoning
+- **FR-027.1**: `<cite key="Key">claim</cite>` tags MUST be used for all factual claims; the key MUST match the citation key from read_snippet
+- **FR-027.2**: `<free>text</free>` tags MUST be used for structural content (headers, transitions, analytical comparisons)
+- **FR-027.3**: `<unverified>claim</unverified>` tags MAY be used for uncertain claims that couldn't find direct evidence
+- **FR-027.4**: Text outside XML tags MUST be treated as scratchpad (excluded from final report)
+- **FR-027.5**: System MUST parse tagged content after ReAct loop completion and assemble only tagged blocks into final report
+
 ### Key Entities
 
 - **Claim**: A single atomic factual assertion extracted from generated text; includes claim text, claim type (general/numeric), position in response, verification verdict

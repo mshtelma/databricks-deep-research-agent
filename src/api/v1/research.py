@@ -7,14 +7,12 @@ Key Design: Deferred Database Materialization
 - Benefits: No orphaned records, no cleanup needed on failure
 """
 
-import contextlib
 import json
 import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 from uuid import UUID, uuid4
 
-import mlflow
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -243,10 +241,6 @@ async def stream_research_endpoint(
                 "recoverable": False,
             }
             yield f"data: {json.dumps(error_event)}\n\n"
-        finally:
-            # Flush async traces before response ends
-            with contextlib.suppress(Exception):
-                mlflow.flush_trace_async_logging()
 
     return StreamingResponse(
         generate_sse_events(),
@@ -398,10 +392,6 @@ async def stream_research_with_history(
                 "recoverable": False,
             }
             yield f"data: {json.dumps(error_event)}\n\n"
-        finally:
-            # Flush async traces before response ends
-            with contextlib.suppress(Exception):
-                mlflow.flush_trace_async_logging()
 
     return StreamingResponse(
         generate_sse_events(),
