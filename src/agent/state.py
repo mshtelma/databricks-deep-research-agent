@@ -195,6 +195,7 @@ class ClaimInfo:
     abstained: bool = False
     citation_key: str | None = None  # Primary key like "Arxiv", "Zhipu"
     citation_keys: list[str] | None = None  # All keys for multi-marker sentences
+    from_free_block: bool = False  # True if extracted from <free> block (needs verification)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -210,6 +211,7 @@ class ClaimInfo:
             "abstained": self.abstained,
             "citation_key": self.citation_key,
             "citation_keys": self.citation_keys,
+            "from_free_block": self.from_free_block,
         }
 
 
@@ -218,6 +220,7 @@ class VerificationSummaryInfo:
     """Summary of verification results for a message.
 
     Created after Stage 4 (Isolated Verification) completes.
+    Updated with Stage 7 metrics after ARE-style verification.
     """
 
     total_claims: int = 0
@@ -230,6 +233,17 @@ class VerificationSummaryInfo:
     contradicted_rate: float = 0.0
     warning: bool = False
     citation_corrections: int = 0
+
+    # Stage 7: ARE-style Verification Retrieval metrics
+    claim_revisions: int = 0  # Number of claims revised by Stage 7
+    atomic_facts_total: int = 0  # Total atomic facts decomposed
+    atomic_facts_verified: int = 0  # Facts verified with evidence
+    atomic_facts_softened: int = 0  # Facts softened (no evidence)
+    claims_fully_verified: int = 0  # Claims where all facts verified
+    claims_partially_softened: int = 0  # Claims with mixed verified/softened
+    claims_fully_softened: int = 0  # Claims where all facts softened
+    external_searches: int = 0  # Brave searches performed
+    new_sources_added: int = 0  # New sources discovered during Stage 7
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -244,6 +258,16 @@ class VerificationSummaryInfo:
             "contradicted_rate": self.contradicted_rate,
             "warning": self.warning,
             "citation_corrections": self.citation_corrections,
+            # Stage 7 metrics
+            "claim_revisions": self.claim_revisions,
+            "atomic_facts_total": self.atomic_facts_total,
+            "atomic_facts_verified": self.atomic_facts_verified,
+            "atomic_facts_softened": self.atomic_facts_softened,
+            "claims_fully_verified": self.claims_fully_verified,
+            "claims_partially_softened": self.claims_partially_softened,
+            "claims_fully_softened": self.claims_fully_softened,
+            "external_searches": self.external_searches,
+            "new_sources_added": self.new_sources_added,
         }
 
 

@@ -40,6 +40,18 @@ endpoints:
     tokens_per_minute: 50000
     supports_structured_output: true
 
+  opus:
+    endpoint_identifier: databricks-claude-opus-4-5
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+
+  gpt5:
+    endpoint_identifier: databricks-gpt-5-2
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+
 # Model roles (tiers) with priority-ordered endpoints
 # Endpoints are tried in order; fallback occurs on 429 or 5xx errors
 models:
@@ -72,6 +84,7 @@ models:
   complex:
     endpoints:
       - sonnet
+      - opus
     temperature: 0.7
     max_tokens: 32000
     reasoning_effort: high
@@ -156,6 +169,10 @@ research_types:
     citation_verification:
       generation_mode: natural
       enable_numeric_qa_verification: false
+      enable_verification_retrieval: true  # Stage 7 enabled for all depths
+      verification_retrieval:
+        max_searches_per_fact: 1           # Keep lightweight
+        max_atomic_facts_per_claim: 3      # Reduce for speed
 
   medium:
     # Step limits: balanced research covering key aspects
@@ -177,9 +194,12 @@ research_types:
       max_urls_to_crawl: 5
       max_tool_calls: 12     # ReAct budget
 
-    # Citation verification: standard verification
+    # Citation verification: standard verification with Stage 7
     citation_verification:
       generation_mode: natural
+      enable_verification_retrieval: true   # Enable Stage 7 for medium
+      verification_retrieval:
+        max_searches_per_fact: 1            # Reduced budget for medium
 
   extended:
     # Step limits: comprehensive deep research
@@ -199,15 +219,19 @@ research_types:
       mode: react          # ReAct for deep research
       max_search_queries: 4  # Classic fallback
       max_urls_to_crawl: 8
-      max_tool_calls: 20     # More budget for deep research
+      max_tool_calls: 40     # Doubled from 20 - more budget for complex queries like Basel IV
 
-    # Citation verification: strict verification with numeric QA
+    # Citation verification: strict verification with numeric QA and Stage 7
     citation_verification:
-      generation_mode: strict
+      generation_mode: natural
       enable_numeric_qa_verification: true
+      enable_verification_retrieval: true   # Enable Stage 7 with full budget
       react_synthesis:
-        max_tool_calls: 125          # Higher budget for comprehensive extended reports
+        max_tool_calls: 200          # Increased from 125 - enough for 11 sections at 20 calls each
         tool_budget_per_section: 20  # More budget per section
+      verification_retrieval:
+        max_atomic_facts_per_claim: 7  # More facts for deep research
+        max_searches_per_fact: 2       # Full budget
 
 # Search configuration
 search:
@@ -245,10 +269,10 @@ search:
 
 # Rate limiting and retry configuration
 rate_limiting:
-  max_retries: 3                    # Max retry attempts before failing
-  base_delay_seconds: 2.0           # Initial backoff delay
+  max_retries: 50                   # Max retry attempts before failing
+  base_delay_seconds: 5.0           # Initial backoff delay
   max_delay_seconds: 60.0           # Maximum backoff delay
-  backoff_strategy: exponential     # "exponential" (2^n) or "linear" (+n)
+  backoff_strategy: linear     # "exponential" (2^n) or "linear" (+n)
   jitter: true                      # Add random jitter to prevent thundering herd
 
 # Truncation limits for consistency
@@ -258,7 +282,16 @@ truncation:
   query_display: 100
   source_snippet: 300
 
-# Citation verification configuration (6-stage pipeline)
+# Citation verification configuration (7-stage pipeline)
+#
+# Stages:
+# 1. Evidence Pre-Selection - Extract relevant quotes from sources
+# 2. Interleaved Generation - Generate claims with [N] citations
+# 3. Confidence Classification - Route claims by confidence level
+# 4. Isolated Verification - Produce verdicts (supported/partial/unsupported/contradicted)
+# 5. Citation Correction - Swap citations from existing pool
+# 6. Numeric QA Verification - Deep verification of numeric claims
+# 7. ARE Verification Retrieval - Atomic fact decomposition + external search + revision
 #
 # Per-depth overrides in research_types.*.citation_verification inherit from this
 # global config. Only explicitly set fields override; unset fields inherit.
@@ -294,7 +327,7 @@ citation_verification:
     embedding_high_threshold: 0.7   # Auto-grounded above this
     embedding_low_threshold: 0.4    # Auto-ungrounded below this
     use_llm_judge_for_borderline: true  # Use LLM for 0.4-0.7 range
-    enable_post_processing: true    # Polish pass for coherence
+    enable_post_processing: false   # Polish pass for coherence (disabled by default)
     use_sectioned_synthesis: false  # Disabled to use XML tag parsing in run_react_synthesis()
 
   # Stage toggles (only apply to "natural" and "strict" modes)
@@ -353,11 +386,37 @@ citation_verification:
     require_unit_match: true
     require_entity_match: true
 
-  # Verification retrieval (when enabled)
+  # Stage 7: ARE-style Verification Retrieval
+  # Implements Atomic fact decomposition-based Retrieval and Editing (ARE) pattern
+  # for verifying and revising unsupported/partial claims.
+  # Scientific basis: ARE (arXiv:2410.16708), FActScore (EMNLP 2023), SAFE (DeepMind)
   verification_retrieval:
-    trigger_on_verdicts: [unsupported, nei]
-    max_additional_searches: 2
-    search_timeout_seconds: 3
+    # Trigger on these verdicts from Stage 4
+    trigger_on_verdicts: [unsupported, partial]
+
+    # Atomic decomposition settings
+    max_atomic_facts_per_claim: 5  # Max facts per claim (FActScore-style)
+
+    # Search budget (per atomic fact, not per claim)
+    max_searches_per_fact: 2       # Allows 1 query reformulation
+    max_external_urls_per_search: 3
+
+    # Entailment thresholds (NLI-style verification)
+    entailment_threshold: 0.6      # Min score to accept evidence
+    internal_search_threshold: 0.7 # Similarity threshold for internal pool
+
+    # Reconstruction behavior
+    softening_strategy: hedge      # hedge | qualify | parenthetical
+
+    # Timeouts
+    decomposition_timeout_seconds: 10.0
+    search_timeout_seconds: 10.0
+    crawl_timeout_seconds: 15.0
+
+    # Model tiers for LLM calls
+    decomposition_tier: simple
+    entailment_tier: analytical
+    reconstruction_tier: analytical
 
   # Warning thresholds
   unsupported_claim_warning_threshold: 0.20

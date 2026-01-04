@@ -75,32 +75,48 @@ def get_claim_citation_keys(state: ResearchState) -> set[str]:
 def count_grey_references(state: ResearchState) -> dict[str, int]:
     """Count different types of grey (unverified) references.
 
-    Grey references include:
-    - Abstained claims: verification couldn't proceed (no evidence)
-    - Claims without evidence: have citation key but no EvidenceInfo
-    - Orphaned markers: [Key] in content with no matching ClaimInfo
+    Grey references are citation markers in the final report that have no valid
+    evidence backing them. This distinguishes between:
+    - True grey: abstained claims whose markers are STILL in the report
+    - Removed abstained: markers were removed (e.g., contradicted claims) - not grey
 
     Args:
         state: Research state after synthesis.
 
     Returns:
-        Dict with counts: abstained, no_evidence, orphaned_markers, total_grey
+        Dict with counts for grey reference analysis.
     """
+    # Get markers in final report
+    content_markers = extract_citation_markers(state.final_report or "")
+    claim_keys = get_claim_citation_keys(state)
+
+    # All abstained claims
     abstained = sum(1 for c in state.claims if c.abstained)
+
+    # TRUE grey: abstained claims whose markers are STILL in the report
+    abstained_keys = {
+        c.citation_key for c in state.claims if c.abstained and c.citation_key
+    }
+    true_grey = len(content_markers & abstained_keys)
+
+    # Removed abstained: markers no longer in report (handled correctly)
+    removed_abstained = abstained - true_grey
+
+    # No evidence (not abstained but no evidence linked)
     no_evidence = sum(
         1 for c in state.claims if c.evidence is None and not c.abstained
     )
 
     # Orphaned markers: in content but no matching claim
-    content_markers = extract_citation_markers(state.final_report or "")
-    claim_keys = get_claim_citation_keys(state)
     orphaned = len(content_markers - claim_keys)
 
     return {
         "abstained": abstained,
+        "true_grey": true_grey,  # Citation markers with no valid evidence
+        "removed_abstained": removed_abstained,  # Handled correctly, not grey
         "no_evidence": no_evidence,
         "orphaned_markers": orphaned,
-        "total_grey": abstained + no_evidence + orphaned,
+        "total_grey": true_grey + no_evidence + orphaned,  # Only count actual grey
     }
 
 
@@ -137,6 +153,8 @@ def log_verification_metrics_to_mlflow(
             "verification.contradicted": summary.contradicted_count if summary else 0,
             # Grey references
             "verification.abstained": grey["abstained"],
+            "verification.true_grey": grey["true_grey"],
+            "verification.removed_abstained": grey["removed_abstained"],
             "verification.no_evidence": grey["no_evidence"],
             "verification.orphaned_markers": grey["orphaned_markers"],
             "verification.total_grey": grey["total_grey"],
@@ -170,17 +188,20 @@ def log_verification_metrics_to_mlflow(
 
 VERIFICATION_TEST_CASES = [
     pytest.param(
-        "What are the key architectural differences between Qwen2 and GLM-4 "
-        "transformer models, including attention mechanisms, tokenization, "
-        "and training approaches?",
+        "What were the major changes in Basel IV and CRR 3 banking regulations "
+        "and their impact on capital requirements?",
+        "finance",
+        id="finance-basel-iv",
+    ),
+    pytest.param(
+        "What are the key architectural differences between Qwen 3 and GLM 4.7?",
         "ai_architecture",
         id="ai-qwen-vs-glm",
     ),
     pytest.param(
-        "What were the major changes in Basel IV banking regulations "
-        "and their impact on capital requirements?",
-        "finance",
-        id="finance-basel-iv",
+        "What are the key architectural advancements introduced in GLM 4.7?",
+        "ai_architecture",
+        id="ai-glm",
     ),
     pytest.param(
         "What are the latest FDA-approved CAR-T cell therapies "
@@ -495,9 +516,9 @@ class TestVerificationMetrics:
             print(f"\n{'='*60}")
             print(f"📊 Verification Report [{domain}]")
             print(f"{'='*60}")
-            print(f"Query: {query[:80]}...")
+            print(f"Query: {query}...")
             print(f"\n📝 Final Report ({len(state.final_report or '')} chars):")
-            print(state.final_report[:500] + "..." if state.final_report else "None")
+            print(state.final_report if state.final_report else "None")
 
             if state.verification_summary:
                 s = state.verification_summary
@@ -512,7 +533,8 @@ class TestVerificationMetrics:
                 print("\n⚠️  No verification summary available")
 
             print(f"\n🔘 Grey References:")
-            print(f"   - Abstained:        {grey['abstained']}")
+            print(f"   - True grey:        {grey['true_grey']} (citation markers with no evidence)")
+            print(f"   - Removed abstained: {grey['removed_abstained']} (handled correctly)")
             print(f"   - No evidence:      {grey['no_evidence']}")
             print(f"   - Orphaned markers: {grey['orphaned_markers']}")
             print(f"   - TOTAL GREY:       {grey['total_grey']}")
@@ -525,15 +547,16 @@ class TestVerificationMetrics:
             assert state.final_report, "Should produce a final report"
             assert len(state.final_report) > 300, "Report should have substantial content"
 
-            # FAIL if grey references exist (zero tolerance)
+            # FAIL if TRUE grey references exist (citation markers with no valid evidence)
+            # Note: removed_abstained (contradicted claims removed from report) don't count
             assert grey["total_grey"] == 0, (
-                f"\n❌ Grey references detected! (Zero tolerance policy)\n"
-                f"   Abstained:        {grey['abstained']}\n"
-                f"   No evidence:      {grey['no_evidence']}\n"
-                f"   Orphaned markers: {grey['orphaned_markers']}\n"
-                f"   TOTAL:            {grey['total_grey']}"
+                f"\n❌ Grey references detected! (Citation markers with no valid evidence)\n"
+                f"   True grey:         {grey['true_grey']}\n"
+                f"   Removed abstained: {grey['removed_abstained']} (OK - handled correctly)\n"
+                f"   No evidence:       {grey['no_evidence']}\n"
+                f"   Orphaned markers:  {grey['orphaned_markers']}\n"
+                f"   TOTAL GREY:        {grey['total_grey']}"
             )
 
             print(f"\n✅ Verification test PASSED for [{domain}]!")
-            print(f"\nFINAL REPORT:\n{state.final_report}\n")
             print(f"{'='*60}\n")

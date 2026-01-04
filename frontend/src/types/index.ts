@@ -142,6 +142,8 @@ export type StreamEventType =
   | 'citation_corrected'
   | 'numeric_claim_detected'
   | 'verification_summary'
+  // Stage 7 content revision event
+  | 'content_revised'
   // Persistence events
   | 'persistence_completed'
 
@@ -257,6 +259,13 @@ export interface PersistenceCompletedEvent extends BaseStreamEvent {
   counts: Record<string, number>
 }
 
+// Stage 7 content revision event - sent after verification retrieval applies softening
+export interface ContentRevisedEvent extends BaseStreamEvent {
+  event_type: 'content_revised'
+  content: string
+  revision_count: number
+}
+
 // Re-export citation stream events from citation types
 export type {
   ClaimGeneratedEvent,
@@ -297,5 +306,7 @@ export type StreamEvent =
   | CitationCorrectedEvent
   | NumericClaimDetectedEvent
   | VerificationSummaryEvent
+  // Stage 7 content revision event
+  | ContentRevisedEvent
   // Persistence events
   | PersistenceCompletedEvent

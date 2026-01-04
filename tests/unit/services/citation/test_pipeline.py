@@ -1047,3 +1047,225 @@ class TestPerformanceEdgeCases:
         # Should be deterministic
         assert result1.level == result2.level
         assert result1.score == result2.score
+
+
+# ---------------------------------------------------------------------------
+# Stage 7: Grey Reference Prevention Tests
+# ---------------------------------------------------------------------------
+
+
+class TestStage7GreyReferencePrevention:
+    """Tests for Stage 7 grey reference prevention fix.
+
+    Verifies that _update_claims_with_stage7_revisions does NOT create
+    grey references when the revised claim has a citation key that
+    is not in the key_to_evidence map.
+    """
+
+    def test_stage7_preserves_original_key_when_new_key_not_in_evidence(
+        self, mock_llm_client: MagicMock, patch_app_config: Any
+    ) -> None:
+        """Stage 7 should NOT update citation_key if new key is not in evidence map.
+
+        This prevents grey references (claims with citation_key but no evidence).
+        """
+        from src.services.citation.atomic_decomposer import (
+            AtomicFact,
+            ClaimDecomposition,
+            ClaimRevision,
+        )
+        from src.services.citation.pipeline import CitationVerificationPipeline
+
+        pipeline = CitationVerificationPipeline(mock_llm_client)
+
+        # Create a claim with known citation_key and evidence
+        original_key = "Arxiv"
+        original_claim = ClaimInfo(
+            claim_text="The market grew by 35%. [Arxiv]",
+            claim_type="numeric",
+            position_start=0,
+            position_end=32,
+            citation_key=original_key,
+            evidence=EvidenceInfo(
+                source_url="https://arxiv.org/paper",
+                quote_text="market grew by 35%",
+                start_offset=0,
+                end_offset=20,
+                section_heading=None,
+                relevance_score=0.9,
+                has_numeric_content=True,
+            ),
+        )
+
+        # Create atomic facts for decomposition
+        atomic_fact_1 = AtomicFact(
+            fact_text="The market grew",
+            fact_index=0,
+            parent_claim_id=0,
+            is_verified=True,
+        )
+        atomic_fact_2 = AtomicFact(
+            fact_text="by approximately 35%",
+            fact_index=1,
+            parent_claim_id=0,
+            is_verified=False,
+        )
+
+        # Create decomposition
+        decomposition = ClaimDecomposition(
+            original_claim=original_claim,
+            atomic_facts=[atomic_fact_1, atomic_fact_2],
+        )
+
+        # Create revision with a NEW key that's NOT in evidence pool
+        revision = ClaimRevision(
+            original_claim="The market grew by 35%. [Arxiv]",
+            revised_claim="Reportedly, the market grew by approximately 35%. [NewSource]",
+            revision_type="partially_softened",
+            original_position_start=0,
+            original_position_end=32,
+            decomposition=decomposition,
+            verified_facts=[atomic_fact_1],
+            softened_facts=[atomic_fact_2],
+        )
+
+        # Evidence pool only has original key, NOT "NewSource"
+        key_to_evidence = {
+            "Arxiv": RankedEvidence(
+                source_id=None,
+                source_url="https://arxiv.org/paper",
+                source_title="Arxiv Paper",
+                quote_text="market grew by 35%",
+                start_offset=0,
+                end_offset=20,
+                section_heading=None,
+                relevance_score=0.9,
+                has_numeric_content=True,
+            ),
+        }
+
+        # Content for position finding
+        revised_content = "Reportedly, the market grew by approximately 35%. [NewSource]"
+
+        # Call the method under test
+        updated_count = pipeline._update_claims_with_stage7_revisions(
+            revisions=[revision],
+            claims=[original_claim],
+            revised_content=revised_content,
+            key_to_evidence=key_to_evidence,
+        )
+
+        # Should update the claim (position, text)
+        assert updated_count == 1
+
+        # BUT citation_key should remain ORIGINAL, not "NewSource"
+        # because "NewSource" is not in key_to_evidence
+        assert original_claim.citation_key == original_key, (
+            f"Expected citation_key to remain '{original_key}', "
+            f"but got '{original_claim.citation_key}'. "
+            "This would create a grey reference!"
+        )
+
+        # Evidence should also remain (not set to None)
+        assert original_claim.evidence is not None
+
+    def test_stage7_updates_key_when_new_key_is_in_evidence(
+        self, mock_llm_client: MagicMock, patch_app_config: Any
+    ) -> None:
+        """Stage 7 SHOULD update citation_key when new key IS in evidence map."""
+        from src.services.citation.atomic_decomposer import (
+            AtomicFact,
+            ClaimDecomposition,
+            ClaimRevision,
+        )
+        from src.services.citation.pipeline import CitationVerificationPipeline
+
+        pipeline = CitationVerificationPipeline(mock_llm_client)
+
+        # Create a claim with original key
+        original_claim = ClaimInfo(
+            claim_text="The market grew by 35%. [Arxiv]",
+            claim_type="numeric",
+            position_start=0,
+            position_end=32,
+            citation_key="Arxiv",
+            evidence=EvidenceInfo(
+                source_url="https://arxiv.org/paper",
+                quote_text="market grew by 35%",
+                start_offset=0,
+                end_offset=20,
+                section_heading=None,
+                relevance_score=0.9,
+                has_numeric_content=True,
+            ),
+        )
+
+        # Create atomic facts for decomposition
+        atomic_fact_1 = AtomicFact(
+            fact_text="The market grew by 35%",
+            fact_index=0,
+            parent_claim_id=0,
+            is_verified=True,
+        )
+
+        # Create decomposition
+        decomposition = ClaimDecomposition(
+            original_claim=original_claim,
+            atomic_facts=[atomic_fact_1],
+        )
+
+        # Create revision with a key that IS in evidence pool
+        revision = ClaimRevision(
+            original_claim="The market grew by 35%. [Arxiv]",
+            revised_claim="According to Reuters, the market grew by 35%. [Reuters]",
+            revision_type="fully_verified",
+            original_position_start=0,
+            original_position_end=32,
+            decomposition=decomposition,
+            verified_facts=[atomic_fact_1],
+            softened_facts=[],
+        )
+
+        # Evidence pool has BOTH keys
+        key_to_evidence = {
+            "Arxiv": RankedEvidence(
+                source_id=None,
+                source_url="https://arxiv.org/paper",
+                source_title="Arxiv Paper",
+                quote_text="market grew by 35%",
+                start_offset=0,
+                end_offset=20,
+                section_heading=None,
+                relevance_score=0.9,
+                has_numeric_content=True,
+            ),
+            "Reuters": RankedEvidence(
+                source_id=None,
+                source_url="https://reuters.com/article",
+                source_title="Reuters Article",
+                quote_text="market grew by 35%",
+                start_offset=5,
+                end_offset=25,
+                section_heading=None,
+                relevance_score=0.95,
+                has_numeric_content=True,
+            ),
+        }
+
+        revised_content = "According to Reuters, the market grew by 35%. [Reuters]"
+
+        updated_count = pipeline._update_claims_with_stage7_revisions(
+            revisions=[revision],
+            claims=[original_claim],
+            revised_content=revised_content,
+            key_to_evidence=key_to_evidence,
+        )
+
+        assert updated_count == 1
+
+        # In this case, citation_key SHOULD be updated to Reuters
+        assert original_claim.citation_key == "Reuters"
+
+        # Evidence should be updated from Reuters source
+        assert original_claim.evidence is not None
+        assert original_claim.evidence.source_url == "https://reuters.com/article"

@@ -472,6 +472,21 @@ export function useStreamingQuery(
               break;
             }
 
+            case 'content_revised': {
+              // Stage 7 has revised the content with softening for partial/unsupported claims
+              // Replace the streamed content with the revised version
+              const revisedEvent = data as { content?: string; revision_count?: number };
+              // Handle camelCase runtime keys
+              const revisedContent = (revisedEvent as unknown as { content?: string }).content ?? '';
+              const revisionCount = (revisedEvent as unknown as { revisionCount?: number }).revisionCount ?? revisedEvent.revision_count ?? 0;
+              console.log('[SSE] content_revised:', { contentLen: revisedContent.length, revisionCount });
+              if (revisedContent) {
+                accumulatedContent = revisedContent;
+                setStreamingContent(revisedContent);
+              }
+              break;
+            }
+
             case 'research_completed':
               setAgentStatus('complete');
 

@@ -7,6 +7,7 @@ from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
 import mlflow
+import mlflow.openai
 from mlflow.entities import SpanEvent, SpanType
 
 from src.core.config import get_settings
@@ -86,8 +87,6 @@ def setup_tracing() -> None:
         # Enable automatic tracing for OpenAI SDK calls
         # This captures all streaming calls automatically
         try:
-            import mlflow.openai
-
             mlflow.openai.autolog()
             logger.info("MLflow OpenAI autolog enabled")
         except Exception as e:

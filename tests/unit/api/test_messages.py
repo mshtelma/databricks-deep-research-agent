@@ -166,8 +166,8 @@ class TestSendMessage:
 
             assert response.status_code == 201
             data = response.json()
-            assert "user_message" in data
-            assert "research_session_id" in data
+            assert "userMessage" in data
+            assert "researchSessionId" in data
 
     def test_send_message_empty_content(self, client: TestClient):
         """Test sending a message with empty content is rejected."""
@@ -249,8 +249,8 @@ class TestEditMessage:
 
             assert response.status_code == 200
             data = response.json()
-            assert data["message"]["is_edited"] is True
-            assert data["removed_message_count"] == 2
+            assert data["message"]["isEdited"] is True
+            assert data["removedMessageCount"] == 2
 
     def test_edit_nonexistent_message(self, client: TestClient):
         """Test editing a message that doesn't exist."""
@@ -316,8 +316,8 @@ class TestRegenerateMessage:
 
             assert response.status_code == 201
             data = response.json()
-            assert "new_message_id" in data
-            assert "research_session_id" in data
+            assert "newMessageId" in data
+            assert "researchSessionId" in data
 
     def test_regenerate_nonexistent_message(self, client: TestClient):
         """Test regenerating a message that doesn't exist."""
@@ -390,7 +390,7 @@ class TestSubmitFeedback:
             assert response.status_code == 201
             data = response.json()
             assert data["rating"] == "positive"
-            assert data["message_id"] == str(message_id)
+            assert data["messageId"] == str(message_id)
 
     def test_submit_negative_feedback_with_report(
         self, client: TestClient, mock_agent_message: Message
@@ -446,7 +446,7 @@ class TestSubmitFeedback:
             assert response.status_code == 201
             data = response.json()
             assert data["rating"] == "negative"
-            assert data["feedback_text"] is not None
+            assert data["feedbackText"] is not None
 
     def test_submit_feedback_nonexistent_message(self, client: TestClient):
         """Test submitting feedback for a message that doesn't exist."""

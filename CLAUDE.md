@@ -358,6 +358,21 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
 - Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
 
 ## Recent Changes
+- 003-claim-level-citations: Stage 7 ARE-Style Verification Retrieval (2026-01-02)
+  - **NEW FEATURE**: Post-processing stage for unsupported/partial claims
+  - Implements ARE (Atomic fact decomposition-based Retrieval and Editing) pattern
+  - Decomposes claims into atomic facts for granular verification (FActScore methodology)
+  - Searches internal evidence pool first, then external Brave API if needed
+  - Revises claims: verified facts keep citations, unverified facts get hedging language
+  - Key files:
+    - `src/services/citation/atomic_decomposer.py` - Atomic fact decomposition
+    - `src/services/citation/verification_retriever.py` - Main Stage 7 orchestration
+    - `src/agent/prompts/citation/verification_retrieval.py` - Stage 7 prompts
+  - Config: `verification_retrieval` section in `config/app.yaml`
+  - Per-depth: disabled for light, enabled for medium/extended
+  - Scientific basis: [ARE](https://arxiv.org/abs/2410.16708), [FActScore](https://arxiv.org/abs/2305.14251), [SAFE](https://arxiv.org/abs/2403.18802)
+  - Softening strategies: hedge ("reportedly"), qualify ("some evidence suggests"), parenthetical ("(unverified)")
+
 - 003-claim-level-citations: Per-Depth Config Merge Fix (2026-01-01)
   - **BUG FIX**: Per-depth `citation_verification` configs were replacing global config instead of merging
   - Root cause: `get_citation_config_for_depth()` returned per-type config directly without inheriting global values

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import mlflow
+from mlflow.entities import SpanType
 
 from src.agent.config import get_researcher_config, get_researcher_config_for_depth
 from src.agent.state import ResearchState, SourceInfo
@@ -27,6 +28,13 @@ from src.agent.tools.url_registry import UrlRegistry
 from src.agent.tools.web_crawler import WebCrawler, web_crawl
 from src.agent.tools.web_search import format_search_results_indexed, web_search
 from src.core.logging_utils import get_logger, truncate
+from src.core.tracing_constants import (
+    ATTR_STEP_INDEX,
+    ATTR_STEP_TITLE,
+    PHASE_EXECUTE,
+    research_span_name,
+    truncate_for_attr,
+)
 from src.services.llm.types import ModelTier, ToolCall
 from src.services.search.brave import BraveSearchClient
 
@@ -89,7 +97,6 @@ class ReactResearchState:
     url_registry: UrlRegistry = field(default_factory=UrlRegistry)  # Index -> URL mapping
 
 
-@mlflow.trace(name="react_researcher", span_type="AGENT")
 async def run_react_researcher(
     state: ResearchState,
     llm: "LLMClient",
@@ -131,21 +138,33 @@ async def run_react_researcher(
         logger.warning("REACT_RESEARCHER_NO_STEP")
         return
 
-    logger.info(
-        "REACT_RESEARCHER_START",
-        step_title=truncate(step.title, 60),
-        query=truncate(state.query, 80),
-        max_tool_calls=effective_max_tool_calls,
-        depth=depth,
-    )
+    # Build span name with step context
+    step_number = state.current_step_index + 1
+    span_name = research_span_name(PHASE_EXECUTE, "react_researcher", step=step_number)
 
-    # Initialize ReAct state
-    react_state = ReactResearchState()
-    react_state.messages = [
-        {"role": "system", "content": REACT_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": f"""Research this topic and find high-quality sources:
+    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
+        span.set_attributes({
+            ATTR_STEP_INDEX: step_number,
+            ATTR_STEP_TITLE: truncate_for_attr(step.title, 100),
+            "max_tool_calls": effective_max_tool_calls,
+            "depth": depth,
+        })
+
+        logger.info(
+            "REACT_RESEARCHER_START",
+            step_title=truncate(step.title, 60),
+            query=truncate(state.query, 80),
+            max_tool_calls=effective_max_tool_calls,
+            depth=depth,
+        )
+
+        # Initialize ReAct state
+        react_state = ReactResearchState()
+        react_state.messages = [
+            {"role": "system", "content": REACT_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": f"""Research this topic and find high-quality sources:
 
 **Research Query:** {state.query}
 
@@ -154,192 +173,199 @@ async def run_react_researcher(
 
 Find sources with specific facts, numbers, and quotes that can be cited.
 Start by searching for relevant information.""",
-        },
-    ]
+            },
+        ]
 
-    # ReAct loop - continues until LLM stops calling tools or max reached
-    while react_state.tool_call_count < effective_max_tool_calls:
-        # Call LLM with tools
-        tool_calls_this_turn = []
-        accumulated_content = ""
+        # ReAct loop - continues until LLM stops calling tools or max reached
+        while react_state.tool_call_count < effective_max_tool_calls:
+            # Call LLM with tools
+            tool_calls_this_turn = []
+            accumulated_content = ""
 
-        try:
-            async for chunk in llm.stream_with_tools(
-                messages=react_state.messages,
-                tools=RESEARCH_TOOLS,
-                tier=ModelTier.ANALYTICAL,
-                max_tokens=2000,
-            ):
-                if chunk.content:
-                    accumulated_content += chunk.content
+            try:
+                async for chunk in llm.stream_with_tools(
+                    messages=react_state.messages,
+                    tools=RESEARCH_TOOLS,
+                    tier=ModelTier.ANALYTICAL,
+                    max_tokens=2000,
+                ):
+                    if chunk.content:
+                        accumulated_content += chunk.content
 
-                if chunk.is_done:
-                    if chunk.tool_calls:
-                        tool_calls_this_turn = chunk.tool_calls
-                    break
+                    if chunk.is_done:
+                        if chunk.tool_calls:
+                            tool_calls_this_turn = chunk.tool_calls
+                        break
 
-        except Exception as e:
-            logger.error(
-                "REACT_RESEARCHER_LLM_ERROR",
-                error=str(e)[:200],
-            )
-            yield ReactResearchEvent(
-                event_type="error",
-                data={"error": str(e)[:200]},
-            )
-            break
+            except Exception as e:
+                logger.error(
+                    "REACT_RESEARCHER_LLM_ERROR",
+                    error=str(e)[:200],
+                )
+                yield ReactResearchEvent(
+                    event_type="error",
+                    data={"error": str(e)[:200]},
+                )
+                break
 
-        # If no tool calls, LLM is done researching (implicit stop)
-        if not tool_calls_this_turn:
-            logger.info(
-                "REACT_RESEARCHER_IMPLICIT_STOP",
-                tool_calls=react_state.tool_call_count,
-                high_quality_sources=len(react_state.high_quality_sources),
-                reasoning=truncate(accumulated_content, 200),
-            )
+            # If no tool calls, LLM is done researching (implicit stop)
+            if not tool_calls_this_turn:
+                logger.info(
+                    "REACT_RESEARCHER_IMPLICIT_STOP",
+                    tool_calls=react_state.tool_call_count,
+                    high_quality_sources=len(react_state.high_quality_sources),
+                    reasoning=truncate(accumulated_content, 200),
+                )
 
-            # Add assistant response to message history
-            if accumulated_content:
+                # Add assistant response to message history
+                if accumulated_content:
+                    react_state.messages.append({
+                        "role": "assistant",
+                        "content": accumulated_content,
+                    })
+
+                yield ReactResearchEvent(
+                    event_type="research_complete",
+                    data={
+                        "reason": "llm_decided",
+                        "tool_calls": react_state.tool_call_count,
+                        "high_quality_sources": len(react_state.high_quality_sources),
+                        "summary": accumulated_content,
+                    },
+                )
+                break
+
+            # Add assistant response with tool calls to message history
+            react_state.messages.append({
+                "role": "assistant",
+                "content": accumulated_content or None,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.name,
+                            "arguments": _serialize_args(tc.arguments),
+                        },
+                    }
+                    for tc in tool_calls_this_turn
+                ],
+            })
+
+            # Execute each tool call
+            for tc in tool_calls_this_turn:
+                react_state.tool_call_count += 1
+
+                yield ReactResearchEvent(
+                    event_type="tool_call",
+                    data={
+                        "tool": tc.name,
+                        "args": tc.arguments,
+                        "call_number": react_state.tool_call_count,
+                    },
+                )
+
+                # Execute tool
+                tool_result = await _execute_tool(
+                    tc,
+                    state,
+                    react_state,
+                    crawler,
+                    brave_client,
+                    config,
+                )
+
+                # Add tool result to message history
                 react_state.messages.append({
-                    "role": "assistant",
-                    "content": accumulated_content,
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": tool_result,
                 })
 
+                yield ReactResearchEvent(
+                    event_type="tool_result",
+                    data={
+                        "tool": tc.name,
+                        "result_preview": truncate(tool_result, 200),
+                        "high_quality_count": len(react_state.high_quality_sources),
+                    },
+                )
+
+            # Check if we have enough high-quality sources
+            if len(react_state.high_quality_sources) >= 5:
+                logger.info(
+                    "REACT_RESEARCHER_QUALITY_THRESHOLD",
+                    high_quality_sources=len(react_state.high_quality_sources),
+                )
+                yield ReactResearchEvent(
+                    event_type="quality_threshold",
+                    data={"count": len(react_state.high_quality_sources)},
+                )
+                # Let LLM make one more turn to potentially stop
+
+        # If we hit max tool calls
+        if react_state.tool_call_count >= effective_max_tool_calls:
+            logger.warning(
+                "REACT_RESEARCHER_MAX_CALLS",
+                tool_calls=react_state.tool_call_count,
+                high_quality_sources=len(react_state.high_quality_sources),
+            )
             yield ReactResearchEvent(
                 event_type="research_complete",
                 data={
-                    "reason": "llm_decided",
+                    "reason": "max_tool_calls",
                     "tool_calls": react_state.tool_call_count,
                     "high_quality_sources": len(react_state.high_quality_sources),
-                    "summary": accumulated_content,
                 },
             )
-            break
 
-        # Add assistant response with tool calls to message history
-        react_state.messages.append({
-            "role": "assistant",
-            "content": accumulated_content or None,
-            "tool_calls": [
-                {
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": _serialize_args(tc.arguments),
-                    },
-                }
-                for tc in tool_calls_this_turn
-            ],
+        # Store high-quality content in state sources
+        for url in react_state.high_quality_sources:
+            if url in react_state.crawled_content:
+                for source in state.sources:
+                    if source.url == url:
+                        source.content = react_state.crawled_content[url]
+                        break
+
+        # Generate observation from crawled content for reflector/synthesizer
+        # Build a summary of what was found
+        observation_parts = []
+        step_title = step.title if step else "Research"
+        observation_parts.append(f"## Research Step: {step_title}\n")
+        observation_parts.append(f"Searched and crawled {len(react_state.high_quality_sources)} sources.\n")
+
+        for url in react_state.high_quality_sources[:5]:  # Top 5 sources
+            content = react_state.crawled_content.get(url, "")
+            if content:
+                # Get source title
+                title = url
+                for s in state.sources:
+                    if s.url == url:
+                        title = s.title or url
+                        break
+                # Include first 500 chars as summary
+                preview = content[:500].replace("\n", " ").strip()
+                observation_parts.append(f"\n### {title}\n{preview}...\n")
+
+        observation = "\n".join(observation_parts)
+        state.last_observation = observation
+        state.all_observations.append(observation)
+
+        # Update span with final metrics
+        span.set_attributes({
+            "total_tool_calls": react_state.tool_call_count,
+            "high_quality_sources": len(react_state.high_quality_sources),
+            "low_quality_sources": len(react_state.low_quality_sources),
         })
 
-        # Execute each tool call
-        for tc in tool_calls_this_turn:
-            react_state.tool_call_count += 1
-
-            yield ReactResearchEvent(
-                event_type="tool_call",
-                data={
-                    "tool": tc.name,
-                    "args": tc.arguments,
-                    "call_number": react_state.tool_call_count,
-                },
-            )
-
-            # Execute tool
-            tool_result = await _execute_tool(
-                tc,
-                state,
-                react_state,
-                crawler,
-                brave_client,
-                config,
-            )
-
-            # Add tool result to message history
-            react_state.messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": tool_result,
-            })
-
-            yield ReactResearchEvent(
-                event_type="tool_result",
-                data={
-                    "tool": tc.name,
-                    "result_preview": truncate(tool_result, 200),
-                    "high_quality_count": len(react_state.high_quality_sources),
-                },
-            )
-
-        # Check if we have enough high-quality sources
-        if len(react_state.high_quality_sources) >= 5:
-            logger.info(
-                "REACT_RESEARCHER_QUALITY_THRESHOLD",
-                high_quality_sources=len(react_state.high_quality_sources),
-            )
-            yield ReactResearchEvent(
-                event_type="quality_threshold",
-                data={"count": len(react_state.high_quality_sources)},
-            )
-            # Let LLM make one more turn to potentially stop
-
-    # If we hit max tool calls
-    if react_state.tool_call_count >= effective_max_tool_calls:
-        logger.warning(
-            "REACT_RESEARCHER_MAX_CALLS",
-            tool_calls=react_state.tool_call_count,
+        logger.info(
+            "REACT_RESEARCHER_COMPLETE",
+            total_tool_calls=react_state.tool_call_count,
             high_quality_sources=len(react_state.high_quality_sources),
+            low_quality_sources=len(react_state.low_quality_sources),
+            state_sources=len(state.sources),
+            observation_len=len(observation),
         )
-        yield ReactResearchEvent(
-            event_type="research_complete",
-            data={
-                "reason": "max_tool_calls",
-                "tool_calls": react_state.tool_call_count,
-                "high_quality_sources": len(react_state.high_quality_sources),
-            },
-        )
-
-    # Store high-quality content in state sources
-    for url in react_state.high_quality_sources:
-        if url in react_state.crawled_content:
-            for source in state.sources:
-                if source.url == url:
-                    source.content = react_state.crawled_content[url]
-                    break
-
-    # Generate observation from crawled content for reflector/synthesizer
-    # Build a summary of what was found
-    observation_parts = []
-    step_title = step.title if step else "Research"
-    observation_parts.append(f"## Research Step: {step_title}\n")
-    observation_parts.append(f"Searched and crawled {len(react_state.high_quality_sources)} sources.\n")
-
-    for url in react_state.high_quality_sources[:5]:  # Top 5 sources
-        content = react_state.crawled_content.get(url, "")
-        if content:
-            # Get source title
-            title = url
-            for s in state.sources:
-                if s.url == url:
-                    title = s.title or url
-                    break
-            # Include first 500 chars as summary
-            preview = content[:500].replace("\n", " ").strip()
-            observation_parts.append(f"\n### {title}\n{preview}...\n")
-
-    observation = "\n".join(observation_parts)
-    state.last_observation = observation
-    state.all_observations.append(observation)
-
-    logger.info(
-        "REACT_RESEARCHER_COMPLETE",
-        total_tool_calls=react_state.tool_call_count,
-        high_quality_sources=len(react_state.high_quality_sources),
-        low_quality_sources=len(react_state.low_quality_sources),
-        state_sources=len(state.sources),
-        observation_len=len(observation),
-    )
 
 
 async def _execute_tool(

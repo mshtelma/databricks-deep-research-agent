@@ -200,7 +200,7 @@ Provide a well-structured markdown response with inline citations.""",
         state.complete(full_content + error_msg)
 
 
-@mlflow.trace(name="citation_synthesizer", span_type="AGENT")
+@mlflow.trace(name="research.synthesis.citation_synthesizer", span_type="AGENT")
 async def run_citation_synthesizer(
     state: ResearchState,
     llm: LLMClient,

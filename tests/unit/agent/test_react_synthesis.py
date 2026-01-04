@@ -4,12 +4,21 @@ Tests for:
 - EvidenceRegistry: Index-based evidence access and retrieval tracking
 - Synthesis tools: Tool definitions and formatters
 - Claim extraction: Parsing claims from ReAct-generated content
+- Thinking text strip: Removes planning text from LLM output
+- Citation validation: Ensures citations preserved after post-processing
+- Block assembly: Source-based paragraph grouping
 """
 
 from uuid import uuid4
 
 import pytest
 
+from src.agent.nodes.react_synthesizer import (
+    deduplicate_report,
+    parse_tagged_content,
+    strip_thinking_text,
+    validate_citations_preserved,
+)
 from src.agent.tools.evidence_registry import (
     EvidenceRegistry,
     IndexedEvidence,
@@ -339,6 +348,496 @@ class TestToolFormatters:
 
         assert "(Section:" not in result
         assert "GitHub Repo" in result
+
+
+# ============================================================================
+# Thinking Text Strip Tests
+# ============================================================================
+
+
+class TestStripThinkingText:
+    """Tests for strip_thinking_text function."""
+
+    def test_strips_ill_search_pattern(self) -> None:
+        """Test stripping 'I'll search for...' patterns."""
+        content = """I'll search for evidence about Basel III.
+The Basel III framework was established in 2010 [Arxiv].
+Implementation varies across jurisdictions [Wiki]."""
+        result = strip_thinking_text(content)
+        assert "I'll search for" not in result
+        assert "Basel III framework" in result
+
+    def test_strips_let_me_pattern(self) -> None:
+        """Test stripping 'Let me search...' patterns."""
+        content = """Let me find information about capital requirements.
+Capital requirements are set at 10.5% [Source-1].
+This includes the capital conservation buffer [Source-2]."""
+        result = strip_thinking_text(content)
+        assert "Let me find" not in result
+        assert "Capital requirements" in result
+
+    def test_strips_now_ill_pattern(self) -> None:
+        """Test stripping 'Now I'll...' patterns."""
+        content = """Now I'll look for more details.
+First, I'll retrieve the implementation timeline.
+The CRR came into effect in 2014 [Official]."""
+        result = strip_thinking_text(content)
+        assert "Now I'll" not in result
+        assert "First, I'll retrieve" not in result
+        assert "CRR came into effect" in result
+
+    def test_strips_searching_pattern(self) -> None:
+        """Test stripping 'Searching for...' patterns."""
+        content = """Searching for regulatory information...
+The framework includes capital requirements [Source]."""
+        result = strip_thinking_text(content)
+        assert "Searching for" not in result
+        assert "framework includes" in result
+
+    def test_preserves_legitimate_content(self) -> None:
+        """Test that legitimate content is not stripped."""
+        content = """The CEO stated "I'll search for a solution to this problem."
+This quote shows the company's commitment [Press]."""
+        result = strip_thinking_text(content)
+        # This should be preserved because it's within a quote
+        assert "CEO stated" in result
+        assert "commitment" in result
+
+    def test_handles_empty_content(self) -> None:
+        """Test handling empty content."""
+        assert strip_thinking_text("") == ""
+        assert strip_thinking_text("   ") == ""
+
+    def test_handles_only_thinking_text(self) -> None:
+        """Test content that is only thinking text."""
+        content = """I'll search for information.
+Let me find the relevant data.
+Now I'll look for more context."""
+        result = strip_thinking_text(content)
+        assert result == ""
+
+    def test_preserves_markdown_headers(self) -> None:
+        """Test that markdown headers are preserved."""
+        content = """## Key Findings
+I'll search for implementation details.
+The framework was introduced in 2010 [Source]."""
+        result = strip_thinking_text(content)
+        assert "## Key Findings" in result
+        assert "I'll search" not in result
+
+    def test_strips_i_need_to_pattern(self) -> None:
+        """Test stripping 'I need to search...' patterns."""
+        content = """I need to find more information about this.
+I should search for regulatory details.
+The regulation is complex [Source]."""
+        result = strip_thinking_text(content)
+        assert "I need to find" not in result
+        assert "I should search" not in result
+        assert "regulation is complex" in result
+
+
+# ============================================================================
+# Report Deduplication Tests
+# ============================================================================
+
+
+class TestDeduplicateReport:
+    """Tests for deduplicate_report function that removes duplicated report sections."""
+
+    def test_no_duplication_returns_unchanged(self) -> None:
+        """Test that content with single Introduction is unchanged."""
+        content = """## Introduction
+
+This is a research report about Basel III.
+
+## Key Findings
+
+Capital requirements are set at 10.5% [Source-1].
+
+## Conclusion
+
+The regulatory framework is comprehensive."""
+        result = deduplicate_report(content)
+        assert result == content
+
+    def test_duplicate_introduction_keeps_longer_with_conclusion(self) -> None:
+        """Test that when both have conclusions, longer one is kept."""
+        content = """## Introduction
+
+First report content about Basel III.
+
+## Conclusion
+
+First conclusion.
+
+## Introduction
+
+Second report content (duplicate) with more detailed information.
+This one has significantly more content than the first.
+
+## Key Findings
+
+Detailed duplicate findings with extra content.
+
+## Conclusion
+
+Longer duplicate conclusion with more analysis."""
+        result = deduplicate_report(content)
+        # Both have conclusions, longer one (second) is kept
+        assert "Second report content" in result
+        assert "Detailed duplicate findings" in result
+        assert "Longer duplicate conclusion" in result
+        # First report should be removed (shorter)
+        assert "First report content about Basel III" not in result
+        assert "First conclusion" not in result
+
+    def test_handles_empty_content(self) -> None:
+        """Test handling empty content."""
+        assert deduplicate_report("") == ""
+
+    def test_handles_no_introduction(self) -> None:
+        """Test content without ## Introduction is unchanged."""
+        content = """Some content without a header.
+
+More content here."""
+        result = deduplicate_report(content)
+        assert result == content
+
+    def test_handles_h3_introduction(self) -> None:
+        """Test that ### Introduction (h3) is NOT treated as duplication marker."""
+        content = """## Introduction
+
+Main intro.
+
+### Introduction Details
+
+More details here."""
+        result = deduplicate_report(content)
+        # h3 should not trigger deduplication
+        assert result == content
+
+    def test_strips_trailing_whitespace(self) -> None:
+        """Test that trailing whitespace is stripped after selection."""
+        content = """## Introduction
+
+First content (shorter, with conclusion).
+
+## Conclusion
+
+First.
+
+
+## Introduction
+
+Second content is longer than first.
+More lines here.
+
+## Conclusion
+
+Second conclusion."""
+        result = deduplicate_report(content)
+        assert not result.endswith(" ")
+        assert not result.endswith("\n")
+        # Second is longer with conclusion, so it's kept
+        assert "Second content is longer" in result
+        assert "First content (shorter" not in result
+
+    def test_real_world_duplication_pattern(self) -> None:
+        """Test pattern observed in Basel IV trace: both have conclusions, pick longest."""
+        content = """## Introduction
+
+Basel III Endgame: Core capital changes.
+
+## Key Regulatory Changes
+
+CRR III entered into force on 1 January 2025 [ECB].
+
+## Conclusion
+
+Banks' capital stacking strategies will need adjustment.
+
+## Introduction
+
+Basel III Endgame ("Basel IV"): Core framework revisions.
+
+## Key Regulatory Updates
+
+CRR 3 (EU): Implementation timeline details. More detailed content here.
+
+## Conclusion
+
+EU Capital Stack Complexity increases. This conclusion is longer."""
+        result = deduplicate_report(content)
+        # Both have conclusions, so longer one is kept (second one)
+        assert 'Basel III Endgame ("Basel IV")' in result
+        assert "CRR 3 (EU)" in result
+        assert "This conclusion is longer" in result
+        # First version removed
+        assert "Basel III Endgame: Core capital changes" not in result
+
+    def test_multiline_introduction(self) -> None:
+        """Test ## Introduction at various line positions - keeps longer when no conclusion."""
+        content = """## Introduction
+First paragraph.
+
+More content.
+
+## Introduction
+Second intro with more text here."""
+        result = deduplicate_report(content)
+        assert result.count("## Introduction") == 1
+        # Neither has conclusion, so longer one is kept (second)
+        assert "Second intro" in result
+        assert "First paragraph" not in result
+
+    def test_keeps_report_with_conclusion(self) -> None:
+        """Test that report with conclusion is preferred over incomplete one."""
+        content = """## Introduction
+
+First report content that is incomplete.
+
+## Key Findings
+
+Some findings here.
+
+## Introduction
+
+Second report content.
+
+## Key Findings
+
+Different findings.
+
+## Conclusion
+
+This is the conclusion of the second report."""
+        result = deduplicate_report(content)
+        # Second report has conclusion, first doesn't - keep second
+        assert "Second report content" in result
+        assert "This is the conclusion" in result
+        assert "First report content that is incomplete" not in result
+
+    def test_keeps_longer_when_neither_has_conclusion(self) -> None:
+        """When neither report has a conclusion, keep the longer one."""
+        content = """## Introduction
+
+Short first report.
+
+## Introduction
+
+This is a much longer second report with lots of content.
+It has multiple paragraphs and detailed information.
+This makes it the better choice when neither has a conclusion."""
+        result = deduplicate_report(content)
+        # Neither has conclusion, keep longer (second)
+        assert "much longer second report" in result
+        assert "Short first report" not in result
+
+
+# ============================================================================
+# Citation Validation Tests
+# ============================================================================
+
+
+class TestValidateCitationsPreserved:
+    """Tests for validate_citations_preserved function."""
+
+    def test_identical_citations_returns_true(self) -> None:
+        """Test that identical citations return True."""
+        original = "The rate is 10% [Source-1]. The limit is 8% [Source-2]."
+        polished = "At 10%, the rate is significant [Source-1]. Meanwhile, the limit stands at 8% [Source-2]."
+        assert validate_citations_preserved(original, polished) is True
+
+    def test_missing_citation_returns_false(self) -> None:
+        """Test that missing citation returns False."""
+        original = "Rate is 10% [Source-1]. Limit is 8% [Source-2]."
+        polished = "Rate is 10% [Source-1]. Limit is 8%."
+        assert validate_citations_preserved(original, polished) is False
+
+    def test_extra_citation_returns_false(self) -> None:
+        """Test that extra citation returns False."""
+        original = "Rate is 10% [Source-1]."
+        polished = "Rate is 10% [Source-1] [Source-2]."
+        assert validate_citations_preserved(original, polished) is False
+
+    def test_empty_content_returns_true(self) -> None:
+        """Test empty content returns True."""
+        assert validate_citations_preserved("", "") is True
+
+    def test_no_citations_returns_true(self) -> None:
+        """Test content without citations returns True."""
+        original = "Some text without citations."
+        polished = "Polished text without citations."
+        assert validate_citations_preserved(original, polished) is True
+
+    def test_complex_citation_keys(self) -> None:
+        """Test various citation key formats."""
+        original = "[Arxiv] paper and [Github-2] repo and [Wikipedia-10] article."
+        polished = "Article from [Wikipedia-10], repo [Github-2], and paper [Arxiv]."
+        assert validate_citations_preserved(original, polished) is True
+
+    def test_citation_order_doesnt_matter(self) -> None:
+        """Test that citation order doesn't affect validation."""
+        original = "[A] first [B] second [C] third."
+        polished = "[C] first [A] second [B] third."
+        assert validate_citations_preserved(original, polished) is True
+
+    def test_duplicate_citations_counted(self) -> None:
+        """Test that duplicate citations are handled correctly."""
+        original = "[Source-1] once [Source-1] twice."
+        polished = "[Source-1] appears twice."
+        # Both have the same set of unique citations
+        assert validate_citations_preserved(original, polished) is True
+
+
+# ============================================================================
+# Block Assembly Tests (parse_tagged_content)
+# ============================================================================
+
+
+class TestParseTaggedContent:
+    """Tests for parse_tagged_content function."""
+
+    def test_parses_cite_tags(self) -> None:
+        """Test parsing <cite> tags."""
+        content = '<cite key="Source-1">This is a cited claim.</cite>'
+        assembled, blocks = parse_tagged_content(content)
+        assert len(blocks) == 1
+        assert blocks[0].tag_type == "cite"
+        assert blocks[0].citation_key == "Source-1"
+        assert "Source-1" in assembled
+
+    def test_parses_free_tags(self) -> None:
+        """Test parsing <free> tags."""
+        content = "<free>## Introduction</free>"
+        assembled, blocks = parse_tagged_content(content)
+        assert len(blocks) == 1
+        assert blocks[0].tag_type == "free"
+        assert "## Introduction" in assembled
+
+    def test_parses_mixed_content(self) -> None:
+        """Test parsing mixed cite and free tags."""
+        content = """<free>## Key Findings</free>
+<free>The regulatory landscape has evolved.</free>
+<cite key="Arxiv">The framework was established in 2010.</cite>
+<free>This laid the groundwork.</free>
+<cite key="Wiki">Implementation varied across jurisdictions.</cite>"""
+        assembled, blocks = parse_tagged_content(content)
+        assert len(blocks) == 5
+        assert blocks[0].tag_type == "free"
+        assert blocks[2].tag_type == "cite"
+        assert "[Arxiv]" in assembled
+        assert "[Wiki]" in assembled
+
+    def test_headers_get_own_line(self) -> None:
+        """Test that markdown headers get their own paragraph."""
+        content = """<free>## Section One</free>
+<cite key="Source-1">First claim.</cite>
+<free>## Section Two</free>
+<cite key="Source-2">Second claim.</cite>"""
+        assembled, blocks = parse_tagged_content(content)
+        lines = [line.strip() for line in assembled.split("\n\n") if line.strip()]
+        # Headers should be separate
+        assert any("## Section One" in line for line in lines)
+        assert any("## Section Two" in line for line in lines)
+
+    def test_multiple_sources_same_paragraph(self) -> None:
+        """Test that multiple sources can be in the same paragraph (flowing prose)."""
+        content = """<cite key="Arxiv-1">First Arxiv claim.</cite>
+<cite key="Arxiv-2">Second Arxiv claim.</cite>
+<cite key="Wiki">Wiki claim.</cite>"""
+        assembled, blocks = parse_tagged_content(content)
+        # All claims should be in same paragraph (no source-based breaks)
+        paragraphs = [p.strip() for p in assembled.split("\n\n") if p.strip()]
+        assert len(paragraphs) == 1
+        # All citations should be in the same paragraph
+        assert "[Arxiv-1]" in paragraphs[0]
+        assert "[Arxiv-2]" in paragraphs[0]
+        assert "[Wiki]" in paragraphs[0]
+
+    def test_different_sources_flow_together(self) -> None:
+        """Test that different sources flow together in prose (no forced breaks)."""
+        content = """<cite key="Source-A">Claim from A.</cite>
+<cite key="Source-B">Claim from B.</cite>"""
+        assembled, blocks = parse_tagged_content(content)
+        paragraphs = [p.strip() for p in assembled.split("\n\n") if p.strip()]
+        # Should be 1 paragraph - no source-based breaks for flowing prose
+        assert len(paragraphs) == 1
+        assert "[Source-A]" in paragraphs[0]
+        assert "[Source-B]" in paragraphs[0]
+
+    def test_untagged_content_is_discarded(self) -> None:
+        """Test that untagged content is discarded (scratchpad behavior)."""
+        content = "Plain text without any tags."
+        assembled, blocks = parse_tagged_content(content)
+        # Untagged content is treated as scratchpad and discarded
+        assert assembled == ""
+        assert len(blocks) == 0
+
+    def test_handles_empty_content(self) -> None:
+        """Test handling empty content."""
+        assembled, blocks = parse_tagged_content("")
+        assert assembled == ""
+        assert len(blocks) == 0
+
+    def test_parses_unverified_tags(self) -> None:
+        """Test parsing <unverified> tags."""
+        content = "<unverified>This claim is unverified.</unverified>"
+        assembled, blocks = parse_tagged_content(content)
+        assert len(blocks) == 1
+        assert blocks[0].tag_type == "unverified"
+        # Unverified content is included in paragraph but without special marker
+        assert "This claim is unverified." in assembled
+
+    def test_parses_analysis_tags(self) -> None:
+        """Test parsing <analysis> tags for author's synthesis/conclusions."""
+        content = """<cite key="Arxiv">GPT-4 achieves 86.4% accuracy on MMLU.</cite>
+<analysis>This demonstrates significant progress in language model capabilities.</analysis>"""
+        assembled, blocks = parse_tagged_content(content)
+        assert len(blocks) == 2
+        assert blocks[0].tag_type == "cite"
+        assert blocks[0].citation_key == "Arxiv"
+        assert blocks[1].tag_type == "analysis"
+        assert blocks[1].citation_key is None  # Analysis has no citation
+        # Analysis content flows into the same paragraph
+        assert "significant progress" in assembled
+        # Analysis is NOT marked with a citation
+        assert "[Arxiv]" in assembled
+        assert "[analysis]" not in assembled.lower()
+
+    def test_analysis_mixed_with_cite_and_free(self) -> None:
+        """Test <analysis> blocks mix correctly with <cite> and <free>."""
+        content = """<free>## Results</free>
+<cite key="Paper-1">The model achieved state-of-the-art results.</cite>
+<analysis>These findings suggest a paradigm shift in the field.</analysis>
+<free>## Conclusion</free>
+<analysis>Overall, the research represents a major advancement.</analysis>"""
+        assembled, blocks = parse_tagged_content(content)
+        assert len(blocks) == 5
+        # Verify tag types
+        assert blocks[0].tag_type == "free"
+        assert blocks[1].tag_type == "cite"
+        assert blocks[2].tag_type == "analysis"
+        assert blocks[3].tag_type == "free"
+        assert blocks[4].tag_type == "analysis"
+        # Headers should be on separate lines
+        assert "## Results" in assembled
+        assert "## Conclusion" in assembled
+        # Analysis content included
+        assert "paradigm shift" in assembled
+        assert "major advancement" in assembled
+
+    def test_free_text_joins_paragraph(self) -> None:
+        """Test that free text stays with current paragraph."""
+        content = """<cite key="Source-1">Main claim here.</cite>
+<free>Furthermore, this is important context.</free>
+<cite key="Source-1">Another related claim.</cite>"""
+        assembled, blocks = parse_tagged_content(content)
+        # All three should be in same paragraph (same source + connector)
+        paragraphs = [p.strip() for p in assembled.split("\n\n") if p.strip()]
+        # Should be a single paragraph since same source
+        assert len(paragraphs) == 1
+        assert "Furthermore" in paragraphs[0]
 
 
 # ============================================================================

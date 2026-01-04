@@ -254,6 +254,19 @@ class CorrectionMethod(str, Enum):
     SEMANTIC_ONLY = "semantic_only"
 
 
+class SofteningStrategy(str, Enum):
+    """Strategy for softening unverified claims in Stage 7.
+
+    - HEDGE: Add hedging words ("reportedly", "allegedly", "according to some sources")
+    - QUALIFY: Add qualifying phrases ("it is believed that", "some evidence suggests")
+    - PARENTHETICAL: Add parenthetical markers ("(unverified)", "(needs citation)")
+    """
+
+    HEDGE = "hedge"
+    QUALIFY = "qualify"
+    PARENTHETICAL = "parenthetical"
+
+
 class GenerationMode(str, Enum):
     """Generation mode for research reports.
 
@@ -287,7 +300,7 @@ class ReactSynthesisConfig(BaseModel):
     """Configuration for ReAct-based synthesis mode."""
 
     # Tool budget
-    max_tool_calls: int = Field(default=40, ge=5, le=150)
+    max_tool_calls: int = Field(default=40, ge=5, le=250)
     tool_budget_per_section: int = Field(default=10, ge=3, le=50)
 
     # Grounding settings
@@ -316,13 +329,13 @@ class ReactSynthesisConfig(BaseModel):
 
     # Post-processing
     enable_post_processing: bool = Field(
-        default=True,
-        description="Run coherence polish pass after section generation"
+        default=False,
+        description="Run coherence polish pass after synthesis (disabled by default)"
     )
 
     # Section-based synthesis
     use_sectioned_synthesis: bool = Field(
-        default=True,
+        default=False,
         description="Process research steps as separate sections"
     )
 
@@ -403,17 +416,134 @@ class NumericQAVerificationConfig(BaseModel):
 
 
 class VerificationRetrievalConfig(BaseModel):
-    """Configuration for optional verification retrieval."""
+    """Configuration for Stage 7: ARE-style Verification Retrieval.
 
-    trigger_on_verdicts: list[str] = Field(default_factory=lambda: ["unsupported", "nei"])
-    max_additional_searches: int = Field(default=2, ge=0, le=10)
-    search_timeout_seconds: int = Field(default=3, ge=1, le=30)
+    Implements the ARE (Atomic fact decomposition-based Retrieval and Editing) pattern
+    for verifying and revising unsupported/partial claims. Based on research from:
+    - ARE: https://arxiv.org/abs/2410.16708
+    - FActScore: https://arxiv.org/abs/2305.14251
+    - SAFE: https://arxiv.org/abs/2403.18802
+    """
+
+    # Trigger conditions
+    trigger_on_verdicts: list[str] = Field(
+        default_factory=lambda: ["unsupported", "partial"],
+        description="Verdicts that trigger verification retrieval",
+    )
+
+    # Atomic decomposition settings
+    max_atomic_facts_per_claim: int = Field(
+        default=5, ge=1, le=10,
+        description="Maximum atomic facts to extract from a single claim",
+    )
+
+    # Search budget (per atomic fact, not per claim)
+    max_searches_per_fact: int = Field(
+        default=2, ge=1, le=5,
+        description="Max search attempts per atomic fact (includes reformulations)",
+    )
+    max_external_urls_per_search: int = Field(
+        default=3, ge=1, le=10,
+        description="Max URLs to crawl per external search",
+    )
+
+    # Entailment thresholds
+    entailment_threshold: float = Field(
+        default=0.6, ge=0.0, le=1.0,
+        description="Minimum entailment score to accept evidence as supporting",
+    )
+    internal_search_threshold: float = Field(
+        default=0.7, ge=0.0, le=1.0,
+        description="Similarity threshold for internal pool match",
+    )
+
+    # Reconstruction behavior
+    softening_strategy: SofteningStrategy = Field(
+        default=SofteningStrategy.HEDGE,
+        description="Strategy for softening unverified facts",
+    )
+
+    # Timeouts
+    decomposition_timeout_seconds: float = Field(
+        default=10.0, ge=1.0, le=60.0,
+        description="Timeout for atomic decomposition LLM call",
+    )
+    search_timeout_seconds: float = Field(
+        default=10.0, ge=1.0, le=60.0,
+        description="Timeout for each external search",
+    )
+    crawl_timeout_seconds: float = Field(
+        default=15.0, ge=1.0, le=60.0,
+        description="Timeout for web crawling",
+    )
+
+    # Model tiers for LLM calls
+    decomposition_tier: str = Field(
+        default="simple",
+        description="Model tier for atomic fact decomposition",
+    )
+    entailment_tier: str = Field(
+        default="analytical",
+        description="Model tier for entailment checking",
+    )
+    reconstruction_tier: str = Field(
+        default="analytical",
+        description="Model tier for claim reconstruction",
+    )
+
+    model_config = {"frozen": True}
+
+
+class GroundingValidationConfig(BaseModel):
+    """Configuration for grounding validation of <analysis> and <free> blocks.
+
+    Validates that:
+    - <analysis> blocks are logically derived from preceding <cite> claims
+    - <free> blocks contain only structural content (no hidden factual claims)
+
+    Based on SOTA research (FACTS Grounding, FActScore, SAFE).
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable grounding validation for analysis blocks",
+    )
+    max_blocks_to_validate: int = Field(
+        default=20, ge=1, le=50,
+        description="Maximum analysis/free blocks to validate per report",
+    )
+    min_analysis_length: int = Field(
+        default=30, ge=10, le=100,
+        description="Minimum character length for analysis block to require validation",
+    )
+    allow_topic_sentences: bool = Field(
+        default=True,
+        description="Allow short (<=50 chars) analysis blocks after headers without citations",
+    )
+    max_preceding_citations: int = Field(
+        default=10, ge=1, le=20,
+        description="Maximum preceding citations to include in grounding context",
+    )
+    hedging_prefix: str = Field(
+        default="Based on the evidence presented, ",
+        description="Hedging prefix for ungrounded analysis",
+    )
 
     model_config = {"frozen": True}
 
 
 class CitationVerificationConfig(BaseModel):
-    """Configuration for the 6-stage citation verification pipeline."""
+    """Configuration for the 7-stage citation verification pipeline.
+
+    Stages:
+    1. Evidence Pre-Selection - Extract relevant quotes from sources
+    2. Interleaved Generation - Generate claims with [N] citations
+    3. Confidence Classification - Route claims by confidence level
+    4. Isolated Verification - Produce verdicts (supported/partial/unsupported/contradicted)
+    5. Citation Correction - Swap citations from existing pool
+    6. Numeric QA Verification - Deep verification of numeric claims
+    7. ARE Verification Retrieval - Atomic fact decomposition + external search + revision
+    """
 
     # Master toggle
     enabled: bool = True
@@ -465,9 +595,34 @@ class CitationVerificationConfig(BaseModel):
     verification_retrieval: VerificationRetrievalConfig = Field(
         default_factory=VerificationRetrievalConfig
     )
+    grounding_validation: GroundingValidationConfig = Field(
+        default_factory=GroundingValidationConfig
+    )
 
     # Warning thresholds
     unsupported_claim_warning_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
+
+    # Post-verification claim processing (Stage 8)
+    enable_free_block_extraction: bool = Field(
+        default=True,
+        description="Extract claims from <free> blocks that contain factual content",
+    )
+    enable_claim_removal: bool = Field(
+        default=True,
+        description="Remove contradicted claims from final report",
+    )
+    enable_claim_softening: bool = Field(
+        default=True,
+        description="Soften unsupported claims with hedging language",
+    )
+    max_free_block_claims: int = Field(
+        default=20, ge=0, le=100,
+        description="Maximum claims to extract from <free> blocks (0 = unlimited)",
+    )
+    free_block_min_length: int = Field(
+        default=30, ge=10, le=200,
+        description="Minimum character length for <free> block to be considered for claim extraction",
+    )
 
     model_config = {"frozen": True}
 
@@ -475,7 +630,7 @@ class CitationVerificationConfig(BaseModel):
 class RateLimitingConfig(BaseModel):
     """Configuration for rate limit retry behavior."""
 
-    max_retries: int = Field(default=3, ge=0, le=10)
+    max_retries: int = Field(default=3, ge=0, le=100)
     base_delay_seconds: float = Field(default=2.0, gt=0, le=30)
     max_delay_seconds: float = Field(default=60.0, gt=0, le=300)
     backoff_strategy: BackoffStrategy = BackoffStrategy.EXPONENTIAL

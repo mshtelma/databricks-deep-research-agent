@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import httpx
 import mlflow
+from mlflow.entities import SpanType
 from trafilatura import bare_extraction
 
 from src.core.app_config import get_app_config
@@ -17,6 +18,13 @@ from src.core.logging_utils import (
     log_crawl_error,
     log_crawl_request,
     log_crawl_response,
+)
+from src.core.tracing_constants import (
+    ATTR_CRAWL_FAILED,
+    ATTR_CRAWL_SUCCESSFUL,
+    ATTR_CRAWL_URLS_COUNT,
+    list_to_attr,
+    tool_span_name,
 )
 from src.services.search.domain_filter import DomainFilter
 
@@ -305,24 +313,39 @@ class WebCrawler:
         await self._client.aclose()
 
 
-@mlflow.trace(name="web_crawl", span_type="TOOL")
 async def web_crawl(
     urls: list[str],
     crawler: WebCrawler,
+    context: str | None = None,
 ) -> CrawlOutput:
     """Crawl multiple URLs and extract content.
 
     Args:
         urls: List of URLs to crawl.
         crawler: WebCrawler instance (injected via DI).
+        context: Optional context for span naming (e.g., "step_1", "background").
 
     Returns:
         CrawlOutput with crawl results.
     """
-    logger.info(f"Crawling {len(urls)} URLs")
+    span_name = tool_span_name("web_crawl", context)
 
-    output = await crawler.crawl(urls)
+    with mlflow.start_span(name=span_name, span_type=SpanType.TOOL) as span:
+        span.set_attributes({
+            ATTR_CRAWL_URLS_COUNT: len(urls),
+            "crawl.urls": list_to_attr(urls, max_items=5),
+        })
 
-    logger.info(f"Crawled {output.successful_count} successfully, {output.failed_count} failed")
+        logger.info(f"Crawling {len(urls)} URLs")
 
-    return output
+        output = await crawler.crawl(urls)
+
+        logger.info(f"Crawled {output.successful_count} successfully, {output.failed_count} failed")
+
+        # Set output attributes
+        span.set_attributes({
+            ATTR_CRAWL_SUCCESSFUL: output.successful_count,
+            ATTR_CRAWL_FAILED: output.failed_count,
+        })
+
+        return output
