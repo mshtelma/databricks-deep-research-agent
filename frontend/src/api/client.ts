@@ -203,8 +203,10 @@ export const preferencesApi = {
 
   update: (data: {
     system_instructions?: string
-    default_depth?: string
-    ui_preferences?: Record<string, unknown>
+    default_research_depth?: string
+    default_query_mode?: import('../types').QueryMode
+    theme?: string
+    notifications_enabled?: boolean
   }) =>
     request<import('../types').UserPreferences>('/preferences', {
       method: 'PUT',

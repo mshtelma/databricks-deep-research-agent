@@ -6,3 +6,4 @@ export type { ToolActivity } from './useStreamingQuery';
 export { useCitations } from './useCitations';
 export { useDraftChats } from './useDraftChats';
 export type { DraftChat } from './useDraftChats';
+export { useQueryMode } from './useQueryMode';

@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.logging_utils import get_logger
+from src.models.enums import QueryMode
 from src.models.research_session import ResearchDepth
 from src.models.user_preferences import UserPreferences
 
@@ -63,6 +64,7 @@ class PreferencesService:
         user_id: str,
         system_instructions: str | None = None,
         default_research_depth: ResearchDepth | None = None,
+        default_query_mode: QueryMode | None = None,
         theme: str | None = None,
         notifications_enabled: bool | None = None,
     ) -> UserPreferences:
@@ -72,6 +74,7 @@ class PreferencesService:
             user_id: User ID.
             system_instructions: System instructions for all chats.
             default_research_depth: Default research depth.
+            default_query_mode: Default query mode (simple/web_search/deep_research).
             theme: UI theme preference.
             notifications_enabled: Whether notifications are enabled.
 
@@ -86,6 +89,9 @@ class PreferencesService:
 
         if default_research_depth is not None:
             preferences.update_depth(default_research_depth)
+
+        if default_query_mode is not None:
+            preferences.update_query_mode(default_query_mode)
 
         if theme is not None:
             preferences.update_theme(theme)
@@ -128,6 +134,18 @@ class PreferencesService:
         preferences = await self.get_preferences(user_id)
         return preferences.default_research_depth
 
+    async def get_default_query_mode(self, user_id: str) -> str:
+        """Get user's default query mode.
+
+        Args:
+            user_id: User ID.
+
+        Returns:
+            Default query mode (simple/web_search/deep_research).
+        """
+        preferences = await self.get_preferences(user_id)
+        return preferences.default_query_mode
+
     def to_dict(self, preferences: UserPreferences) -> dict[str, Any]:
         """Convert preferences to dictionary.
 
@@ -140,6 +158,7 @@ class PreferencesService:
         return {
             "system_instructions": preferences.system_instructions,
             "default_research_depth": preferences.default_research_depth.value,
+            "default_query_mode": preferences.default_query_mode,
             "theme": preferences.theme,
             "notifications_enabled": preferences.notifications_enabled,
             "updated_at": preferences.updated_at.isoformat() if preferences.updated_at else None,

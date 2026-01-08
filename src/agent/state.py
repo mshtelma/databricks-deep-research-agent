@@ -303,7 +303,10 @@ class ResearchState:
     # User preferences
     system_instructions: str | None = None  # Custom instructions from user preferences
 
-    # Research depth configuration
+    # Query mode configuration (tiered query modes feature)
+    query_mode: str = "deep_research"  # simple, web_search, deep_research
+
+    # Research depth configuration (only applies to deep_research mode)
     research_depth: str = "auto"  # auto, light, medium, extended
     effective_depth: str | None = None  # Resolved depth after auto selection
 
@@ -505,6 +508,7 @@ class ResearchState:
         return {
             "query": self.query,
             "session_id": str(self.session_id),
+            "query_mode": self.query_mode,
             "query_classification": self.query_classification.to_dict()
             if self.query_classification
             else None,

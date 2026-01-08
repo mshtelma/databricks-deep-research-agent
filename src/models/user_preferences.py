@@ -6,6 +6,7 @@ from sqlalchemy import Boolean, DateTime, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.db.base import Base, UUIDMixin
+from src.models.enums import QueryMode
 from src.models.research_session import ResearchDepth
 
 
@@ -37,6 +38,14 @@ class UserPreferences(Base, UUIDMixin):
     system_instructions: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
+    )
+
+    # Default query mode (simple, web_search, deep_research)
+    default_query_mode: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        server_default="simple",
+        default="simple",
     )
 
     # UI preferences (separate columns matching migration)
@@ -81,3 +90,7 @@ class UserPreferences(Base, UUIDMixin):
     def update_notifications(self, enabled: bool) -> None:
         """Update notifications setting."""
         self.notifications_enabled = enabled
+
+    def update_query_mode(self, mode: QueryMode) -> None:
+        """Update default query mode."""
+        self.default_query_mode = mode.value

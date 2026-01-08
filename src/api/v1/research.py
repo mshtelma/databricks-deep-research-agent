@@ -106,7 +106,9 @@ async def stream_research_endpoint(
     chat_id: UUID,
     user: CurrentUser,
     query: str = Query(default=""),
+    query_mode: str = Query(default="deep_research", pattern="^(simple|web_search|deep_research)$"),
     research_depth: str = Query(default="auto", pattern="^(auto|light|medium|extended)$"),
+    verify_sources: bool = Query(default=True, description="Enable citation verification pipeline"),
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """Stream research progress (SSE).
@@ -208,11 +210,13 @@ async def stream_research_endpoint(
 
             # Create orchestration config with pre-generated UUIDs
             config = OrchestrationConfig(
+                query_mode=query_mode,
                 research_depth=research_depth,
                 system_instructions=system_instructions,
                 message_id=agent_message_id,
                 research_session_id=research_session_id,
                 is_draft=is_draft,
+                verify_sources=verify_sources,
             )
 
             # Stream events - orchestrator handles persistence on success
@@ -291,7 +295,9 @@ async def stream_research_with_history(
     chat_id: UUID,
     user: CurrentUser,
     query: str = Query(default=""),
+    query_mode: str = Query(default="deep_research", pattern="^(simple|web_search|deep_research)$"),
     research_depth: str = Query(default="auto", pattern="^(auto|light|medium|extended)$"),
+    verify_sources: bool = Query(default=True, description="Enable citation verification pipeline"),
     history: list[ConversationMessage] | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
@@ -359,11 +365,13 @@ async def stream_research_with_history(
 
             # Create orchestration config with pre-generated UUIDs
             config = OrchestrationConfig(
+                query_mode=query_mode,
                 research_depth=research_depth,
                 system_instructions=system_instructions,
                 message_id=agent_message_id,
                 research_session_id=research_session_id,
                 is_draft=is_draft,
+                verify_sources=verify_sources,
             )
 
             # Stream events - orchestrator handles persistence on success

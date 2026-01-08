@@ -1,6 +1,6 @@
 # Deep Research Agent Development Guidelines
 
-Auto-generated from feature plans. Last updated: 2025-12-21
+Auto-generated from feature plans. Last updated: 2026-01-06
 
 ## Project Overview
 
@@ -22,6 +22,7 @@ Deep research agent with **5-agent architecture** (Coordinator, Planner, Researc
 - YAML file (`config/app.yaml`), Pydantic models for validation (001-deep-research-agent)
 - Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, AsyncOpenAI, Pydantic v2, React 18, TanStack Query (003-claim-level-citations)
 - Databricks Lakebase (PostgreSQL) via asyncpg, existing schema extensions (003-claim-level-citations)
+- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, Pydantic v2, React 18, TanStack Query, Tailwind CSS (004-tiered-query-modes)
 
 | Component | Technology | Version |
 |-----------|------------|---------|
@@ -358,6 +359,24 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
 - Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
 
 ## Recent Changes
+- 004-tiered-query-modes: Verify Sources Toggle & Snippet Fallback (2026-01-06)
+  - **NEW FEATURE**: User-controllable "Verify sources" checkbox for Web Search and Deep Research modes
+  - When enabled: runs full citation verification pipeline (claim extraction, evidence selection)
+  - When disabled: uses classical synthesis with `[Title](url)` style citations
+  - Default: `false` for Web Search (prioritize speed), `true` for Deep Research (prioritize accuracy)
+  - **SNIPPET FALLBACK**: Brave Search snippets used as fallback when web fetch fails or not performed
+  - Snippet-based evidence assigned 0.5 relevance score (lower confidence than full content)
+  - Added `is_snippet_based: bool` field to `RankedEvidence` dataclass
+  - Key files:
+    - `src/api/v1/research.py` - Added `verify_sources` query parameter
+    - `src/agent/orchestrator.py` - Added to `OrchestrationConfig`, passed to `ResearchState`
+    - `frontend/src/components/chat/MessageInput.tsx` - Checkbox UI with mode-based defaults
+    - `frontend/src/hooks/useStreamingQuery.ts` - Pass `verify_sources` in URL
+    - `src/services/citation/evidence_selector.py` - Snippet fallback logic
+    - `src/services/citation/pipeline.py` - Include snippet-only sources
+  - Related FRs: FR-046 through FR-055 in spec.md
+
+- 004-tiered-query-modes: Added Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, Pydantic v2, React 18, TanStack Query, Tailwind CSS
 - 003-claim-level-citations: Stage 7 ARE-Style Verification Retrieval (2026-01-02)
   - **NEW FEATURE**: Post-processing stage for unsupported/partial claims
   - Implements ARE (Atomic fact decomposition-based Retrieval and Editing) pattern
@@ -380,7 +399,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Affected: `synthesis_mode`, `react_synthesis`, and other fields not specified per-type were using Pydantic defaults
   - Key file: `src/agent/config.py` (get_citation_config_for_depth function)
 
-- 003-claim-level-citations: Research Type Profiles Configuration (2025-12-31)
   - **NEW FEATURE**: Consolidated `research_types` configuration in app.yaml
   - Each depth (light/medium/extended) now has unified settings:
     - `steps`: min, max, and optional `prompt_guidance` for planner
@@ -394,7 +412,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Config accessors: `get_research_type_config()`, `get_step_limits()`, `get_report_limits()`,
     `get_researcher_config_for_depth()`, `get_citation_config_for_depth()`
 
-- 003-claim-level-citations: Citation Position Mismatch Fix (2025-12-30)
   - **CRITICAL BUG FIX**: Claims were parsed from original content with numeric markers `[0]`, `[1]`
   - But final_report stored in DB had human-readable keys `[Arxiv]`, `[Zhipu-2]` (different lengths)
   - This caused position_start/position_end mismatch, making citations unresolvable in frontend
@@ -406,7 +423,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - **Related issue**: This is similar to snake_case vs camelCase mismatch fixed in SSE events
   - **Testing**: All 162 citation unit tests pass
 
-- 003-claim-level-citations: Frontend Cache & Draft Persistence Fix (2025-12-30)
   - **BUG**: Phantom chats appeared after DB clean due to localStorage drafts and stale cache
   - Reduced TanStack Query `staleTime` from 5 minutes to 30 seconds
   - Enabled `refetchOnWindowFocus` for fresh data on tab switch
@@ -414,13 +430,11 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Removed drafts older than 60 seconds that don't exist in API response
   - Key files: `frontend/src/main.tsx`, `frontend/src/hooks/useDraftChats.ts`, `frontend/src/pages/ChatPage.tsx`
 
-- 003-claim-level-citations: SSE Event snake_case vs camelCase Mismatch (2025-12-30)
   - **BUG**: Frontend event handlers accessed snake_case properties but runtime SSE had camelCase
   - Fixed all event handlers in `useStreamingQuery.ts` to check camelCase first
   - Added `formatToolCall()` and `formatToolResult()` to activityLabels.ts
   - Key files: `frontend/src/hooks/useStreamingQuery.ts`, `frontend/src/utils/activityLabels.ts`
 
-- 003-claim-level-citations: Test Infrastructure Re-Architecture (2025-12-28)
   - Implemented 3-tier test hierarchy: unit, integration, complex
   - Created `config/app.test.yaml` for integration tests (minimal iterations, fast models)
   - Added `APP_CONFIG_PATH` env var support in `src/core/app_config.py`
@@ -432,7 +446,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Integration tests use test config; complex tests use production config
   - Key files: `config/app.test.yaml`, `tests/integration/conftest.py`, `tests/complex/conftest.py`
 
-- 001-deep-research-agent: Plan Preservation During ADJUST (2025-12-26)
   - When reflector triggers ADJUST, completed steps are now preserved in the plan
   - Added `get_completed_steps()` method to `ResearchState` in `src/agent/state.py`
   - Updated planner prompt to include completed steps section (not duplicated by LLM)
@@ -442,7 +455,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Benefits: Visual progress preserved, no redundant re-execution, better UX
   - Key files: `src/agent/state.py`, `src/agent/nodes/planner.py`, `src/agent/prompts/planner.py`, `src/agent/orchestrator.py`
 
-- 003-claim-level-citations: Deferred Database Materialization (2025-12-26)
   - Database records (messages, research_session) are no longer created before streaming
   - UUIDs are pre-generated in memory, passed to orchestrator via `OrchestrationConfig`
   - All data persisted atomically in `persist_complete_research()` after synthesis succeeds
@@ -450,8 +462,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Benefits: No orphaned records, no cleanup on failure, single atomic transaction
   - Key files: `src/api/v1/research.py`, `src/agent/persistence.py`, `src/agent/orchestrator.py`
 
-- 003-claim-level-citations: Added Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, AsyncOpenAI, Pydantic v2, React 18, TanStack Query
-- 001-deep-research-agent: Cross-cutting backend services (2025-12-25)
   - Added `PreferencesService` for managing user preferences (get/update)
   - Added `FeedbackService` for message feedback with MLflow trace correlation
   - Added `ExportService` for chat export to Markdown/JSON formats
@@ -460,7 +470,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Added `build_system_prompt()` utility for consistent instruction injection
   - Updated research API endpoints to fetch and pass user preferences
 
-- 001-deep-research-agent: LLM context truncation (2025-12-25)
   - Added `src/services/llm/truncation.py` with intelligent message truncation
   - Preserves system prompt and recent messages when context exceeds limits
   - `truncate_messages()` and `truncate_text()` with configurable limits

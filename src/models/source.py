@@ -4,13 +4,14 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from src.db.base import Base, UUIDMixin
 
 if TYPE_CHECKING:
+    from src.models.chat import Chat
     from src.models.evidence_span import EvidenceSpan
     from src.models.research_session import ResearchSession
 
@@ -28,6 +29,16 @@ class Source(Base, UUIDMixin):
         PGUUID(as_uuid=True),
         ForeignKey("research_sessions.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
+    )
+
+    # Direct chat reference for chat-level source pool queries
+    # Enables O(1) lookup of all sources in a chat without 4-table join
+    # Nullable for backward compatibility with existing data
+    chat_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("chats.id", ondelete="CASCADE"),
+        nullable=True,
         index=True,
     )
 
@@ -79,9 +90,39 @@ class Source(Base, UUIDMixin):
         nullable=True,
     )
 
+    # Tiered query modes: source tracking fields
+    is_cited: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    step_index: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    step_title: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    crawl_status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="success",
+        server_default="success",
+    )
+    error_reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
     # Relationships
     session: Mapped["ResearchSession"] = relationship(
         "ResearchSession",
+        back_populates="sources",
+    )
+    chat: Mapped["Chat | None"] = relationship(
+        "Chat",
         back_populates="sources",
     )
     evidence_spans: Mapped[list["EvidenceSpan"]] = relationship(

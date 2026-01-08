@@ -64,6 +64,7 @@ class RankedEvidence:
     section_heading: str | None
     relevance_score: float
     has_numeric_content: bool
+    is_snippet_based: bool = False  # True if from Brave Search snippet (lower confidence)
 
 
 @dataclass
@@ -367,7 +368,27 @@ class EvidencePreSelector:
             source_url = source.get("url", "")
             source_title = source.get("title")
             source_content = source.get("content", "")
+            source_snippet = source.get("snippet", "")
             source_id = source.get("id")
+
+            # Use snippet as fallback when content is not available
+            # This handles cases where web fetch failed or was not performed
+            if not source_content and source_snippet:
+                # Create evidence directly from snippet (no LLM extraction needed)
+                evidence = RankedEvidence(
+                    source_id=source_id,
+                    source_url=source_url,
+                    source_title=source_title,
+                    quote_text=source_snippet,
+                    start_offset=None,
+                    end_offset=None,
+                    section_heading=None,
+                    relevance_score=0.5,  # Lower confidence for snippet-based evidence
+                    has_numeric_content=self._detect_numeric_content(source_snippet),
+                    is_snippet_based=True,
+                )
+                all_evidence.append(evidence)
+                continue
 
             if not source_content:
                 continue

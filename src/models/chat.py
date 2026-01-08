@@ -12,6 +12,7 @@ from src.db.base import BaseModel
 
 if TYPE_CHECKING:
     from src.models.message import Message
+    from src.models.source import Source
 
 
 class ChatStatus(str, Enum):
@@ -61,6 +62,12 @@ class Chat(BaseModel):
         back_populates="chat",
         cascade="all, delete-orphan",
         order_by="Message.created_at",
+    )
+    sources: Mapped[list["Source"]] = relationship(
+        "Source",
+        back_populates="chat",
+        cascade="all, delete-orphan",
+        order_by="Source.fetched_at.desc()",
     )
 
     # Indexes

@@ -4,7 +4,6 @@ Generates claims constrained by pre-selected evidence using the
 ReClaim pattern (reference-first claim generation).
 """
 
-import logging
 import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ from src.agent.prompts.citation.interleaved_generation import (
     NATURAL_GENERATION_PROMPT,
 )
 from src.core.app_config import GenerationMode, get_app_config
+from src.core.logging_utils import get_logger
 from src.services.citation.citation_keys import (
     build_citation_key_map,
     replace_numeric_markers,
@@ -26,7 +26,7 @@ from src.services.citation.evidence_selector import RankedEvidence
 from src.services.llm.client import LLMClient
 from src.services.llm.types import ModelTier
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # Pydantic models for structured LLM output
@@ -300,9 +300,10 @@ Write ONE concise factual claim that is fully supported by the evidence:"""
                 source_count=unique_sources,
             )
             logger.info(
-                "GENERATION_MODE mode=natural evidence_count=%d source_count=%d",
-                len(evidence_pool),
-                unique_sources,
+                "GENERATION_MODE",
+                mode="natural",
+                evidence_count=len(evidence_pool),
+                source_count=unique_sources,
             )
         elif self._generation_mode == GenerationMode.STRICT:
             prompt = INTERLEAVED_GENERATION_PROMPT.format(
@@ -314,9 +315,10 @@ Write ONE concise factual claim that is fully supported by the evidence:"""
                 min_sources_to_cite=min_sources_to_cite,
             )
             logger.info(
-                "GENERATION_MODE mode=strict evidence_count=%d source_count=%d",
-                len(evidence_pool),
-                unique_sources,
+                "GENERATION_MODE",
+                mode="strict",
+                evidence_count=len(evidence_pool),
+                source_count=unique_sources,
             )
         else:
             # Classical mode should be handled at pipeline level

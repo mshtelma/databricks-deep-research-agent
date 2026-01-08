@@ -2,9 +2,11 @@
 
 import asyncio
 import ipaddress
+import random
 import socket
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import httpx
@@ -36,11 +38,25 @@ MAX_CONTENT_LENGTH = 50000
 # Timeout for fetching pages
 FETCH_TIMEOUT = 10.0
 
-# User agent for requests
-USER_AGENT = (
-    "Mozilla/5.0 (compatible; DeepResearchBot/1.0; "
-    "+https://databricks.com/deep-research-agent)"
-)
+# User agents for requests - rotate between common browser UAs to reduce blocking
+# Using browser-like UAs significantly improves crawl success rate on sites with bot detection
+USER_AGENTS = [
+    # Chrome on Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    # Chrome on macOS
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    # Firefox on Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    # Safari on macOS
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+]
+
+# Rate limiting: minimum interval between requests (seconds)
+CRAWL_RATE_LIMIT_INTERVAL = 0.5  # 2 requests per second max
+
+# Retry settings for 403/blocked responses
+MAX_RETRY_ATTEMPTS = 2
+RETRY_BACKOFF_BASE = 1.0  # seconds
 
 # Private IP ranges for SSRF protection
 PRIVATE_IP_RANGES = [
@@ -116,68 +132,151 @@ class WebCrawler:
         """
         self._max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
+        # Don't set User-Agent here - we'll set it per-request for rotation
         self._client = httpx.AsyncClient(
             timeout=FETCH_TIMEOUT,
             follow_redirects=True,
-            headers={"User-Agent": USER_AGENT},
         )
+
+        # Rate limiting state
+        self._rate_lock = asyncio.Lock()
+        self._last_request: datetime | None = None
 
         # Domain filtering (second line of defense after search filtering)
         search_config = get_app_config().search
         self._domain_filter = DomainFilter(search_config.domain_filter)
 
+    async def _rate_limit(self) -> None:
+        """Apply rate limiting between crawl requests.
+
+        Enforces minimum interval between requests to reduce blocking.
+        """
+        async with self._rate_lock:
+            if self._last_request:
+                elapsed = (datetime.now(UTC) - self._last_request).total_seconds()
+                if elapsed < CRAWL_RATE_LIMIT_INTERVAL:
+                    await asyncio.sleep(CRAWL_RATE_LIMIT_INTERVAL - elapsed)
+            self._last_request = datetime.now(UTC)
+
     async def _fetch_url(self, url: str) -> CrawlResult:
-        """Fetch and parse a single URL."""
+        """Fetch and parse a single URL with retry on 403 errors.
+
+        Implements retry logic with User-Agent rotation to handle sites
+        that block based on User-Agent or rate limiting.
+        """
+        # Apply rate limiting before starting
+        await self._rate_limit()
+
+        # Pre-flight checks (domain filter, URL validation, SSRF) - no retry needed
+        preflight_result = self._preflight_checks(url)
+        if preflight_result is not None:
+            return preflight_result
+
+        # Try with different User-Agents on 403 errors
+        last_result: CrawlResult | None = None
+        for attempt in range(MAX_RETRY_ATTEMPTS + 1):
+            # Rotate User-Agent on each attempt
+            user_agent = USER_AGENTS[attempt % len(USER_AGENTS)]
+
+            result = await self._fetch_single(url, user_agent)
+
+            # Success or non-retryable error - return immediately
+            if result.success:
+                return result
+
+            last_result = result
+
+            # Only retry on 403/blocked errors
+            error = result.error or ""
+            if "403" not in error and "blocked" not in error.lower():
+                return result
+
+            # Don't wait after final attempt
+            if attempt < MAX_RETRY_ATTEMPTS:
+                # Exponential backoff: 1s, 2s, ...
+                wait_time = RETRY_BACKOFF_BASE * (attempt + 1)
+                # Add jitter to avoid thundering herd
+                wait_time += random.uniform(0, 0.5)
+                logger.info(
+                    "CRAWL_RETRY",
+                    url=url[:80],
+                    attempt=attempt + 1,
+                    max_attempts=MAX_RETRY_ATTEMPTS + 1,
+                    wait_seconds=round(wait_time, 2),
+                )
+                await asyncio.sleep(wait_time)
+
+        # All retries exhausted
+        return last_result or CrawlResult(
+            url=url,
+            title=None,
+            content="",
+            success=False,
+            error="Max retries exceeded",
+        )
+
+    def _preflight_checks(self, url: str) -> CrawlResult | None:
+        """Perform pre-flight checks before fetching.
+
+        Returns CrawlResult if checks fail, None if all checks pass.
+        """
+        # Domain filter check (second line of defense)
+        if self._domain_filter.is_active:
+            match_result = self._domain_filter.is_allowed(url)
+            if not match_result.allowed:
+                logger.warning(
+                    "CRAWL_DOMAIN_BLOCKED",
+                    url=url[:80],
+                    reason=match_result.reason,
+                )
+                return CrawlResult(
+                    url=url,
+                    title=None,
+                    content="",
+                    success=False,
+                    error=f"Domain not allowed: {match_result.reason}",
+                )
+
+        # Validate URL
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            error = ValueError("Invalid URL scheme")
+            log_crawl_error(logger, url=url, error=error)
+            return CrawlResult(
+                url=url,
+                title=None,
+                content="",
+                success=False,
+                error="Invalid URL scheme",
+            )
+
+        # SSRF protection: reject requests to private/internal IPs
+        hostname = parsed.hostname
+        if hostname and _is_private_ip(hostname):
+            error = ValueError("Access to private IP ranges is not allowed")
+            log_crawl_error(logger, url=url, error=error)
+            return CrawlResult(
+                url=url,
+                title=None,
+                content="",
+                success=False,
+                error="Access to private IP ranges is not allowed",
+            )
+
+        return None
+
+    async def _fetch_single(self, url: str, user_agent: str) -> CrawlResult:
+        """Fetch and parse a single URL with specified User-Agent."""
         async with self._semaphore:
             log_crawl_request(logger, url=url)
             start_time = time.perf_counter()
 
             try:
-                # Domain filter check (second line of defense)
-                if self._domain_filter.is_active:
-                    match_result = self._domain_filter.is_allowed(url)
-                    if not match_result.allowed:
-                        logger.warning(
-                            "CRAWL_DOMAIN_BLOCKED",
-                            url=url[:80],
-                            reason=match_result.reason,
-                        )
-                        return CrawlResult(
-                            url=url,
-                            title=None,
-                            content="",
-                            success=False,
-                            error=f"Domain not allowed: {match_result.reason}",
-                        )
-
-                # Validate URL
-                parsed = urlparse(url)
-                if parsed.scheme not in ("http", "https"):
-                    error = ValueError("Invalid URL scheme")
-                    log_crawl_error(logger, url=url, error=error)
-                    return CrawlResult(
-                        url=url,
-                        title=None,
-                        content="",
-                        success=False,
-                        error="Invalid URL scheme",
-                    )
-
-                # SSRF protection: reject requests to private/internal IPs
-                hostname = parsed.hostname
-                if hostname and _is_private_ip(hostname):
-                    error = ValueError("Access to private IP ranges is not allowed")
-                    log_crawl_error(logger, url=url, error=error)
-                    return CrawlResult(
-                        url=url,
-                        title=None,
-                        content="",
-                        success=False,
-                        error="Access to private IP ranges is not allowed",
-                    )
-
-                # Fetch page
-                response = await self._client.get(url)
+                # Fetch page with specific User-Agent
+                response = await self._client.get(
+                    url,
+                    headers={"User-Agent": user_agent},
+                )
                 response.raise_for_status()
 
                 duration_ms = (time.perf_counter() - start_time) * 1000

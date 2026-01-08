@@ -168,6 +168,9 @@ async def handle_simple_query(
 ) -> AsyncGenerator[str, None]:
     """Handle a simple query with direct LLM response.
 
+    Includes full conversation history so follow-ups can reference
+    previous research reports (e.g., "Tell me more about the first point").
+
     Args:
         state: Research state with simple query.
         llm: LLM client for completions.
@@ -179,10 +182,16 @@ async def handle_simple_query(
         yield state.direct_response
         return
 
-    messages = [
-        {"role": "system", "content": SIMPLE_QUERY_SYSTEM_PROMPT},
-        {"role": "user", "content": state.query},
-    ]
+    # Include FULL conversation history for follow-up context
+    # This enables referencing previous 13K+ word reports
+    from src.agent.utils.conversation import build_messages_with_history
+
+    messages = build_messages_with_history(
+        system_prompt=SIMPLE_QUERY_SYSTEM_PROMPT,
+        user_query=state.query,
+        history=state.conversation_history,
+        max_history_messages=5,  # Balance context with token limits
+    )
 
     async for chunk in llm.stream(messages=messages, tier=ModelTier.SIMPLE):
         yield chunk

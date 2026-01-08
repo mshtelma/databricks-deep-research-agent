@@ -135,13 +135,26 @@ export function useDraftChats() {
   }, []);
 
   /**
-   * Check if a chat ID belongs to a draft.
+   * Check if a chat ID belongs to an active draft.
+   *
+   * Only considers drafts created within the last 60 seconds as "active".
+   * Older drafts are considered stale (likely persisted to DB in a previous session)
+   * and should not prevent message fetching.
    *
    * @param id - Chat ID to check.
-   * @returns True if the chat is a draft.
+   * @returns True if the chat is an active draft.
    */
   const isDraft = useCallback((id: string): boolean => {
-    return id in drafts;
+    const draft = drafts[id];
+    if (!draft) return false;
+
+    // Only consider recent drafts as active
+    // Older drafts are stale and shouldn't block message fetching
+    const IN_FLIGHT_WINDOW_MS = 60000; // 60 seconds
+    const createdAt = new Date(draft.created_at).getTime();
+    const isRecent = Date.now() - createdAt < IN_FLIGHT_WINDOW_MS;
+
+    return isRecent;
   }, [drafts]);
 
   /**

@@ -14,6 +14,7 @@ import type {
   ResearchStartedEvent,
   PersistenceCompletedEvent,
   ResearchSession,
+  QueryMode,
 } from '../types';
 import type {
   VerificationSummary,
@@ -80,7 +81,7 @@ interface UseStreamingQueryReturn {
   agentStatus: AgentStatus;
   currentPlan: Plan | null;
   currentStepIndex: number;
-  sendQuery: (query: string, researchDepth?: string) => void;
+  sendQuery: (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean) => void;
   stopStream: () => void;
   error: Error | null;
   /** The completed messages from this session (for tracking conversation) */
@@ -199,7 +200,7 @@ export function useStreamingQuery(
   }, []);
 
   const sendQuery = useCallback(
-    (query: string, researchDepth?: string) => {
+    (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean) => {
       if (!chatId) {
         console.error('No chat ID provided');
         return;
@@ -215,7 +216,8 @@ export function useStreamingQuery(
       setEvents([]);
       setStreamingContent('');
       setError(null);
-      setAgentStatus('classifying');
+      // For simple mode, skip to synthesizing status immediately
+      setAgentStatus(queryMode === 'simple' ? 'synthesizing' : 'classifying');
       setCurrentPlan(null);
       setCurrentStepIndex(-1);
       setIsStreaming(true);
@@ -231,10 +233,16 @@ export function useStreamingQuery(
       setPersistenceResult(null);
       setPersistenceFailed(false);
 
-      // Build stream URL with query and research_depth parameters
+      // Build stream URL with query, query_mode, and research_depth parameters
       let streamUrl = `${API_BASE_URL}/chats/${chatId}/stream?query=${encodeURIComponent(query)}`;
+      if (queryMode) {
+        streamUrl += `&query_mode=${encodeURIComponent(queryMode)}`;
+      }
       if (researchDepth && researchDepth !== 'auto') {
         streamUrl += `&research_depth=${encodeURIComponent(researchDepth)}`;
+      }
+      if (verifySources !== undefined) {
+        streamUrl += `&verify_sources=${verifySources}`;
       }
 
       const eventSource = new EventSource(streamUrl);
@@ -489,27 +497,11 @@ export function useStreamingQuery(
 
             case 'research_completed':
               setAgentStatus('complete');
-
-              // Add this exchange to completed messages
-              if (currentQueryRef.current && accumulatedContent) {
-                setCompletedMessages(prev => [
-                  ...prev,
-                  { role: 'user' as const, content: currentQueryRef.current },
-                  { role: 'assistant' as const, content: accumulatedContent }
-                ]);
-              }
-
+              // DON'T add to completedMessages here - content may be revised after this event
+              // The streamingContent will continue showing until persistence_completed triggers refetch
               stopStream();
-
-              // Notify parent that streaming is complete - allows message refetch
-              // This enables citation rendering after persistence
-              onStreamComplete?.();
-
-              // Clear streaming content after a short delay to allow message refetch
-              // This prevents duplicate rendering of streaming placeholder and persisted message
-              setTimeout(() => {
-                setStreamingContent('');
-              }, 150);
+              // DON'T call onStreamComplete here - wait for persistence_completed
+              // to ensure we get the final message with all revisions/citations
               break;
 
             case 'persistence_completed': {
@@ -517,6 +509,15 @@ export function useStreamingQuery(
               const persistEvent = data as PersistenceCompletedEvent;
               setPersistenceResult(persistEvent);
               setPersistenceFailed(false);
+
+              // NOW it's safe to refetch - database has the final message with all revisions
+              onStreamComplete?.();
+
+              // Clear streaming content after a short delay to allow message refetch
+              // This prevents duplicate rendering of streaming placeholder and persisted message
+              setTimeout(() => {
+                setStreamingContent('');
+              }, 150);
               break;
             }
 

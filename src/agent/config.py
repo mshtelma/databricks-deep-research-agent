@@ -5,6 +5,8 @@ from src.core.app_config import (
     CitationVerificationConfig,
     CoordinatorConfig,
     PlannerConfig,
+    QueryModeConfig,
+    QueryModesConfig,
     ReportLimitConfig,
     ResearcherConfig,
     ResearcherMode,
@@ -217,3 +219,32 @@ def get_citation_config_for_depth(depth: str) -> CitationVerificationConfig:
             merged[key] = per_type_value
 
     return CitationVerificationConfig(**merged)
+
+
+# =============================================================================
+# Query Mode Accessors (Tiered Query Modes)
+# =============================================================================
+
+
+def get_query_modes_config() -> QueryModesConfig:
+    """Get all query mode configurations.
+
+    Returns:
+        QueryModesConfig containing simple, web_search, and deep_research configs
+    """
+    return get_app_config().query_modes
+
+
+def get_query_mode_config(mode: str) -> QueryModeConfig:
+    """Get configuration for a specific query mode.
+
+    Args:
+        mode: One of 'simple', 'web_search', 'deep_research'
+
+    Returns:
+        QueryModeConfig for the specified mode
+
+    Raises:
+        ValueError: If mode is not a valid query mode
+    """
+    return get_app_config().query_modes.get(mode)

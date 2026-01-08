@@ -69,6 +69,22 @@ export function formatActivityLabel(event: StreamEvent): string {
       return formatResearchCompleted(event)
     case 'error':
       return formatError(event)
+    case 'research_started':
+      return '🚀 Research started'
+    case 'claim_generated':
+      return '💡 Claim generated'
+    case 'citation_corrected':
+      return '🔧 Citation corrected'
+    case 'numeric_claim_detected':
+      return '🔢 Numeric claim detected'
+    case 'content_revised':
+      return '✏️ Content revised'
+    case 'persistence_completed':
+      return '💾 Saved to database'
+    case 'claim_verified':
+      return '✓ Claim verified'
+    case 'verification_summary':
+      return '📊 Verification complete'
     default:
       return (event as StreamEvent).event_type
   }
@@ -187,6 +203,22 @@ export function getActivityColor(event: StreamEvent): string {
       return 'text-blue-500 dark:text-blue-400'
     case 'tool_call':
       return 'text-cyan-500 dark:text-cyan-400'
+    case 'research_started':
+      return 'text-blue-500 dark:text-blue-400'
+    case 'claim_generated':
+      return 'text-purple-500 dark:text-purple-400'
+    case 'citation_corrected':
+      return 'text-amber-500 dark:text-amber-400'
+    case 'numeric_claim_detected':
+      return 'text-cyan-500 dark:text-cyan-400'
+    case 'content_revised':
+      return 'text-orange-500 dark:text-orange-400'
+    case 'persistence_completed':
+      return 'text-green-500 dark:text-green-400'
+    case 'claim_verified':
+      return 'text-green-600 dark:text-green-400'
+    case 'verification_summary':
+      return 'text-purple-500 dark:text-purple-400'
     default:
       return 'text-amber-500 dark:text-amber-400'
   }

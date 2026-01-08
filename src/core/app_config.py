@@ -136,13 +136,9 @@ class SynthesizerConfig(BaseModel):
     """Configuration for the Synthesizer agent."""
 
     max_report_length: int = Field(default=50000, ge=1000)
-    report_limits: dict[str, ReportLimitConfig] = Field(
-        default_factory=lambda: {
-            "light": ReportLimitConfig(min_words=200, max_words=400, max_tokens=1000),
-            "medium": ReportLimitConfig(min_words=400, max_words=800, max_tokens=2000),
-            "extended": ReportLimitConfig(min_words=800, max_words=1500, max_tokens=4000),
-        }
-    )
+    # DEPRECATED: report_limits moved to research_types.*.report_limits
+    # Kept for backward compatibility with configs that don't have research_types
+    report_limits: dict[str, ReportLimitConfig] = Field(default_factory=dict)
 
     model_config = {"frozen": True}
 
@@ -656,6 +652,174 @@ class RateLimitingConfig(BaseModel):
 
 
 # =============================================================================
+# Query Mode Configuration (Tiered Query Modes)
+# =============================================================================
+
+
+class QueryModeResearcherConfig(BaseModel):
+    """Researcher configuration for a specific query mode.
+
+    Used to override default researcher settings when running in web_search mode.
+    """
+
+    mode: ResearcherMode = Field(
+        default=ResearcherMode.CLASSIC,
+        description="Researcher implementation: 'react' or 'classic'",
+    )
+    max_search_queries: int = Field(
+        default=2, ge=1, le=10, description="Max search queries"
+    )
+    max_urls_to_crawl: int = Field(
+        default=3, ge=1, le=20, description="Max URLs to crawl"
+    )
+
+    model_config = {"frozen": True}
+
+
+class QueryModeCitationConfig(BaseModel):
+    """Citation verification configuration for a specific query mode.
+
+    Used to override default citation settings for lightweight modes.
+    """
+
+    enabled: bool = True
+    generation_mode: GenerationMode = GenerationMode.NATURAL
+    enable_numeric_qa_verification: bool = False
+    enable_verification_retrieval: bool = False
+
+    model_config = {"frozen": True}
+
+
+class QueryModeConfig(BaseModel):
+    """Configuration for a single query mode (simple, web_search, deep_research).
+
+    Query modes determine the processing pipeline:
+    - simple: Direct LLM response, no web search, no research session
+    - web_search: Quick search with 2-5 sources, lightweight session
+    - deep_research: Full research pipeline with plan, steps, verification
+    """
+
+    model_role: str = Field(
+        default="analytical",
+        description="Model tier to use for this mode (simple, analytical, complex)",
+    )
+    emit_events: bool = Field(
+        default=True,
+        description="Whether to emit streaming events for progress tracking",
+    )
+    create_session: bool = Field(
+        default=True,
+        description="Whether to create a research session in the database",
+    )
+    timeout_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=600,
+        description="Total timeout for the request",
+    )
+
+    # Skip flags for lightweight modes
+    skip_coordinator: bool = Field(
+        default=False,
+        description="Skip coordinator classification (mode is explicit)",
+    )
+    skip_planner: bool = Field(
+        default=False,
+        description="Skip planner (use programmatic 1-step plan)",
+    )
+    skip_reflector: bool = Field(
+        default=False,
+        description="Skip reflector (always complete after research)",
+    )
+
+    # For deep_research mode: inherit from research_types
+    use_research_types: bool = Field(
+        default=False,
+        description="Inherit configuration from research_types section",
+    )
+
+    # Mode-specific overrides
+    researcher: QueryModeResearcherConfig | None = Field(
+        default=None,
+        description="Researcher configuration overrides for this mode",
+    )
+    citation_verification: QueryModeCitationConfig | None = Field(
+        default=None,
+        description="Citation verification overrides for this mode",
+    )
+
+    model_config = {"frozen": True}
+
+
+class QueryModesConfig(BaseModel):
+    """Container for all query mode configurations."""
+
+    simple: QueryModeConfig = Field(
+        default_factory=lambda: QueryModeConfig(
+            model_role="simple",
+            emit_events=False,
+            create_session=False,
+            timeout_seconds=30,
+        )
+    )
+    web_search: QueryModeConfig = Field(
+        default_factory=lambda: QueryModeConfig(
+            model_role="analytical",
+            emit_events=True,
+            create_session=True,
+            timeout_seconds=15,
+            skip_coordinator=True,
+            skip_planner=True,
+            skip_reflector=True,
+            researcher=QueryModeResearcherConfig(
+                mode=ResearcherMode.CLASSIC,
+                max_search_queries=2,
+                max_urls_to_crawl=3,
+            ),
+            citation_verification=QueryModeCitationConfig(
+                enabled=True,
+                generation_mode=GenerationMode.NATURAL,
+                enable_numeric_qa_verification=False,
+                enable_verification_retrieval=False,
+            ),
+        )
+    )
+    deep_research: QueryModeConfig = Field(
+        default_factory=lambda: QueryModeConfig(
+            model_role="complex",
+            emit_events=True,
+            create_session=True,
+            use_research_types=True,
+        )
+    )
+
+    model_config = {"frozen": True}
+
+    def get(self, mode: str) -> QueryModeConfig:
+        """Get configuration for a query mode.
+
+        Args:
+            mode: One of 'simple', 'web_search', 'deep_research'
+
+        Returns:
+            QueryModeConfig for the specified mode
+
+        Raises:
+            ValueError: If mode is not a valid query mode
+        """
+        if mode == "simple":
+            return self.simple
+        elif mode == "web_search":
+            return self.web_search
+        elif mode == "deep_research":
+            return self.deep_research
+        else:
+            raise ValueError(
+                f"Invalid query mode: '{mode}'. Must be 'simple', 'web_search', or 'deep_research'"
+            )
+
+
+# =============================================================================
 # Research Type Profiles (FR-100)
 # =============================================================================
 
@@ -778,6 +942,11 @@ class AppConfig(BaseModel):
     research_types: ResearchTypesConfig | None = Field(
         default=None,
         description="Research type profiles for light/medium/extended. If not set, uses legacy scattered configs.",
+    )
+    # Query mode configuration (Tiered Query Modes feature)
+    query_modes: QueryModesConfig = Field(
+        default_factory=QueryModesConfig,
+        description="Query mode configurations for simple/web_search/deep_research.",
     )
 
     @model_validator(mode="after")

@@ -114,20 +114,7 @@ agents:
 
   synthesizer:
     max_report_length: 50000
-    # Report length limits by research depth (min/max words, max tokens)
-    report_limits:
-      light:
-        min_words: 800
-        max_words: 1200
-        max_tokens: 2000
-      medium:
-        min_words: 1200
-        max_words: 2000
-        max_tokens: 4000
-      extended:
-        min_words: 1200
-        max_words: 3200
-        max_tokens: 8000
+    # NOTE: report_limits moved to research_types.*.report_limits (single source of truth)
 
   background:
     max_search_queries: 4
@@ -155,8 +142,8 @@ research_types:
     # Report length limits
     report_limits:
       min_words: 800
-      max_words: 1200
-      max_tokens: 2000
+      max_words: 2000
+      max_tokens: 4000
 
     # Researcher configuration
     researcher:
@@ -274,6 +261,52 @@ rate_limiting:
   max_delay_seconds: 60.0           # Maximum backoff delay
   backoff_strategy: linear     # "exponential" (2^n) or "linear" (+n)
   jitter: true                      # Add random jitter to prevent thundering herd
+
+# =============================================================================
+# Query Mode Configuration (Tiered Query Modes Feature)
+# =============================================================================
+# Three query modes with progressive complexity:
+#   - simple: Direct LLM response, no web search, no research session
+#   - web_search: Quick search with 2-5 sources, lightweight session
+#   - deep_research: Full research pipeline with plan, steps, verification
+query_modes:
+  simple:
+    # Uses existing is_simple_query path in orchestrator
+    model_role: simple
+    emit_events: false        # No streaming events for simple mode
+    create_session: false     # No research session created
+    timeout_seconds: 30       # Quick response timeout
+
+  web_search:
+    model_role: analytical
+    timeout_seconds: 15       # 15 second total budget
+    emit_events: true         # Stream progress events
+    create_session: true      # Lightweight session for source tracking
+
+    # Reuse researcher with minimal configuration
+    researcher:
+      mode: classic           # Single-pass for speed
+      max_search_queries: 2   # Limited search budget
+      max_urls_to_crawl: 3    # Few sources for quick results
+
+    # Skip planning stages - use implicit 1-step plan
+    skip_coordinator: true    # Don't classify, mode is explicit
+    skip_planner: true        # Use programmatic 1-step plan
+    skip_reflector: true      # Always complete after 1 step
+
+    # Synthesis configuration - Natural mode for [1], [2] citations
+    citation_verification:
+      enabled: true
+      generation_mode: natural            # [1], [2] style citations
+      enable_numeric_qa_verification: false
+      enable_verification_retrieval: false  # Skip Stage 7 for speed
+
+  deep_research:
+    # Uses existing research_types config (light/medium/extended)
+    model_role: complex
+    emit_events: true
+    create_session: true
+    use_research_types: true  # Inherits from research_types section
 
 # Truncation limits for consistency
 truncation:

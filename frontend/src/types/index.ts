@@ -3,6 +3,7 @@
 export type ChatStatus = 'active' | 'archived' | 'deleted'
 export type MessageRole = 'user' | 'agent' | 'system'
 export type ResearchDepth = 'auto' | 'light' | 'medium' | 'extended'
+export type QueryMode = 'simple' | 'web_search' | 'deep_research'
 export type ResearchStatus =
   | 'pending'
   | 'classifying'
@@ -86,6 +87,7 @@ export interface ResearchSession {
 export interface UserPreferences {
   system_instructions: string | null
   default_depth: ResearchDepth
+  default_query_mode: QueryMode
   ui_preferences: Record<string, unknown>
   updated_at: string
 }

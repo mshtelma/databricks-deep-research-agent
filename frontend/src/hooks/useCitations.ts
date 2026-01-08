@@ -8,8 +8,14 @@
  * - Citation lookup by position in text
  */
 
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+
+// Max retries for polling empty claims (prevents infinite polling)
+// Increased from 10 to 30 to handle long-running ReAct synthesis (~5-7 min)
+const MAX_CLAIM_POLL_RETRIES = 30;
+// Polling interval in milliseconds
+const CLAIM_POLL_INTERVAL_MS = 3000;
 import type {
   Claim,
   Citation,
@@ -110,7 +116,17 @@ export function useCitations(
   // Active citation state for popover
   const [activeCitationId, setActiveCitationId] = useState<string | null>(null);
 
-  // Query for claims data
+  // Track retry count for polling empty claims
+  // Uses ref instead of state to avoid unnecessary re-renders
+  const pollRetryCountRef = useRef(0);
+
+  // Reset retry count when messageId changes
+  useEffect(() => {
+    pollRetryCountRef.current = 0;
+  }, [messageId]);
+
+  // Query for claims data with polling support for race condition
+  // When claims are empty (persistence not complete), poll every 3s until claims arrive
   const {
     data,
     isLoading,
@@ -118,9 +134,23 @@ export function useCitations(
     refetch,
   } = useQuery({
     queryKey: ['messageClaims', messageId],
-    queryFn: () => fetchMessageClaims(messageId!),
+    queryFn: async () => {
+      const result = await fetchMessageClaims(messageId!);
+      return result;
+    },
     enabled: !!messageId,
     staleTime: 30000, // 30 seconds
+    // Poll every 3s while claims are empty, stop when claims arrive or max retries reached
+    refetchInterval: (query) => {
+      const queryData = query.state.data;
+      // If we got data but claims array is empty, keep polling
+      // This handles race condition where message renders before claims are persisted
+      if (queryData && queryData.claims.length === 0 && pollRetryCountRef.current < MAX_CLAIM_POLL_RETRIES) {
+        pollRetryCountRef.current += 1;
+        return CLAIM_POLL_INTERVAL_MS;
+      }
+      return false; // Stop polling
+    },
   });
 
   const claims = data?.claims ?? [];

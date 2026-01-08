@@ -174,9 +174,36 @@ async def list_message_claims(
 
     Returns all claims extracted from the agent message, including
     their citations, verification verdicts, and corrections.
+
+    NOTE: Returns empty claims (200 OK) instead of 404 when message not found.
+    This supports frontend polling during the persistence race condition:
+    - Message UUID is pre-generated before streaming
+    - Claims are persisted after synthesis completes (~10-30s)
+    - Frontend polls this endpoint until claims are available
     """
-    # Verify ownership
-    message = await _verify_message_ownership(message_id, user.user_id, db)
+    # Try to verify ownership - return empty claims if message doesn't exist yet
+    # This handles the race condition where frontend polls for claims before
+    # the message has been persisted to the database
+    try:
+        message = await _verify_message_ownership(message_id, user.user_id, db)
+    except NotFoundError:
+        # Message not persisted yet - return empty claims to allow frontend polling
+        return MessageClaimsResponse(
+            message_id=message_id,
+            claims=[],
+            verification_summary=VerificationSummary(
+                total_claims=0,
+                supported_count=0,
+                partial_count=0,
+                unsupported_count=0,
+                contradicted_count=0,
+                abstained_count=0,
+                unsupported_rate=0.0,
+                contradicted_rate=0.0,
+                warning=False,
+            ),
+            correction_metrics=None,
+        )
 
     # Get claims with all relationships
     claim_service = ClaimService(db)

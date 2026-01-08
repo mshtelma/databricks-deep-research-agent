@@ -14,6 +14,7 @@ from src.db.base import BaseModel
 
 if TYPE_CHECKING:
     from src.models.message import Message
+    from src.models.research_event import ResearchEvent
     from src.models.source import Source
 
 
@@ -142,6 +143,13 @@ class ResearchSession(BaseModel):
         nullable=True,
     )
 
+    # Query mode (simple, web_search, deep_research)
+    query_mode: Mapped[str] = mapped_column(
+        String(20),
+        default="deep_research",
+        nullable=False,
+    )
+
     # Relationships
     message: Mapped["Message"] = relationship(
         "Message",
@@ -151,6 +159,12 @@ class ResearchSession(BaseModel):
         "Source",
         back_populates="session",
         cascade="all, delete-orphan",
+    )
+    events: Mapped[list["ResearchEvent"]] = relationship(
+        "ResearchEvent",
+        back_populates="research_session",
+        cascade="all, delete-orphan",
+        order_by="ResearchEvent.timestamp",
     )
 
     @property

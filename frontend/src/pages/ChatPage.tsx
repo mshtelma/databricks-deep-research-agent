@@ -2,10 +2,10 @@ import { useParams, useNavigate, useLocation, useSearchParams } from 'react-rout
 import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ChatSidebar, MessageList, MessageInput, DeleteChatDialog, ExportChatDialog, type ExportFormat } from '@/components/chat';
-import { AgentStatusIndicator, PlanProgress } from '@/components/research';
+import { AgentStatusIndicator, PlanProgress, CenteredActivityPanel } from '@/components/research';
 import { useChats, useMessages, useStreamingQuery, useChatActions, useDraftChats } from '@/hooks';
 import { formatActivityLabel, getActivityColor } from '@/utils/activityLabels';
-import type { Chat, Message, PersistenceCompletedEvent } from '@/types';
+import type { Chat, Message, PersistenceCompletedEvent, QueryMode } from '@/types';
 
 export default function ChatPage() {
   const { chatId } = useParams<{ chatId?: string }>();
@@ -86,6 +86,9 @@ export default function ChatPage() {
 
   // Track last query for retry functionality
   const [lastQuery, setLastQuery] = useState<string>('');
+
+  // Track current query mode for conditional UI rendering
+  const [currentQueryMode, setCurrentQueryMode] = useState<QueryMode | null>(null);
 
   // Callback when streaming completes - refresh messages to enable citation rendering
   const handleStreamComplete = useCallback(() => {
@@ -179,9 +182,12 @@ export default function ChatPage() {
 
   // Wrapped sendQuery that also sets the pending user message
   const sendQuery = useCallback(
-    (query: string, researchDepth?: string) => {
+    (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean) => {
       // Track query for retry functionality
       setLastQuery(query);
+
+      // Track query mode for UI rendering
+      setCurrentQueryMode(queryMode || 'simple');
 
       // Create a pending user message
       setPendingUserMessage({
@@ -195,7 +201,7 @@ export default function ChatPage() {
 
       // The hook now automatically tracks conversation history
       // and the backend loads history from DB
-      originalSendQuery(query, researchDepth);
+      originalSendQuery(query, queryMode, researchDepth, verifySources);
     },
     [chatId, originalSendQuery]
   );
@@ -204,10 +210,12 @@ export default function ChatPage() {
   useEffect(() => {
     if (chatId && location.state?.pendingQuery) {
       const query = location.state.pendingQuery;
+      const queryMode = location.state.queryMode as QueryMode | undefined;
       const researchDepth = location.state.researchDepth as string | undefined;
+      const verifySources = location.state.verifySources as boolean | undefined;
       // Clear state immediately to prevent re-sending on refresh
       window.history.replaceState({}, document.title);
-      sendQuery(query, researchDepth);
+      sendQuery(query, queryMode, researchDepth, verifySources);
     }
   }, [chatId, location.state?.pendingQuery, sendQuery]);
 
@@ -275,15 +283,15 @@ export default function ChatPage() {
   }, [chatId, chats, isLoadingChats, navigate, location.state?.newChat]);
 
   // Send message - for draft chats, backend will persist chat on success
-  const handleSendMessage = async (content: string, researchDepth?: string) => {
+  const handleSendMessage = async (content: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean) => {
     if (!chatId) {
       // No chat selected - create a draft and navigate
       const draft = createDraft();
-      navigate(`/chat/${draft.id}?draft=1`, { state: { pendingQuery: content, researchDepth } });
+      navigate(`/chat/${draft.id}?draft=1`, { state: { pendingQuery: content, queryMode, researchDepth, verifySources } });
     } else {
       // Chat exists (draft or real) - just send the query
       // Backend handles persistence for drafts via deferred materialization
-      sendQuery(content, researchDepth);
+      sendQuery(content, queryMode, researchDepth, verifySources);
     }
   };
 
@@ -399,6 +407,18 @@ export default function ChatPage() {
               className="flex-1"
             />
 
+            {/* Centered Activity Panel - shown during deep_research streaming */}
+            {isStreaming && currentQueryMode === 'deep_research' && (currentPlan || events.length > 0) && (
+              <div className="mb-4 px-4">
+                <CenteredActivityPanel
+                  events={events}
+                  isLive={isStreaming}
+                  plan={currentPlan}
+                  currentStepIndex={currentStepIndex}
+                />
+              </div>
+            )}
+
             {/* Input */}
             <MessageInput
               onSubmit={handleSendMessage}
@@ -408,24 +428,24 @@ export default function ChatPage() {
             />
           </div>
 
-          {/* Research progress panel (when active) */}
-          {(isStreaming || currentPlan) && (
+          {/* Research progress panel - NOT shown during deep_research (centered panel handles it) */}
+          {(isStreaming || currentPlan) && currentQueryMode !== 'deep_research' && (
             <aside className="w-72 border-l p-4 overflow-y-auto bg-muted/20">
               <PlanProgress
                 plan={currentPlan}
                 currentStepIndex={currentStepIndex}
               />
 
-              {/* Recent events log */}
+              {/* Recent events log (compact view in sidebar) */}
               {events.length > 0 && (
                 <div className="mt-4">
                   <h4 className="text-xs font-medium text-muted-foreground mb-2">
                     Research Activity
                   </h4>
-                  <div className="space-y-1 text-xs max-h-40 overflow-y-auto">
-                    {events.slice(-10).map((event, i) => (
+                  <div className="space-y-1 text-xs max-h-80 overflow-y-auto border rounded-md p-2 bg-muted/30">
+                    {events.slice(-20).map((event, i) => (
                       <div
-                        key={`${event.event_type}-${events.length - 10 + i}`}
+                        key={`${event.event_type}-${events.length - 20 + i}`}
                         className={`truncate ${getActivityColor(event)}`}
                       >
                         {formatActivityLabel(event)}

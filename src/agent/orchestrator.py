@@ -1,15 +1,17 @@
 """Multi-agent orchestrator - coordinates the 5-agent research workflow."""
 
+import asyncio
 import time
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import mlflow
 
 from src.agent.config import (
     get_coordinator_config,
     get_planner_config,
+    get_query_mode_config,
     get_researcher_config_for_depth,
 )
 from src.agent.nodes.background import run_background_investigator
@@ -23,7 +25,15 @@ from src.agent.nodes.react_researcher import run_react_researcher
 from src.agent.nodes.reflector import run_reflector
 from src.agent.nodes.researcher import run_researcher
 from src.agent.nodes.synthesizer import run_synthesizer, stream_synthesis
-from src.agent.state import ReflectionDecision, ReflectionResult, ResearchState
+from src.agent.state import (
+    Plan,
+    PlanStep,
+    ReflectionDecision,
+    ReflectionResult,
+    ResearchState,
+    StepStatus,
+    StepType,
+)
 from src.agent.tools.web_crawler import WebCrawler
 from src.core.app_config import ResearcherMode
 from src.core.logging_utils import (
@@ -89,13 +99,17 @@ class OrchestrationConfig:
     enable_background_investigation: bool = True
     enable_clarification: bool = True
     timeout_seconds: int = 300  # 5 minutes
-    research_depth: str = "auto"  # auto, light, medium, extended
+    # Query mode configuration (tiered query modes feature)
+    query_mode: str = "deep_research"  # simple, web_search, deep_research
+    research_depth: str = "auto"  # auto, light, medium, extended (deep_research only)
     system_instructions: str | None = None  # User's custom system instructions
     # Persistence context (for claim/citation storage)
     message_id: UUID | None = None  # Agent message ID for claims
     research_session_id: UUID | None = None  # Research session ID for sources
     # Draft chat support - True if chat doesn't exist in DB yet
     is_draft: bool = False
+    # Citation verification toggle - when False, use classical synthesis
+    verify_sources: bool = True
 
 
 @dataclass
@@ -145,8 +159,10 @@ async def run_research(
         conversation_history=conversation_history or [],
         max_plan_iterations=config.max_plan_iterations,
         enable_clarification=config.enable_clarification,
+        query_mode=config.query_mode,
         research_depth=config.research_depth,
         system_instructions=config.system_instructions,
+        enable_citation_verification=config.verify_sources,
     )
     if session_id:
         state.session_id = session_id
@@ -565,11 +581,58 @@ async def stream_research(
         conversation_history=conversation_history or [],
         max_plan_iterations=config.max_plan_iterations,
         enable_clarification=config.enable_clarification,
+        query_mode=config.query_mode,
         research_depth=config.research_depth,
         system_instructions=config.system_instructions,
+        enable_citation_verification=config.verify_sources,
     )
     if session_id:
         state.session_id = session_id
+
+    # Load existing sources from chat source pool for follow-ups
+    # This enables citing previous research without re-crawling
+    chat_source_pool = None
+    if db is not None and chat_id and conversation_history:
+        try:
+            from src.services.chat_source_pool_service import ChatSourcePoolService
+            from src.services.llm.embedder import get_embedder
+
+            chat_id_uuid = UUID(chat_id) if isinstance(chat_id, str) else chat_id
+            embedder = get_embedder()
+            chat_source_pool = ChatSourcePoolService(db, embedder=embedder)
+
+            # Load existing sources from this chat
+            existing_sources = await chat_source_pool.get_all_sources(chat_id_uuid)
+
+            if existing_sources:
+                # Pre-populate state with existing sources for follow-up context
+                from src.agent.state import SourceInfo
+
+                for src in existing_sources:
+                    state.sources.append(
+                        SourceInfo(
+                            url=src.url,
+                            title=src.title,
+                            snippet=src.snippet,
+                            content=src.content,
+                            relevance_score=src.relevance_score,
+                        )
+                    )
+
+                # Build searchable index for researcher to use
+                await chat_source_pool.build_search_index(chat_id_uuid)
+
+                logger.info(
+                    "CHAT_SOURCES_LOADED",
+                    chat_id=str(chat_id_uuid),
+                    count=len(existing_sources),
+                )
+        except Exception as e:
+            logger.warning(
+                "CHAT_SOURCE_POOL_LOAD_FAILED",
+                error=str(e)[:200],
+            )
+            # Continue without existing sources - not critical
 
     steps_executed = 0
     steps_skipped = 0
@@ -598,6 +661,291 @@ async def stream_research(
                 mlflow.update_current_trace(metadata=trace_metadata)
 
             try:
+                # =============================================================
+                # Query Mode Routing (Tiered Query Modes feature)
+                # =============================================================
+                # SIMPLE mode: Direct LLM response, skip coordinator entirely
+                # WEB_SEARCH mode: Lightweight pipeline (handled below in T022)
+                # DEEP_RESEARCH mode: Full pipeline (existing flow)
+                # =============================================================
+
+                if config.query_mode == "simple":
+                    # Simple mode: Direct LLM response without web search
+                    # Skip coordinator, no session, no events
+                    logger.info(
+                        "SIMPLE_MODE_START",
+                        query=truncate(query, 100),
+                    )
+
+                    yield SynthesisStartedEvent(total_observations=0, total_sources=0)
+                    yield _agent_started("synthesizer", "simple")
+                    agent_start = time.perf_counter()
+
+                    # Use handle_simple_query to stream direct LLM response
+                    simple_chunks: list[str] = []
+                    async for chunk in handle_simple_query(state, llm):
+                        simple_chunks.append(chunk)
+                        yield SynthesisProgressEvent(content_chunk=chunk)
+
+                    full_report = "".join(simple_chunks)
+                    yield _agent_completed("synthesizer", agent_start)
+                    state.complete(full_report)
+
+                    # Emit completion event
+                    total_duration_ms = (time.perf_counter() - start_time) * 1000
+                    yield ResearchCompletedEvent(
+                        session_id=state.session_id,
+                        total_steps_executed=0,
+                        total_steps_skipped=0,
+                        plan_iterations=0,
+                        total_duration_ms=int(total_duration_ms),
+                    )
+
+                    # Persist chat + message for simple mode (no research session)
+                    # Use asyncio.shield with independent session to survive cancellation
+                    if (
+                        db is not None
+                        and config.message_id is not None
+                        and chat_id is not None
+                        and user_id is not None
+                    ):
+                        from src.agent.persistence import persist_simple_message_independent
+
+                        try:
+                            chat_id_uuid = UUID(chat_id) if isinstance(chat_id, str) else chat_id
+                            counts = await asyncio.shield(
+                                persist_simple_message_independent(
+                                    chat_id=chat_id_uuid,
+                                    user_id=user_id,
+                                    user_query=query,
+                                    message_id=config.message_id,
+                                    content=full_report,
+                                )
+                            )
+                            logger.info(
+                                "SIMPLE_MODE_PERSISTED",
+                                message_id=str(config.message_id),
+                                content_len=len(full_report),
+                            )
+
+                            # Emit persistence_completed event for frontend
+                            chat_title = query[:47] + "..." if len(query) > 50 else query
+                            yield PersistenceCompletedEvent(
+                                chat_id=str(chat_id_uuid),
+                                message_id=str(config.message_id),
+                                research_session_id=None,  # No research session for simple mode
+                                chat_title=chat_title,
+                                was_draft=config.is_draft,
+                                counts=counts,
+                            )
+                        except asyncio.CancelledError:
+                            logger.warning(
+                                "SIMPLE_MODE_PERSISTENCE_CANCELLED",
+                                detail="Persistence cancelled but may have completed",
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "SIMPLE_MODE_PERSISTENCE_FAILED",
+                                error=str(e)[:200],
+                                message_id=str(config.message_id) if config.message_id else None,
+                            )
+                    else:
+                        logger.warning(
+                            "SIMPLE_MODE_PERSISTENCE_SKIPPED",
+                            db_available=db is not None,
+                            message_id=config.message_id,
+                            chat_id=chat_id,
+                            user_id=user_id,
+                        )
+                        yield StreamErrorEvent(
+                            error_code="PERSISTENCE_SKIPPED",
+                            error_message="Simple mode response completed but could not persist to database",
+                            recoverable=True,
+                        )
+
+                    return
+
+                if config.query_mode == "web_search":
+                    # =============================================================
+                    # Web Search mode: Lightweight pipeline with 2-5 sources
+                    # Reuses existing researcher + synthesizer with minimal config
+                    # =============================================================
+                    logger.info(
+                        "WEB_SEARCH_MODE_START",
+                        query=truncate(query, 100),
+                    )
+
+                    # Get web search mode config
+                    mode_config = get_query_mode_config("web_search")
+
+                    # 1. Create minimal 1-step plan programmatically
+                    plan_id = str(uuid4())
+                    step_id = str(uuid4())
+                    state.current_plan = Plan(
+                        id=plan_id,
+                        title="Quick Web Search",
+                        thought="Answering query with quick web search",
+                        steps=[
+                            PlanStep(
+                                id=step_id,
+                                title="Search and answer",
+                                description=f"Find information about: {query}",
+                                step_type=StepType.RESEARCH,
+                                needs_search=True,
+                                status=StepStatus.PENDING,
+                            )
+                        ],
+                        has_enough_context=False,
+                        iteration=1,
+                    )
+                    yield _plan_created(state)
+
+                    # 2. Run researcher with minimal configuration
+                    yield _step_started(state)
+                    log_agent_transition(logger, from_agent=None, to_agent="researcher")
+                    yield _agent_started("researcher", "analytical")
+                    agent_start = time.perf_counter()
+
+                    # Use classic researcher - it loads limits from depth config
+                    # For web search, we set effective_depth to 'light' to get minimal limits
+                    state.effective_depth = "light"  # Override to use light depth limits
+                    state = await run_researcher(
+                        state,
+                        llm,
+                        crawler,
+                        brave_client,
+                    )
+
+                    yield _agent_completed("researcher", agent_start)
+
+                    # Mark step as complete (skip reflector - always COMPLETE for web search)
+                    state.mark_step_complete(state.last_observation)
+                    yield _step_completed(state)
+                    state.advance_step()
+                    steps_executed = 1
+
+                    # 3. Synthesize with natural mode ([1], [2] citations)
+                    yield SynthesisStartedEvent(
+                        total_observations=1,
+                        total_sources=len(state.sources),
+                    )
+                    log_agent_transition(logger, from_agent="researcher", to_agent="synthesizer")
+                    yield _agent_started("synthesizer", "analytical")
+                    agent_start = time.perf_counter()
+
+                    # Use citation synthesizer - returns dict events, convert to StreamEvents
+                    web_search_chunks: list[str] = []
+                    async for event_dict in stream_synthesis_with_citations(state, llm):
+                        event_type = event_dict.get("type")
+                        if event_type == "content":
+                            chunk = event_dict.get("chunk", "")
+                            web_search_chunks.append(chunk)
+                            yield SynthesisProgressEvent(content_chunk=chunk)
+                        elif event_type == "claim_verified":
+                            # Convert claim_id to UUID - generate new one if not valid UUID
+                            raw_claim_id = event_dict.get("claim_id")
+                            if isinstance(raw_claim_id, UUID):
+                                claim_id_uuid = raw_claim_id
+                            else:
+                                # Generate new UUID - claim_id from synthesis may be
+                                # an index or non-UUID string
+                                claim_id_uuid = uuid4()
+                            yield ClaimVerifiedEvent(
+                                claim_id=claim_id_uuid,
+                                claim_text=event_dict.get("claim_text", ""),
+                                position_start=event_dict.get("position_start", 0),
+                                position_end=event_dict.get("position_end", 0),
+                                verdict=event_dict.get("verdict", "unsupported"),
+                                confidence_level=event_dict.get("confidence", "medium"),
+                                evidence_preview=event_dict.get("evidence_preview", ""),
+                                reasoning=event_dict.get("reasoning"),
+                            )
+                        elif event_type == "verification_summary":
+                            yield VerificationSummaryEvent(
+                                message_id=config.message_id or uuid4(),
+                                total_claims=event_dict.get("total_claims", 0),
+                                supported=event_dict.get("supported", 0),
+                                partial=event_dict.get("partial", 0),
+                                unsupported=event_dict.get("unsupported", 0),
+                                contradicted=event_dict.get("contradicted", 0),
+                                abstained_count=event_dict.get("abstained_count", 0),
+                                citation_corrections=event_dict.get("citation_corrections", 0),
+                                warning=event_dict.get("warning", False),
+                            )
+
+                    full_report = "".join(web_search_chunks)
+                    yield _agent_completed("synthesizer", agent_start)
+                    state.complete(full_report)
+
+                    # Emit completion event
+                    total_duration_ms = (time.perf_counter() - start_time) * 1000
+                    yield ResearchCompletedEvent(
+                        session_id=state.session_id,
+                        total_steps_executed=steps_executed,
+                        total_steps_skipped=0,
+                        plan_iterations=1,
+                        total_duration_ms=int(total_duration_ms),
+                    )
+
+                    # Persist web search session (lightweight - sources only)
+                    # Use asyncio.shield with independent session to prevent cancellation
+                    # when client disconnects and request-scoped session is cleaned up
+                    if (
+                        db is not None
+                        and config.research_session_id
+                        and config.message_id
+                        and chat_id
+                        and user_id
+                    ):
+                        from src.agent.persistence import persist_complete_research_independent
+
+                        try:
+                            await asyncio.shield(
+                                persist_complete_research_independent(
+                                    chat_id=UUID(chat_id),
+                                    user_id=user_id,
+                                    user_query=query,
+                                    message_id=config.message_id,
+                                    research_session_id=config.research_session_id,
+                                    research_depth="light",  # Web search uses light depth
+                                    state=state,
+                                )
+                            )
+                        except asyncio.CancelledError:
+                            logger.warning(
+                                "WEB_SEARCH_PERSISTENCE_CANCELLED",
+                                detail="Persistence cancelled but may have completed",
+                            )
+                        yield PersistenceCompletedEvent(
+                            chat_id=chat_id,
+                            message_id=str(config.message_id),
+                            research_session_id=str(config.research_session_id),
+                            chat_title=query[:50] + "..." if len(query) > 50 else query,
+                            was_draft=True,  # Web search always creates new session
+                            counts={"sources": len(state.sources)},
+                        )
+                    else:
+                        # Log warning when persistence conditions not met
+                        logger.warning(
+                            "WEB_SEARCH_PERSISTENCE_SKIPPED",
+                            db_available=db is not None,
+                            message_id=config.message_id,
+                            research_session_id=config.research_session_id,
+                            chat_id=chat_id,
+                            user_id=user_id,
+                        )
+                        yield StreamErrorEvent(
+                            error_code="PERSISTENCE_SKIPPED",
+                            error_message="Web search completed but could not persist to database",
+                            recoverable=True,
+                        )
+
+                    return
+
+                # =============================================================
+                # Deep Research mode continues here (existing full pipeline)
+                # =============================================================
+
                 # Phase 1: Coordinator
                 log_agent_transition(logger, from_agent=None, to_agent="coordinator")
                 yield _agent_started("coordinator", "simple")
@@ -610,7 +958,7 @@ async def stream_research(
                 # Log research configuration to MLflow run (after coordinator resolves depth)
                 log_research_config(depth=state.resolve_depth())
 
-                # Handle simple queries
+                # Handle simple queries (coordinator-detected, not user-selected mode)
                 if state.is_simple_query:
                     yield SynthesisStartedEvent(total_observations=0, total_sources=0)
                     yield _agent_started("synthesizer", "simple")
@@ -826,7 +1174,8 @@ async def stream_research(
 
                     yield _agent_completed("synthesizer", agent_start)
 
-                    # Persist all research data if db session available and we have content
+                    # Persist all research data if db context available and we have content
+                    # Use independent session to survive request cancellation
                     if (
                         db is not None
                         and config.message_id is not None
@@ -836,18 +1185,21 @@ async def stream_research(
                         and user_id is not None
                     ):
                         try:
-                            from src.agent.persistence import persist_complete_research
+                            from src.agent.persistence import persist_complete_research_independent
 
                             chat_id_uuid = UUID(chat_id) if isinstance(chat_id, str) else chat_id
-                            counts = await persist_complete_research(
-                                db=db,
-                                chat_id=chat_id_uuid,
-                                user_id=user_id,
-                                user_query=query,
-                                message_id=config.message_id,
-                                research_session_id=config.research_session_id,
-                                research_depth=config.research_depth,
-                                state=state,
+                            # Use asyncio.shield with independent session to prevent cancellation
+                            # when client disconnects and request-scoped session is cleaned up
+                            counts = await asyncio.shield(
+                                persist_complete_research_independent(
+                                    chat_id=chat_id_uuid,
+                                    user_id=user_id,
+                                    user_query=query,
+                                    message_id=config.message_id,
+                                    research_session_id=config.research_session_id,
+                                    research_depth=config.research_depth,
+                                    state=state,
+                                )
                             )
                             logger.info(
                                 "RESEARCH_DATA_PERSISTED",
@@ -876,6 +1228,22 @@ async def stream_research(
                                 error=str(e)[:200],
                                 message_id=str(config.message_id) if config.message_id else None,
                             )
+                    else:
+                        # Log warning when persistence conditions not met
+                        logger.warning(
+                            "DEEP_RESEARCH_PERSISTENCE_SKIPPED",
+                            db_available=db is not None,
+                            message_id=config.message_id,
+                            research_session_id=config.research_session_id,
+                            has_final_report=bool(state.final_report),
+                            chat_id=chat_id,
+                            user_id=user_id,
+                        )
+                        yield StreamErrorEvent(
+                            error_code="PERSISTENCE_SKIPPED",
+                            error_message="Deep research completed but could not persist to database",
+                            recoverable=True,
+                        )
 
             except Exception as e:
                 logger.exception(

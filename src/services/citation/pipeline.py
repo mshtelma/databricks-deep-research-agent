@@ -175,24 +175,40 @@ class CitationVerificationPipeline:
         )
 
         # Convert SourceInfo objects to dicts for evidence selector
+        # Include snippet as fallback when content is not available (web fetch failed)
         source_dicts = [
             {
                 "url": source.url,
                 "title": source.title,
                 "content": source.content,
+                "snippet": source.snippet,  # Fallback when content unavailable
             }
             for source in sources
-            if source.content
+            if source.content or source.snippet  # Include snippet-only sources
         ]
 
         if not source_dicts:
-            logger.warning("CITATION_PIPELINE_STAGE1", action="no_sources_with_content")
+            logger.warning("CITATION_PIPELINE_STAGE1", action="no_sources_with_content_or_snippet")
             return []
 
         # Filter sources by content quality - discard abstract-only, paywalled, low-quality
+        # Snippet-only sources bypass quality filter (already lower confidence)
         high_quality_sources = []
         for source in source_dicts:
             content = source.get("content") or ""
+            snippet = source.get("snippet") or ""
+
+            # Snippet-only sources: accept without quality evaluation
+            # Evidence selector will handle them with lower confidence
+            if not content and snippet:
+                high_quality_sources.append(source)
+                logger.debug(
+                    "SOURCE_SNIPPET_ONLY_ACCEPTED",
+                    url=truncate(source.get("url", ""), 50),
+                    snippet_len=len(snippet),
+                )
+                continue
+
             quality = evaluate_content_quality(content, query)
             # Accept sources with score >= 0.5 that aren't abstract-only
             if quality.score >= 0.5 and not quality.is_abstract_only:

@@ -16,6 +16,7 @@ from src.models.evidence_span import EvidenceSpan
 from src.models.message import Message, MessageRole
 from src.models.message_feedback import FeedbackRating, MessageFeedback
 from src.models.numeric_claim import NumericClaim
+from src.models.research_event import ResearchEvent
 from src.models.research_session import (
     ResearchDepth,
     ResearchSession,
@@ -38,6 +39,7 @@ __all__ = [
     "ResearchSessionStatus",
     "ResearchStatus",
     "ResearchDepth",
+    "ResearchEvent",
     # Source
     "Source",
     # User Preferences

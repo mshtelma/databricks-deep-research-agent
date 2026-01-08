@@ -1,6 +1,7 @@
-"""Enums for citation verification models.
+"""Enums for models.
 
-This module defines all enums used in the claim-level citation feature:
+This module defines all enums used across the application:
+- QueryMode: Query mode classification (simple/web_search/deep_research)
 - ClaimType: General vs. numeric claims
 - VerificationVerdict: Four-tier verification outcomes
 - ConfidenceLevel: HaluGate-style routing classification
@@ -9,6 +10,19 @@ This module defines all enums used in the claim-level citation feature:
 """
 
 from enum import Enum
+
+
+class QueryMode(str, Enum):
+    """Query mode determining processing pipeline.
+
+    - SIMPLE: LLM-only response, no web search, no research session
+    - WEB_SEARCH: Quick search with 2-5 sources, lightweight session
+    - DEEP_RESEARCH: Full research pipeline with plan, steps, verification
+    """
+
+    SIMPLE = "simple"
+    WEB_SEARCH = "web_search"
+    DEEP_RESEARCH = "deep_research"
 
 
 class ClaimType(str, Enum):
