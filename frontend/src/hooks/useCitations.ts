@@ -10,12 +10,7 @@
 
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-
-// Max retries for polling empty claims (prevents infinite polling)
-// Increased from 10 to 30 to handle long-running ReAct synthesis (~5-7 min)
-const MAX_CLAIM_POLL_RETRIES = 30;
-// Polling interval in milliseconds
-const CLAIM_POLL_INTERVAL_MS = 3000;
+import { snakeToCamel } from '@/utils/caseConversion';
 import type {
   Claim,
   Citation,
@@ -28,30 +23,13 @@ import type {
   VerificationVerdict,
 } from '@/types/citation';
 
+// Max retries for polling empty claims (prevents infinite polling)
+// Increased from 10 to 30 to handle long-running ReAct synthesis (~5-7 min)
+const MAX_CLAIM_POLL_RETRIES = 30;
+// Polling interval in milliseconds
+const CLAIM_POLL_INTERVAL_MS = 3000;
+
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1';
-
-/**
- * Recursively convert snake_case keys to camelCase.
- * Handles nested objects and arrays.
- */
-function snakeToCamel(obj: unknown): unknown {
-  if (obj === null || obj === undefined) return obj;
-
-  if (Array.isArray(obj)) {
-    return obj.map(snakeToCamel);
-  }
-
-  if (typeof obj === 'object') {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-      const camelKey = key.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
-      result[camelKey] = snakeToCamel(value);
-    }
-    return result;
-  }
-
-  return obj;
-}
 
 interface UseCitationsOptions {
   /** Whether to enable real-time updates */

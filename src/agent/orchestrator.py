@@ -54,6 +54,7 @@ from src.schemas.streaming import (
     PlanCreatedEvent,
     ReflectionDecisionEvent,
     ResearchCompletedEvent,
+    ResearchStartedEvent,
     StepCompletedEvent,
     StepStartedEvent,
     StreamErrorEvent,
@@ -66,6 +67,7 @@ from src.schemas.streaming import (
 )
 from src.services.llm.client import LLMClient
 from src.services.search.brave import BraveSearchClient
+from src.services.research_event_buffer import EventBuffer
 
 # Import database session type for persistence (optional dependency)
 try:
@@ -670,20 +672,27 @@ async def stream_research(
                 # =============================================================
 
                 if config.query_mode == "simple":
-                    # Simple mode: Direct LLM response without web search
-                    # Skip coordinator, no session, no events
+                    # Simple mode: Direct LLM response with full memory access
+                    # Skip coordinator, no web search, but has access to sources/observations
                     logger.info(
                         "SIMPLE_MODE_START",
                         query=truncate(query, 100),
+                        sources_count=len(state.sources),
+                        observations_count=len(state.all_observations),
                     )
 
-                    yield SynthesisStartedEvent(total_observations=0, total_sources=0)
+                    yield SynthesisStartedEvent(
+                        total_observations=len(state.all_observations),
+                        total_sources=len(state.sources),
+                    )
                     yield _agent_started("synthesizer", "simple")
                     agent_start = time.perf_counter()
 
-                    # Use handle_simple_query to stream direct LLM response
+                    # Use handle_simple_query with memory access (sources + observations)
                     simple_chunks: list[str] = []
-                    async for chunk in handle_simple_query(state, llm):
+                    async for chunk in handle_simple_query(
+                        state, llm, chat_source_pool=chat_source_pool
+                    ):
                         simple_chunks.append(chunk)
                         yield SynthesisProgressEvent(content_chunk=chunk)
 
@@ -739,6 +748,11 @@ async def stream_research(
                                 counts=counts,
                             )
                         except asyncio.CancelledError:
+                            # INTENTIONAL: Not re-raising CancelledError here.
+                            # asyncio.shield() ensures persistence completes even if client
+                            # disconnects. We swallow the exception to allow graceful
+                            # degradation - data is saved, just the confirmation event
+                            # couldn't be sent to the disconnected client.
                             logger.warning(
                                 "SIMPLE_MODE_PERSISTENCE_CANCELLED",
                                 detail="Persistence cancelled but may have completed",
@@ -769,182 +783,374 @@ async def stream_research(
                     # =============================================================
                     # Web Search mode: Lightweight pipeline with 2-5 sources
                     # Reuses existing researcher + synthesizer with minimal config
+                    # Includes 15-second timeout with fallback to Simple mode
                     # =============================================================
                     logger.info(
                         "WEB_SEARCH_MODE_START",
                         query=truncate(query, 100),
                     )
 
-                    # Get web search mode config
+                    # Get web search mode config (includes timeout_seconds)
                     mode_config = get_query_mode_config("web_search")
+                    web_search_timeout = getattr(mode_config, "timeout_seconds", 15)
 
-                    # 1. Create minimal 1-step plan programmatically
-                    plan_id = str(uuid4())
-                    step_id = str(uuid4())
-                    state.current_plan = Plan(
-                        id=plan_id,
-                        title="Quick Web Search",
-                        thought="Answering query with quick web search",
-                        steps=[
-                            PlanStep(
-                                id=step_id,
-                                title="Search and answer",
-                                description=f"Find information about: {query}",
-                                step_type=StepType.RESEARCH,
-                                needs_search=True,
-                                status=StepStatus.PENDING,
-                            )
-                        ],
-                        has_enough_context=False,
-                        iteration=1,
-                    )
-                    yield _plan_created(state)
+                    # Track start time for timeout
+                    web_search_start = time.perf_counter()
 
-                    # 2. Run researcher with minimal configuration
-                    yield _step_started(state)
-                    log_agent_transition(logger, from_agent=None, to_agent="researcher")
-                    yield _agent_started("researcher", "analytical")
-                    agent_start = time.perf_counter()
-
-                    # Use classic researcher - it loads limits from depth config
-                    # For web search, we set effective_depth to 'light' to get minimal limits
-                    state.effective_depth = "light"  # Override to use light depth limits
-                    state = await run_researcher(
-                        state,
-                        llm,
-                        crawler,
-                        brave_client,
-                    )
-
-                    yield _agent_completed("researcher", agent_start)
-
-                    # Mark step as complete (skip reflector - always COMPLETE for web search)
-                    state.mark_step_complete(state.last_observation)
-                    yield _step_completed(state)
-                    state.advance_step()
-                    steps_executed = 1
-
-                    # 3. Synthesize with natural mode ([1], [2] citations)
-                    yield SynthesisStartedEvent(
-                        total_observations=1,
-                        total_sources=len(state.sources),
-                    )
-                    log_agent_transition(logger, from_agent="researcher", to_agent="synthesizer")
-                    yield _agent_started("synthesizer", "analytical")
-                    agent_start = time.perf_counter()
-
-                    # Use citation synthesizer - returns dict events, convert to StreamEvents
-                    web_search_chunks: list[str] = []
-                    async for event_dict in stream_synthesis_with_citations(state, llm):
-                        event_type = event_dict.get("type")
-                        if event_type == "content":
-                            chunk = event_dict.get("chunk", "")
-                            web_search_chunks.append(chunk)
-                            yield SynthesisProgressEvent(content_chunk=chunk)
-                        elif event_type == "claim_verified":
-                            # Convert claim_id to UUID - generate new one if not valid UUID
-                            raw_claim_id = event_dict.get("claim_id")
-                            if isinstance(raw_claim_id, UUID):
-                                claim_id_uuid = raw_claim_id
-                            else:
-                                # Generate new UUID - claim_id from synthesis may be
-                                # an index or non-UUID string
-                                claim_id_uuid = uuid4()
-                            yield ClaimVerifiedEvent(
-                                claim_id=claim_id_uuid,
-                                claim_text=event_dict.get("claim_text", ""),
-                                position_start=event_dict.get("position_start", 0),
-                                position_end=event_dict.get("position_end", 0),
-                                verdict=event_dict.get("verdict", "unsupported"),
-                                confidence_level=event_dict.get("confidence", "medium"),
-                                evidence_preview=event_dict.get("evidence_preview", ""),
-                                reasoning=event_dict.get("reasoning"),
-                            )
-                        elif event_type == "verification_summary":
-                            yield VerificationSummaryEvent(
-                                message_id=config.message_id or uuid4(),
-                                total_claims=event_dict.get("total_claims", 0),
-                                supported=event_dict.get("supported", 0),
-                                partial=event_dict.get("partial", 0),
-                                unsupported=event_dict.get("unsupported", 0),
-                                contradicted=event_dict.get("contradicted", 0),
-                                abstained_count=event_dict.get("abstained_count", 0),
-                                citation_corrections=event_dict.get("citation_corrections", 0),
-                                warning=event_dict.get("warning", False),
-                            )
-
-                    full_report = "".join(web_search_chunks)
-                    yield _agent_completed("synthesizer", agent_start)
-                    state.complete(full_report)
-
-                    # Emit completion event
-                    total_duration_ms = (time.perf_counter() - start_time) * 1000
-                    yield ResearchCompletedEvent(
-                        session_id=state.session_id,
-                        total_steps_executed=steps_executed,
-                        total_steps_skipped=0,
-                        plan_iterations=1,
-                        total_duration_ms=int(total_duration_ms),
-                    )
-
-                    # Persist web search session (lightweight - sources only)
-                    # Use asyncio.shield with independent session to prevent cancellation
-                    # when client disconnects and request-scoped session is cleaned up
-                    if (
-                        db is not None
-                        and config.research_session_id
-                        and config.message_id
-                        and chat_id
-                        and user_id
-                    ):
-                        from src.agent.persistence import persist_complete_research_independent
-
-                        try:
-                            await asyncio.shield(
-                                persist_complete_research_independent(
-                                    chat_id=UUID(chat_id),
-                                    user_id=user_id,
-                                    user_query=query,
-                                    message_id=config.message_id,
-                                    research_session_id=config.research_session_id,
-                                    research_depth="light",  # Web search uses light depth
-                                    state=state,
+                    try:
+                        # 1. Create minimal 1-step plan programmatically
+                        plan_id = str(uuid4())
+                        step_id = str(uuid4())
+                        state.current_plan = Plan(
+                            id=plan_id,
+                            title="Quick Web Search",
+                            thought="Answering query with quick web search",
+                            steps=[
+                                PlanStep(
+                                    id=step_id,
+                                    title="Search and answer",
+                                    description=f"Find information about: {query}",
+                                    step_type=StepType.RESEARCH,
+                                    needs_search=True,
+                                    status=StepStatus.PENDING,
                                 )
+                            ],
+                            has_enough_context=False,
+                            iteration=1,
+                        )
+                        yield _plan_created(state)
+
+                        # 2. Run researcher with minimal configuration and timeout
+                        yield _step_started(state)
+                        log_agent_transition(logger, from_agent=None, to_agent="researcher")
+                        yield _agent_started("researcher", "analytical")
+                        agent_start = time.perf_counter()
+
+                        # Use classic researcher - it loads limits from depth config
+                        # For web search, we set effective_depth to 'light' to get minimal limits
+                        state.effective_depth = "light"  # Override to use light depth limits
+
+                        # Wrap researcher in timeout
+                        try:
+                            state = await asyncio.wait_for(
+                                run_researcher(
+                                    state,
+                                    llm,
+                                    crawler,
+                                    brave_client,
+                                ),
+                                timeout=web_search_timeout,
                             )
-                        except asyncio.CancelledError:
+                        except asyncio.TimeoutError:
                             logger.warning(
-                                "WEB_SEARCH_PERSISTENCE_CANCELLED",
-                                detail="Persistence cancelled but may have completed",
+                                "WEB_SEARCH_RESEARCHER_TIMEOUT",
+                                elapsed_seconds=time.perf_counter() - web_search_start,
+                                timeout_seconds=web_search_timeout,
                             )
-                        yield PersistenceCompletedEvent(
-                            chat_id=chat_id,
-                            message_id=str(config.message_id),
-                            research_session_id=str(config.research_session_id),
-                            chat_title=query[:50] + "..." if len(query) > 50 else query,
-                            was_draft=True,  # Web search always creates new session
-                            counts={"sources": len(state.sources)},
+                            raise  # Re-raise to trigger fallback
+
+                        yield _agent_completed("researcher", agent_start)
+
+                        # Mark step as complete (skip reflector - always COMPLETE for web search)
+                        state.mark_step_complete(state.last_observation)
+                        yield _step_completed(state)
+                        state.advance_step()
+                        steps_executed = 1
+
+                        # 3. Synthesize with natural mode ([1], [2] citations)
+                        yield SynthesisStartedEvent(
+                            total_observations=1,
+                            total_sources=len(state.sources),
                         )
-                    else:
-                        # Log warning when persistence conditions not met
+                        log_agent_transition(logger, from_agent="researcher", to_agent="synthesizer")
+                        yield _agent_started("synthesizer", "analytical")
+                        agent_start = time.perf_counter()
+
+                        # Use citation synthesizer - returns dict events, convert to StreamEvents
+                        web_search_chunks: list[str] = []
+                        async for event_dict in stream_synthesis_with_citations(state, llm):
+                            event_type = event_dict.get("type")
+                            if event_type == "content":
+                                chunk = event_dict.get("chunk", "")
+                                web_search_chunks.append(chunk)
+                                yield SynthesisProgressEvent(content_chunk=chunk)
+                            elif event_type == "claim_verified":
+                                # Convert claim_id to UUID - generate new one if not valid UUID
+                                raw_claim_id = event_dict.get("claim_id")
+                                if isinstance(raw_claim_id, UUID):
+                                    claim_id_uuid = raw_claim_id
+                                else:
+                                    # Generate new UUID - claim_id from synthesis may be
+                                    # an index or non-UUID string
+                                    claim_id_uuid = uuid4()
+                                yield ClaimVerifiedEvent(
+                                    claim_id=claim_id_uuid,
+                                    claim_text=event_dict.get("claim_text", ""),
+                                    position_start=event_dict.get("position_start", 0),
+                                    position_end=event_dict.get("position_end", 0),
+                                    verdict=event_dict.get("verdict", "unsupported"),
+                                    confidence_level=event_dict.get("confidence", "medium"),
+                                    evidence_preview=event_dict.get("evidence_preview", ""),
+                                    reasoning=event_dict.get("reasoning"),
+                                )
+                            elif event_type == "verification_summary":
+                                yield VerificationSummaryEvent(
+                                    message_id=config.message_id or uuid4(),
+                                    total_claims=event_dict.get("total_claims", 0),
+                                    supported=event_dict.get("supported", 0),
+                                    partial=event_dict.get("partial", 0),
+                                    unsupported=event_dict.get("unsupported", 0),
+                                    contradicted=event_dict.get("contradicted", 0),
+                                    abstained_count=event_dict.get("abstained_count", 0),
+                                    citation_corrections=event_dict.get("citation_corrections", 0),
+                                    warning=event_dict.get("warning", False),
+                                )
+
+                        full_report = "".join(web_search_chunks)
+                        yield _agent_completed("synthesizer", agent_start)
+                        state.complete(full_report)
+
+                        # Emit completion event
+                        total_duration_ms = (time.perf_counter() - start_time) * 1000
+                        yield ResearchCompletedEvent(
+                            session_id=state.session_id,
+                            total_steps_executed=steps_executed,
+                            total_steps_skipped=0,
+                            plan_iterations=1,
+                            total_duration_ms=int(total_duration_ms),
+                        )
+
+                        # Persist web search session (lightweight - sources only)
+                        # Use asyncio.shield with independent session to prevent cancellation
+                        # when client disconnects and request-scoped session is cleaned up
+                        if (
+                            db is not None
+                            and config.research_session_id
+                            and config.message_id
+                            and chat_id
+                            and user_id
+                        ):
+                            from src.agent.persistence import persist_complete_research_independent
+
+                            try:
+                                await asyncio.shield(
+                                    persist_complete_research_independent(
+                                        chat_id=UUID(chat_id),
+                                        user_id=user_id,
+                                        user_query=query,
+                                        message_id=config.message_id,
+                                        research_session_id=config.research_session_id,
+                                        research_depth="light",  # Web search uses light depth
+                                        state=state,
+                                    )
+                                )
+                            except asyncio.CancelledError:
+                                # INTENTIONAL: Not re-raising CancelledError here.
+                                # asyncio.shield() ensures persistence completes even if client
+                                # disconnects. We swallow the exception to allow graceful
+                                # degradation - data is saved, just the confirmation event
+                                # couldn't be sent to the disconnected client.
+                                logger.warning(
+                                    "WEB_SEARCH_PERSISTENCE_CANCELLED",
+                                    detail="Persistence cancelled but may have completed",
+                                )
+                            yield PersistenceCompletedEvent(
+                                chat_id=chat_id,
+                                message_id=str(config.message_id),
+                                research_session_id=str(config.research_session_id),
+                                chat_title=query[:50] + "..." if len(query) > 50 else query,
+                                was_draft=True,  # Web search always creates new session
+                                counts={"sources": len(state.sources)},
+                            )
+                        else:
+                            # Log warning when persistence conditions not met
+                            logger.warning(
+                                "WEB_SEARCH_PERSISTENCE_SKIPPED",
+                                db_available=db is not None,
+                                message_id=config.message_id,
+                                research_session_id=config.research_session_id,
+                                chat_id=chat_id,
+                                user_id=user_id,
+                            )
+                            yield StreamErrorEvent(
+                                error_code="PERSISTENCE_SKIPPED",
+                                error_message="Web search completed but could not persist to database",
+                                recoverable=True,
+                            )
+
+                        return
+
+                    except asyncio.TimeoutError:
+                        # Web search timed out - fall back to Simple mode
                         logger.warning(
-                            "WEB_SEARCH_PERSISTENCE_SKIPPED",
-                            db_available=db is not None,
-                            message_id=config.message_id,
-                            research_session_id=config.research_session_id,
-                            chat_id=chat_id,
-                            user_id=user_id,
+                            "WEB_SEARCH_TIMEOUT_FALLBACK",
+                            elapsed_seconds=time.perf_counter() - web_search_start,
+                            timeout_seconds=web_search_timeout,
+                            query=truncate(query, 100),
                         )
+
+                        # Notify frontend of fallback
                         yield StreamErrorEvent(
-                            error_code="PERSISTENCE_SKIPPED",
-                            error_message="Web search completed but could not persist to database",
+                            error_code="WEB_SEARCH_TIMEOUT",
+                            error_message="Web search timed out, falling back to direct answer",
                             recoverable=True,
                         )
+
+                        # Fall back to Simple mode (direct LLM response)
+                        yield SynthesisStartedEvent(total_observations=0, total_sources=0)
+                        yield _agent_started("synthesizer", "simple")
+                        fallback_start = time.perf_counter()
+
+                        fallback_chunks: list[str] = []
+                        async for chunk in handle_simple_query(state, llm):
+                            fallback_chunks.append(chunk)
+                            yield SynthesisProgressEvent(content_chunk=chunk)
+
+                        full_report = "".join(fallback_chunks)
+                        yield _agent_completed("synthesizer", fallback_start)
+                        state.complete(full_report)
+
+                        # Emit completion event
+                        total_duration_ms = (time.perf_counter() - start_time) * 1000
+                        yield ResearchCompletedEvent(
+                            session_id=state.session_id,
+                            total_steps_executed=0,
+                            total_steps_skipped=0,
+                            plan_iterations=0,
+                            total_duration_ms=int(total_duration_ms),
+                        )
+
+                        # Persist fallback response (same pattern as simple mode)
+                        # Use asyncio.shield with independent session to survive cancellation
+                        if (
+                            db is not None
+                            and config.message_id is not None
+                            and chat_id is not None
+                            and user_id is not None
+                        ):
+                            from src.agent.persistence import persist_simple_message_independent
+
+                            try:
+                                chat_id_uuid = UUID(chat_id) if isinstance(chat_id, str) else chat_id
+                                counts = await asyncio.shield(
+                                    persist_simple_message_independent(
+                                        chat_id=chat_id_uuid,
+                                        user_id=user_id,
+                                        user_query=query,
+                                        message_id=config.message_id,
+                                        content=full_report,
+                                    )
+                                )
+                                logger.info(
+                                    "WEB_SEARCH_FALLBACK_PERSISTED",
+                                    message_id=str(config.message_id),
+                                    content_len=len(full_report),
+                                )
+
+                                # Emit persistence_completed event for frontend
+                                chat_title = query[:47] + "..." if len(query) > 50 else query
+                                yield PersistenceCompletedEvent(
+                                    chat_id=str(chat_id_uuid),
+                                    message_id=str(config.message_id),
+                                    research_session_id=None,  # No research session for fallback
+                                    chat_title=chat_title,
+                                    was_draft=config.is_draft,
+                                    counts=counts,
+                                )
+                            except asyncio.CancelledError:
+                                # INTENTIONAL: Not re-raising CancelledError here.
+                                # asyncio.shield() ensures persistence completes even if client
+                                # disconnects. We swallow the exception to allow graceful
+                                # degradation - data is saved, just the confirmation event
+                                # couldn't be sent to the disconnected client.
+                                logger.warning(
+                                    "WEB_SEARCH_FALLBACK_PERSISTENCE_CANCELLED",
+                                    detail="Persistence cancelled but may have completed",
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "WEB_SEARCH_FALLBACK_PERSISTENCE_FAILED",
+                                    error=str(e)[:200],
+                                    message_id=str(config.message_id) if config.message_id else None,
+                                )
+                        else:
+                            logger.warning(
+                                "WEB_SEARCH_FALLBACK_PERSISTENCE_SKIPPED",
+                                db_available=db is not None,
+                                message_id=config.message_id,
+                                chat_id=chat_id,
+                                user_id=user_id,
+                            )
+                            yield StreamErrorEvent(
+                                error_code="PERSISTENCE_SKIPPED",
+                                error_message="Web search fallback response could not persist to database",
+                                recoverable=True,
+                            )
 
                     return
 
                 # =============================================================
                 # Deep Research mode continues here (existing full pipeline)
                 # =============================================================
+
+                # Pre-generate user message UUID for session start
+                user_message_id = uuid4()
+                event_buffer: EventBuffer | None = None
+
+                # =============================================================
+                # Two-Phase Persistence: Create session at START for crash resilience
+                # =============================================================
+                # This enables:
+                # - Events to be persisted during streaming (FK to session satisfied)
+                # - Frontend to reconnect if browser reloads mid-research
+                # - Session marked FAILED on error instead of orphaned
+                # =============================================================
+                if (
+                    db is not None
+                    and config.research_session_id is not None
+                    and config.message_id is not None
+                    and chat_id is not None
+                    and user_id is not None
+                ):
+                    from src.agent.persistence import persist_research_session_start_independent
+
+                    chat_id_uuid = UUID(chat_id) if isinstance(chat_id, str) else chat_id
+                    try:
+                        await persist_research_session_start_independent(
+                            chat_id=chat_id_uuid,
+                            user_id=user_id,
+                            user_query=query,
+                            user_message_id=user_message_id,
+                            agent_message_id=config.message_id,
+                            research_session_id=config.research_session_id,
+                            research_depth=config.research_depth,
+                            query_mode=config.query_mode,
+                        )
+                        logger.info(
+                            "RESEARCH_SESSION_CREATED_AT_START",
+                            session_id=str(config.research_session_id)[:8],
+                            chat_id=str(chat_id_uuid)[:8],
+                        )
+
+                        # Create event buffer now that session exists (FK satisfied)
+                        event_buffer = EventBuffer(config.research_session_id)
+
+                        # Emit research_started event for frontend
+                        started_event = ResearchStartedEvent(
+                            message_id=str(config.message_id),
+                            research_session_id=str(config.research_session_id),
+                        )
+                        yield started_event
+                        if event_buffer:
+                            await event_buffer.add_event(started_event)
+
+                    except Exception as e:
+                        logger.warning(
+                            "RESEARCH_SESSION_START_FAILED",
+                            error=str(e)[:200],
+                            session_id=str(config.research_session_id)[:8] if config.research_session_id else None,
+                        )
+                        # Continue without event buffering - old behavior as fallback
 
                 # Phase 1: Coordinator
                 log_agent_transition(logger, from_agent=None, to_agent="coordinator")
@@ -1174,8 +1380,25 @@ async def stream_research(
 
                     yield _agent_completed("synthesizer", agent_start)
 
-                    # Persist all research data if db context available and we have content
-                    # Use independent session to survive request cancellation
+                    # =============================================================
+                    # Two-Phase Persistence: Update session to COMPLETED at END
+                    # =============================================================
+                    # Flush event buffer first to ensure all events are persisted
+                    if event_buffer:
+                        try:
+                            await event_buffer.flush()
+                            logger.debug(
+                                "EVENT_BUFFER_FINAL_FLUSH",
+                                total_flushed=event_buffer.total_flushed,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "EVENT_BUFFER_FLUSH_FAILED",
+                                error=str(e)[:200],
+                            )
+
+                    # Use update function if session was created at START (two-phase)
+                    # Otherwise fall back to old create function (backward compat)
                     if (
                         db is not None
                         and config.message_id is not None
@@ -1184,50 +1407,100 @@ async def stream_research(
                         and chat_id is not None
                         and user_id is not None
                     ):
-                        try:
+                        chat_id_uuid = UUID(chat_id) if isinstance(chat_id, str) else chat_id
+
+                        # Check if session was created at START (event_buffer exists)
+                        if event_buffer is not None:
+                            # Two-phase: Update existing session to COMPLETED
+                            from src.agent.persistence import persist_research_session_complete_update_independent
+
+                            try:
+                                counts = await asyncio.shield(
+                                    persist_research_session_complete_update_independent(
+                                        chat_id=chat_id_uuid,
+                                        research_session_id=config.research_session_id,
+                                        agent_message_id=config.message_id,
+                                        state=state,
+                                    )
+                                )
+                                logger.info(
+                                    "RESEARCH_SESSION_COMPLETED",
+                                    message_id=str(config.message_id),
+                                    research_session_id=str(config.research_session_id),
+                                    report_len=len(state.final_report),
+                                    claims=counts.get("claims", 0),
+                                    citations=counts.get("citations", 0),
+                                    sources=counts.get("sources", 0),
+                                )
+
+                                # Emit persistence_completed event
+                                chat_title = query[:47] + "..." if len(query) > 50 else query
+                                yield PersistenceCompletedEvent(
+                                    chat_id=str(chat_id_uuid),
+                                    message_id=str(config.message_id),
+                                    research_session_id=str(config.research_session_id),
+                                    chat_title=chat_title,
+                                    was_draft=config.is_draft,
+                                    counts=counts,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "RESEARCH_SESSION_COMPLETE_FAILED",
+                                    error=str(e)[:200],
+                                    message_id=str(config.message_id) if config.message_id else None,
+                                )
+                                # Mark session as FAILED
+                                from src.agent.persistence import persist_research_session_failed_independent
+                                try:
+                                    await persist_research_session_failed_independent(
+                                        research_session_id=config.research_session_id,
+                                        agent_message_id=config.message_id,
+                                        error_message=str(e)[:500],
+                                    )
+                                except Exception:
+                                    pass  # Best effort
+                        else:
+                            # Fallback: Old single-phase persistence (session not created at START)
                             from src.agent.persistence import persist_complete_research_independent
 
-                            chat_id_uuid = UUID(chat_id) if isinstance(chat_id, str) else chat_id
-                            # Use asyncio.shield with independent session to prevent cancellation
-                            # when client disconnects and request-scoped session is cleaned up
-                            counts = await asyncio.shield(
-                                persist_complete_research_independent(
-                                    chat_id=chat_id_uuid,
-                                    user_id=user_id,
-                                    user_query=query,
-                                    message_id=config.message_id,
-                                    research_session_id=config.research_session_id,
-                                    research_depth=config.research_depth,
-                                    state=state,
+                            try:
+                                counts = await asyncio.shield(
+                                    persist_complete_research_independent(
+                                        chat_id=chat_id_uuid,
+                                        user_id=user_id,
+                                        user_query=query,
+                                        message_id=config.message_id,
+                                        research_session_id=config.research_session_id,
+                                        research_depth=config.research_depth,
+                                        state=state,
+                                    )
                                 )
-                            )
-                            logger.info(
-                                "RESEARCH_DATA_PERSISTED",
-                                message_id=str(config.message_id),
-                                research_session_id=str(config.research_session_id),
-                                report_len=len(state.final_report),
-                                chat_created=counts.get("chat_created", 0),
-                                claims=counts.get("claims", 0),
-                                citations=counts.get("citations", 0),
-                                sources=counts.get("sources", 0),
-                            )
+                                logger.info(
+                                    "RESEARCH_DATA_PERSISTED_LEGACY",
+                                    message_id=str(config.message_id),
+                                    research_session_id=str(config.research_session_id),
+                                    report_len=len(state.final_report),
+                                    chat_created=counts.get("chat_created", 0),
+                                    claims=counts.get("claims", 0),
+                                    citations=counts.get("citations", 0),
+                                    sources=counts.get("sources", 0),
+                                )
 
-                            # Emit persistence_completed event for frontend to finalize draft
-                            chat_title = query[:47] + "..." if len(query) > 50 else query
-                            yield PersistenceCompletedEvent(
-                                chat_id=str(chat_id_uuid),
-                                message_id=str(config.message_id),
-                                research_session_id=str(config.research_session_id),
-                                chat_title=chat_title,
-                                was_draft=config.is_draft,
-                                counts=counts,
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "RESEARCH_PERSISTENCE_FAILED",
-                                error=str(e)[:200],
-                                message_id=str(config.message_id) if config.message_id else None,
-                            )
+                                chat_title = query[:47] + "..." if len(query) > 50 else query
+                                yield PersistenceCompletedEvent(
+                                    chat_id=str(chat_id_uuid),
+                                    message_id=str(config.message_id),
+                                    research_session_id=str(config.research_session_id),
+                                    chat_title=chat_title,
+                                    was_draft=config.is_draft,
+                                    counts=counts,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "RESEARCH_PERSISTENCE_FAILED",
+                                    error=str(e)[:200],
+                                    message_id=str(config.message_id) if config.message_id else None,
+                                )
                     else:
                         # Log warning when persistence conditions not met
                         logger.warning(
@@ -1256,6 +1529,37 @@ async def stream_research(
                     error_message=str(e),
                     recoverable=False,
                 )
+
+                # Mark session as FAILED if it was created at START
+                if (
+                    event_buffer is not None
+                    and config.research_session_id is not None
+                    and config.message_id is not None
+                ):
+                    from src.agent.persistence import persist_research_session_failed_independent
+
+                    try:
+                        # Flush buffer first to preserve any events collected
+                        await event_buffer.flush()
+                    except Exception:
+                        pass  # Best effort
+
+                    try:
+                        await persist_research_session_failed_independent(
+                            research_session_id=config.research_session_id,
+                            agent_message_id=config.message_id,
+                            error_message=str(e)[:500],
+                        )
+                        logger.info(
+                            "RESEARCH_SESSION_MARKED_FAILED",
+                            session_id=str(config.research_session_id)[:8],
+                            error=str(e)[:100],
+                        )
+                    except Exception as fail_err:
+                        logger.warning(
+                            "RESEARCH_SESSION_FAIL_MARK_FAILED",
+                            error=str(fail_err)[:200],
+                        )
 
             total_duration_ms = (time.perf_counter() - start_time) * 1000
 

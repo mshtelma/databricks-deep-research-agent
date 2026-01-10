@@ -172,7 +172,7 @@ async def run_reflector(state: ResearchState, llm: LLMClient) -> ResearchState:
         try:
             response = await llm.complete(
                 messages=messages,
-                tier=ModelTier.SIMPLE,
+                tier=ModelTier.BULK_ANALYSIS,  # Use Gemini for decision classification
                 structured_output=ReflectorOutput,
             )
 

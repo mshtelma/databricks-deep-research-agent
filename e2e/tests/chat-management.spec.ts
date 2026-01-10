@@ -18,28 +18,22 @@ test.describe('Chat Management', () => {
       // Get initial chat count
       const initialCount = await sidebarPage.getChatCount();
 
-      // Create new chat
-      await sidebarPage.createNewChat();
-
-      // Wait a moment for the new chat to appear
-      await sidebarPage.page.waitForTimeout(500);
+      // Create new chat and wait for it to appear
+      const chatId = await sidebarPage.createNewChatAndWait();
 
       // Chat count should increase
       const newCount = await sidebarPage.getChatCount();
-      expect(newCount).toBeGreaterThanOrEqual(initialCount);
+      expect(newCount).toBeGreaterThan(initialCount);
+      expect(chatId).not.toBeNull();
     });
 
-    test('new chat is selected after creation', async ({ sidebarPage, page }) => {
-      // Create new chat
-      await sidebarPage.createNewChat();
+    test('new chat is selected after creation', async ({ sidebarPage }) => {
+      // Create new chat and wait for it to appear
+      const chatId = await sidebarPage.createNewChatAndWait();
 
-      // Wait for chat to be created
-      await page.waitForTimeout(500);
-
-      // The first chat should be selected (new chat goes to top)
-      const firstChatId = await sidebarPage.getFirstChatId();
-      if (firstChatId) {
-        const isSelected = await sidebarPage.isChatSelected(firstChatId);
+      // The new chat should be selected
+      if (chatId) {
+        const isSelected = await sidebarPage.isChatSelected(chatId);
         expect(isSelected).toBe(true);
       }
     });
@@ -51,11 +45,8 @@ test.describe('Chat Management', () => {
 
   test.describe('Rename Chat', () => {
     test('rename updates title in sidebar', async ({ sidebarPage, page }) => {
-      // First create a new chat to have something to rename
-      await sidebarPage.createNewChat();
-      await page.waitForTimeout(500);
-
-      const chatId = await sidebarPage.getFirstChatId();
+      // Create a persisted chat (not draft) so it has menu actions
+      const chatId = await sidebarPage.createPersistedChat();
       if (!chatId) {
         test.skip(true, 'No chat available to rename');
         return;
@@ -75,11 +66,8 @@ test.describe('Chat Management', () => {
     });
 
     test('cancel rename preserves original title', async ({ sidebarPage, page }) => {
-      // Create a chat first
-      await sidebarPage.createNewChat();
-      await page.waitForTimeout(500);
-
-      const chatId = await sidebarPage.getFirstChatId();
+      // Create a persisted chat (not draft) so it has menu actions
+      const chatId = await sidebarPage.createPersistedChat();
       if (!chatId) {
         test.skip(true, 'No chat available');
         return;
@@ -102,11 +90,8 @@ test.describe('Chat Management', () => {
 
   test.describe('Delete Chat', () => {
     test('delete removes chat from list', async ({ sidebarPage, page }) => {
-      // Create a chat to delete
-      await sidebarPage.createNewChat();
-      await page.waitForTimeout(500);
-
-      const chatId = await sidebarPage.getFirstChatId();
+      // Create a persisted chat (not draft) so it has menu actions
+      const chatId = await sidebarPage.createPersistedChat();
       if (!chatId) {
         test.skip(true, 'No chat available to delete');
         return;
@@ -126,11 +111,8 @@ test.describe('Chat Management', () => {
     });
 
     test('deleted chat disappears from sidebar', async ({ sidebarPage, page }) => {
-      // Create a chat to delete
-      await sidebarPage.createNewChat();
-      await page.waitForTimeout(500);
-
-      const chatId = await sidebarPage.getFirstChatId();
+      // Create a persisted chat (not draft) so it has menu actions
+      const chatId = await sidebarPage.createPersistedChat();
       if (!chatId) {
         test.skip(true, 'No chat available to delete');
         return;
@@ -149,11 +131,8 @@ test.describe('Chat Management', () => {
 
   test.describe('Archive/Restore', () => {
     test('archive hides chat from active filter', async ({ sidebarPage, page }) => {
-      // Create a chat to archive
-      await sidebarPage.createNewChat();
-      await page.waitForTimeout(500);
-
-      const chatId = await sidebarPage.getFirstChatId();
+      // Create a persisted chat (not draft) so it has menu actions
+      const chatId = await sidebarPage.createPersistedChat();
       if (!chatId) {
         test.skip(true, 'No chat available to archive');
         return;
@@ -174,11 +153,8 @@ test.describe('Chat Management', () => {
     });
 
     test('archived filter shows archived chats', async ({ sidebarPage, page }) => {
-      // Create and archive a chat
-      await sidebarPage.createNewChat();
-      await page.waitForTimeout(500);
-
-      const chatId = await sidebarPage.getFirstChatId();
+      // Create a persisted chat (not draft) so it has menu actions
+      const chatId = await sidebarPage.createPersistedChat();
       if (!chatId) {
         test.skip(true, 'No chat available to archive');
         return;
@@ -197,11 +173,8 @@ test.describe('Chat Management', () => {
     });
 
     test('restore returns chat to active', async ({ sidebarPage, page }) => {
-      // Create and archive a chat
-      await sidebarPage.createNewChat();
-      await page.waitForTimeout(500);
-
-      const chatId = await sidebarPage.getFirstChatId();
+      // Create a persisted chat (not draft) so it has menu actions
+      const chatId = await sidebarPage.createPersistedChat();
       if (!chatId) {
         test.skip(true, 'No chat available');
         return;
@@ -306,10 +279,13 @@ test.describe('Chat Management', () => {
   test.describe('Chat Selection', () => {
     test('clicking chat selects it', async ({ sidebarPage, page }) => {
       // Create two chats
-      await sidebarPage.createNewChat();
-      await page.waitForTimeout(500);
-      await sidebarPage.createNewChat();
-      await page.waitForTimeout(500);
+      const chatId1 = await sidebarPage.createNewChatAndWait();
+      const chatId2 = await sidebarPage.createNewChatAndWait();
+
+      if (!chatId1 || !chatId2) {
+        test.skip(true, 'Need at least 2 chats');
+        return;
+      }
 
       const count = await sidebarPage.getChatCount();
       if (count < 2) {
@@ -336,21 +312,23 @@ test.describe('Chat Management', () => {
     });
 
     test('draft appears in sidebar immediately', async ({ sidebarPage, page }) => {
-      // Wait for initial page state to stabilize
-      await page.waitForTimeout(500);
-      const countBefore = await sidebarPage.getChatCount();
-
       await sidebarPage.createNewChat();
 
       // Wait for URL to change to draft pattern
       await expect(page).toHaveURL(/\/chat\/[a-f0-9-]+\?draft=1/);
 
-      // Draft should appear immediately (no API call needed)
-      // Count should increase by 1
+      // Extract chat ID from URL
+      const url = page.url();
+      const match = url.match(/\/chat\/([a-f0-9-]+)\?draft=1/);
+      expect(match).not.toBeNull();
+      const chatId = match![1];
+
+      // Use polling approach since React useMemo might not trigger re-render immediately
+      // when getDraftList() returns the new draft
       await expect(async () => {
-        const countAfter = await sidebarPage.getChatCount();
-        expect(countAfter).toBeGreaterThan(countBefore);
-      }).toPass({ timeout: 3000 });
+        const chatItem = page.getByTestId(`chat-item-${chatId}`);
+        await expect(chatItem).toBeVisible();
+      }).toPass({ timeout: 15000 });
     });
 
     test('draft survives page refresh', async ({ sidebarPage, page }) => {

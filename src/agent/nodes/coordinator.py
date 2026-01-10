@@ -1,6 +1,10 @@
 """Coordinator agent - query classification and simple query handling."""
 
+from __future__ import annotations
+
+import json
 from collections.abc import AsyncGenerator
+from typing import TYPE_CHECKING, Any
 
 import mlflow
 from mlflow.entities import SpanType
@@ -10,6 +14,7 @@ from src.agent.prompts.coordinator import (
     COORDINATOR_SYSTEM_PROMPT,
     COORDINATOR_USER_PROMPT,
     SIMPLE_QUERY_SYSTEM_PROMPT,
+    SIMPLE_QUERY_TOOLS,
 )
 from src.agent.state import QueryClassification, ResearchState
 from src.core.logging_utils import get_logger, log_agent_decision, truncate
@@ -23,6 +28,9 @@ from src.core.tracing_constants import (
 )
 from src.services.llm.client import LLMClient
 from src.services.llm.types import ModelTier
+
+if TYPE_CHECKING:
+    from src.services.chat_source_pool_service import ChatSourcePoolService
 
 logger = get_logger(__name__)
 
@@ -90,7 +98,7 @@ async def run_coordinator(state: ResearchState, llm: LLMClient) -> ResearchState
         try:
             response = await llm.complete(
                 messages=messages,
-                tier=ModelTier.SIMPLE,
+                tier=ModelTier.BULK_ANALYSIS,  # Use Gemini for classification
                 structured_output=CoordinatorOutput,
             )
 
@@ -162,18 +170,153 @@ async def run_coordinator(state: ResearchState, llm: LLMClient) -> ResearchState
         return state
 
 
+async def _handle_search_sources(
+    query: str,
+    chat_source_pool: ChatSourcePoolService,
+) -> str:
+    """Execute search_sources tool against chat source pool.
+
+    Args:
+        query: Search query from the model.
+        chat_source_pool: Service for searching sources.
+
+    Returns:
+        Formatted search results or error message.
+    """
+    try:
+        # Use hybrid search (BM25 + semantic)
+        results = await chat_source_pool.search(query, limit=5)
+
+        if not results:
+            return "No relevant content found in sources."
+
+        # Format results
+        output = []
+        for i, result in enumerate(results, 1):
+            source_title = result.title or "Untitled"
+            snippet = result.content[:500] if result.content else result.snippet or ""
+            output.append(f"[Result {i}] From: {source_title}\n{snippet}")
+
+        return "\n\n".join(output)
+    except Exception as e:
+        logger.warning(f"search_sources failed: {e}")
+        return f"Search failed: {str(e)}"
+
+
+async def _simple_query_with_tools(
+    messages: list[dict[str, str]],
+    tools: list[dict[str, Any]],
+    llm: LLMClient,
+    chat_source_pool: ChatSourcePoolService,
+    max_tool_calls: int = 3,
+) -> AsyncGenerator[str, None]:
+    """ReAct loop for simple query with search tool.
+
+    Args:
+        messages: Initial messages for the LLM.
+        tools: Tool definitions.
+        llm: LLM client.
+        chat_source_pool: Service for searching sources.
+        max_tool_calls: Maximum number of tool calls allowed.
+
+    Yields:
+        Response chunks for streaming.
+    """
+    tool_call_count = 0
+    current_messages: list[dict[str, Any]] = list(messages)  # Copy to avoid mutation
+
+    while tool_call_count < max_tool_calls:
+        # Use stream_with_tools to get content and/or tool calls
+        pending_tool_calls = []
+        content_chunks = []
+
+        async for chunk in llm.stream_with_tools(
+            messages=current_messages,
+            tools=tools,
+            tier=ModelTier.COMPLEX,
+        ):
+            # Collect content chunks
+            if chunk.content:
+                content_chunks.append(chunk.content)
+
+            # Collect tool calls
+            if chunk.tool_calls:
+                pending_tool_calls.extend(chunk.tool_calls)
+
+            # If done and no tool calls, we can yield content
+            if chunk.is_done:
+                break
+
+        # If we got tool calls, execute them
+        if pending_tool_calls:
+            for tool_call in pending_tool_calls:
+                if tool_call.name == "search_sources":
+                    query = tool_call.arguments.get("query", "")
+                    result = await _handle_search_sources(query, chat_source_pool)
+
+                    # Add assistant message with tool call
+                    current_messages.append({
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": tool_call.id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_call.name,
+                                    "arguments": json.dumps(tool_call.arguments),
+                                },
+                            }
+                        ],
+                    })
+
+                    # Add tool result
+                    current_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result,
+                    })
+                    tool_call_count += 1
+
+                    logger.info(
+                        "SIMPLE_QUERY_TOOL_CALL",
+                        tool="search_sources",
+                        query=query[:100],
+                        result_len=len(result),
+                    )
+        else:
+            # No tool calls - yield the final content
+            for chunk_content in content_chunks:
+                yield chunk_content
+            return
+
+    # Max tool calls reached - generate final response without tools
+    # Convert messages to string-only format for regular stream
+    stream_messages: list[dict[str, str]] = [
+        {"role": m["role"], "content": m.get("content") or ""}
+        for m in current_messages
+        if m.get("role") != "tool"  # Skip tool messages for final stream
+    ]
+    async for final_chunk in llm.stream(
+        messages=stream_messages, tier=ModelTier.COMPLEX
+    ):
+        yield final_chunk
+
+
 async def handle_simple_query(
     state: ResearchState,
     llm: LLMClient,
+    chat_source_pool: ChatSourcePoolService | None = None,
 ) -> AsyncGenerator[str, None]:
-    """Handle a simple query with direct LLM response.
+    """Handle simple query with full memory access (hybrid approach).
 
-    Includes full conversation history so follow-ups can reference
-    previous research reports (e.g., "Tell me more about the first point").
+    Phase 1: Include source summaries + observations in context
+    Phase 2: Use search_sources tool for deep retrieval when needed
 
     Args:
         state: Research state with simple query.
         llm: LLM client for completions.
+        chat_source_pool: Optional service for searching sources.
 
     Yields:
         Response chunks for streaming.
@@ -182,16 +325,65 @@ async def handle_simple_query(
         yield state.direct_response
         return
 
-    # Include FULL conversation history for follow-up context
-    # This enables referencing previous 13K+ word reports
+    # === PHASE 1: Static Context ===
+
+    # 1a. Build sources summary (titles + URLs for awareness)
+    sources_summary = ""
+    if state.sources:
+        sources_summary = "\n\n## Available Sources from Previous Research\n"
+        for i, src in enumerate(state.sources[:20], 1):
+            title = src.title or "Untitled"
+            sources_summary += f"[{i}] {title}\n    URL: {src.url}\n"
+            if src.snippet:
+                sources_summary += f"    Summary: {src.snippet[:200]}...\n"
+
+    # 1b. Build observations context (key findings from research)
+    observations_context = ""
+    if state.all_observations:
+        observations_context = "\n\n## Key Findings from Previous Research\n"
+        for i, obs in enumerate(state.all_observations[-5:], 1):
+            # Truncate long observations
+            obs_preview = obs[:1000] + "..." if len(obs) > 1000 else obs
+            observations_context += f"\n### Finding {i}\n{obs_preview}\n"
+
+    # 1c. Enhanced system prompt with memory
+    system_prompt = SIMPLE_QUERY_SYSTEM_PROMPT
+    if sources_summary:
+        system_prompt += sources_summary
+    if observations_context:
+        system_prompt += observations_context
+
+    # === PHASE 2: Tool-Based Search (if source pool available) ===
+    tools = None
+    if chat_source_pool and state.sources:
+        tools = SIMPLE_QUERY_TOOLS
+
+    # Build messages with conversation history
     from src.agent.utils.conversation import build_messages_with_history
 
     messages = build_messages_with_history(
-        system_prompt=SIMPLE_QUERY_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         user_query=state.query,
         history=state.conversation_history,
-        max_history_messages=5,  # Balance context with token limits
+        max_history_messages=10,  # Increased for richer context
     )
 
-    async for chunk in llm.stream(messages=messages, tier=ModelTier.SIMPLE):
-        yield chunk
+    logger.info(
+        "SIMPLE_QUERY_CONTEXT",
+        history_messages=len(state.conversation_history),
+        sources_count=len(state.sources),
+        observations_count=len(state.all_observations),
+        has_search_tool=tools is not None,
+    )
+
+    # Use COMPLEX tier - simple mode means "no web search", not "dumb model"
+    if tools and chat_source_pool:
+        # ReAct loop with search tool
+        async for chunk in _simple_query_with_tools(
+            messages, tools, llm, chat_source_pool
+        ):
+            yield chunk
+    else:
+        # Direct response (no tools available)
+        async for chunk in llm.stream(messages=messages, tier=ModelTier.COMPLEX):
+            yield chunk

@@ -71,6 +71,8 @@ class EndpointConfig(BaseModel):
     supports_structured_output: bool = False
     # Some models (e.g., GPT-5) don't support temperature parameter
     supports_temperature: bool = True
+    # Claude models support prompt caching via cache_control parameter
+    supports_prompt_caching: bool = False
 
     model_config = {"frozen": True}
 
@@ -383,8 +385,8 @@ class IsolatedVerificationConfig(BaseModel):
     """Configuration for Stage 4: Isolated Verification."""
 
     enable_nei_verdict: bool = True
-    verification_model_tier: str = Field(default="analytical")
-    quick_verification_tier: str = Field(default="simple")
+    verification_model_tier: str = Field(default="bulk_analysis")
+    quick_verification_tier: str = Field(default="bulk_analysis")
 
     model_config = {"frozen": True}
 
@@ -475,16 +477,20 @@ class VerificationRetrievalConfig(BaseModel):
 
     # Model tiers for LLM calls
     decomposition_tier: str = Field(
-        default="simple",
-        description="Model tier for atomic fact decomposition",
+        default="bulk_analysis",
+        description="Model tier for atomic fact decomposition (Gemini for analysis)",
     )
     entailment_tier: str = Field(
-        default="analytical",
-        description="Model tier for entailment checking",
+        default="bulk_analysis",
+        description="Model tier for entailment checking (Gemini for NLI)",
     )
     reconstruction_tier: str = Field(
         default="analytical",
-        description="Model tier for claim reconstruction",
+        description="Model tier for claim reconstruction (Claude for synthesis quality)",
+    )
+    softening_tier: str = Field(
+        default="fast",
+        description="Model tier for softening unverified claims (GPT 5.2 for simple rewrites)",
     )
 
     model_config = {"frozen": True}
@@ -651,6 +657,48 @@ class RateLimitingConfig(BaseModel):
         return min(delay, self.max_delay_seconds)
 
 
+class PromptCachingConfig(BaseModel):
+    """Configuration for prompt caching (Claude models on Databricks).
+
+    Prompt caching reduces costs by up to 90% on cached content. Works by storing
+    the KV cache for common prefixes (like system prompts) and reusing it across
+    requests. Claude models on Databricks support this via the cache_control parameter.
+
+    Implementation is transparent - higher layers (agents) don't know about caching.
+    The LLM client transforms messages internally when caching is enabled.
+    """
+
+    # Master toggle - enables/disables all prompt caching
+    enabled: bool = Field(
+        default=True,
+        description="Enable prompt caching for supported endpoints",
+    )
+    # Minimum tokens required to cache (Claude requires 1024)
+    min_tokens_threshold: int = Field(
+        default=1024,
+        ge=128,
+        le=10000,
+        description="Minimum estimated tokens before caching is applied",
+    )
+    # Cache type for Claude (ephemeral = 5 min TTL, refreshes on use)
+    cache_type: str = Field(
+        default="ephemeral",
+        description="Cache type to use (ephemeral for Claude)",
+    )
+    # Which message types to cache
+    cache_system_prompt: bool = Field(
+        default=True,
+        description="Apply cache_control to system messages",
+    )
+    # Observability
+    log_cache_usage: bool = Field(
+        default=True,
+        description="Log when cache_control is applied",
+    )
+
+    model_config = {"frozen": True}
+
+
 # =============================================================================
 # Query Mode Configuration (Tiered Query Modes)
 # =============================================================================
@@ -718,19 +766,9 @@ class QueryModeConfig(BaseModel):
         description="Total timeout for the request",
     )
 
-    # Skip flags for lightweight modes
-    skip_coordinator: bool = Field(
-        default=False,
-        description="Skip coordinator classification (mode is explicit)",
-    )
-    skip_planner: bool = Field(
-        default=False,
-        description="Skip planner (use programmatic 1-step plan)",
-    )
-    skip_reflector: bool = Field(
-        default=False,
-        description="Skip reflector (always complete after research)",
-    )
+    # Note: Web search mode routing is handled programmatically in orchestrator
+    # (creates synthetic 1-step plan, skips coordinator/reflector in code)
+    # No skip_* flags needed - they were a superseded design approach.
 
     # For deep_research mode: inherit from research_types
     use_research_types: bool = Field(
@@ -768,9 +806,6 @@ class QueryModesConfig(BaseModel):
             emit_events=True,
             create_session=True,
             timeout_seconds=15,
-            skip_coordinator=True,
-            skip_planner=True,
-            skip_reflector=True,
             researcher=QueryModeResearcherConfig(
                 mode=ResearcherMode.CLASSIC,
                 max_search_queries=2,
@@ -935,6 +970,7 @@ class AppConfig(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     truncation: TruncationConfig = Field(default_factory=TruncationConfig)
     rate_limiting: RateLimitingConfig = Field(default_factory=RateLimitingConfig)
+    prompt_caching: PromptCachingConfig = Field(default_factory=PromptCachingConfig)
     citation_verification: CitationVerificationConfig = Field(
         default_factory=CitationVerificationConfig
     )

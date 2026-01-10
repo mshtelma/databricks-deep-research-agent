@@ -308,7 +308,7 @@ class NumericVerifier:
         try:
             response = await self._llm.complete(
                 messages=[{"role": "user", "content": prompt}],
-                tier=ModelTier.SIMPLE,
+                tier=ModelTier.BULK_ANALYSIS,  # Use Gemini for QA/comparison analysis
                 structured_output=NumericQAOutput,
             )
 

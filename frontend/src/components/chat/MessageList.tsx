@@ -3,6 +3,7 @@ import { Message } from '@/types';
 import { UserMessage } from './UserMessage';
 import { AgentMessage } from './AgentMessage';
 import { AgentMessageWithCitations } from './AgentMessageWithCitations';
+import { ErrorBoundary } from '@/components/common/ErrorBoundary';
 import { cn } from '@/lib/utils';
 
 interface MessageListProps {
@@ -11,6 +12,10 @@ interface MessageListProps {
   isStreaming?: boolean;
   isLoading?: boolean;
   className?: string;
+  /** Research panel to render at the bottom of the message list (scrolls with content) */
+  researchPanel?: React.ReactNode;
+  /** Hide the Sources & Citations section in agent messages (when shown in ResearchPanel) */
+  hideAgentSourcesSection?: boolean;
 }
 
 export function MessageList({
@@ -19,12 +24,31 @@ export function MessageList({
   isStreaming = false,
   isLoading = false,
   className,
+  researchPanel,
+  hideAgentSourcesSection = false,
 }: MessageListProps) {
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
+  const scrollTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Auto-scroll to bottom on new messages
+  // Debounced auto-scroll to bottom on new messages (100ms debounce)
+  // This prevents excessive scrolling during rapid streaming updates
   React.useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    // Clear any pending scroll
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
+    }
+
+    // Schedule debounced scroll
+    scrollTimeoutRef.current = setTimeout(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, 100);
+
+    // Cleanup on unmount
+    return () => {
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+      }
+    };
   }, [messages, streamingContent]);
 
   // Show welcome screen only if no messages, not streaming, and no completed streaming content
@@ -44,13 +68,18 @@ export function MessageList({
 
   return (
     <div data-testid="message-list" className={cn('flex-1 overflow-y-auto p-4 space-y-4', className)}>
-      {messages.map((message) =>
-        message.role === 'user' ? (
-          <UserMessage key={message.id} message={message} />
-        ) : (
-          <AgentMessageWithCitations key={message.id} message={message} />
-        )
-      )}
+      {messages.map((message) => (
+        <ErrorBoundary key={message.id} name={`Message-${message.id}`}>
+          {message.role === 'user' ? (
+            <UserMessage message={message} />
+          ) : (
+            <AgentMessageWithCitations
+              message={message}
+              hideSourcesSection={hideAgentSourcesSection}
+            />
+          )}
+        </ErrorBoundary>
+      ))}
 
       {/* Loading indicator (before streaming starts) */}
       {isLoading && !streamingContent && (
@@ -91,6 +120,13 @@ export function MessageList({
           }}
           isStreaming={false}
         />
+      )}
+
+      {/* Research panel - scrolls with messages */}
+      {researchPanel && (
+        <div className="mt-4">
+          {researchPanel}
+        </div>
       )}
 
       <div ref={messagesEndRef} />

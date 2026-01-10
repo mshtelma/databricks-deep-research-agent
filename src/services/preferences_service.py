@@ -28,34 +28,34 @@ class PreferencesService:
     async def get_preferences(self, user_id: str) -> UserPreferences:
         """Get user preferences, creating defaults if not exists.
 
+        Uses INSERT ... ON CONFLICT DO NOTHING to avoid race conditions
+        when multiple concurrent requests try to create preferences.
+
         Args:
             user_id: User ID.
 
         Returns:
             UserPreferences instance.
         """
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        # Upsert: INSERT ... ON CONFLICT DO NOTHING (atomic, no race condition)
+        stmt = pg_insert(UserPreferences).values(
+            user_id=user_id,
+            default_research_depth=ResearchDepth.AUTO,
+            system_instructions=None,
+            default_query_mode="simple",
+            theme="system",
+            notifications_enabled=True,
+        ).on_conflict_do_nothing(index_elements=["user_id"])
+
+        await self._session.execute(stmt)
+
+        # Now query - guaranteed to exist
         result = await self._session.execute(
             select(UserPreferences).where(UserPreferences.user_id == user_id)
         )
-        preferences = result.scalar_one_or_none()
-
-        if not preferences:
-            # Create default preferences for new user
-            preferences = UserPreferences(
-                user_id=user_id,
-                default_research_depth=ResearchDepth.AUTO,
-                system_instructions=None,
-                theme="system",
-                notifications_enabled=True,
-            )
-            self._session.add(preferences)
-            await self._session.flush()
-            await self._session.refresh(preferences)
-
-            logger.info(
-                "PREFERENCES_CREATED",
-                user_id=user_id,
-            )
+        preferences = result.scalar_one()
 
         return preferences
 

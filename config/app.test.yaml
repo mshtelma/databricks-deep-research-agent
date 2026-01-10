@@ -62,6 +62,29 @@ models:
     rotation_strategy: priority
     fallback_on_429: true
 
+  # New tiers for multi-model load balancing - use test endpoints
+  bulk_analysis:
+    endpoints:
+      - gemini3flash  # Use Gemini Flash for bulk analysis in tests
+      - haiku
+    temperature: 0.3
+    max_tokens: 4000
+    reasoning_effort: medium
+    tokens_per_minute: 50000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  fast:
+    endpoints:
+      - gpt5nano  # Use GPT 5 Nano for fast tasks in tests
+      - haiku
+    temperature: 0.7
+    max_tokens: 2000
+    reasoning_effort: low
+    tokens_per_minute: 50000
+    rotation_strategy: priority
+    fallback_on_429: true
+
 # Agent configuration - minimal for fast tests
 agents:
   researcher:

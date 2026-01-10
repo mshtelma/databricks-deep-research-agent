@@ -1,14 +1,22 @@
 """Export service for converting chats to various formats."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from src.models.claim import Claim
+from src.models.message import Message
+from src.models.research_session import ResearchSession
+from src.models.source import Source
 from src.services.chat_service import ChatService
+from src.services.claim_service import ClaimService
 from src.services.message_service import MessageService
+from src.services.verification_summary_service import VerificationSummaryService
 
 logger = logging.getLogger(__name__)
 
@@ -114,19 +122,19 @@ class ExportService:
         from src.models.source import Source
 
         # Get research session for this message
-        result = await self._session.execute(
+        session_result = await self._session.execute(
             select(ResearchSession).where(ResearchSession.message_id == message_id)
         )
-        session = result.scalar_one_or_none()
+        session = session_result.scalar_one_or_none()
 
         if not session:
             return []
 
         # Get sources
-        result = await self._session.execute(
+        sources_result = await self._session.execute(
             select(Source).where(Source.research_session_id == session.id)
         )
-        sources = result.scalars().all()
+        sources = sources_result.scalars().all()
 
         return [
             {"title": s.title or s.url, "url": s.url}
@@ -180,3 +188,252 @@ class ExportService:
                 for msg in messages
             ],
         }
+
+    async def _verify_message_ownership(
+        self,
+        message_id: UUID,
+        user_id: str,
+    ) -> Message:
+        """Verify user owns the message's chat and return the message.
+
+        Args:
+            message_id: Message ID.
+            user_id: User ID for authorization.
+
+        Returns:
+            The message if authorized.
+
+        Raises:
+            ValueError: If message not found or not owned by user.
+        """
+        from src.core.config import get_settings
+        from src.models.chat import Chat
+
+        # Step 1: Get message with chat relationship
+        result = await self._session.execute(
+            select(Message)
+            .options(selectinload(Message.chat))
+            .where(Message.id == message_id)
+        )
+        message = result.scalar_one_or_none()
+
+        if not message:
+            raise ValueError(f"Message {message_id} not found")
+
+        # Step 2: Get chat (via relationship or direct query)
+        chat: Chat | None = message.chat
+        if not chat:
+            chat_result = await self._session.execute(
+                select(Chat).where(Chat.id == message.chat_id)
+            )
+            chat = chat_result.scalar_one_or_none()
+
+        if not chat:
+            raise ValueError(f"Chat for message {message_id} not found")
+
+        # Step 3: Check ownership (skip in development mode for anonymous users)
+        settings = get_settings()
+        if chat.user_id != user_id:
+            if settings.is_production:
+                # Production: strict ownership check
+                raise ValueError(f"Access denied to message {message_id}")
+            elif user_id != "anonymous":
+                # Development with real user: still check ownership
+                raise ValueError(f"Access denied to message {message_id}")
+            # Development with anonymous: allow access (for testing)
+            logger.debug(
+                f"DEV_MODE: Allowing anonymous access to message {message_id} "
+                f"owned by {chat.user_id}"
+            )
+
+        return message
+
+    async def export_report_markdown(
+        self,
+        message_id: UUID,
+        user_id: str,
+    ) -> str:
+        """Export agent response as standalone markdown report.
+
+        Args:
+            message_id: Agent message ID containing the synthesis.
+            user_id: User ID for authorization.
+
+        Returns:
+            Markdown formatted research report.
+
+        Raises:
+            ValueError: If message not found or not owned by user.
+        """
+        # Verify ownership and get message
+        message = await self._verify_message_ownership(message_id, user_id)
+
+        if not message.content:
+            raise ValueError("Message has no content to export")
+
+        # Get research session for metadata
+        session_result = await self._session.execute(
+            select(ResearchSession).where(ResearchSession.message_id == message_id)
+        )
+        session = session_result.scalar_one_or_none()
+
+        lines: list[str] = []
+
+        # Title from query or fallback
+        if session and session.query:
+            query_title = session.query[:100]
+            if len(session.query) > 100:
+                query_title += "..."
+        else:
+            query_title = "Research Report"
+
+        lines.extend([
+            f"# {query_title}",
+            "",
+        ])
+
+        # Metadata
+        lines.append(
+            f"*Generated by Deep Research Agent*  "
+        )
+        lines.append(
+            f"*Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}*"
+        )
+
+        if session and session.research_depth:
+            # Handle both enum and string values (DB may return string)
+            depth_value = (
+                session.research_depth.value
+                if hasattr(session.research_depth, "value")
+                else str(session.research_depth)
+            )
+            depth_label = depth_value.title()
+            lines[-1] = f"*Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')} | Depth: {depth_label}*"
+
+        lines.extend(["", "---", ""])
+
+        # Main content
+        lines.append(message.content)
+
+        lines.extend(["", "---", ""])
+
+        # Sources section
+        if session:
+            sources_result = await self._session.execute(
+                select(Source)
+                .where(Source.research_session_id == session.id)
+                .order_by(Source.fetched_at)
+            )
+            sources = sources_result.scalars().all()
+
+            if sources:
+                lines.extend(["## Sources", ""])
+                for i, source in enumerate(sources, 1):
+                    title = source.title or source.url
+                    lines.append(f"{i}. **{title}** - {source.url}")
+                lines.extend([""])
+
+        return "\n".join(lines)
+
+    async def export_provenance_markdown(
+        self,
+        message_id: UUID,
+        user_id: str,
+    ) -> str:
+        """Export verification report as markdown.
+
+        Args:
+            message_id: Agent message ID.
+            user_id: User ID for authorization.
+
+        Returns:
+            Markdown formatted verification report.
+
+        Raises:
+            ValueError: If message not found or not owned by user.
+        """
+        # Verify ownership
+        await self._verify_message_ownership(message_id, user_id)
+
+        # Get claims with citations
+        claim_service = ClaimService(self._session)
+        claims = await claim_service.list_by_message(message_id, include_citations=True)
+
+        # Get verification summary
+        summary_service = VerificationSummaryService(self._session)
+        summary = await summary_service.get_or_compute(message_id)
+
+        lines: list[str] = []
+
+        # Header
+        lines.extend([
+            "# Verification Report",
+            "",
+            f"*Generated on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC*",
+            "",
+        ])
+
+        # Summary table
+        total = summary.total_claims or 1  # Avoid division by zero
+
+        lines.extend([
+            "| Metric | Count |",
+            "|--------|-------|",
+            f"| Total Claims | {summary.total_claims} |",
+            f"| Supported | {summary.supported_count} ({summary.supported_count * 100 // total}%) |",
+            f"| Partial | {summary.partial_count} ({summary.partial_count * 100 // total}%) |",
+            f"| Unsupported | {summary.unsupported_count} ({summary.unsupported_count * 100 // total}%) |",
+            f"| Contradicted | {summary.contradicted_count} ({summary.contradicted_count * 100 // total}%) |",
+            "",
+        ])
+
+        if summary.warning:
+            lines.extend([
+                "> **Warning**: High rate of unsupported or contradicted claims detected.",
+                "",
+            ])
+
+        lines.extend(["---", ""])
+
+        # Claims detail
+        if claims:
+            lines.extend(["## Claims", ""])
+
+            for i, claim in enumerate(claims, 1):
+                verdict = (
+                    claim.verification_verdict.upper()
+                    if claim.verification_verdict
+                    else "PENDING"
+                )
+                lines.extend([
+                    f"### {i}. {verdict}",
+                    "",
+                    f"> \"{claim.claim_text}\"",
+                    "",
+                ])
+
+                # Evidence from citations
+                if claim.citations:
+                    lines.append("**Evidence:**")
+                    for citation in claim.citations:
+                        span = citation.evidence_span
+                        source = span.source if span else None
+                        if source and span:
+                            title = source.title or source.url
+                            primary_mark = " (Primary)" if citation.is_primary else ""
+                            lines.append(f"- [{title}]({source.url}){primary_mark}")
+                            if span.quote_text:
+                                quote = span.quote_text[:200]
+                                if len(span.quote_text) > 200:
+                                    quote += "..."
+                                lines.append(f"  > \"{quote}\"")
+                    lines.append("")
+
+                lines.extend(["---", ""])
+        else:
+            lines.extend([
+                "*No claims found for this message.*",
+                "",
+            ])
+
+        return "\n".join(lines)

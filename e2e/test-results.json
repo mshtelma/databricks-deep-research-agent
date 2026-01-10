@@ -10,7 +10,9 @@
     "grep": {},
     "grepInvert": null,
     "maxFailures": 0,
-    "metadata": {},
+    "metadata": {
+      "actualWorkers": 1
+    },
     "preserveOutput": "always",
     "reporter": [
       [
@@ -40,7 +42,9 @@
         "outputDir": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results",
         "repeatEach": 1,
         "retries": 1,
-        "metadata": {},
+        "metadata": {
+          "actualWorkers": 1
+        },
         "id": "chromium",
         "name": "chromium",
         "testDir": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests",
@@ -98,8 +102,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 1007,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:11.710Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-7605330410f2be31e940",
@@ -118,8 +136,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 1804,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:13.098Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-30c175ab008314657431",
@@ -138,8 +170,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 1078,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:14.908Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-c0d9c68eafc0a414a884",
@@ -162,11 +208,45 @@
                   "tests": [
                     {
                       "timeout": 60000,
-                      "annotations": [],
-                      "expectedStatus": "passed",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "No chat available to rename",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                            "line": 60,
+                            "column": 14
+                          }
+                        }
+                      ],
+                      "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 2226,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:15.991Z",
+                          "annotations": [
+                            {
+                              "type": "skip",
+                              "description": "No chat available to rename",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                                "line": 60,
+                                "column": 14
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -182,11 +262,45 @@
                   "tests": [
                     {
                       "timeout": 60000,
-                      "annotations": [],
-                      "expectedStatus": "passed",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "No chat available",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                            "line": 84,
+                            "column": 14
+                          }
+                        }
+                      ],
+                      "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 1619,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:18.224Z",
+                          "annotations": [
+                            {
+                              "type": "skip",
+                              "description": "No chat available",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                                "line": 84,
+                                "column": 14
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -210,11 +324,45 @@
                   "tests": [
                     {
                       "timeout": 60000,
-                      "annotations": [],
-                      "expectedStatus": "passed",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "No chat available to delete",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                            "line": 111,
+                            "column": 14
+                          }
+                        }
+                      ],
+                      "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 1640,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:19.848Z",
+                          "annotations": [
+                            {
+                              "type": "skip",
+                              "description": "No chat available to delete",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                                "line": 111,
+                                "column": 14
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -230,11 +378,45 @@
                   "tests": [
                     {
                       "timeout": 60000,
-                      "annotations": [],
-                      "expectedStatus": "passed",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "No chat available to delete",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                            "line": 135,
+                            "column": 14
+                          }
+                        }
+                      ],
+                      "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 1604,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:21.493Z",
+                          "annotations": [
+                            {
+                              "type": "skip",
+                              "description": "No chat available to delete",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                                "line": 135,
+                                "column": 14
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -258,11 +440,45 @@
                   "tests": [
                     {
                       "timeout": 60000,
-                      "annotations": [],
-                      "expectedStatus": "passed",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "No chat available to archive",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                            "line": 158,
+                            "column": 14
+                          }
+                        }
+                      ],
+                      "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 1657,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:23.103Z",
+                          "annotations": [
+                            {
+                              "type": "skip",
+                              "description": "No chat available to archive",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                                "line": 158,
+                                "column": 14
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -278,11 +494,45 @@
                   "tests": [
                     {
                       "timeout": 60000,
-                      "annotations": [],
-                      "expectedStatus": "passed",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "No chat available to archive",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                            "line": 183,
+                            "column": 14
+                          }
+                        }
+                      ],
+                      "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 1642,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:24.765Z",
+                          "annotations": [
+                            {
+                              "type": "skip",
+                              "description": "No chat available to archive",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                                "line": 183,
+                                "column": 14
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -298,11 +548,45 @@
                   "tests": [
                     {
                       "timeout": 60000,
-                      "annotations": [],
-                      "expectedStatus": "passed",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "No chat available",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                            "line": 206,
+                            "column": 14
+                          }
+                        }
+                      ],
+                      "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 1652,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:26.413Z",
+                          "annotations": [
+                            {
+                              "type": "skip",
+                              "description": "No chat available",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                                "line": 206,
+                                "column": 14
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -330,8 +614,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 1318,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:28.074Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-288e3fdfc67b3c45c462",
@@ -350,8 +648,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 2091,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:29.396Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-ad4b18105179dada14e7",
@@ -370,8 +682,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 1499,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:31.492Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-35c4b07cea62b746b70e",
@@ -398,8 +724,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 1100,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:32.996Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-5831d53808b5ddb88979",
@@ -418,8 +758,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 2581,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:34.101Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-f8fbdb603bf886613ba4",
@@ -442,11 +796,45 @@
                   "tests": [
                     {
                       "timeout": 60000,
-                      "annotations": [],
-                      "expectedStatus": "passed",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "Need at least 2 chats",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                            "line": 316,
+                            "column": 14
+                          }
+                        }
+                      ],
+                      "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 1807,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:36.686Z",
+                          "annotations": [
+                            {
+                              "type": "skip",
+                              "description": "Need at least 2 chats",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/chat-management.spec.ts",
+                                "line": 316,
+                                "column": 14
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -474,8 +862,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 622,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:38.498Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-28f3ff59a197043832da",
@@ -494,8 +896,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 5013,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:39.124Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-fa99998842e2410054a3",
@@ -514,8 +930,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 5091,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:44.141Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-494936162b2ba4175f01",
@@ -534,8 +964,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 3351,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:49.236Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "10cb79793b4876314e7e-4509c4cfad505bf85cca",
@@ -598,7 +1042,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.591Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -636,7 +1112,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.591Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -674,7 +1182,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.591Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -712,7 +1252,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.591Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -750,7 +1322,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.591Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -796,7 +1400,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.591Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -834,7 +1470,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.591Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -872,7 +1540,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -910,7 +1610,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -956,7 +1688,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -1002,7 +1766,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -1040,7 +1836,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 23,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Citation tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/citations.spec.ts",
+                                "line": 26,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -1088,7 +1916,30 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                            "line": 21,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1117,7 +1968,30 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                            "line": 45,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1146,7 +2020,30 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                            "line": 69,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1175,7 +2072,30 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/edit-message.spec.ts",
+                            "line": 90,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1230,7 +2150,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 13,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Error handling tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 16,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1268,7 +2220,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 13,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Error handling tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 16,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1306,7 +2290,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 13,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Error handling tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 16,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1344,7 +2360,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 13,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Error handling tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 16,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1382,7 +2430,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 13,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Error handling tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 16,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1420,7 +2500,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 13,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Error handling tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 16,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1458,7 +2570,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 13,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Error handling tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/error-handling.spec.ts",
+                            "line": 16,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1505,7 +2649,31 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "Grey reference tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/grey-references.spec.ts",
+                            "line": 23,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1535,7 +2703,31 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "Grey reference tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/grey-references.spec.ts",
+                            "line": 23,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1565,7 +2757,31 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "Grey reference tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/grey-references.spec.ts",
+                            "line": 23,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1595,7 +2811,31 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:02:52.592Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "description": "Grey reference tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/grey-references.spec.ts",
+                            "line": 23,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -1657,7 +2897,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 19,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Numeric claims tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 22,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -1695,7 +2967,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 19,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Numeric claims tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 22,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -1741,7 +3045,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 19,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Numeric claims tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 22,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -1779,7 +3115,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 19,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Numeric claims tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 22,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -1817,7 +3185,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 19,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Numeric claims tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 22,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -1855,7 +3255,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 19,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Numeric claims tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 22,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -1893,7 +3325,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 19,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Numeric claims tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 22,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -1939,7 +3403,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 19,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Numeric claims tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 22,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -1985,7 +3481,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.592Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 19,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Numeric claims tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/numeric-claims.spec.ts",
+                                "line": 22,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -2031,8 +3559,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 2025,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:52.594Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-c49622526a25746a0cf0",
@@ -2051,8 +3593,22 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 1692,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:54.624Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-a4e8cbbe73aa30210aa5",
@@ -2071,13 +3627,27 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 1867,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:56.322Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-7a13e91d82276cbf90cc",
                   "file": "provenance-export.spec.ts",
-                  "line": 32,
+                  "line": 35,
                   "column": 9
                 }
               ]
@@ -2085,7 +3655,7 @@
             {
               "title": "Export Content Validation",
               "file": "provenance-export.spec.ts",
-              "line": 40,
+              "line": 43,
               "column": 8,
               "specs": [
                 {
@@ -2094,13 +3664,13 @@
                   "tags": [],
                   "tests": [
                     {
-                      "timeout": 300000,
+                      "timeout": 900000,
                       "annotations": [
                         {
                           "type": "slow",
                           "location": {
                             "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
-                            "line": 42,
+                            "line": 45,
                             "column": 10
                           }
                         },
@@ -2109,7 +3679,7 @@
                           "description": "Export content validation requires real research - set RUN_SLOW_TESTS=1 to enable",
                           "location": {
                             "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
-                            "line": 43,
+                            "line": 46,
                             "column": 10
                           }
                         }
@@ -2117,13 +3687,45 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:58.197Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
+                                "line": 45,
+                                "column": 10
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Export content validation requires real research - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
+                                "line": 46,
+                                "column": 10
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-c88f5e2ab5c9ddd9a014",
                   "file": "provenance-export.spec.ts",
-                  "line": 49,
+                  "line": 52,
                   "column": 9
                 },
                 {
@@ -2132,13 +3734,13 @@
                   "tags": [],
                   "tests": [
                     {
-                      "timeout": 300000,
+                      "timeout": 900000,
                       "annotations": [
                         {
                           "type": "slow",
                           "location": {
                             "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
-                            "line": 42,
+                            "line": 45,
                             "column": 10
                           }
                         },
@@ -2147,7 +3749,7 @@
                           "description": "Export content validation requires real research - set RUN_SLOW_TESTS=1 to enable",
                           "location": {
                             "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
-                            "line": 43,
+                            "line": 46,
                             "column": 10
                           }
                         }
@@ -2155,13 +3757,45 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:58.198Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
+                                "line": 45,
+                                "column": 10
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Export content validation requires real research - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
+                                "line": 46,
+                                "column": 10
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-d6720b39ecd94002b56f",
                   "file": "provenance-export.spec.ts",
-                  "line": 75,
+                  "line": 78,
                   "column": 9
                 },
                 {
@@ -2170,13 +3804,13 @@
                   "tags": [],
                   "tests": [
                     {
-                      "timeout": 300000,
+                      "timeout": 900000,
                       "annotations": [
                         {
                           "type": "slow",
                           "location": {
                             "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
-                            "line": 42,
+                            "line": 45,
                             "column": 10
                           }
                         },
@@ -2185,7 +3819,7 @@
                           "description": "Export content validation requires real research - set RUN_SLOW_TESTS=1 to enable",
                           "location": {
                             "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
-                            "line": 43,
+                            "line": 46,
                             "column": 10
                           }
                         }
@@ -2193,13 +3827,45 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:58.198Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
+                                "line": 45,
+                                "column": 10
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Export content validation requires real research - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/provenance-export.spec.ts",
+                                "line": 46,
+                                "column": 10
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-ea1fb80b5acd32a248fc",
                   "file": "provenance-export.spec.ts",
-                  "line": 85,
+                  "line": 88,
                   "column": 9
                 }
               ]
@@ -2207,7 +3873,7 @@
             {
               "title": "Error Handling",
               "file": "provenance-export.spec.ts",
-              "line": 96,
+              "line": 99,
               "column": 8,
               "specs": [
                 {
@@ -2221,13 +3887,27 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 760,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:58.198Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-5d5367c6567114161a3c",
                   "file": "provenance-export.spec.ts",
-                  "line": 97,
+                  "line": 100,
                   "column": 9
                 },
                 {
@@ -2241,13 +3921,27 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 1868,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:02:58.965Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-fa3c33b7b81926fbf2ac",
                   "file": "provenance-export.spec.ts",
-                  "line": 105,
+                  "line": 108,
                   "column": 9
                 }
               ]
@@ -2255,7 +3949,7 @@
             {
               "title": "Export Format",
               "file": "provenance-export.spec.ts",
-              "line": 115,
+              "line": 118,
               "column": 8,
               "specs": [
                 {
@@ -2269,13 +3963,27 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 1929,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:00.841Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-710585d8402766ea8ae2",
                   "file": "provenance-export.spec.ts",
-                  "line": 116,
+                  "line": 119,
                   "column": 9
                 },
                 {
@@ -2289,13 +3997,27 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 1696,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:02.777Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-824829ea144581658bbe",
                   "file": "provenance-export.spec.ts",
-                  "line": 132,
+                  "line": 135,
                   "column": 9
                 }
               ]
@@ -2303,7 +4025,7 @@
             {
               "title": "Claim Details Endpoint",
               "file": "provenance-export.spec.ts",
-              "line": 140,
+              "line": 155,
               "column": 8,
               "specs": [
                 {
@@ -2317,13 +4039,27 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 2817,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:04.481Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-e9759f7716aeda45571c",
                   "file": "provenance-export.spec.ts",
-                  "line": 141,
+                  "line": 156,
                   "column": 9
                 },
                 {
@@ -2337,13 +4073,27 @@
                       "expectedStatus": "passed",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
-                      "status": "skipped"
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "passed",
+                          "duration": 2831,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:07.305Z",
+                          "annotations": [],
+                          "attachments": []
+                        }
+                      ],
+                      "status": "expected"
                     }
                   ],
                   "id": "6f93add1d0d06ceb2554-b7b67ea6aec2a47dc5e1",
                   "file": "provenance-export.spec.ts",
-                  "line": 148,
+                  "line": 163,
                   "column": 9
                 }
               ]
@@ -2385,7 +4135,30 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.143Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 20,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2414,7 +4187,30 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.143Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 43,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2443,7 +4239,30 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.143Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 52,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2472,7 +4291,30 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.143Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 73,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2501,7 +4343,30 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.143Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 97,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2530,7 +4395,30 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.143Z",
+                      "annotations": [
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/regenerate.spec.ts",
+                            "line": 119,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2593,7 +4481,47 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.143Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 18,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Research flow tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 21,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 30,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2639,7 +4567,47 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.143Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 18,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Research flow tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 21,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 55,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2677,7 +4645,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.143Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 18,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Research flow tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 21,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2723,7 +4723,47 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.143Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 18,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Research flow tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 21,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/research-flow.spec.ts",
+                            "line": 113,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2760,8 +4800,22 @@
                   "expectedStatus": "passed",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
-                  "status": "skipped"
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 256,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.147Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
                 }
               ],
               "id": "4219922fea2e2bd3c691-31c7e8d52c56bca05474",
@@ -2780,8 +4834,22 @@
                   "expectedStatus": "passed",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
-                  "status": "skipped"
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 3312,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:10.408Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
                 }
               ],
               "id": "4219922fea2e2bd3c691-2f3290f40584ae766987",
@@ -2800,8 +4868,22 @@
                   "expectedStatus": "passed",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
-                  "status": "skipped"
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 1606,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:13.724Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
                 }
               ],
               "id": "4219922fea2e2bd3c691-1e0777fc64f7ac628b83",
@@ -2820,8 +4902,22 @@
                   "expectedStatus": "passed",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
-                  "status": "skipped"
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "passed",
+                      "duration": 1621,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:15.333Z",
+                      "annotations": [],
+                      "attachments": []
+                    }
+                  ],
+                  "status": "expected"
                 }
               ],
               "id": "4219922fea2e2bd3c691-73072178684d48cab45b",
@@ -2843,7 +4939,7 @@
                   "tags": [],
                   "tests": [
                     {
-                      "timeout": 120000,
+                      "timeout": 360000,
                       "annotations": [
                         {
                           "type": "slow",
@@ -2866,7 +4962,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": 0,
+                          "parallelIndex": 0,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:13.723Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/smoke.spec.ts",
+                                "line": 36,
+                                "column": 10
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Message response tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/smoke.spec.ts",
+                                "line": 38,
+                                "column": 10
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -2923,7 +5051,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:16.958Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 17,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Stop/cancel tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 20,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2961,7 +5121,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:16.958Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 17,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Stop/cancel tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 20,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -2999,7 +5191,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:16.958Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 17,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Stop/cancel tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 20,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -3045,7 +5269,47 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:16.958Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 17,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Stop/cancel tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 20,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 86,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -3083,7 +5347,39 @@
                   "expectedStatus": "skipped",
                   "projectId": "chromium",
                   "projectName": "chromium",
-                  "results": [],
+                  "results": [
+                    {
+                      "workerIndex": -1,
+                      "parallelIndex": -1,
+                      "status": "skipped",
+                      "duration": 0,
+                      "errors": [],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-08T07:03:16.958Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 17,
+                            "column": 8
+                          }
+                        },
+                        {
+                          "type": "skip",
+                          "description": "Stop/cancel tests require real research - set RUN_SLOW_TESTS=1 to enable",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/stop-cancel.spec.ts",
+                            "line": 20,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": []
+                    }
+                  ],
                   "status": "skipped"
                 }
               ],
@@ -3145,7 +5441,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3183,7 +5511,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3229,7 +5589,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3267,7 +5659,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3305,7 +5729,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3351,7 +5807,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3389,7 +5877,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3435,7 +5955,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3481,7 +6033,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3519,7 +6103,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3557,7 +6173,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3595,7 +6243,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3641,7 +6321,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3679,7 +6391,39 @@
                       "expectedStatus": "skipped",
                       "projectId": "chromium",
                       "projectName": "chromium",
-                      "results": [],
+                      "results": [
+                        {
+                          "workerIndex": -1,
+                          "parallelIndex": -1,
+                          "status": "skipped",
+                          "duration": 0,
+                          "errors": [],
+                          "stdout": [],
+                          "stderr": [],
+                          "retry": 0,
+                          "startTime": "2026-01-08T07:03:16.958Z",
+                          "annotations": [
+                            {
+                              "type": "slow",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 25,
+                                "column": 8
+                              }
+                            },
+                            {
+                              "type": "skip",
+                              "description": "Verification tests are slow - set RUN_SLOW_TESTS=1 to enable",
+                              "location": {
+                                "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/verification-summary.spec.ts",
+                                "line": 28,
+                                "column": 8
+                              }
+                            }
+                          ],
+                          "attachments": []
+                        }
+                      ],
                       "status": "skipped"
                     }
                   ],
@@ -3697,10 +6441,10 @@
   ],
   "errors": [],
   "stats": {
-    "startTime": "2025-12-31T08:46:38.255Z",
-    "duration": 26.115999999999985,
-    "expected": 0,
-    "skipped": 102,
+    "startTime": "2026-01-08T07:02:06.661Z",
+    "duration": 70335.24399999999,
+    "expected": 25,
+    "skipped": 77,
     "unexpected": 0,
     "flaky": 0
   }

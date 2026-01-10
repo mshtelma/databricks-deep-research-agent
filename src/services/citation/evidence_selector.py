@@ -493,7 +493,7 @@ class EvidencePreSelector:
 
         response = await self._llm.complete(
             messages=[{"role": "user", "content": prompt}],
-            tier=ModelTier.SIMPLE,  # Use fast model for extraction
+            tier=ModelTier.BULK_ANALYSIS,  # Use Gemini for large-context extraction
             structured_output=EvidenceSpansOutput,  # Use structured generation
         )
 

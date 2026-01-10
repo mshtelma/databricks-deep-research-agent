@@ -71,8 +71,8 @@ test.describe('Error Handling', () => {
   test('app remains stable after normal operation', async ({ chatPage, page }) => {
     // This test verifies the happy path works and app remains stable
 
-    // Send a normal message first
-    await chatPage.sendMessage('Hello');
+    // Send a normal message using web_search mode to ensure reliable response
+    await chatPage.sendMessageWithMode('Hello', 'web_search');
     await chatPage.waitForAgentResponse(120000);
 
     // Verify we got a response
@@ -108,11 +108,11 @@ test.describe('Error Handling', () => {
   });
 
   test('handles special characters in messages', async ({ chatPage, page }) => {
-    // Send a simple greeting with special characters - should be treated as simple query
-    // Using greeting format to avoid triggering full research cycle
+    // Send a simple greeting with special characters
+    // Using web_search mode to ensure reliable response
     const specialMessage = 'Hello! <script>alert("xss")</script> & "quotes" \'apostrophe\'';
 
-    await chatPage.sendMessage(specialMessage);
+    await chatPage.sendMessageWithMode(specialMessage, 'web_search');
 
     // Wait for URL to stabilize (draft chat created and navigated)
     // This handles the race condition when no chatId exists initially
@@ -144,7 +144,8 @@ test.describe('Error Handling', () => {
 
   test('handles rapid message sending', async ({ chatPage }) => {
     // Send messages rapidly (simulate impatient user)
-    await chatPage.sendMessage('First question');
+    // Use web_search mode to ensure reliable response
+    await chatPage.sendMessageWithMode('First question', 'web_search');
 
     // Don't wait for response, immediately try another
     await chatPage.messageInput.fill('Second question');
@@ -164,10 +165,11 @@ test.describe('Error Handling', () => {
   });
 
   test('handles unicode and emoji in messages', async ({ chatPage, page }) => {
-    // Send a simple greeting with unicode and emoji - should be treated as simple query
+    // Send a simple greeting with unicode and emoji
+    // Use web_search mode to ensure reliable response
     const unicodeMessage = 'Hello! 你好 🌍 مرحبا 🚀 How are you?';
 
-    await chatPage.sendMessage(unicodeMessage);
+    await chatPage.sendMessageWithMode(unicodeMessage, 'web_search');
 
     // Wait for either a response or verify the app handles it gracefully
     const responseAppeared = await chatPage

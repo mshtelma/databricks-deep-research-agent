@@ -15,6 +15,7 @@ import { cn } from '@/lib/utils';
 import { Card, CardContent } from '@/components/ui/card';
 import { MarkdownRenderer, CitationContext } from '@/components/common';
 import { EvidenceCard, SourceGroupedCitations } from '@/components/citations';
+import { MessageExportMenu } from './MessageExportMenu';
 import type { Claim, VerificationSummary } from '@/types/citation';
 
 interface ReasoningSummary {
@@ -40,6 +41,8 @@ interface AgentMessageProps {
   verificationSummary?: VerificationSummary | null;
   /** Enable claim-level citation display */
   enableCitations?: boolean;
+  /** Hide the Sources & Citations section (when shown in ResearchPanel) */
+  hideSourcesSection?: boolean;
 }
 
 export function AgentMessage({
@@ -53,12 +56,25 @@ export function AgentMessage({
   claims = [],
   verificationSummary,
   enableCitations = false,
+  hideSourcesSection = false,
 }: AgentMessageProps) {
   const [showSources, setShowSources] = React.useState(false);
   const [showReasoning, setShowReasoning] = React.useState(false);
   const [showVerification, setShowVerification] = React.useState(false);
   const [activeCitationKey, setActiveCitationKey] = React.useState<string | null>(null);
   const [popoverClaim, setPopoverClaim] = React.useState<Claim | null>(null);
+
+  // Ref to track popover hide timeout for proper cleanup
+  const popoverTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup popover timeout on unmount to prevent setState on unmounted component
+  React.useEffect(() => {
+    return () => {
+      if (popoverTimeoutRef.current) {
+        clearTimeout(popoverTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const hasReasoning = reasoning || (plan && plan.steps && plan.steps.length > 0);
   const hasCitations = enableCitations && claims.length > 0;
@@ -145,11 +161,18 @@ export function AgentMessage({
     citationKey: string | null,
     element?: HTMLElement | null
   ) => {
+    // Clear any pending hide timeout
+    if (popoverTimeoutRef.current) {
+      clearTimeout(popoverTimeoutRef.current);
+      popoverTimeoutRef.current = null;
+    }
+
     if (citationKey === null) {
       // Mouse left - hide popover (after delay to allow moving to popover)
-      setTimeout(() => {
+      popoverTimeoutRef.current = setTimeout(() => {
         setPopoverClaim(null);
         setActiveCitationKey(null);
+        popoverTimeoutRef.current = null;
       }, 100);
     } else {
       // Mouse entered - show popover anchored to the citation marker element
@@ -168,10 +191,26 @@ export function AgentMessage({
 
   // Note: click-outside and escape key are handled by useDismiss from floating-ui
 
+  // Helper to validate UUID format (8-4-4-4-12 hex characters)
+  const isValidMessageId = React.useMemo(() =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(message.id),
+    [message.id]
+  );
+
   return (
     <div data-testid="agent-response" className={cn('flex justify-start', className)}>
       <Card className="max-w-[90%] bg-muted">
         <CardContent className="p-4">
+          {/* Export menu in top-right corner - only show when not streaming and has valid ID */}
+          {!isStreaming && isValidMessageId && (
+            <div className="flex justify-end -mt-1 -mr-1 mb-2">
+              <MessageExportMenu
+                messageId={message.id}
+                hasClaims={claims.length > 0}
+              />
+            </div>
+          )}
+
           {/* Message content with markdown rendering and citation support */}
           <div className="relative">
             <MarkdownRenderer
@@ -216,7 +255,8 @@ export function AgentMessage({
           </div>
 
           {/* Sources & Citations - Unified source-centric display */}
-          {hasCitations && !isStreaming && (
+          {/* Hidden when hideSourcesSection is true (ResearchPanel shows citations instead) */}
+          {hasCitations && !isStreaming && !hideSourcesSection && (
             <div data-testid="sources-citations-section" className="mt-4 pt-4 border-t">
               <button
                 data-testid="sources-citations-toggle"

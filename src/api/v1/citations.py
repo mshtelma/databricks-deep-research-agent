@@ -5,12 +5,14 @@ Provides API endpoints for claim-level citation access:
 - GET /claims/{id} - Get a specific claim with evidence
 - GET /claims/{id}/evidence - Get evidence for a claim
 - GET /messages/{id}/verification-summary - Get verification summary
-- GET /messages/{id}/provenance - Export provenance data for a message
+- GET /messages/{id}/provenance - Export provenance data for a message (JSON or Markdown)
+- GET /messages/{id}/report - Export research report as Markdown
 """
 
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -44,7 +46,12 @@ async def _verify_message_ownership(
     message_id: UUID, user_id: str, db: AsyncSession
 ) -> Message:
     """Verify user owns the message's chat. Returns the message."""
+    import logging
     from sqlalchemy import select
+    from src.core.config import get_settings
+    from src.models.chat import Chat
+
+    logger = logging.getLogger(__name__)
 
     result = await db.execute(
         select(Message)
@@ -56,11 +63,27 @@ async def _verify_message_ownership(
     if not message:
         raise NotFoundError("Message", str(message_id))
 
-    # Verify chat ownership
-    chat_service = ChatService(db)
-    chat = await chat_service.get(message.chat_id, user_id)
+    # Get chat via relationship or query
+    chat: Chat | None = message.chat
+    if not chat:
+        chat_result = await db.execute(
+            select(Chat).where(Chat.id == message.chat_id)
+        )
+        chat = chat_result.scalar_one_or_none()
+
     if not chat:
         raise NotFoundError("Message", str(message_id))
+
+    # Ownership check with dev mode bypass
+    settings = get_settings()
+    if chat.user_id != user_id:
+        if settings.is_production or user_id != "anonymous":
+            raise NotFoundError("Message", str(message_id))
+        # Dev mode with anonymous user: allow
+        logger.debug(
+            f"DEV_MODE: Allowing anonymous access to message {message_id} "
+            f"owned by {chat.user_id}"
+        )
 
     return message
 
@@ -368,18 +391,89 @@ async def get_verification_summary(
     )
 
 
-@router.get("/messages/{message_id}/provenance", response_model=ProvenanceExport)
+@router.get("/messages/{message_id}/report")
+async def export_report(
+    message_id: UUID,
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> PlainTextResponse:
+    """Export research report as standalone markdown.
+
+    Returns the agent synthesis with metadata and sources list
+    as a downloadable markdown file.
+    """
+    import logging
+
+    from src.services.export_service import ExportService
+
+    logger = logging.getLogger(__name__)
+    export_service = ExportService(db)
+
+    try:
+        content = await export_service.export_report_markdown(
+            message_id=message_id,
+            user_id=user.user_id,
+        )
+    except ValueError as e:
+        raise NotFoundError("Message", str(message_id)) from e
+    except Exception as e:
+        logger.exception(f"Failed to export report for message {message_id}: {e}")
+        raise NotFoundError("Message", str(message_id)) from e
+
+    return PlainTextResponse(
+        content=content,
+        media_type="text/markdown",
+        headers={
+            "Content-Disposition": f'attachment; filename="report-{message_id}.md"'
+        },
+    )
+
+
+@router.get("/messages/{message_id}/provenance", response_model=None)
 async def export_provenance(
     message_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
-) -> ProvenanceExport:
+    format: str = Query("json", pattern="^(json|markdown)$"),
+) -> ProvenanceExport | PlainTextResponse:
     """Export provenance data for a message.
 
     Returns all claims with their citations, verification verdicts,
     corrections, and verification summary in an exportable format.
     Suitable for audit trails, compliance, and downstream processing.
+
+    Args:
+        format: Export format - "json" (default) or "markdown"
     """
+    # Handle markdown format
+    if format == "markdown":
+        import logging
+
+        from src.services.export_service import ExportService
+
+        logger = logging.getLogger(__name__)
+        export_service = ExportService(db)
+
+        try:
+            content = await export_service.export_provenance_markdown(
+                message_id=message_id,
+                user_id=user.user_id,
+            )
+        except ValueError as e:
+            raise NotFoundError("Message", str(message_id)) from e
+        except Exception as e:
+            logger.exception(f"Failed to export provenance for message {message_id}: {e}")
+            raise NotFoundError("Message", str(message_id)) from e
+
+        return PlainTextResponse(
+            content=content,
+            media_type="text/markdown",
+            headers={
+                "Content-Disposition": f'attachment; filename="verification-{message_id}.md"'
+            },
+        )
+
+    # JSON format (default)
     from datetime import datetime, timezone
     from src.schemas.citation import ClaimTypeEnum, DerivationTypeEnum
 

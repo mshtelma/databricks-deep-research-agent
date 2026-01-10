@@ -13,6 +13,7 @@ endpoints:
     max_context_window: 128000
     tokens_per_minute: 50000
     supports_structured_output: true
+    supports_prompt_caching: true  # Claude supports cache_control
 
   gpt5nano:
     endpoint_identifier: databricks-gpt-5-nano
@@ -39,18 +40,28 @@ endpoints:
     max_context_window: 128000
     tokens_per_minute: 50000
     supports_structured_output: true
+    supports_prompt_caching: true  # Claude supports cache_control
 
   opus:
     endpoint_identifier: databricks-claude-opus-4-5
     max_context_window: 128000
     tokens_per_minute: 50000
     supports_structured_output: true
+    supports_prompt_caching: true  # Claude supports cache_control
 
   gpt5:
     endpoint_identifier: databricks-gpt-5-2
     max_context_window: 128000
     tokens_per_minute: 50000
     supports_structured_output: true
+
+  gemini3pro:
+    endpoint_identifier: databricks-gemini-3-pro
+    max_context_window: 1000000  # 1M tokens - excellent for large documents
+    tokens_per_minute: 500000    # High throughput
+    supports_structured_output: true
+    supports_temperature: true
+
 
 # Model roles (tiers) with priority-ordered endpoints
 # Endpoints are tried in order; fallback occurs on 429 or 5xx errors
@@ -90,6 +101,36 @@ models:
     reasoning_effort: high
     reasoning_budget: 8000
     tokens_per_minute: 100000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  # TIER 4: BULK_ANALYSIS - Large-context analysis tasks (Gemini 3 Pro)
+  # Use for: NLI/entailment, evidence extraction, classification, decomposition
+  # NOT for: Text synthesis (use Claude for synthesis quality)
+  bulk_analysis:
+    endpoints:
+      - gpt5
+      - gpt5mini
+      - gemini3flash
+      - haiku
+    temperature: 0.3  # Lower temperature for analytical consistency
+    max_tokens: 16000
+    reasoning_effort: medium
+    tokens_per_minute: 500000  # Higher throughput
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  # TIER 5: FAST - Non-structured quick tasks (GPT 5.2)
+  # Use for: Search query generation, simple text rewrites, softening
+  # NOT for: Structured JSON output (GPT 5.2 has issues with this)
+  fast:
+    endpoints:
+      - gpt5mini
+      - haiku  # Fallback if GPT fails
+    temperature: 0.7
+    max_tokens: 4000
+    reasoning_effort: low
+    tokens_per_minute: 200000
     rotation_strategy: priority
     fallback_on_429: true
 
@@ -262,6 +303,16 @@ rate_limiting:
   backoff_strategy: linear     # "exponential" (2^n) or "linear" (+n)
   jitter: true                      # Add random jitter to prevent thundering herd
 
+# Prompt caching configuration (reduces costs by up to 90% on cached content)
+# Claude models on Databricks support cache_control for KV cache reuse.
+# Transparent to higher layers - LLMClient handles transformation internally.
+prompt_caching:
+  enabled: true                     # Master toggle for prompt caching
+  min_tokens_threshold: 1024        # Minimum tokens to cache (Claude minimum)
+  cache_type: ephemeral             # Cache type (ephemeral = 5 min TTL)
+  cache_system_prompt: true         # Cache system messages
+  log_cache_usage: true             # Log when cache_control is applied
+
 # =============================================================================
 # Query Mode Configuration (Tiered Query Modes Feature)
 # =============================================================================
@@ -289,10 +340,8 @@ query_modes:
       max_search_queries: 2   # Limited search budget
       max_urls_to_crawl: 3    # Few sources for quick results
 
-    # Skip planning stages - use implicit 1-step plan
-    skip_coordinator: true    # Don't classify, mode is explicit
-    skip_planner: true        # Use programmatic 1-step plan
-    skip_reflector: true      # Always complete after 1 step
+    # Note: Web search routing handled programmatically in orchestrator
+    # (creates synthetic 1-step plan, skips coordinator/reflector in code)
 
     # Synthesis configuration - Natural mode for [1], [2] citations
     citation_verification:
@@ -447,9 +496,14 @@ citation_verification:
     crawl_timeout_seconds: 15.0
 
     # Model tiers for LLM calls
-    decomposition_tier: simple
-    entailment_tier: analytical
+    # decomposition_tier: Gemini for analytical breakdown of claims into facts
+    # entailment_tier: Gemini for NLI-style verification (does evidence support fact?)
+    # reconstruction_tier: Claude for quality synthesis when rebuilding claims
+    # softening_tier: GPT 5.2 for simple text rewrites (adding hedging language)
+    decomposition_tier: bulk_analysis
+    entailment_tier: bulk_analysis
     reconstruction_tier: analytical
+    softening_tier: fast
 
   # Warning thresholds
   unsupported_claim_warning_threshold: 0.20

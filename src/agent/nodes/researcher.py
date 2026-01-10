@@ -314,7 +314,7 @@ async def _generate_search_queries(
     try:
         response = await llm.complete(
             messages=messages,
-            tier=ModelTier.SIMPLE,
+            tier=ModelTier.FAST,  # Use GPT 5.2 for non-structured query generation
             max_tokens=500,  # Increased from 200 to prevent truncation
             structured_output=SearchQueriesOutput,
         )

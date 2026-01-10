@@ -18,14 +18,14 @@ import type {
   ToolResultEvent,
 } from '../types'
 
-/** Human-readable labels for each agent */
+/** Human-readable labels for each agent (no emojis - EnhancedEventLabel adds icons) */
 const AGENT_STARTED_LABELS: Record<string, string> = {
-  coordinator: '🔍 Analyzing query...',
-  background_investigator: '📚 Background search...',
-  planner: '📋 Creating plan...',
-  researcher: '🔬 Researching...',
-  reflector: '🤔 Evaluating...',
-  synthesizer: '✍️ Writing report...',
+  coordinator: 'Analyzing query...',
+  background_investigator: 'Background search...',
+  planner: 'Creating plan...',
+  researcher: 'Researching...',
+  reflector: 'Evaluating...',
+  synthesizer: 'Writing report...',
 }
 
 /** Human-readable labels for completed agents */
@@ -48,7 +48,7 @@ export function formatActivityLabel(event: StreamEvent): string {
     case 'agent_completed':
       return formatAgentCompleted(event)
     case 'clarification_needed':
-      return '❓ Need more info...'
+      return 'Need more info...'
     case 'plan_created':
       return formatPlanCreated(event)
     case 'step_started':
@@ -64,27 +64,27 @@ export function formatActivityLabel(event: StreamEvent): string {
     case 'synthesis_started':
       return formatSynthesisStarted(event)
     case 'synthesis_progress':
-      return '✍️ Writing...'
+      return 'Writing...'
     case 'research_completed':
       return formatResearchCompleted(event)
     case 'error':
       return formatError(event)
     case 'research_started':
-      return '🚀 Research started'
+      return 'Research started'
     case 'claim_generated':
-      return '💡 Claim generated'
+      return 'Claim generated'
     case 'citation_corrected':
-      return '🔧 Citation corrected'
+      return 'Citation corrected'
     case 'numeric_claim_detected':
-      return '🔢 Numeric claim detected'
+      return 'Numeric claim detected'
     case 'content_revised':
-      return '✏️ Content revised'
+      return 'Content revised'
     case 'persistence_completed':
-      return '💾 Saved to database'
+      return 'Saved to database'
     case 'claim_verified':
-      return '✓ Claim verified'
+      return 'Claim verified'
     case 'verification_summary':
-      return '📊 Verification complete'
+      return 'Verification complete'
     default:
       return (event as StreamEvent).event_type
   }
@@ -105,12 +105,12 @@ function formatAgentCompleted(event: AgentCompletedEvent): string {
   const duration = durationMs != null && !isNaN(durationMs)
     ? (durationMs / 1000).toFixed(1)
     : '?'
-  return `✓ ${label} (${duration}s)`
+  return `${label} (${duration}s)`
 }
 
 function formatPlanCreated(event: PlanCreatedEvent): string {
   const stepCount = event.steps.length
-  return `📋 Plan: ${stepCount} step${stepCount !== 1 ? 's' : ''}`
+  return `Plan: ${stepCount} step${stepCount !== 1 ? 's' : ''}`
 }
 
 function formatStepStarted(event: StepStartedEvent): string {
@@ -118,14 +118,14 @@ function formatStepStarted(event: StepStartedEvent): string {
   const stepIndex = (event as unknown as { stepIndex?: number }).stepIndex ?? event.step_index
   const stepTitle = (event as unknown as { stepTitle?: string }).stepTitle ?? event.step_title
   const stepNum = stepIndex + 1
-  const title = truncate(stepTitle, 25)
-  return `▶ Step ${stepNum}: ${title}`
+  const title = truncate(stepTitle, 80)
+  return `Step ${stepNum}: ${title}`
 }
 
 function formatStepCompleted(event: StepCompletedEvent): string {
   // Handle camelCase runtime keys
   const sources = (event as unknown as { sourcesFound?: number }).sourcesFound ?? event.sources_found
-  return `✓ Found ${sources} source${sources !== 1 ? 's' : ''}`
+  return `Found ${sources} source${sources !== 1 ? 's' : ''}`
 }
 
 function formatToolCall(event: ToolCallEvent): string {
@@ -133,40 +133,41 @@ function formatToolCall(event: ToolCallEvent): string {
   const toolName = (event as unknown as { toolName?: string }).toolName ?? event.tool_name
   if (toolName === 'web_search') {
     const toolArgs = (event as unknown as { toolArgs?: Record<string, unknown> }).toolArgs ?? event.tool_args
-    const query = typeof toolArgs?.query === 'string' ? truncate(toolArgs.query, 25) : ''
-    return `🔎 Searching: ${query}`
+    const query = typeof toolArgs?.query === 'string' ? truncate(toolArgs.query, 80) : ''
+    return `Searching: ${query}`
   } else if (toolName === 'web_crawl') {
-    return '📄 Crawling page...'
+    return 'Crawling page...'
   }
-  return `🔧 ${toolName}...`
+  return `${toolName}...`
 }
 
 function formatToolResult(event: ToolResultEvent): string {
   // Handle camelCase runtime keys
   const sourcesCrawled = (event as unknown as { sourcesCrawled?: number }).sourcesCrawled ?? event.sources_crawled
   if (sourcesCrawled != null && sourcesCrawled > 0) {
-    return `📥 Crawled ${sourcesCrawled} page${sourcesCrawled !== 1 ? 's' : ''}`
+    return `Crawled ${sourcesCrawled} page${sourcesCrawled !== 1 ? 's' : ''}`
   }
-  return '📥 Got results'
+  // For web_search results or failed crawls, return empty to skip display
+  return ''
 }
 
 function formatReflectionDecision(event: ReflectionDecisionEvent): string {
   switch (event.decision) {
     case 'continue':
-      return '→ Continue'
+      return 'Continue'
     case 'adjust':
-      return '↻ Adjusting plan...'
+      return 'Adjusting plan...'
     case 'complete':
-      return '✓ Research sufficient'
+      return 'Research sufficient'
     default:
-      return `→ ${event.decision}`
+      return event.decision
   }
 }
 
 function formatSynthesisStarted(event: SynthesisStartedEvent): string {
   // Handle camelCase runtime keys
   const totalSources = (event as unknown as { totalSources?: number }).totalSources ?? event.total_sources
-  return `✍️ Writing (${totalSources} sources)`
+  return `Writing (${totalSources} sources)`
 }
 
 function formatResearchCompleted(event: ResearchCompletedEvent): string {
@@ -175,14 +176,14 @@ function formatResearchCompleted(event: ResearchCompletedEvent): string {
   const duration = totalDurationMs != null && !isNaN(totalDurationMs)
     ? (totalDurationMs / 1000).toFixed(1)
     : '?'
-  return `🎉 Done (${duration}s)`
+  return `Done (${duration}s)`
 }
 
 function formatError(event: StreamErrorEvent): string {
   // Handle camelCase runtime keys
   const errorMessage = (event as unknown as { errorMessage?: string }).errorMessage ?? event.error_message
   const message = truncate(errorMessage, 30)
-  return `❌ ${message}`
+  return message
 }
 
 /**

@@ -28,8 +28,25 @@ class ResearchDepth(str, Enum):
 
 
 class ResearchStatus(str, Enum):
-    """Research session status."""
+    """Research session status.
 
+    Lifecycle states:
+    - IN_PROGRESS: Research is actively running (set at START for crash resilience)
+    - COMPLETED: Research finished successfully
+    - CANCELLED: Research was cancelled by user
+    - FAILED: Research failed due to error
+
+    Phase states (legacy, for more granular tracking):
+    - PENDING, CLASSIFYING, CLARIFYING, PLANNING, RESEARCHING, REFLECTING, SYNTHESIZING
+    """
+
+    # Lifecycle states (used for crash resilience)
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+    # Phase states (legacy, for granular tracking)
     PENDING = "pending"
     CLASSIFYING = "classifying"
     CLARIFYING = "clarifying"
@@ -37,9 +54,6 @@ class ResearchStatus(str, Enum):
     RESEARCHING = "researching"
     REFLECTING = "reflecting"
     SYNTHESIZING = "synthesizing"
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
 
 
 class ResearchSessionStatus(str, Enum):

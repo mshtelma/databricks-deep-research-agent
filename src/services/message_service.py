@@ -230,7 +230,13 @@ class MessageService:
         messages = list(result.scalars().all())
 
         # Return in chronological order
+        # Handle both enum (MessageRole) and string role values from DB
+        # Filter out messages with no content (e.g., placeholder agent messages)
         return [
-            {"role": msg.role.value, "content": msg.content}
+            {
+                "role": msg.role.value if hasattr(msg.role, "value") else str(msg.role),
+                "content": msg.content or "",
+            }
             for msg in reversed(messages)
+            if msg.content  # Skip messages with NULL content
         ]

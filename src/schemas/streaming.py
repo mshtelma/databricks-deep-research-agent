@@ -196,6 +196,19 @@ class VerificationSummaryEvent(BaseStreamEvent):
     warning: bool
 
 
+class ResearchStartedEvent(BaseStreamEvent):
+    """Emitted at the start of a research request.
+
+    This event signals that the research has begun and provides
+    pre-generated IDs for the message and research session.
+    The frontend uses this to set up UI state before streaming begins.
+    """
+
+    event_type: Literal["research_started"] = "research_started"
+    message_id: str  # UUID as string for JSON serialization
+    research_session_id: str | None = None  # Only set for deep_research mode
+
+
 class PersistenceCompletedEvent(BaseStreamEvent):
     """Emitted after successful database persistence.
 
@@ -207,7 +220,7 @@ class PersistenceCompletedEvent(BaseStreamEvent):
     event_type: Literal["persistence_completed"] = "persistence_completed"
     chat_id: str  # UUID as string for JSON serialization
     message_id: str
-    research_session_id: str
+    research_session_id: str | None = None  # Only set for deep_research mode
     chat_title: str
     was_draft: bool  # True if chat was created, False if already existed
     counts: dict[str, int]  # Entity counts from persistence
@@ -234,6 +247,7 @@ StreamEvent = (
     | CitationCorrectedEvent
     | NumericClaimDetectedEvent
     | VerificationSummaryEvent
-    # Persistence events
+    # Lifecycle events
+    | ResearchStartedEvent
     | PersistenceCompletedEvent
 )

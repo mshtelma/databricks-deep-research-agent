@@ -358,7 +358,46 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
 - Tokens auto-refresh (1-hour lifetime, 5-minute buffer)
 - Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
 
+## Known Issues
+
+### Web Search Mode Incomplete
+- **Status**: Design complete, implementation pending
+- **Current behavior**: Web Search mode falls through to full Deep Research pipeline
+- **Expected behavior**: Single-step researcher with limited budget (~15s total)
+- **Spec reference**: `specs/004-tiered-query-modes/plan.md` lines 172-176
+- **Note**: The `skip_*` config flags in app.yaml were a superseded design approach and have been removed. Implementation should use programmatic routing per spec.
+
+### API Case Sensitivity
+- **Status**: Fixed in code review (2026-01-08)
+- **Issue**: Backend emitted snake_case keys but frontend expected camelCase
+- **Fix**: BaseSchema already has `alias_generator=to_camel`. Now all events are serialized with `by_alias=True` to emit camelCase keys consistently.
+- **Key files**: `src/api/v1/research.py`, `src/schemas/common.py`
+
+### Frontend Improvements Applied (2026-01-08)
+- Added Zod validation for SSE events with graceful degradation (`frontend/src/schemas/streamEvents.ts`)
+- Added React Error Boundaries to prevent app crashes (`frontend/src/components/common/ErrorBoundary.tsx`)
+- Debounced auto-scroll to prevent excessive re-renders during streaming
+- Fixed timer cleanup to prevent setState on unmounted components
+- Created shared `snakeToCamel` utility (`frontend/src/utils/caseConversion.ts`)
+
 ## Recent Changes
+- 004-tiered-query-modes: Message Export Feature (2026-01-10)
+  - **NEW FEATURE**: Export agent messages as markdown via 3-dot menu
+  - Three export options: Export Report, Verification Report, Copy to Clipboard
+  - Export Report: Downloads synthesis with title, metadata, content, and sources list
+  - Verification Report: Downloads claims with verdicts and evidence quotes (only shows when claims exist)
+  - Copy to Clipboard: Copies report markdown to system clipboard with toast notification
+  - New API endpoints:
+    - `GET /messages/{id}/report` - Returns standalone markdown report
+    - `GET /messages/{id}/provenance?format=markdown` - Returns verification report as markdown
+  - Key files:
+    - `src/services/export_service.py` - Added `export_report_markdown()` and `export_provenance_markdown()`
+    - `src/api/v1/citations.py` - Added report endpoint and format param to provenance endpoint
+    - `frontend/src/components/chat/MessageExportMenu.tsx` - New dropdown menu component
+    - `frontend/src/components/chat/AgentMessage.tsx` - Integrated export menu
+    - `frontend/src/api/client.ts` - Added `messagesApi.exportReport()` and `messagesApi.exportProvenance()`
+  - Related FRs: FR-056 through FR-060 in spec.md
+
 - 004-tiered-query-modes: Verify Sources Toggle & Snippet Fallback (2026-01-06)
   - **NEW FEATURE**: User-controllable "Verify sources" checkbox for Web Search and Deep Research modes
   - When enabled: runs full citation verification pipeline (claim extraction, evidence selection)

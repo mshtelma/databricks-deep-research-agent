@@ -7,3 +7,5 @@ export { useCitations } from './useCitations';
 export { useDraftChats } from './useDraftChats';
 export type { DraftChat } from './useDraftChats';
 export { useQueryMode } from './useQueryMode';
+export { useResearchPanel } from './useResearchPanel';
+export type { ResearchPanelTab } from './useResearchPanel';

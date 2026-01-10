@@ -20,6 +20,55 @@ from mlflow.entities import SpanType
 
 from src.services.llm.types import ModelTier, StreamWithToolsChunk
 
+
+def _normalize_messages_for_span(messages: list[dict[str, Any]] | None) -> list[dict[str, str]] | None:
+    """Normalize messages for MLflow span logging.
+
+    This is a local copy to avoid circular import with client.py.
+    Converts message content from list format (used by cache_control or
+    Gemini responses) to plain strings to avoid Pydantic serialization
+    warnings when MLflow logs the messages.
+
+    Args:
+        messages: List of message dicts, potentially with list content.
+
+    Returns:
+        List of message dicts with all content normalized to strings, or None.
+    """
+    if messages is None:
+        return None
+
+    normalized: list[dict[str, str]] = []
+    for msg in messages:
+        content = msg.get("content", "")
+        # Normalize list content to string
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    text = part.get("text", "")
+                    if text:
+                        parts.append(text)
+                elif isinstance(part, str):
+                    parts.append(part)
+                else:
+                    parts.append(str(part))
+            content = " ".join(parts)
+        elif not isinstance(content, str):
+            content = str(content) if content else ""
+
+        normalized_msg: dict[str, str] = {
+            "role": str(msg.get("role", "user")),
+            "content": content,
+        }
+        # Preserve tool_call_id if present (for tool response messages)
+        if "tool_call_id" in msg:
+            normalized_msg["tool_call_id"] = str(msg["tool_call_id"])
+        if "name" in msg:
+            normalized_msg["name"] = str(msg["name"])
+        normalized.append(normalized_msg)
+    return normalized
+
 T = TypeVar("T")
 
 
@@ -122,8 +171,11 @@ class TracedAsyncIterator(AsyncIterator[T]):
         self._span = self._span_cm.__enter__()
 
         # Set inputs and attributes
+        # Normalize messages to avoid Pydantic serialization warnings with list content
         if self._messages:
-            self._span.set_inputs({"messages": self._messages})
+            normalized = _normalize_messages_for_span(self._messages)
+            if normalized:
+                self._span.set_inputs({"messages": normalized})
 
         self._span.set_attributes({
             "llm.tier": self._tier.value,

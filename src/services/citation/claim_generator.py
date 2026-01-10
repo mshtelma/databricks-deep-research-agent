@@ -201,7 +201,7 @@ Write ONE concise factual claim that is fully supported by the evidence:"""
         try:
             response = await self._llm.complete(
                 messages=[{"role": "user", "content": prompt}],
-                tier=ModelTier.SIMPLE,
+                tier=ModelTier.BULK_ANALYSIS,  # Use Gemini for matching/ranking
                 structured_output=ClaimEvidenceMatchOutput,
             )
 

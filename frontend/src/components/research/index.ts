@@ -4,3 +4,6 @@ export { EnhancedEventLabel } from './EnhancedEventLabel';
 export { ActivityAccordion } from './ActivityAccordion';
 export { CenteredActivityPanel } from './CenteredActivityPanel';
 export { VisitedSourcesPanel } from './VisitedSourcesPanel';
+export { ResearchPanel } from './ResearchPanel';
+export { EventFeed } from './EventFeed';
+export { ActivityTabContent } from './ActivityTabContent';

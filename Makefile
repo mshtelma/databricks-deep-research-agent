@@ -32,6 +32,9 @@
 # =============================================================================
 
 dev:
+	@echo "Stopping any existing servers..."
+	@./scripts/kill-server.sh 8000 || true
+	@./scripts/kill-server.sh 5173 || true
 	@echo "Starting backend (:8000) and frontend (:5173)..."
 	@echo "Backend logs: /tmp/deep-research-dev.log"
 	@echo "Access UI at: http://localhost:5173"
@@ -50,11 +53,15 @@ dev:
 		wait'
 
 dev-backend:
+	@echo "Stopping any existing server on port 8000..."
+	@./scripts/kill-server.sh 8000 || true
 	@echo "Starting backend only with hot reload on :8000..."
 	@echo "Logs: /tmp/deep-research-dev.log"
 	uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-dev.log
 
 dev-frontend:
+	@echo "Stopping any existing server on port 5173..."
+	@./scripts/kill-server.sh 5173 || true
 	@echo "Starting frontend with hot reload on :5173..."
 	cd frontend && npm run dev
 
@@ -78,6 +85,8 @@ build:
 	@ls -la static/
 
 prod: build
+	@echo "Stopping any existing server on port 8000..."
+	@./scripts/kill-server.sh 8000 || true
 	@echo "Starting production server on :8000..."
 	@echo "Logs: /tmp/deep-research-prod.log"
 	SERVE_STATIC=true uv run uvicorn src.main:app --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-prod.log

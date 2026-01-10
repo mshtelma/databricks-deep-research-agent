@@ -2,7 +2,7 @@
 
 import logging
 
-from src.core.app_config import get_app_config
+from src.core.app_config import AppConfig, get_app_config
 from src.services.llm.types import (
     ModelEndpoint,
     ModelRole,
@@ -42,6 +42,7 @@ class ModelConfig:
                 reasoning_budget=ep_config.reasoning_budget,
                 supports_structured_output=ep_config.supports_structured_output,
                 supports_temperature=ep_config.supports_temperature,
+                supports_prompt_caching=ep_config.supports_prompt_caching,
             )
 
         # Convert role configs to ModelRole
@@ -95,3 +96,8 @@ class ModelConfig:
     def endpoints(self) -> dict[str, ModelEndpoint]:
         """Get all endpoints."""
         return self._endpoints
+
+    @property
+    def app_config(self) -> "AppConfig":
+        """Get the underlying AppConfig for accessing global settings like prompt_caching."""
+        return self._app_config

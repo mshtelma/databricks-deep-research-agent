@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ResearchDepthSelector, type ResearchDepth } from './ResearchDepthSelector';
 import { QueryModeSelector } from './QueryModeSelector';
+import { useQueryMode } from '@/hooks';
 import type { QueryMode } from '@/types';
 
 interface MessageInputProps {
@@ -25,7 +26,11 @@ export function MessageInput({
   showDepthSelector = true,
 }: MessageInputProps) {
   const [message, setMessage] = React.useState('');
-  const [queryMode, setQueryMode] = React.useState<QueryMode>('simple');
+  // Use hook for persistence (localStorage + optional API sync)
+  const { mode: queryMode, setMode: setQueryMode } = useQueryMode({
+    initialMode: 'simple',
+    syncWithPreferences: true, // Load user's default from preferences API
+  });
   const [researchDepth, setResearchDepth] = React.useState<ResearchDepth>('auto');
   // Default: true for deep_research (thorough), false for web_search (speed)
   const [verifySources, setVerifySources] = React.useState<boolean>(false);

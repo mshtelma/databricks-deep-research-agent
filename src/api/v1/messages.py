@@ -69,7 +69,7 @@ def _message_to_response(msg: Message) -> MessageResponse:
         id=msg.id,
         chat_id=msg.chat_id,
         role=msg.role,
-        content=msg.content,
+        content=msg.content or "",  # Content can be None for in-progress agent messages
         created_at=msg.created_at,
         is_edited=msg.is_edited,
         research_session=_research_session_to_schema(msg.research_session),

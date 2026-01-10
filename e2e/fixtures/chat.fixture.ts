@@ -17,15 +17,21 @@ export interface ChatFixtures {
 
 export const test = base.extend<ChatFixtures>({
   chatPage: async ({ page }, use) => {
+    // Clear localStorage to remove stale drafts before each test
+    await page.goto('/');
+    await page.evaluate(() => localStorage.clear());
+    await page.reload();
     const chatPage = new ChatPage(page);
-    await chatPage.goto();
+    await chatPage.waitForReady();
     await use(chatPage);
   },
 
   sidebarPage: async ({ page }, use) => {
-    const sidebarPage = new SidebarPage(page);
-    // Navigate to the app and wait for sidebar to be ready
+    // Clear localStorage to remove stale drafts before each test
     await page.goto('/');
+    await page.evaluate(() => localStorage.clear());
+    await page.reload();
+    const sidebarPage = new SidebarPage(page);
     await sidebarPage.newChatButton.waitFor({ state: 'visible', timeout: 30000 });
     await use(sidebarPage);
   },

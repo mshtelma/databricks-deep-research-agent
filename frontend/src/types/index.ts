@@ -152,6 +152,8 @@ export type StreamEventType =
 export interface BaseStreamEvent {
   event_type: StreamEventType
   timestamp: string
+  /** Stable unique ID for React keys (added by useStreamingQuery) */
+  _eventId?: string
 }
 
 export interface AgentStartedEvent extends BaseStreamEvent {

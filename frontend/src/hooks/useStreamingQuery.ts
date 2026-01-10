@@ -21,6 +21,7 @@ import type {
   VerificationVerdict,
   ConfidenceLevel,
 } from '../types/citation';
+import { parseStreamEvent } from '../schemas/streamEvents';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1';
 
@@ -102,6 +103,20 @@ interface UseStreamingQueryReturn {
   persistenceFailed: boolean;
   /** Hydrate state from persisted research session (for page reload) */
   hydrateFromSession: (session: ResearchSession) => void;
+  /** Process an external event (for reconnection replay) */
+  processExternalEvent: (event: StreamEvent) => void;
+  /** Set streaming state (for reconnection to enable streaming UI) */
+  setIsStreaming: (value: boolean) => void;
+  /** Set streaming content directly (for reconnection final report) */
+  setStreamingContent: (content: string) => void;
+  /** Timestamp when streaming started (for elapsed time display) */
+  startTime: number | null;
+  /** Current active agent name (for status display) */
+  currentAgent: string | null;
+  /** Current query mode for the active/last streaming session (for UI rendering) */
+  currentQueryMode: QueryMode | null;
+  /** Set current query mode (for reconnection restoration) */
+  setCurrentQueryMode: (mode: QueryMode | null) => void;
 }
 
 interface UseStreamingQueryOptions {
@@ -142,7 +157,69 @@ export function useStreamingQuery(
   const [persistenceResult, setPersistenceResult] = useState<PersistenceCompletedEvent | null>(null);
   const [persistenceFailed, setPersistenceFailed] = useState(false);
 
+  // Streaming time and agent tracking for activity panel
+  const [startTime, setStartTime] = useState<number | null>(null);
+  const [currentAgent, setCurrentAgent] = useState<string | null>(null);
+
+  // Query mode for the current streaming session (used for UI visibility)
+  const [currentQueryMode, setCurrentQueryMode] = useState<QueryMode | null>(null);
+
+  // ===== DEBUG LOGGING =====
+  useEffect(() => {
+    console.log('[useStreamingQuery] currentQueryMode is now:', currentQueryMode);
+  }, [currentQueryMode]);
+
+  useEffect(() => {
+    console.log('[useStreamingQuery] isStreaming is now:', isStreaming);
+  }, [isStreaming]);
+
+  useEffect(() => {
+    console.log('[useStreamingQuery] currentPlan changed:', currentPlan ? `has plan with ${currentPlan.steps?.length} steps` : 'null');
+  }, [currentPlan]);
+
+  useEffect(() => {
+    console.log('[useStreamingQuery] events count:', events.length);
+  }, [events.length]);
+  // ===== END DEBUG LOGGING =====
+
+  // Event counter for stable unique keys (prevents blinking on re-renders)
+  const eventCounterRef = useRef(0);
+
+  // Track seen event keys for deduplication (reconnection scenario)
+  const seenEventKeysRef = useRef<Set<string>>(new Set());
+
+  // Track previous chatId to prevent false state resets during draft→real navigation
+  const prevChatIdRef = useRef<string | undefined>(undefined);
+
+  // Track SSE connection errors for resilient handling
+  const sseErrorCountRef = useRef(0);
+  const lastSseErrorTimeRef = useRef(0);
+
   const eventSourceRef = useRef<EventSource | null>(null);
+
+  /**
+   * Check if an event has already been processed (for reconnection deduplication).
+   * Uses sequence_number if available, otherwise falls back to eventType+timestamp.
+   * Returns true if duplicate (should skip), false if new (should process).
+   */
+  const isDuplicateEvent = useCallback((data: StreamEvent): boolean => {
+    // Build a unique key for this event
+    // Handle camelCase runtime keys (sequenceNumber vs sequence_number)
+    const seqNum = (data as unknown as { sequenceNumber?: number }).sequenceNumber
+      ?? (data as unknown as { sequence_number?: number }).sequence_number;
+
+    const key = seqNum !== undefined
+      ? `seq:${seqNum}`
+      : `${data.event_type}:${(data as unknown as { timestamp?: string }).timestamp || Date.now()}`;
+
+    if (seenEventKeysRef.current.has(key)) {
+      console.log('[Dedup] Skipping duplicate event:', key);
+      return true;
+    }
+
+    seenEventKeysRef.current.add(key);
+    return false;
+  }, []);
 
   const stopStream = useCallback(() => {
     if (eventSourceRef.current) {
@@ -199,6 +276,222 @@ export function useStreamingQuery(
     }
   }, []);
 
+  /**
+   * Process a single event and update state accordingly.
+   * Used by both SSE handler and reconnection replay.
+   * Handles deduplication internally.
+   */
+  const processExternalEvent = useCallback((data: StreamEvent) => {
+    // Deduplication check (for reconnection scenarios)
+    if (isDuplicateEvent(data)) {
+      return; // Skip duplicate event
+    }
+
+    console.log('[External] Processing event:', data.event_type, data);
+
+    // Add stable unique ID to each event for React keys
+    const eventWithId = {
+      ...data,
+      _eventId: `${data.event_type}-${eventCounterRef.current++}-${Date.now()}`,
+    } as StreamEvent;
+    setEvents((prev) => [...prev, eventWithId]);
+
+    // Process event based on type (same logic as SSE handler)
+    switch (data.event_type) {
+      case 'agent_started': {
+        if ('agent' in data) {
+          const agent = (data as { agent: string }).agent;
+          setCurrentAgent(agent.charAt(0).toUpperCase() + agent.slice(1));
+          if (agent === 'coordinator') setAgentStatus('classifying');
+          else if (agent === 'planner') setAgentStatus('planning');
+          else if (agent === 'researcher') setAgentStatus('researching');
+          else if (agent === 'reflector') setAgentStatus('reflecting');
+          else if (agent === 'synthesizer') setAgentStatus('synthesizing');
+          else if (agent === 'verifier') setAgentStatus('verifying');
+        }
+        break;
+      }
+
+      case 'agent_completed': {
+        setCurrentAgent(null);
+        break;
+      }
+
+      case 'research_started': {
+        const startedEvent = data as ResearchStartedEvent;
+        const messageId = (startedEvent as unknown as { messageId?: string }).messageId ?? startedEvent.message_id;
+        setAgentMessageId(messageId);
+        break;
+      }
+
+      case 'plan_created': {
+        setAgentStatus('researching');
+        const planEvent = data as PlanCreatedEvent;
+        setCurrentPlan({
+          title: planEvent.title,
+          reasoning: planEvent.thought,
+          steps: planEvent.steps.map((s, i) => ({
+            index: i,
+            title: s.title,
+            description: undefined,
+            status: 'pending' as const,
+          })),
+        });
+        break;
+      }
+
+      case 'step_started': {
+        const stepEvent = data as StepStartedEvent;
+        const stepIndex = (stepEvent as unknown as { stepIndex?: number }).stepIndex ?? stepEvent.step_index;
+        setCurrentStepIndex(stepIndex);
+        setCurrentPlan((prev) => {
+          if (!prev) return prev;
+          const steps = [...prev.steps];
+          const step = steps[stepIndex];
+          if (step) {
+            steps[stepIndex] = { ...step, status: 'in_progress' };
+          }
+          return { ...prev, steps };
+        });
+        break;
+      }
+
+      case 'step_completed': {
+        const stepEvent = data as StepCompletedEvent;
+        const stepIndex = (stepEvent as unknown as { stepIndex?: number }).stepIndex ?? stepEvent.step_index;
+        setCurrentPlan((prev) => {
+          if (!prev) return prev;
+          const steps = [...prev.steps];
+          const step = steps[stepIndex];
+          if (step) {
+            steps[stepIndex] = { ...step, status: 'completed' };
+          }
+          return { ...prev, steps };
+        });
+        setCurrentStepIndex(-1);
+        setToolActivity(null);
+        break;
+      }
+
+      case 'tool_call': {
+        const toolEvent = data as ToolCallEvent;
+        const toolName = (toolEvent as unknown as { toolName?: string }).toolName ?? toolEvent.tool_name;
+        const toolArgs = (toolEvent as unknown as { toolArgs?: Record<string, unknown> }).toolArgs ?? toolEvent.tool_args;
+        const callNumber = (toolEvent as unknown as { callNumber?: number }).callNumber ?? toolEvent.call_number;
+        setToolActivity({
+          toolName: toolName as 'web_search' | 'web_crawl',
+          toolArgs,
+          callNumber,
+          sourcesCrawled: 0,
+        });
+        break;
+      }
+
+      case 'tool_result': {
+        const toolEvent = data as ToolResultEvent;
+        const sourcesCrawled = (toolEvent as unknown as { sourcesCrawled?: number }).sourcesCrawled ?? toolEvent.sources_crawled;
+        setToolActivity((prev) => prev ? { ...prev, toolName: null, sourcesCrawled } : null);
+        break;
+      }
+
+      case 'reflection_decision': {
+        const reflectionEvent = data as ReflectionDecisionEvent;
+        setAgentStatus('reflecting');
+        if (reflectionEvent.decision === 'complete') {
+          setCurrentPlan((prev) => {
+            if (!prev) return prev;
+            const steps = prev.steps.map(step =>
+              step.status === 'pending' ? { ...step, status: 'skipped' as const } : step
+            );
+            return { ...prev, steps };
+          });
+        }
+        break;
+      }
+
+      case 'synthesis_started':
+        setAgentStatus('synthesizing');
+        break;
+
+      case 'synthesis_progress': {
+        const progressEvent = data as SynthesisProgressEvent;
+        const contentChunk = (progressEvent as unknown as { contentChunk?: string }).contentChunk ?? progressEvent.content_chunk;
+        setStreamingContent((prev) => prev + contentChunk);
+        break;
+      }
+
+      case 'claim_verified': {
+        const claimEvent = data as unknown as ClaimVerifiedEvent;
+        setAgentStatus('verifying');
+        setStreamingClaims((prev) => {
+          const existingIndex = prev.findIndex(c => c.id === claimEvent.claimId);
+          const newClaim: StreamingClaim = {
+            id: claimEvent.claimId,
+            claimText: claimEvent.claimText,
+            positionStart: claimEvent.positionStart,
+            positionEnd: claimEvent.positionEnd,
+            verificationVerdict: claimEvent.verdict,
+            confidenceLevel: claimEvent.confidenceLevel,
+            evidencePreview: claimEvent.evidencePreview,
+            reasoning: claimEvent.reasoning,
+          };
+          if (existingIndex >= 0) {
+            const updated = [...prev];
+            updated[existingIndex] = newClaim;
+            return updated;
+          }
+          return [...prev, newClaim];
+        });
+        break;
+      }
+
+      case 'citation_corrected': {
+        setCitationCorrectionCount((prev) => prev + 1);
+        break;
+      }
+
+      case 'verification_summary': {
+        const summaryEvent = data as unknown as VerificationSummaryEvent;
+        setStreamingVerificationSummary({
+          totalClaims: summaryEvent.totalClaims,
+          supportedCount: summaryEvent.supported,
+          partialCount: summaryEvent.partial,
+          unsupportedCount: summaryEvent.unsupported,
+          contradictedCount: summaryEvent.contradicted,
+          abstainedCount: summaryEvent.abstainedCount,
+          unsupportedRate: summaryEvent.totalClaims > 0 ? summaryEvent.unsupported / summaryEvent.totalClaims : 0,
+          contradictedRate: summaryEvent.totalClaims > 0 ? summaryEvent.contradicted / summaryEvent.totalClaims : 0,
+          warning: summaryEvent.warning,
+        });
+        break;
+      }
+
+      case 'content_revised': {
+        const revisedEvent = data as { content?: string; revision_count?: number };
+        const revisedContent = (revisedEvent as unknown as { content?: string }).content ?? '';
+        if (revisedContent) {
+          setStreamingContent(revisedContent);
+        }
+        break;
+      }
+
+      case 'research_completed':
+        setAgentStatus('complete');
+        // Note: Don't stop stream here - we're processing external events
+        break;
+
+      case 'error': {
+        const errorEvent = data as StreamErrorEvent;
+        const errorMessage = (errorEvent as unknown as { errorMessage?: string }).errorMessage ?? errorEvent.error_message;
+        if (!errorEvent.recoverable) {
+          setError(new Error(errorMessage || 'Research failed'));
+          setAgentStatus('error');
+        }
+        break;
+      }
+    }
+  }, [isDuplicateEvent]);
+
   const sendQuery = useCallback(
     (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean) => {
       if (!chatId) {
@@ -233,6 +526,19 @@ export function useStreamingQuery(
       setPersistenceResult(null);
       setPersistenceFailed(false);
 
+      // Reset streaming time and agent tracking
+      setStartTime(Date.now());
+      setCurrentAgent(null);
+      eventCounterRef.current = 0;
+      sseErrorCountRef.current = 0;
+      lastSseErrorTimeRef.current = 0;
+      // Reset deduplication state for new query
+      seenEventKeysRef.current.clear();
+
+      // Store query mode for the session (used for activity panel visibility)
+      console.log('[useStreamingQuery] sendQuery: Setting currentQueryMode to:', queryMode || 'simple');
+      setCurrentQueryMode(queryMode || 'simple');
+
       // Build stream URL with query, query_mode, and research_depth parameters
       let streamUrl = `${API_BASE_URL}/chats/${chatId}/stream?query=${encodeURIComponent(query)}`;
       if (queryMode) {
@@ -248,21 +554,37 @@ export function useStreamingQuery(
       const eventSource = new EventSource(streamUrl);
       eventSourceRef.current = eventSource;
 
-      // Accumulate content for final message
-      let accumulatedContent = '';
-
       eventSource.onmessage = (event) => {
-        try {
-          const data = JSON.parse(event.data) as StreamEvent;
-          console.log('[SSE] Event received:', data.event_type, data);
-          setEvents((prev) => [...prev, data]);
+        // Use Zod validation for safe parsing with graceful degradation
+        const data = parseStreamEvent(event.data);
 
-          // Update state based on event type
-          switch (data.event_type) {
-            case 'agent_started':
+        if (!data) {
+          // Malformed event - already logged by parseStreamEvent, skip processing
+          return;
+        }
+
+        // Deduplication check (for reconnection scenarios)
+        if (isDuplicateEvent(data as StreamEvent)) {
+          return; // Skip duplicate event
+        }
+
+        console.log('[SSE] Event received:', data.event_type, data);
+
+        // Add stable unique ID to each event for React keys (prevents blinking)
+        const eventWithId = {
+          ...data,
+          _eventId: `${data.event_type}-${eventCounterRef.current++}-${Date.now()}`,
+        } as StreamEvent;
+        setEvents((prev) => [...prev, eventWithId]);
+
+        // Update state based on event type
+        switch (data.event_type) {
+            case 'agent_started': {
               // Update status based on which agent started
               if ('agent' in data) {
                 const agent = (data as { agent: string }).agent;
+                // Track current agent for activity panel display
+                setCurrentAgent(agent.charAt(0).toUpperCase() + agent.slice(1));
                 if (agent === 'coordinator') setAgentStatus('classifying');
                 else if (agent === 'planner') setAgentStatus('planning');
                 else if (agent === 'researcher') setAgentStatus('researching');
@@ -271,6 +593,7 @@ export function useStreamingQuery(
                 else if (agent === 'verifier') setAgentStatus('verifying');
               }
               break;
+            }
 
             case 'agent_completed': {
               // Agent completed, continue with flow
@@ -280,6 +603,8 @@ export function useStreamingQuery(
                 duration_ms: completedEvent.duration_ms,
                 hasValidDuration: typeof completedEvent.duration_ms === 'number',
               });
+              // Clear current agent (next agent_started will set new one)
+              setCurrentAgent(null);
               break;
             }
 
@@ -421,7 +746,6 @@ export function useStreamingQuery(
               const progressEvent = data as SynthesisProgressEvent;
               // Handle camelCase runtime keys
               const contentChunk = (progressEvent as unknown as { contentChunk?: string }).contentChunk ?? progressEvent.content_chunk;
-              accumulatedContent += contentChunk;
               setStreamingContent((prev) => prev + contentChunk);
               break;
             }
@@ -489,7 +813,6 @@ export function useStreamingQuery(
               const revisionCount = (revisedEvent as unknown as { revisionCount?: number }).revisionCount ?? revisedEvent.revision_count ?? 0;
               console.log('[SSE] content_revised:', { contentLen: revisedContent.length, revisionCount });
               if (revisedContent) {
-                accumulatedContent = revisedContent;
                 setStreamingContent(revisedContent);
               }
               break;
@@ -510,59 +833,101 @@ export function useStreamingQuery(
               setPersistenceResult(persistEvent);
               setPersistenceFailed(false);
 
-              // NOW it's safe to refetch - database has the final message with all revisions
+              // Trigger refetch - streamingContent will naturally be hidden
+              // once agent message appears in apiMessages (MessageList.tsx line 111)
               onStreamComplete?.();
 
-              // Clear streaming content after a short delay to allow message refetch
-              // This prevents duplicate rendering of streaming placeholder and persisted message
-              setTimeout(() => {
-                setStreamingContent('');
-              }, 150);
+              // DON'T clear streamingContent here - it acts as a fallback
+              // until the refetch completes. The MessageList rendering logic
+              // already hides it when agent messages exist in the array.
+              // Content is cleared on: new query start (line 510) or chat change (line 932)
               break;
             }
 
-            case 'error': {
-              const errorEvent = data as StreamErrorEvent;
-              // Handle camelCase runtime keys
-              const errorMessage = (errorEvent as unknown as { errorMessage?: string }).errorMessage ?? errorEvent.error_message;
-              console.log('[SSE] error:', { errorMessage, recoverable: errorEvent.recoverable });
-              if (!errorEvent.recoverable) {
-                const err = new Error(errorMessage || 'Research failed');
-                setError(err);
-                setAgentStatus('error');
-                stopStream();
-              }
-              break;
+          case 'error': {
+            const errorEvent = data as StreamErrorEvent;
+            // Handle camelCase runtime keys
+            const errorMessage = (errorEvent as unknown as { errorMessage?: string }).errorMessage ?? errorEvent.error_message;
+            console.log('[SSE] error:', { errorMessage, recoverable: errorEvent.recoverable });
+            if (!errorEvent.recoverable) {
+              const err = new Error(errorMessage || 'Research failed');
+              setError(err);
+              setAgentStatus('error');
+              stopStream();
             }
+            break;
           }
-        } catch (e) {
-          console.error('Failed to parse SSE event:', e);
-          setError(e instanceof Error ? e : new Error('Failed to parse SSE event'));
-          setAgentStatus('error');
-          stopStream();
         }
+        // Note: Removed try-catch - parseStreamEvent handles JSON parse errors with graceful degradation
       };
 
       eventSource.onerror = (e) => {
-        console.error('SSE error:', e);
-        const err = new Error('Stream connection failed');
-        setError(err);
-        setAgentStatus('error');
-        stopStream();
+        const now = Date.now();
+        const timeSinceLastError = now - lastSseErrorTimeRef.current;
+
+        // Reset error count if it's been more than 5 seconds since last error
+        if (timeSinceLastError > 5000) {
+          sseErrorCountRef.current = 0;
+        }
+
+        sseErrorCountRef.current++;
+        lastSseErrorTimeRef.current = now;
+
+        console.error('[SSE] ERROR - Connection issue detected:', {
+          error: e,
+          errorCount: sseErrorCountRef.current,
+          timeSinceLastError,
+          readyState: eventSource.readyState // 0=CONNECTING, 1=OPEN, 2=CLOSED
+        });
+
+        // EventSource auto-reconnects, so only give up after multiple rapid errors
+        // or if the connection is definitively closed
+        if (sseErrorCountRef.current >= 3 || eventSource.readyState === 2) {
+          console.log('[SSE] ERROR - Multiple errors or connection closed, stopping stream');
+          const err = new Error('Stream connection failed');
+          setError(err);
+          setAgentStatus('error');
+          stopStream();
+        } else {
+          console.log('[SSE] ERROR - Waiting for auto-reconnect (error count:', sseErrorCountRef.current, ')');
+        }
       };
     },
-    [chatId, stopStream]
+    [chatId, stopStream, onStreamComplete, isDuplicateEvent]
   );
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      console.log('[useStreamingQuery] Cleanup on unmount');
       stopStream();
     };
   }, [stopStream]);
 
-  // Reset when chat changes
+  // Reset when chat changes (but NOT for draft→real navigation with same chatId)
   useEffect(() => {
+    console.log('[useStreamingQuery] Chat change effect triggered:', {
+      prevChatId: prevChatIdRef.current,
+      newChatId: chatId,
+      willReset: prevChatIdRef.current !== chatId,
+    });
+
+    // Only reset if chatId actually changed to a DIFFERENT value
+    // This prevents state reset when URL changes but chatId stays the same (draft→real)
+    if (prevChatIdRef.current === chatId) {
+      console.log('[useStreamingQuery] SKIPPING reset - same chatId');
+      return; // Same chatId, don't reset - prevents flickering during navigation
+    }
+
+    console.log('[useStreamingQuery] RESETTING ALL STATE - chatId changed from', prevChatIdRef.current, 'to', chatId);
+    prevChatIdRef.current = chatId;
+
+    // CRITICAL: Close any open EventSource BEFORE resetting state!
+    // This prevents events from old chat polluting new chat's state
+    console.log('[useStreamingQuery] Stopping stream before chat change');
+    stopStream();
+
+    // Reset all state for new chat
     setEvents([]);
     setStreamingContent('');
     setAgentStatus('idle');
@@ -577,7 +942,16 @@ export function useStreamingQuery(
     setToolActivity(null);
     setPersistenceResult(null);
     setPersistenceFailed(false);
-  }, [chatId]);
+    // Reset streaming time and agent tracking
+    setStartTime(null);
+    setCurrentAgent(null);
+    eventCounterRef.current = 0;
+    // Reset deduplication state when switching chats
+    seenEventKeysRef.current.clear();
+    // Reset query mode when switching chats
+    console.log('[useStreamingQuery] Resetting currentQueryMode to null');
+    setCurrentQueryMode(null);
+  }, [chatId, stopStream]);
 
   return {
     isStreaming,
@@ -598,5 +972,12 @@ export function useStreamingQuery(
     persistenceResult,
     persistenceFailed,
     hydrateFromSession,
+    processExternalEvent,
+    setIsStreaming,
+    setStreamingContent,
+    startTime,
+    currentAgent,
+    currentQueryMode,
+    setCurrentQueryMode,
   };
 }

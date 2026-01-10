@@ -36,7 +36,8 @@ test.describe('Citation Interactions', () => {
       const query = RESEARCH_QUERIES[0];
 
       // Send research query
-      await chatPage.sendMessage(query.text);
+      // Use deep_research mode to trigger citation generation
+      await chatPage.sendMessageWithMode(query.text, 'deep_research');
       await chatPage.waitForAgentResponse(180000);
 
       // Check if citations exist in the response
@@ -59,7 +60,8 @@ test.describe('Citation Interactions', () => {
     test('pressing Enter on focused marker opens evidence card', async ({ chatPage, citationsPage, page }) => {
       const query = RESEARCH_QUERIES[0];
 
-      await chatPage.sendMessage(query.text);
+      // Use deep_research mode to trigger citation generation
+      await chatPage.sendMessageWithMode(query.text, 'deep_research');
       await chatPage.waitForAgentResponse(180000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
@@ -80,7 +82,8 @@ test.describe('Citation Interactions', () => {
     test('pressing Escape closes evidence card', async ({ chatPage, citationsPage, page }) => {
       const query = RESEARCH_QUERIES[0];
 
-      await chatPage.sendMessage(query.text);
+      // Use deep_research mode to trigger citation generation
+      await chatPage.sendMessageWithMode(query.text, 'deep_research');
       await chatPage.waitForAgentResponse(180000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
@@ -105,7 +108,8 @@ test.describe('Citation Interactions', () => {
     test('clicking outside evidence card closes it', async ({ chatPage, citationsPage, page }) => {
       const query = RESEARCH_QUERIES[0];
 
-      await chatPage.sendMessage(query.text);
+      // Use deep_research mode to trigger citation generation
+      await chatPage.sendMessageWithMode(query.text, 'deep_research');
       await chatPage.waitForAgentResponse(180000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
@@ -129,7 +133,8 @@ test.describe('Citation Interactions', () => {
     test('multiple citation markers are present and numbered', async ({ chatPage, citationsPage }) => {
       const query = RESEARCH_QUERIES[0];
 
-      await chatPage.sendMessage(query.text);
+      // Use deep_research mode to trigger citation generation
+      await chatPage.sendMessageWithMode(query.text, 'deep_research');
       await chatPage.waitForAgentResponse(180000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
@@ -152,7 +157,8 @@ test.describe('Citation Interactions', () => {
     test('evidence card shows source metadata', async ({ chatPage, citationsPage, page }) => {
       const query = RESEARCH_QUERIES[0];
 
-      await chatPage.sendMessage(query.text);
+      // Use deep_research mode to trigger citation generation
+      await chatPage.sendMessageWithMode(query.text, 'deep_research');
       await chatPage.waitForAgentResponse(180000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
@@ -174,7 +180,8 @@ test.describe('Citation Interactions', () => {
     test('evidence card shows evidence quote', async ({ chatPage, citationsPage, page }) => {
       const query = RESEARCH_QUERIES[0];
 
-      await chatPage.sendMessage(query.text);
+      // Use deep_research mode to trigger citation generation
+      await chatPage.sendMessageWithMode(query.text, 'deep_research');
       await chatPage.waitForAgentResponse(180000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
@@ -199,7 +206,8 @@ test.describe('Citation Interactions', () => {
     test('source URL link has correct target attribute', async ({ chatPage, citationsPage, page }) => {
       const query = RESEARCH_QUERIES[0];
 
-      await chatPage.sendMessage(query.text);
+      // Use deep_research mode to trigger citation generation
+      await chatPage.sendMessageWithMode(query.text, 'deep_research');
       await chatPage.waitForAgentResponse(180000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
@@ -227,7 +235,8 @@ test.describe('Citation Interactions', () => {
     test('close button dismisses evidence card', async ({ chatPage, citationsPage, page }) => {
       const query = RESEARCH_QUERIES[0];
 
-      await chatPage.sendMessage(query.text);
+      // Use deep_research mode to trigger citation generation
+      await chatPage.sendMessageWithMode(query.text, 'deep_research');
       await chatPage.waitForAgentResponse(180000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
@@ -264,7 +273,8 @@ test.describe('Citation Interactions', () => {
     test('response renders without errors', async ({ chatPage, page }) => {
       const query = 'What is climate change?';
 
-      await chatPage.sendMessage(query);
+      // Use deep_research mode to trigger citation generation
+      await chatPage.sendMessageWithMode(query, 'deep_research');
       await chatPage.waitForAgentResponse(180000);
 
       // Get the agent response
@@ -282,7 +292,8 @@ test.describe('Citation Interactions', () => {
     test('sources section is accessible', async ({ chatPage, page }) => {
       const query = RESEARCH_QUERIES[0];
 
-      await chatPage.sendMessage(query.text);
+      // Use deep_research mode to trigger citation generation
+      await chatPage.sendMessageWithMode(query.text, 'deep_research');
       await chatPage.waitForAgentResponse(180000);
 
       // Look for sources section

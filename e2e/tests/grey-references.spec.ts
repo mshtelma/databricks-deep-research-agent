@@ -32,8 +32,8 @@ test.describe('Grey Reference Detection', () => {
     // Select light research mode for fastest execution
     await chatPage.selectResearchDepth('light');
 
-    // Run a simple factual research query
-    await chatPage.sendMessage('What is the capital of France?');
+    // Run a simple factual research query with deep_research mode to trigger citations
+    await chatPage.sendMessageWithMode('What is the capital of France?', 'deep_research');
 
     // Wait for agent response (2 min max for ultra-light research)
     await chatPage.waitForAgentResponse(120000);
@@ -71,8 +71,8 @@ test.describe('Grey Reference Detection', () => {
     // Select light research mode
     await chatPage.selectResearchDepth('light');
 
-    // Run research query
-    await chatPage.sendMessage('What programming language did Guido van Rossum create?');
+    // Run research query with deep_research mode to trigger citations
+    await chatPage.sendMessageWithMode('What programming language did Guido van Rossum create?', 'deep_research');
     await chatPage.waitForAgentResponse(120000);
 
     // Check if citations exist
@@ -107,8 +107,8 @@ test.describe('Grey Reference Detection', () => {
     // Select light research mode
     await chatPage.selectResearchDepth('light');
 
-    // Run research
-    await chatPage.sendMessage('What year was Python first released?');
+    // Run research with deep_research mode to trigger citations
+    await chatPage.sendMessageWithMode('What year was Python first released?', 'deep_research');
     await chatPage.waitForAgentResponse(120000);
 
     // Wait for citations
@@ -146,8 +146,8 @@ test.describe('Grey Reference Detection', () => {
     // Select light research mode
     await chatPage.selectResearchDepth('light');
 
-    // Run research
-    await chatPage.sendMessage('Who founded Microsoft?');
+    // Run research with deep_research mode to trigger citations
+    await chatPage.sendMessageWithMode('Who founded Microsoft?', 'deep_research');
     await chatPage.waitForAgentResponse(120000);
 
     // Wait for citations

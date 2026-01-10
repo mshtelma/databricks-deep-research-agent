@@ -27,6 +27,8 @@ interface AgentMessageWithCitationsProps {
   isStreaming?: boolean;
   onRegenerate?: () => void;
   className?: string;
+  /** Hide the Sources & Citations section (when shown in ResearchPanel) */
+  hideSourcesSection?: boolean;
 }
 
 // Helper to validate UUID format (8-4-4-4-12 hex characters)
@@ -41,6 +43,7 @@ export function AgentMessageWithCitations({
   isStreaming = false,
   onRegenerate,
   className,
+  hideSourcesSection = false,
 }: AgentMessageWithCitationsProps) {
   // Fetch citations for this message
   // Only fetch if message has a valid UUID (not a placeholder like 'streaming-*', 'session-*', etc.)
@@ -96,6 +99,7 @@ export function AgentMessageWithCitations({
       claims={claims}
       verificationSummary={verificationSummary}
       enableCitations={enableCitations}
+      hideSourcesSection={hideSourcesSection}
     />
   );
 }

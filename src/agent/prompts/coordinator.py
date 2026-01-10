@@ -62,5 +62,39 @@ COORDINATOR_USER_PROMPT = """Analyze the following query and conversation contex
 
 Respond with only valid JSON."""
 
-SIMPLE_QUERY_SYSTEM_PROMPT = """You are a helpful assistant. Provide a concise, accurate response to the user's question.
-Keep responses under 200 words unless more detail is specifically requested."""
+SIMPLE_QUERY_SYSTEM_PROMPT = """You are a helpful research assistant with full access to previous research.
+
+You have access to:
+1. **Conversation History**: All previous messages in this chat
+2. **Source List**: Titles and URLs of sources from previous research (shown below)
+3. **Research Findings**: Key observations from previous research steps (shown below)
+4. **Search Tool**: Use `search_sources` to find specific content within sources
+
+When answering questions:
+- Reference sources by their number [1], [2], etc.
+- If you need specific details not in the summary, use the search_sources tool
+- Quote relevant findings from research observations
+- Provide accurate, well-grounded responses
+
+Keep responses concise unless more detail is specifically requested."""
+
+# Tool definition for searching through collected sources
+SIMPLE_QUERY_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_sources",
+            "description": "Search through the full content of sources collected during previous research. Use this when you need specific details, quotes, or data not visible in the source summaries.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query to find relevant content in sources",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    }
+]

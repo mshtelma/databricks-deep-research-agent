@@ -184,6 +184,56 @@ export const messagesApi = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+
+  exportReport: async (messageId: string): Promise<{ content: string; filename: string }> => {
+    const url = `${API_BASE_URL}/messages/${messageId}/report`
+    const response = await fetch(url, {
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!response.ok) {
+      let errorData: { code?: string; message?: string }
+      try {
+        errorData = await response.json()
+      } catch {
+        errorData = { code: 'UNKNOWN', message: response.statusText }
+      }
+      throw new ApiError(
+        response.status,
+        errorData.code || 'UNKNOWN',
+        errorData.message || 'Export failed'
+      )
+    }
+    const content = await response.text()
+    const contentDisposition = response.headers.get('Content-Disposition') || ''
+    const filenameMatch = contentDisposition.match(/filename="([^"]+)"/)
+    const filename = filenameMatch?.[1] ?? `report-${messageId}.md`
+    return { content, filename }
+  },
+
+  exportProvenance: async (messageId: string): Promise<{ content: string; filename: string }> => {
+    const url = `${API_BASE_URL}/messages/${messageId}/provenance?format=markdown`
+    const response = await fetch(url, {
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!response.ok) {
+      let errorData: { code?: string; message?: string }
+      try {
+        errorData = await response.json()
+      } catch {
+        errorData = { code: 'UNKNOWN', message: response.statusText }
+      }
+      throw new ApiError(
+        response.status,
+        errorData.code || 'UNKNOWN',
+        errorData.message || 'Export failed'
+      )
+    }
+    const content = await response.text()
+    const contentDisposition = response.headers.get('Content-Disposition') || ''
+    const filenameMatch = contentDisposition.match(/filename="([^"]+)"/)
+    const filename = filenameMatch?.[1] ?? `verification-${messageId}.md`
+    return { content, filename }
+  },
 }
 
 // Research API

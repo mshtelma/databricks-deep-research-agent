@@ -48,9 +48,11 @@ class Message(BaseModel):
         String(20),
         nullable=False,
     )
-    content: Mapped[str] = mapped_column(
+    # Content is nullable to support agent message placeholder at research start
+    # Agent message created with NULL content, updated with final_report at end
+    content: Mapped[str | None] = mapped_column(
         Text,
-        nullable=False,
+        nullable=True,
     )
 
     # Edit tracking

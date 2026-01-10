@@ -80,6 +80,35 @@ def _normalize_content(raw_content: str | list[Any] | None) -> str:
     return str(raw_content)
 
 
+def normalize_messages_for_logging(messages: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Normalize messages for MLflow span logging.
+
+    Converts message content from list format (used by cache_control or
+    Gemini responses) to plain strings to avoid Pydantic serialization
+    warnings when MLflow logs the messages.
+
+    Args:
+        messages: List of message dicts, potentially with list content.
+
+    Returns:
+        List of message dicts with all content normalized to strings.
+    """
+    normalized: list[dict[str, str]] = []
+    for msg in messages:
+        content = msg.get("content", "")
+        normalized_msg: dict[str, str] = {
+            "role": str(msg.get("role", "user")),
+            "content": _normalize_content(content) if not isinstance(content, str) else content,
+        }
+        # Preserve tool_call_id if present (for tool response messages)
+        if "tool_call_id" in msg:
+            normalized_msg["tool_call_id"] = str(msg["tool_call_id"])
+        if "name" in msg:
+            normalized_msg["name"] = str(msg["name"])
+        normalized.append(normalized_msg)
+    return normalized
+
+
 class LLMClient:
     """Unified LLM client with model routing and health tracking."""
 
@@ -207,14 +236,27 @@ class LLMClient:
         role: ModelRole,
         estimated_tokens: int,
     ) -> tuple[ModelEndpoint, EndpointHealth]:
-        """Select best endpoint for request."""
+        """Select best endpoint for request.
+
+        Includes time-based recovery: endpoints marked unhealthy due to rate
+        limits can be retried after their rate_limited_until timestamp expires.
+        """
         endpoints = self._config.get_endpoints_for_role(role.name)
 
         for endpoint in endpoints:
             health = self._get_health(endpoint.id)
 
+            # Check if endpoint should be considered (includes time-based recovery)
             if not health.is_healthy:
-                continue
+                # Try time-based recovery for rate-limited endpoints
+                if health.reset_if_recovered():
+                    logger.info(
+                        "ENDPOINT_RECOVERED",
+                        endpoint=endpoint.id,
+                        reason="rate_limit_expired",
+                    )
+                else:
+                    continue  # Still unhealthy, skip
 
             if health.can_handle_request(estimated_tokens, endpoint.tokens_per_minute):
                 return endpoint, health
@@ -244,10 +286,79 @@ class LLMClient:
 
         return config
 
+    def _apply_cache_control(
+        self,
+        messages: list[dict[str, Any]],
+        endpoint: ModelEndpoint,
+    ) -> list[dict[str, Any]]:
+        """Transform messages to include cache_control for supported endpoints.
+
+        This is transparent to higher layers - agents send plain messages,
+        this method transforms them internally when caching is enabled.
+
+        Converts system message from string format:
+            {"role": "system", "content": "Your prompt..."}
+
+        To content-array format with cache_control:
+            {"role": "system", "content": [
+                {"type": "text", "text": "Your prompt...", "cache_control": {"type": "ephemeral"}}
+            ]}
+
+        Args:
+            messages: Original messages from agent.
+            endpoint: Selected endpoint (checked for caching support).
+
+        Returns:
+            Messages with cache_control applied if applicable, otherwise unchanged.
+        """
+        # Check if endpoint supports caching
+        if not endpoint.supports_prompt_caching:
+            return messages
+
+        # Get prompt caching config from app config
+        caching_config = self._config.app_config.prompt_caching
+        if not caching_config.enabled:
+            return messages
+
+        transformed: list[dict[str, Any]] = []
+        for msg in messages:
+            if msg.get("role") == "system" and caching_config.cache_system_prompt:
+                content = msg.get("content", "")
+                # Handle content that's already in array format
+                if isinstance(content, list):
+                    transformed.append(msg)
+                    continue
+
+                # Only cache if above minimum threshold (~4 chars per token)
+                estimated_tokens = len(content) // 4
+                if estimated_tokens >= caching_config.min_tokens_threshold:
+                    transformed.append({
+                        "role": "system",
+                        "content": [{
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": caching_config.cache_type}
+                        }]
+                    })
+                    if caching_config.log_cache_usage:
+                        logger.debug(
+                            "CACHE_CONTROL_APPLIED",
+                            role="system",
+                            estimated_tokens=estimated_tokens,
+                            endpoint=endpoint.id,
+                        )
+                else:
+                    transformed.append(msg)
+            else:
+                transformed.append(msg)
+
+        return transformed
+
     def _get_earliest_endpoint_available(self, role: ModelRole) -> float:
         """Get seconds until the earliest endpoint becomes available.
 
-        Returns 0 if an endpoint is already available, otherwise the
+        Returns 0 if an endpoint is already available (including endpoints
+        that can be recovered via time-based recovery), otherwise the
         shortest wait time until any endpoint's rate limit expires.
 
         Args:
@@ -262,17 +373,20 @@ class LLMClient:
         for endpoint_id in role.endpoints:
             health = self._get_health(endpoint_id)
 
-            # Endpoint is available now
-            if health.is_healthy and not health.rate_limited_until:
-                return 0.0
+            # Check for healthy endpoints available now
+            if health.is_healthy:
+                if not health.rate_limited_until or health.rate_limited_until <= now:
+                    return 0.0  # Available now
 
-            # Check when rate limit expires
+            # Check for unhealthy endpoints that can be recovered
+            # (rate limit expired, so reset_if_recovered() will succeed)
+            elif health.rate_limited_until and health.rate_limited_until <= now:
+                return 0.0  # Will recover on next _select_endpoint() call
+
+            # Check when rate limit expires (for both healthy and unhealthy)
             if health.rate_limited_until and health.rate_limited_until > now:
                 wait = (health.rate_limited_until - now).total_seconds()
                 min_wait = min(min_wait, wait)
-            elif health.rate_limited_until:
-                # Rate limit already expired
-                return 0.0
 
         return min_wait if min_wait != float("inf") else 0.0
 
@@ -412,15 +526,19 @@ class LLMClient:
                 "llm.temperature": config.get("temperature"),
             })
             # Capture input messages for tracing visibility
-            span.set_inputs({"messages": messages})
+            # Normalize to avoid Pydantic serialization warnings with list content
+            span.set_inputs({"messages": normalize_messages_for_logging(messages)})
 
             start_time = time.perf_counter()
 
             try:
+                # Apply cache control for supported endpoints (transparent to callers)
+                cached_messages = self._apply_cache_control(messages, endpoint)
+
                 # Build request
                 request_kwargs: dict[str, Any] = {
                     "model": endpoint.endpoint_identifier,
-                    "messages": messages,
+                    "messages": cached_messages,
                     **config,
                 }
 
@@ -776,6 +894,9 @@ class LLMClient:
         endpoint, health = self._select_endpoint(role, estimated_tokens + 4000)
         config = self._merge_config(role, endpoint, temperature, max_tokens)
 
+        # Apply cache control for supported endpoints (transparent to callers)
+        cached_messages = self._apply_cache_control(messages, endpoint)
+
         # Log stream start
         logger.info(
             "LLM_STREAM_START",
@@ -806,7 +927,7 @@ class LLMClient:
                     AsyncStream[ChatCompletionChunk],
                     await self._client.chat.completions.create(
                         model=endpoint.endpoint_identifier,
-                        messages=cast(Any, messages),
+                        messages=cast(Any, cached_messages),
                         stream=True,
                         **config,
                     ),
@@ -1049,6 +1170,9 @@ class LLMClient:
         endpoint, health = self._select_endpoint(role, estimated_tokens + 4000)
         config = self._merge_config(role, endpoint, temperature, max_tokens)
 
+        # Apply cache control for supported endpoints (transparent to callers)
+        cached_messages = self._apply_cache_control(messages, endpoint)
+
         logger.info(
             "LLM_STREAM_WITH_TOOLS_START",
             endpoint=endpoint.endpoint_identifier,
@@ -1070,7 +1194,7 @@ class LLMClient:
                     AsyncStream[ChatCompletionChunk],
                     await self._client.chat.completions.create(
                         model=endpoint.endpoint_identifier,
-                        messages=cast(Any, messages),
+                        messages=cast(Any, cached_messages),
                         tools=cast(Any, tools if tools else None),
                         stream=True,
                         **config,

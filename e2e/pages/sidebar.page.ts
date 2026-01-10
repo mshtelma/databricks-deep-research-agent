@@ -69,6 +69,65 @@ export class SidebarPage {
   }
 
   /**
+   * Create a new draft chat and wait for it to appear in the sidebar.
+   * Note: Draft chats don't have context menu actions (rename, delete, archive).
+   * Use createPersistedChat() for tests that need menu actions.
+   * @param timeout Maximum time to wait for the chat to appear
+   * @returns The ID of the newly created chat, or null if not found
+   */
+  async createNewChatAndWait(timeout: number = 10000): Promise<string | null> {
+    await this.newChatButton.click();
+
+    // Wait for URL to change to draft pattern: /chat/{uuid}?draft=1
+    await expect(this.page).toHaveURL(/\/chat\/([a-f0-9-]+)\?draft=1/, { timeout });
+
+    // Extract chat ID from URL
+    const url = this.page.url();
+    const match = url.match(/\/chat\/([a-f0-9-]+)\?draft=1/);
+    if (!match) {
+      return null;
+    }
+    const chatId = match[1];
+
+    // Wait for the chat item to appear in the sidebar
+    const chatItem = this.page.getByTestId(`chat-item-${chatId}`);
+    await expect(chatItem).toBeVisible({ timeout });
+
+    return chatId;
+  }
+
+  /**
+   * Create a persisted chat via API and wait for it to appear in the sidebar.
+   * Unlike draft chats, persisted chats have context menu actions (rename, delete, archive).
+   * @param title Optional title for the chat
+   * @param timeout Maximum time to wait for the chat to appear
+   * @returns The ID of the newly created chat, or null if creation failed
+   */
+  async createPersistedChat(title?: string, timeout: number = 10000): Promise<string | null> {
+    // Create chat via API
+    const response = await this.page.request.post('/api/v1/chats', {
+      data: title ? { title } : {},
+    });
+
+    if (!response.ok()) {
+      console.error('Failed to create chat via API:', response.status());
+      return null;
+    }
+
+    const chat = await response.json();
+    const chatId = chat.id;
+
+    // Navigate to the new chat
+    await this.page.goto(`/chat/${chatId}`);
+
+    // Wait for the chat item to appear in the sidebar
+    const chatItem = this.page.getByTestId(`chat-item-${chatId}`);
+    await expect(chatItem).toBeVisible({ timeout });
+
+    return chatId;
+  }
+
+  /**
    * Get the count of chats in the sidebar.
    * @returns Number of chat items
    */

@@ -26,10 +26,28 @@ export class ChatPage {
   }
 
   /**
-   * Navigate to the chat page.
+   * Navigate to the chat page and wait for it to be ready.
    */
   async goto(): Promise<void> {
     await this.page.goto('/');
+    await this.waitForReady();
+  }
+
+  /**
+   * Wait for the chat page to be fully loaded and ready for interaction.
+   * This means the message input is visible and enabled (not loading).
+   */
+  async waitForReady(timeout: number = 30000): Promise<void> {
+    // Wait for message input to be visible
+    await this.messageInput.waitFor({ state: 'visible', timeout });
+    // Wait for input to be enabled (not disabled during loading)
+    await this.page.waitForFunction(
+      () => {
+        const input = document.querySelector('[data-testid="message-input"]');
+        return input && !input.hasAttribute('disabled');
+      },
+      { timeout }
+    );
   }
 
   /**
@@ -38,6 +56,14 @@ export class ChatPage {
    */
   async sendMessage(text: string): Promise<void> {
     await this.messageInput.fill(text);
+    // Wait for Send button to become enabled (React state update)
+    await this.page.waitForFunction(
+      () => {
+        const button = document.querySelector('[data-testid="send-button"]');
+        return button && !button.hasAttribute('disabled');
+      },
+      { timeout: 5000 }
+    );
     await this.sendButton.click();
   }
 
@@ -235,5 +261,27 @@ export class ChatPage {
     };
     const depthButton = this.page.getByRole('button', { name: depthLabels[depth] });
     await depthButton.click();
+  }
+
+  /**
+   * Select a query mode.
+   * @param mode The query mode: 'simple' | 'web_search' | 'deep_research'
+   */
+  async selectQueryMode(mode: 'simple' | 'web_search' | 'deep_research'): Promise<void> {
+    const modeButton = this.page.getByTestId(`mode-${mode}`);
+    await modeButton.click();
+  }
+
+  /**
+   * Send a message with a specific query mode.
+   * @param text The message text to send
+   * @param mode The query mode to use
+   */
+  async sendMessageWithMode(
+    text: string,
+    mode: 'simple' | 'web_search' | 'deep_research'
+  ): Promise<void> {
+    await this.selectQueryMode(mode);
+    await this.sendMessage(text);
   }
 }
