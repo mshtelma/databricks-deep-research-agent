@@ -1,0 +1,1062 @@
+openapi: 3.1.0
+info:
+  title: Claim-Level Citation API Extensions
+  description: |
+    API extensions for claim-level citation granularity feature.
+    These endpoints extend the existing Deep Research Agent API to provide
+    claim verification, evidence card access, and provenance export.
+
+    **Updated 2025-12-25**: Incorporates 2024-2025 SOTA improvements:
+    - Four-tier verdict system (added CONTRADICTED)
+    - Confidence-based verification routing
+    - Citation correction tracking
+    - QA-based numeric verification
+    - Abstention capability
+  version: 2.0.0
+
+servers:
+  - url: /api/v1
+    description: API v1
+
+security:
+  - databricksAuth: []
+
+tags:
+  - name: Claims
+    description: Claim extraction and verification endpoints
+  - name: Evidence
+    description: Evidence span and citation endpoints
+  - name: Provenance
+    description: Provenance data export endpoints
+  - name: Corrections
+    description: Citation correction endpoints
+
+paths:
+  # ============================================================================
+  # CLAIM ENDPOINTS
+  # ============================================================================
+  /messages/{messageId}/claims:
+    parameters:
+      - $ref: '#/components/parameters/messageId'
+
+    get:
+      tags: [Claims]
+      operationId: getMessageClaims
+      summary: Get all claims for a message
+      description: |
+        Returns all claims extracted from an agent message, with their
+        citations, corrections, and verification status. Includes verification
+        summary with four-tier support level breakdown.
+      responses:
+        '200':
+          description: Claims with citations and verification summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageClaimsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /claims/{claimId}:
+    parameters:
+      - $ref: '#/components/parameters/claimId'
+
+    get:
+      tags: [Claims]
+      operationId: getClaim
+      summary: Get claim details
+      description: |
+        Returns a single claim with full details including all evidence spans,
+        verification reasoning, confidence level, corrections, and numeric
+        claim metadata with QA verification results if applicable.
+      responses:
+        '200':
+          description: Claim details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /claims/{claimId}/evidence:
+    parameters:
+      - $ref: '#/components/parameters/claimId'
+
+    get:
+      tags: [Evidence]
+      operationId: getClaimEvidence
+      summary: Get evidence spans for a claim
+      description: |
+        Returns all evidence spans linked to a specific claim. Each span
+        includes the exact quote, source metadata, relevance score, and
+        position information.
+      responses:
+        '200':
+          description: Evidence spans for the claim
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimEvidenceResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /claims/{claimId}/corrections:
+    parameters:
+      - $ref: '#/components/parameters/claimId'
+
+    get:
+      tags: [Corrections]
+      operationId: getClaimCorrections
+      summary: Get citation corrections for a claim
+      description: |
+        Returns all citation corrections made during the CiteFix post-processing
+        stage for a specific claim. Includes original and corrected evidence,
+        correction type, and reasoning.
+      responses:
+        '200':
+          description: Citation corrections for the claim
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimCorrectionsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================================
+  # VERIFICATION ENDPOINTS
+  # ============================================================================
+  /messages/{messageId}/verification-summary:
+    parameters:
+      - $ref: '#/components/parameters/messageId'
+
+    get:
+      tags: [Claims]
+      operationId: getVerificationSummary
+      summary: Get verification summary for a message
+      description: |
+        Returns aggregate verification statistics for all claims in a message.
+        Includes four-tier support level counts (supported, partial, unsupported,
+        contradicted), abstention count, and warning flags.
+      responses:
+        '200':
+          description: Verification summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VerificationSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /messages/{messageId}/correction-metrics:
+    parameters:
+      - $ref: '#/components/parameters/messageId'
+
+    get:
+      tags: [Corrections]
+      operationId: getCorrectionMetrics
+      summary: Get citation correction metrics for a message
+      description: |
+        Returns aggregate metrics about citation corrections made during
+        post-processing. Useful for tracking citation quality over time.
+      responses:
+        '200':
+          description: Citation correction metrics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CorrectionMetrics'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ============================================================================
+  # PROVENANCE EXPORT ENDPOINTS
+  # ============================================================================
+  /messages/{messageId}/provenance:
+    parameters:
+      - $ref: '#/components/parameters/messageId'
+
+    get:
+      tags: [Provenance]
+      operationId: exportProvenance
+      summary: Export provenance data for a message
+      description: |
+        Exports complete structured provenance data for a message, including
+        all claims, evidence spans, citations, corrections, and verification
+        results. Machine-readable format suitable for audit trails.
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [json, csv]
+            default: json
+      responses:
+        '200':
+          description: Provenance data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProvenanceExport'
+            text/csv:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /chats/{chatId}/provenance:
+    parameters:
+      - $ref: '#/components/parameters/chatId'
+
+    get:
+      tags: [Provenance]
+      operationId: exportChatProvenance
+      summary: Export provenance data for entire chat
+      description: |
+        Exports complete structured provenance data for all agent messages
+        in a chat session. Useful for compliance and audit purposes.
+      parameters:
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [json, csv]
+            default: json
+      responses:
+        '200':
+          description: Chat provenance data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatProvenanceExport'
+            text/csv:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    databricksAuth:
+      type: http
+      scheme: bearer
+      description: Databricks workspace OAuth token
+
+  parameters:
+    chatId:
+      name: chatId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    messageId:
+      name: messageId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    claimId:
+      name: claimId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    # ============================================================================
+    # ENUM SCHEMAS (UPDATED)
+    # ============================================================================
+    ClaimType:
+      type: string
+      enum: [general, numeric]
+      description: Type of factual claim
+
+    VerificationVerdict:
+      type: string
+      enum: [supported, partial, unsupported, contradicted]
+      description: |
+        Verification result (four-tier system):
+        - supported: Claim fully entailed by evidence
+        - partial: Some aspects supported, others not stated
+        - unsupported: Claim has no evidence basis (not contradicted)
+        - contradicted: Evidence directly opposes claim (NEW)
+
+    ConfidenceLevel:
+      type: string
+      enum: [high, medium, low]
+      description: |
+        Confidence level for verification routing (HaluGate-inspired):
+        - high: Direct quotes, exact matches (>0.85)
+        - medium: Paraphrased facts (0.50-0.85)
+        - low: Hedged, comparative, synthetic (<0.50)
+
+    CorrectionType:
+      type: string
+      enum: [keep, replace, remove, add_alternate]
+      description: |
+        Citation correction type (CiteFix-style):
+        - keep: Original citation is correct (~60%)
+        - replace: Found better citation from pool (~25%)
+        - remove: No valid citation exists (~10%)
+        - add_alternate: Multiple valid citations (~5%)
+
+    DerivationType:
+      type: string
+      enum: [direct, computed]
+      description: |
+        How a numeric value was obtained:
+        - direct: Quoted directly from source
+        - computed: Calculated from source values
+
+    # ============================================================================
+    # CLAIM SCHEMAS (UPDATED)
+    # ============================================================================
+    ClaimResponse:
+      type: object
+      required:
+        - id
+        - claim_text
+        - claim_type
+        - position_start
+        - position_end
+      properties:
+        id:
+          type: string
+          format: uuid
+        claim_text:
+          type: string
+          description: The extracted atomic claim
+        claim_type:
+          $ref: '#/components/schemas/ClaimType'
+        confidence_level:
+          $ref: '#/components/schemas/ConfidenceLevel'
+          nullable: true
+          description: HaluGate-style confidence for routing
+        position_start:
+          type: integer
+          description: Start character offset in message content
+        position_end:
+          type: integer
+          description: End character offset in message content
+        verification_verdict:
+          $ref: '#/components/schemas/VerificationVerdict'
+        verification_reasoning:
+          type: string
+          nullable: true
+          description: Explanation for the verdict
+        abstained:
+          type: boolean
+          default: false
+          description: Whether verification was abstained due to insufficient evidence
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/CitationResponse'
+        corrections:
+          type: array
+          items:
+            $ref: '#/components/schemas/CitationCorrectionResponse'
+          description: Citation corrections made during post-processing
+        numeric_detail:
+          $ref: '#/components/schemas/NumericClaimDetail'
+          nullable: true
+          description: Present only for numeric claims
+
+    MessageClaimsResponse:
+      type: object
+      required:
+        - message_id
+        - claims
+        - verification_summary
+      properties:
+        message_id:
+          type: string
+          format: uuid
+        claims:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClaimResponse'
+        verification_summary:
+          $ref: '#/components/schemas/VerificationSummary'
+        correction_metrics:
+          $ref: '#/components/schemas/CorrectionMetrics'
+          description: Aggregate citation correction statistics
+
+    VerificationSummary:
+      type: object
+      required:
+        - total_claims
+        - supported_count
+        - partial_count
+        - unsupported_count
+        - contradicted_count
+        - unsupported_rate
+        - warning
+      properties:
+        total_claims:
+          type: integer
+          description: Total number of claims in the message
+        supported_count:
+          type: integer
+          description: Claims fully supported by evidence
+        partial_count:
+          type: integer
+          description: Claims partially supported
+        unsupported_count:
+          type: integer
+          description: Claims without adequate support
+        contradicted_count:
+          type: integer
+          description: Claims where evidence contradicts the claim
+        abstained_count:
+          type: integer
+          default: 0
+          description: Claims where verification was abstained
+        unsupported_rate:
+          type: number
+          format: float
+          description: Ratio of unsupported claims (0.0-1.0)
+        contradicted_rate:
+          type: number
+          format: float
+          default: 0.0
+          description: Ratio of contradicted claims (0.0-1.0)
+        warning:
+          type: boolean
+          description: True if unsupported_rate > 0.20 or contradicted_rate > 0.05
+
+    # ============================================================================
+    # EVIDENCE SCHEMAS (UPDATED)
+    # ============================================================================
+    EvidenceSpanResponse:
+      type: object
+      required:
+        - id
+        - source_id
+        - quote_text
+      properties:
+        id:
+          type: string
+          format: uuid
+        source_id:
+          type: string
+          format: uuid
+        quote_text:
+          type: string
+          description: The exact supporting quote from source
+        start_offset:
+          type: integer
+          nullable: true
+          description: Start position in source content
+        end_offset:
+          type: integer
+          nullable: true
+          description: End position in source content
+        section_heading:
+          type: string
+          nullable: true
+          description: Section or page context
+        relevance_score:
+          type: number
+          format: float
+          nullable: true
+          description: Relevance ranking score (0.0-1.0)
+        has_numeric_content:
+          type: boolean
+          default: false
+          description: Whether span contains numeric data
+        source_title:
+          type: string
+          nullable: true
+          description: Denormalized source title
+        source_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Denormalized source URL
+        source_author:
+          type: string
+          nullable: true
+          description: Author or publisher if available
+        source_date:
+          type: string
+          format: date
+          nullable: true
+          description: Publication date if available
+
+    CitationResponse:
+      type: object
+      required:
+        - evidence_span
+      properties:
+        evidence_span:
+          $ref: '#/components/schemas/EvidenceSpanResponse'
+        confidence_score:
+          type: number
+          format: float
+          nullable: true
+          description: Confidence in the attribution (0.0-1.0)
+        is_primary:
+          type: boolean
+          default: true
+          description: Whether this is the primary citation
+
+    ClaimEvidenceResponse:
+      type: object
+      required:
+        - claim_id
+        - evidence_spans
+      properties:
+        claim_id:
+          type: string
+          format: uuid
+        evidence_spans:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvidenceSpanResponse'
+
+    # ============================================================================
+    # CITATION CORRECTION SCHEMAS (NEW)
+    # ============================================================================
+    CitationCorrectionResponse:
+      type: object
+      required:
+        - id
+        - correction_type
+      properties:
+        id:
+          type: string
+          format: uuid
+        correction_type:
+          $ref: '#/components/schemas/CorrectionType'
+        original_evidence:
+          $ref: '#/components/schemas/EvidenceSpanResponse'
+          nullable: true
+          description: The original (incorrect) citation
+        corrected_evidence:
+          $ref: '#/components/schemas/EvidenceSpanResponse'
+          nullable: true
+          description: The corrected citation (null if removed)
+        reasoning:
+          type: string
+          nullable: true
+          description: Explanation for the correction
+
+    ClaimCorrectionsResponse:
+      type: object
+      required:
+        - claim_id
+        - corrections
+      properties:
+        claim_id:
+          type: string
+          format: uuid
+        corrections:
+          type: array
+          items:
+            $ref: '#/components/schemas/CitationCorrectionResponse'
+
+    CorrectionMetrics:
+      type: object
+      required:
+        - total_corrections
+        - keep_count
+        - replace_count
+        - remove_count
+        - add_alternate_count
+      properties:
+        total_corrections:
+          type: integer
+          description: Total number of citation corrections made
+        keep_count:
+          type: integer
+          description: Citations that were kept as-is
+        replace_count:
+          type: integer
+          description: Citations that were replaced with better ones
+        remove_count:
+          type: integer
+          description: Citations that were removed (no valid citation)
+        add_alternate_count:
+          type: integer
+          description: Cases where alternate citations were added
+        correction_rate:
+          type: number
+          format: float
+          description: Rate of corrections needed (corrections / total citations)
+
+    # ============================================================================
+    # NUMERIC CLAIM SCHEMAS (UPDATED)
+    # ============================================================================
+    QAVerificationResult:
+      type: object
+      required:
+        - question
+        - claim_answer
+        - evidence_answer
+        - match
+      properties:
+        question:
+          type: string
+          description: Generated verification question
+        claim_answer:
+          type: string
+          description: Answer derived from the claim
+        evidence_answer:
+          type: string
+          description: Answer derived from the evidence
+        match:
+          type: boolean
+          description: Whether answers match after normalization
+        normalized_comparison:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Normalized numeric values for comparison
+
+    NumericClaimDetail:
+      type: object
+      required:
+        - raw_value
+        - derivation_type
+      properties:
+        raw_value:
+          type: string
+          description: The value as stated in source
+        normalized_value:
+          type: number
+          nullable: true
+          description: Standardized numeric value
+        unit:
+          type: string
+          nullable: true
+          description: Unit of measurement
+        entity_reference:
+          type: string
+          nullable: true
+          description: The entity the value describes
+        derivation_type:
+          $ref: '#/components/schemas/DerivationType'
+        computation_details:
+          $ref: '#/components/schemas/ComputationDetails'
+          nullable: true
+          description: Present only for computed values
+        assumptions:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: Applied assumptions (currency year, exchange rate, etc.)
+        qa_verification:
+          type: array
+          items:
+            $ref: '#/components/schemas/QAVerificationResult'
+          nullable: true
+          description: QAFactEval verification results
+
+    ComputationDetails:
+      type: object
+      properties:
+        inputs:
+          type: array
+          items:
+            $ref: '#/components/schemas/ComputationInput'
+        formula:
+          type: string
+          description: Description of calculation performed
+        steps:
+          type: array
+          items:
+            type: string
+          description: Calculation steps
+
+    ComputationInput:
+      type: object
+      properties:
+        value:
+          type: string
+        source_claim_id:
+          type: string
+          format: uuid
+          nullable: true
+        description:
+          type: string
+
+    # ============================================================================
+    # PROVENANCE EXPORT SCHEMAS (UPDATED)
+    # ============================================================================
+    ProvenanceExport:
+      type: object
+      required:
+        - message_id
+        - export_timestamp
+        - claims
+      properties:
+        message_id:
+          type: string
+          format: uuid
+        message_content:
+          type: string
+          description: Full message content for reference
+        export_timestamp:
+          type: string
+          format: date-time
+        claims:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProvenanceClaimRecord'
+        verification_summary:
+          $ref: '#/components/schemas/VerificationSummary'
+        correction_metrics:
+          $ref: '#/components/schemas/CorrectionMetrics'
+
+    ChatProvenanceExport:
+      type: object
+      required:
+        - chat_id
+        - export_timestamp
+        - messages
+      properties:
+        chat_id:
+          type: string
+          format: uuid
+        chat_title:
+          type: string
+          nullable: true
+        export_timestamp:
+          type: string
+          format: date-time
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProvenanceExport'
+        aggregate_summary:
+          $ref: '#/components/schemas/VerificationSummary'
+          description: Aggregate verification across all messages
+        aggregate_corrections:
+          $ref: '#/components/schemas/CorrectionMetrics'
+          description: Aggregate correction metrics across all messages
+
+    ProvenanceClaimRecord:
+      type: object
+      required:
+        - claim_id
+        - claim_text
+        - claim_type
+      properties:
+        claim_id:
+          type: string
+          format: uuid
+        claim_text:
+          type: string
+        claim_type:
+          $ref: '#/components/schemas/ClaimType'
+        confidence_level:
+          $ref: '#/components/schemas/ConfidenceLevel'
+          nullable: true
+        position_start:
+          type: integer
+        position_end:
+          type: integer
+        verification_verdict:
+          $ref: '#/components/schemas/VerificationVerdict'
+        verification_reasoning:
+          type: string
+          nullable: true
+        abstained:
+          type: boolean
+          default: false
+        evidence_records:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProvenanceEvidenceRecord'
+        correction_records:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProvenanceCorrectionRecord'
+        numeric_detail:
+          $ref: '#/components/schemas/NumericClaimDetail'
+          nullable: true
+
+    ProvenanceEvidenceRecord:
+      type: object
+      required:
+        - evidence_span_id
+        - source_id
+        - quote_text
+      properties:
+        evidence_span_id:
+          type: string
+          format: uuid
+        source_id:
+          type: string
+          format: uuid
+        quote_text:
+          type: string
+        source_url:
+          type: string
+          format: uri
+          nullable: true
+        source_title:
+          type: string
+          nullable: true
+        section_heading:
+          type: string
+          nullable: true
+        relevance_score:
+          type: number
+          format: float
+          nullable: true
+        confidence_score:
+          type: number
+          format: float
+          nullable: true
+        is_primary:
+          type: boolean
+          default: true
+
+    ProvenanceCorrectionRecord:
+      type: object
+      required:
+        - correction_id
+        - correction_type
+      properties:
+        correction_id:
+          type: string
+          format: uuid
+        correction_type:
+          $ref: '#/components/schemas/CorrectionType'
+        original_evidence_id:
+          type: string
+          format: uuid
+          nullable: true
+        corrected_evidence_id:
+          type: string
+          format: uuid
+          nullable: true
+        reasoning:
+          type: string
+          nullable: true
+
+    # ============================================================================
+    # SSE EVENT SCHEMAS (UPDATED)
+    # ============================================================================
+    ClaimGeneratedEvent:
+      type: object
+      description: Emitted when a claim is generated during interleaved synthesis
+      required:
+        - event_type
+        - timestamp
+        - claim_text
+        - position_start
+        - position_end
+      properties:
+        event_type:
+          type: string
+          enum: [claim_generated]
+        timestamp:
+          type: string
+          format: date-time
+        claim_text:
+          type: string
+        position_start:
+          type: integer
+        position_end:
+          type: integer
+        evidence_preview:
+          type: string
+          description: Truncated evidence quote for UI display
+        confidence_level:
+          $ref: '#/components/schemas/ConfidenceLevel'
+
+    ClaimVerifiedEvent:
+      type: object
+      description: Emitted when a claim is verified during synthesis
+      required:
+        - event_type
+        - timestamp
+        - claim_id
+        - claim_text
+        - verdict
+      properties:
+        event_type:
+          type: string
+          enum: [claim_verified]
+        timestamp:
+          type: string
+          format: date-time
+        claim_id:
+          type: string
+          format: uuid
+        claim_text:
+          type: string
+        position_start:
+          type: integer
+        position_end:
+          type: integer
+        verdict:
+          $ref: '#/components/schemas/VerificationVerdict'
+        confidence_level:
+          $ref: '#/components/schemas/ConfidenceLevel'
+        evidence_preview:
+          type: string
+          description: Truncated quote for UI display (max 200 chars)
+        reasoning:
+          type: string
+          nullable: true
+          description: Verification reasoning
+
+    CitationCorrectedEvent:
+      type: object
+      description: Emitted when a citation is corrected during post-processing
+      required:
+        - event_type
+        - timestamp
+        - claim_id
+        - correction_type
+      properties:
+        event_type:
+          type: string
+          enum: [citation_corrected]
+        timestamp:
+          type: string
+          format: date-time
+        claim_id:
+          type: string
+          format: uuid
+        correction_type:
+          $ref: '#/components/schemas/CorrectionType'
+        reasoning:
+          type: string
+          nullable: true
+
+    NumericClaimDetectedEvent:
+      type: object
+      description: Emitted when a numeric claim is detected
+      required:
+        - event_type
+        - timestamp
+        - claim_id
+        - raw_value
+        - derivation_type
+      properties:
+        event_type:
+          type: string
+          enum: [numeric_claim_detected]
+        timestamp:
+          type: string
+          format: date-time
+        claim_id:
+          type: string
+          format: uuid
+        raw_value:
+          type: string
+        normalized_value:
+          type: string
+          nullable: true
+        unit:
+          type: string
+          nullable: true
+        derivation_type:
+          $ref: '#/components/schemas/DerivationType'
+        qa_verified:
+          type: boolean
+          default: false
+          description: Whether QA verification passed
+
+    VerificationSummaryEvent:
+      type: object
+      description: Emitted when verification is complete for a message
+      required:
+        - event_type
+        - timestamp
+        - message_id
+        - total_claims
+        - supported
+        - partial
+        - unsupported
+        - contradicted
+        - warning
+      properties:
+        event_type:
+          type: string
+          enum: [verification_summary]
+        timestamp:
+          type: string
+          format: date-time
+        message_id:
+          type: string
+          format: uuid
+        total_claims:
+          type: integer
+        supported:
+          type: integer
+        partial:
+          type: integer
+        unsupported:
+          type: integer
+        contradicted:
+          type: integer
+        abstained_count:
+          type: integer
+          default: 0
+        citation_corrections:
+          type: integer
+          default: 0
+          description: Number of citation corrections made
+        warning:
+          type: boolean
+
+    # ============================================================================
+    # ERROR SCHEMA
+    # ============================================================================
+    Error:
+      type: object
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true

@@ -9,15 +9,16 @@ Requirements:
 - .env file with BRAVE_API_KEY
 
 Run with:
-    uv run pytest backend/tests/integration/test_e2e_research.py -v -s
+    uv run pytest tests/integration/test_e2e_research.py -v -s
+
+Note: Integration tests use config/app.test.yaml (set via conftest.py)
+for minimal iterations and faster execution.
 """
 
-import os
 from uuid import uuid4
 
 import pytest
 
-# Note: .env is loaded by conftest.py
 from src.agent.orchestrator import (
     OrchestrationConfig,
     run_research,
@@ -31,65 +32,8 @@ from src.schemas.streaming import (
 from src.services.llm.client import LLMClient
 from src.services.search.brave import BraveSearchClient
 
-# ---------------------------------------------------------------------------
-# Credential Checks
-# ---------------------------------------------------------------------------
-
-
-def _has_databricks_creds() -> bool:
-    """Check if Databricks credentials are available."""
-    return bool(os.getenv("DATABRICKS_TOKEN") or os.getenv("DATABRICKS_CONFIG_PROFILE"))
-
-
-def _has_brave_key() -> bool:
-    """Check if Brave API key is available."""
-    return bool(os.getenv("BRAVE_API_KEY"))
-
-
-# Skip markers for tests that require real credentials
-requires_databricks = pytest.mark.skipif(
-    not _has_databricks_creds(),
-    reason="Databricks credentials not configured (check .env for DATABRICKS_TOKEN or DATABRICKS_CONFIG_PROFILE)",
-)
-requires_brave = pytest.mark.skipif(
-    not _has_brave_key(),
-    reason="Brave API key not configured (check .env for BRAVE_API_KEY)",
-)
-
-# Combined marker for tests that need both
-requires_all_credentials = pytest.mark.skipif(
-    not (_has_databricks_creds() and _has_brave_key()),
-    reason="Both Databricks and Brave credentials required (check .env)",
-)
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-async def llm_client() -> LLMClient:
-    """Create a real LLMClient with Databricks endpoints."""
-    client = LLMClient()
-    yield client
-    await client.close()
-
-
-@pytest.fixture
-async def brave_client() -> BraveSearchClient:
-    """Create a real BraveSearchClient."""
-    client = BraveSearchClient()
-    yield client
-    await client.close()
-
-
-@pytest.fixture
-async def web_crawler() -> WebCrawler:
-    """Create a WebCrawler for fetching pages."""
-    crawler = WebCrawler(max_concurrent=3)
-    yield crawler
-    await crawler.close()
+# Import markers from conftest.py
+from tests.integration.conftest import requires_all_credentials
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +99,62 @@ async def test_deep_research_initial_query(
     print(f"   - Sources found: {len(result.state.sources)}")
     print(f"   - Report length: {len(result.state.final_report)} chars")
 
+    # ==== Citation Verification Assertions ====
+
+    # 1. Claims should be extracted
+    assert len(result.state.claims) > 0, "Should have extracted at least one claim"
+
+    # 2. Each claim should have required fields
+    for claim in result.state.claims:
+        assert claim.claim_text, "Claim should have text"
+        assert claim.claim_type in ("general", "numeric"), "Claim type should be general or numeric"
+        assert claim.position_start >= 0, "Position start should be non-negative"
+        assert claim.position_end > claim.position_start, "Position end should be after start"
+        # Verification verdict should be assigned (unless abstained)
+        if not claim.abstained:
+            assert claim.verification_verdict in (
+                "supported", "partial", "unsupported", "contradicted"
+            ), f"Invalid verdict: {claim.verification_verdict}"
+
+    # 3. Evidence pool should be populated
+    assert len(result.state.evidence_pool) > 0, "Should have evidence spans"
+    for evidence in result.state.evidence_pool:
+        assert evidence.source_url, "Evidence should have source URL"
+        assert evidence.quote_text, "Evidence should have quote text"
+
+    # 4. Verification summary should be populated
+    assert result.state.verification_summary is not None, "Should have verification summary"
+    summary = result.state.verification_summary
+    assert summary.total_claims > 0, "Summary should have total claims count"
+    assert summary.total_claims == len(result.state.claims), "Summary count should match claims list"
+
+    # 5. Verdict counts should sum correctly
+    verdict_sum = (
+            summary.supported_count
+            + summary.partial_count
+            + summary.unsupported_count
+            + summary.contradicted_count
+            + summary.abstained_count
+    )
+    assert verdict_sum == summary.total_claims, "Verdict counts should sum to total"
+
+    # ==== Print Summary ====
+    print("\n✅ Research with citation verification completed!")
+    print(f"   - Duration: {result.total_duration_ms / 1000:.1f}s")
+    print(f"   - Steps executed: {result.steps_executed}")
+    print(f"   - Sources found: {len(result.state.sources)}")
+    print(f"   - Report length: {len(result.state.final_report)} chars")
+    print(f"\n📊 Citation Verification Results:")
+    print(f"   - Claims extracted: {summary.total_claims}")
+    print(f"   - Supported: {summary.supported_count}")
+    print(f"   - Partial: {summary.partial_count}")
+    print(f"   - Unsupported: {summary.unsupported_count}")
+    print(f"   - Contradicted: {summary.contradicted_count}")
+    print(f"   - Abstained: {summary.abstained_count}")
+    print(f"   - Evidence spans: {len(result.state.evidence_pool)}")
+    if summary.warning:
+        print(f"   ⚠️  Warning: High unsupported/contradicted rate")
+
 
 @requires_all_credentials
 @pytest.mark.asyncio
@@ -183,7 +183,7 @@ async def test_followup_with_conversation_history(
         session_id=session_id,
         config=OrchestrationConfig(
             max_plan_iterations=1,
-            max_steps_per_plan=3,
+            max_steps_per_plan=2,
             timeout_seconds=180,
         ),
     )

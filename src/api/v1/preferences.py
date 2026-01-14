@@ -25,6 +25,7 @@ async def get_preferences(
     return UserPreferencesResponse(
         system_instructions=preferences.system_instructions,
         default_research_depth=preferences.default_research_depth,
+        default_query_mode=preferences.default_query_mode,
         theme=preferences.theme,
         notifications_enabled=preferences.notifications_enabled,
         updated_at=preferences.updated_at,
@@ -43,6 +44,7 @@ async def update_preferences(
         user_id=user.user_id,
         system_instructions=request.system_instructions,
         default_research_depth=request.default_research_depth,
+        default_query_mode=request.default_query_mode,
         theme=request.theme,
         notifications_enabled=request.notifications_enabled,
     )
@@ -50,6 +52,7 @@ async def update_preferences(
     return UserPreferencesResponse(
         system_instructions=preferences.system_instructions,
         default_research_depth=preferences.default_research_depth,
+        default_query_mode=preferences.default_query_mode,
         theme=preferences.theme,
         notifications_enabled=preferences.notifications_enabled,
         updated_at=preferences.updated_at,

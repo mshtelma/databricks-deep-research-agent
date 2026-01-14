@@ -64,6 +64,29 @@ class ChatService:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_id(self, chat_id: UUID) -> Chat | None:
+        """Get a chat by ID without user ownership filter.
+
+        Used for authorization checks to distinguish:
+        - Chat doesn't exist (allow draft chat flow)
+        - Chat exists but belongs to another user (reject with 403)
+
+        Args:
+            chat_id: Chat ID.
+
+        Returns:
+            Chat if found (regardless of owner), None if not found.
+        """
+        result = await self._session.execute(
+            select(Chat).where(
+                and_(
+                    Chat.id == chat_id,
+                    Chat.deleted_at.is_(None),
+                )
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def list(
         self,
         user_id: str,

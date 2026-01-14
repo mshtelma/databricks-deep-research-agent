@@ -6,6 +6,7 @@ from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.models.message import Message, MessageRole
 
@@ -116,9 +117,10 @@ class MessageService:
         count_result = await self._session.execute(count_query)
         total = count_result.scalar() or 0
 
-        # Get messages ordered by creation time
+        # Get messages ordered by creation time, with research_session eager loaded
         query = (
             select(Message)
+            .options(selectinload(Message.research_session))
             .where(and_(*conditions))
             .order_by(Message.created_at.asc())
             .limit(limit)
@@ -228,7 +230,13 @@ class MessageService:
         messages = list(result.scalars().all())
 
         # Return in chronological order
+        # Handle both enum (MessageRole) and string role values from DB
+        # Filter out messages with no content (e.g., placeholder agent messages)
         return [
-            {"role": msg.role.value, "content": msg.content}
+            {
+                "role": msg.role.value if hasattr(msg.role, "value") else str(msg.role),
+                "content": msg.content or "",
+            }
             for msg in reversed(messages)
+            if msg.content  # Skip messages with NULL content
         ]

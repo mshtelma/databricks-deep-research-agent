@@ -3,6 +3,7 @@
 export type ChatStatus = 'active' | 'archived' | 'deleted'
 export type MessageRole = 'user' | 'agent' | 'system'
 export type ResearchDepth = 'auto' | 'light' | 'medium' | 'extended'
+export type QueryMode = 'simple' | 'web_search' | 'deep_research'
 export type ResearchStatus =
   | 'pending'
   | 'classifying'
@@ -31,6 +32,7 @@ export interface Message {
   content: string
   created_at: string
   is_edited: boolean
+  research_session?: ResearchSession | null
 }
 
 export interface Source {
@@ -85,6 +87,7 @@ export interface ResearchSession {
 export interface UserPreferences {
   system_instructions: string | null
   default_depth: ResearchDepth
+  default_query_mode: QueryMode
   ui_preferences: Record<string, unknown>
   updated_at: string
 }
@@ -123,19 +126,34 @@ export interface PaginatedResponse<T> {
 export type StreamEventType =
   | 'agent_started'
   | 'agent_completed'
+  | 'research_started'
   | 'clarification_needed'
   | 'plan_created'
   | 'step_started'
   | 'step_completed'
+  | 'tool_call'
+  | 'tool_result'
   | 'reflection_decision'
   | 'synthesis_started'
   | 'synthesis_progress'
   | 'research_completed'
   | 'error'
+  // Citation verification events
+  | 'claim_generated'
+  | 'claim_verified'
+  | 'citation_corrected'
+  | 'numeric_claim_detected'
+  | 'verification_summary'
+  // Stage 7 content revision event
+  | 'content_revised'
+  // Persistence events
+  | 'persistence_completed'
 
 export interface BaseStreamEvent {
   event_type: StreamEventType
   timestamp: string
+  /** Stable unique ID for React keys (added by useStreamingQuery) */
+  _eventId?: string
 }
 
 export interface AgentStartedEvent extends BaseStreamEvent {
@@ -148,6 +166,12 @@ export interface AgentCompletedEvent extends BaseStreamEvent {
   event_type: 'agent_completed'
   agent: string
   duration_ms: number
+}
+
+export interface ResearchStartedEvent extends BaseStreamEvent {
+  event_type: 'research_started'
+  message_id: string
+  research_session_id: string
 }
 
 export interface ClarificationNeededEvent extends BaseStreamEvent {
@@ -179,6 +203,20 @@ export interface StepCompletedEvent extends BaseStreamEvent {
   step_id: string
   observation_summary: string
   sources_found: number
+}
+
+export interface ToolCallEvent extends BaseStreamEvent {
+  event_type: 'tool_call'
+  tool_name: string // 'web_search' | 'web_crawl'
+  tool_args: Record<string, unknown>
+  call_number: number
+}
+
+export interface ToolResultEvent extends BaseStreamEvent {
+  event_type: 'tool_result'
+  tool_name: string
+  result_preview: string
+  sources_crawled: number
 }
 
 export interface ReflectionDecisionEvent extends BaseStreamEvent {
@@ -213,17 +251,70 @@ export interface StreamErrorEvent extends BaseStreamEvent {
   error_code: string
   error_message: string
   recoverable: boolean
+  /** Full Python traceback for debugging */
+  stack_trace?: string
+  /** Exception class name (e.g., "ValueError") */
+  error_type?: string
 }
+
+export interface PersistenceCompletedEvent extends BaseStreamEvent {
+  event_type: 'persistence_completed'
+  chat_id: string
+  message_id: string
+  research_session_id: string
+  chat_title: string
+  was_draft: boolean
+  counts: Record<string, number>
+}
+
+// Stage 7 content revision event - sent after verification retrieval applies softening
+export interface ContentRevisedEvent extends BaseStreamEvent {
+  event_type: 'content_revised'
+  content: string
+  revision_count: number
+}
+
+// Re-export citation stream events from citation types
+export type {
+  ClaimGeneratedEvent,
+  ClaimVerifiedEvent,
+  CitationCorrectedEvent,
+  NumericClaimDetectedEvent,
+  VerificationSummaryEvent,
+  CitationStreamEvent,
+} from './citation';
+
+// Import citation event types for use in StreamEvent union
+import type {
+  ClaimGeneratedEvent,
+  ClaimVerifiedEvent,
+  CitationCorrectedEvent,
+  NumericClaimDetectedEvent,
+  VerificationSummaryEvent,
+} from './citation';
 
 export type StreamEvent =
   | AgentStartedEvent
   | AgentCompletedEvent
+  | ResearchStartedEvent
   | ClarificationNeededEvent
   | PlanCreatedEvent
   | StepStartedEvent
   | StepCompletedEvent
+  | ToolCallEvent
+  | ToolResultEvent
   | ReflectionDecisionEvent
   | SynthesisStartedEvent
   | SynthesisProgressEvent
   | ResearchCompletedEvent
   | StreamErrorEvent
+  // Citation verification events
+  | ClaimGeneratedEvent
+  | ClaimVerifiedEvent
+  | CitationCorrectedEvent
+  | NumericClaimDetectedEvent
+  | VerificationSummaryEvent
+  // Stage 7 content revision event
+  | ContentRevisedEvent
+  // Persistence events
+  | PersistenceCompletedEvent

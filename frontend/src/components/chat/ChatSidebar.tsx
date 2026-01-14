@@ -3,11 +3,13 @@ import { Chat } from '@/types';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ChatSearchInput } from './ChatSearchInput';
+import { ActiveJobsIndicator } from '@/components/jobs/ActiveJobsIndicator';
 
 type StatusFilter = 'active' | 'archived' | 'all';
+type ChatListEntry = Chat & { isDraft?: boolean };
 
 interface ChatSidebarProps {
-  chats: Chat[];
+  chats: ChatListEntry[];
   currentChatId?: string;
   onSelectChat: (chatId: string) => void;
   onNewChat: () => void;
@@ -16,6 +18,10 @@ interface ChatSidebarProps {
   onRestoreChat?: (chatId: string) => void;
   onDeleteChat?: (chatId: string) => void;
   onExportChat?: (chatId: string) => void;
+  searchQuery: string;
+  onSearchQueryChange: (query: string) => void;
+  statusFilter: StatusFilter;
+  onStatusFilterChange: (status: StatusFilter) => void;
   isLoading?: boolean;
   className?: string;
 }
@@ -30,12 +36,13 @@ export function ChatSidebar({
   onRestoreChat,
   onDeleteChat,
   onExportChat,
+  searchQuery,
+  onSearchQueryChange,
+  statusFilter,
+  onStatusFilterChange,
   isLoading = false,
   className,
 }: ChatSidebarProps) {
-  const [searchQuery, setSearchQuery] = React.useState('');
-  const [statusFilter, setStatusFilter] = React.useState<StatusFilter>('active');
-
   // Filter chats by status and search query
   const filteredChats = React.useMemo(() => {
     return chats.filter((chat) => {
@@ -66,7 +73,7 @@ export function ChatSidebar({
 
         <ChatSearchInput
           value={searchQuery}
-          onChange={setSearchQuery}
+          onChange={onSearchQueryChange}
           placeholder="Search chats..."
         />
 
@@ -75,17 +82,17 @@ export function ChatSidebar({
           <StatusFilterTab
             label="Active"
             isActive={statusFilter === 'active'}
-            onClick={() => setStatusFilter('active')}
+            onClick={() => onStatusFilterChange('active')}
           />
           <StatusFilterTab
             label="Archived"
             isActive={statusFilter === 'archived'}
-            onClick={() => setStatusFilter('archived')}
+            onClick={() => onStatusFilterChange('archived')}
           />
           <StatusFilterTab
             label="All"
             isActive={statusFilter === 'all'}
-            onClick={() => setStatusFilter('all')}
+            onClick={() => onStatusFilterChange('all')}
           />
         </div>
       </div>
@@ -93,11 +100,11 @@ export function ChatSidebar({
       {/* Chat list */}
       <div data-testid="chat-list" className="flex-1 overflow-y-auto p-2 space-y-1">
         {isLoading ? (
-          <div className="p-4 text-center text-muted-foreground">
+          <div data-testid="chat-list-loading" className="p-4 text-center text-muted-foreground">
             Loading chats...
           </div>
         ) : filteredChats.length === 0 ? (
-          <div className="p-4 text-center text-muted-foreground">
+          <div data-testid="chat-list-empty" className="p-4 text-center text-muted-foreground">
             {searchQuery ? 'No matching chats' : statusFilter === 'archived' ? 'No archived chats' : 'No chats yet'}
           </div>
         ) : (
@@ -107,14 +114,29 @@ export function ChatSidebar({
               chat={chat}
               isSelected={chat.id === currentChatId}
               onClick={() => onSelectChat(chat.id)}
-              onRename={onRenameChat ? (title) => onRenameChat(chat.id, title) : undefined}
-              onArchive={onArchiveChat ? () => onArchiveChat(chat.id) : undefined}
-              onRestore={onRestoreChat ? () => onRestoreChat(chat.id) : undefined}
-              onDelete={onDeleteChat ? () => onDeleteChat(chat.id) : undefined}
-              onExport={onExportChat ? () => onExportChat(chat.id) : undefined}
+              onRename={
+                !chat.isDraft && onRenameChat ? (title) => onRenameChat(chat.id, title) : undefined
+              }
+              onArchive={
+                !chat.isDraft && onArchiveChat ? () => onArchiveChat(chat.id) : undefined
+              }
+              onRestore={
+                !chat.isDraft && onRestoreChat ? () => onRestoreChat(chat.id) : undefined
+              }
+              onDelete={
+                !chat.isDraft && onDeleteChat ? () => onDeleteChat(chat.id) : undefined
+              }
+              onExport={
+                !chat.isDraft && onExportChat ? () => onExportChat(chat.id) : undefined
+              }
             />
           ))
         )}
+      </div>
+
+      {/* Active Jobs Indicator - shown at bottom of sidebar */}
+      <div className="p-2 border-t">
+        <ActiveJobsIndicator onNavigateToChat={onSelectChat} />
       </div>
     </aside>
   );
@@ -130,6 +152,7 @@ function StatusFilterTab({ label, isActive, onClick }: StatusFilterTabProps) {
   return (
     <button
       type="button"
+      data-testid={`status-filter-${label.toLowerCase()}`}
       onClick={onClick}
       className={cn(
         'flex-1 px-2 py-1 text-xs font-medium rounded transition-colors',
@@ -144,7 +167,7 @@ function StatusFilterTab({ label, isActive, onClick }: StatusFilterTabProps) {
 }
 
 interface ChatListItemProps {
-  chat: Chat;
+  chat: ChatListEntry;
   isSelected: boolean;
   onClick: () => void;
   onRename?: (newTitle: string) => void;
@@ -204,6 +227,7 @@ function ChatListItem({
   };
 
   const isArchived = chat.status === 'archived';
+  const isDraft = !!chat.isDraft;
 
   return (
     <div className="relative group">
@@ -226,6 +250,11 @@ function ChatListItem({
           <span className="text-xs text-muted-foreground">
             {new Date(chat.updated_at).toLocaleDateString()}
           </span>
+          {isDraft && (
+            <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+              Draft
+            </span>
+          )}
           {isArchived && (
             <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
               Archived
@@ -235,26 +264,29 @@ function ChatListItem({
       </button>
 
       {/* Context menu trigger */}
-      <button
-        ref={buttonRef}
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          setShowMenu(!showMenu);
-        }}
-        className={cn(
-          'absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded',
-          'opacity-0 group-hover:opacity-100 focus:opacity-100',
-          'hover:bg-accent text-muted-foreground hover:text-foreground',
-          'transition-opacity'
-        )}
-        aria-label="Chat options"
-        aria-haspopup="menu"
-        aria-expanded={showMenu}
-        aria-controls={`chat-menu-${chat.id}`}
-      >
-        <MoreIcon className="w-4 h-4" />
-      </button>
+      {!isDraft && (
+        <button
+          ref={buttonRef}
+          type="button"
+          data-testid={`chat-menu-trigger-${chat.id}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowMenu(!showMenu);
+          }}
+          className={cn(
+            'absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded',
+            'opacity-0 group-hover:opacity-100 focus:opacity-100',
+            'hover:bg-accent text-muted-foreground hover:text-foreground',
+            'transition-opacity'
+          )}
+          aria-label="Chat options"
+          aria-haspopup="menu"
+          aria-expanded={showMenu}
+          aria-controls={`chat-menu-${chat.id}`}
+        >
+          <MoreIcon className="w-4 h-4" />
+        </button>
+      )}
 
       {/* Context menu */}
       {showMenu && (
@@ -271,6 +303,7 @@ function ChatListItem({
         >
           {onRename && (
             <ContextMenuItem
+              data-testid="chat-action-rename"
               icon={<EditIcon className="w-4 h-4" />}
               label="Rename"
               onClick={() => {
@@ -285,6 +318,7 @@ function ChatListItem({
           )}
           {onExport && (
             <ContextMenuItem
+              data-testid="chat-action-export"
               icon={<ExportIcon className="w-4 h-4" />}
               label="Export"
               onClick={() => handleMenuAction(onExport)}
@@ -293,6 +327,7 @@ function ChatListItem({
           {isArchived ? (
             onRestore && (
               <ContextMenuItem
+                data-testid="chat-action-restore"
                 icon={<RestoreIcon className="w-4 h-4" />}
                 label="Unarchive"
                 onClick={() => handleMenuAction(onRestore)}
@@ -301,6 +336,7 @@ function ChatListItem({
           ) : (
             onArchive && (
               <ContextMenuItem
+                data-testid="chat-action-archive"
                 icon={<ArchiveIcon className="w-4 h-4" />}
                 label="Archive"
                 onClick={() => handleMenuAction(onArchive)}
@@ -311,6 +347,7 @@ function ChatListItem({
             <>
               <div className="my-1 h-px bg-border" />
               <ContextMenuItem
+                data-testid="chat-action-delete"
                 icon={<TrashIcon className="w-4 h-4" />}
                 label="Delete"
                 onClick={() => handleMenuAction(onDelete)}
@@ -329,12 +366,14 @@ interface ContextMenuItemProps {
   label: string;
   onClick: () => void;
   variant?: 'default' | 'destructive';
+  'data-testid'?: string;
 }
 
-function ContextMenuItem({ icon, label, onClick, variant = 'default' }: ContextMenuItemProps) {
+function ContextMenuItem({ icon, label, onClick, variant = 'default', 'data-testid': dataTestId }: ContextMenuItemProps) {
   return (
     <button
       type="button"
+      data-testid={dataTestId}
       onClick={onClick}
       className={cn(
         'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm',

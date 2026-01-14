@@ -3,7 +3,9 @@
 from collections.abc import AsyncGenerator
 
 import mlflow
+from mlflow.entities import SpanType
 
+from src.agent.config import get_report_limits, get_synthesizer_config
 from src.agent.prompts.synthesizer import (
     STREAMING_SYNTHESIZER_SYSTEM_PROMPT,
     SYNTHESIZER_SYSTEM_PROMPT,
@@ -12,13 +14,13 @@ from src.agent.prompts.synthesizer import (
 from src.agent.prompts.utils import build_system_prompt
 from src.agent.state import ResearchState
 from src.core.logging_utils import get_logger, truncate
+from src.core.tracing_constants import PHASE_SYNTHESIS, research_span_name
 from src.services.llm.client import LLMClient
 from src.services.llm.types import ModelTier
 
 logger = get_logger(__name__)
 
 
-@mlflow.trace(name="synthesizer", span_type="AGENT")
 async def run_synthesizer(state: ResearchState, llm: LLMClient) -> ResearchState:
     """Run the Synthesizer agent to create final report.
 
@@ -29,88 +31,104 @@ async def run_synthesizer(state: ResearchState, llm: LLMClient) -> ResearchState
     Returns:
         Updated state with final report.
     """
-    logger.info(
-        "SYNTHESIZER_START",
-        observations=len(state.all_observations),
-        sources=len(state.sources),
-        query=truncate(state.query, 60),
-    )
+    span_name = research_span_name(PHASE_SYNTHESIS, "synthesizer")
 
-    # Format observations
-    observations_str = ""
-    if state.all_observations:
-        observations_str = "\n\n---\n\n".join(
-            f"**Observation {i + 1}:**\n{obs}" for i, obs in enumerate(state.all_observations)
-        )
-    else:
-        observations_str = "(No research observations available)"
-
-    # Format sources
-    sources_list = ""
-    for i, source in enumerate(state.sources[:20]):  # Limit to 20 sources
-        title = source.title or "Untitled"
-        sources_list += f"[{i + 1}] {title}\n    URL: {source.url}\n"
-        if source.snippet:
-            sources_list += f"    Snippet: {source.snippet[:200]}...\n"
-
-    # Calculate research stats
-    steps_executed = sum(
-        1 for s in (state.current_plan.steps if state.current_plan else [])
-        if s.status.value in ("completed", "skipped")
-    )
-
-    # Determine research depth label
-    depth_label = "medium"
-    if state.query_classification:
-        depth_label = state.query_classification.recommended_depth
-
-    # Build system prompt with user's custom instructions if available
-    system_prompt = build_system_prompt(
-        SYNTHESIZER_SYSTEM_PROMPT,
-        state.system_instructions,
-    )
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {
-            "role": "user",
-            "content": SYNTHESIZER_USER_PROMPT.format(
-                query=state.query,
-                research_depth=depth_label,
-                plan_iterations=state.plan_iterations,
-                steps_executed=steps_executed,
-                sources_count=len(state.sources),
-                all_observations=observations_str,
-                sources_list=sources_list or "(No sources collected)",
-            ),
-        },
-    ]
-
-    try:
-        response = await llm.complete(
-            messages=messages,
-            tier=ModelTier.COMPLEX,
-            max_tokens=4000,
-        )
-
-        state.complete(response.content)
+    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
         logger.info(
-            "SYNTHESIZER_COMPLETE",
-            report_len=len(response.content),
-            report_preview=truncate(response.content, 150),
+            "SYNTHESIZER_START",
+            observations=len(state.all_observations),
+            sources=len(state.sources),
+            query=truncate(state.query, 60),
         )
 
-    except Exception as e:
-        logger.error(
-            "SYNTHESIZER_ERROR",
-            error_type=type(e).__name__,
-            error=str(e)[:200],
-        )
-        # Fallback: use collected observations
-        fallback_report = f"## Research Summary\n\n{observations_str}"
-        state.complete(fallback_report)
+        # Format observations
+        observations_str = ""
+        if state.all_observations:
+            observations_str = "\n\n---\n\n".join(
+                f"**Observation {i + 1}:**\n{obs}" for i, obs in enumerate(state.all_observations)
+            )
+        else:
+            observations_str = "(No research observations available)"
 
-    return state
+        # Format sources
+        sources_list = ""
+        for i, source in enumerate(state.sources[:20]):  # Limit to 20 sources
+            title = source.title or "Untitled"
+            sources_list += f"[{i + 1}] {title}\n    URL: {source.url}\n"
+            if source.snippet:
+                sources_list += f"    Snippet: {source.snippet[:200]}...\n"
+
+        # Calculate research stats
+        steps_executed = sum(
+            1 for s in (state.current_plan.steps if state.current_plan else [])
+            if s.status.value in ("completed", "skipped")
+        )
+
+        # Get effective research depth from state
+        depth_label = state.resolve_depth()
+
+        # Get word count and token limits from centralized research_types config
+        limits = get_report_limits(depth_label)
+        min_words = limits.min_words
+        max_words = limits.max_words
+        max_tokens = limits.max_tokens
+
+        # Build system prompt with user's custom instructions if available
+        system_prompt = build_system_prompt(
+            SYNTHESIZER_SYSTEM_PROMPT,
+            state.system_instructions,
+        )
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": SYNTHESIZER_USER_PROMPT.format(
+                    query=state.query,
+                    research_depth=depth_label,
+                    plan_iterations=state.plan_iterations,
+                    steps_executed=steps_executed,
+                    sources_count=len(state.sources),
+                    all_observations=observations_str,
+                    sources_list=sources_list or "(No sources collected)",
+                    min_words=min_words,
+                    max_words=max_words,
+                ),
+            },
+        ]
+
+        try:
+            response = await llm.complete(
+                messages=messages,
+                tier=ModelTier.COMPLEX,
+                max_tokens=max_tokens,
+            )
+
+            state.complete(response.content)
+            logger.info(
+                "SYNTHESIZER_COMPLETE",
+                report_len=len(response.content),
+                report_preview=truncate(response.content, 150),
+            )
+
+            # Add span attributes
+            span.set_attributes({
+                "observations_count": len(state.all_observations),
+                "sources_count": len(state.sources),
+                "report_length": len(response.content),
+            })
+
+        except Exception as e:
+            logger.error(
+                "SYNTHESIZER_ERROR",
+                error_type=type(e).__name__,
+                error=str(e)[:200],
+            )
+            # Fallback: use collected observations
+            fallback_report = f"## Research Summary\n\n{observations_str}"
+            state.complete(fallback_report)
+
+        return state
 
 
 async def stream_synthesis(state: ResearchState, llm: LLMClient) -> AsyncGenerator[str, None]:
@@ -142,9 +160,20 @@ async def stream_synthesis(state: ResearchState, llm: LLMClient) -> AsyncGenerat
         title = source.title or "Untitled"
         sources_list += f"- [{title}]({source.url})\n"
 
+    # Get effective research depth from state
+    depth_label = state.resolve_depth()
+
+    # Get word count and token limits from centralized research_types config
+    limits = get_report_limits(depth_label)
+    min_words = limits.min_words
+    max_words = limits.max_words
+    max_tokens = limits.max_tokens
+
     # Build system prompt with user's custom instructions if available
     system_prompt = build_system_prompt(
-        STREAMING_SYNTHESIZER_SYSTEM_PROMPT,
+        STREAMING_SYNTHESIZER_SYSTEM_PROMPT.format(
+            min_words=min_words, max_words=max_words
+        ),
         state.system_instructions,
     )
 
@@ -152,7 +181,7 @@ async def stream_synthesis(state: ResearchState, llm: LLMClient) -> AsyncGenerat
         {"role": "system", "content": system_prompt},
         {
             "role": "user",
-            "content": f"""Create a comprehensive research report.
+            "content": f"""Create a research report in {min_words}-{max_words} words.
 
 ## Query
 {state.query}
@@ -163,7 +192,7 @@ async def stream_synthesis(state: ResearchState, llm: LLMClient) -> AsyncGenerat
 ## Available Sources
 {sources_list}
 
-Provide a well-structured markdown response with inline citations.""",
+Be concise. Cite inline as [Title](url).""",
         },
     ]
 
@@ -172,7 +201,7 @@ Provide a well-structured markdown response with inline citations.""",
         async for chunk in llm.stream(
             messages=messages,
             tier=ModelTier.COMPLEX,
-            max_tokens=4000,
+            max_tokens=max_tokens,
         ):
             full_content += chunk
             yield chunk

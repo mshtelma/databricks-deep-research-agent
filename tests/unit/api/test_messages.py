@@ -166,8 +166,8 @@ class TestSendMessage:
 
             assert response.status_code == 201
             data = response.json()
-            assert "user_message" in data
-            assert "research_session_id" in data
+            assert "userMessage" in data
+            assert "researchSessionId" in data
 
     def test_send_message_empty_content(self, client: TestClient):
         """Test sending a message with empty content is rejected."""
@@ -249,8 +249,8 @@ class TestEditMessage:
 
             assert response.status_code == 200
             data = response.json()
-            assert data["message"]["is_edited"] is True
-            assert data["removed_message_count"] == 2
+            assert data["message"]["isEdited"] is True
+            assert data["removedMessageCount"] == 2
 
     def test_edit_nonexistent_message(self, client: TestClient):
         """Test editing a message that doesn't exist."""
@@ -316,8 +316,8 @@ class TestRegenerateMessage:
 
             assert response.status_code == 201
             data = response.json()
-            assert "new_message_id" in data
-            assert "research_session_id" in data
+            assert "newMessageId" in data
+            assert "researchSessionId" in data
 
     def test_regenerate_nonexistent_message(self, client: TestClient):
         """Test regenerating a message that doesn't exist."""
@@ -343,15 +343,44 @@ class TestSubmitFeedback:
         self, client: TestClient, mock_agent_message: Message
     ):
         """Test submitting positive feedback."""
+        from datetime import UTC, datetime
+
+        from src.models.message_feedback import FeedbackRating, MessageFeedback
+
         chat_id = mock_agent_message.chat_id
         message_id = mock_agent_message.id
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(
+        # Create mock chat for ownership verification
+        mock_chat = MagicMock()
+        mock_chat.id = chat_id
+
+        # Create mock feedback
+        mock_feedback = MagicMock(spec=MessageFeedback)
+        mock_feedback.id = uuid4()
+        mock_feedback.message_id = message_id
+        mock_feedback.rating = FeedbackRating.POSITIVE
+        mock_feedback.feedback_text = None
+        mock_feedback.feedback_category = None
+        mock_feedback.created_at = datetime.now(UTC)
+
+        with (
+            patch("src.api.v1.messages.MessageService") as MockMessageService,
+            patch("src.api.v1.messages.ChatService") as MockChatService,
+            patch("src.api.v1.messages.FeedbackService") as MockFeedbackService,
+        ):
+            mock_message_service = MagicMock()
+            mock_message_service.get_with_chat = AsyncMock(
                 return_value=mock_agent_message
             )
-            MockService.return_value = mock_service
+            MockMessageService.return_value = mock_message_service
+
+            mock_chat_service = MagicMock()
+            mock_chat_service.get = AsyncMock(return_value=mock_chat)
+            MockChatService.return_value = mock_chat_service
+
+            mock_feedback_service = MagicMock()
+            mock_feedback_service.create_feedback = AsyncMock(return_value=mock_feedback)
+            MockFeedbackService.return_value = mock_feedback_service
 
             response = client.post(
                 f"/api/v1/chats/{chat_id}/messages/{message_id}/feedback",
@@ -361,21 +390,50 @@ class TestSubmitFeedback:
             assert response.status_code == 201
             data = response.json()
             assert data["rating"] == "positive"
-            assert data["message_id"] == str(message_id)
+            assert data["messageId"] == str(message_id)
 
     def test_submit_negative_feedback_with_report(
         self, client: TestClient, mock_agent_message: Message
     ):
         """Test submitting negative feedback with error report."""
+        from datetime import UTC, datetime
+
+        from src.models.message_feedback import FeedbackRating, MessageFeedback
+
         chat_id = mock_agent_message.chat_id
         message_id = mock_agent_message.id
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(
+        # Create mock chat for ownership verification
+        mock_chat = MagicMock()
+        mock_chat.id = chat_id
+
+        # Create mock feedback
+        mock_feedback = MagicMock(spec=MessageFeedback)
+        mock_feedback.id = uuid4()
+        mock_feedback.message_id = message_id
+        mock_feedback.rating = FeedbackRating.NEGATIVE
+        mock_feedback.feedback_text = "The dates mentioned are incorrect"
+        mock_feedback.feedback_category = None
+        mock_feedback.created_at = datetime.now(UTC)
+
+        with (
+            patch("src.api.v1.messages.MessageService") as MockMessageService,
+            patch("src.api.v1.messages.ChatService") as MockChatService,
+            patch("src.api.v1.messages.FeedbackService") as MockFeedbackService,
+        ):
+            mock_message_service = MagicMock()
+            mock_message_service.get_with_chat = AsyncMock(
                 return_value=mock_agent_message
             )
-            MockService.return_value = mock_service
+            MockMessageService.return_value = mock_message_service
+
+            mock_chat_service = MagicMock()
+            mock_chat_service.get = AsyncMock(return_value=mock_chat)
+            MockChatService.return_value = mock_chat_service
+
+            mock_feedback_service = MagicMock()
+            mock_feedback_service.create_feedback = AsyncMock(return_value=mock_feedback)
+            MockFeedbackService.return_value = mock_feedback_service
 
             response = client.post(
                 f"/api/v1/chats/{chat_id}/messages/{message_id}/feedback",
@@ -388,17 +446,28 @@ class TestSubmitFeedback:
             assert response.status_code == 201
             data = response.json()
             assert data["rating"] == "negative"
-            assert data["feedback_text"] is not None
+            assert data["feedbackText"] is not None
 
     def test_submit_feedback_nonexistent_message(self, client: TestClient):
         """Test submitting feedback for a message that doesn't exist."""
         chat_id = uuid4()
         message_id = uuid4()
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(return_value=None)
-            MockService.return_value = mock_service
+        # Create mock chat for ownership verification
+        mock_chat = MagicMock()
+        mock_chat.id = chat_id
+
+        with (
+            patch("src.api.v1.messages.MessageService") as MockMessageService,
+            patch("src.api.v1.messages.ChatService") as MockChatService,
+        ):
+            mock_message_service = MagicMock()
+            mock_message_service.get_with_chat = AsyncMock(return_value=None)
+            MockMessageService.return_value = mock_message_service
+
+            mock_chat_service = MagicMock()
+            mock_chat_service.get = AsyncMock(return_value=mock_chat)
+            MockChatService.return_value = mock_chat_service
 
             response = client.post(
                 f"/api/v1/chats/{chat_id}/messages/{message_id}/feedback",

@@ -26,10 +26,28 @@ export class ChatPage {
   }
 
   /**
-   * Navigate to the chat page.
+   * Navigate to the chat page and wait for it to be ready.
    */
   async goto(): Promise<void> {
     await this.page.goto('/');
+    await this.waitForReady();
+  }
+
+  /**
+   * Wait for the chat page to be fully loaded and ready for interaction.
+   * This means the message input is visible and enabled (not loading).
+   */
+  async waitForReady(timeout: number = 30000): Promise<void> {
+    // Wait for message input to be visible
+    await this.messageInput.waitFor({ state: 'visible', timeout });
+    // Wait for input to be enabled (not disabled during loading)
+    await this.page.waitForFunction(
+      () => {
+        const input = document.querySelector('[data-testid="message-input"]');
+        return input && !input.hasAttribute('disabled');
+      },
+      { timeout }
+    );
   }
 
   /**
@@ -38,26 +56,94 @@ export class ChatPage {
    */
   async sendMessage(text: string): Promise<void> {
     await this.messageInput.fill(text);
+    // Wait for Send button to become enabled (React state update)
+    await this.page.waitForFunction(
+      () => {
+        const button = document.querySelector('[data-testid="send-button"]');
+        return button && !button.hasAttribute('disabled');
+      },
+      { timeout: 5000 }
+    );
     await this.sendButton.click();
   }
 
   /**
    * Wait for the agent to complete its response.
    * @param timeout Maximum wait time in milliseconds (default: 120000 = 2 minutes)
+   *
+   * NOTE: The loading indicator shows during the ENTIRE research phase (before synthesis).
+   * We need to wait for EITHER the loading/streaming indicators to hide OR for an
+   * agent-response to appear (which indicates completion).
    */
   async waitForAgentResponse(timeout: number = 120000): Promise<void> {
-    // Wait for loading indicator to disappear
-    await expect(this.loadingIndicator).toBeHidden({ timeout });
+    // Strategy: Two-phase polling
+    // Phase 1: Wait for research to START (loading or streaming indicator appears)
+    // Phase 2: Wait for research to COMPLETE (agent response appears)
 
-    // Wait for streaming indicator to disappear (if present)
-    try {
-      await expect(this.streamingIndicator).toBeHidden({ timeout });
-    } catch {
-      // Streaming indicator might not be present for simple queries
+    const agentResponse = this.page.getByTestId('agent-response').first();
+    const startTime = Date.now();
+    const pollInterval = 1000; // Check every second
+
+    // PHASE 1: Wait for research to start
+    // At the beginning, both loading and streaming indicators may be hidden.
+    // We need to wait for one of them to appear, OR for an early response.
+    let researchStarted = false;
+    while (Date.now() - startTime < timeout && !researchStarted) {
+      // Check if agent response already exists (maybe cached or very fast)
+      const responseVisible = await agentResponse.isVisible().catch(() => false);
+      if (responseVisible) {
+        return; // Success! Response already appeared
+      }
+
+      // Check if research has started (either indicator visible)
+      const loadingVisible = await this.loadingIndicator.isVisible().catch(() => false);
+      const streamingVisible = await this.streamingIndicator.isVisible().catch(() => false);
+
+      if (loadingVisible || streamingVisible) {
+        researchStarted = true;
+        break;
+      }
+
+      // Wait a bit before checking again
+      await this.page.waitForTimeout(pollInterval);
     }
 
-    // Verify at least one agent response exists
-    await expect(this.page.getByTestId('agent-response').first()).toBeVisible({ timeout });
+    // PHASE 2: Wait for research to complete
+    // Now poll until agent response appears, or indicators disappear after having been visible
+    while (Date.now() - startTime < timeout) {
+      // Check if agent response exists
+      const responseVisible = await agentResponse.isVisible().catch(() => false);
+      if (responseVisible) {
+        return; // Success! Agent response appeared
+      }
+
+      // Check current indicator state
+      const loadingVisible = await this.loadingIndicator.isVisible().catch(() => false);
+      const streamingVisible = await this.streamingIndicator.isVisible().catch(() => false);
+
+      // If research started but now both indicators are hidden, check for response
+      if (researchStarted && !loadingVisible && !streamingVisible) {
+        // Both indicators hidden after research started - check for response
+        const finalCheck = await agentResponse.isVisible().catch(() => false);
+        if (finalCheck) {
+          return;
+        }
+        // Wait a bit more for potential late response (DOM update lag)
+        await this.page.waitForTimeout(2000);
+        const lastCheck = await agentResponse.isVisible().catch(() => false);
+        if (lastCheck) {
+          return;
+        }
+        // Still no response after indicators gone - might be a failure, but don't break
+        // Keep polling in case of a slow DOM update
+      }
+
+      // Still waiting - sleep before next poll
+      await this.page.waitForTimeout(pollInterval);
+    }
+
+    // Final assertion - if we get here, either timeout or unexpected state
+    await expect(agentResponse).toBeVisible({ timeout: 5000 });
   }
 
   /**
@@ -160,5 +246,42 @@ export class ChatPage {
   async getCitationCount(): Promise<number> {
     const citations = this.page.getByTestId('citation');
     return citations.count();
+  }
+
+  /**
+   * Select a research depth option.
+   * @param depth The depth level: 'auto' | 'light' | 'medium' | 'extended'
+   */
+  async selectResearchDepth(depth: 'auto' | 'light' | 'medium' | 'extended'): Promise<void> {
+    const depthLabels: Record<string, string> = {
+      auto: 'Auto',
+      light: 'Light',
+      medium: 'Medium',
+      extended: 'Extended',
+    };
+    const depthButton = this.page.getByRole('button', { name: depthLabels[depth] });
+    await depthButton.click();
+  }
+
+  /**
+   * Select a query mode.
+   * @param mode The query mode: 'simple' | 'web_search' | 'deep_research'
+   */
+  async selectQueryMode(mode: 'simple' | 'web_search' | 'deep_research'): Promise<void> {
+    const modeButton = this.page.getByTestId(`mode-${mode}`);
+    await modeButton.click();
+  }
+
+  /**
+   * Send a message with a specific query mode.
+   * @param text The message text to send
+   * @param mode The query mode to use
+   */
+  async sendMessageWithMode(
+    text: string,
+    mode: 'simple' | 'web_search' | 'deep_research'
+  ): Promise<void> {
+    await this.selectQueryMode(mode);
+    await this.sendMessage(text);
   }
 }

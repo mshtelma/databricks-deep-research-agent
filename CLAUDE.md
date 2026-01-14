@@ -1,6 +1,6 @@
 # Deep Research Agent Development Guidelines
 
-Auto-generated from feature plans. Last updated: 2025-12-21
+Auto-generated from feature plans. Last updated: 2026-01-06
 
 ## Project Overview
 
@@ -20,6 +20,9 @@ Deep research agent with **5-agent architecture** (Coordinator, Planner, Researc
 - Mocked (unit tests), Real PostgreSQL/Lakebase (integration tests optional) (001-deep-research-agent)
 - Python 3.11+ + PyYAML, Pydantic v2, FastAPI (001-deep-research-agent)
 - YAML file (`config/app.yaml`), Pydantic models for validation (001-deep-research-agent)
+- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, AsyncOpenAI, Pydantic v2, React 18, TanStack Query (003-claim-level-citations)
+- Databricks Lakebase (PostgreSQL) via asyncpg, existing schema extensions (003-claim-level-citations)
+- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, Pydantic v2, React 18, TanStack Query, Tailwind CSS (004-tiered-query-modes)
 
 | Component | Technology | Version |
 |-----------|------------|---------|
@@ -83,7 +86,19 @@ e2e/                            # Playwright E2E tests (full-stack)
 ├── fixtures/                   # Test fixtures
 └── playwright.config.ts
 
-tests/                          # Python unit tests
+tests/                          # Python backend tests (3-tier architecture)
+├── unit/                       # Fast tests with mocks (no credentials needed)
+│   ├── agent/
+│   ├── api/
+│   └── services/
+├── integration/                # Real LLM/Brave tests (uses config/app.test.yaml)
+│   ├── conftest.py            # Shared fixtures, test config
+│   ├── test_e2e_research.py
+│   └── test_citation_pipeline.py
+└── complex/                    # Long-running tests (uses production config)
+    ├── conftest.py
+    └── test_complex_research.py
+
 static/                         # Built frontend (gitignored, created by `make build`)
 ```
 
@@ -92,13 +107,19 @@ static/                         # Built frontend (gitignored, created by `make b
 ## Commands
 
 ```bash
-# Development (two terminals)
-make dev                         # Terminal 1: Backend with hot reload (:8000)
-make dev-frontend                # Terminal 2: Frontend with hot reload (:5173)
+# Development (single command - runs both backend and frontend)
+make dev                         # Backend (:8000) + Frontend (:5173) → UI at localhost:5173
+make dev-backend                 # Backend only (:8000)
+make dev-frontend                # Frontend only (:5173)
 
 # Production build
 make build                       # Build frontend to static/
 make prod                        # Run unified server on :8000
+
+# Log files (auto-created by make dev/prod)
+# /tmp/deep-research-dev.log     # Dev server logs
+# /tmp/deep-research-prod.log    # Prod server logs
+tail -f /tmp/deep-research-dev.log  # Monitor logs in real-time
 
 # E2E Testing (single command!)
 make e2e                         # Build + start server + run Playwright tests
@@ -107,14 +128,158 @@ make e2e-ui                      # Run E2E tests with Playwright UI
 # Quality checks
 make typecheck                   # Type check backend + frontend
 make lint                        # Lint backend + frontend
-make test                        # Run Python tests
-make test-frontend               # Run frontend tests
+
+# Testing (3-tier architecture)
+make test                        # Unit tests only (fast, no credentials)
+make test-integration            # Integration tests (real LLM/Brave, test config)
+make test-complex                # Complex long-running tests (production config)
+make test-all                    # All Python + Frontend tests
+make test-frontend               # Run frontend tests only
+
+# Direct pytest with markers
+uv run pytest -m "unit"          # Unit tests
+uv run pytest -m "integration"   # Integration tests
+uv run pytest -m "complex"       # Complex tests
 
 # Individual tools (if needed)
 uv run mypy src --strict
 uv run ruff check src
 cd frontend && npm run typecheck
 ```
+
+## Databricks Apps Deployment
+
+### Full Deployment (One Command)
+
+```bash
+# Deploy to dev workspace (builds, migrates, grants permissions, starts app)
+make deploy TARGET=dev BRAVE_SCOPE=msh
+
+# Deploy to AIS workspace
+make deploy TARGET=ais
+
+# What deploy does (8 steps):
+# 1. Build frontend (npm run build)
+# 2. Generate requirements.txt from pyproject.toml
+# 3. Deploy bundle with postgres DB (bootstrap phase)
+# 4. Wait for Lakebase instance to be ready (~30-60s for new instances)
+# 5. Create deep_research database
+# 6. Re-deploy bundle with deep_research DB
+# 7. Run migrations with developer credentials
+# 8. Grant table permissions to app's service principal
+# 9. Start app and show deployment summary
+```
+
+### Operations Commands
+
+```bash
+# Download app logs (via /logz/batch REST API)
+make logs TARGET=dev                         # Fetch logs once
+make logs TARGET=dev FOLLOW=-f               # Follow logs (poll every 5s)
+make logs TARGET=dev SEARCH="--search ERROR" # Filter logs by term
+make logs TARGET=ais FOLLOW=-f               # Follow AIS logs
+
+# Restart app (after config changes)
+databricks bundle run -t dev deep_research_agent
+databricks bundle run -t ais deep_research_agent
+
+# Check deployment status
+databricks bundle summary -t dev
+databricks bundle summary -t ais
+
+# Run migrations manually (usually automatic via deploy)
+make db-migrate-remote TARGET=dev
+make db-migrate-remote TARGET=ais
+
+# Grant permissions manually (usually automatic via deploy)
+./scripts/grant-app-permissions.sh "deep-research-lakebase-dre-dev" "e2-demo-west" "deep_research" "deep-research-agent-dre-dev"
+```
+
+### Two-Phase Deployment Architecture
+
+**Problem**: Chicken-and-egg scenario with Lakebase
+1. App needs `LAKEBASE_DATABASE` environment variable
+2. But database doesn't exist until Lakebase instance is created
+3. Lakebase instance is created by bundle deploy
+
+**Solution**: Two-phase deployment
+1. **Phase 1 (Bootstrap)**: Deploy with `postgres` database (always exists in PostgreSQL)
+2. Wait for Lakebase, create `deep_research` database via `scripts/create-database.sh`
+3. **Phase 2 (Complete)**: Re-deploy with `deep_research` as the configured database
+
+### Permission Model (Why GRANT Statements Are Needed)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Permission Problem                                              │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Developer runs migrations → Tables owned by developer       │
+│  2. App has CAN_CONNECT_AND_CREATE on database                  │
+│  3. CAN_CONNECT_AND_CREATE ≠ SELECT/INSERT/UPDATE/DELETE        │
+│  4. App service principal cannot access tables it doesn't own   │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Solution: Post-Migration GRANT Statements                      │
+├─────────────────────────────────────────────────────────────────┤
+│  GRANT ALL ON ALL TABLES IN SCHEMA public TO <app_sp>;          │
+│  GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO <app_sp>;       │
+│  ALTER DEFAULT PRIVILEGES ... GRANT ALL ON TABLES TO <app_sp>;  │
+│  ALTER DEFAULT PRIVILEGES ... GRANT ALL ON SEQUENCES TO <app_sp>│
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key files**:
+- `src/db/grant_permissions.py` - Python module to grant table permissions
+- `scripts/grant-app-permissions.sh` - Shell wrapper for the grant script
+- `scripts/create-database.sh` - Create deep_research database
+- `scripts/wait-for-lakebase.sh` - Wait for Lakebase to be connectable
+
+### Lakebase Authentication Flow
+
+```
+Developer Machine                    Databricks Profile              Lakebase Instance
+       │                                    │                              │
+       │ 1. Run migrations                  │                              │
+       │    DATABRICKS_CONFIG_PROFILE=...   │                              │
+       ├───────────────────────────────────>│                              │
+       │                                    │ 2. Get OAuth token           │
+       │                                    │    via generate_database_    │
+       │                                    │    credential()              │
+       │                                    ├─────────────────────────────>│
+       │                                    │                              │
+       │ 3. Connect with OAuth token        │                              │
+       │    user="token", pass=<oauth>      │                              │
+       ├──────────────────────────────────────────────────────────────────>│
+       │                                    │                              │
+       │ 4. Create tables (owned by dev)    │                              │
+       ├──────────────────────────────────────────────────────────────────>│
+       │                                    │                              │
+       │ 5. GRANT permissions to app SP     │                              │
+       ├──────────────────────────────────────────────────────────────────>│
+       │                                    │                              │
+       │                                    │     App Service Principal    │
+       │                                    │            │                 │
+       │                                    │ 6. App connects with its     │
+       │                                    │    own OAuth token           │
+       │                                    │            ├────────────────>│
+       │                                    │            │                 │
+       │                                    │ 7. SELECT/INSERT/UPDATE/     │
+       │                                    │    DELETE now works!         │
+       │                                    │            ├────────────────>│
+```
+
+**Token characteristics**:
+- OAuth tokens have 1-hour lifetime with 5-minute refresh buffer
+- Username is always `"token"` for OAuth connections
+- Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
+
+### Profile to Workspace Mapping
+
+| TARGET | Profile | Workspace |
+|--------|---------|-----------|
+| dev | e2-demo-west | E2 Demo West |
+| ais | ais | AIS Production |
 
 ## Constitution Principles (MUST FOLLOW)
 
@@ -156,8 +321,9 @@ cd frontend && npm run typecheck
 ## Key Files
 
 - `config/app.yaml` - Central configuration (endpoints, models, agents, search)
+- `config/app.test.yaml` - Test-specific config (minimal iterations, fast models)
 - `config/app.example.yaml` - Documented example configuration
-- `src/core/app_config.py` - Pydantic configuration models
+- `src/core/app_config.py` - Pydantic configuration models (supports APP_CONFIG_PATH env var)
 - `specs/001-deep-research-agent/spec.md` - Feature specification
 - `specs/001-deep-research-agent/plan.md` - Implementation plan
 - `specs/001-deep-research-agent/data-model.md` - Entity definitions
@@ -207,6 +373,57 @@ search:
   brave:
     requests_per_second: 1.0
     default_result_count: 10
+```
+
+### Research Type Profiles (FR-100)
+
+Research types (light, medium, extended) are configured in `research_types` section:
+
+```yaml
+research_types:
+  light:
+    steps:
+      min: 1
+      max: 3
+      prompt_guidance: "Quick overview with 1-3 focused steps."
+    report_limits:
+      min_words: 800
+      max_words: 1200
+      max_tokens: 2000
+    researcher:
+      mode: classic  # "react" or "classic"
+      max_search_queries: 2
+      max_urls_to_crawl: 3
+      max_tool_calls: 8
+    citation_verification:
+      generation_mode: natural
+      enable_numeric_qa_verification: false
+
+  medium:
+    steps: {min: 3, max: 6}
+    report_limits: {min_words: 1200, max_words: 2000, max_tokens: 4000}
+    researcher: {mode: react, max_tool_calls: 12}
+
+  extended:
+    steps: {min: 5, max: 10}
+    report_limits: {min_words: 1500, max_words: 3200, max_tokens: 8000}
+    researcher: {mode: react, max_tool_calls: 20}
+    citation_verification: {generation_mode: strict, enable_numeric_qa_verification: true}
+```
+
+**Researcher Modes**:
+- `classic`: Single-pass researcher with fixed searches/crawls per step (faster)
+- `react`: ReAct loop where LLM controls tool calls with budget limit (more intelligent)
+
+**Config Accessors**:
+```python
+from src.agent.config import (
+    get_research_type_config,  # Full config for a depth
+    get_step_limits,           # StepLimits (min, max, prompt_guidance)
+    get_report_limits,         # ReportLimitConfig (min_words, max_words, max_tokens)
+    get_researcher_config_for_depth,  # ResearcherTypeConfig (mode, limits)
+    get_citation_config_for_depth,    # CitationVerificationConfig overrides
+)
 ```
 
 ### Environment Variable Interpolation
@@ -275,8 +492,172 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
 - Tokens auto-refresh (1-hour lifetime, 5-minute buffer)
 - Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
 
+## Known Issues
+
+### Web Search Mode Incomplete
+- **Status**: Design complete, implementation pending
+- **Current behavior**: Web Search mode falls through to full Deep Research pipeline
+- **Expected behavior**: Single-step researcher with limited budget (~15s total)
+- **Spec reference**: `specs/004-tiered-query-modes/plan.md` lines 172-176
+- **Note**: The `skip_*` config flags in app.yaml were a superseded design approach and have been removed. Implementation should use programmatic routing per spec.
+
+### API Case Sensitivity
+- **Status**: Fixed in code review (2026-01-08)
+- **Issue**: Backend emitted snake_case keys but frontend expected camelCase
+- **Fix**: BaseSchema already has `alias_generator=to_camel`. Now all events are serialized with `by_alias=True` to emit camelCase keys consistently.
+- **Key files**: `src/api/v1/research.py`, `src/schemas/common.py`
+
+### Frontend Improvements Applied (2026-01-08)
+- Added Zod validation for SSE events with graceful degradation (`frontend/src/schemas/streamEvents.ts`)
+- Added React Error Boundaries to prevent app crashes (`frontend/src/components/common/ErrorBoundary.tsx`)
+- Debounced auto-scroll to prevent excessive re-renders during streaming
+- Fixed timer cleanup to prevent setState on unmounted components
+- Created shared `snakeToCamel` utility (`frontend/src/utils/caseConversion.ts`)
+
 ## Recent Changes
-- 001-deep-research-agent: Cross-cutting backend services (2025-12-25)
+- Lakebase OAuth Token Refresh Bug Fix (2026-01-11)
+  - **BUG FIX**: App failed with `InvalidPasswordError` after ~1 hour due to expired OAuth token
+  - Root cause: `get_session_maker()` cached the session maker and never called `get_engine()` after first request
+  - The token expiry check in `get_engine()` was bypassed, so tokens were never refreshed
+  - Fix: `get_session_maker()` now calls `get_engine()` on every request to trigger proactive token refresh
+  - When token is expired, engine is disposed and recreated with fresh credentials
+  - Key file: `src/db/session.py` (lines 142-145: always call get_engine())
+
+- Deployment Architecture Documentation (2026-01-11)
+  - **NEW DOCUMENTATION**: Comprehensive deployment guide added to CLAUDE.md and plan.md
+  - Documented 8-step deployment pipeline via `make deploy TARGET=dev BRAVE_SCOPE=msh`
+  - Documented two-phase deployment architecture (bootstrap with postgres, then switch to deep_research)
+  - Documented Lakebase permission model (CAN_CONNECT_AND_CREATE doesn't grant table access)
+  - Documented OAuth authentication flow for Lakebase connections
+  - Added operations commands (logs, restart, status, manual migrations)
+  - Key files:
+    - `src/db/grant_permissions.py` - Grant table permissions to app service principal
+    - `scripts/grant-app-permissions.sh` - Shell wrapper for permission grants
+    - `scripts/create-database.sh` - Create deep_research database
+    - `scripts/wait-for-lakebase.sh` - Wait for Lakebase to be connectable
+    - `src/db/lakebase_auth.py` - OAuth credential provider for Lakebase
+  - Related sections: "Databricks Apps Deployment" in CLAUDE.md, "Deployment Architecture" in plan.md
+
+- 004-tiered-query-modes: Message Export Feature (2026-01-10)
+  - **NEW FEATURE**: Export agent messages as markdown via 3-dot menu
+  - Three export options: Export Report, Verification Report, Copy to Clipboard
+  - Export Report: Downloads synthesis with title, metadata, content, and sources list
+  - Verification Report: Downloads claims with verdicts and evidence quotes (only shows when claims exist)
+  - Copy to Clipboard: Copies report markdown to system clipboard with toast notification
+  - New API endpoints:
+    - `GET /messages/{id}/report` - Returns standalone markdown report
+    - `GET /messages/{id}/provenance?format=markdown` - Returns verification report as markdown
+  - Key files:
+    - `src/services/export_service.py` - Added `export_report_markdown()` and `export_provenance_markdown()`
+    - `src/api/v1/citations.py` - Added report endpoint and format param to provenance endpoint
+    - `frontend/src/components/chat/MessageExportMenu.tsx` - New dropdown menu component
+    - `frontend/src/components/chat/AgentMessage.tsx` - Integrated export menu
+    - `frontend/src/api/client.ts` - Added `messagesApi.exportReport()` and `messagesApi.exportProvenance()`
+  - Related FRs: FR-056 through FR-060 in spec.md
+
+- 004-tiered-query-modes: Verify Sources Toggle & Snippet Fallback (2026-01-06)
+  - **NEW FEATURE**: User-controllable "Verify sources" checkbox for Web Search and Deep Research modes
+  - When enabled: runs full citation verification pipeline (claim extraction, evidence selection)
+  - When disabled: uses classical synthesis with `[Title](url)` style citations
+  - Default: `false` for Web Search (prioritize speed), `true` for Deep Research (prioritize accuracy)
+  - **SNIPPET FALLBACK**: Brave Search snippets used as fallback when web fetch fails or not performed
+  - Snippet-based evidence assigned 0.5 relevance score (lower confidence than full content)
+  - Added `is_snippet_based: bool` field to `RankedEvidence` dataclass
+  - Key files:
+    - `src/api/v1/research.py` - Added `verify_sources` query parameter
+    - `src/agent/orchestrator.py` - Added to `OrchestrationConfig`, passed to `ResearchState`
+    - `frontend/src/components/chat/MessageInput.tsx` - Checkbox UI with mode-based defaults
+    - `frontend/src/hooks/useStreamingQuery.ts` - Pass `verify_sources` in URL
+    - `src/services/citation/evidence_selector.py` - Snippet fallback logic
+    - `src/services/citation/pipeline.py` - Include snippet-only sources
+  - Related FRs: FR-046 through FR-055 in spec.md
+
+- 004-tiered-query-modes: Added Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, Pydantic v2, React 18, TanStack Query, Tailwind CSS
+- 003-claim-level-citations: Stage 7 ARE-Style Verification Retrieval (2026-01-02)
+  - **NEW FEATURE**: Post-processing stage for unsupported/partial claims
+  - Implements ARE (Atomic fact decomposition-based Retrieval and Editing) pattern
+  - Decomposes claims into atomic facts for granular verification (FActScore methodology)
+  - Searches internal evidence pool first, then external Brave API if needed
+  - Revises claims: verified facts keep citations, unverified facts get hedging language
+  - Key files:
+    - `src/services/citation/atomic_decomposer.py` - Atomic fact decomposition
+    - `src/services/citation/verification_retriever.py` - Main Stage 7 orchestration
+    - `src/agent/prompts/citation/verification_retrieval.py` - Stage 7 prompts
+  - Config: `verification_retrieval` section in `config/app.yaml`
+  - Per-depth: disabled for light, enabled for medium/extended
+  - Scientific basis: [ARE](https://arxiv.org/abs/2410.16708), [FActScore](https://arxiv.org/abs/2305.14251), [SAFE](https://arxiv.org/abs/2403.18802)
+  - Softening strategies: hedge ("reportedly"), qualify ("some evidence suggests"), parenthetical ("(unverified)")
+
+- 003-claim-level-citations: Per-Depth Config Merge Fix (2026-01-01)
+  - **BUG FIX**: Per-depth `citation_verification` configs were replacing global config instead of merging
+  - Root cause: `get_citation_config_for_depth()` returned per-type config directly without inheriting global values
+  - Fix: Deep merge per-type with global - fields explicitly set in per-type override, unset fields inherit from global
+  - Affected: `synthesis_mode`, `react_synthesis`, and other fields not specified per-type were using Pydantic defaults
+  - Key file: `src/agent/config.py` (get_citation_config_for_depth function)
+
+  - **NEW FEATURE**: Consolidated `research_types` configuration in app.yaml
+  - Each depth (light/medium/extended) now has unified settings:
+    - `steps`: min, max, and optional `prompt_guidance` for planner
+    - `report_limits`: min_words, max_words, max_tokens
+    - `researcher`: mode (react/classic), max_tool_calls, max_search_queries, max_urls_to_crawl
+    - `citation_verification`: per-type overrides (generation_mode, enable_numeric_qa_verification)
+  - Added `ResearcherMode` enum for switching between classic and react researcher
+  - Orchestrator now dynamically selects researcher based on per-depth config
+  - Removed hardcoded `DEPTH_TO_STEPS` from state.py
+  - Key files: `src/core/app_config.py`, `src/agent/config.py`, `src/agent/orchestrator.py`
+  - Config accessors: `get_research_type_config()`, `get_step_limits()`, `get_report_limits()`,
+    `get_researcher_config_for_depth()`, `get_citation_config_for_depth()`
+
+  - **CRITICAL BUG FIX**: Claims were parsed from original content with numeric markers `[0]`, `[1]`
+  - But final_report stored in DB had human-readable keys `[Arxiv]`, `[Zhipu-2]` (different lengths)
+  - This caused position_start/position_end mismatch, making citations unresolvable in frontend
+  - **Root cause**: `_parse_interleaved_content()` parsed from pre-replacement content
+  - **Fix**: Parse claims from `content_with_keys` (after replacement) instead of original `content`
+  - Added `reverse_key_map` to lookup evidence_index from citation keys
+  - Updated regex to match human-readable keys `\[([A-Za-z][A-Za-z0-9-]*(?:-\d+)?)\]`
+  - Key files: `src/services/citation/claim_generator.py` (lines 346-477)
+  - **Related issue**: This is similar to snake_case vs camelCase mismatch fixed in SSE events
+  - **Testing**: All 162 citation unit tests pass
+
+  - **BUG**: Phantom chats appeared after DB clean due to localStorage drafts and stale cache
+  - Reduced TanStack Query `staleTime` from 5 minutes to 30 seconds
+  - Enabled `refetchOnWindowFocus` for fresh data on tab switch
+  - Added `clearStaleDrafts()` function to sync localStorage with API state
+  - Removed drafts older than 60 seconds that don't exist in API response
+  - Key files: `frontend/src/main.tsx`, `frontend/src/hooks/useDraftChats.ts`, `frontend/src/pages/ChatPage.tsx`
+
+  - **BUG**: Frontend event handlers accessed snake_case properties but runtime SSE had camelCase
+  - Fixed all event handlers in `useStreamingQuery.ts` to check camelCase first
+  - Added `formatToolCall()` and `formatToolResult()` to activityLabels.ts
+  - Key files: `frontend/src/hooks/useStreamingQuery.ts`, `frontend/src/utils/activityLabels.ts`
+
+  - Implemented 3-tier test hierarchy: unit, integration, complex
+  - Created `config/app.test.yaml` for integration tests (minimal iterations, fast models)
+  - Added `APP_CONFIG_PATH` env var support in `src/core/app_config.py`
+  - Moved mocked citation pipeline test to `tests/unit/services/citation/`
+  - Created `tests/integration/test_citation_pipeline.py` with real LLM tests
+  - Created `tests/complex/` directory with long-running research tests
+  - Updated Makefile with `test-unit`, `test-integration`, `test-complex` targets
+  - Added pytest markers: `unit`, `integration`, `complex`
+  - Integration tests use test config; complex tests use production config
+  - Key files: `config/app.test.yaml`, `tests/integration/conftest.py`, `tests/complex/conftest.py`
+
+  - When reflector triggers ADJUST, completed steps are now preserved in the plan
+  - Added `get_completed_steps()` method to `ResearchState` in `src/agent/state.py`
+  - Updated planner prompt to include completed steps section (not duplicated by LLM)
+  - Planner merges completed steps with new LLM-generated steps automatically
+  - `current_step_index` now resumes from first non-completed step instead of resetting to 0
+  - Enhanced logging shows `preserving_completed_steps` count during ADJUST
+  - Benefits: Visual progress preserved, no redundant re-execution, better UX
+  - Key files: `src/agent/state.py`, `src/agent/nodes/planner.py`, `src/agent/prompts/planner.py`, `src/agent/orchestrator.py`
+
+  - Database records (messages, research_session) are no longer created before streaming
+  - UUIDs are pre-generated in memory, passed to orchestrator via `OrchestrationConfig`
+  - All data persisted atomically in `persist_complete_research()` after synthesis succeeds
+  - New `research_started` SSE event broadcasts pre-generated IDs to frontend
+  - Benefits: No orphaned records, no cleanup on failure, single atomic transaction
+  - Key files: `src/api/v1/research.py`, `src/agent/persistence.py`, `src/agent/orchestrator.py`
+
   - Added `PreferencesService` for managing user preferences (get/update)
   - Added `FeedbackService` for message feedback with MLflow trace correlation
   - Added `ExportService` for chat export to Markdown/JSON formats
@@ -285,20 +666,17 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Added `build_system_prompt()` utility for consistent instruction injection
   - Updated research API endpoints to fetch and pass user preferences
 
-- 001-deep-research-agent: LLM context truncation (2025-12-25)
   - Added `src/services/llm/truncation.py` with intelligent message truncation
   - Preserves system prompt and recent messages when context exceeds limits
   - `truncate_messages()` and `truncate_text()` with configurable limits
   - `get_context_window_for_request()` for endpoint-aware truncation
 
-- 001-deep-research-agent: Researcher validation error resilience (2025-12-25)
   - Added default value to ResearcherOutput.observation field for validation resilience
   - Enhanced researcher prompt with explicit "ALWAYS REQUIRED" observation guidance
   - Added instructions for handling limited/empty search results
   - Updated output schema comments to emphasize observation is required
   - Fixes: LLM validation errors when search results are limited or empty
 
-- 001-deep-research-agent: Multi-entity query decomposition (2025-12-25)
   - Enhanced planner prompt with entity-by-entity decomposition guidance
   - Added "Multi-Entity Query Handling" section with CRITICAL RULE to never bundle entities
   - Increased step limit from 2-8 to 2-15 for multi-entity comparisons
@@ -306,7 +684,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Enhanced SEARCH_QUERY_PROMPT with entity isolation rules and diverse examples
   - Fixes: broad multi-entity queries now decomposed into focused entity-specific steps
 
-- 001-deep-research-agent: MLflow 3.8+ upgrade and streaming trace fix (2025-12-25)
   - Upgraded MLflow from 2.10+ to 3.8+ for production-grade tracing support
   - Added `@mlflow.trace` decorator to `stream_research()` in orchestrator.py
   - Fixed traces not appearing from web app - `stream_research()` now has root span like `run_research()`
@@ -315,7 +692,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Added `mlflow.flush_trace_async_logging()` after streaming completes in API layer
   - Fixes: orphan traces, context propagation issues, traces not flushed before response ends
 
-- 001-deep-research-agent: LLM rate limit retry with configurable backoff (2025-12-25)
   - Added automatic retry with backoff when rate limits are hit at the LLM client layer
   - All agents benefit automatically without code changes
   - Configurable via `rate_limiting` section in `config/app.yaml`
@@ -324,26 +700,22 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - New `RateLimitingConfig` model with `calculate_delay()` method
   - Refactored `LLMClient.complete()` and `LLMClient.stream()` with retry wrappers
 
-- 001-deep-research-agent: MLflow trace session grouping (2025-12-24)
   - Added `user_id` and `chat_id` parameters to `run_research()` and `stream_research()` functions
   - Traces from the same chat conversation are now grouped together via `mlflow.update_current_trace()`
   - Uses `mlflow.trace.user` (user_id) and `mlflow.trace.session` (chat_id) metadata
   - API layer passes user context to orchestrator for trace correlation
   - New FR-099 in spec.md documenting the requirement
 
-- 001-deep-research-agent: MLflow tracing fixes (2025-12-24)
   - Enabled async logging via `mlflow.config.enable_async_logging(True)` for FastAPI context
   - Added MLflow spans to `LLMClient.complete()` with tier, endpoint, and token metrics
   - Added root span attributes (session_id, query, max_iterations) in orchestrator
   - LLM calls now visible in MLflow traces as `llm_simple`, `llm_analytical`, `llm_complex` spans
 
-- 001-deep-research-agent: Chat UX improvements (2025-12-24)
   - Auto-select first chat or create new one when navigating to home page without a chat
   - Changed "Untitled Chat" label to "New chat..." with italic/muted styling
   - Fixed plan step status flickering by clearing currentStepIndex on step completion
   - New FR-093, FR-094, FR-095 in spec.md
 
-- 001-deep-research-agent: LLM-based search query generation in Background Investigator (2025-12-24)
   - Fixed HTTP 422 errors from Brave Search when user queries are too long
   - Added `BACKGROUND_SEARCH_PROMPT` in `src/agent/prompts/background.py`
   - Background Investigator now uses LLM to generate 2-3 focused search queries
@@ -352,7 +724,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Fallback to truncated query (200 chars) if LLM query generation fails
   - New FR-092 in spec.md documenting the requirement
 
-- 001-deep-research-agent: Markdown rendering in agent messages (2025-12-24)
   - Added `frontend/src/components/common/MarkdownRenderer.tsx` - reusable markdown component
   - Uses `react-markdown` with `remark-gfm` for GitHub Flavored Markdown support
   - Added `react-syntax-highlighter` for code block syntax highlighting (vscDarkPlus/vs themes)
@@ -361,13 +732,11 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Links open in new tabs with `target="_blank" rel="noopener noreferrer"`
   - Streaming content renders as markdown in real-time
 
-- 001-deep-research-agent: Research Activity panel improvements (2025-12-24)
   - Added `frontend/src/utils/activityLabels.ts` with event formatting utilities
   - `formatActivityLabel()`: Converts raw event types to human-readable labels with emojis
   - `getActivityColor()`: Returns Tailwind color classes (green/amber/blue/red) by event status
   - Updated `ChatPage.tsx` to use the new formatters for the activity log
 
-- 001-deep-research-agent: Central YAML configuration (2025-12-24)
   - Added `config/app.yaml` for all model endpoints, roles, agents, and search settings
   - Environment variable interpolation: `${VAR}` and `${VAR:-default}`
   - Pydantic v2 models for configuration validation in `src/core/app_config.py`
@@ -375,7 +744,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - Startup validation fails fast if config is invalid
   - All hardcoded values removed from agent nodes and services
 
-- 001-deep-research-agent: Critical codebase review and fixes (2025-12-24)
   - **Security**: Added authorization checks to all 9 API endpoints (messages.py, research.py)
   - **Data integrity**: Fixed model/migration column name mismatches (Source, UserPreferences, MessageFeedback, AuditLog)
   - **Transaction safety**: Added flush after delete operations, rollback on errors
@@ -384,7 +752,6 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
   - **Deprecations**: Replaced all datetime.utcnow() with datetime.now(UTC) across codebase
   - **Schema updates**: FeedbackRating now uses string values ("positive"/"negative") matching migration
 
-- 001-deep-research-agent: Added Python 3.11+ (backend), TypeScript 5.x (frontend, E2E)
   - Moved `backend/src/` to `/src/` (Python at root)
   - Moved `backend/tests/` to `/tests/`
   - Moved `frontend/e2e/` to `/e2e/` (full-stack E2E tests at root)

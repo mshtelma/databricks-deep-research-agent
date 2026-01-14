@@ -13,12 +13,55 @@ endpoints:
     max_context_window: 128000
     tokens_per_minute: 50000
     supports_structured_output: true
+    supports_prompt_caching: true  # Claude supports cache_control
+
+  gpt5nano:
+    endpoint_identifier: databricks-gpt-5-nano
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+    supports_temperature: false  # GPT-5 models don't support temperature parameter
+
+  gpt5mini:
+    endpoint_identifier: databricks-gpt-5-mini
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+    supports_temperature: false  # GPT-5 models don't support temperature parameter
+
+  gemini3flash:
+    endpoint_identifier: databricks-gemini-3-flash
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
 
   sonnet:
     endpoint_identifier: databricks-claude-sonnet-4-5
     max_context_window: 128000
     tokens_per_minute: 50000
     supports_structured_output: true
+    supports_prompt_caching: true  # Claude supports cache_control
+
+  opus:
+    endpoint_identifier: databricks-claude-opus-4-5
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+    supports_prompt_caching: true  # Claude supports cache_control
+
+  gpt5:
+    endpoint_identifier: databricks-gpt-5-2
+    max_context_window: 128000
+    tokens_per_minute: 50000
+    supports_structured_output: true
+
+  gemini3pro:
+    endpoint_identifier: databricks-gemini-3-pro
+    max_context_window: 1000000  # 1M tokens - excellent for large documents
+    tokens_per_minute: 500000    # High throughput
+    supports_structured_output: true
+    supports_temperature: true
+
 
 # Model roles (tiers) with priority-ordered endpoints
 # Endpoints are tried in order; fallback occurs on 429 or 5xx errors
@@ -27,8 +70,9 @@ models:
   simple:
     endpoints:
       - haiku
+      - gemini3flash
     temperature: 0.7
-    max_tokens: 4000
+    max_tokens: 8000
     reasoning_effort: low
     tokens_per_minute: 200000
     rotation_strategy: priority
@@ -38,6 +82,8 @@ models:
   analytical:
     endpoints:
       - haiku
+      - gpt5mini
+      - gemini3flash
     temperature: 0.7
     max_tokens: 8000
     reasoning_effort: medium
@@ -49,6 +95,7 @@ models:
   complex:
     endpoints:
       - sonnet
+      - opus
     temperature: 0.7
     max_tokens: 32000
     reasoning_effort: high
@@ -57,15 +104,45 @@ models:
     rotation_strategy: priority
     fallback_on_429: true
 
+  # TIER 4: BULK_ANALYSIS - Large-context analysis tasks (Gemini 3 Pro)
+  # Use for: NLI/entailment, evidence extraction, classification, decomposition
+  # NOT for: Text synthesis (use Claude for synthesis quality)
+  bulk_analysis:
+    endpoints:
+      - gpt5
+      - gpt5mini
+      - gemini3flash
+      - haiku
+    temperature: 0.3  # Lower temperature for analytical consistency
+    max_tokens: 16000
+    reasoning_effort: medium
+    tokens_per_minute: 500000  # Higher throughput
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  # TIER 5: FAST - Non-structured quick tasks (GPT 5.2)
+  # Use for: Search query generation, simple text rewrites, softening
+  # NOT for: Structured JSON output (GPT 5.2 has issues with this)
+  fast:
+    endpoints:
+      - gpt5mini
+      - haiku  # Fallback if GPT fails
+    temperature: 0.7
+    max_tokens: 4000
+    reasoning_effort: low
+    tokens_per_minute: 200000
+    rotation_strategy: priority
+    fallback_on_429: true
+
 # Agent configuration
 agents:
   researcher:
-    max_search_queries: 2
-    max_search_results: 10
-    max_urls_to_crawl: 3
+    max_search_queries: 4
+    max_search_results: 15      # Increased from 10 - more URL options
+    max_urls_to_crawl: 10        # Increased from 3 - more content for citations
     content_preview_length: 3000
-    content_storage_length: 10000
-    max_previous_observations: 3
+    content_storage_length: 15000  # Increased from 10000 - store more content
+    max_previous_observations: 10
     page_contents_limit: 8000
     max_generated_queries: 3
 
@@ -78,11 +155,111 @@ agents:
 
   synthesizer:
     max_report_length: 50000
+    # NOTE: report_limits moved to research_types.*.report_limits (single source of truth)
 
   background:
-    max_search_queries: 2
-    max_results_per_query: 3
-    max_total_results: 5
+    max_search_queries: 4
+    max_results_per_query: 5
+    max_total_results: 8
+
+# =============================================================================
+# Research Type Profiles (FR-100)
+# =============================================================================
+# Unified configuration for each research depth. Consolidates step limits,
+# report limits, researcher settings, and citation verification overrides.
+# Each type defines complete behavior for that research depth.
+#
+# Researcher modes:
+#   - "classic": Single-pass researcher with fixed searches/crawls per step
+#   - "react": ReAct loop where LLM controls tool calls with budget limit
+research_types:
+  light:
+    # Step limits: quick overview with minimal research
+    steps:
+      min: 1
+      max: 3
+      prompt_guidance: "Quick overview with 1-3 focused steps. Prioritize speed over depth."
+
+    # Report length limits
+    report_limits:
+      min_words: 800
+      max_words: 2000
+      max_tokens: 4000
+
+    # Researcher configuration
+    researcher:
+      mode: classic        # Single-pass for speed
+      max_search_queries: 2
+      max_urls_to_crawl: 3
+      max_tool_calls: 8    # ReAct fallback budget
+
+    # Citation verification: lighter verification for quick research
+    citation_verification:
+      generation_mode: natural
+      enable_numeric_qa_verification: false
+      enable_verification_retrieval: true  # Stage 7 enabled for all depths
+      verification_retrieval:
+        max_searches_per_fact: 1           # Keep lightweight
+        max_atomic_facts_per_claim: 3      # Reduce for speed
+
+  medium:
+    # Step limits: balanced research covering key aspects
+    steps:
+      min: 3
+      max: 6
+      prompt_guidance: "Balanced research covering key aspects thoroughly. Aim for comprehensive coverage."
+
+    # Report length limits
+    report_limits:
+      min_words: 1200
+      max_words: 2000
+      max_tokens: 4000
+
+    # Researcher configuration
+    researcher:
+      mode: react          # ReAct for more intelligent search
+      max_search_queries: 3  # Classic fallback
+      max_urls_to_crawl: 5
+      max_tool_calls: 12     # ReAct budget
+
+    # Citation verification: standard verification with Stage 7
+    citation_verification:
+      generation_mode: natural
+      enable_verification_retrieval: true   # Enable Stage 7 for medium
+      verification_retrieval:
+        max_searches_per_fact: 1            # Reduced budget for medium
+
+  extended:
+    # Step limits: comprehensive deep research
+    steps:
+      min: 5
+      max: 10
+      prompt_guidance: "Comprehensive deep research. Multiple perspectives, thorough verification, detailed analysis."
+
+    # Report length limits
+    report_limits:
+      min_words: 1500
+      max_words: 3200
+      max_tokens: 8000
+
+    # Researcher configuration
+    researcher:
+      mode: react          # ReAct for deep research
+      max_search_queries: 4  # Classic fallback
+      max_urls_to_crawl: 8
+      max_tool_calls: 40     # Doubled from 20 - more budget for complex queries like Basel IV
+
+    # Citation verification: strict verification with numeric QA and Stage 7
+    citation_verification:
+      generation_mode: natural
+      enable_numeric_qa_verification: true
+      enable_verification_retrieval: true   # Enable Stage 7 with full budget
+      react_synthesis:
+        max_tool_calls: 200          # Increased from 125 - enough for 11 sections at 20 calls each
+        tool_budget_per_section: 20  # More budget per section
+      verification_retrieval:
+        max_atomic_facts_per_claim: 7  # More facts for deep research
+        max_searches_per_fact: 2       # Full budget
 
 # Search configuration
 search:
@@ -91,13 +268,112 @@ search:
     default_result_count: 10
     freshness: pm  # pd=day, pw=week, pm=month, py=year
 
+  # Domain whitelist/blacklist filtering
+  # Supports wildcard patterns: *.gov, *.edu, news.*, *.example.*
+  # Modes: "include" (whitelist only), "exclude" (blacklist only), "both" (whitelist + blacklist)
+  domain_filter:
+    mode: exclude  # Default: exclude (blacklist mode)
+
+    # Domains to include (whitelist) - only used when mode is "include" or "both"
+    # If set in include/both mode, ONLY these domains are allowed
+    # include_domains:
+    #   - "*.gov"
+    #   - "*.edu"
+    #   - "reuters.com"
+    #   - "bbc.com"
+    #   - "*.wikipedia.org"
+    #   - "arxiv.org"
+
+    # Domains to exclude (blacklist) - used when mode is "exclude" or "both"
+    # These domains are always blocked
+    exclude_domains: []
+      # Examples of domains you might want to block:
+      # - "*.ru"           # Russian domains
+      # - "*.cn"           # Chinese domains
+      # - "spam-site.com"  # Known spam sites
+
+    # Log filtered URLs for debugging (default: false)
+    log_filtered: false
+
 # Rate limiting and retry configuration
 rate_limiting:
-  max_retries: 3                    # Max retry attempts before failing
-  base_delay_seconds: 2.0           # Initial backoff delay
+  max_retries: 50                   # Max retry attempts before failing
+  base_delay_seconds: 5.0           # Initial backoff delay
   max_delay_seconds: 60.0           # Maximum backoff delay
-  backoff_strategy: exponential     # "exponential" (2^n) or "linear" (+n)
+  backoff_strategy: linear     # "exponential" (2^n) or "linear" (+n)
   jitter: true                      # Add random jitter to prevent thundering herd
+
+# Prompt caching configuration (reduces costs by up to 90% on cached content)
+# Claude models on Databricks support cache_control for KV cache reuse.
+# Transparent to higher layers - LLMClient handles transformation internally.
+prompt_caching:
+  enabled: true                     # Master toggle for prompt caching
+  min_tokens_threshold: 1024        # Minimum tokens to cache (Claude minimum)
+  cache_type: ephemeral             # Cache type (ephemeral = 5 min TTL)
+  cache_system_prompt: true         # Cache system messages
+  log_cache_usage: true             # Log when cache_control is applied
+
+# =============================================================================
+# Query Mode Configuration (Tiered Query Modes Feature)
+# =============================================================================
+# Three query modes with progressive complexity:
+#   - simple: Direct LLM response, no web search, no research session
+#   - web_search: Quick search with 2-5 sources, lightweight session
+#   - deep_research: Full research pipeline with plan, steps, verification
+query_modes:
+  simple:
+    # Uses existing is_simple_query path in orchestrator
+    model_role: simple
+    emit_events: false        # No streaming events for simple mode
+    create_session: false     # No research session created
+    timeout_seconds: 30       # Quick response timeout
+
+  web_search:
+    model_role: analytical
+    timeout_seconds: 15       # 15 second total budget
+    emit_events: true         # Stream progress events
+    create_session: true      # Lightweight session for source tracking
+
+    # Reuse researcher with minimal configuration
+    researcher:
+      mode: classic           # Single-pass for speed
+      max_search_queries: 2   # Limited search budget
+      max_urls_to_crawl: 3    # Few sources for quick results
+
+    # Note: Web search routing handled programmatically in orchestrator
+    # (creates synthetic 1-step plan, skips coordinator/reflector in code)
+
+    # Synthesis configuration - Natural mode for [1], [2] citations
+    citation_verification:
+      enabled: true
+      generation_mode: natural            # [1], [2] style citations
+      enable_numeric_qa_verification: false
+      enable_verification_retrieval: false  # Skip Stage 7 for speed
+
+  deep_research:
+    # Uses existing research_types config (light/medium/extended)
+    model_role: complex
+    emit_events: true
+    create_session: true
+    use_research_types: true  # Inherits from research_types section
+
+# =============================================================================
+# Background Job Configuration
+# =============================================================================
+# Controls background research job execution and lifecycle.
+# Jobs are decoupled from HTTP request lifecycle for reliability.
+jobs:
+  # Maximum concurrent research jobs per user
+  max_concurrent_per_user: 2
+
+  # Heartbeat interval for zombie detection (seconds)
+  heartbeat_interval_seconds: 10
+
+  # Jobs without heartbeat for this duration are considered zombies (seconds)
+  zombie_threshold_seconds: 30
+
+  # Future: checkpoint interval for job resumption (steps)
+  # checkpoint_interval_steps: 3
 
 # Truncation limits for consistency
 truncation:
@@ -105,3 +381,147 @@ truncation:
   error_message: 500
   query_display: 100
   source_snippet: 300
+
+# Citation verification configuration (7-stage pipeline)
+#
+# Stages:
+# 1. Evidence Pre-Selection - Extract relevant quotes from sources
+# 2. Interleaved Generation - Generate claims with [N] citations
+# 3. Confidence Classification - Route claims by confidence level
+# 4. Isolated Verification - Produce verdicts (supported/partial/unsupported/contradicted)
+# 5. Citation Correction - Swap citations from existing pool
+# 6. Numeric QA Verification - Deep verification of numeric claims
+# 7. ARE Verification Retrieval - Atomic fact decomposition + external search + revision
+#
+# Per-depth overrides in research_types.*.citation_verification inherit from this
+# global config. Only explicitly set fields override; unset fields inherit.
+# Example: setting only `generation_mode: natural` in per-type inherits
+# `synthesis_mode: react` from global.
+citation_verification:
+  # Master toggle for the feature
+  enabled: true
+
+  # Synthesis mode: controls the overall synthesis approach
+  # - "interleaved": Current approach - evidence in context, [N] markers
+  # - "react": ReAct-based - LLM uses tools to retrieve evidence before claims
+  synthesis_mode: react
+
+  # Generation mode for research reports (only applies when synthesis_mode=interleaved)
+  # - "classical": Free-form prose with inline [Title](url) links
+  #                Best text quality, uses existing synthesizer
+  #                Skips verification stages 3-6 (no claim markers to verify)
+  # - "natural": Light-touch [N] citations, balanced quality + verification
+  #              Good text quality while maintaining verifiable citations
+  #              Runs full verification pipeline (stages 3-6)
+  # - "strict": Heavy [N] constraints, maximum citations (DEFAULT)
+  #             Current behavior, every claim must cite evidence
+  #             Runs full verification pipeline (stages 3-6)
+  generation_mode: natural
+
+  # ReAct synthesis configuration (only applies when synthesis_mode=react)
+  react_synthesis:
+    max_tool_calls: 75              # Total tool call budget (increased from 40)
+    tool_budget_per_section: 15     # Budget per research step section
+    retrieval_window_size: 3        # Sliding window for grounding inference
+    grounding_threshold: 0.6        # Minimum similarity for grounded claim
+    embedding_high_threshold: 0.7   # Auto-grounded above this
+    embedding_low_threshold: 0.4    # Auto-ungrounded below this
+    use_llm_judge_for_borderline: true  # Use LLM for 0.4-0.7 range
+    enable_post_processing: false   # Polish pass for coherence (disabled by default)
+    use_sectioned_synthesis: false  # Disabled to use XML tag parsing in run_react_synthesis()
+
+  # Stage toggles (only apply to "natural" and "strict" modes)
+  enable_evidence_preselection: true
+  enable_interleaved_generation: true
+  enable_confidence_classification: true
+  enable_citation_correction: true
+  enable_numeric_qa_verification: true
+  enable_verification_retrieval: false  # Optional additional search
+
+  # Stage 1: Evidence Pre-Selection
+  evidence_preselection:
+    max_spans_per_source: 15
+    min_span_length: 50
+    max_span_length: 500
+    relevance_threshold: 0.3
+    numeric_content_boost: 0.2
+    relevance_computation_method: hybrid  # semantic | keyword | hybrid
+    # Chunking config for long sources (research papers, long articles)
+    chunk_size: 8000           # Target size per chunk in characters
+    chunk_overlap: 1000        # Overlap between chunks to avoid missing spans at boundaries
+    max_chunks_per_source: 5   # Max chunks to process per source (limits LLM calls)
+
+  # Stage 2: Interleaved Generation
+  interleaved_generation:
+    max_claims_per_section: 50
+    min_evidence_similarity: 0.5
+    retry_on_entailment_failure: true
+    max_retries: 3
+
+  # Stage 3: Confidence Classification
+  confidence_classification:
+    high_threshold: 0.6
+    low_threshold: 0.50
+    quote_match_bonus: 0.3
+    hedging_word_penalty: 0.2
+    estimation_method: embedding_similarity  # linguistic | embedding_similarity | hybrid
+
+  # Stage 4: Isolated Verification
+  isolated_verification:
+    enable_nei_verdict: true
+    verification_model_tier: analytical
+    quick_verification_tier: simple
+
+  # Stage 5: Citation Correction
+  citation_correction:
+    correction_method: keyword_semantic_hybrid
+    lambda_weight: 0.8
+    correction_threshold: 0.6
+    allow_alternate_citations: true
+
+  # Stage 6: Numeric QA Verification
+  numeric_qa_verification:
+    rounding_tolerance: 0.05
+    answer_comparison_method: f1  # exact_match | f1 | lerc
+    require_unit_match: true
+    require_entity_match: true
+
+  # Stage 7: ARE-style Verification Retrieval
+  # Implements Atomic fact decomposition-based Retrieval and Editing (ARE) pattern
+  # for verifying and revising unsupported/partial claims.
+  # Scientific basis: ARE (arXiv:2410.16708), FActScore (EMNLP 2023), SAFE (DeepMind)
+  verification_retrieval:
+    # Trigger on these verdicts from Stage 4
+    trigger_on_verdicts: [unsupported, partial]
+
+    # Atomic decomposition settings
+    max_atomic_facts_per_claim: 5  # Max facts per claim (FActScore-style)
+
+    # Search budget (per atomic fact, not per claim)
+    max_searches_per_fact: 2       # Allows 1 query reformulation
+    max_external_urls_per_search: 3
+
+    # Entailment thresholds (NLI-style verification)
+    entailment_threshold: 0.6      # Min score to accept evidence
+    internal_search_threshold: 0.7 # Similarity threshold for internal pool
+
+    # Reconstruction behavior
+    softening_strategy: hedge      # hedge | qualify | parenthetical
+
+    # Timeouts
+    decomposition_timeout_seconds: 10.0
+    search_timeout_seconds: 10.0
+    crawl_timeout_seconds: 15.0
+
+    # Model tiers for LLM calls
+    # decomposition_tier: Gemini for analytical breakdown of claims into facts
+    # entailment_tier: Gemini for NLI-style verification (does evidence support fact?)
+    # reconstruction_tier: Claude for quality synthesis when rebuilding claims
+    # softening_tier: GPT 5.2 for simple text rewrites (adding hedging language)
+    decomposition_tier: bulk_analysis
+    entailment_tier: bulk_analysis
+    reconstruction_tier: analytical
+    softening_tier: fast
+
+  # Warning thresholds
+  unsupported_claim_warning_threshold: 0.20

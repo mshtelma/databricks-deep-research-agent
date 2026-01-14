@@ -14,6 +14,8 @@ class ModelTier(str, Enum):
     SIMPLE = "simple"  # Fast, low-latency, low-cost
     ANALYTICAL = "analytical"  # Balanced reasoning, moderate cost
     COMPLEX = "complex"  # Extended thinking, higher cost
+    BULK_ANALYSIS = "bulk_analysis"  # Large-context analysis (Gemini), NLI, extraction
+    FAST = "fast"  # Non-structured quick tasks (GPT 5.2)
 
 
 class ReasoningEffort(str, Enum):
@@ -46,6 +48,10 @@ class ModelEndpoint:
     reasoning_effort: ReasoningEffort | None = None
     reasoning_budget: int | None = None
     supports_structured_output: bool = False
+    # Some models (e.g., GPT-5) don't support temperature parameter
+    supports_temperature: bool = True
+    # Claude models support prompt caching via cache_control parameter
+    supports_prompt_caching: bool = False
 
 
 @dataclass
@@ -60,6 +66,11 @@ class ModelRole:
     reasoning_budget: int | None = None
     rotation_strategy: SelectionStrategy = SelectionStrategy.PRIORITY
     fallback_on_429: bool = True
+
+
+# Minimum time (seconds) before retrying an unhealthy endpoint
+# This ensures provider rate limits have time to clear
+MIN_RECOVERY_SECONDS = 60
 
 
 @dataclass
@@ -91,9 +102,30 @@ class EndpointHealth:
             self.is_healthy = False
 
         if rate_limited:
-            # Exponential backoff with jitter
-            delay = min(60, 2**self.consecutive_errors) + random.uniform(0, 1)
+            # Exponential backoff with jitter, but enforce minimum floor
+            # to let provider rate limits clear before retry
+            exponential_delay = min(180, 2**self.consecutive_errors)
+            delay = max(MIN_RECOVERY_SECONDS, exponential_delay) + random.uniform(0, 1)
             self.rate_limited_until = datetime.now(UTC) + timedelta(seconds=delay)
+
+    def reset_if_recovered(self) -> bool:
+        """Reset health if rate limit has expired.
+
+        This enables time-based recovery: when an endpoint was marked unhealthy
+        due to rate limits, it can be given another chance after the rate limit
+        timeout expires.
+
+        Returns:
+            True if the endpoint was reset to healthy, False otherwise.
+        """
+        if not self.is_healthy and self.rate_limited_until:
+            if datetime.now(UTC) >= self.rate_limited_until:
+                # Give the endpoint another chance
+                self.is_healthy = True
+                self.consecutive_errors = 0
+                self.rate_limited_until = None
+                return True
+        return False
 
     def record_tokens(self, tokens: int) -> None:
         """Record token usage for rate limiting."""
@@ -129,3 +161,38 @@ class LLMResponse:
     endpoint_id: str
     duration_ms: float
     structured: Any | None = None
+
+
+@dataclass
+class ToolCall:
+    """A tool call from an LLM response (OpenAI format)."""
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass
+class ToolCallChunk:
+    """Accumulated streaming data for a single tool call."""
+
+    index: int
+    id: str | None = None
+    name: str | None = None
+    arguments_json: str = ""
+
+    def is_complete(self) -> bool:
+        """Check if we have all required fields."""
+        return bool(self.id and self.name and self.arguments_json)
+
+
+@dataclass
+class StreamWithToolsChunk:
+    """A chunk from streaming with tools - either content or tool calls."""
+
+    # Content text (may be empty)
+    content: str = ""
+    # Tool calls detected in this chunk
+    tool_calls: list[ToolCall] | None = None
+    # Is this the final chunk (LLM finished)?
+    is_done: bool = False

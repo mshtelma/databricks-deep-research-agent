@@ -184,6 +184,56 @@ export const messagesApi = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+
+  exportReport: async (messageId: string): Promise<{ content: string; filename: string }> => {
+    const url = `${API_BASE_URL}/messages/${messageId}/report`
+    const response = await fetch(url, {
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!response.ok) {
+      let errorData: { code?: string; message?: string }
+      try {
+        errorData = await response.json()
+      } catch {
+        errorData = { code: 'UNKNOWN', message: response.statusText }
+      }
+      throw new ApiError(
+        response.status,
+        errorData.code || 'UNKNOWN',
+        errorData.message || 'Export failed'
+      )
+    }
+    const content = await response.text()
+    const contentDisposition = response.headers.get('Content-Disposition') || ''
+    const filenameMatch = contentDisposition.match(/filename="([^"]+)"/)
+    const filename = filenameMatch?.[1] ?? `report-${messageId}.md`
+    return { content, filename }
+  },
+
+  exportProvenance: async (messageId: string): Promise<{ content: string; filename: string }> => {
+    const url = `${API_BASE_URL}/messages/${messageId}/provenance?format=markdown`
+    const response = await fetch(url, {
+      headers: { 'Content-Type': 'application/json' },
+    })
+    if (!response.ok) {
+      let errorData: { code?: string; message?: string }
+      try {
+        errorData = await response.json()
+      } catch {
+        errorData = { code: 'UNKNOWN', message: response.statusText }
+      }
+      throw new ApiError(
+        response.status,
+        errorData.code || 'UNKNOWN',
+        errorData.message || 'Export failed'
+      )
+    }
+    const content = await response.text()
+    const contentDisposition = response.headers.get('Content-Disposition') || ''
+    const filenameMatch = contentDisposition.match(/filename="([^"]+)"/)
+    const filename = filenameMatch?.[1] ?? `verification-${messageId}.md`
+    return { content, filename }
+  },
 }
 
 // Research API
@@ -197,14 +247,99 @@ export const researchApi = {
   streamUrl: (chatId: string) => `${API_BASE_URL}/research/chats/${chatId}/stream`,
 }
 
+// Jobs API - Background research job management
+export interface Job {
+  sessionId: string
+  status: 'in_progress' | 'completed' | 'failed' | 'cancelled'
+  query: string
+  queryMode: string
+  chatId: string
+  startedAt: string | null
+  completedAt: string | null
+  currentStep: number | null
+  totalSteps: number | null
+  errorMessage: string | null
+}
+
+export interface JobListResponse {
+  jobs: Job[]
+  activeCount: number
+  limit: number
+  limitReached: boolean
+}
+
+export interface JobEvent {
+  id: string
+  eventType: string
+  timestamp: string
+  sequenceNumber: number | null
+  payload: Record<string, unknown>
+}
+
+export interface JobEventsResponse {
+  events: JobEvent[]
+  sessionStatus: string
+  hasMore: boolean
+}
+
+export const jobsApi = {
+  // Submit a new research job
+  submit: (data: {
+    chatId: string
+    query: string
+    queryMode?: string
+    researchDepth?: string
+    verifySources?: boolean
+  }) =>
+    request<Job>('/research/jobs', {
+      method: 'POST',
+      body: JSON.stringify({
+        chat_id: data.chatId,
+        query: data.query,
+        query_mode: data.queryMode || 'deep_research',
+        research_depth: data.researchDepth || 'auto',
+        verify_sources: data.verifySources ?? true,
+      }),
+    }),
+
+  // List user's jobs
+  list: (params?: { status?: string; limit?: number }) =>
+    request<JobListResponse>('/research/jobs', { params }),
+
+  // Get a specific job
+  get: (sessionId: string) => request<Job>(`/research/jobs/${sessionId}`),
+
+  // Cancel a running job
+  cancel: (sessionId: string) =>
+    request<{ sessionId: string; status: string }>(`/research/jobs/${sessionId}`, {
+      method: 'DELETE',
+    }),
+
+  // Get job events (polling)
+  getEvents: (sessionId: string, sinceSequence = 0, limit = 100) =>
+    request<JobEventsResponse>(`/research/jobs/${sessionId}/events`, {
+      params: { sinceSequence, limit },
+    }),
+
+  // Get active job for a chat
+  getChatActiveJob: (chatId: string) =>
+    request<Job | null>(`/research/jobs/chat/${chatId}/active`),
+
+  // Get SSE stream URL for a job
+  streamUrl: (sessionId: string, sinceSequence = 0) =>
+    `${API_BASE_URL}/research/jobs/${sessionId}/stream?sinceSequence=${sinceSequence}`,
+}
+
 // Preferences API
 export const preferencesApi = {
   get: () => request<import('../types').UserPreferences>('/preferences'),
 
   update: (data: {
     system_instructions?: string
-    default_depth?: string
-    ui_preferences?: Record<string, unknown>
+    default_research_depth?: string
+    default_query_mode?: import('../types').QueryMode
+    theme?: string
+    notifications_enabled?: boolean
   }) =>
     request<import('../types').UserPreferences>('/preferences', {
       method: 'PUT',

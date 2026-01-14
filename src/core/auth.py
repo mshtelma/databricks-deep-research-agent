@@ -35,36 +35,33 @@ class UserIdentity:
         )
 
 
-def get_workspace_client(token: str | None = None) -> WorkspaceClient:
-    """Get Databricks WorkspaceClient.
+def get_workspace_client() -> WorkspaceClient:
+    """Get Databricks WorkspaceClient using automatic auth.
 
-    Args:
-        token: Optional OAuth token for OBO (On-Behalf-Of) authentication.
-               If not provided, uses default authentication from environment.
+    In Databricks Apps, auto-detects service principal from environment.
+    In development, uses profile or token from settings.
+
+    Note: OBO (On-Behalf-Of) authentication is not currently used.
+    When needed for user-specific data access (e.g., Vector Search),
+    implement a separate function that explicitly disables OAuth env vars.
 
     Returns:
         Configured WorkspaceClient instance.
     """
     settings = get_settings()
 
-    if token:
-        # OBO authentication with provided token
-        return WorkspaceClient(
-            host=settings.databricks_host,
-            token=token,
-        )
-
-    # Default authentication (profile or environment)
+    # Profile-based auth (local development)
     if settings.databricks_config_profile:
         return WorkspaceClient(profile=settings.databricks_config_profile)
 
+    # Direct token auth (local development fallback)
     if settings.databricks_host and settings.databricks_token:
         return WorkspaceClient(
             host=settings.databricks_host,
             token=settings.databricks_token,
         )
 
-    # Fall back to default SDK authentication
+    # Automatic auth (Databricks Apps - service principal)
     return WorkspaceClient()
 
 
@@ -87,6 +84,9 @@ def get_current_user(client: WorkspaceClient) -> UserIdentity:
 
 def extract_obo_token(headers: dict[str, str]) -> str | None:
     """Extract OBO (On-Behalf-Of) token from request headers.
+
+    DEPRECATED: OBO authentication is not currently used.
+    Kept for future implementation when user-specific data access is needed.
 
     In Databricks Apps, the user's OAuth token is forwarded as
     'x-forwarded-access-token' header for impersonation.

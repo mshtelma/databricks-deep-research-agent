@@ -42,8 +42,9 @@ export default defineConfig({
   ],
   // WebServer: Auto-start backend with static file serving
   // Uses Lakebase from .env configuration (or local PostgreSQL if DATABASE_URL is set)
+  // Uses lightweight E2E config for faster tests
   webServer: {
-    command: 'cd .. && SERVE_STATIC=true uv run uvicorn src.main:app --host 0.0.0.0 --port 8000',
+    command: 'cd .. && APP_CONFIG_PATH=config/app.e2e.yaml SERVE_STATIC=true uv run uvicorn src.main:app --host 0.0.0.0 --port 8000',
     url: 'http://localhost:8000/health',
     reuseExistingServer: !process.env.CI, // Reuse locally, fresh in CI
     timeout: 120000,

@@ -63,45 +63,18 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Middleware for logging HTTP requests and responses."""
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        """Log request details and timing."""
-        # Generate request ID
+        """Process request and log errors only."""
+        # Generate request ID for tracing
         request_id = str(uuid.uuid4())[:8]
         request.state.request_id = request_id
 
-        # Record start time
+        # Record start time for error logging
         start_time = time.perf_counter()
 
-        # Log request
-        logger.info(
-            "Request started",
-            extra={
-                "request_id": request_id,
-                "method": request.method,
-                "url": str(request.url),
-                "client_ip": self._get_client_ip(request),
-            },
-        )
-
-        # Process request
         try:
             response = await call_next(request)
 
-            # Calculate duration
-            duration_ms = (time.perf_counter() - start_time) * 1000
-
-            # Log response
-            logger.info(
-                "Request completed",
-                extra={
-                    "request_id": request_id,
-                    "method": request.method,
-                    "url": str(request.url),
-                    "status_code": response.status_code,
-                    "duration_ms": round(duration_ms, 2),
-                },
-            )
-
-            # Add request ID to response headers
+            # Add request ID to response headers for debugging
             response.headers["X-Request-ID"] = request_id
 
             return response
@@ -121,22 +94,6 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 exc_info=True,
             )
             raise
-
-    def _get_client_ip(self, request: Request) -> str | None:
-        """Extract client IP from request."""
-        # Check forwarded headers
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-
-        real_ip = request.headers.get("x-real-ip")
-        if real_ip:
-            return real_ip
-
-        if request.client:
-            return request.client.host
-
-        return None
 
 
 def setup_logging(log_level: str = "INFO", log_format: str = "text") -> None:

@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils';
+import type { ToolActivity } from '@/hooks/useStreamingQuery';
 
 type AgentStatus =
   | 'idle'
@@ -7,6 +8,7 @@ type AgentStatus =
   | 'researching'
   | 'reflecting'
   | 'synthesizing'
+  | 'verifying'
   | 'complete'
   | 'error';
 
@@ -14,14 +16,16 @@ interface AgentStatusIndicatorProps {
   status: AgentStatus;
   currentAgent?: string;
   className?: string;
+  toolActivity?: ToolActivity | null;
 }
 
 export function AgentStatusIndicator({
   status,
   currentAgent,
   className,
+  toolActivity,
 }: AgentStatusIndicatorProps) {
-  const statusInfo = getStatusInfo(status, currentAgent);
+  const statusInfo = getStatusInfo(status, currentAgent, toolActivity);
 
   if (status === 'idle') {
     return null;
@@ -38,11 +42,53 @@ export function AgentStatusIndicator({
     >
       {statusInfo.icon}
       <span className={statusInfo.textClass}>{statusInfo.label}</span>
+      {/* Show sources crawled count during research */}
+      {status === 'researching' && toolActivity && toolActivity.sourcesCrawled > 0 && (
+        <span className="text-xs text-amber-500 ml-1">
+          ({toolActivity.sourcesCrawled} sources)
+        </span>
+      )}
     </div>
   );
 }
 
-function getStatusInfo(status: AgentStatus, currentAgent?: string) {
+function getToolLabel(toolActivity: ToolActivity | null | undefined): string {
+  if (!toolActivity || !toolActivity.toolName) {
+    return 'Researching...';
+  }
+
+  if (toolActivity.toolName === 'web_search') {
+    const query = toolActivity.toolArgs?.query as string | undefined;
+    if (query) {
+      // Truncate query for display
+      const displayQuery = query.length > 30 ? query.substring(0, 30) + '...' : query;
+      return `🔍 Searching: "${displayQuery}"`;
+    }
+    return '🔍 Searching...';
+  }
+
+  if (toolActivity.toolName === 'web_crawl') {
+    const url = toolActivity.toolArgs?.url as string | undefined;
+    if (url) {
+      // Extract domain for display
+      try {
+        const domain = new URL(url).hostname;
+        return `📄 Crawling: ${domain}`;
+      } catch {
+        return '📄 Crawling...';
+      }
+    }
+    return '📄 Crawling...';
+  }
+
+  return 'Researching...';
+}
+
+function getStatusInfo(
+  status: AgentStatus,
+  _currentAgent?: string,
+  toolActivity?: ToolActivity | null
+) {
   switch (status) {
     case 'classifying':
       return {
@@ -60,8 +106,10 @@ function getStatusInfo(status: AgentStatus, currentAgent?: string) {
       };
     case 'researching':
       return {
-        label: currentAgent || 'Researching...',
-        icon: <SearchIcon className="w-4 h-4 text-amber-500 animate-pulse" />,
+        label: getToolLabel(toolActivity),
+        icon: toolActivity?.toolName === 'web_crawl'
+          ? <PageIcon className="w-4 h-4 text-amber-500 animate-pulse" />
+          : <SearchIcon className="w-4 h-4 text-amber-500 animate-pulse" />,
         bgClass: 'bg-amber-50 dark:bg-amber-950',
         textClass: 'text-amber-600 dark:text-amber-400',
       };
@@ -78,6 +126,13 @@ function getStatusInfo(status: AgentStatus, currentAgent?: string) {
         icon: <PenIcon className="w-4 h-4 text-green-500 animate-pulse" />,
         bgClass: 'bg-green-50 dark:bg-green-950',
         textClass: 'text-green-600 dark:text-green-400',
+      };
+    case 'verifying':
+      return {
+        label: 'Verifying claims...',
+        icon: <SpinnerIcon className="w-4 h-4 animate-spin text-indigo-500" />,
+        bgClass: 'bg-indigo-50 dark:bg-indigo-950',
+        textClass: 'text-indigo-600 dark:text-indigo-400',
       };
     case 'complete':
       return {
@@ -137,6 +192,27 @@ function SearchIcon({ className }: { className?: string }) {
     >
       <circle cx="11" cy="11" r="8" />
       <path d="m21 21-4.3-4.3" />
+    </svg>
+  );
+}
+
+function PageIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="16" y1="13" x2="8" y2="13" />
+      <line x1="16" y1="17" x2="8" y2="17" />
+      <line x1="10" y1="9" x2="8" y2="9" />
     </svg>
   );
 }

@@ -31,18 +31,28 @@ test.describe('Smoke Tests', () => {
     await expect(messageInput).toBeEmpty();
   });
 
-  test('can send simple message', async ({ chatPage }) => {
-    const query = SMOKE_QUERIES[0]; // "Hello"
+  // This test requires real research - skip unless RUN_SLOW_TESTS=1
+  test.describe('Message Response', () => {
+    test.slow();
 
-    // Send a simple message
-    await chatPage.sendMessage(query.text);
+    test.skip(
+      !process.env.RUN_SLOW_TESTS,
+      'Message response tests require real research - set RUN_SLOW_TESTS=1 to enable'
+    );
 
-    // Wait for response with appropriate timeout
-    await chatPage.waitForAgentResponse(query.expectedResponseTimeMs);
+    test('can send simple message and receive response', async ({ chatPage }) => {
+      const query = SMOKE_QUERIES[0]; // "Hello"
 
-    // Verify we got a response
-    const response = await chatPage.getLastAgentResponse();
-    expect(response.length).toBeGreaterThan(0);
+      // Send a simple message
+      await chatPage.sendMessage(query.text);
+
+      // Wait for response with appropriate timeout
+      await chatPage.waitForAgentResponse(query.expectedResponseTimeMs);
+
+      // Verify we got a response
+      const response = await chatPage.getLastAgentResponse();
+      expect(response.length).toBeGreaterThan(0);
+    });
   });
 
   test('message input is focused after load', async ({ page }) => {

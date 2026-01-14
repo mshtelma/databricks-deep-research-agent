@@ -34,6 +34,7 @@ export function ChatSearchInput({
       <input
         ref={inputRef}
         type="text"
+        data-testid="chat-search-input"
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
@@ -47,6 +48,7 @@ export function ChatSearchInput({
       {value && (
         <button
           type="button"
+          data-testid="chat-search-clear"
           onClick={() => onChange('')}
           className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
           aria-label="Clear search"

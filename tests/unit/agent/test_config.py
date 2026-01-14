@@ -4,17 +4,28 @@ import pytest
 
 from src.agent.config import (
     get_background_config,
+    get_citation_config_for_depth,
     get_coordinator_config,
     get_planner_config,
+    get_report_limits,
     get_researcher_config,
+    get_researcher_config_for_depth,
+    get_research_type_config,
+    get_step_limits,
     get_synthesizer_config,
     get_truncation_limit,
 )
 from src.core.app_config import (
     BackgroundConfig,
+    CitationVerificationConfig,
     CoordinatorConfig,
     PlannerConfig,
+    ReportLimitConfig,
     ResearcherConfig,
+    ResearcherMode,
+    ResearcherTypeConfig,
+    ResearchTypeConfig,
+    StepLimits,
     SynthesizerConfig,
     clear_config_cache,
 )
@@ -186,3 +197,147 @@ class TestConfigAccessorConsistency:
         # Values should be equal
         assert config1.max_search_queries == config2.max_search_queries
         assert config1.max_urls_to_crawl == config2.max_urls_to_crawl
+
+
+class TestGetResearchTypeConfig:
+    """Tests for get_research_type_config accessor (FR-100)."""
+
+    def setup_method(self) -> None:
+        """Clear config cache before each test."""
+        clear_config_cache()
+
+    def test_returns_research_type_config_for_light(self) -> None:
+        """Test returns ResearchTypeConfig for light depth."""
+        config = get_research_type_config("light")
+        assert isinstance(config, ResearchTypeConfig)
+
+    def test_returns_research_type_config_for_medium(self) -> None:
+        """Test returns ResearchTypeConfig for medium depth."""
+        config = get_research_type_config("medium")
+        assert isinstance(config, ResearchTypeConfig)
+
+    def test_returns_research_type_config_for_extended(self) -> None:
+        """Test returns ResearchTypeConfig for extended depth."""
+        config = get_research_type_config("extended")
+        assert isinstance(config, ResearchTypeConfig)
+
+    def test_light_has_smallest_step_limits(self) -> None:
+        """Test light depth has smallest step limits."""
+        light = get_research_type_config("light")
+        medium = get_research_type_config("medium")
+        extended = get_research_type_config("extended")
+
+        assert light.steps.max <= medium.steps.max <= extended.steps.max
+
+    def test_extended_has_largest_report_limits(self) -> None:
+        """Test extended depth has largest report limits."""
+        light = get_research_type_config("light")
+        medium = get_research_type_config("medium")
+        extended = get_research_type_config("extended")
+
+        assert light.report_limits.max_words <= medium.report_limits.max_words
+        assert medium.report_limits.max_words <= extended.report_limits.max_words
+
+
+class TestGetStepLimits:
+    """Tests for get_step_limits accessor."""
+
+    def setup_method(self) -> None:
+        """Clear config cache before each test."""
+        clear_config_cache()
+
+    def test_returns_step_limits(self) -> None:
+        """Test returns StepLimits instance."""
+        limits = get_step_limits("medium")
+        assert isinstance(limits, StepLimits)
+
+    def test_min_less_than_or_equal_max(self) -> None:
+        """Test min steps <= max steps for all depths."""
+        for depth in ["light", "medium", "extended"]:
+            limits = get_step_limits(depth)
+            assert limits.min <= limits.max
+
+    def test_light_has_small_steps(self) -> None:
+        """Test light depth has small step limits."""
+        limits = get_step_limits("light")
+        assert limits.min >= 1
+        assert limits.max <= 5
+
+    def test_extended_has_large_steps(self) -> None:
+        """Test extended depth has large step limits."""
+        limits = get_step_limits("extended")
+        assert limits.max >= 5
+
+
+class TestGetReportLimits:
+    """Tests for get_report_limits accessor."""
+
+    def setup_method(self) -> None:
+        """Clear config cache before each test."""
+        clear_config_cache()
+
+    def test_returns_report_limit_config(self) -> None:
+        """Test returns ReportLimitConfig instance."""
+        limits = get_report_limits("medium")
+        assert isinstance(limits, ReportLimitConfig)
+
+    def test_has_min_and_max_words(self) -> None:
+        """Test limits have min and max words."""
+        for depth in ["light", "medium", "extended"]:
+            limits = get_report_limits(depth)
+            assert limits.min_words >= 100
+            assert limits.max_words >= limits.min_words
+            assert limits.max_tokens >= 1000
+
+
+class TestGetResearcherConfigForDepth:
+    """Tests for get_researcher_config_for_depth accessor."""
+
+    def setup_method(self) -> None:
+        """Clear config cache before each test."""
+        clear_config_cache()
+
+    def test_returns_researcher_type_config(self) -> None:
+        """Test returns ResearcherTypeConfig instance."""
+        config = get_researcher_config_for_depth("medium")
+        assert isinstance(config, ResearcherTypeConfig)
+
+    def test_has_mode(self) -> None:
+        """Test config has mode field."""
+        config = get_researcher_config_for_depth("medium")
+        assert isinstance(config.mode, ResearcherMode)
+        assert config.mode in [ResearcherMode.REACT, ResearcherMode.CLASSIC]
+
+    def test_light_uses_classic_mode(self) -> None:
+        """Test light depth uses classic mode for speed."""
+        config = get_researcher_config_for_depth("light")
+        # Light should use classic for speed (as defined in app.yaml)
+        assert config.mode == ResearcherMode.CLASSIC
+
+    def test_has_tool_call_limits(self) -> None:
+        """Test config has max_tool_calls for ReAct mode."""
+        for depth in ["light", "medium", "extended"]:
+            config = get_researcher_config_for_depth(depth)
+            assert config.max_tool_calls >= 1
+            assert config.max_search_queries >= 1
+            assert config.max_urls_to_crawl >= 1
+
+
+class TestGetCitationConfigForDepth:
+    """Tests for get_citation_config_for_depth accessor."""
+
+    def setup_method(self) -> None:
+        """Clear config cache before each test."""
+        clear_config_cache()
+
+    def test_returns_citation_verification_config(self) -> None:
+        """Test returns CitationVerificationConfig instance."""
+        config = get_citation_config_for_depth("medium")
+        assert isinstance(config, CitationVerificationConfig)
+
+    def test_all_depths_have_config(self) -> None:
+        """Test all depths have citation config."""
+        for depth in ["light", "medium", "extended"]:
+            config = get_citation_config_for_depth(depth)
+            assert config is not None
+            assert hasattr(config, "generation_mode")

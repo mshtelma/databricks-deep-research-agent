@@ -9,14 +9,15 @@ from src.schemas.agent import QueryClassification, SourceResponse
 from src.schemas.common import BaseSchema
 
 
-class ReasoningStep(BaseSchema):
-    """A single reasoning step."""
+class ReflectionStepSchema(BaseSchema):
+    """Reflection result from Reflector agent.
 
-    step_number: int
-    action: str  # search, fetch, reflect, synthesize
-    input_summary: str
-    output_summary: str
-    timestamp: datetime
+    Stored in research_session.reasoning_steps JSONB column.
+    """
+
+    decision: str  # "continue", "adjust", "complete"
+    reasoning: str
+    suggested_changes: list[str] | None = None
 
 
 class PlanStepSummary(BaseSchema):
@@ -39,7 +40,7 @@ class ResearchPlanStep(PlanStepSummary):
 class ResearchPlan(BaseSchema):
     """Research plan structure."""
 
-    id: UUID
+    id: str  # Plan ID like "plan-iteration-1", not UUID
     title: str
     thought: str
     steps: list[ResearchPlanStep]
@@ -53,7 +54,7 @@ class ResearchSession(BaseSchema):
     id: UUID
     query_classification: QueryClassification | None = None
     research_depth: ResearchDepth
-    reasoning_steps: list[ReasoningStep] = []
+    reasoning_steps: list[ReflectionStepSchema] = []
     status: ResearchStatus
     current_agent: str | None = None
     plan: ResearchPlan | None = None

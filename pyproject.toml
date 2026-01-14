@@ -23,6 +23,8 @@ dependencies = [
     "pyyaml>=6.0.0",
     "sse-starlette>=2.0.0",
     "trafilatura>=2.0.0",
+    "bm25s>=0.2.0",
+    "numpy>=1.24.0",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +32,7 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
+    "pytest-timeout>=2.2.0",
     "mypy>=1.8.0",
     "ruff>=0.2.0",
     "httpx>=0.26.0",
@@ -96,6 +99,7 @@ module = [
     "mlflow.*",
     "databricks.*",
     "sse_starlette.*",
+    "bm25s.*",
 ]
 ignore_missing_imports = true
 
@@ -104,8 +108,13 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-v --tb=short"
 markers = [
-    "unit: mark test as a unit test",
-    "integration: mark test as an integration test requiring external services",
+    "unit: Fast tests with mocked dependencies (default)",
+    "integration: Tests requiring real LLM and Brave API (uses test config)",
+    "complex: Long-running research tests with production config (opt-in)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pyspark.*",
+    "ignore::DeprecationWarning:distutils.*",
 ]
 
 [tool.coverage.run]

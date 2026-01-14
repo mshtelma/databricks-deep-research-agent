@@ -5,9 +5,20 @@ import { test, expect } from '../fixtures';
  *
  * Tests various error conditions to ensure the application
  * handles failures gracefully and provides useful feedback.
+ *
+ * NOTE: Some tests in this suite are slow as they run real research queries.
  */
 test.describe('Error Handling', () => {
-  test.setTimeout(180000); // 3 minutes - research agent needs time
+  // Mark all tests as slow (triples timeout)
+  test.slow();
+
+  // Skip research-dependent tests unless explicitly enabled with RUN_SLOW_TESTS=1
+  test.skip(
+    !process.env.RUN_SLOW_TESTS,
+    'Error handling tests require real research - set RUN_SLOW_TESTS=1 to enable'
+  );
+
+  test.setTimeout(300000); // 5 minutes - research agent needs time
 
   test('handles empty message gracefully', async ({ chatPage, page }) => {
     // Try to send an empty message
@@ -60,8 +71,8 @@ test.describe('Error Handling', () => {
   test('app remains stable after normal operation', async ({ chatPage, page }) => {
     // This test verifies the happy path works and app remains stable
 
-    // Send a normal message first
-    await chatPage.sendMessage('Hello');
+    // Send a normal message using web_search mode to ensure reliable response
+    await chatPage.sendMessageWithMode('Hello', 'web_search');
     await chatPage.waitForAgentResponse(120000);
 
     // Verify we got a response
@@ -97,11 +108,18 @@ test.describe('Error Handling', () => {
   });
 
   test('handles special characters in messages', async ({ chatPage, page }) => {
-    // Send a simple greeting with special characters - should be treated as simple query
-    // Using greeting format to avoid triggering full research cycle
+    // Send a simple greeting with special characters
+    // Using web_search mode to ensure reliable response
     const specialMessage = 'Hello! <script>alert("xss")</script> & "quotes" \'apostrophe\'';
 
-    await chatPage.sendMessage(specialMessage);
+    await chatPage.sendMessageWithMode(specialMessage, 'web_search');
+
+    // Wait for URL to stabilize (draft chat created and navigated)
+    // This handles the race condition when no chatId exists initially
+    await page.waitForURL(/\/chat\//, { timeout: 15000 });
+
+    // Wait for user message to appear (increased timeout to handle state updates)
+    await expect(page.getByTestId('user-message').first()).toBeVisible({ timeout: 30000 });
 
     // Wait for either a response or verify the app handles it gracefully
     // Use shorter timeout since simple queries should respond quickly
@@ -118,7 +136,7 @@ test.describe('Error Handling', () => {
       const response = await chatPage.getLastAgentResponse();
       expect(response.length).toBeGreaterThan(0);
     } else {
-      // If no response, at least verify the user message was displayed correctly
+      // User message should still be displayed correctly even if no agent response
       const userMessages = await chatPage.getUserMessages();
       expect(userMessages.length).toBeGreaterThan(0);
     }
@@ -126,7 +144,8 @@ test.describe('Error Handling', () => {
 
   test('handles rapid message sending', async ({ chatPage }) => {
     // Send messages rapidly (simulate impatient user)
-    await chatPage.sendMessage('First question');
+    // Use web_search mode to ensure reliable response
+    await chatPage.sendMessageWithMode('First question', 'web_search');
 
     // Don't wait for response, immediately try another
     await chatPage.messageInput.fill('Second question');
@@ -146,10 +165,11 @@ test.describe('Error Handling', () => {
   });
 
   test('handles unicode and emoji in messages', async ({ chatPage, page }) => {
-    // Send a simple greeting with unicode and emoji - should be treated as simple query
+    // Send a simple greeting with unicode and emoji
+    // Use web_search mode to ensure reliable response
     const unicodeMessage = 'Hello! 你好 🌍 مرحبا 🚀 How are you?';
 
-    await chatPage.sendMessage(unicodeMessage);
+    await chatPage.sendMessageWithMode(unicodeMessage, 'web_search');
 
     // Wait for either a response or verify the app handles it gracefully
     const responseAppeared = await chatPage

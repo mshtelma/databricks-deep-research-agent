@@ -67,7 +67,10 @@ def run_migrations_offline() -> None:
 
 def do_run_migrations(connection: Connection) -> None:
     """Run migrations with the given connection."""
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+    )
 
     with context.begin_transaction():
         context.run_migrations()
@@ -75,6 +78,11 @@ def do_run_migrations(connection: Connection) -> None:
 
 async def run_async_migrations() -> None:
     """Run migrations in 'online' mode with async engine."""
+    # Ensure database exists first (idempotent)
+    from src.db.bootstrap import ensure_database_exists
+
+    await ensure_database_exists(settings)
+
     # For Lakebase: use SSL (asyncpg doesn't accept sslmode URL param)
     connect_args = {"ssl": True} if settings.use_lakebase else {}
 

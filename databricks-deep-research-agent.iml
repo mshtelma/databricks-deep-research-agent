@@ -4,6 +4,14 @@
     <exclude-output />
     <content url="file://$MODULE_DIR$">
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/e2e/node_modules" />
+      <excludeFolder url="file://$MODULE_DIR$/e2e/playwright-report" />
+      <excludeFolder url="file://$MODULE_DIR$/e2e/test-results" />
+      <excludeFolder url="file://$MODULE_DIR$/frontend/node_modules" />
+      <excludeFolder url="file://$MODULE_DIR$/frontend/playwright-report" />
+      <excludeFolder url="file://$MODULE_DIR$/frontend/test-results" />
+      <excludeFolder url="file://$MODULE_DIR$/htmlcov" />
+      <excludeFolder url="file://$MODULE_DIR$/static" />
     </content>
     <orderEntry type="jdk" jdkName="uv (databricks-deep-research-agent)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

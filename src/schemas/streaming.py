@@ -1,7 +1,7 @@
 """Streaming event schemas for SSE."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import Field
@@ -72,6 +72,24 @@ class StepCompletedEvent(BaseStreamEvent):
     sources_found: int
 
 
+class ToolCallEvent(BaseStreamEvent):
+    """Tool called during ReAct research loop."""
+
+    event_type: Literal["tool_call"] = "tool_call"
+    tool_name: str  # web_search, web_crawl
+    tool_args: dict[str, Any]
+    call_number: int
+
+
+class ToolResultEvent(BaseStreamEvent):
+    """Tool execution completed."""
+
+    event_type: Literal["tool_result"] = "tool_result"
+    tool_name: str
+    result_preview: str  # First 200 chars of result
+    sources_crawled: int  # Total sources with content so far
+
+
 class ReflectionDecisionEvent(BaseStreamEvent):
     """Reflector decision made."""
 
@@ -108,12 +126,114 @@ class ResearchCompletedEvent(BaseStreamEvent):
 
 
 class StreamErrorEvent(BaseStreamEvent):
-    """Error during streaming."""
+    """Error during streaming.
+
+    Includes optional stack trace for debugging. Since Databricks Apps logs
+    get purged, the stack trace is included in the event so the frontend
+    can display it in a collapsible panel for troubleshooting.
+    """
 
     event_type: Literal["error"] = "error"
     error_code: str
-    error_message: str
+    error_message: str  # User-friendly error message
     recoverable: bool
+    stack_trace: str | None = None  # Full Python traceback for debugging
+    error_type: str | None = None  # Exception class name (e.g., "ValueError")
+
+
+# Citation verification events
+class ClaimGeneratedEvent(BaseStreamEvent):
+    """Claim generated during interleaved synthesis."""
+
+    event_type: Literal["claim_generated"] = "claim_generated"
+    claim_text: str
+    position_start: int
+    position_end: int
+    evidence_preview: str
+    confidence_level: str  # "high", "medium", "low"
+
+
+class ClaimVerifiedEvent(BaseStreamEvent):
+    """Claim verification completed."""
+
+    event_type: Literal["claim_verified"] = "claim_verified"
+    claim_id: UUID
+    claim_text: str
+    position_start: int
+    position_end: int
+    verdict: str  # "supported", "partial", "unsupported", "contradicted"
+    confidence_level: str
+    evidence_preview: str
+    reasoning: str | None = None
+    # Citation keys for frontend citationData mapping (e.g., "Arxiv", "Zhipu")
+    citation_key: str | None = None  # Primary citation key
+    citation_keys: list[str] | None = None  # All keys for multi-source claims
+
+
+class CitationCorrectedEvent(BaseStreamEvent):
+    """Citation corrected during post-processing."""
+
+    event_type: Literal["citation_corrected"] = "citation_corrected"
+    claim_id: UUID
+    correction_type: str  # "keep", "replace", "remove", "add_alternate"
+    reasoning: str | None = None
+
+
+class NumericClaimDetectedEvent(BaseStreamEvent):
+    """Numeric claim detected with QA verification."""
+
+    event_type: Literal["numeric_claim_detected"] = "numeric_claim_detected"
+    claim_id: UUID
+    raw_value: str
+    normalized_value: str | None = None
+    unit: str | None = None
+    derivation_type: str  # "direct", "computed"
+    qa_verified: bool = False
+
+
+class VerificationSummaryEvent(BaseStreamEvent):
+    """Verification summary for a message."""
+
+    event_type: Literal["verification_summary"] = "verification_summary"
+    message_id: UUID
+    total_claims: int
+    supported: int
+    partial: int
+    unsupported: int
+    contradicted: int
+    abstained_count: int
+    citation_corrections: int
+    warning: bool
+
+
+class ResearchStartedEvent(BaseStreamEvent):
+    """Emitted at the start of a research request.
+
+    This event signals that the research has begun and provides
+    pre-generated IDs for the message and research session.
+    The frontend uses this to set up UI state before streaming begins.
+    """
+
+    event_type: Literal["research_started"] = "research_started"
+    message_id: str  # UUID as string for JSON serialization
+    research_session_id: str | None = None  # Only set for deep_research mode
+
+
+class PersistenceCompletedEvent(BaseStreamEvent):
+    """Emitted after successful database persistence.
+
+    This event signals that the chat and all research data have been
+    persisted to the database. For draft chats, this indicates the
+    chat is now "real" and should be reflected in the UI.
+    """
+
+    event_type: Literal["persistence_completed"] = "persistence_completed"
+    chat_id: str  # UUID as string for JSON serialization
+    message_id: str
+    research_session_id: str | None = None  # Only set for deep_research mode
+    chat_title: str
+    was_draft: bool  # True if chat was created, False if already existed
+    counts: dict[str, int]  # Entity counts from persistence
 
 
 # Union type for all stream events
@@ -124,9 +244,20 @@ StreamEvent = (
     | PlanCreatedEvent
     | StepStartedEvent
     | StepCompletedEvent
+    | ToolCallEvent
+    | ToolResultEvent
     | ReflectionDecisionEvent
     | SynthesisStartedEvent
     | SynthesisProgressEvent
     | ResearchCompletedEvent
     | StreamErrorEvent
+    # Citation verification events
+    | ClaimGeneratedEvent
+    | ClaimVerifiedEvent
+    | CitationCorrectedEvent
+    | NumericClaimDetectedEvent
+    | VerificationSummaryEvent
+    # Lifecycle events
+    | ResearchStartedEvent
+    | PersistenceCompletedEvent
 )

@@ -13,7 +13,7 @@ PLANNER_SYSTEM_PROMPT = """You are the Planner agent for a deep research system.
 2. Each plan should have:
    - A clear title summarizing the research goal
    - Your reasoning for the plan structure
-   - 2-15 concrete steps with specific actions (more for multi-entity comparisons)
+   - Concrete steps following the count guidance provided (min to max steps)
 
 ## Step Types
 
@@ -97,7 +97,12 @@ When replanning, consider:
 - What was already discovered in all_observations
 - What gaps remain
 - Reflector's suggested changes
-- Don't repeat successful steps
+
+**CRITICAL: Preserve completed steps.** If `completed_steps` is provided:
+1. Do NOT include completed steps in your output - they will be automatically preserved
+2. Only output NEW steps that should come AFTER the completed steps
+3. Start your step IDs from the next number (e.g., if 2 steps completed, start at "step-3")
+4. Focus on addressing the reflector feedback with remaining/new steps
 
 Increment the iteration number when replanning.
 """
@@ -107,8 +112,15 @@ PLANNER_USER_PROMPT = """Create a research plan for the following:
 ## Query
 {query}
 
+## Research Depth Guidance
+Target: {min_steps} to {max_steps} research steps
+{step_prompt_guidance}
+
 ## Background Investigation
 {background_results}
+
+## Completed Steps (PRESERVED AUTOMATICALLY)
+{completed_steps}
 
 ## Previous Observations (from completed steps)
 {all_observations}

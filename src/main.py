@@ -25,6 +25,13 @@ async def lifespan(app: FastAPI):
     # Setup logging
     setup_logging(settings.log_level)
 
+    # NOTE: Database migrations are NOT run here.
+    # The app's service principal has limited permissions (CAN_CONNECT_AND_CREATE)
+    # but cannot create tables in the public schema.
+    # Migrations must be run remotely with developer credentials via:
+    #   make deploy TARGET=dev  (runs migrations as part of deployment)
+    #   make db-migrate-remote TARGET=dev  (manual migration only)
+
     # Validate central configuration (fail fast on startup)
     try:
         app_config = get_app_config()
@@ -47,12 +54,14 @@ async def lifespan(app: FastAPI):
         pass
 
     # Initialize Lakebase credential provider if configured
-    if settings.use_lakebase:
-        provider = get_credential_provider(settings)
-        if provider:
-            # Pre-generate credential to fail fast on startup
-            provider.get_credential()
-            logger.info("Lakebase OAuth credential initialized")
+    # NOTE: Credential pre-generation disabled - will generate on first DB request
+    # if settings.use_lakebase:
+    #     provider = get_credential_provider(settings)
+    #     if provider:
+    #         # Pre-generate credential to fail fast on startup
+    #         provider.get_credential()
+    #         logger.info("Lakebase OAuth credential initialized")
+    logger.info("Lakebase credential will be generated on first database request")
 
     # Initialize shared services
     from src.agent.tools.web_crawler import WebCrawler
@@ -65,15 +74,45 @@ async def lifespan(app: FastAPI):
     app.state.brave_client = BraveSearchClient()
     app.state.web_crawler = WebCrawler()
 
+    # Initialize background job manager
+    from src.db.session import get_session_maker
+    from src.services.job_manager import initialize_job_manager
+
+    job_manager = initialize_job_manager()
+    session_maker = get_session_maker(settings)
+    await job_manager.start(session_maker)
+    app.state.job_manager = job_manager
+    logger.info(
+        "Job manager started: worker_id=%s",
+        job_manager.worker_id,
+    )
+
+    logger.info(
+        "Application started: env=%s, is_databricks_app=%s, port=%s",
+        settings.app_env,
+        settings.is_databricks_app,
+        settings.server_port,
+    )
+
     yield
+
+    # Graceful shutdown - Databricks Apps requires completion within 15 seconds
+    logger.info("Shutdown signal received, cleaning up...")
+
+    # Stop job manager first (cancels running jobs)
+    if hasattr(app.state, "job_manager") and app.state.job_manager:
+        await app.state.job_manager.stop()
+        logger.info("Job manager stopped")
 
     # Cleanup shared services
     await app.state.llm_client.close()
     await app.state.web_crawler.close()
     await app.state.brave_client.close()
+    logger.info("Shared services closed")
 
     # Cleanup database
     await close_db()
+    logger.info("Database connections closed - shutdown complete")
 
 
 def create_app() -> FastAPI:

@@ -5,7 +5,7 @@ from enum import Enum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -13,7 +13,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from src.db.base import BaseModel
 
 if TYPE_CHECKING:
+    from src.models.chat import Chat
     from src.models.message import Message
+    from src.models.research_event import ResearchEvent
     from src.models.source import Source
 
 
@@ -27,8 +29,25 @@ class ResearchDepth(str, Enum):
 
 
 class ResearchStatus(str, Enum):
-    """Research session status."""
+    """Research session status.
 
+    Lifecycle states:
+    - IN_PROGRESS: Research is actively running (set at START for crash resilience)
+    - COMPLETED: Research finished successfully
+    - CANCELLED: Research was cancelled by user
+    - FAILED: Research failed due to error
+
+    Phase states (legacy, for more granular tracking):
+    - PENDING, CLASSIFYING, CLARIFYING, PLANNING, RESEARCHING, REFLECTING, SYNTHESIZING
+    """
+
+    # Lifecycle states (used for crash resilience)
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
+
+    # Phase states (legacy, for granular tracking)
     PENDING = "pending"
     CLASSIFYING = "classifying"
     CLARIFYING = "clarifying"
@@ -36,9 +55,6 @@ class ResearchStatus(str, Enum):
     RESEARCHING = "researching"
     REFLECTING = "reflecting"
     SYNTHESIZING = "synthesizing"
-    COMPLETED = "completed"
-    CANCELLED = "cancelled"
-    FAILED = "failed"
 
 
 class ResearchSessionStatus(str, Enum):
@@ -142,7 +158,61 @@ class ResearchSession(BaseModel):
         nullable=True,
     )
 
+    # Query mode (simple, web_search, deep_research)
+    query_mode: Mapped[str] = mapped_column(
+        String(20),
+        default="deep_research",
+        nullable=False,
+    )
+
+    # =====================================================================
+    # Background Job Management Columns (Migration 009)
+    # =====================================================================
+
+    # Direct user ID lookup (avoids joining through message→chat)
+    user_id: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        index=True,
+    )
+
+    # Direct chat ID lookup (FK to chats table)
+    chat_id: Mapped[UUID] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("chats.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    # Serialized ResearchState for job resumption
+    execution_state: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+    )
+
+    # Worker instance ID that owns this job (for multi-instance)
+    worker_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
+    # Last heartbeat timestamp for zombie detection
+    last_heartbeat: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    # Whether citation verification is enabled
+    verify_sources: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
+
+    # =====================================================================
     # Relationships
+    # =====================================================================
+
     message: Mapped["Message"] = relationship(
         "Message",
         back_populates="research_session",
@@ -151,6 +221,16 @@ class ResearchSession(BaseModel):
         "Source",
         back_populates="session",
         cascade="all, delete-orphan",
+    )
+    events: Mapped[list["ResearchEvent"]] = relationship(
+        "ResearchEvent",
+        back_populates="research_session",
+        cascade="all, delete-orphan",
+        order_by="ResearchEvent.timestamp",
+    )
+    chat: Mapped["Chat"] = relationship(
+        "Chat",
+        back_populates="research_sessions",
     )
 
     @property

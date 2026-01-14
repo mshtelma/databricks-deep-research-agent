@@ -55,25 +55,25 @@ export function PlanProgress({
   const progressPercent = (completedCount / plan.steps.length) * 100;
 
   return (
-    <div data-testid="reasoning-panel" className={cn('rounded-lg border bg-card p-4', className)}>
+    <div data-testid="reasoning-panel" className={cn('rounded-lg border bg-card p-3', className)}>
       {/* Header */}
-      <div className="flex items-center justify-between mb-3">
-        <h3 data-testid="research-status" className="font-semibold text-sm flex items-center gap-2">
-          <PlanIcon className="w-4 h-4" />
+      <div className="flex items-center justify-between mb-2">
+        <h3 data-testid="research-status" className="font-semibold text-xs flex items-center gap-1.5">
+          <PlanIcon className="w-3.5 h-3.5" />
           Research Plan
           {plan.iteration && plan.iteration > 1 && (
-            <span className="text-xs font-normal text-muted-foreground">
+            <span className="text-[10px] font-normal text-muted-foreground">
               (Iteration {plan.iteration})
             </span>
           )}
         </h3>
-        <span className="text-xs text-muted-foreground">
+        <span className="text-[10px] text-muted-foreground">
           {completedCount}/{plan.steps.length}
         </span>
       </div>
 
       {/* Progress bar */}
-      <div className="h-1.5 bg-muted rounded-full overflow-hidden mb-3">
+      <div className="h-1 bg-muted rounded-full overflow-hidden mb-2">
         <div
           className="h-full bg-primary transition-all duration-300"
           style={{ width: `${progressPercent}%` }}
@@ -82,18 +82,18 @@ export function PlanProgress({
 
       {/* Plan title and reasoning */}
       {(plan.title || plan.reasoning || plan.thought) && showDetails && (
-        <div className="mb-3 p-2 bg-muted/50 rounded text-xs">
+        <div className="mb-2 p-1.5 bg-muted/50 rounded text-[11px]">
           {plan.title && <p className="font-medium">{plan.title}</p>}
           {(plan.reasoning || plan.thought) && (
-            <p className="text-muted-foreground mt-1 line-clamp-3">
+            <p className="text-muted-foreground mt-0.5 line-clamp-2">
               {plan.reasoning || plan.thought}
             </p>
           )}
         </div>
       )}
 
-      {/* Steps */}
-      <div className="space-y-2">
+      {/* Steps - scrollable container */}
+      <div className="space-y-1 max-h-[240px] overflow-y-auto pr-0.5">
         {plan.steps.map((step, index) => (
           <StepItem
             key={step.index ?? index}
@@ -126,7 +126,7 @@ function StepItem({ step, stepIndex, isActive, isExpanded, onToggle, showDetails
     <div
       data-testid={`reasoning-step-${stepIndex}`}
       className={cn(
-        'rounded-md transition-colors',
+        'rounded transition-colors',
         isActive && 'bg-primary/5 border border-primary/20',
         !isActive && 'hover:bg-muted/50'
       )}
@@ -136,16 +136,16 @@ function StepItem({ step, stepIndex, isActive, isExpanded, onToggle, showDetails
         onClick={onToggle}
         disabled={!hasExpandableContent}
         className={cn(
-          'w-full flex items-start gap-3 p-2 text-left',
+          'w-full flex items-start gap-2 p-1.5 text-left',
           hasExpandableContent && 'cursor-pointer'
         )}
       >
         <StepStatusIcon status={step.status} isActive={isActive} stepType={step.step_type} needsSearch={step.needs_search} />
         <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <p
               className={cn(
-                'text-sm font-medium',
+                'text-xs font-medium',
                 step.status === 'completed' && 'text-muted-foreground',
                 step.status === 'skipped' && 'text-muted-foreground'
               )}
@@ -153,13 +153,13 @@ function StepItem({ step, stepIndex, isActive, isExpanded, onToggle, showDetails
               {step.title}
             </p>
             {step.needs_search && (
-              <span className="text-xs px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300">
+              <span className="text-[10px] px-1 py-0.5 rounded bg-blue-100 text-blue-700 dark:bg-blue-950 dark:text-blue-300">
                 Search
               </span>
             )}
           </div>
           {!isExpanded && step.description && showDetails && (
-            <p className="text-xs text-muted-foreground mt-0.5 line-clamp-1">
+            <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-1">
               {step.description}
             </p>
           )}
@@ -167,7 +167,7 @@ function StepItem({ step, stepIndex, isActive, isExpanded, onToggle, showDetails
         {hasExpandableContent && (
           <ChevronIcon
             className={cn(
-              'w-4 h-4 text-muted-foreground transition-transform flex-shrink-0 mt-0.5',
+              'w-3.5 h-3.5 text-muted-foreground transition-transform flex-shrink-0 mt-0.5',
               isExpanded && 'rotate-180'
             )}
           />
@@ -176,13 +176,13 @@ function StepItem({ step, stepIndex, isActive, isExpanded, onToggle, showDetails
 
       {/* Expanded content */}
       {isExpanded && hasExpandableContent && (
-        <div className="px-2 pb-2 pt-0 ml-8 border-l-2 border-muted">
+        <div className="px-1.5 pb-1.5 pt-0 ml-6 border-l-2 border-muted">
           {step.description && (
-            <p className="text-xs text-muted-foreground mb-2">{step.description}</p>
+            <p className="text-[10px] text-muted-foreground mb-1">{step.description}</p>
           )}
           {step.observation && (
-            <div className="bg-muted/50 p-2 rounded text-xs">
-              <p className="font-medium text-muted-foreground mb-1">Observation:</p>
+            <div className="bg-muted/50 p-1.5 rounded text-[10px]">
+              <p className="font-medium text-muted-foreground mb-0.5">Observation:</p>
               <p className="text-foreground">{step.observation}</p>
             </div>
           )}
@@ -202,8 +202,8 @@ interface StepStatusIconProps {
 function StepStatusIcon({ status, isActive, needsSearch }: StepStatusIconProps) {
   if (isActive && status !== 'completed') {
     return (
-      <div className="w-5 h-5 rounded-full border-2 border-primary flex items-center justify-center flex-shrink-0">
-        <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+      <div className="w-4 h-4 rounded-full border-2 border-primary flex items-center justify-center flex-shrink-0">
+        <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
       </div>
     );
   }
@@ -211,26 +211,26 @@ function StepStatusIcon({ status, isActive, needsSearch }: StepStatusIconProps) 
   switch (status) {
     case 'completed':
       return (
-        <div className="w-5 h-5 rounded-full bg-green-500 flex items-center justify-center flex-shrink-0">
-          <CheckIcon className="w-3 h-3 text-white" />
+        <div className="w-4 h-4 rounded-full bg-green-500 flex items-center justify-center flex-shrink-0">
+          <CheckIcon className="w-2.5 h-2.5 text-white" />
         </div>
       );
     case 'skipped':
       return (
-        <div className="w-5 h-5 rounded-full bg-muted flex items-center justify-center flex-shrink-0">
-          <MinusIcon className="w-3 h-3 text-muted-foreground" />
+        <div className="w-4 h-4 rounded-full bg-muted flex items-center justify-center flex-shrink-0">
+          <MinusIcon className="w-2.5 h-2.5 text-muted-foreground" />
         </div>
       );
     default:
       if (needsSearch) {
         return (
-          <div className="w-5 h-5 rounded-full border-2 border-blue-300 flex items-center justify-center flex-shrink-0">
-            <SearchIcon className="w-3 h-3 text-blue-400" />
+          <div className="w-4 h-4 rounded-full border-2 border-blue-300 flex items-center justify-center flex-shrink-0">
+            <SearchIcon className="w-2.5 h-2.5 text-blue-400" />
           </div>
         );
       }
       return (
-        <div className="w-5 h-5 rounded-full border-2 border-muted-foreground/30 flex-shrink-0" />
+        <div className="w-4 h-4 rounded-full border-2 border-muted-foreground/30 flex-shrink-0" />
       );
   }
 }

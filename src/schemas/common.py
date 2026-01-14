@@ -4,16 +4,25 @@ from datetime import datetime
 from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, ConfigDict
+from pydantic.alias_generators import to_camel
 
 T = TypeVar("T")
 
 
 class BaseSchema(BaseModel):
-    """Base schema with common configuration."""
+    """Base schema with common configuration.
+
+    Uses camelCase aliases for JSON serialization (frontend compatibility).
+    - alias_generator: generates camelCase aliases from snake_case field names
+    - populate_by_name: accepts both snake_case and camelCase on input
+    - serialize_by_alias: outputs camelCase (uses aliases) by default
+    """
 
     model_config = ConfigDict(
         from_attributes=True,
         populate_by_name=True,
+        alias_generator=to_camel,
+        serialize_by_alias=True,
     )
 
 

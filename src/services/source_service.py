@@ -10,6 +10,23 @@ from src.models.source import Source
 
 logger = logging.getLogger(__name__)
 
+# Database constraint: sources.title is VARCHAR(500)
+MAX_TITLE_LENGTH = 500
+
+
+def _truncate_title(title: str | None) -> str | None:
+    """Truncate title to fit VARCHAR(500) constraint.
+
+    Args:
+        title: Source title from API.
+
+    Returns:
+        Truncated title with ellipsis if over limit, original otherwise.
+    """
+    if title and len(title) > MAX_TITLE_LENGTH:
+        return title[: MAX_TITLE_LENGTH - 3] + "..."
+    return title
+
 
 class SourceService:
     """Service for managing research sources."""
@@ -47,7 +64,7 @@ class SourceService:
         source = Source(
             research_session_id=research_session_id,
             url=url,
-            title=title,
+            title=_truncate_title(title),
             snippet=snippet,
             content=content,
             relevance_score=relevance_score,
@@ -77,10 +94,10 @@ class SourceService:
             source = Source(
                 research_session_id=research_session_id,
                 url=str(source_data.get("url", "")),
-                title=source_data.get("title"),  # type: ignore[arg-type]
-                snippet=source_data.get("snippet"),  # type: ignore[arg-type]
-                content=source_data.get("content"),  # type: ignore[arg-type]
-                relevance_score=source_data.get("relevance_score"),  # type: ignore[arg-type]
+                title=_truncate_title(source_data.get("title")),  # type: ignore[arg-type]
+                snippet=source_data.get("snippet"),
+                content=source_data.get("content"),
+                relevance_score=source_data.get("relevance_score"),
             )
             self._session.add(source)
             created.append(source)

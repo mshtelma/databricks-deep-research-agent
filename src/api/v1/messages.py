@@ -11,6 +11,7 @@ from src.core.exceptions import NotFoundError
 from src.db.session import get_db
 from src.middleware.auth import CurrentUser
 from src.models.message import Message, MessageRole
+from src.models.research_session import ResearchSession
 from src.schemas.feedback import FeedbackRequest, FeedbackResponse
 from src.schemas.message import (
     EditMessageRequest,
@@ -21,6 +22,7 @@ from src.schemas.message import (
     SendMessageRequest,
     SendMessageResponse,
 )
+from src.schemas.research import ResearchSession as ResearchSessionSchema
 from src.services.chat_service import ChatService
 from src.services.feedback_service import FeedbackService
 from src.services.message_service import MessageService
@@ -38,15 +40,39 @@ async def _verify_chat_ownership(
         raise NotFoundError("Chat", str(chat_id))
 
 
+def _research_session_to_schema(
+    session: ResearchSession | None,
+) -> ResearchSessionSchema | None:
+    """Convert ResearchSession model to schema."""
+    if session is None:
+        return None
+
+    return ResearchSessionSchema(
+        id=session.id,
+        query_classification=session.query_classification,
+        research_depth=session.research_depth,
+        reasoning_steps=session.reasoning_steps or [],
+        status=session.status,
+        current_agent=session.current_agent,
+        plan=session.plan,  # JSONB dict, frontend can parse as needed
+        current_step_index=session.current_step_index,
+        plan_iterations=session.plan_iterations,
+        started_at=session.started_at,
+        completed_at=session.completed_at,
+        sources=[],  # Don't load sources to avoid N+1 queries
+    )
+
+
 def _message_to_response(msg: Message) -> MessageResponse:
     """Convert Message model to MessageResponse schema."""
     return MessageResponse(
         id=msg.id,
         chat_id=msg.chat_id,
         role=msg.role,
-        content=msg.content,
+        content=msg.content or "",  # Content can be None for in-progress agent messages
         created_at=msg.created_at,
         is_edited=msg.is_edited,
+        research_session=_research_session_to_schema(msg.research_session),
     )
 
 

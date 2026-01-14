@@ -9,8 +9,19 @@ import { LONG_RUNNING_QUERIES } from '../utils/test-data';
  * - Trigger stop/cancel
  * - Verify operation stops within 2 seconds
  * - Verify partial results preserved or stopped message shown
+ *
+ * NOTE: Some tests in this suite are slow as they run real research queries.
  */
 test.describe('Stop/Cancel', () => {
+  // Mark all tests as slow (triples timeout)
+  test.slow();
+
+  // Skip stop/cancel tests unless explicitly enabled with RUN_SLOW_TESTS=1
+  test.skip(
+    !process.env.RUN_SLOW_TESTS,
+    'Stop/cancel tests require real research - set RUN_SLOW_TESTS=1 to enable'
+  );
+
   test('stops operation within 2 seconds', async ({ chatPage }) => {
     const query = LONG_RUNNING_QUERIES[0];
 
