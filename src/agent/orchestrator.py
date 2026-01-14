@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+import traceback
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
@@ -112,6 +113,9 @@ class OrchestrationConfig:
     is_draft: bool = False
     # Citation verification toggle - when False, use classical synthesis
     verify_sources: bool = True
+    # Session pre-created - True if JobManager already created the session
+    # When True, orchestrator skips session creation to avoid duplicate key error
+    session_pre_created: bool = False
 
 
 @dataclass
@@ -497,6 +501,7 @@ async def run_research(
                 events.append(_agent_completed("synthesizer", agent_start))
 
     except Exception as e:
+        tb = traceback.format_exc()
         logger.exception(
             "ORCHESTRATION_ERROR",
             error_type=type(e).__name__,
@@ -507,6 +512,8 @@ async def run_research(
                 error_code="ORCHESTRATION_ERROR",
                 error_message=str(e),
                 recoverable=False,
+                stack_trace=tb,
+                error_type=type(e).__name__,
             )
         )
 
@@ -638,6 +645,7 @@ async def stream_research(
 
     steps_executed = 0
     steps_skipped = 0
+    event_buffer: EventBuffer | None = None  # Initialize before try block for exception handler
 
     # Create MLflow run to associate trace with params
     with mlflow.start_run(run_name=f"research_{str(state.session_id)[:8]}", nested=True):
@@ -892,6 +900,8 @@ async def stream_research(
                                     confidence_level=event_dict.get("confidence", "medium"),
                                     evidence_preview=event_dict.get("evidence_preview", ""),
                                     reasoning=event_dict.get("reasoning"),
+                                    citation_key=event_dict.get("citation_key"),
+                                    citation_keys=event_dict.get("citation_keys"),
                                 )
                             elif event_type == "verification_summary":
                                 yield VerificationSummaryEvent(
@@ -1095,7 +1105,6 @@ async def stream_research(
 
                 # Pre-generate user message UUID for session start
                 user_message_id = uuid4()
-                event_buffer: EventBuffer | None = None
 
                 # =============================================================
                 # Two-Phase Persistence: Create session at START for crash resilience
@@ -1105,12 +1114,14 @@ async def stream_research(
                 # - Frontend to reconnect if browser reloads mid-research
                 # - Session marked FAILED on error instead of orphaned
                 # =============================================================
+                # Skip if session was already created by JobManager
                 if (
                     db is not None
                     and config.research_session_id is not None
                     and config.message_id is not None
                     and chat_id is not None
                     and user_id is not None
+                    and not config.session_pre_created  # Skip if JobManager already created
                 ):
                     from src.agent.persistence import persist_research_session_start_independent
 
@@ -1151,15 +1162,34 @@ async def stream_research(
                             session_id=str(config.research_session_id)[:8] if config.research_session_id else None,
                         )
                         # Continue without event buffering - old behavior as fallback
+                elif config.session_pre_created and config.research_session_id is not None:
+                    # Session was pre-created by JobManager, just set up event buffer
+                    event_buffer = EventBuffer(config.research_session_id)
+                    logger.info(
+                        "USING_PRE_CREATED_SESSION",
+                        session_id=str(config.research_session_id)[:8],
+                    )
+                    # Emit research_started event for frontend
+                    started_event = ResearchStartedEvent(
+                        message_id=str(config.message_id) if config.message_id else "",
+                        research_session_id=str(config.research_session_id),
+                    )
+                    yield started_event
+                    if event_buffer:
+                        await event_buffer.add_event(started_event)
 
                 # Phase 1: Coordinator
                 log_agent_transition(logger, from_agent=None, to_agent="coordinator")
-                yield _agent_started("coordinator", "simple")
+                evt: StreamEvent = _agent_started("coordinator", "simple")
+                yield evt
+                await _buffer_event(evt, event_buffer)
                 agent_start = time.perf_counter()
 
                 state = await run_coordinator(state, llm)
 
-                yield _agent_completed("coordinator", agent_start)
+                evt = _agent_completed("coordinator", agent_start)
+                yield evt
+                await _buffer_event(evt, event_buffer)
 
                 # Log research configuration to MLflow run (after coordinator resolves depth)
                 log_research_config(depth=state.resolve_depth())
@@ -1184,10 +1214,14 @@ async def stream_research(
                     # Phase 2: Background Investigation
                     if config.enable_background_investigation:
                         log_agent_transition(logger, from_agent="coordinator", to_agent="background_investigator")
-                        yield _agent_started("background_investigator", "simple")
+                        evt = _agent_started("background_investigator", "simple")
+                        yield evt
+                        await _buffer_event(evt, event_buffer)
                         agent_start = time.perf_counter()
                         state = await run_background_investigator(state, llm, brave_client)
-                        yield _agent_completed("background_investigator", agent_start)
+                        evt = _agent_completed("background_investigator", agent_start)
+                        yield evt
+                        await _buffer_event(evt, event_buffer)
 
                     # Phase 3: Planning and Research Loop
                     while state.plan_iterations < config.max_plan_iterations:
@@ -1201,13 +1235,19 @@ async def stream_research(
                             to_agent="planner",
                             reason=f"iteration {state.plan_iterations + 1}",
                         )
-                        yield _agent_started("planner", "analytical")
+                        evt = _agent_started("planner", "analytical")
+                        yield evt
+                        await _buffer_event(evt, event_buffer)
                         agent_start = time.perf_counter()
                         state = await run_planner(state, llm)
-                        yield _agent_completed("planner", agent_start)
+                        evt = _agent_completed("planner", agent_start)
+                        yield evt
+                        await _buffer_event(evt, event_buffer)
 
                         if state.current_plan:
-                            yield _plan_created(state)
+                            evt = _plan_created(state)
+                            yield evt
+                            await _buffer_event(evt, event_buffer)
 
                             if state.current_plan.has_enough_context:
                                 break
@@ -1217,7 +1257,9 @@ async def stream_research(
                                 if not step:
                                     break
 
-                                yield _step_started(state)
+                                evt = _step_started(state)
+                                yield evt
+                                await _buffer_event(evt, event_buffer)
 
                                 log_agent_transition(
                                     logger,
@@ -1225,7 +1267,9 @@ async def stream_research(
                                     to_agent="researcher",
                                     reason=f"step {state.current_step_index + 1}",
                                 )
-                                yield _agent_started("researcher", "analytical")
+                                evt = _agent_started("researcher", "analytical")
+                                yield evt
+                                await _buffer_event(evt, event_buffer)
                                 agent_start = time.perf_counter()
 
                                 # Get researcher mode for current depth
@@ -1238,17 +1282,21 @@ async def stream_research(
                                         state, llm, crawler, brave_client
                                     ):
                                         if react_event.event_type == "tool_call":
-                                            yield ToolCallEvent(
+                                            evt = ToolCallEvent(
                                                 tool_name=react_event.data.get("tool", ""),
                                                 tool_args=react_event.data.get("args", {}),
                                                 call_number=react_event.data.get("call_number", 0),
                                             )
+                                            yield evt
+                                            await _buffer_event(evt, event_buffer)
                                         elif react_event.event_type == "tool_result":
-                                            yield ToolResultEvent(
+                                            evt = ToolResultEvent(
                                                 tool_name=react_event.data.get("tool", ""),
                                                 result_preview=react_event.data.get("result_preview", "")[:200],
                                                 sources_crawled=react_event.data.get("high_quality_count", 0),
                                             )
+                                            yield evt
+                                            await _buffer_event(evt, event_buffer)
                                         elif react_event.event_type == "research_complete":
                                             logger.info(
                                                 "REACT_RESEARCH_COMPLETE",
@@ -1262,19 +1310,29 @@ async def stream_research(
                                         state, llm, crawler, brave_client
                                     )
 
-                                yield _agent_completed("researcher", agent_start)
+                                evt = _agent_completed("researcher", agent_start)
+                                yield evt
+                                await _buffer_event(evt, event_buffer)
                                 steps_executed += 1
 
-                                yield _step_completed(state)
+                                evt = _step_completed(state)
+                                yield evt
+                                await _buffer_event(evt, event_buffer)
 
                                 log_agent_transition(logger, from_agent="researcher", to_agent="reflector")
-                                yield _agent_started("reflector", "simple")
+                                evt = _agent_started("reflector", "simple")
+                                yield evt
+                                await _buffer_event(evt, event_buffer)
                                 agent_start = time.perf_counter()
                                 state = await run_reflector(state, llm)
-                                yield _agent_completed("reflector", agent_start)
+                                evt = _agent_completed("reflector", agent_start)
+                                yield evt
+                                await _buffer_event(evt, event_buffer)
 
                                 if state.last_reflection:
-                                    yield _reflection_decision(state)
+                                    evt = _reflection_decision(state)
+                                    yield evt
+                                    await _buffer_event(evt, event_buffer)
 
                                     if state.last_reflection.decision == ReflectionDecision.COMPLETE:
                                         while state.has_more_steps():
@@ -1299,74 +1357,80 @@ async def stream_research(
 
                     # Phase 4: Streaming Synthesis
                     log_agent_transition(logger, from_agent="reflector", to_agent="synthesizer")
-                    yield SynthesisStartedEvent(
+                    evt = SynthesisStartedEvent(
                         total_observations=len(state.all_observations),
                         total_sources=len(state.sources),
                     )
+                    yield evt
+                    await _buffer_event(evt, event_buffer)
 
-                    yield _agent_started("synthesizer", "complex")
+                    evt = _agent_started("synthesizer", "complex")
+                    yield evt
+                    await _buffer_event(evt, event_buffer)
                     agent_start = time.perf_counter()
 
                     # Use citation-aware synthesizer if enabled
                     # Collect content chunks for persistence
                     content_chunks: list[str] = []
                     if state.enable_citation_verification:
-                        async for event in stream_synthesis_with_citations(state, llm):
-                            event_type = event.get("type", "")
-                            if event_type == "content":
-                                chunk = event.get("chunk", "")
+                        async for synth_evt in stream_synthesis_with_citations(state, llm):
+                            synth_event_type = synth_evt.get("type", "")
+                            if synth_event_type == "content":
+                                chunk = synth_evt.get("chunk", "")
                                 content_chunks.append(chunk)
                                 yield SynthesisProgressEvent(content_chunk=chunk)
                             # Yield verification events to frontend for real-time display
-                            elif event_type == "claim_verified":
+                            elif synth_event_type == "claim_verified":
                                 yield ClaimVerifiedEvent(
-                                    claim_id=_to_claim_uuid(event.get("claim_id")),
-                                    claim_text=event.get("claim_text", ""),
-                                    position_start=event.get("position_start", 0),
-                                    position_end=event.get("position_end", 0),
-                                    verdict=event.get("verdict", ""),
-                                    confidence_level=event.get("confidence_level", ""),
-                                    evidence_preview=event.get("evidence_preview", ""),
-                                    reasoning=event.get("reasoning"),
+                                    claim_id=_to_claim_uuid(synth_evt.get("claim_id")),
+                                    claim_text=synth_evt.get("claim_text", ""),
+                                    position_start=synth_evt.get("position_start", 0),
+                                    position_end=synth_evt.get("position_end", 0),
+                                    verdict=synth_evt.get("verdict", ""),
+                                    confidence_level=synth_evt.get("confidence_level", ""),
+                                    evidence_preview=synth_evt.get("evidence_preview", ""),
+                                    reasoning=synth_evt.get("reasoning"),
+                                    citation_key=synth_evt.get("citation_key"),
+                                    citation_keys=synth_evt.get("citation_keys"),
                                 )
-                            elif event_type == "verification_summary":
+                            elif synth_event_type == "verification_summary":
                                 yield VerificationSummaryEvent(
                                     message_id=config.message_id or UUID(int=0),
-                                    total_claims=event.get("total_claims", 0),
-                                    supported=event.get("supported", 0),
-                                    partial=event.get("partial", 0),
-                                    unsupported=event.get("unsupported", 0),
-                                    contradicted=event.get("contradicted", 0),
-                                    abstained_count=event.get("abstained_count", 0),
-                                    citation_corrections=event.get("citation_corrections", 0),
-                                    warning=event.get("warning") or False,
+                                    total_claims=synth_evt.get("total_claims", 0),
+                                    supported=synth_evt.get("supported", 0),
+                                    partial=synth_evt.get("partial", 0),
+                                    unsupported=synth_evt.get("unsupported", 0),
+                                    contradicted=synth_evt.get("contradicted", 0),
+                                    abstained_count=synth_evt.get("abstained_count", 0),
+                                    citation_corrections=synth_evt.get("citation_corrections", 0),
+                                    warning=synth_evt.get("warning") or False,
                                 )
-                            elif event_type == "citation_corrected":
+                            elif synth_event_type == "citation_corrected":
                                 yield CitationCorrectedEvent(
-                                    claim_id=_to_claim_uuid(event.get("claim_id")),
-                                    correction_type=event.get("correction_type", ""),
-                                    reasoning=event.get("reasoning"),
+                                    claim_id=_to_claim_uuid(synth_evt.get("claim_id")),
+                                    correction_type=synth_evt.get("correction_type", ""),
+                                    reasoning=synth_evt.get("reasoning"),
                                 )
-                            elif event_type == "numeric_claim_detected":
+                            elif synth_event_type == "numeric_claim_detected":
                                 # Convert normalized_value to string - schema expects str, not float
-                                raw_normalized = event.get("normalized_value")
+                                raw_normalized = synth_evt.get("normalized_value")
                                 normalized_str = str(raw_normalized) if raw_normalized is not None else None
                                 yield NumericClaimDetectedEvent(
-                                    claim_id=_to_claim_uuid(event.get("claim_id")),
-                                    raw_value=event.get("raw_value", ""),
+                                    claim_id=_to_claim_uuid(synth_evt.get("claim_id")),
+                                    raw_value=synth_evt.get("raw_value", ""),
                                     normalized_value=normalized_str,
-                                    unit=event.get("unit"),
-                                    derivation_type=event.get("derivation_type", "direct"),
-                                    qa_verified=event.get("qa_verified", False),
+                                    unit=synth_evt.get("unit"),
+                                    derivation_type=synth_evt.get("derivation_type", "direct"),
+                                    qa_verified=synth_evt.get("qa_verified", False),
                                 )
-                            elif event_type == "correction_metrics":
+                            elif synth_event_type == "correction_metrics":
                                 # Log metrics, no need to send to frontend
                                 logger.debug(
                                     "CITATION_CORRECTION_METRICS",
-                                    total_corrected=event.get("total_corrected", 0),
-                                    kept=event.get("kept", 0),
-                                    replaced=event.get("replaced", 0),
-                                    removed=event.get("removed", 0),
+                                    total_corrected=synth_evt.get("total_corrected", 0),
+                                    kept=synth_evt.get("kept", 0),
+                                    replaced=synth_evt.get("replaced", 0),
+                                    removed=synth_evt.get("removed", 0),
                                 )
                     else:
                         async for chunk in stream_synthesis(state, llm):
@@ -1378,7 +1442,9 @@ async def stream_research(
                         final_content = "".join(content_chunks)
                         state.complete(final_content)
 
-                    yield _agent_completed("synthesizer", agent_start)
+                    evt = _agent_completed("synthesizer", agent_start)
+                    yield evt
+                    await _buffer_event(evt, event_buffer)
 
                     # =============================================================
                     # Two-Phase Persistence: Update session to COMPLETED at END
@@ -1519,6 +1585,7 @@ async def stream_research(
                         )
 
             except Exception as e:
+                tb = traceback.format_exc()
                 logger.exception(
                     "STREAM_ORCHESTRATION_ERROR",
                     error_type=type(e).__name__,
@@ -1528,6 +1595,8 @@ async def stream_research(
                     error_code="ORCHESTRATION_ERROR",
                     error_message=str(e),
                     recoverable=False,
+                    stack_trace=tb,
+                    error_type=type(e).__name__,
                 )
 
                 # Mark session as FAILED if it was created at START
@@ -1573,6 +1642,14 @@ async def stream_research(
 
 
 # Helper functions for creating events
+async def _buffer_event(
+    event: StreamEvent, event_buffer: "EventBuffer | None"
+) -> None:
+    """Add event to buffer if available (for database persistence)."""
+    if event_buffer is not None:
+        await event_buffer.add_event(event)
+
+
 def _agent_started(agent: str, tier: str) -> AgentStartedEvent:
     return AgentStartedEvent(agent=agent, model_tier=tier)
 

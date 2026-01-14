@@ -176,6 +176,18 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
                 if step.id not in completed_ids  # Don't duplicate completed steps
             ]
 
+            # Enforce step limits - truncate if LLM exceeds max
+            max_new_steps = step_limits.max - len(completed_steps)
+            if len(new_steps) > max_new_steps:
+                logger.warning(
+                    "PLANNER_STEPS_EXCEEDED_LIMIT",
+                    returned_steps=len(new_steps),
+                    completed_steps=len(completed_steps),
+                    max_allowed=step_limits.max,
+                    truncating_to=max_new_steps,
+                )
+                new_steps = new_steps[:max_new_steps]
+
             # Merge: completed steps (preserved) + new steps from LLM
             final_steps = completed_steps + new_steps
 

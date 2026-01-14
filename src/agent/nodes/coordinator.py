@@ -254,10 +254,9 @@ async def _simple_query_with_tools(
                     query = tool_call.arguments.get("query", "")
                     result = await _handle_search_sources(query, chat_source_pool)
 
-                    # Add assistant message with tool call
+                    # Add assistant message with tool call (omit content field - API rejects empty content)
                     current_messages.append({
                         "role": "assistant",
-                        "content": "",
                         "tool_calls": [
                             {
                                 "id": tool_call.id,
@@ -292,10 +291,11 @@ async def _simple_query_with_tools(
 
     # Max tool calls reached - generate final response without tools
     # Convert messages to string-only format for regular stream
+    # Skip tool messages and messages with no content (tool-call-only assistant messages)
     stream_messages: list[dict[str, str]] = [
-        {"role": m["role"], "content": m.get("content") or ""}
+        {"role": m["role"], "content": m["content"]}
         for m in current_messages
-        if m.get("role") != "tool"  # Skip tool messages for final stream
+        if m.get("role") != "tool" and m.get("content")
     ]
     async for final_chunk in llm.stream(
         messages=stream_messages, tier=ModelTier.COMPLEX

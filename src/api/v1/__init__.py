@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from src.api.v1 import agent, chats, citations, health, messages, preferences, research
+from src.api.v1 import agent, chats, citations, health, jobs, messages, preferences, research
 
 router = APIRouter()
 
@@ -16,3 +16,5 @@ router.include_router(research.router, prefix="/chats", tags=["Research"])
 router.include_router(preferences.router, prefix="/preferences", tags=["Preferences"])
 # Citation verification routes
 router.include_router(citations.router, tags=["Citations"])
+# Background job management routes
+router.include_router(jobs.router, tags=["Jobs"])

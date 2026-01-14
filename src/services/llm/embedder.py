@@ -11,9 +11,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 from openai import AsyncOpenAI
 
-from src.core.config import get_settings
+from src.core.databricks_auth import get_databricks_auth
 from src.core.logging_utils import get_logger
-from src.services.llm.auth import LLMCredentialProvider
 
 if TYPE_CHECKING:
     from numpy.typing import NDArray
@@ -42,61 +41,49 @@ class GteEmbedder:
     def __init__(self, endpoint_name: str = DEFAULT_GTE_ENDPOINT):
         """Initialize the GTE embedder.
 
+        Uses centralized DatabricksAuth for authentication which supports:
+        1. Direct token: DATABRICKS_TOKEN environment variable
+        2. Profile-based OAuth: DATABRICKS_CONFIG_PROFILE from ~/.databrickscfg
+        3. Automatic OAuth: Databricks Apps environment (service principal)
+
         Args:
             endpoint_name: Databricks model serving endpoint name for GTE.
         """
-        settings = get_settings()
         self._endpoint = endpoint_name
 
-        # Auth mode tracking (same pattern as LLMClient)
-        self._credential_provider: LLMCredentialProvider | None = None
-        self._current_token: str | None = None
-
-        # Get token - either from env or from WorkspaceClient
-        token = settings.databricks_token
-        self._base_url = f"{settings.databricks_host}/serving-endpoints"
-
-        if not token and settings.databricks_config_profile:
-            # Profile-based OAuth auth with refresh support
-            self._credential_provider = LLMCredentialProvider(
-                profile=settings.databricks_config_profile
-            )
-            credential = self._credential_provider.get_credential()
-            token = credential.token
-            self._base_url = self._credential_provider.get_base_url()
-
-        if not token:
-            raise ValueError("No Databricks token available for embedder")
-
-        self._current_token = token
+        # Use centralized auth (same as LLMClient)
+        self._auth = get_databricks_auth()
+        self._current_token = self._auth.get_token()
+        self._base_url = self._auth.get_base_url()
 
         # Initialize OpenAI client for Databricks embeddings
         self._client = AsyncOpenAI(
-            api_key=token,
+            api_key=self._current_token,
             base_url=self._base_url,
         )
 
         logger.info(
             "GTE_EMBEDDER_INITIALIZED",
             endpoint=endpoint_name,
+            auth_mode=self._auth.auth_mode,
         )
 
     def _ensure_fresh_client(self) -> None:
         """Ensure the OpenAI client has a fresh OAuth token.
 
-        For profile-based OAuth auth, checks if token is expired and
-        refreshes if needed. For direct token auth, this is a no-op.
+        For OAuth-based auth, checks if token is expired and refreshes if needed.
+        For direct token auth, this is a no-op.
         """
-        if self._credential_provider is None:
+        if not self._auth.is_oauth:
             return
 
-        credential = self._credential_provider.get_credential()
+        token = self._auth.get_token()
 
-        if credential.token != self._current_token:
-            logger.info("GTE_TOKEN_REFRESHED", provider="oauth")
-            self._current_token = credential.token
+        if token != self._current_token:
+            logger.info("GTE_TOKEN_REFRESHED", auth_mode=self._auth.auth_mode)
+            self._current_token = token
             self._client = AsyncOpenAI(
-                api_key=credential.token,
+                api_key=token,
                 base_url=self._base_url,
             )
 

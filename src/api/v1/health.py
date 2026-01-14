@@ -1,33 +1,25 @@
 """Health check endpoint."""
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
+import logging
 
-from src.db.session import get_db
+from fastapi import APIRouter
+
 from src.schemas.common import HealthResponse
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 @router.get("/health", response_model=HealthResponse)
-async def health_check(
-    db: AsyncSession = Depends(get_db),
-) -> HealthResponse:
+async def health_check() -> HealthResponse:
     """Health check endpoint for monitoring and load balancer health checks.
 
-    Returns service status including database connectivity and model endpoint
-    availability.
+    Note: Database check removed to allow health checks to pass even if DB is down.
+    Database connectivity is verified during Alembic migrations at startup.
     """
-    # Check database connectivity
-    db_status = "connected"
-    try:
-        await db.execute(text("SELECT 1"))
-    except Exception:
-        db_status = "disconnected"
-
+    logger.info("Health check called")
     return HealthResponse(
-        status="healthy" if db_status == "connected" else "degraded",
-        database=db_status,
+        status="healthy",
+        database="not_checked",
         version="1.0.0",
     )

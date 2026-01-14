@@ -5,6 +5,7 @@ import { ChatSidebar, MessageList, MessageInput, DeleteChatDialog, ExportChatDia
 import { AgentStatusIndicator, ResearchPanel } from '@/components/research';
 import { useChats, useMessages, useStreamingQuery, useChatActions, useDraftChats, useCitations } from '@/hooks';
 import { useResearchReconnection } from '@/hooks/useResearchReconnection';
+import { useChatActiveJob } from '@/hooks/useResearchJobs';
 import type { Chat, Message, PersistenceCompletedEvent, QueryMode } from '@/types';
 
 export default function ChatPage() {
@@ -112,7 +113,18 @@ export default function ChatPage() {
     currentAgent,
     currentQueryMode,
     setCurrentQueryMode,
+    activeSessionId,
+    reconnectToJob,
+    // Streaming claims for real-time citation display
+    streamingClaims,
+    streamingVerificationSummary,
+    // Error details for error display
+    errorDetails,
+    clearErrorDetails,
   } = useStreamingQuery(chatId, { onStreamComplete: handleStreamComplete });
+
+  // Check for active background job for this chat (job-based reconnection)
+  const { data: activeJob, isLoading: isLoadingActiveJob } = useChatActiveJob(chatId || null);
 
   // Reconnection hook for crash resilience
   const {
@@ -137,14 +149,16 @@ export default function ChatPage() {
     enabled: !isStreaming,
   });
 
-  // Check for active research on page load (reconnection)
+  // Check for active research on page load (legacy reconnection - OLD SSE flow)
   useEffect(() => {
     if (!chatId || isStreaming || isDraftChat(chatId)) return;
+    // Skip if we have a job-based active session (new flow takes precedence)
+    if (activeJob) return;
 
-    // Check if there's an active research session to reconnect to
+    // Check if there's an active research session to reconnect to (old flow)
     checkAndReconnect().then((result) => {
       if (result.reconnected) {
-        console.log('[ChatPage] Reconnected to active research session:', result);
+        console.log('[ChatPage] Reconnected to active research session (legacy):', result);
 
         // Restore query mode for panel visibility (CRITICAL!)
         if (result.queryMode) {
@@ -155,7 +169,20 @@ export default function ChatPage() {
         setIsStreaming(true);
       }
     });
-  }, [chatId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [chatId, activeJob]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Job-based reconnection - NEW FLOW
+  // This takes precedence over the legacy reconnection above
+  useEffect(() => {
+    if (!chatId || isStreaming || isDraftChat(chatId) || isLoadingActiveJob) return;
+    // Skip if we already have an active session connected
+    if (activeSessionId) return;
+
+    if (activeJob && activeJob.status === 'in_progress') {
+      console.log('[ChatPage] Found active background job, reconnecting:', activeJob.sessionId);
+      reconnectToJob(activeJob.sessionId);
+    }
+  }, [chatId, isStreaming, activeJob, isLoadingActiveJob, activeSessionId, reconnectToJob, isDraftChat]);
 
   // Get the latest agent message ID for citation fetching
   const latestAgentMessageId = useMemo(() => {
@@ -577,6 +604,13 @@ export default function ChatPage() {
                   isLoading={isStreaming}
                   className="flex-1"
                   hideAgentSourcesSection={showResearchPanel}
+                  // Pass streaming claims for real-time citation display during streaming
+                  streamingClaims={streamingClaims}
+                  streamingVerificationSummary={streamingVerificationSummary}
+                  // Error display with stack trace
+                  errorDetails={errorDetails}
+                  onRetry={errorDetails?.recoverable ? () => lastQuery && sendQuery(lastQuery) : undefined}
+                  onDismissError={clearErrorDetails}
                   researchPanel={
                     showResearchPanel ? (
                       <ResearchPanel

@@ -13,7 +13,7 @@ PLANNER_SYSTEM_PROMPT = """You are the Planner agent for a deep research system.
 2. Each plan should have:
    - A clear title summarizing the research goal
    - Your reasoning for the plan structure
-   - 2-15 concrete steps with specific actions (more for multi-entity comparisons)
+   - Concrete steps following the count guidance provided (min to max steps)
 
 ## Step Types
 

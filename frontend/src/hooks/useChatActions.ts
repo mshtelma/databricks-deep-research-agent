@@ -1,5 +1,5 @@
 import { useCallback } from 'react';
-import { useUpdateChat, useDeleteChat, useRestoreChat, useExportChat } from './useChats';
+import { useUpdateChat, useDeleteChat, useExportChat } from './useChats';
 
 interface UseChatActionsOptions {
   currentChatId?: string;
@@ -13,7 +13,6 @@ interface UseChatActionsOptions {
 export function useChatActions({ currentChatId, onNavigateAway }: UseChatActionsOptions = {}) {
   const updateMutation = useUpdateChat();
   const deleteMutation = useDeleteChat();
-  const restoreMutation = useRestoreChat();
   const exportMutation = useExportChat();
 
   const renameChat = useCallback((chatId: string, newTitle: string) => {
@@ -37,8 +36,10 @@ export function useChatActions({ currentChatId, onNavigateAway }: UseChatActions
   }, [deleteMutation, currentChatId, onNavigateAway]);
 
   const restoreChat = useCallback((chatId: string) => {
-    restoreMutation.mutate(chatId);
-  }, [restoreMutation]);
+    // Use update mutation to change status back to active (unarchive)
+    // The restore endpoint is for undeleting soft-deleted chats, not for unarchiving
+    updateMutation.mutate({ chatId, data: { status: 'active' } });
+  }, [updateMutation]);
 
   const exportChat = useCallback((chatId: string, format: 'markdown' | 'json') => {
     exportMutation.mutate({ chatId, format });

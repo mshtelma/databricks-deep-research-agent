@@ -126,12 +126,19 @@ class ResearchCompletedEvent(BaseStreamEvent):
 
 
 class StreamErrorEvent(BaseStreamEvent):
-    """Error during streaming."""
+    """Error during streaming.
+
+    Includes optional stack trace for debugging. Since Databricks Apps logs
+    get purged, the stack trace is included in the event so the frontend
+    can display it in a collapsible panel for troubleshooting.
+    """
 
     event_type: Literal["error"] = "error"
     error_code: str
-    error_message: str
+    error_message: str  # User-friendly error message
     recoverable: bool
+    stack_trace: str | None = None  # Full Python traceback for debugging
+    error_type: str | None = None  # Exception class name (e.g., "ValueError")
 
 
 # Citation verification events
@@ -158,6 +165,9 @@ class ClaimVerifiedEvent(BaseStreamEvent):
     confidence_level: str
     evidence_preview: str
     reasoning: str | None = None
+    # Citation keys for frontend citationData mapping (e.g., "Arxiv", "Zhipu")
+    citation_key: str | None = None  # Primary citation key
+    citation_keys: list[str] | None = None  # All keys for multi-source claims
 
 
 class CitationCorrectedEvent(BaseStreamEvent):

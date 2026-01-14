@@ -259,6 +259,8 @@ export class SidebarPage {
    */
   async renameChat(chatId: string, newTitle: string): Promise<void> {
     await this.openChatMenu(chatId);
+    // Wait for the rename action to be visible in the context menu
+    await this.actionRename.waitFor({ state: 'visible', timeout: 5000 });
 
     // Set up dialog handler before clicking rename
     this.page.once('dialog', async (dialog) => {
@@ -273,6 +275,8 @@ export class SidebarPage {
    */
   async cancelRename(chatId: string): Promise<void> {
     await this.openChatMenu(chatId);
+    // Wait for the rename action to be visible in the context menu
+    await this.actionRename.waitFor({ state: 'visible', timeout: 5000 });
 
     this.page.once('dialog', async (dialog) => {
       await dialog.dismiss();
@@ -287,6 +291,8 @@ export class SidebarPage {
    */
   async deleteChat(chatId: string): Promise<void> {
     await this.openChatMenu(chatId);
+    // Wait for the delete action to be visible in the context menu
+    await this.actionDelete.waitFor({ state: 'visible', timeout: 5000 });
     await this.actionDelete.click();
     // Wait for dialog to appear and click confirm
     await this.deleteDialogConfirm.waitFor({ state: 'visible' });
@@ -298,6 +304,8 @@ export class SidebarPage {
    */
   async archiveChat(chatId: string): Promise<void> {
     await this.openChatMenu(chatId);
+    // Wait for the archive action to be visible in the context menu
+    await this.actionArchive.waitFor({ state: 'visible', timeout: 5000 });
     await this.actionArchive.click();
   }
 
@@ -306,6 +314,8 @@ export class SidebarPage {
    */
   async restoreChat(chatId: string): Promise<void> {
     await this.openChatMenu(chatId);
+    // Wait for the restore action to be visible in the context menu
+    await this.actionRestore.waitFor({ state: 'visible', timeout: 5000 });
     await this.actionRestore.click();
   }
 

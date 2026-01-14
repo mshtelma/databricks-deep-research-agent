@@ -251,6 +251,10 @@ export interface StreamErrorEvent extends BaseStreamEvent {
   error_code: string
   error_message: string
   recoverable: boolean
+  /** Full Python traceback for debugging */
+  stack_trace?: string
+  /** Exception class name (e.g., "ValueError") */
+  error_type?: string
 }
 
 export interface PersistenceCompletedEvent extends BaseStreamEvent {

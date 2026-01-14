@@ -357,6 +357,24 @@ query_modes:
     create_session: true
     use_research_types: true  # Inherits from research_types section
 
+# =============================================================================
+# Background Job Configuration
+# =============================================================================
+# Controls background research job execution and lifecycle.
+# Jobs are decoupled from HTTP request lifecycle for reliability.
+jobs:
+  # Maximum concurrent research jobs per user
+  max_concurrent_per_user: 2
+
+  # Heartbeat interval for zombie detection (seconds)
+  heartbeat_interval_seconds: 10
+
+  # Jobs without heartbeat for this duration are considered zombies (seconds)
+  zombie_threshold_seconds: 30
+
+  # Future: checkpoint interval for job resumption (steps)
+  # checkpoint_interval_steps: 3
+
 # Truncation limits for consistency
 truncation:
   log_preview: 200

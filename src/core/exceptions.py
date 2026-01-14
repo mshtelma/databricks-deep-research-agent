@@ -24,7 +24,7 @@ class AppException(Exception):
 
     def to_response(self) -> dict[str, Any]:
         """Convert to API error response format."""
-        response = {
+        response: dict[str, Any] = {
             "code": self.code,
             "message": self.message,
         }
@@ -83,14 +83,39 @@ class AuthorizationError(AppException):
 class RateLimitError(AppException):
     """Rate limit exceeded error."""
 
-    def __init__(self, retry_after: int = 60):
+    def __init__(
+        self,
+        retry_after: int = 60,
+        endpoint: str | None = None,
+        checked_endpoints: list[str] | None = None,
+    ):
+        details: dict[str, Any] = {"retry_after": retry_after}
+        if endpoint:
+            details["endpoint"] = endpoint
+        if checked_endpoints:
+            details["checked_endpoints"] = checked_endpoints
         super().__init__(
             message="Rate limit exceeded",
             code="RATE_LIMITED",
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            details={"retry_after": retry_after},
+            details=details,
         )
         self.retry_after = retry_after
+        self.endpoint = endpoint
+        self.checked_endpoints = checked_endpoints or []
+
+    @property
+    def endpoint_display(self) -> str:
+        """Get a display string for the endpoint(s) involved.
+
+        Returns the specific endpoint if one failed, otherwise lists
+        all checked endpoints that were unavailable.
+        """
+        if self.endpoint:
+            return self.endpoint
+        if self.checked_endpoints:
+            return f"all_unavailable({','.join(self.checked_endpoints)})"
+        return "unknown"
 
 
 class ConflictError(AppException):

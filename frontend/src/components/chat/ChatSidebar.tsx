@@ -3,6 +3,7 @@ import { Chat } from '@/types';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ChatSearchInput } from './ChatSearchInput';
+import { ActiveJobsIndicator } from '@/components/jobs/ActiveJobsIndicator';
 
 type StatusFilter = 'active' | 'archived' | 'all';
 type ChatListEntry = Chat & { isDraft?: boolean };
@@ -131,6 +132,11 @@ export function ChatSidebar({
             />
           ))
         )}
+      </div>
+
+      {/* Active Jobs Indicator - shown at bottom of sidebar */}
+      <div className="p-2 border-t">
+        <ActiveJobsIndicator onNavigateToChat={onSelectChat} />
       </div>
     </aside>
   );

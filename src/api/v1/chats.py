@@ -26,7 +26,7 @@ router = APIRouter()
 async def list_chats(
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
-    status: ChatStatus = Query(ChatStatus.ACTIVE),
+    status: ChatStatus | None = Query(None, description="Filter by status. If not provided, returns all non-deleted chats."),
     search: str | None = Query(None),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),

@@ -93,32 +93,36 @@ async def persist_research_data(
 
     for source_info in state.sources:
         try:
-            # Atomic upsert using ON CONFLICT - no race condition possible
-            # Use (chat_id, url) columns to deduplicate sources at chat level
-            # NOTE: Must use index_elements (not constraint) because uq_sources_chat_url
-            # was created as a UNIQUE INDEX, not a table constraint (migration 006)
-            stmt = pg_insert(Source).values(
-                research_session_id=research_session_id,
-                chat_id=chat_id,  # For chat-level source pool queries
-                url=source_info.url,
-                title=source_info.title,
-                snippet=source_info.snippet,
-                content=source_info.content,
-                relevance_score=source_info.relevance_score,
-            ).on_conflict_do_update(
-                index_elements=["chat_id", "url"],
-                set_={
-                    "content": source_info.content,
-                    "research_session_id": research_session_id,
-                    "fetched_at": func.now(),
-                },
-            ).returning(Source.id)
+            # Use savepoint to isolate each source insert - if one fails,
+            # the savepoint is rolled back but the main transaction continues
+            async with db.begin_nested():
+                # Atomic upsert using ON CONFLICT - no race condition possible
+                # Use (chat_id, url) columns to deduplicate sources at chat level
+                # NOTE: Must use index_elements (not constraint) because uq_sources_chat_url
+                # was created as a UNIQUE INDEX, not a table constraint (migration 006)
+                stmt = pg_insert(Source).values(
+                    research_session_id=research_session_id,
+                    chat_id=chat_id,  # For chat-level source pool queries
+                    url=source_info.url,
+                    title=source_info.title,
+                    snippet=source_info.snippet,
+                    content=source_info.content,
+                    relevance_score=source_info.relevance_score,
+                ).on_conflict_do_update(
+                    index_elements=["chat_id", "url"],
+                    set_={
+                        "content": source_info.content,
+                        "research_session_id": research_session_id,
+                        "fetched_at": func.now(),
+                    },
+                ).returning(Source.id)
 
-            result = await db.execute(stmt)
-            source_id = result.scalar_one()
-            url_to_source_id[source_info.url] = source_id
-            counts["sources"] += 1
+                result = await db.execute(stmt)
+                source_id = result.scalar_one()
+                url_to_source_id[source_info.url] = source_id
+                counts["sources"] += 1
         except Exception as e:
+            # Savepoint automatically rolled back on exception - main transaction intact
             counts["sources_failed"] = counts.get("sources_failed", 0) + 1
             logger.warning(
                 "PERSIST_SOURCE_FAILED source_url=%s error=%s",
@@ -149,20 +153,24 @@ async def persist_research_data(
             continue
 
         try:
-            span = await evidence_service.create(
-                source_id=evidence_source_id,
-                quote_text=evidence.quote_text,
-                start_offset=evidence.start_offset,
-                end_offset=evidence.end_offset,
-                section_heading=evidence.section_heading,
-                relevance_score=evidence.relevance_score,
-                has_numeric_content=evidence.has_numeric_content,
-            )
-            # Key for lookup: source_url + SHA-256 hash of quote_text
-            key = _make_evidence_key(evidence.source_url, evidence.quote_text)
-            evidence_key_to_id[key] = span.id
-            counts["evidence_spans"] += 1
+            # Use savepoint to isolate each evidence insert - if one fails,
+            # the savepoint is rolled back but the main transaction continues
+            async with db.begin_nested():
+                span = await evidence_service.create(
+                    source_id=evidence_source_id,
+                    quote_text=evidence.quote_text,
+                    start_offset=evidence.start_offset,
+                    end_offset=evidence.end_offset,
+                    section_heading=evidence.section_heading,
+                    relevance_score=evidence.relevance_score,
+                    has_numeric_content=evidence.has_numeric_content,
+                )
+                # Key for lookup: source_url + SHA-256 hash of quote_text
+                key = _make_evidence_key(evidence.source_url, evidence.quote_text)
+                evidence_key_to_id[key] = span.id
+                counts["evidence_spans"] += 1
         except Exception as e:
+            # Savepoint automatically rolled back on exception - main transaction intact
             counts["evidence_failed"] = counts.get("evidence_failed", 0) + 1
             logger.warning(
                 "PERSIST_EVIDENCE_FAILED source_url=%s error=%s",
@@ -181,53 +189,57 @@ async def persist_research_data(
     citations_missing_evidence = 0
     for claim_info in state.claims:
         try:
-            claim = await claim_service.create(
-                message_id=message_id,
-                claim_text=claim_info.claim_text,
-                claim_type=claim_info.claim_type,
-                position_start=claim_info.position_start,
-                position_end=claim_info.position_end,
-                confidence_level=claim_info.confidence_level,
-                verification_verdict=claim_info.verification_verdict,
-                verification_reasoning=claim_info.verification_reasoning,
-                abstained=claim_info.abstained,
-                citation_key=claim_info.citation_key,
-                citation_keys=claim_info.citation_keys,
-            )
-            counts["claims"] += 1
-
-            logger.debug(
-                "CLAIM_PERSISTED claim_id=%s citation_key=%s verdict=%s text=%s",
-                str(claim.id),
-                claim.citation_key,
-                claim.verification_verdict,
-                claim.claim_text[:60],
-            )
-
-            # Create citation if claim has evidence
-            if claim_info.evidence:
-                key = _make_evidence_key(
-                    claim_info.evidence.source_url, claim_info.evidence.quote_text
+            # Use savepoint to isolate each claim+citation insert - if one fails,
+            # the savepoint is rolled back but the main transaction continues
+            async with db.begin_nested():
+                claim = await claim_service.create(
+                    message_id=message_id,
+                    claim_text=claim_info.claim_text,
+                    claim_type=claim_info.claim_type,
+                    position_start=claim_info.position_start,
+                    position_end=claim_info.position_end,
+                    confidence_level=claim_info.confidence_level,
+                    verification_verdict=claim_info.verification_verdict,
+                    verification_reasoning=claim_info.verification_reasoning,
+                    abstained=claim_info.abstained,
+                    citation_key=claim_info.citation_key,
+                    citation_keys=claim_info.citation_keys,
                 )
-                evidence_span_id = evidence_key_to_id.get(key)
+                counts["claims"] += 1
 
-                if evidence_span_id:
-                    await citation_service.create(
-                        claim_id=claim.id,
-                        evidence_span_id=evidence_span_id,
-                        confidence_score=claim_info.evidence.relevance_score,
-                        is_primary=True,
+                logger.debug(
+                    "CLAIM_PERSISTED claim_id=%s citation_key=%s verdict=%s text=%s",
+                    str(claim.id),
+                    claim.citation_key,
+                    claim.verification_verdict,
+                    claim.claim_text[:60],
+                )
+
+                # Create citation if claim has evidence
+                if claim_info.evidence:
+                    key = _make_evidence_key(
+                        claim_info.evidence.source_url, claim_info.evidence.quote_text
                     )
-                    counts["citations"] += 1
-                else:
-                    citations_missing_evidence += 1
-                    logger.warning(
-                        "PERSIST_CITATION_MISSING_EVIDENCE claim=%s source_url=%s - Evidence span not found in lookup table",
-                        claim_info.claim_text[:60],
-                        claim_info.evidence.source_url[:80],
-                    )
+                    evidence_span_id = evidence_key_to_id.get(key)
+
+                    if evidence_span_id:
+                        await citation_service.create(
+                            claim_id=claim.id,
+                            evidence_span_id=evidence_span_id,
+                            confidence_score=claim_info.evidence.relevance_score,
+                            is_primary=True,
+                        )
+                        counts["citations"] += 1
+                    else:
+                        citations_missing_evidence += 1
+                        logger.warning(
+                            "PERSIST_CITATION_MISSING_EVIDENCE claim=%s source_url=%s - Evidence span not found in lookup table",
+                            claim_info.claim_text[:60],
+                            claim_info.evidence.source_url[:80],
+                        )
 
         except Exception as e:
+            # Savepoint automatically rolled back on exception - main transaction intact
             counts["claims_failed"] = counts.get("claims_failed", 0) + 1
             logger.warning(
                 "PERSIST_CLAIM_FAILED claim=%s error=%s",
@@ -527,6 +539,11 @@ async def persist_research_session_start_independent(
     research_session_id: UUID,
     research_depth: str,
     query_mode: str,
+    *,
+    # Job management columns (optional for backwards compatibility)
+    worker_id: str | None = None,
+    last_heartbeat: datetime | None = None,
+    verify_sources: bool = True,
 ) -> None:
     """Create minimal research session at START with IN_PROGRESS status.
 
@@ -548,6 +565,9 @@ async def persist_research_session_start_independent(
         research_session_id: Pre-generated UUID for the research session.
         research_depth: Research depth setting (auto/light/medium/extended).
         query_mode: Query mode (simple/web_search/deep_research).
+        worker_id: Worker instance ID for job tracking (optional).
+        last_heartbeat: Initial heartbeat timestamp (optional).
+        verify_sources: Whether citation verification is enabled (default True).
     """
     from src.db.session import get_session_maker
 
@@ -594,6 +614,12 @@ async def persist_research_session_start_independent(
                 research_depth=research_depth,
                 query_mode=query_mode,
                 status=ResearchStatus.IN_PROGRESS,  # KEY: IN_PROGRESS at start!
+                # Job management columns (migration 009)
+                user_id=user_id,
+                chat_id=chat_id,
+                worker_id=worker_id,
+                last_heartbeat=last_heartbeat,
+                verify_sources=verify_sources,
             )
             db.add(research_session)
 

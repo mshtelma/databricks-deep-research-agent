@@ -68,7 +68,7 @@ yarn-error.log*
 # Frontend build
 frontend/dist/
 frontend/build/
-static/
+# static/ - NOT ignored: needed for DAB deployment
 .next/
 out/
 

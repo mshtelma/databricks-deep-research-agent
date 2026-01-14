@@ -1,64 +1,70 @@
 """Databricks authentication middleware."""
 
+import logging
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 
 from src.core.auth import (
     UserIdentity,
-    extract_obo_token,
     get_current_user,
     get_workspace_client,
 )
 from src.core.config import Settings, get_settings
 
+logger = logging.getLogger(__name__)
+
 
 async def get_current_user_identity(
     request: Request,
     settings: Annotated[Settings, Depends(get_settings)],
-    x_forwarded_access_token: str | None = Header(None),
 ) -> UserIdentity:
     """FastAPI dependency to get current user identity.
 
-    In production (Databricks Apps), uses the OBO token from headers.
+    In Databricks Apps, uses the app's service principal for all operations.
+    OBO (On-Behalf-Of) authentication is not currently used to avoid conflicts
+    with the auto-injected OAuth credentials in the Databricks Apps environment.
+
     In development, falls back to configured credentials or anonymous.
 
     Args:
         request: FastAPI request object.
         settings: Application settings.
-        x_forwarded_access_token: OBO token from Databricks Apps proxy.
 
     Returns:
         UserIdentity of the authenticated user.
 
     Raises:
-        HTTPException: If authentication fails in production mode.
+        HTTPException: If all authentication methods fail.
     """
-    # Try to get OBO token from header
-    token = x_forwarded_access_token or extract_obo_token(dict(request.headers))
-
+    # Use service principal auth (WorkspaceClient auto-detects environment)
     try:
-        client = get_workspace_client(token=token)
+        client = get_workspace_client()
         user = get_current_user(client)
 
         # Store in request state for later use
         request.state.user = user
         request.state.workspace_client = client
 
+        logger.debug(f"Service principal auth successful: user={user.email}")
         return user
 
     except Exception as e:
-        if settings.is_production:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication failed",
-                headers={"WWW-Authenticate": "Bearer"},
-            ) from e
+        logger.warning(f"Service principal auth failed: {e}")
 
-        # In development, allow anonymous access
+    # Fallback: In development mode, allow anonymous access
+    if not settings.is_production:
         user = UserIdentity.anonymous()
         request.state.user = user
+        logger.debug("Using anonymous user (development mode)")
         return user
+
+    # All methods failed in production
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Authentication failed",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 # Type alias for dependency injection

@@ -1,5 +1,6 @@
 """Application configuration using Pydantic Settings."""
 
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -37,9 +38,13 @@ class Settings(BaseSettings):
     databricks_token: str | None = None
     databricks_config_profile: str | None = None
 
+    # Databricks Apps (automatically set when running as a Databricks App)
+    databricks_app_port: int | None = Field(default=None, alias="DATABRICKS_APP_PORT")
+    serve_static: bool = False  # Set to True in production to serve frontend from static/
+
     # Lakebase (OAuth-authenticated PostgreSQL on Databricks)
     lakebase_instance_name: str | None = None  # e.g., "instance-xxx-yyy"
-    lakebase_database: str = "deep_research"   # Database name
+    lakebase_database: str = "deep_research"  # Custom DB we own (can create schemas/tables)
     lakebase_port: int = 5432
 
     # Database (fallback for local development when Lakebase is not configured)
@@ -80,13 +85,43 @@ class Settings(BaseSettings):
         return self.app_env == "production"
 
     @property
+    def is_databricks_app(self) -> bool:
+        """Check if running as a Databricks App (DATABRICKS_APP_PORT is set)."""
+        return self.databricks_app_port is not None or os.environ.get("DATABRICKS_APP_PORT") is not None
+
+    @property
+    def server_port(self) -> int:
+        """Get the server port (DATABRICKS_APP_PORT or default 8000)."""
+        if self.databricks_app_port is not None:
+            return self.databricks_app_port
+        return int(os.environ.get("DATABRICKS_APP_PORT", "8000"))
+
+    @property
     def use_lakebase(self) -> bool:
-        """Check if Lakebase authentication should be used."""
-        return bool(self.lakebase_instance_name and self.databricks_config_profile)
+        """Check if Lakebase authentication should be used.
+
+        Lakebase is used when:
+        - PGHOST is set (Databricks Apps auto-injects this for database resources)
+        - OR instance name is configured AND profile/app auth is available
+        """
+        # Priority 1: PGHOST is auto-injected by Databricks Apps
+        if os.environ.get("PGHOST"):
+            return True
+
+        # Priority 2: Manual configuration with appropriate auth
+        if not self.lakebase_instance_name:
+            return False
+        return self.is_databricks_app or bool(self.databricks_config_profile)
 
     @property
     def lakebase_host(self) -> str | None:
-        """Derive Lakebase host from instance name."""
+        """Get Lakebase host (either from PGHOST or derived from instance name)."""
+        # Priority 1: Use PGHOST if available
+        pghost = os.environ.get("PGHOST")
+        if pghost:
+            return pghost
+
+        # Priority 2: Derive from instance name (not recommended, use PGHOST)
         if not self.lakebase_instance_name:
             return None
         return f"{self.lakebase_instance_name}.database.cloud.databricks.com"

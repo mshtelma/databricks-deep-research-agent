@@ -68,20 +68,45 @@ def get_database_url(settings: Settings) -> str:
 
 
 def get_engine(settings: Settings | None = None) -> AsyncEngine:
-    """Get or create async database engine.
+    """Get or create async database engine with proactive credential refresh.
 
     Args:
         settings: Application settings (uses cached settings if None).
 
     Returns:
         SQLAlchemy async engine.
+
+    Note:
+        For Lakebase connections, this checks if the OAuth token is expired
+        and refreshes it proactively before creating/reusing the engine.
     """
-    global _engine
+    global _engine, _async_session_maker, _credential_provider
+
+    if settings is None:
+        settings = get_settings()
+
+    # Proactive token refresh check (Lakebase only)
+    if settings.use_lakebase and _credential_provider is not None:
+        cred = _credential_provider._credential
+        if cred is not None and cred.is_expired:
+            logger.info("Lakebase token expired or expiring soon, recreating engine...")
+            # Force credential refresh
+            _credential_provider.get_credential(force_refresh=True)
+            # Clear engine to force reconnection with new URL
+            if _engine is not None:
+                # Schedule engine disposal (can't await in sync function)
+                import asyncio
+
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_engine.dispose())
+                except RuntimeError:
+                    # No running loop - engine will be garbage collected
+                    pass
+                _engine = None
+                _async_session_maker = None
 
     if _engine is None:
-        if settings is None:
-            settings = get_settings()
-
         database_url = get_database_url(settings)
 
         logger.info(f"Creating database engine (lakebase={settings.use_lakebase})")
@@ -114,8 +139,12 @@ def get_session_maker(settings: Settings | None = None) -> async_sessionmaker[As
     """
     global _async_session_maker
 
+    # CRITICAL: Always call get_engine() to trigger proactive token refresh.
+    # If token is expired, get_engine() disposes the old engine and sets
+    # _async_session_maker = None, forcing recreation below.
+    engine = get_engine(settings)
+
     if _async_session_maker is None:
-        engine = get_engine(settings)
         _async_session_maker = async_sessionmaker(
             engine,
             class_=AsyncSession,
@@ -153,7 +182,7 @@ async def refresh_engine_credentials() -> None:
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency for database session.
+    """FastAPI dependency for database session with auto-refresh on auth failure.
 
     Usage:
         @router.get("/items")
@@ -162,14 +191,26 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
     Yields:
         Database session.
+
+    Note:
+        If a database authentication error occurs (expired Lakebase token),
+        this will trigger a credential refresh for the next request.
     """
     session_maker = get_session_maker()
     async with session_maker() as session:
         try:
             yield session
             await session.commit()
-        except Exception:
+        except Exception as e:
             await session.rollback()
+            # Check if this is an auth error that might be fixed by credential refresh
+            error_str = str(e).lower()
+            if "invalid" in error_str and (
+                "password" in error_str or "authorization" in error_str
+            ):
+                logger.warning(f"Database auth failed: {e}")
+                logger.info("Triggering credential refresh for next request...")
+                await refresh_engine_credentials()
             raise
         finally:
             await session.close()

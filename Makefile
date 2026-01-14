@@ -8,6 +8,12 @@
 #   make build          - Build frontend to static/
 #   make prod           - Build and run unified server
 #
+# Databricks Apps Deployment:
+#   make deploy TARGET=dev BRAVE_SCOPE=msh  - Full deployment (recommended)
+#   make quickstart     - Set up local development environment
+#   make db-migrate-remote  - Run migrations manually (usually not needed)
+#   make requirements   - Generate requirements.txt from pyproject.toml
+#
 # Testing:
 #   make test           - Run unit tests only (fast, no credentials)
 #   make test-integration - Run integration tests (requires credentials)
@@ -24,8 +30,9 @@
 #   make db-reset       - Reset database schema (downgrade + upgrade)
 #   make typecheck      - Run type checking (backend + frontend)
 #   make lint           - Run linting (backend + frontend)
+#   make logs TARGET=dev - Download app logs (add FOLLOW=-f to follow)
 
-.PHONY: dev dev-backend dev-frontend build prod clean clean_db db-reset typecheck lint install e2e e2e-ui e2e-debug test test-unit test-integration test-complex test-all-python test-frontend test-all
+.PHONY: dev dev-backend dev-frontend build prod clean clean_db db-reset db-migrate-remote typecheck lint install e2e e2e-ui e2e-debug test test-unit test-integration test-complex test-all-python test-frontend test-all quickstart deploy requirements bundle-validate bundle-deploy bundle-deploy-full bundle-deploy-prod bundle-summary logs
 
 # =============================================================================
 # Development
@@ -174,7 +181,7 @@ db:
 	@echo "Waiting for PostgreSQL to be ready..."
 	@sleep 3
 	@echo "Running migrations..."
-	DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/deep_research \
+	DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/postgres \
 		LAKEBASE_INSTANCE_NAME= \
 		uv run alembic upgrade head || echo "Note: Run migrations manually if needed"
 
@@ -192,6 +199,32 @@ db-reset:
 	uv run alembic downgrade base
 	uv run alembic upgrade head
 	@echo "Database schema reset complete!"
+
+# Run migrations on deployed Lakebase instance
+# Usage: make db-migrate-remote TARGET=dev
+#        make db-migrate-remote TARGET=ais
+# Note: Requires databricks CLI configured and app deployed
+# The Lakebase instance name follows the pattern: deep-research-lakebase-dre-<suffix>
+# Profile mapping: dev -> e2-demo-west, ais -> ais (from databricks.yml targets)
+db-migrate-remote:
+	@echo "Running migrations on deployed Lakebase instance..."
+	@echo "Target: $(TARGET)"
+	@echo ""
+	@INSTANCE_NAME="deep-research-lakebase"; \
+	case "$(TARGET)" in \
+		dev) PROFILE="e2-demo-west" ;; \
+		ais) PROFILE="ais" ;; \
+		*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
+	esac; \
+	echo "Lakebase instance: $$INSTANCE_NAME"; \
+	echo "Databricks profile: $$PROFILE"; \
+	echo ""; \
+	echo "Bootstrapping database and running migrations..."; \
+	DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
+	LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
+	uv run alembic upgrade head
+	@echo ""
+	@echo "Migrations complete!"
 
 # =============================================================================
 # E2E Testing with Playwright
@@ -243,9 +276,151 @@ clean-all: clean
 	rm -rf .venv/
 
 # =============================================================================
-# Databricks Deployment
+# Databricks Apps Deployment
 # =============================================================================
 
-deploy: build
-	@echo "Deploying to Databricks Apps..."
-	databricks apps deploy .
+# Quickstart: Set up local development environment
+quickstart:
+	@./scripts/quickstart.sh
+
+# Generate requirements.txt for Databricks Apps
+requirements:
+	@echo "Generating requirements.txt from pyproject.toml..."
+	uv pip compile pyproject.toml -o requirements.txt
+	@echo "requirements.txt updated"
+
+# =============================================================================
+# Databricks Asset Bundles (DAB) Deployment
+# Use DAB for infrastructure-as-code with configurable secret scope/key
+# =============================================================================
+
+# Validate bundle configuration
+bundle-validate:
+	databricks bundle validate
+
+# Full deployment - ONE COMMAND DOES EVERYTHING
+# Builds frontend, deploys bundle, waits for DB, runs migrations, starts app
+# Usage: make deploy TARGET=dev BRAVE_SCOPE=msh
+#        make deploy TARGET=ais
+#
+# Deployment sequence:
+#   1. Build frontend (npm run build)
+#   2. Generate requirements.txt
+#   3. Deploy bundle (creates Lakebase + app)
+#   4. Wait for Lakebase to be ready (retry with backoff)
+#   5. Run migrations with developer credentials
+#   6. Start/restart app
+#   7. Show deployment summary
+#
+# NOTE: Migrations are run with developer credentials (not app service principal)
+# because the app's service principal has CAN_CONNECT_AND_CREATE permission
+# but cannot create tables in the public schema.
+TARGET ?= ais
+BRAVE_SCOPE ?=
+deploy: build requirements
+	@echo "=============================================="
+	@echo "Full Deployment Pipeline (Two-Phase)"
+	@echo "Target: $(TARGET)"
+	@echo "=============================================="
+	@# Determine profile and instance name based on target
+	@INSTANCE_NAME="deep-research-lakebase"; \
+	case "$(TARGET)" in \
+		dev) PROFILE="e2-demo-west" ;; \
+		ais) PROFILE="ais" ;; \
+		*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
+	esac; \
+	DEPLOY_ARGS="-t $(TARGET)"; \
+	if [ -n "$(BRAVE_SCOPE)" ]; then \
+		DEPLOY_ARGS="$$DEPLOY_ARGS --var brave_secret_scope=$(BRAVE_SCOPE)"; \
+	fi; \
+	\
+	echo ""; \
+	echo "Phase 1: Bootstrap Infrastructure"; \
+	echo "=================================="; \
+	echo ""; \
+	echo "Step 1/8: Deploying bundle with postgres (bootstrap)..."; \
+	echo "  Instance: $$INSTANCE_NAME"; \
+	echo "  Profile: $$PROFILE"; \
+	echo "  Note: Using postgres database for initial deploy"; \
+	databricks bundle deploy $$DEPLOY_ARGS --var lakebase_database=postgres || { echo "ERROR: Bundle deploy failed"; exit 1; }; \
+	\
+	echo ""; \
+	echo "Step 2/8: Waiting for Lakebase to be ready..."; \
+	echo "  (New instances may take 30-60 seconds to be connectable)"; \
+	./scripts/wait-for-lakebase.sh "$$INSTANCE_NAME" "$$PROFILE" 10 || { echo "ERROR: Lakebase not ready"; exit 1; }; \
+	\
+	echo ""; \
+	echo "Step 3/8: Creating deep_research database..."; \
+	./scripts/create-database.sh "$$INSTANCE_NAME" "$$PROFILE" deep_research || { echo "ERROR: Database creation failed"; exit 1; }; \
+	\
+	echo ""; \
+	echo "Phase 2: Complete Deployment"; \
+	echo "============================"; \
+	echo ""; \
+	echo "Step 4/8: Re-deploying bundle with deep_research..."; \
+	databricks bundle deploy $$DEPLOY_ARGS --var lakebase_database=deep_research || { echo "ERROR: Bundle re-deploy failed"; exit 1; }; \
+	\
+	echo ""; \
+	echo "Step 5/8: Running database migrations..."; \
+	DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
+	LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
+	LAKEBASE_DATABASE="deep_research" \
+	uv run alembic upgrade head || { echo "ERROR: Migrations failed"; exit 1; }; \
+	\
+	echo ""; \
+	echo "Step 6/8: Granting permissions to app service principal..."; \
+	./scripts/grant-app-permissions.sh "$$INSTANCE_NAME" "$$PROFILE" "deep_research" "deep-research-agent-dre-$(TARGET)" || { echo "ERROR: Permission grant failed"; exit 1; }; \
+	\
+	echo ""; \
+	echo "Step 7/8: Starting app..."; \
+	databricks bundle run -t $(TARGET) deep_research_agent || { echo "ERROR: App start failed"; exit 1; }; \
+	\
+	echo ""; \
+	echo "Step 8/8: Deployment summary..."; \
+	databricks bundle summary -t $(TARGET)
+	@echo ""
+	@echo "=============================================="
+	@echo "Deployment Complete!"
+	@echo "=============================================="
+	@echo ""
+	@echo "Verify deployment:"
+	@echo "  1. Visit the app URL shown above"
+	@echo "  2. Check /health endpoint returns {\"status\": \"healthy\"}"
+	@echo "  3. Create a new chat to verify database works"
+	@echo ""
+	@echo "If app fails to start, check logs:"
+	@echo "  make logs TARGET=$(TARGET)"
+	@echo "  make logs TARGET=$(TARGET) FOLLOW=-f  # Follow logs in real-time"
+
+# Alias for backwards compatibility
+bundle-deploy: deploy
+
+# Alias for backwards compatibility (migrations now run automatically)
+bundle-deploy-full: deploy
+
+# Deploy to production
+bundle-deploy-prod: build requirements
+	@echo "Deploying to production..."
+	databricks bundle deploy -t prod
+	@echo "Starting app..."
+	databricks bundle run -t prod deep_research_agent
+
+# Show bundle deployment summary
+bundle-summary:
+	databricks bundle summary -t $(TARGET)
+
+# Download logs from deployed Databricks App via /logz/batch REST API
+# Note: Logs are not persisted when app compute shuts down
+# Usage: make logs TARGET=dev                         # Fetch logs once
+#        make logs TARGET=dev FOLLOW=-f               # Follow logs (poll every 5s)
+#        make logs TARGET=dev SEARCH="--search ERROR" # Filter logs
+#        make logs TARGET=dev FOLLOW=-f SEARCH="--search ERROR"  # Combine options
+FOLLOW ?=
+SEARCH ?=
+logs:
+	@case "$(TARGET)" in \
+		dev) PROFILE="e2-demo-west" ;; \
+		ais) PROFILE="ais" ;; \
+		*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
+	esac; \
+	./scripts/download-app-logs.sh "deep-research-agent-dre-$(TARGET)" "$$PROFILE" $(FOLLOW) $(SEARCH)

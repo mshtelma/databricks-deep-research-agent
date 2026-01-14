@@ -405,6 +405,9 @@ class CitationVerificationPipeline:
                         "confidence_level": claim.confidence_level,
                         "evidence_preview": truncate(claim.evidence.quote_text, 100),
                         "reasoning": result.reasoning,
+                        # Citation keys for frontend citationData mapping
+                        "citation_key": claim.citation_key,
+                        "citation_keys": claim.citation_keys,
                     },
                 )
 

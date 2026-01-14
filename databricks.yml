@@ -1,0 +1,163 @@
+# Databricks Asset Bundle Configuration
+# Enables infrastructure-as-code deployment with Lakebase provisioning
+#
+# Deploy with:
+#   databricks bundle deploy                    # Deploy to dev (default)
+#   databricks bundle deploy -t prod            # Deploy to production
+#   databricks bundle deploy --var lakebase_capacity=CU_2  # Custom capacity
+#
+# IMPORTANT: Lakebase instances incur cost immediately upon deployment!
+# See: https://docs.databricks.com/pricing
+#
+# See: https://docs.databricks.com/dev-tools/bundles/resources
+
+bundle:
+  name: deep-research-agent
+
+variables:
+  # App naming
+  app_name:
+    description: "Name of the Databricks App"
+    default: "deep-research-agent"
+
+  # Lakebase Configuration (provisioned by this bundle)
+  lakebase_instance_name:
+    description: "Name for the Lakebase instance to be provisioned"
+    default: "deep-research-lakebase"
+
+  lakebase_database:
+    description: "Database name in Lakebase (we create and own this)"
+    default: "deep_research"
+
+  lakebase_capacity:
+    description: "Lakebase compute capacity (CU_1, CU_2, CU_4, etc)"
+    default: "CU_1"
+
+  # Brave Search API Secret Configuration
+  brave_secret_scope:
+    description: "Databricks secret scope containing the Brave API key"
+    default: "deep-research-secrets"
+
+  brave_secret_key:
+    description: "Key name within the secret scope for Brave API key"
+    default: "BRAVE_API_KEY"
+
+  # Resource suffix for multi-user workspaces
+  resource_suffix:
+    description: "Suffix for resource names to avoid collisions"
+    default: "dra"
+
+resources:
+
+  database_instances:
+    deep_research_lakebase:
+      name: ${var.lakebase_instance_name}
+      capacity: ${var.lakebase_capacity}
+
+  apps:
+    deep_research_agent:
+      name: ${var.app_name}-${var.resource_suffix}
+      description: "AI-powered deep research agent with 5-agent architecture"
+      source_code_path: .
+
+      # App resources - grant service principal access to platform resources
+      resources:
+        # =================================================================
+        # Secrets
+        # =================================================================
+        - name: brave-api-key
+          description: "Brave Search API key for web search functionality"
+          secret:
+            scope: ${var.brave_secret_scope}
+            key: ${var.brave_secret_key}
+            permission: READ
+
+        # =================================================================
+        # Database
+        # =================================================================
+        - name: database
+          description: "Lakebase database for chat persistence"
+          database:
+            database_name: ${var.lakebase_database}
+            instance_name: ${resources.database_instances.deep_research_lakebase.name}
+            permission: CAN_CONNECT_AND_CREATE
+
+        # =================================================================
+        # Model Serving Endpoints
+        # All endpoints used by the app need CAN_QUERY permission
+        # =================================================================
+
+        # Claude models
+        - name: endpoint-haiku
+          description: "Claude Haiku 4.5 - fast, lightweight operations"
+          serving_endpoint:
+            name: databricks-claude-haiku-4-5
+            permission: CAN_QUERY
+
+        - name: endpoint-sonnet
+          description: "Claude Sonnet 4.5 - balanced performance"
+          serving_endpoint:
+            name: databricks-claude-sonnet-4-5
+            permission: CAN_QUERY
+
+        - name: endpoint-opus
+          description: "Claude Opus 4.5 - complex reasoning"
+          serving_endpoint:
+            name: databricks-claude-opus-4-5
+            permission: CAN_QUERY
+
+        # GPT-5 models
+        - name: endpoint-gpt5-nano
+          description: "GPT-5 Nano - lightweight operations"
+          serving_endpoint:
+            name: databricks-gpt-5-nano
+            permission: CAN_QUERY
+
+        - name: endpoint-gpt5-mini
+          description: "GPT-5 Mini - balanced performance"
+          serving_endpoint:
+            name: databricks-gpt-5-mini
+            permission: CAN_QUERY
+
+        - name: endpoint-gpt5
+          description: "GPT-5 - complex reasoning"
+          serving_endpoint:
+            name: databricks-gpt-5-2
+            permission: CAN_QUERY
+
+        # Gemini models
+        - name: endpoint-gemini-flash
+          description: "Gemini 3 Flash - fast operations"
+          serving_endpoint:
+            name: databricks-gemini-3-flash
+            permission: CAN_QUERY
+
+        - name: endpoint-gemini-pro
+          description: "Gemini 3 Pro - large context (1M tokens)"
+          serving_endpoint:
+            name: databricks-gemini-3-pro
+            permission: CAN_QUERY
+
+        # =================================================================
+        # Optional: MLflow Experiment
+        # =================================================================
+        # - name: experiment
+        #   description: "MLflow experiment for tracing"
+        #   mlflow_experiment:
+        #     path: /Workspace/Shared/deep-research-agent
+
+targets:
+  dev:
+    mode: development
+    workspace:
+      profile: e2-demo-west
+    variables:
+      resource_suffix: "dre-dev"
+
+  ais:
+    mode: development
+    default: true
+    workspace:
+      profile: ais
+    variables:
+      resource_suffix: "dre-ais"

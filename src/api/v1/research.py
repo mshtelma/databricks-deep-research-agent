@@ -9,6 +9,7 @@ Key Design: Deferred Database Materialization
 
 import json
 import logging
+import traceback
 from collections.abc import AsyncGenerator
 from typing import Any
 from uuid import UUID, uuid4
@@ -113,6 +114,10 @@ async def stream_research_endpoint(
 ) -> StreamingResponse:
     """Stream research progress (SSE).
 
+    DEPRECATED: Use POST /api/v1/research/jobs for new implementations.
+    This endpoint is maintained for backwards compatibility but will be
+    removed in a future release.
+
     Server-Sent Events stream for real-time multi-agent research progress.
 
     Event Flow (5-Agent Architecture):
@@ -139,8 +144,44 @@ async def stream_research_endpoint(
     - research_completed
     - persistence_completed (after successful DB write)
     """
+    from fastapi import HTTPException
+
     # Verify user can access chat (returns True if draft, False if persisted)
     is_draft = await _verify_chat_access(chat_id, user.user_id, db)
+
+    # =========================================================================
+    # GUARD: Prevent duplicate research sessions on SSE reconnect
+    # This is critical to fix the bug where browser auto-reconnect spawns
+    # parallel research sessions with new UUIDs.
+    # =========================================================================
+    if not is_draft:
+        session_service = ResearchSessionService(db)
+        active_session = await session_service.get_active_session_by_chat(
+            chat_id=chat_id,
+            user_id=user.user_id,
+        )
+
+        if active_session:
+            logger.warning(
+                f"DUPLICATE_RESEARCH_BLOCKED: chat_id={chat_id}, "
+                f"active_session_id={active_session.id}, user_id={user.user_id}"
+            )
+            raise HTTPException(
+                status_code=409,  # Conflict
+                detail={
+                    "error": "research_in_progress",
+                    "message": "Research is already in progress for this chat. "
+                    "Use the jobs API to connect to the existing session.",
+                    "session_id": str(active_session.id),
+                    "query": active_session.query[:100] if active_session.query else "",
+                },
+            )
+
+    # Log deprecation warning
+    logger.warning(
+        f"DEPRECATED_SSE_ENDPOINT_USED: chat_id={chat_id}, user_id={user.user_id}. "
+        "Use POST /api/v1/research/jobs instead."
+    )
 
     # Get services from app state
     llm: LLMClient = request.app.state.llm_client
@@ -235,6 +276,7 @@ async def stream_research_endpoint(
             # Orchestrator persists data on success - nothing to do here
 
         except Exception as e:
+            tb = traceback.format_exc()
             logger.exception(f"Error during research stream: {e}")
             # No cleanup needed - nothing was written to DB
             error_event = {
@@ -242,6 +284,8 @@ async def stream_research_endpoint(
                 "error_code": "STREAM_ERROR",
                 "error_message": str(e),
                 "recoverable": False,
+                "stack_trace": tb,
+                "error_type": type(e).__name__,
             }
             yield f"data: {json.dumps(error_event)}\n\n"
 
@@ -302,11 +346,49 @@ async def stream_research_with_history(
 ) -> StreamingResponse:
     """Stream research with explicit conversation history (POST variant).
 
+    DEPRECATED: Use POST /api/v1/research/jobs for new implementations.
+    This endpoint is maintained for backwards compatibility but will be
+    removed in a future release.
+
     This endpoint allows the frontend to pass conversation history
     directly instead of loading from database.
     """
+    from fastapi import HTTPException
+
     # Verify user can access chat (returns True if draft, False if persisted)
     is_draft = await _verify_chat_access(chat_id, user.user_id, db)
+
+    # =========================================================================
+    # GUARD: Prevent duplicate research sessions on SSE reconnect
+    # =========================================================================
+    if not is_draft:
+        session_service = ResearchSessionService(db)
+        active_session = await session_service.get_active_session_by_chat(
+            chat_id=chat_id,
+            user_id=user.user_id,
+        )
+
+        if active_session:
+            logger.warning(
+                f"DUPLICATE_RESEARCH_BLOCKED: chat_id={chat_id}, "
+                f"active_session_id={active_session.id}, user_id={user.user_id}"
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "research_in_progress",
+                    "message": "Research is already in progress for this chat. "
+                    "Use the jobs API to connect to the existing session.",
+                    "session_id": str(active_session.id),
+                    "query": active_session.query[:100] if active_session.query else "",
+                },
+            )
+
+    # Log deprecation warning
+    logger.warning(
+        f"DEPRECATED_SSE_ENDPOINT_USED: chat_id={chat_id}, user_id={user.user_id}. "
+        "Use POST /api/v1/research/jobs instead."
+    )
 
     # Get services from app state
     llm: LLMClient = request.app.state.llm_client
@@ -389,6 +471,7 @@ async def stream_research_with_history(
             # Orchestrator persists data on success - nothing to do here
 
         except Exception as e:
+            tb = traceback.format_exc()
             logger.exception(f"Error during research stream: {e}")
             # No cleanup needed - nothing was written to DB
             error_event = {
@@ -396,6 +479,8 @@ async def stream_research_with_history(
                 "error_code": "STREAM_ERROR",
                 "error_message": str(e),
                 "recoverable": False,
+                "stack_trace": tb,
+                "error_type": type(e).__name__,
             }
             yield f"data: {json.dumps(error_event)}\n\n"
 

@@ -3,8 +3,35 @@ import { Message } from '@/types';
 import { UserMessage } from './UserMessage';
 import { AgentMessage } from './AgentMessage';
 import { AgentMessageWithCitations } from './AgentMessageWithCitations';
+import { StreamErrorAlert } from './StreamErrorAlert';
 import { ErrorBoundary } from '@/components/common/ErrorBoundary';
 import { cn } from '@/lib/utils';
+import type { StreamingClaim, ErrorDetails } from '@/hooks/useStreamingQuery';
+import type { Claim, VerificationSummary } from '@/types/citation';
+
+/**
+ * Convert StreamingClaim to minimal Claim format for citationData mapping.
+ * During streaming, we don't have full evidence data, but we have enough
+ * to show citation markers with correct verdict colors.
+ */
+function streamingClaimsToClaims(streamingClaims: StreamingClaim[]): Claim[] {
+  return streamingClaims.map((sc) => ({
+    id: sc.id,
+    claimText: sc.claimText,
+    claimType: 'general' as const,
+    confidenceLevel: sc.confidenceLevel,
+    positionStart: sc.positionStart,
+    positionEnd: sc.positionEnd,
+    verificationVerdict: sc.verificationVerdict,
+    verificationReasoning: sc.reasoning,
+    abstained: false,
+    citations: [], // No full evidence during streaming
+    corrections: [],
+    numericDetail: null,
+    citationKey: sc.citationKey,
+    citationKeys: sc.citationKeys,
+  }));
+}
 
 interface MessageListProps {
   messages: Message[];
@@ -16,6 +43,16 @@ interface MessageListProps {
   researchPanel?: React.ReactNode;
   /** Hide the Sources & Citations section in agent messages (when shown in ResearchPanel) */
   hideAgentSourcesSection?: boolean;
+  /** Streaming claims for real-time citation display during streaming */
+  streamingClaims?: StreamingClaim[];
+  /** Verification summary from streaming */
+  streamingVerificationSummary?: VerificationSummary | null;
+  /** Error details including stack trace for debugging */
+  errorDetails?: ErrorDetails | null;
+  /** Callback to retry after error */
+  onRetry?: () => void;
+  /** Callback to dismiss error */
+  onDismissError?: () => void;
 }
 
 export function MessageList({
@@ -26,6 +63,11 @@ export function MessageList({
   className,
   researchPanel,
   hideAgentSourcesSection = false,
+  streamingClaims = [],
+  streamingVerificationSummary = null,
+  errorDetails = null,
+  onRetry,
+  onDismissError,
 }: MessageListProps) {
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
   const scrollTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -103,6 +145,10 @@ export function MessageList({
               is_edited: false,
             }}
             isStreaming={true}
+            // Pass streaming claims for real-time citation display with verdict colors
+            claims={streamingClaims.length > 0 ? streamingClaimsToClaims(streamingClaims) : undefined}
+            verificationSummary={streamingVerificationSummary}
+            enableCitations={streamingClaims.length > 0}
           />
         </div>
       )}
@@ -119,7 +165,29 @@ export function MessageList({
             is_edited: false,
           }}
           isStreaming={false}
+          // Pass streaming claims for citation display after streaming completes
+          // This prevents grey citations while waiting for DB persistence
+          claims={streamingClaims.length > 0 ? streamingClaimsToClaims(streamingClaims) : undefined}
+          verificationSummary={streamingVerificationSummary}
+          enableCitations={streamingClaims.length > 0}
         />
+      )}
+
+      {/* Error display - shows inline where agent message would appear */}
+      {errorDetails && (
+        <div className="flex justify-start">
+          <div className="max-w-[85%] w-full">
+            <StreamErrorAlert
+              error={errorDetails.error}
+              errorCode={errorDetails.errorCode}
+              stackTrace={errorDetails.stackTrace}
+              errorType={errorDetails.errorType}
+              recoverable={errorDetails.recoverable}
+              onRetry={onRetry}
+              onDismiss={onDismissError}
+            />
+          </div>
+        </div>
       )}
 
       {/* Research panel - scrolls with messages */}

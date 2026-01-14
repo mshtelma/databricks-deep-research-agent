@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.models.research_session import ResearchSession, ResearchSessionStatus
+from src.models.research_session import ResearchSession, ResearchSessionStatus, ResearchStatus
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +80,34 @@ class ResearchSessionService:
         result = await self._session.execute(
             select(ResearchSession).where(ResearchSession.message_id == message_id)
         )
+        return result.scalar_one_or_none()
+
+    async def get_active_session_by_chat(
+        self,
+        chat_id: UUID,
+        user_id: str,
+    ) -> ResearchSession | None:
+        """Get active (in_progress) research session for a chat.
+
+        Used to prevent duplicate research sessions when SSE reconnects.
+        This is a critical guard against the duplicate research bug.
+
+        Args:
+            chat_id: Chat to check.
+            user_id: User ID for security verification.
+
+        Returns:
+            Active ResearchSession if one exists, None otherwise.
+        """
+        stmt = (
+            select(ResearchSession)
+            .where(ResearchSession.chat_id == chat_id)
+            .where(ResearchSession.user_id == user_id)
+            .where(ResearchSession.status == ResearchStatus.IN_PROGRESS)
+            .order_by(ResearchSession.created_at.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
     async def update_plan(

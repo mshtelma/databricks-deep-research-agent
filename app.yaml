@@ -1,55 +1,49 @@
-# Databricks Apps deployment configuration
-# https://docs.databricks.com/en/dev-tools/databricks-apps/index.html
+# Databricks Apps Configuration
+# See: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/best-practices
+#
+# IMPORTANT: This file uses `valueFrom` to reference app resources.
+# Resources are configured via:
+#   Option A: Databricks UI (Compute > Apps > Configure > App resources)
+#   Option B: databricks.yml (infrastructure-as-code, provisions Lakebase)
+#
+# The `valueFrom` value is a RESOURCE KEY (alias), not the actual resource name.
 
-name: deep-research-agent
-description: Deep Research Agent with 5-agent architecture
+# Simple command pattern (matching working template)
+# Databricks Apps auto-injects port via --port flag when spawning the process
+# Migrations run in lifespan startup hook via on_startup event
+command: ["uvicorn", "src.main:app"]
 
-# Application entry point
-command:
-  - python
-  - -m
-  - src.agent_server.start_server
-
-# Environment variables
 env:
-  # Runtime settings
-  - name: PORT
-    value: "8080"
-  - name: HOST
-    value: "0.0.0.0"
+  # MLflow Integration (automatic within Databricks workspace)
+  # Using the app's service principal experiment path to ensure write access
+  - name: MLFLOW_TRACKING_URI
+    value: "databricks"
+  - name: MLFLOW_REGISTRY_URI
+    value: "databricks-uc"
+  - name: MLFLOW_EXPERIMENT_NAME
+    value: "/Shared/deep-research-agent-experiments"
 
-  # Serve static frontend
+  # App Configuration
   - name: SERVE_STATIC
     value: "true"
+  - name: APP_ENV
+    value: "production"
+  - name: LOG_LEVEL
+    value: "INFO"
 
-  # MLflow tracing
-  - name: MLFLOW_EXPERIMENT_NAME
-    value: "/Shared/deep-research-agent"
+  # Lakebase Configuration
+  # Databricks Apps automatically injects PGHOST, PGUSER, PGDATABASE, PGPORT
+  # when a database resource is configured.
+  #
+  # LAKEBASE_INSTANCE_NAME is required for OAuth credential generation.
+  # This must match the instance name in databricks.yml (not the PGHOST UID format).
+  # The instance name is fixed (no target suffix) since workspaces are isolated.
+  - name: LAKEBASE_INSTANCE_NAME
+    value: "deep-research-lakebase"
+  - name: LAKEBASE_DATABASE
+    value: "deep_research"
 
-  # Auth (uses workspace-managed credentials)
-  - name: DATABRICKS_CONFIG_PROFILE
-    valueFrom:
-      secretKeyRef:
-        name: databricks-config-profile
-        key: profile
-        optional: true
-
-# Resource requirements
-resources:
-  cpu: "2"
-  memory: "4Gi"
-
-# Health check
-healthCheck:
-  path: /health
-  port: 8080
-  initialDelaySeconds: 30
-  periodSeconds: 10
-  timeoutSeconds: 5
-  failureThreshold: 3
-
-# Scaling configuration
-scaling:
-  minReplicas: 1
-  maxReplicas: 3
-  targetCPUUtilizationPercentage: 70
+  # Brave Search API (external service)
+  # The "brave-api-key" resource provides the API key from secret scope
+  - name: BRAVE_API_KEY
+    valueFrom: "brave-api-key"

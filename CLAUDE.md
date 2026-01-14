@@ -147,6 +147,140 @@ uv run ruff check src
 cd frontend && npm run typecheck
 ```
 
+## Databricks Apps Deployment
+
+### Full Deployment (One Command)
+
+```bash
+# Deploy to dev workspace (builds, migrates, grants permissions, starts app)
+make deploy TARGET=dev BRAVE_SCOPE=msh
+
+# Deploy to AIS workspace
+make deploy TARGET=ais
+
+# What deploy does (8 steps):
+# 1. Build frontend (npm run build)
+# 2. Generate requirements.txt from pyproject.toml
+# 3. Deploy bundle with postgres DB (bootstrap phase)
+# 4. Wait for Lakebase instance to be ready (~30-60s for new instances)
+# 5. Create deep_research database
+# 6. Re-deploy bundle with deep_research DB
+# 7. Run migrations with developer credentials
+# 8. Grant table permissions to app's service principal
+# 9. Start app and show deployment summary
+```
+
+### Operations Commands
+
+```bash
+# Download app logs (via /logz/batch REST API)
+make logs TARGET=dev                         # Fetch logs once
+make logs TARGET=dev FOLLOW=-f               # Follow logs (poll every 5s)
+make logs TARGET=dev SEARCH="--search ERROR" # Filter logs by term
+make logs TARGET=ais FOLLOW=-f               # Follow AIS logs
+
+# Restart app (after config changes)
+databricks bundle run -t dev deep_research_agent
+databricks bundle run -t ais deep_research_agent
+
+# Check deployment status
+databricks bundle summary -t dev
+databricks bundle summary -t ais
+
+# Run migrations manually (usually automatic via deploy)
+make db-migrate-remote TARGET=dev
+make db-migrate-remote TARGET=ais
+
+# Grant permissions manually (usually automatic via deploy)
+./scripts/grant-app-permissions.sh "deep-research-lakebase-dre-dev" "e2-demo-west" "deep_research" "deep-research-agent-dre-dev"
+```
+
+### Two-Phase Deployment Architecture
+
+**Problem**: Chicken-and-egg scenario with Lakebase
+1. App needs `LAKEBASE_DATABASE` environment variable
+2. But database doesn't exist until Lakebase instance is created
+3. Lakebase instance is created by bundle deploy
+
+**Solution**: Two-phase deployment
+1. **Phase 1 (Bootstrap)**: Deploy with `postgres` database (always exists in PostgreSQL)
+2. Wait for Lakebase, create `deep_research` database via `scripts/create-database.sh`
+3. **Phase 2 (Complete)**: Re-deploy with `deep_research` as the configured database
+
+### Permission Model (Why GRANT Statements Are Needed)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Permission Problem                                              │
+├─────────────────────────────────────────────────────────────────┤
+│  1. Developer runs migrations → Tables owned by developer       │
+│  2. App has CAN_CONNECT_AND_CREATE on database                  │
+│  3. CAN_CONNECT_AND_CREATE ≠ SELECT/INSERT/UPDATE/DELETE        │
+│  4. App service principal cannot access tables it doesn't own   │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│  Solution: Post-Migration GRANT Statements                      │
+├─────────────────────────────────────────────────────────────────┤
+│  GRANT ALL ON ALL TABLES IN SCHEMA public TO <app_sp>;          │
+│  GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO <app_sp>;       │
+│  ALTER DEFAULT PRIVILEGES ... GRANT ALL ON TABLES TO <app_sp>;  │
+│  ALTER DEFAULT PRIVILEGES ... GRANT ALL ON SEQUENCES TO <app_sp>│
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key files**:
+- `src/db/grant_permissions.py` - Python module to grant table permissions
+- `scripts/grant-app-permissions.sh` - Shell wrapper for the grant script
+- `scripts/create-database.sh` - Create deep_research database
+- `scripts/wait-for-lakebase.sh` - Wait for Lakebase to be connectable
+
+### Lakebase Authentication Flow
+
+```
+Developer Machine                    Databricks Profile              Lakebase Instance
+       │                                    │                              │
+       │ 1. Run migrations                  │                              │
+       │    DATABRICKS_CONFIG_PROFILE=...   │                              │
+       ├───────────────────────────────────>│                              │
+       │                                    │ 2. Get OAuth token           │
+       │                                    │    via generate_database_    │
+       │                                    │    credential()              │
+       │                                    ├─────────────────────────────>│
+       │                                    │                              │
+       │ 3. Connect with OAuth token        │                              │
+       │    user="token", pass=<oauth>      │                              │
+       ├──────────────────────────────────────────────────────────────────>│
+       │                                    │                              │
+       │ 4. Create tables (owned by dev)    │                              │
+       ├──────────────────────────────────────────────────────────────────>│
+       │                                    │                              │
+       │ 5. GRANT permissions to app SP     │                              │
+       ├──────────────────────────────────────────────────────────────────>│
+       │                                    │                              │
+       │                                    │     App Service Principal    │
+       │                                    │            │                 │
+       │                                    │ 6. App connects with its     │
+       │                                    │    own OAuth token           │
+       │                                    │            ├────────────────>│
+       │                                    │            │                 │
+       │                                    │ 7. SELECT/INSERT/UPDATE/     │
+       │                                    │    DELETE now works!         │
+       │                                    │            ├────────────────>│
+```
+
+**Token characteristics**:
+- OAuth tokens have 1-hour lifetime with 5-minute refresh buffer
+- Username is always `"token"` for OAuth connections
+- Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
+
+### Profile to Workspace Mapping
+
+| TARGET | Profile | Workspace |
+|--------|---------|-----------|
+| dev | e2-demo-west | E2 Demo West |
+| ais | ais | AIS Production |
+
 ## Constitution Principles (MUST FOLLOW)
 
 ### I. Clients and Workspace Integration
@@ -381,6 +515,29 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
 - Created shared `snakeToCamel` utility (`frontend/src/utils/caseConversion.ts`)
 
 ## Recent Changes
+- Lakebase OAuth Token Refresh Bug Fix (2026-01-11)
+  - **BUG FIX**: App failed with `InvalidPasswordError` after ~1 hour due to expired OAuth token
+  - Root cause: `get_session_maker()` cached the session maker and never called `get_engine()` after first request
+  - The token expiry check in `get_engine()` was bypassed, so tokens were never refreshed
+  - Fix: `get_session_maker()` now calls `get_engine()` on every request to trigger proactive token refresh
+  - When token is expired, engine is disposed and recreated with fresh credentials
+  - Key file: `src/db/session.py` (lines 142-145: always call get_engine())
+
+- Deployment Architecture Documentation (2026-01-11)
+  - **NEW DOCUMENTATION**: Comprehensive deployment guide added to CLAUDE.md and plan.md
+  - Documented 8-step deployment pipeline via `make deploy TARGET=dev BRAVE_SCOPE=msh`
+  - Documented two-phase deployment architecture (bootstrap with postgres, then switch to deep_research)
+  - Documented Lakebase permission model (CAN_CONNECT_AND_CREATE doesn't grant table access)
+  - Documented OAuth authentication flow for Lakebase connections
+  - Added operations commands (logs, restart, status, manual migrations)
+  - Key files:
+    - `src/db/grant_permissions.py` - Grant table permissions to app service principal
+    - `scripts/grant-app-permissions.sh` - Shell wrapper for permission grants
+    - `scripts/create-database.sh` - Create deep_research database
+    - `scripts/wait-for-lakebase.sh` - Wait for Lakebase to be connectable
+    - `src/db/lakebase_auth.py` - OAuth credential provider for Lakebase
+  - Related sections: "Databricks Apps Deployment" in CLAUDE.md, "Deployment Architecture" in plan.md
+
 - 004-tiered-query-modes: Message Export Feature (2026-01-10)
   - **NEW FEATURE**: Export agent messages as markdown via 3-dot menu
   - Three export options: Export Report, Verification Report, Copy to Clipboard

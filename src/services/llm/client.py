@@ -15,7 +15,7 @@ from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletionChunk
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 
-from src.core.config import get_settings
+from src.core.databricks_auth import get_databricks_auth
 from src.core.exceptions import LLMError, RateLimitError
 from src.core.logging_utils import (
     get_logger,
@@ -25,7 +25,6 @@ from src.core.logging_utils import (
     log_llm_request,
     log_llm_response,
 )
-from src.services.llm.auth import LLMCredentialProvider
 from src.services.llm.config import ModelConfig
 from src.services.llm.types import (
     EndpointHealth,
@@ -115,63 +114,53 @@ class LLMClient:
     def __init__(self, config: ModelConfig | None = None):
         """Initialize LLM client.
 
+        Uses centralized DatabricksAuth for authentication which supports:
+        1. Direct token: DATABRICKS_TOKEN environment variable
+        2. Profile-based OAuth: DATABRICKS_CONFIG_PROFILE from ~/.databrickscfg
+        3. Automatic OAuth: Databricks Apps environment (service principal)
+
         Args:
             config: Model configuration. If None, creates new instance.
         """
-        settings = get_settings()
         self._config = config or ModelConfig()
         self._health: dict[str, EndpointHealth] = {}
 
-        # Auth mode tracking
-        self._credential_provider: LLMCredentialProvider | None = None
-        self._current_token: str | None = None
+        # Use centralized auth
+        self._auth = get_databricks_auth()
+        self._current_token = self._auth.get_token()
+        self._base_url = self._auth.get_base_url()
 
         # Auth retry tracking (prevents infinite loops on persistent auth failures)
         self._auth_retry_count: int = 0
         self._refresh_lock = asyncio.Lock()
 
-        # Get token - either from env or from WorkspaceClient (with refresh support)
-        token = settings.databricks_token
-        self._base_url = f"{settings.databricks_host}/serving-endpoints"
-
-        if not token and settings.databricks_config_profile:
-            # Profile-based OAuth auth with refresh support
-            self._credential_provider = LLMCredentialProvider(
-                profile=settings.databricks_config_profile
-            )
-            credential = self._credential_provider.get_credential()
-            token = credential.token
-            self._base_url = self._credential_provider.get_base_url()
-
-        if not token:
-            raise ValueError("No Databricks token available")
-
-        self._current_token = token
+        logger.info("LLM_CLIENT_INIT", auth_mode=self._auth.auth_mode)
 
         # Initialize OpenAI client for Databricks
         self._client = AsyncOpenAI(
-            api_key=token,
+            api_key=self._current_token,
             base_url=self._base_url,
         )
 
     def _ensure_fresh_client(self) -> None:
         """Ensure the OpenAI client has a fresh OAuth token.
 
-        For profile-based OAuth auth, checks if token is expired and
-        refreshes if needed. For direct token auth, this is a no-op.
+        For OAuth-based auth, checks if token is expired and refreshes if needed.
+        For direct token auth, this is a no-op.
         """
-        if self._credential_provider is None:
+        if not self._auth.is_oauth:
             # Direct token auth - no refresh needed
             return
 
-        credential = self._credential_provider.get_credential()
+        # Get potentially refreshed token
+        token = self._auth.get_token()
 
-        if credential.token != self._current_token:
+        if token != self._current_token:
             # Token was refreshed - recreate client
-            logger.info("LLM_TOKEN_REFRESHED", provider="oauth")
-            self._current_token = credential.token
+            logger.info("LLM_TOKEN_REFRESHED", auth_mode=self._auth.auth_mode)
+            self._current_token = token
             self._client = AsyncOpenAI(
-                api_key=credential.token,
+                api_key=token,
                 base_url=self._base_url,
             )
 
@@ -184,7 +173,7 @@ class LLMClient:
         Returns:
             True if token was refreshed and retry should proceed, False otherwise.
         """
-        if self._credential_provider is None:
+        if not self._auth.is_oauth:
             return False
 
         async with self._refresh_lock:
@@ -196,13 +185,13 @@ class LLMClient:
                 return False
 
             # Check if another coroutine already refreshed while we waited
-            credential = self._credential_provider.get_credential()
-            if credential.token != self._current_token:
+            token = self._auth.get_token()
+            if token != self._current_token:
                 # Token was already refreshed by another coroutine
                 logger.info("LLM_TOKEN_ALREADY_REFRESHED", by="concurrent_request")
-                self._current_token = credential.token
+                self._current_token = token
                 self._client = AsyncOpenAI(
-                    api_key=credential.token,
+                    api_key=token,
                     base_url=self._base_url,
                 )
                 return True
@@ -213,10 +202,10 @@ class LLMClient:
                 reason="auth_error",
                 attempt=self._auth_retry_count,
             )
-            credential = self._credential_provider.get_credential(force_refresh=True)
-            self._current_token = credential.token
+            token = self._auth.get_token(force_refresh=True)
+            self._current_token = token
             self._client = AsyncOpenAI(
-                api_key=credential.token,
+                api_key=token,
                 base_url=self._base_url,
             )
             return True
@@ -231,6 +220,50 @@ class LLMClient:
             self._health[endpoint_id] = EndpointHealth(endpoint_id=endpoint_id)
         return self._health[endpoint_id]
 
+    def _find_fallback_endpoint(
+        self,
+        role: ModelRole,
+        current_endpoint_id: str,
+        estimated_tokens: int,
+    ) -> tuple[ModelEndpoint, EndpointHealth] | None:
+        """Find a fallback endpoint after rate limit on current endpoint.
+
+        Tries time-based recovery on candidates before checking health.
+        This enables endpoint rotation when one endpoint is rate-limited.
+
+        Args:
+            role: Model role to get endpoints from.
+            current_endpoint_id: Endpoint that failed (to skip).
+            estimated_tokens: Token estimate for capacity check.
+
+        Returns:
+            Tuple of (endpoint, health) if fallback found, None otherwise.
+        """
+        if not role.fallback_on_429:
+            return None
+
+        for endpoint in self._config.get_endpoints_for_role(role.name):
+            if endpoint.id == current_endpoint_id:
+                continue
+
+            health = self._get_health(endpoint.id)
+
+            # Try time-based recovery for rate-limited endpoints
+            if not health.is_healthy:
+                if health.reset_if_recovered():
+                    logger.info(
+                        "ENDPOINT_RECOVERED_FOR_FALLBACK",
+                        endpoint=endpoint.id,
+                        reason="rate_limit_expired",
+                    )
+                else:
+                    continue  # Still unhealthy, skip
+
+            if health.can_handle_request(estimated_tokens, endpoint.tokens_per_minute):
+                return endpoint, health
+
+        return None
+
     def _select_endpoint(
         self,
         role: ModelRole,
@@ -242,8 +275,10 @@ class LLMClient:
         limits can be retried after their rate_limited_until timestamp expires.
         """
         endpoints = self._config.get_endpoints_for_role(role.name)
+        checked_endpoint_ids: list[str] = []
 
         for endpoint in endpoints:
+            checked_endpoint_ids.append(endpoint.id)
             health = self._get_health(endpoint.id)
 
             # Check if endpoint should be considered (includes time-based recovery)
@@ -261,8 +296,8 @@ class LLMClient:
             if health.can_handle_request(estimated_tokens, endpoint.tokens_per_minute):
                 return endpoint, health
 
-        # No healthy endpoint available
-        raise RateLimitError(retry_after=30)
+        # No healthy endpoint available - include which endpoints were checked
+        raise RateLimitError(retry_after=30, checked_endpoints=checked_endpoint_ids)
 
     def _merge_config(
         self,
@@ -434,6 +469,7 @@ class LLMClient:
                     logger.warning(
                         "LLM_RATE_LIMIT_EXHAUSTED",
                         tier=tier.value,
+                        endpoint=e.endpoint_display,
                         attempts=attempt + 1,
                     )
                     raise
@@ -449,6 +485,7 @@ class LLMClient:
                 logger.warning(
                     "LLM_RATE_LIMIT_RETRY",
                     tier=tier.value,
+                    endpoint=e.endpoint_display,
                     attempt=attempt + 1,
                     max_retries=rate_config.max_retries,
                     delay_seconds=round(delay, 2),
@@ -659,7 +696,7 @@ class LLMClient:
                     "LLM_AUTH_ERROR",
                     endpoint=endpoint.endpoint_identifier,
                     status_code=getattr(e, "status_code", None),
-                    will_retry=self._credential_provider is not None,
+                    will_retry=self._auth.is_oauth,
                 )
 
                 if await self._force_refresh_token():
@@ -688,34 +725,23 @@ class LLMClient:
                     "llm.is_rate_limit": True,
                 })
 
-                # Check if we can fallback to another endpoint
-                can_fallback = False
-                fallback_endpoint_id = None
-                if role.fallback_on_429:
-                    for fallback_endpoint in self._config.get_endpoints_for_role(
-                        role.name
-                    ):
-                        if fallback_endpoint.id == endpoint.id:
-                            continue
-                        fallback_health = self._get_health(fallback_endpoint.id)
-                        if fallback_health.is_healthy:
-                            can_fallback = True
-                            fallback_endpoint_id = fallback_endpoint.id
-                            break
+                # Check for fallback endpoint (uses helper with time-based recovery)
+                fallback = self._find_fallback_endpoint(role, endpoint.id, estimated_tokens)
 
                 log_llm_error(
                     logger,
                     endpoint=endpoint.endpoint_identifier,
                     error=e,
                     is_rate_limit=True,
-                    will_fallback=can_fallback,
+                    will_fallback=fallback is not None,
                 )
 
-                if can_fallback and fallback_endpoint_id:
+                if fallback is not None:
+                    fallback_endpoint, _ = fallback
                     log_llm_fallback(
                         logger,
                         from_endpoint=endpoint.endpoint_identifier,
-                        to_endpoint=fallback_endpoint_id,
+                        to_endpoint=fallback_endpoint.id,
                         reason="rate_limit",
                     )
                     return await self._complete_impl(
@@ -727,7 +753,7 @@ class LLMClient:
                         structured_output,
                     )
 
-                raise RateLimitError(retry_after=30) from e
+                raise RateLimitError(retry_after=30, endpoint=endpoint.id) from e
 
             except openai.APIStatusError as e:
                 # Other API errors with status codes
@@ -742,16 +768,39 @@ class LLMClient:
                     "llm.is_rate_limit": is_rate_limit,
                 })
 
+                # Check for fallback on rate limit
+                fallback_for_status: tuple[ModelEndpoint, EndpointHealth] | None = None
+                if is_rate_limit:
+                    fallback_for_status = self._find_fallback_endpoint(
+                        role, endpoint.id, estimated_tokens
+                    )
+
                 log_llm_error(
                     logger,
                     endpoint=endpoint.endpoint_identifier,
                     error=e,
                     is_rate_limit=is_rate_limit,
-                    will_fallback=False,
+                    will_fallback=fallback_for_status is not None,
                 )
 
                 if is_rate_limit:
-                    raise RateLimitError(retry_after=30) from e
+                    if fallback_for_status is not None:
+                        fallback_endpoint, _ = fallback_for_status
+                        log_llm_fallback(
+                            logger,
+                            from_endpoint=endpoint.endpoint_identifier,
+                            to_endpoint=fallback_endpoint.id,
+                            reason="rate_limit",
+                        )
+                        return await self._complete_impl(
+                            messages,
+                            tier,
+                            role,
+                            temperature,
+                            max_tokens,
+                            structured_output,
+                        )
+                    raise RateLimitError(retry_after=30, endpoint=endpoint.id) from e
                 raise LLMError(str(e), endpoint=endpoint.id) from e
 
             except openai.APIConnectionError as e:
@@ -839,6 +888,7 @@ class LLMClient:
                     logger.warning(
                         "LLM_RATE_LIMIT_EXHAUSTED",
                         tier=tier.value,
+                        endpoint=e.endpoint_display,
                         attempts=attempt + 1,
                         streaming=True,
                     )
@@ -855,6 +905,7 @@ class LLMClient:
                 logger.warning(
                     "LLM_RATE_LIMIT_RETRY",
                     tier=tier.value,
+                    endpoint=e.endpoint_display,
                     attempt=attempt + 1,
                     max_retries=rate_config.max_retries,
                     delay_seconds=round(delay, 2),
@@ -968,7 +1019,7 @@ class LLMClient:
                     "LLM_STREAM_AUTH_ERROR",
                     endpoint=endpoint.endpoint_identifier,
                     status_code=getattr(e, "status_code", None),
-                    will_retry=self._credential_provider is not None,
+                    will_retry=self._auth.is_oauth,
                 )
 
                 if await self._force_refresh_token():
@@ -987,31 +1038,71 @@ class LLMClient:
                 # Proper rate limit detection via exception type
                 health.mark_failure(rate_limited=True)
 
+                # Check for fallback endpoint
+                fallback = self._find_fallback_endpoint(
+                    role, endpoint.id, estimated_tokens + 4000
+                )
+
                 log_llm_error(
                     logger,
                     endpoint=endpoint.endpoint_identifier,
                     error=e,
                     is_rate_limit=True,
-                    will_fallback=False,
+                    will_fallback=fallback is not None,
                 )
 
-                raise RateLimitError(retry_after=30) from e
+                if fallback is not None:
+                    fallback_endpoint, _ = fallback
+                    log_llm_fallback(
+                        logger,
+                        from_endpoint=endpoint.endpoint_identifier,
+                        to_endpoint=fallback_endpoint.id,
+                        reason="rate_limit",
+                    )
+                    # Retry with fallback endpoint
+                    async for retry_chunk in self._stream_impl(
+                        messages, tier, role, temperature, max_tokens
+                    ):
+                        yield retry_chunk
+                    return
+
+                raise RateLimitError(retry_after=30, endpoint=endpoint.id) from e
 
             except openai.APIStatusError as e:
                 # Other API errors with status codes
                 is_rate_limit = e.status_code == 429
                 health.mark_failure(rate_limited=is_rate_limit)
 
+                # Check for fallback on rate limit
+                fallback_for_status: tuple[ModelEndpoint, EndpointHealth] | None = None
+                if is_rate_limit:
+                    fallback_for_status = self._find_fallback_endpoint(
+                        role, endpoint.id, estimated_tokens + 4000
+                    )
+
                 log_llm_error(
                     logger,
                     endpoint=endpoint.endpoint_identifier,
                     error=e,
                     is_rate_limit=is_rate_limit,
-                    will_fallback=False,
+                    will_fallback=fallback_for_status is not None,
                 )
 
                 if is_rate_limit:
-                    raise RateLimitError(retry_after=30) from e
+                    if fallback_for_status is not None:
+                        fallback_endpoint, _ = fallback_for_status
+                        log_llm_fallback(
+                            logger,
+                            from_endpoint=endpoint.endpoint_identifier,
+                            to_endpoint=fallback_endpoint.id,
+                            reason="rate_limit",
+                        )
+                        async for retry_chunk in self._stream_impl(
+                            messages, tier, role, temperature, max_tokens
+                        ):
+                            yield retry_chunk
+                        return
+                    raise RateLimitError(retry_after=30, endpoint=endpoint.id) from e
                 raise LLMError(str(e), endpoint=endpoint.id) from e
 
             except openai.APIConnectionError as e:
@@ -1107,6 +1198,7 @@ class LLMClient:
                     logger.warning(
                         "LLM_RATE_LIMIT_EXHAUSTED",
                         tier=tier.value,
+                        endpoint=e.endpoint_display,
                         attempts=attempt + 1,
                         streaming=True,
                         with_tools=True,
@@ -1123,6 +1215,7 @@ class LLMClient:
                 logger.warning(
                     "LLM_RATE_LIMIT_RETRY",
                     tier=tier.value,
+                    endpoint=e.endpoint_display,
                     attempt=attempt + 1,
                     max_retries=rate_config.max_retries,
                     delay_seconds=round(delay, 2),
@@ -1309,7 +1402,7 @@ class LLMClient:
                     "LLM_STREAM_WITH_TOOLS_AUTH_ERROR",
                     endpoint=endpoint.endpoint_identifier,
                     status_code=getattr(e, "status_code", None),
-                    will_retry=self._credential_provider is not None,
+                    will_retry=self._auth.is_oauth,
                 )
 
                 if await self._force_refresh_token():
@@ -1328,31 +1421,71 @@ class LLMClient:
                 # Proper rate limit detection via exception type
                 health.mark_failure(rate_limited=True)
 
+                # Check for fallback endpoint
+                fallback = self._find_fallback_endpoint(
+                    role, endpoint.id, estimated_tokens + 4000
+                )
+
                 log_llm_error(
                     logger,
                     endpoint=endpoint.endpoint_identifier,
                     error=e,
                     is_rate_limit=True,
-                    will_fallback=False,
+                    will_fallback=fallback is not None,
                 )
 
-                raise RateLimitError(retry_after=30) from e
+                if fallback is not None:
+                    fallback_endpoint, _ = fallback
+                    log_llm_fallback(
+                        logger,
+                        from_endpoint=endpoint.endpoint_identifier,
+                        to_endpoint=fallback_endpoint.id,
+                        reason="rate_limit",
+                    )
+                    # Retry with fallback endpoint
+                    async for retry_chunk in self._stream_with_tools_impl(
+                        messages, tools, tier, role, temperature, max_tokens
+                    ):
+                        yield retry_chunk
+                    return
+
+                raise RateLimitError(retry_after=30, endpoint=endpoint.id) from e
 
             except openai.APIStatusError as e:
                 # Other API errors with status codes
                 is_rate_limit = e.status_code == 429
                 health.mark_failure(rate_limited=is_rate_limit)
 
+                # Check for fallback on rate limit
+                fallback_for_status: tuple[ModelEndpoint, EndpointHealth] | None = None
+                if is_rate_limit:
+                    fallback_for_status = self._find_fallback_endpoint(
+                        role, endpoint.id, estimated_tokens + 4000
+                    )
+
                 log_llm_error(
                     logger,
                     endpoint=endpoint.endpoint_identifier,
                     error=e,
                     is_rate_limit=is_rate_limit,
-                    will_fallback=False,
+                    will_fallback=fallback_for_status is not None,
                 )
 
                 if is_rate_limit:
-                    raise RateLimitError(retry_after=30) from e
+                    if fallback_for_status is not None:
+                        fallback_endpoint, _ = fallback_for_status
+                        log_llm_fallback(
+                            logger,
+                            from_endpoint=endpoint.endpoint_identifier,
+                            to_endpoint=fallback_endpoint.id,
+                            reason="rate_limit",
+                        )
+                        async for retry_chunk in self._stream_with_tools_impl(
+                            messages, tools, tier, role, temperature, max_tokens
+                        ):
+                            yield retry_chunk
+                        return
+                    raise RateLimitError(retry_after=30, endpoint=endpoint.id) from e
                 raise LLMError(str(e), endpoint=endpoint.id) from e
 
             except openai.APIConnectionError as e:

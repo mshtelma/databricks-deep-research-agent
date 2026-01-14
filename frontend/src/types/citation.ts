@@ -218,6 +218,10 @@ export interface ClaimVerifiedEvent {
   confidenceLevel: ConfidenceLevel;
   evidencePreview: string;
   reasoning: string | null;
+  /** Primary citation key for citationData mapping (e.g., "Arxiv", "Zhipu") */
+  citationKey: string | null;
+  /** All citation keys for multi-source claims */
+  citationKeys: string[] | null;
 }
 
 /** Citation corrected during post-processing */

@@ -57,12 +57,12 @@ test.describe('Chat Management', () => {
       // Rename the chat
       await sidebarPage.renameChat(chatId, newTitle);
 
-      // Wait for UI update
-      await page.waitForTimeout(500);
-
-      // Check if the new title appears in the chat list
-      const hasTitleAfter = await sidebarPage.hasChatWithTitle(newTitle);
-      expect(hasTitleAfter).toBe(true);
+      // Wait for UI update using auto-retrying assertion
+      // This polls until the title appears or timeout is reached
+      await expect(async () => {
+        const hasTitleAfter = await sidebarPage.hasChatWithTitle(newTitle);
+        expect(hasTitleAfter).toBe(true);
+      }).toPass({ timeout: 10000 });
     });
 
     test('cancel rename preserves original title', async ({ sidebarPage, page }) => {
@@ -79,8 +79,8 @@ test.describe('Chat Management', () => {
       // Cancel the rename dialog
       await sidebarPage.cancelRename(chatId);
 
-      // Wait for UI
-      await page.waitForTimeout(500);
+      // Brief wait for dialog to close (no API call happens on cancel)
+      await page.waitForTimeout(200);
 
       // Titles should remain the same
       const titlesAfter = await sidebarPage.getChatTitles();
@@ -97,17 +97,15 @@ test.describe('Chat Management', () => {
         return;
       }
 
-      const countBefore = await sidebarPage.getChatCount();
+      // Verify chat exists before deletion
+      const chatItem = page.getByTestId(`chat-item-${chatId}`);
+      await expect(chatItem).toBeVisible();
 
       // Delete the chat
       await sidebarPage.deleteChat(chatId);
 
-      // Wait for deletion to complete
-      await page.waitForTimeout(500);
-
-      // Chat count should decrease
-      const countAfter = await sidebarPage.getChatCount();
-      expect(countAfter).toBeLessThan(countBefore);
+      // Wait for the specific chat to disappear (reliable indicator that delete completed)
+      await expect(chatItem).toBeHidden({ timeout: 15000 });
     });
 
     test('deleted chat disappears from sidebar', async ({ sidebarPage, page }) => {
@@ -124,8 +122,8 @@ test.describe('Chat Management', () => {
       // Delete the chat
       await sidebarPage.deleteChat(chatId);
 
-      // Wait for chat to disappear
-      await sidebarPage.waitForChatToDisappear(chatId);
+      // Wait for chat to disappear with increased timeout
+      await sidebarPage.waitForChatToDisappear(chatId, 10000);
     });
   });
 
@@ -141,64 +139,63 @@ test.describe('Chat Management', () => {
       // Archive the chat
       await sidebarPage.archiveChat(chatId);
 
-      // Wait for UI update
-      await page.waitForTimeout(500);
-
-      // Chat should not be visible in active filter
+      // Wait for archive to complete, then switch to active filter
+      // Chat should not be visible in active filter (increased timeout for API + refetch)
       await sidebarPage.filterByStatus('active');
-      await page.waitForTimeout(300);
-
       const chatItem = page.getByTestId(`chat-item-${chatId}`);
-      await expect(chatItem).toBeHidden({ timeout: 5000 });
+      await expect(chatItem).toBeHidden({ timeout: 10000 });
     });
 
     test('archived filter shows archived chats', async ({ sidebarPage, page }) => {
-      // Create a persisted chat (not draft) so it has menu actions
-      const chatId = await sidebarPage.createPersistedChat();
-      if (!chatId) {
-        test.skip(true, 'No chat available to archive');
+      // Create two chats - we'll archive the first one while viewing the second
+      // This avoids the navigation-away behavior when archiving the current chat
+      const chatIdToArchive = await sidebarPage.createPersistedChat('Chat to Archive');
+      const chatIdToStayOn = await sidebarPage.createPersistedChat('Stay on This');
+      if (!chatIdToArchive || !chatIdToStayOn) {
+        test.skip(true, 'Could not create test chats');
         return;
       }
 
-      await sidebarPage.archiveChat(chatId);
-      await page.waitForTimeout(500);
+      // Navigate to the second chat so the first is not the current chat
+      await sidebarPage.selectChatById(chatIdToStayOn);
 
-      // Switch to archived filter
+      // Archive the first chat (not the current one)
+      await sidebarPage.archiveChat(chatIdToArchive);
+
+      // Switch to archived filter and wait for chat to appear
       await sidebarPage.filterByStatus('archived');
-      await page.waitForTimeout(500);
-
-      // Chat should be visible in archived filter
-      const chatItem = page.getByTestId(`chat-item-${chatId}`);
-      await expect(chatItem).toBeVisible({ timeout: 5000 });
+      const chatItem = page.getByTestId(`chat-item-${chatIdToArchive}`);
+      await expect(chatItem).toBeVisible({ timeout: 15000 });
     });
 
     test('restore returns chat to active', async ({ sidebarPage, page }) => {
-      // Create a persisted chat (not draft) so it has menu actions
-      const chatId = await sidebarPage.createPersistedChat();
-      if (!chatId) {
-        test.skip(true, 'No chat available');
+      // Create two chats - we'll archive/restore the first one while viewing the second
+      // This avoids the navigation-away behavior when archiving the current chat
+      const chatIdToArchive = await sidebarPage.createPersistedChat('Chat to Archive and Restore');
+      const chatIdToStayOn = await sidebarPage.createPersistedChat('Stay on This');
+      if (!chatIdToArchive || !chatIdToStayOn) {
+        test.skip(true, 'Could not create test chats');
         return;
       }
 
-      // Archive the chat
-      await sidebarPage.archiveChat(chatId);
-      await page.waitForTimeout(500);
+      // Navigate to the second chat so the first is not the current chat
+      await sidebarPage.selectChatById(chatIdToStayOn);
 
-      // Switch to archived filter
+      // Archive the first chat (not the current one)
+      await sidebarPage.archiveChat(chatIdToArchive);
+
+      // Switch to archived filter and wait for chat to appear
       await sidebarPage.filterByStatus('archived');
-      await page.waitForTimeout(500);
+      const chatItem = page.getByTestId(`chat-item-${chatIdToArchive}`);
+      await expect(chatItem).toBeVisible({ timeout: 15000 });
 
-      // Restore the chat
-      await sidebarPage.restoreChat(chatId);
-      await page.waitForTimeout(500);
+      // Restore the chat and wait for it to disappear from archived filter
+      await sidebarPage.restoreChat(chatIdToArchive);
+      await expect(chatItem).toBeHidden({ timeout: 15000 });
 
-      // Switch to active filter
+      // Switch to active filter and wait for chat to appear
       await sidebarPage.filterByStatus('active');
-      await page.waitForTimeout(500);
-
-      // Chat should be visible in active filter
-      const chatItem = page.getByTestId(`chat-item-${chatId}`);
-      await expect(chatItem).toBeVisible({ timeout: 5000 });
+      await expect(chatItem).toBeVisible({ timeout: 15000 });
     });
   });
 
