@@ -5,24 +5,21 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from src.models.message import Message, MessageRole
+from src.services.base import BaseRepository
 
 logger = logging.getLogger(__name__)
 
 
-class MessageService:
-    """Service for managing messages."""
+class MessageService(BaseRepository[Message]):
+    """Service for managing messages.
 
-    def __init__(self, session: AsyncSession) -> None:
-        """Initialize message service.
+    Extends BaseRepository[Message] for standard CRUD operations.
+    """
 
-        Args:
-            session: Database session.
-        """
-        self._session = session
+    model = Message
 
     async def create(
         self,
@@ -49,25 +46,9 @@ class MessageService:
             role=role,
             content=content,
         )
-        self._session.add(message)
-        await self._session.flush()
-        await self._session.refresh(message)
+        message = await self.add(message)
         logger.info(f"Created {role} message {message.id} in chat {chat_id}")
         return message
-
-    async def get(self, message_id: UUID) -> Message | None:
-        """Get a message by ID.
-
-        Args:
-            message_id: Message ID.
-
-        Returns:
-            Message if found, None otherwise.
-        """
-        result = await self._session.execute(
-            select(Message).where(Message.id == message_id)
-        )
-        return result.scalar_one_or_none()
 
     async def get_with_chat(self, message_id: UUID, chat_id: UUID) -> Message | None:
         """Get a message by ID and chat ID.
@@ -152,8 +133,7 @@ class MessageService:
         message.content = content
         message.is_edited = True
         message.updated_at = datetime.now(UTC)
-        await self._session.flush()
-        await self._session.refresh(message)
+        message = await self.update(message)
         logger.info(f"Updated message {message_id}")
         return message
 
@@ -202,9 +182,7 @@ class MessageService:
             return None
 
         message.research_session_id = research_session_id
-        await self._session.flush()
-        await self._session.refresh(message)
-        return message
+        return await self.update(message)
 
     async def get_conversation_history(
         self,

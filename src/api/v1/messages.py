@@ -7,7 +7,9 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.v1.utils import verify_chat_ownership
 from src.core.exceptions import NotFoundError
+from src.services.chat_service import ChatService
 from src.db.session import get_db
 from src.middleware.auth import CurrentUser
 from src.models.message import Message, MessageRole
@@ -23,21 +25,10 @@ from src.schemas.message import (
     SendMessageResponse,
 )
 from src.schemas.research import ResearchSession as ResearchSessionSchema
-from src.services.chat_service import ChatService
 from src.services.feedback_service import FeedbackService
 from src.services.message_service import MessageService
 
 router = APIRouter()
-
-
-async def _verify_chat_ownership(
-    chat_id: UUID, user_id: str, db: AsyncSession
-) -> None:
-    """Verify user owns the chat. Raises NotFoundError if not."""
-    chat_service = ChatService(db)
-    chat = await chat_service.get(chat_id, user_id)
-    if not chat:
-        raise NotFoundError("Chat", str(chat_id))
 
 
 def _research_session_to_schema(
@@ -86,7 +77,7 @@ async def list_messages(
 ) -> MessageListResponse:
     """List messages in a chat."""
     # Verify user owns the chat
-    await _verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db)
 
     service = MessageService(db)
     messages, total = await service.list_messages(
@@ -116,7 +107,7 @@ async def send_message(
     with message IDs. Use SSE endpoint to stream the agent response.
     """
     # Verify user owns the chat
-    await _verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db)
 
     message_service = MessageService(db)
     chat_service = ChatService(db)
@@ -153,7 +144,7 @@ async def get_message(
 ) -> MessageResponse:
     """Get message details."""
     # Verify user owns the chat
-    await _verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db)
 
     service = MessageService(db)
     message = await service.get_with_chat(message_id, chat_id)
@@ -176,7 +167,7 @@ async def edit_message(
     messages in the conversation thread.
     """
     # Verify user owns the chat
-    await _verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db)
 
     service = MessageService(db)
 
@@ -229,7 +220,7 @@ async def regenerate_message(
     Creates a new agent message with fresh research results.
     """
     # Verify user owns the chat
-    await _verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db)
 
     service = MessageService(db)
 
@@ -267,7 +258,7 @@ async def submit_feedback(
 ) -> FeedbackResponse:
     """Submit feedback on agent message."""
     # Verify user owns the chat
-    await _verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db)
 
     message_service = MessageService(db)
 
@@ -313,7 +304,7 @@ async def get_message_content(
     Returns plain text content suitable for copying to clipboard.
     """
     # Verify user owns the chat
-    await _verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db)
 
     service = MessageService(db)
     message = await service.get_with_chat(message_id, chat_id)

@@ -4,9 +4,9 @@ import logging
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.source import Source
+from src.services.base import BaseRepository
 
 logger = logging.getLogger(__name__)
 
@@ -28,16 +28,13 @@ def _truncate_title(title: str | None) -> str | None:
     return title
 
 
-class SourceService:
-    """Service for managing research sources."""
+class SourceService(BaseRepository[Source]):
+    """Service for managing research sources.
 
-    def __init__(self, session: AsyncSession) -> None:
-        """Initialize source service.
+    Extends BaseRepository[Source] for standard CRUD operations.
+    """
 
-        Args:
-            session: Database session.
-        """
-        self._session = session
+    model = Source
 
     async def create(
         self,
@@ -69,9 +66,7 @@ class SourceService:
             content=content,
             relevance_score=relevance_score,
         )
-        self._session.add(source)
-        await self._session.flush()
-        await self._session.refresh(source)
+        source = await self.add(source)
         logger.debug(f"Created source {source.id} for session {research_session_id}")
         return source
 
@@ -89,9 +84,8 @@ class SourceService:
         Returns:
             Created sources.
         """
-        created = []
-        for source_data in sources:
-            source = Source(
+        entities = [
+            Source(
                 research_session_id=research_session_id,
                 url=str(source_data.get("url", "")),
                 title=_truncate_title(source_data.get("title")),  # type: ignore[arg-type]
@@ -99,31 +93,13 @@ class SourceService:
                 content=source_data.get("content"),
                 relevance_score=source_data.get("relevance_score"),
             )
-            self._session.add(source)
-            created.append(source)
-
-        await self._session.flush()
-        for source in created:
-            await self._session.refresh(source)
-
+            for source_data in sources
+        ]
+        created = await self.add_many(entities)
         logger.info(
             f"Created {len(created)} sources for session {research_session_id}"
         )
         return created
-
-    async def get(self, source_id: UUID) -> Source | None:
-        """Get a source by ID.
-
-        Args:
-            source_id: Source ID.
-
-        Returns:
-            Source if found, None otherwise.
-        """
-        result = await self._session.execute(
-            select(Source).where(Source.id == source_id)
-        )
-        return result.scalar_one_or_none()
 
     async def list_by_session(
         self,
@@ -167,9 +143,7 @@ class SourceService:
             return None
 
         source.content = content
-        await self._session.flush()
-        await self._session.refresh(source)
-        return source
+        return await self.update(source)
 
     async def get_by_url(
         self,

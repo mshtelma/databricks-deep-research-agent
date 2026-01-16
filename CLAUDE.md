@@ -58,8 +58,14 @@ src/                            # Python backend source
 │   ├── prompts/                # Agent prompt templates
 │   └── tools/                  # web_search, web_crawler
 ├── api/                        # FastAPI routes
+│   └── v1/
+│       └── utils/              # Shared API utilities
+│           ├── authorization.py  # Centralized auth checks
+│           └── transformers.py   # Response builders
 ├── models/                     # Pydantic models
 ├── services/
+│   ├── base.py                 # BaseRepository pattern for CRUD
+│   ├── loading.py              # Shared eager-loading options
 │   ├── llm/                    # LLM client, rate limiter, model router
 │   ├── search/                 # Brave Search API
 │   └── storage/                # Session/message repos
@@ -311,6 +317,18 @@ Developer Machine                    Databricks Profile              Lakebase In
 - Dependency injection via FastAPI Depends()
 - SQLAlchemy async for database operations
 
+### Service Layer Patterns
+- All CRUD services SHOULD extend `BaseRepository[T]` from `src/services/base.py`
+- Use eager-loading constants from `src/services/loading.py` to prevent N+1 queries
+- Use `NotFoundError` for missing entities, `AuthorizationError` for access denied
+- Services support optional dependency injection for testability
+
+### API Layer Patterns
+- Use authorization utilities from `src/api/v1/utils/authorization`
+- Use response transformers from `src/api/v1/utils/transformers`
+- Never duplicate `_verify_*` functions in endpoint files
+- All authorization checks return the entity for further use
+
 ### TypeScript (Frontend)
 - Strict mode enabled
 - Use TanStack Query for data fetching
@@ -515,6 +533,23 @@ DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
 - Created shared `snakeToCamel` utility (`frontend/src/utils/caseConversion.ts`)
 
 ## Recent Changes
+- Code Quality Refactoring (2026-01-16)
+  - **REFACTOR**: Eliminated code duplication across API and service layers
+  - Created `src/api/v1/utils/authorization.py` - Centralized auth checks (3 functions)
+  - Created `src/api/v1/utils/transformers.py` - Response builders (7 functions)
+  - Created `src/services/base.py` - BaseRepository pattern for CRUD operations
+  - Created `src/services/loading.py` - Shared eager-loading options
+  - Refactored ClaimService, SourceService, EvidenceSpanService, MessageService, ChatService to extend BaseRepository
+  - Fixed ExportService tight coupling with dependency injection
+  - Updated research.py to use shared `verify_chat_access()` function
+  - Key files:
+    - `src/api/v1/utils/__init__.py` - Exports shared utilities
+    - `src/api/v1/utils/authorization.py` - verify_chat_ownership, verify_chat_access, verify_message_ownership
+    - `src/api/v1/utils/transformers.py` - claim_to_response, build_verification_summary, etc.
+    - `src/services/base.py` - BaseRepository[T] with add, add_many, get, update, delete methods
+    - `src/services/loading.py` - CLAIM_WITH_CITATIONS_OPTIONS, MESSAGE_WITH_SESSION_OPTIONS, etc.
+  - Impact: ~95 occurrences of add/flush/refresh boilerplate reduced, 4 duplicate auth functions consolidated
+
 - Lakebase OAuth Token Refresh Bug Fix (2026-01-11)
   - **BUG FIX**: App failed with `InvalidPasswordError` after ~1 hour due to expired OAuth token
   - Root cause: `get_session_maker()` cached the session maker and never called `get_engine()` after first request

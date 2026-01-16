@@ -14,176 +14,32 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
+from src.api.v1.utils import (
+    build_citation_response,
+    build_empty_verification_summary,
+    build_verification_summary,
+    claim_to_response,
+    verify_message_ownership,
+)
 from src.core.exceptions import NotFoundError
 from src.db.session import get_db
 from src.middleware.auth import CurrentUser
-from src.models.claim import Claim
-from src.models.message import Message
 from src.schemas.citation import (
-    CitationResponse,
     ClaimEvidenceResponse,
     ClaimProvenanceExport,
     ClaimResponse,
     ConfidenceLevelEnum,
     CorrectionMetrics,
-    EvidenceSpanResponse,
     MessageClaimsResponse,
     ProvenanceExport,
-    SourceMetadataResponse,
     VerificationSummary,
     VerificationVerdictEnum,
 )
-from src.services.chat_service import ChatService
 from src.services.claim_service import ClaimService
 from src.services.verification_summary_service import VerificationSummaryService
 
 router = APIRouter()
-
-
-async def _verify_message_ownership(
-    message_id: UUID, user_id: str, db: AsyncSession
-) -> Message:
-    """Verify user owns the message's chat. Returns the message."""
-    import logging
-    from sqlalchemy import select
-    from src.core.config import get_settings
-    from src.models.chat import Chat
-
-    logger = logging.getLogger(__name__)
-
-    result = await db.execute(
-        select(Message)
-        .options(selectinload(Message.chat))
-        .where(Message.id == message_id)
-    )
-    message = result.scalar_one_or_none()
-
-    if not message:
-        raise NotFoundError("Message", str(message_id))
-
-    # Get chat via relationship or query
-    chat: Chat | None = message.chat
-    if not chat:
-        chat_result = await db.execute(
-            select(Chat).where(Chat.id == message.chat_id)
-        )
-        chat = chat_result.scalar_one_or_none()
-
-    if not chat:
-        raise NotFoundError("Message", str(message_id))
-
-    # Ownership check with dev mode bypass
-    settings = get_settings()
-    if chat.user_id != user_id:
-        if settings.is_production or user_id != "anonymous":
-            raise NotFoundError("Message", str(message_id))
-        # Dev mode with anonymous user: allow
-        logger.debug(
-            f"DEV_MODE: Allowing anonymous access to message {message_id} "
-            f"owned by {chat.user_id}"
-        )
-
-    return message
-
-
-def _claim_to_response(claim: Claim) -> ClaimResponse:
-    """Convert Claim model to ClaimResponse schema."""
-    from src.schemas.citation import (
-        CitationCorrectionResponse,
-        CorrectionTypeEnum,
-        NumericClaimDetail,
-        DerivationTypeEnum,
-        ClaimTypeEnum,
-    )
-
-    # Build citations list
-    citations = []
-    for citation in claim.citations:
-        span = citation.evidence_span
-        source = span.source if span else None
-
-        source_metadata = None
-        if source:
-            source_metadata = SourceMetadataResponse(
-                id=source.id,
-                title=source.title,
-                url=source.url,
-                author=None,  # Not stored in current model
-                published_date=None,
-                content_type=source.content_type,
-                total_pages=source.total_pages,
-            )
-
-        evidence_span = EvidenceSpanResponse(
-            id=span.id,
-            source_id=span.source_id,
-            quote_text=span.quote_text,
-            start_offset=span.start_offset,
-            end_offset=span.end_offset,
-            section_heading=span.section_heading,
-            relevance_score=span.relevance_score,
-            has_numeric_content=span.has_numeric_content,
-            source=source_metadata,
-        )
-
-        citations.append(
-            CitationResponse(
-                evidence_span=evidence_span,
-                confidence_score=citation.confidence_score,
-                is_primary=citation.is_primary,
-            )
-        )
-
-    # Build corrections list
-    corrections = []
-    for correction in claim.corrections:
-        corrections.append(
-            CitationCorrectionResponse(
-                id=correction.id,
-                correction_type=CorrectionTypeEnum(correction.correction_type),
-                original_evidence=None,  # Simplified for now
-                corrected_evidence=None,
-                reasoning=correction.reasoning,
-            )
-        )
-
-    # Build numeric detail if applicable
-    numeric_detail = None
-    if claim.numeric_detail:
-        nd = claim.numeric_detail
-        numeric_detail = NumericClaimDetail(
-            raw_value=nd.raw_value,
-            normalized_value=float(nd.normalized_value) if nd.normalized_value else None,
-            unit=nd.unit,
-            entity_reference=nd.entity_reference,
-            derivation_type=DerivationTypeEnum(nd.derivation_type),
-            computation_details=nd.computation_details,
-            assumptions=nd.assumptions,
-            qa_verification=None,  # TODO: Parse QA verification
-        )
-
-    return ClaimResponse(
-        id=claim.id,
-        claim_text=claim.claim_text,
-        claim_type=ClaimTypeEnum(claim.claim_type),
-        confidence_level=ConfidenceLevelEnum(claim.confidence_level)
-        if claim.confidence_level
-        else None,
-        position_start=claim.position_start,
-        position_end=claim.position_end,
-        verification_verdict=VerificationVerdictEnum(claim.verification_verdict)
-        if claim.verification_verdict
-        else None,
-        verification_reasoning=claim.verification_reasoning,
-        abstained=claim.abstained,
-        citations=citations,
-        corrections=corrections,
-        numeric_detail=numeric_detail,
-        citation_key=claim.citation_key,
-        citation_keys=claim.citation_keys,
-    )
 
 
 @router.get("/messages/{message_id}/claims", response_model=MessageClaimsResponse)
@@ -208,23 +64,13 @@ async def list_message_claims(
     # This handles the race condition where frontend polls for claims before
     # the message has been persisted to the database
     try:
-        message = await _verify_message_ownership(message_id, user.user_id, db)
+        await verify_message_ownership(message_id, user.user_id, db)
     except NotFoundError:
         # Message not persisted yet - return empty claims to allow frontend polling
         return MessageClaimsResponse(
             message_id=message_id,
             claims=[],
-            verification_summary=VerificationSummary(
-                total_claims=0,
-                supported_count=0,
-                partial_count=0,
-                unsupported_count=0,
-                contradicted_count=0,
-                abstained_count=0,
-                unsupported_rate=0.0,
-                contradicted_rate=0.0,
-                warning=False,
-            ),
+            verification_summary=build_empty_verification_summary(),
             correction_metrics=None,
         )
 
@@ -235,19 +81,6 @@ async def list_message_claims(
     # Get or compute verification summary
     summary_service = VerificationSummaryService(db)
     summary_model = await summary_service.get_or_compute(message_id)
-
-    # Build verification summary response
-    summary = VerificationSummary(
-        total_claims=summary_model.total_claims,
-        supported_count=summary_model.supported_count,
-        partial_count=summary_model.partial_count,
-        unsupported_count=summary_model.unsupported_count,
-        contradicted_count=summary_model.contradicted_count,
-        abstained_count=summary_model.abstained_count,
-        unsupported_rate=summary_model.unsupported_rate,
-        contradicted_rate=summary_model.contradicted_rate,
-        warning=summary_model.warning,
-    )
 
     # Get correction metrics if requested
     correction_metrics = None
@@ -265,8 +98,8 @@ async def list_message_claims(
 
     return MessageClaimsResponse(
         message_id=message_id,
-        claims=[_claim_to_response(c) for c in claims],
-        verification_summary=summary,
+        claims=[claim_to_response(c) for c in claims],
+        verification_summary=build_verification_summary(summary_model),
         correction_metrics=correction_metrics,
     )
 
@@ -286,9 +119,9 @@ async def get_claim(
         raise NotFoundError("Claim", str(claim_id))
 
     # Verify ownership through the message's chat
-    await _verify_message_ownership(claim.message_id, user.user_id, db)
+    await verify_message_ownership(claim.message_id, user.user_id, db)
 
-    return _claim_to_response(claim)
+    return claim_to_response(claim)
 
 
 @router.get("/claims/{claim_id}/evidence", response_model=ClaimEvidenceResponse)
@@ -310,45 +143,10 @@ async def get_claim_evidence(
         raise NotFoundError("Claim", str(claim_id))
 
     # Verify ownership
-    await _verify_message_ownership(claim.message_id, user.user_id, db)
+    await verify_message_ownership(claim.message_id, user.user_id, db)
 
-    # Build citations with full source metadata
-    citations = []
-    for citation in claim.citations:
-        span = citation.evidence_span
-        source = span.source if span else None
-
-        source_metadata = None
-        if source:
-            source_metadata = SourceMetadataResponse(
-                id=source.id,
-                title=source.title,
-                url=source.url,
-                author=None,
-                published_date=None,
-                content_type=source.content_type,
-                total_pages=source.total_pages,
-            )
-
-        evidence_span = EvidenceSpanResponse(
-            id=span.id,
-            source_id=span.source_id,
-            quote_text=span.quote_text,
-            start_offset=span.start_offset,
-            end_offset=span.end_offset,
-            section_heading=span.section_heading,
-            relevance_score=span.relevance_score,
-            has_numeric_content=span.has_numeric_content,
-            source=source_metadata,
-        )
-
-        citations.append(
-            CitationResponse(
-                evidence_span=evidence_span,
-                confidence_score=citation.confidence_score,
-                is_primary=citation.is_primary,
-            )
-        )
+    # Build citations using shared transformer
+    citations = [build_citation_response(c) for c in claim.citations]
 
     return ClaimEvidenceResponse(
         claim_id=claim.id,
@@ -372,23 +170,13 @@ async def get_verification_summary(
     counts by verdict and warning status.
     """
     # Verify ownership
-    await _verify_message_ownership(message_id, user.user_id, db)
+    await verify_message_ownership(message_id, user.user_id, db)
 
     # Get or compute summary
     summary_service = VerificationSummaryService(db)
     summary_model = await summary_service.get_or_compute(message_id)
 
-    return VerificationSummary(
-        total_claims=summary_model.total_claims,
-        supported_count=summary_model.supported_count,
-        partial_count=summary_model.partial_count,
-        unsupported_count=summary_model.unsupported_count,
-        contradicted_count=summary_model.contradicted_count,
-        abstained_count=summary_model.abstained_count,
-        unsupported_rate=summary_model.unsupported_rate,
-        contradicted_rate=summary_model.contradicted_rate,
-        warning=summary_model.warning,
-    )
+    return build_verification_summary(summary_model)
 
 
 @router.get("/messages/{message_id}/report")
@@ -475,10 +263,12 @@ async def export_provenance(
 
     # JSON format (default)
     from datetime import datetime, timezone
-    from src.schemas.citation import ClaimTypeEnum, DerivationTypeEnum
+
+    from src.api.v1.utils import build_numeric_detail
+    from src.schemas.citation import ClaimTypeEnum
 
     # Verify ownership
-    await _verify_message_ownership(message_id, user.user_id, db)
+    await verify_message_ownership(message_id, user.user_id, db)
 
     # Get claims with all relationships
     claim_service = ClaimService(db)
@@ -491,7 +281,7 @@ async def export_provenance(
     # Build export claims
     export_claims: list[ClaimProvenanceExport] = []
     for claim in claims:
-        # Build citations for export
+        # Build citations for export (simplified dict format)
         citations: list[dict[str, str | bool | None]] = []
         for citation in claim.citations:
             span = citation.evidence_span
@@ -511,23 +301,6 @@ async def export_provenance(
                 "reasoning": correction.reasoning,
             })
 
-        # Build numeric detail if applicable
-        from src.schemas.citation import NumericClaimDetail
-
-        numeric_detail = None
-        if claim.numeric_detail:
-            nd = claim.numeric_detail
-            numeric_detail = NumericClaimDetail(
-                raw_value=nd.raw_value,
-                normalized_value=float(nd.normalized_value) if nd.normalized_value else None,
-                unit=nd.unit,
-                entity_reference=nd.entity_reference,
-                derivation_type=DerivationTypeEnum(nd.derivation_type),
-                computation_details=nd.computation_details,
-                assumptions=nd.assumptions,
-                qa_verification=None,
-            )
-
         export_claims.append(
             ClaimProvenanceExport(
                 claim_text=claim.claim_text,
@@ -539,27 +312,14 @@ async def export_provenance(
                 if claim.confidence_level
                 else None,
                 citations=citations,
-                numeric_detail=numeric_detail,
+                numeric_detail=build_numeric_detail(claim.numeric_detail),
                 corrections=corrections,
             )
         )
-
-    # Build summary
-    summary = VerificationSummary(
-        total_claims=summary_model.total_claims,
-        supported_count=summary_model.supported_count,
-        partial_count=summary_model.partial_count,
-        unsupported_count=summary_model.unsupported_count,
-        contradicted_count=summary_model.contradicted_count,
-        abstained_count=summary_model.abstained_count,
-        unsupported_rate=summary_model.unsupported_rate,
-        contradicted_rate=summary_model.contradicted_rate,
-        warning=summary_model.warning,
-    )
 
     return ProvenanceExport(
         exported_at=datetime.now(timezone.utc),
         message_id=message_id,
         claims=export_claims,
-        summary=summary,
+        summary=build_verification_summary(summary_model),
     )

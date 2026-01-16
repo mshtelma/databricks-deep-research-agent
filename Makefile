@@ -32,7 +32,7 @@
 #   make lint           - Run linting (backend + frontend)
 #   make logs TARGET=dev - Download app logs (add FOLLOW=-f to follow)
 
-.PHONY: dev dev-backend dev-frontend build prod clean clean_db db-reset db-migrate-remote typecheck lint install e2e e2e-ui e2e-debug test test-unit test-integration test-complex test-all-python test-frontend test-all quickstart deploy requirements bundle-validate bundle-deploy bundle-deploy-full bundle-deploy-prod bundle-summary logs
+.PHONY: dev dev-backend dev-frontend build prod clean clean_db db-reset db-migrate-remote typecheck lint install e2e e2e-ui e2e-debug test test-integration test-complex test-all-python test-frontend test-all quickstart deploy requirements bundle-validate bundle-summary logs
 
 # =============================================================================
 # Development
@@ -149,8 +149,6 @@ format:
 # Unit tests (fast, mocked, no credentials needed)
 test:
 	uv run pytest tests/unit -v
-
-test-unit: test
 
 # Integration tests (real LLM/Brave, test config, requires credentials)
 test-integration:
@@ -391,19 +389,6 @@ deploy: build requirements
 	@echo "If app fails to start, check logs:"
 	@echo "  make logs TARGET=$(TARGET)"
 	@echo "  make logs TARGET=$(TARGET) FOLLOW=-f  # Follow logs in real-time"
-
-# Alias for backwards compatibility
-bundle-deploy: deploy
-
-# Alias for backwards compatibility (migrations now run automatically)
-bundle-deploy-full: deploy
-
-# Deploy to production
-bundle-deploy-prod: build requirements
-	@echo "Deploying to production..."
-	databricks bundle deploy -t prod
-	@echo "Starting app..."
-	databricks bundle run -t prod deep_research_agent
 
 # Show bundle deployment summary
 bundle-summary:

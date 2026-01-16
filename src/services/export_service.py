@@ -1,15 +1,15 @@
 """Export service for converting chats to various formats."""
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from src.models.claim import Claim
+from src.api.v1.utils import verify_message_ownership
+from src.core.exceptions import NotFoundError
 from src.models.message import Message
 from src.models.research_session import ResearchSession
 from src.models.source import Source
@@ -22,17 +22,33 @@ logger = logging.getLogger(__name__)
 
 
 class ExportService:
-    """Service for exporting chats to various formats."""
+    """Service for exporting chats to various formats.
 
-    def __init__(self, session: AsyncSession) -> None:
+    Supports dependency injection for testability.
+    """
+
+    def __init__(
+        self,
+        session: AsyncSession,
+        chat_service: ChatService | None = None,
+        message_service: MessageService | None = None,
+        claim_service: ClaimService | None = None,
+        summary_service: VerificationSummaryService | None = None,
+    ) -> None:
         """Initialize export service.
 
         Args:
             session: Database session.
+            chat_service: Optional injected ChatService (created if None).
+            message_service: Optional injected MessageService (created if None).
+            claim_service: Optional injected ClaimService (created if None).
+            summary_service: Optional injected VerificationSummaryService (created if None).
         """
         self._session = session
-        self._chat_service = ChatService(session)
-        self._message_service = MessageService(session)
+        self._chat_service = chat_service or ChatService(session)
+        self._message_service = message_service or MessageService(session)
+        self._claim_service = claim_service or ClaimService(session)
+        self._summary_service = summary_service or VerificationSummaryService(session)
 
     async def export_markdown(
         self,
@@ -56,7 +72,7 @@ class ExportService:
             ValueError: If chat not found or not owned by user.
         """
         # Get chat
-        chat = await self._chat_service.get(chat_id, user_id)
+        chat = await self._chat_service.get_for_user(chat_id, user_id)
         if not chat:
             raise ValueError(f"Chat {chat_id} not found")
 
@@ -159,7 +175,7 @@ class ExportService:
             ValueError: If chat not found or not owned by user.
         """
         # Get chat
-        chat = await self._chat_service.get(chat_id, user_id)
+        chat = await self._chat_service.get_for_user(chat_id, user_id)
         if not chat:
             raise ValueError(f"Chat {chat_id} not found")
 
@@ -189,12 +205,14 @@ class ExportService:
             ],
         }
 
-    async def _verify_message_ownership(
+    async def _get_message_with_auth(
         self,
         message_id: UUID,
         user_id: str,
     ) -> Message:
-        """Verify user owns the message's chat and return the message.
+        """Get message after verifying authorization.
+
+        Uses the shared authorization utility from API layer.
 
         Args:
             message_id: Message ID.
@@ -206,47 +224,10 @@ class ExportService:
         Raises:
             ValueError: If message not found or not owned by user.
         """
-        from src.core.config import get_settings
-        from src.models.chat import Chat
-
-        # Step 1: Get message with chat relationship
-        result = await self._session.execute(
-            select(Message)
-            .options(selectinload(Message.chat))
-            .where(Message.id == message_id)
-        )
-        message = result.scalar_one_or_none()
-
-        if not message:
-            raise ValueError(f"Message {message_id} not found")
-
-        # Step 2: Get chat (via relationship or direct query)
-        chat: Chat | None = message.chat
-        if not chat:
-            chat_result = await self._session.execute(
-                select(Chat).where(Chat.id == message.chat_id)
-            )
-            chat = chat_result.scalar_one_or_none()
-
-        if not chat:
-            raise ValueError(f"Chat for message {message_id} not found")
-
-        # Step 3: Check ownership (skip in development mode for anonymous users)
-        settings = get_settings()
-        if chat.user_id != user_id:
-            if settings.is_production:
-                # Production: strict ownership check
-                raise ValueError(f"Access denied to message {message_id}")
-            elif user_id != "anonymous":
-                # Development with real user: still check ownership
-                raise ValueError(f"Access denied to message {message_id}")
-            # Development with anonymous: allow access (for testing)
-            logger.debug(
-                f"DEV_MODE: Allowing anonymous access to message {message_id} "
-                f"owned by {chat.user_id}"
-            )
-
-        return message
+        try:
+            return await verify_message_ownership(message_id, user_id, self._session)
+        except NotFoundError as e:
+            raise ValueError(str(e)) from e
 
     async def export_report_markdown(
         self,
@@ -266,7 +247,7 @@ class ExportService:
             ValueError: If message not found or not owned by user.
         """
         # Verify ownership and get message
-        message = await self._verify_message_ownership(message_id, user_id)
+        message = await self._get_message_with_auth(message_id, user_id)
 
         if not message.content:
             raise ValueError("Message has no content to export")
@@ -294,10 +275,10 @@ class ExportService:
 
         # Metadata
         lines.append(
-            f"*Generated by Deep Research Agent*  "
+            "*Generated by Deep Research Agent*  "
         )
         lines.append(
-            f"*Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}*"
+            f"*Date: {datetime.now(UTC).strftime('%Y-%m-%d')}*"
         )
 
         if session and session.research_depth:
@@ -308,7 +289,7 @@ class ExportService:
                 else str(session.research_depth)
             )
             depth_label = depth_value.title()
-            lines[-1] = f"*Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')} | Depth: {depth_label}*"
+            lines[-1] = f"*Date: {datetime.now(UTC).strftime('%Y-%m-%d')} | Depth: {depth_label}*"
 
         lines.extend(["", "---", ""])
 
@@ -353,15 +334,15 @@ class ExportService:
             ValueError: If message not found or not owned by user.
         """
         # Verify ownership
-        await self._verify_message_ownership(message_id, user_id)
+        await self._get_message_with_auth(message_id, user_id)
 
-        # Get claims with citations
-        claim_service = ClaimService(self._session)
-        claims = await claim_service.list_by_message(message_id, include_citations=True)
+        # Get claims with citations (use injected service)
+        claims = await self._claim_service.list_by_message(
+            message_id, include_citations=True
+        )
 
-        # Get verification summary
-        summary_service = VerificationSummaryService(self._session)
-        summary = await summary_service.get_or_compute(message_id)
+        # Get verification summary (use injected service)
+        summary = await self._summary_service.get_or_compute(message_id)
 
         lines: list[str] = []
 
@@ -369,7 +350,7 @@ class ExportService:
         lines.extend([
             "# Verification Report",
             "",
-            f"*Generated on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC*",
+            f"*Generated on {datetime.now(UTC).strftime('%Y-%m-%d %H:%M:%S')} UTC*",
             "",
         ])
 

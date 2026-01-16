@@ -78,7 +78,7 @@ async def get_chat(
 ) -> ChatResponse:
     """Get chat details with optional messages."""
     service = ChatService(db)
-    chat = await service.get(chat_id, user.user_id)
+    chat = await service.get_for_user(chat_id, user.user_id)
     if not chat:
         raise NotFoundError("Chat", str(chat_id))
     return _chat_to_response(chat)
@@ -93,7 +93,7 @@ async def update_chat(
 ) -> ChatResponse:
     """Update chat (rename, archive)."""
     service = ChatService(db)
-    chat = await service.update(
+    chat = await service.update_chat(
         chat_id=chat_id,
         user_id=user.user_id,
         title=request.title,

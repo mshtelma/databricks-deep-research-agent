@@ -58,8 +58,8 @@ class TestChatServiceCreate:
         assert result.title is None
 
 
-class TestChatServiceGet:
-    """Tests for ChatService.get method."""
+class TestChatServiceGetForUser:
+    """Tests for ChatService.get_for_user method."""
 
     @pytest.mark.asyncio
     async def test_get_existing_chat(
@@ -78,7 +78,7 @@ class TestChatServiceGet:
         service = ChatService(mock_db_session)
 
         # Act
-        result = await service.get(chat_id, user_id)
+        result = await service.get_for_user(chat_id, user_id)
 
         # Assert
         assert result == expected_chat
@@ -95,7 +95,7 @@ class TestChatServiceGet:
         service = ChatService(mock_db_session)
 
         # Act
-        result = await service.get(uuid4(), "test-user-123")
+        result = await service.get_for_user(uuid4(), "test-user-123")
 
         # Assert
         assert result is None
@@ -104,7 +104,7 @@ class TestChatServiceGet:
     async def test_get_chat_wrong_user(
         self, mock_db_session: AsyncMock, chat_factory
     ):
-        """Test that get returns None for wrong user."""
+        """Test that get_for_user returns None for wrong user."""
         # Arrange
         chat_id = uuid4()
         # Simulate query returning None because user_id doesn't match
@@ -115,7 +115,7 @@ class TestChatServiceGet:
         service = ChatService(mock_db_session)
 
         # Act
-        result = await service.get(chat_id, "wrong-user")
+        result = await service.get_for_user(chat_id, "wrong-user")
 
         # Assert
         assert result is None
@@ -232,8 +232,8 @@ class TestChatServiceList:
         assert len(chats) == 1
 
 
-class TestChatServiceUpdate:
-    """Tests for ChatService.update method."""
+class TestChatServiceUpdateChat:
+    """Tests for ChatService.update_chat method."""
 
     @pytest.mark.asyncio
     async def test_update_chat_title(
@@ -245,7 +245,7 @@ class TestChatServiceUpdate:
         user_id = "test-user-123"
         existing_chat = chat_factory(id=chat_id, user_id=user_id, title="Old Title")
 
-        # Mock get() to return existing chat
+        # Mock get_for_user() to return existing chat
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = existing_chat
         mock_db_session.execute.return_value = mock_result
@@ -253,7 +253,7 @@ class TestChatServiceUpdate:
         service = ChatService(mock_db_session)
 
         # Act
-        result = await service.update(
+        result = await service.update_chat(
             chat_id=chat_id, user_id=user_id, title="New Title"
         )
 
@@ -279,7 +279,7 @@ class TestChatServiceUpdate:
         service = ChatService(mock_db_session)
 
         # Act
-        result = await service.update(
+        result = await service.update_chat(
             chat_id=chat_id, user_id=user_id, status=ChatStatus.ARCHIVED
         )
 
@@ -298,7 +298,7 @@ class TestChatServiceUpdate:
         service = ChatService(mock_db_session)
 
         # Act
-        result = await service.update(
+        result = await service.update_chat(
             chat_id=uuid4(), user_id="test-user", title="New Title"
         )
 

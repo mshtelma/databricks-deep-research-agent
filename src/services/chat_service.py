@@ -5,9 +5,9 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.chat import Chat, ChatStatus
+from src.services.base import BaseRepository
 
 logger = logging.getLogger(__name__)
 
@@ -15,16 +15,13 @@ logger = logging.getLogger(__name__)
 PURGE_AFTER_DAYS = 30
 
 
-class ChatService:
-    """Service for managing chats."""
+class ChatService(BaseRepository[Chat]):
+    """Service for managing chats.
 
-    def __init__(self, session: AsyncSession) -> None:
-        """Initialize chat service.
+    Extends BaseRepository[Chat] for standard CRUD operations.
+    """
 
-        Args:
-            session: Database session.
-        """
-        self._session = session
+    model = Chat
 
     async def create(self, user_id: str, title: str | None = None) -> Chat:
         """Create a new chat.
@@ -37,14 +34,12 @@ class ChatService:
             Created chat.
         """
         chat = Chat(user_id=user_id, title=title)
-        self._session.add(chat)
-        await self._session.flush()
-        await self._session.refresh(chat)
+        chat = await self.add(chat)
         logger.info(f"Created chat {chat.id} for user {user_id}")
         return chat
 
-    async def get(self, chat_id: UUID, user_id: str) -> Chat | None:
-        """Get a chat by ID.
+    async def get_for_user(self, chat_id: UUID, user_id: str) -> Chat | None:
+        """Get a chat by ID with user ownership check.
 
         Args:
             chat_id: Chat ID.
@@ -137,7 +132,7 @@ class ChatService:
 
         return chats, total
 
-    async def update(
+    async def update_chat(
         self,
         chat_id: UUID,
         user_id: str,
@@ -155,7 +150,7 @@ class ChatService:
         Returns:
             Updated chat or None if not found.
         """
-        chat = await self.get(chat_id, user_id)
+        chat = await self.get_for_user(chat_id, user_id)
         if not chat:
             return None
 
@@ -165,8 +160,7 @@ class ChatService:
             chat.status = status
 
         chat.updated_at = datetime.now(UTC)
-        await self._session.flush()
-        await self._session.refresh(chat)
+        chat = await super().update(chat)
         logger.info(f"Updated chat {chat_id}")
         return chat
 
@@ -180,14 +174,14 @@ class ChatService:
         Returns:
             True if deleted, False if not found.
         """
-        chat = await self.get(chat_id, user_id)
+        chat = await self.get_for_user(chat_id, user_id)
         if not chat:
             return False
 
         chat.status = ChatStatus.DELETED
         chat.deleted_at = datetime.now(UTC)
         chat.updated_at = datetime.now(UTC)
-        await self._session.flush()
+        await super().update(chat)
         logger.info(f"Soft deleted chat {chat_id}")
         return True
 
@@ -217,8 +211,7 @@ class ChatService:
         chat.status = ChatStatus.ACTIVE
         chat.deleted_at = None
         chat.updated_at = datetime.now(UTC)
-        await self._session.flush()
-        await self._session.refresh(chat)
+        chat = await super().update(chat)
         logger.info(f"Restored chat {chat_id}")
         return chat
 

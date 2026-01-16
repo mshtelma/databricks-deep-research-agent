@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.agent.orchestrator import OrchestrationConfig, stream_research
 from src.agent.tools.web_crawler import WebCrawler
+from src.api.v1.utils import verify_chat_access
 from src.core.exceptions import AuthorizationError, NotFoundError
 from src.db.session import get_db
 from src.middleware.auth import CurrentUser
@@ -38,60 +39,6 @@ from src.services.search.brave import BraveSearchClient
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-
-async def _verify_chat_access(
-    chat_id: UUID, user_id: str, db: AsyncSession
-) -> bool:
-    """Verify user can access this chat for streaming.
-
-    Authorization logic for draft chat support:
-    - If chat doesn't exist: allow (draft chat flow) -> return True
-    - If chat exists and owned by user: allow -> return False
-    - If chat exists but owned by another user: reject with 403
-
-    Args:
-        chat_id: Chat UUID to check.
-        user_id: Current user's ID.
-        db: Database session.
-
-    Returns:
-        True if chat is a draft (doesn't exist), False if persisted.
-
-    Raises:
-        AuthorizationError: If chat exists but belongs to another user.
-    """
-    chat_service = ChatService(db)
-    chat = await chat_service.get_by_id(chat_id)
-
-    if chat is None:
-        # Chat doesn't exist - this is a draft, allow streaming
-        logger.info(f"Chat {chat_id} is a draft (not in DB), allowing stream")
-        return True
-
-    if chat.user_id != user_id:
-        # Chat exists but belongs to another user - reject
-        logger.warning(
-            f"User {user_id} attempted to access chat {chat_id} owned by {chat.user_id}"
-        )
-        raise AuthorizationError(f"Access denied to chat {chat_id}")
-
-    # Chat exists and user owns it
-    return False
-
-
-async def _verify_chat_ownership(
-    chat_id: UUID, user_id: str, db: AsyncSession
-) -> None:
-    """Verify user owns the chat. Raises NotFoundError if not.
-
-    DEPRECATED: Use _verify_chat_access() for stream endpoints.
-    Kept for backwards compatibility with other endpoints.
-    """
-    chat_service = ChatService(db)
-    chat = await chat_service.get(chat_id, user_id)
-    if not chat:
-        raise NotFoundError("Chat", str(chat_id))
 
 
 class ConversationMessage(BaseModel):
@@ -147,7 +94,7 @@ async def stream_research_endpoint(
     from fastapi import HTTPException
 
     # Verify user can access chat (returns True if draft, False if persisted)
-    is_draft = await _verify_chat_access(chat_id, user.user_id, db)
+    is_draft, _ = await verify_chat_access(chat_id, user.user_id, db)
 
     # =========================================================================
     # GUARD: Prevent duplicate research sessions on SSE reconnect
@@ -356,7 +303,7 @@ async def stream_research_with_history(
     from fastapi import HTTPException
 
     # Verify user can access chat (returns True if draft, False if persisted)
-    is_draft = await _verify_chat_access(chat_id, user.user_id, db)
+    is_draft, _ = await verify_chat_access(chat_id, user.user_id, db)
 
     # =========================================================================
     # GUARD: Prevent duplicate research sessions on SSE reconnect
@@ -563,7 +510,7 @@ async def get_active_research(
 
     # Verify user has access to this chat
     try:
-        await _verify_chat_access(chat_id, user.user_id, db)
+        await verify_chat_access(chat_id, user.user_id, db)
     except AuthorizationError:
         return ActiveResearchResponse(has_active_research=False)
 

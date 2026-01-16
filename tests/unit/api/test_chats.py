@@ -196,7 +196,7 @@ class TestGetChat:
         """Test getting an existing chat."""
         with patch("src.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
-            mock_service.get = AsyncMock(return_value=mock_chat)
+            mock_service.get_for_user = AsyncMock(return_value=mock_chat)
             MockService.return_value = mock_service
 
             response = client.get(f"/api/v1/chats/{mock_chat.id}")
@@ -209,7 +209,7 @@ class TestGetChat:
         """Test getting a chat that doesn't exist."""
         with patch("src.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
-            mock_service.get = AsyncMock(return_value=None)
+            mock_service.get_for_user = AsyncMock(return_value=None)
             MockService.return_value = mock_service
 
             response = client.get(f"/api/v1/chats/{uuid4()}")
@@ -228,7 +228,7 @@ class TestUpdateChat:
 
         with patch("src.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
-            mock_service.update = AsyncMock(return_value=mock_chat)
+            mock_service.update_chat = AsyncMock(return_value=mock_chat)
             MockService.return_value = mock_service
 
             response = client.patch(
@@ -248,7 +248,7 @@ class TestUpdateChat:
 
         with patch("src.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
-            mock_service.update = AsyncMock(return_value=mock_chat)
+            mock_service.update_chat = AsyncMock(return_value=mock_chat)
             MockService.return_value = mock_service
 
             response = client.patch(
@@ -264,7 +264,7 @@ class TestUpdateChat:
         """Test updating a chat that doesn't exist."""
         with patch("src.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
-            mock_service.update = AsyncMock(return_value=None)
+            mock_service.update_chat = AsyncMock(return_value=None)
             MockService.return_value = mock_service
 
             response = client.patch(

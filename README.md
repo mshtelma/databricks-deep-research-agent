@@ -54,15 +54,18 @@ A production-grade multi-agent research system with claim-level citation verific
 
 ### Prerequisites
 
-- Python 3.11+
-- Node.js 18+ (for frontend development)
-- Databricks workspace with Foundation Model Endpoints
-- Brave Search API key
+| Requirement | Version | Purpose |
+|------------|---------|---------|
+| Python | 3.11+ | Backend runtime |
+| Node.js | 18+ | Frontend build & development |
+| uv | latest | Python package manager |
+| Databricks CLI | latest | Deployment (if deploying to Databricks) |
+| Brave Search API key | - | Web search functionality |
 
 ### Local Development
 
 ```bash
-# Install dependencies
+# Install all dependencies (backend, frontend, E2E)
 make install
 
 # Start development servers (backend + frontend)
@@ -78,21 +81,194 @@ make dev
 # Build frontend to static/
 make build
 
-# Run production server
+# Run production server (serves UI from static/)
 make prod
 
 # Access at http://localhost:8000
 ```
 
-### Deploy to Databricks
+## Databricks Deployment
+
+### One-Command Deployment
 
 ```bash
-# Deploy to dev workspace
-make deploy TARGET=dev BRAVE_SCOPE=msh
+# Deploy to dev workspace (includes all setup)
+make deploy TARGET=dev BRAVE_SCOPE=your-secret-scope
 
 # Deploy to production
 make deploy TARGET=ais
 ```
+
+This single command executes the complete 8-step deployment pipeline:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                    Full Deployment Pipeline                             │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Step 1: Build frontend (npm run build → static/)                      │
+│     ↓                                                                  │
+│  Step 2: Generate requirements.txt from pyproject.toml                  │
+│     ↓                                                                  │
+│  Step 3: Bootstrap deploy with postgres (creates Lakebase instance)     │
+│     ↓                                                                  │
+│  Step 4: Wait for Lakebase to be ready (~30-60s for new instances)     │
+│     ↓                                                                  │
+│  Step 5: Create deep_research database                                  │
+│     ↓                                                                  │
+│  Step 6: Re-deploy bundle with deep_research database                   │
+│     ↓                                                                  │
+│  Step 7: Run migrations with developer credentials                      │
+│     ↓                                                                  │
+│  Step 8: Grant table permissions to app service principal               │
+│     ↓                                                                  │
+│  Step 9: Start app and show deployment summary                          │
+│                                                                         │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Prerequisites for Databricks Deployment
+
+1. **Databricks CLI configured** with workspace profiles:
+   ```bash
+   # Configure CLI with your workspace
+   databricks configure --profile e2-demo-west
+
+   # Verify configuration
+   databricks auth describe --profile e2-demo-west
+   ```
+
+2. **Brave API key in secret scope**:
+   ```bash
+   # Create secret scope (if not exists)
+   databricks secrets create-scope your-secret-scope
+
+   # Add Brave API key
+   databricks secrets put-secret your-secret-scope BRAVE_API_KEY
+   ```
+
+3. **Model endpoints available** in your workspace:
+   - `databricks-claude-sonnet-4-5` (analytical tier)
+   - `databricks-claude-haiku-4-5` (simple tier)
+   - `databricks-claude-opus-4-5` (complex tier)
+
+### Target Workspace Mapping
+
+| TARGET | CLI Profile | Description |
+|--------|-------------|-------------|
+| `dev` | `e2-demo-west` | Development workspace |
+| `ais` | `ais` | Production workspace |
+
+### Operations Commands
+
+```bash
+# View application logs
+make logs TARGET=dev                    # Fetch logs once
+make logs TARGET=dev FOLLOW=-f          # Follow logs in real-time
+make logs TARGET=dev SEARCH="--search ERROR"  # Filter by term
+
+# Restart app after config changes
+databricks bundle run -t dev deep_research_agent
+
+# Check deployment status
+databricks bundle summary -t dev
+
+# Run migrations manually (usually not needed)
+make db-migrate-remote TARGET=dev
+```
+
+### Why Two-Phase Deployment?
+
+Deploying to Databricks Apps with Lakebase requires solving a chicken-and-egg problem:
+
+1. The app needs `LAKEBASE_DATABASE=deep_research` environment variable
+2. The database doesn't exist until the Lakebase instance is created
+3. The Lakebase instance is created by the bundle deploy
+
+**Solution**: Deploy twice - first with `postgres` (always exists), then with `deep_research` after creating the database.
+
+### Permission Model
+
+Tables are owned by the developer who runs migrations, not the app's service principal. The app needs explicit GRANT statements to access tables:
+
+```sql
+GRANT ALL ON ALL TABLES IN SCHEMA public TO <app_service_principal>;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO <app_service_principal>;
+```
+
+This is handled automatically by `scripts/grant-app-permissions.sh` during deployment.
+
+## Environment Configuration
+
+### Local Development (.env file)
+
+```bash
+# Databricks Authentication (choose one)
+DATABRICKS_CONFIG_PROFILE=e2-demo-west  # Recommended: profile-based
+# OR
+DATABRICKS_HOST=https://your-workspace.databricks.com
+DATABRICKS_TOKEN=your-personal-access-token
+
+# Lakebase (when using Databricks Lakebase)
+LAKEBASE_INSTANCE_NAME=deep-research-lakebase
+LAKEBASE_DATABASE=deep_research
+
+# OR Local PostgreSQL (alternative for local dev)
+DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
+
+# Brave Search API
+BRAVE_API_KEY=your-brave-api-key
+
+# Optional
+APP_CONFIG_PATH=config/app.yaml
+LOG_LEVEL=INFO
+```
+
+### Databricks Apps (app.yaml)
+
+Environment variables are configured in `app.yaml` for deployed apps:
+- `LAKEBASE_INSTANCE_NAME` - Instance name for OAuth token generation
+- `LAKEBASE_DATABASE` - Target database name
+- `BRAVE_API_KEY` - Injected from secret scope via `valueFrom`
+- `MLFLOW_TRACKING_URI=databricks` - Automatic tracing
+
+## Troubleshooting
+
+### Common Issues
+
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| `InvalidPasswordError` after ~1 hour | OAuth token expired | Fixed in session.py - tokens auto-refresh |
+| Tables not accessible by app | Tables owned by developer | Run `grant-app-permissions.sh` |
+| Database not found during deploy | Two-phase deploy incomplete | Let `make deploy` complete all steps |
+| Rate limit errors (429) | LLM endpoint throttled | Automatic retry with exponential backoff |
+| Migrations fail | Wrong profile/credentials | Check `DATABRICKS_CONFIG_PROFILE` |
+
+### Debugging Commands
+
+```bash
+# Check database connectivity
+uv run python -c "from src.db.session import get_engine; print(get_engine())"
+
+# Verify migrations
+uv run alembic current
+
+# Test LLM endpoint
+uv run python -c "from src.services.llm.client import LLMClient; ..."
+
+# Check app logs (deployed)
+make logs TARGET=dev FOLLOW=-f SEARCH="--search ERROR"
+```
+
+### Key Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/create-database.sh` | Create deep_research database in Lakebase |
+| `scripts/wait-for-lakebase.sh` | Wait for Lakebase instance to be ready |
+| `scripts/grant-app-permissions.sh` | Grant table access to app service principal |
+| `scripts/download-app-logs.py` | Fetch app logs via REST API |
+| `scripts/quickstart.sh` | Set up local development environment |
 
 ## Documentation
 

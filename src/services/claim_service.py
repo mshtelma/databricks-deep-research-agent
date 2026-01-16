@@ -4,31 +4,25 @@ import logging
 from uuid import UUID
 
 from sqlalchemy import and_, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from src.models.citation import Citation
 from src.models.claim import Claim
 from src.models.enums import ClaimType, ConfidenceLevel, VerificationVerdict
-from src.models.evidence_span import EvidenceSpan
+from src.services.base import BaseRepository
+from src.services.loading import CLAIM_WITH_CITATIONS_OPTIONS
 
 logger = logging.getLogger(__name__)
 
 
-class ClaimService:
+class ClaimService(BaseRepository[Claim]):
     """Service for managing claims.
 
     Provides CRUD operations for claims extracted from agent messages.
     Part of the claim-level citation verification pipeline.
+
+    Extends BaseRepository[Claim] for standard CRUD operations.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
-        """Initialize claim service.
-
-        Args:
-            session: Database session.
-        """
-        self._session = session
+    model = Claim
 
     async def create(
         self,
@@ -88,23 +82,9 @@ class ClaimService:
             citation_key=citation_key,
             citation_keys=citation_keys,
         )
-        self._session.add(claim)
-        await self._session.flush()
-        await self._session.refresh(claim)
+        claim = await self.add(claim)
         logger.info(f"Created claim {claim.id} for message {message_id}")
         return claim
-
-    async def get(self, claim_id: UUID) -> Claim | None:
-        """Get a claim by ID.
-
-        Args:
-            claim_id: Claim ID.
-
-        Returns:
-            Claim if found, None otherwise.
-        """
-        result = await self._session.execute(select(Claim).where(Claim.id == claim_id))
-        return result.scalar_one_or_none()
 
     async def get_with_citations(self, claim_id: UUID) -> Claim | None:
         """Get a claim with its citations eagerly loaded.
@@ -115,17 +95,10 @@ class ClaimService:
         Returns:
             Claim with citations if found, None otherwise.
         """
-        # Chain selectinload to eagerly load nested relationships
-        # This prevents MissingGreenlet errors in async SQLAlchemy
+        # Use shared eager-loading options from loading.py
         result = await self._session.execute(
             select(Claim)
-            .options(
-                selectinload(Claim.citations)
-                .selectinload(Citation.evidence_span)
-                .selectinload(EvidenceSpan.source),
-                selectinload(Claim.numeric_detail),
-                selectinload(Claim.corrections),
-            )
+            .options(*CLAIM_WITH_CITATIONS_OPTIONS)
             .where(Claim.id == claim_id)
         )
         return result.scalar_one_or_none()
@@ -147,15 +120,8 @@ class ClaimService:
         query = select(Claim).where(Claim.message_id == message_id)
 
         if include_citations:
-            # Chain selectinload to eagerly load nested relationships
-            # This prevents MissingGreenlet errors in async SQLAlchemy
-            query = query.options(
-                selectinload(Claim.citations)
-                .selectinload(Citation.evidence_span)
-                .selectinload(EvidenceSpan.source),
-                selectinload(Claim.numeric_detail),
-                selectinload(Claim.corrections),
-            )
+            # Use shared eager-loading options from loading.py
+            query = query.options(*CLAIM_WITH_CITATIONS_OPTIONS)
 
         query = query.order_by(Claim.position_start)
         result = await self._session.execute(query)
@@ -190,8 +156,7 @@ class ClaimService:
         claim.verification_verdict = verdict_value
         claim.verification_reasoning = reasoning
         claim.abstained = abstained
-        await self._session.flush()
-        await self._session.refresh(claim)
+        claim = await self.update(claim)
         logger.info(f"Updated verification for claim {claim_id}: {verdict_value}")
         return claim
 
@@ -220,8 +185,7 @@ class ClaimService:
         )
 
         claim.confidence_level = conf_value
-        await self._session.flush()
-        await self._session.refresh(claim)
+        claim = await self.update(claim)
         logger.info(f"Updated confidence for claim {claim_id}: {conf_value}")
         return claim
 
@@ -275,8 +239,8 @@ class ClaimService:
         )
         return result.scalar() or 0
 
-    async def delete(self, claim_id: UUID) -> bool:
-        """Delete a claim.
+    async def delete_claim(self, claim_id: UUID) -> bool:
+        """Delete a claim by ID.
 
         Args:
             claim_id: Claim ID.
@@ -284,11 +248,7 @@ class ClaimService:
         Returns:
             True if deleted, False if not found.
         """
-        claim = await self.get(claim_id)
-        if not claim:
-            return False
-
-        await self._session.delete(claim)
-        await self._session.flush()
-        logger.info(f"Deleted claim {claim_id}")
-        return True
+        deleted = await self.delete_by_id(claim_id)
+        if deleted:
+            logger.info(f"Deleted claim {claim_id}")
+        return deleted
