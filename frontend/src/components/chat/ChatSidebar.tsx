@@ -248,7 +248,7 @@ function ChatListItem({
         </p>
         <div className="flex items-center gap-2 mt-1">
           <span className="text-xs text-muted-foreground">
-            {new Date(chat.updated_at).toLocaleDateString()}
+            {chat.updatedAt ? new Date(chat.updatedAt).toLocaleDateString() : ''}
           </span>
           {isDraft && (
             <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">

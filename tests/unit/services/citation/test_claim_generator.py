@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.services.citation.claim_generator import InterleavedClaim, InterleavedGenerator
-from src.services.citation.evidence_selector import RankedEvidence
+from deep_research.services.citation.claim_generator import InterleavedClaim, InterleavedGenerator
+from deep_research.services.citation.evidence_selector import RankedEvidence
 
 from .conftest import MockLLMResponse
 
@@ -181,7 +181,7 @@ class TestMatchClaimToEvidence:
         self, mock_llm_client, sample_evidence_list, patch_app_config
     ):
         """Claim-evidence matching returns correct index."""
-        from src.services.citation.claim_generator import ClaimEvidenceMatchOutput
+        from deep_research.services.citation.claim_generator import ClaimEvidenceMatchOutput
 
         # Mock LLM to return a structured response
         mock_structured = ClaimEvidenceMatchOutput(

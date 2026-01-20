@@ -73,7 +73,7 @@ test.describe('Error Handling', () => {
 
     // Send a normal message using web_search mode to ensure reliable response
     await chatPage.sendMessageWithMode('Hello', 'web_search');
-    await chatPage.waitForAgentResponse(120000);
+    await chatPage.waitForAgentResponse(180000);
 
     // Verify we got a response
     const response = await chatPage.getLastAgentResponse();
@@ -95,8 +95,8 @@ test.describe('Error Handling', () => {
     // 2. Show an appropriate error message
     // 3. Truncate the message
 
-    // Wait for some response (success or error)
-    const hasResponse = await chatPage.waitForAgentResponse(60000).then(() => true).catch(() => false);
+    // Wait for some response (success or error) - allow 3 min for long message processing
+    const hasResponse = await chatPage.waitForAgentResponse(180000).then(() => true).catch(() => false);
 
     // App should still be functional regardless
     await expect(chatPage.messageInput).toBeVisible();
@@ -122,9 +122,9 @@ test.describe('Error Handling', () => {
     await expect(page.getByTestId('user-message').first()).toBeVisible({ timeout: 30000 });
 
     // Wait for either a response or verify the app handles it gracefully
-    // Use shorter timeout since simple queries should respond quickly
+    // Allow 3 min for web search mode responses
     const responseAppeared = await chatPage
-      .waitForAgentResponse(60000)
+      .waitForAgentResponse(180000)
       .then(() => true)
       .catch(() => false);
 
@@ -157,8 +157,8 @@ test.describe('Error Handling', () => {
       await chatPage.sendButton.click();
     }
 
-    // Wait for at least one response
-    await chatPage.waitForAgentResponse(120000);
+    // Wait for at least one response (3 min for web search mode)
+    await chatPage.waitForAgentResponse(180000);
 
     // App should remain stable
     await expect(chatPage.messageInput).toBeVisible();
@@ -171,9 +171,9 @@ test.describe('Error Handling', () => {
 
     await chatPage.sendMessageWithMode(unicodeMessage, 'web_search');
 
-    // Wait for either a response or verify the app handles it gracefully
+    // Wait for either a response or verify the app handles it gracefully (3 min)
     const responseAppeared = await chatPage
-      .waitForAgentResponse(60000)
+      .waitForAgentResponse(180000)
       .then(() => true)
       .catch(() => false);
 

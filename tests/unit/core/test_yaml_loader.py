@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from src.core.yaml_loader import interpolate_env_vars, load_yaml_config
+from deep_research.core.yaml_loader import interpolate_env_vars, load_yaml_config
 
 
 class TestInterpolateEnvVars:

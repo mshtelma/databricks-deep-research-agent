@@ -1,0 +1,413 @@
+# OpenAPI Patch: Tiered Query Modes
+# Feature: 004-tiered-query-modes
+# Date: 2026-01-04
+#
+# This file documents API changes for the tiered query modes feature.
+# Apply as patch to existing OpenAPI spec at specs/001-deep-research-agent/contracts/openapi.yaml
+
+openapi: 3.0.3
+info:
+  title: Deep Research Agent API - Tiered Query Modes Patch
+  version: 1.1.0
+  description: |
+    API additions for tiered query modes feature:
+    - QueryMode enum (simple, web_search, deep_research)
+    - Updated stream endpoint with query_mode parameter
+    - Updated preferences endpoint with default_query_mode
+
+# New Components
+components:
+  schemas:
+    QueryMode:
+      type: string
+      enum:
+        - simple
+        - web_search
+        - deep_research
+      description: |
+        Query mode determining processing pipeline:
+        - simple: LLM-only response, no web search
+        - web_search: Quick search with 2-5 sources
+        - deep_research: Full research pipeline
+
+    ResearchEvent:
+      type: object
+      required:
+        - id
+        - research_session_id
+        - event_type
+        - timestamp
+        - payload
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique event identifier
+        research_session_id:
+          type: string
+          format: uuid
+          description: Parent research session
+        event_type:
+          type: string
+          maxLength: 50
+          description: Event type (e.g., claim_verified, tool_call)
+        timestamp:
+          type: string
+          format: date-time
+          description: When event occurred
+        payload:
+          type: object
+          additionalProperties: true
+          description: Event-specific data
+
+    VisitedSource:
+      allOf:
+        - $ref: '#/components/schemas/Source'
+        - type: object
+          properties:
+            is_cited:
+              type: boolean
+              description: Whether source is cited in final report
+            step_index:
+              type: integer
+              nullable: true
+              description: Research step that visited this source
+            step_title:
+              type: string
+              nullable: true
+              maxLength: 255
+              description: Title of research step
+            crawl_status:
+              type: string
+              enum:
+                - success
+                - failed
+                - timeout
+                - blocked
+              description: Status of crawl attempt
+            error_reason:
+              type: string
+              nullable: true
+              description: Error message if crawl failed
+
+    # Extended schemas
+    ResearchSessionExtended:
+      allOf:
+        - $ref: '#/components/schemas/ResearchSession'
+        - type: object
+          properties:
+            query_mode:
+              $ref: '#/components/schemas/QueryMode'
+            events:
+              type: array
+              items:
+                $ref: '#/components/schemas/ResearchEvent'
+              description: Activity events for accordion display
+
+    UserPreferencesExtended:
+      allOf:
+        - $ref: '#/components/schemas/UserPreferences'
+        - type: object
+          properties:
+            default_query_mode:
+              $ref: '#/components/schemas/QueryMode'
+
+# Updated Endpoints
+paths:
+  /api/v1/chats/{chat_id}/stream:
+    get:
+      summary: Stream research response
+      description: |
+        Streams research response with mode-specific behavior:
+        - simple: Direct LLM response, minimal SSE events
+        - web_search: Quick search + synthesis, search events only
+        - deep_research: Full pipeline with all events
+      operationId: streamResearch
+      parameters:
+        - name: chat_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Chat identifier
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 10000
+          description: User query
+        - name: query_mode
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/QueryMode'
+          description: |
+            Query processing mode. Defaults to 'simple' if not specified.
+            When 'deep_research', research_depth parameter is also used.
+        - name: research_depth
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - auto
+              - light
+              - medium
+              - extended
+          description: |
+            Research depth level. Only applicable when query_mode is 'deep_research'.
+            Defaults to 'auto' which lets the system decide based on query complexity.
+      responses:
+        '200':
+          description: SSE stream of research events
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  Server-Sent Events stream. Event types depend on query_mode:
+
+                  Simple mode:
+                  - synthesis_progress: Streaming content chunks
+
+                  Web Search mode:
+                  - agent_started (synthesizer)
+                  - tool_call (web_search)
+                  - tool_result
+                  - synthesis_started
+                  - synthesis_progress
+                  - research_completed
+
+                  Deep Research mode:
+                  - All standard research events
+                  - claim_verified, verification_summary (if enabled)
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_mode:
+                  value:
+                    detail: "Invalid query_mode. Must be one of: simple, web_search, deep_research"
+                depth_without_mode:
+                  value:
+                    detail: "research_depth is only valid when query_mode is 'deep_research'"
+        '401':
+          description: Unauthorized
+        '403':
+          description: Chat access denied
+        '404':
+          description: Chat not found
+
+  /api/v1/users/me/preferences:
+    get:
+      summary: Get user preferences
+      description: Returns user preferences including default query mode
+      operationId: getUserPreferences
+      responses:
+        '200':
+          description: User preferences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPreferencesExtended'
+              example:
+                id: "550e8400-e29b-41d4-a716-446655440000"
+                user_id: "user@example.com"
+                default_research_depth: "medium"
+                default_query_mode: "simple"
+                system_instructions: null
+                theme: "system"
+                notifications_enabled: true
+        '401':
+          description: Unauthorized
+
+    put:
+      summary: Update user preferences
+      description: Updates user preferences including default query mode
+      operationId: updateUserPreferences
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                default_research_depth:
+                  type: string
+                  enum:
+                    - auto
+                    - light
+                    - medium
+                    - extended
+                default_query_mode:
+                  $ref: '#/components/schemas/QueryMode'
+                system_instructions:
+                  type: string
+                  nullable: true
+                  maxLength: 5000
+                theme:
+                  type: string
+                  enum:
+                    - light
+                    - dark
+                    - system
+                notifications_enabled:
+                  type: boolean
+            example:
+              default_query_mode: "web_search"
+              default_research_depth: "light"
+      responses:
+        '200':
+          description: Updated preferences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserPreferencesExtended'
+        '400':
+          description: Invalid preferences
+        '401':
+          description: Unauthorized
+
+  /api/v1/chats/{chat_id}/messages:
+    get:
+      summary: List chat messages
+      description: |
+        Returns messages with research session data including query_mode
+        and events for accordion display.
+      operationId: listMessages
+      parameters:
+        - name: chat_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: include_events
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: |
+            Whether to include research events for accordion display.
+            Set to true when loading completed messages that may have events.
+      responses:
+        '200':
+          description: List of messages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                      format: uuid
+                    role:
+                      type: string
+                      enum:
+                        - user
+                        - agent
+                        - system
+                    content:
+                      type: string
+                    research_session:
+                      $ref: '#/components/schemas/ResearchSessionExtended'
+                    created_at:
+                      type: string
+                      format: date-time
+
+# New SSE Event Types
+x-sse-events:
+  # Mode indicator event (sent at start)
+  mode_selected:
+    description: Indicates which query mode is being used
+    payload:
+      type: object
+      properties:
+        query_mode:
+          $ref: '#/components/schemas/QueryMode'
+        research_depth:
+          type: string
+          nullable: true
+          description: Only present for deep_research mode
+
+  # Enhanced event labels (existing events with richer payload)
+  claim_verified:
+    description: Claim verification complete with display data
+    payload:
+      type: object
+      properties:
+        claim_id:
+          type: string
+          format: uuid
+        claim_text:
+          type: string
+          description: Full claim text for label display
+        claim_text_truncated:
+          type: string
+          maxLength: 60
+          description: Truncated claim text for compact display
+        verdict:
+          type: string
+          enum:
+            - supported
+            - partial
+            - unsupported
+            - contradicted
+        confidence:
+          type: string
+          enum:
+            - high
+            - medium
+            - low
+        evidence_preview:
+          type: string
+          nullable: true
+          maxLength: 200
+
+  numeric_claim_detected:
+    description: Numeric claim extracted with display data
+    payload:
+      type: object
+      properties:
+        claim_id:
+          type: string
+          format: uuid
+        raw_value:
+          type: string
+          description: Original numeric expression
+        display_value:
+          type: string
+          description: Formatted value for display (e.g., "$2.5B")
+        unit:
+          type: string
+          nullable: true
+        qa_verified:
+          type: boolean
+
+  verification_summary:
+    description: Final verification statistics
+    payload:
+      type: object
+      properties:
+        total_claims:
+          type: integer
+        supported:
+          type: integer
+        partial:
+          type: integer
+        unsupported:
+          type: integer
+        contradicted:
+          type: integer
+        display_text:
+          type: string
+          description: Pre-formatted summary text for label display

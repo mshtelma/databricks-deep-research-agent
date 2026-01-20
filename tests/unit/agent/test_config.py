@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.agent.config import (
+from deep_research.agent.config import (
     get_background_config,
     get_citation_config_for_depth,
     get_coordinator_config,
@@ -15,7 +15,7 @@ from src.agent.config import (
     get_synthesizer_config,
     get_truncation_limit,
 )
-from src.core.app_config import (
+from deep_research.core.app_config import (
     BackgroundConfig,
     CitationVerificationConfig,
     CoordinatorConfig,

@@ -25,14 +25,14 @@ from uuid import uuid4
 import mlflow
 import pytest
 
-from src.agent.orchestrator import (
+from deep_research.agent.orchestrator import (
     OrchestrationConfig,
     run_research,
 )
-from src.agent.state import ResearchState
-from src.agent.tools.web_crawler import WebCrawler
-from src.services.llm.client import LLMClient
-from src.services.search.brave import BraveSearchClient
+from deep_research.agent.state import ResearchState
+from deep_research.agent.tools.web_crawler import WebCrawler
+from deep_research.services.llm.client import LLMClient
+from deep_research.services.search.brave import BraveSearchClient
 from tests.complex.conftest import requires_all_credentials
 
 

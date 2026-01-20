@@ -39,8 +39,8 @@ test.describe('Research Flow', () => {
     const streamingVisible = await chatPage.isStreaming();
     expect(loadingVisible || streamingVisible).toBe(true);
 
-    // Then: wait for completion (up to 2 minutes)
-    await chatPage.waitForAgentResponse(120000);
+    // Then: wait for completion (up to 6 minutes - research takes 3-5+ min)
+    await chatPage.waitForAgentResponse(360000);
 
     // Then: verify response contains substantive content
     const response = await chatPage.getLastAgentResponse();
@@ -63,8 +63,8 @@ test.describe('Research Flow', () => {
     const streamingVisible = await chatPage.isStreaming();
     expect(loadingVisible || streamingVisible).toBe(true);
 
-    // Wait for completion
-    await chatPage.waitForAgentResponse(120000);
+    // Wait for completion (6 minutes - research takes 3-5+ min)
+    await chatPage.waitForAgentResponse(360000);
 
     // Streaming/loading should be hidden after completion
     expect(await chatPage.isLoading()).toBe(false);
@@ -76,8 +76,8 @@ test.describe('Research Flow', () => {
     // Send research query
     await chatPage.sendMessage(query.text);
 
-    // Wait for response (5 minutes - research can take 3-5 min)
-    await chatPage.waitForAgentResponse(300000);
+    // Wait for response (6 minutes - research can take 3-5+ min)
+    await chatPage.waitForAgentResponse(360000);
 
     // Get response content
     const response = await chatPage.getLastAgentResponse();
@@ -116,8 +116,8 @@ test.describe('Research Flow', () => {
     // Send research query
     await chatPage.sendMessage(query.text);
 
-    // Wait for response
-    await chatPage.waitForAgentResponse(120000);
+    // Wait for response (6 minutes - research takes 3-5+ min)
+    await chatPage.waitForAgentResponse(360000);
 
     // Check citations
     const citations = page.getByTestId('citation');

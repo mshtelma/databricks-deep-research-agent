@@ -15,11 +15,11 @@ import mlflow
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.agent.tools.web_crawler import WebCrawler
-from src.core.app_config import clear_config_cache
-from src.db.session import close_db, get_session_maker
-from src.services.llm.client import LLMClient
-from src.services.search.brave import BraveSearchClient
+from deep_research.agent.tools.web_crawler import WebCrawler
+from deep_research.core.app_config import clear_config_cache
+from deep_research.db.session import close_db, get_session_maker
+from deep_research.services.llm.client import LLMClient
+from deep_research.services.search.brave import BraveSearchClient
 
 
 # ---------------------------------------------------------------------------

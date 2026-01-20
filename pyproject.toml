@@ -1,7 +1,7 @@
 [project]
-name = "databricks-deep-research-agent"
+name = "databricks-deep-research"
 version = "0.1.0"
-description = "Deep research agent with 5-agent architecture for Databricks"
+description = "Deep research agent with 5-agent architecture for Databricks - pip-installable as a library for child projects"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -17,7 +17,7 @@ dependencies = [
     "asyncpg>=0.29.0",
     "alembic>=1.13.0",
     "mlflow>=3.8.0",
-    "databricks-sdk>=0.20.0",
+    "databricks-sdk>=0.30.0",
     "json-repair>=0.25.0",
     "tiktoken>=0.5.0",
     "pyyaml>=6.0.0",
@@ -44,12 +44,28 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["src/deep_research"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/deep_research"]
+
+# CLI entry points for deployment utilities
+[project.scripts]
+deep-research-run = "deep_research.deployment.app_runner:main"
+deep-research-migrate = "deep_research.deployment.migrations:main"
+
+# Entry points for plugin discovery
+[project.entry-points."deep_research.plugins"]
+# External plugins register themselves in their own pyproject.toml
+
+[project.entry-points."deep_research.tools"]
+web_search = "deep_research.agent.tools.web_search:WebSearchTool"
+web_crawl = "deep_research.agent.tools.web_crawl:WebCrawlTool"
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-src = ["src"]
+src = ["src/deep_research"]
 
 [tool.ruff.lint]
 select = [
@@ -70,19 +86,19 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 # Stub endpoints have unused parameters that will be used when implemented
-"src/api/v1/chats.py" = ["ARG001"]
-"src/api/v1/messages.py" = ["ARG001"]
-"src/api/v1/preferences.py" = ["ARG001"]
-"src/api/v1/research.py" = ["ARG001"]
+"src/deep_research/api/v1/chats.py" = ["ARG001"]
+"src/deep_research/api/v1/messages.py" = ["ARG001"]
+"src/deep_research/api/v1/preferences.py" = ["ARG001"]
+"src/deep_research/api/v1/research.py" = ["ARG001"]
 # Exception handlers require request parameter by FastAPI signature
-"src/core/exceptions.py" = ["ARG001"]
+"src/deep_research/core/exceptions.py" = ["ARG001"]
 # Tracing stubs have reserved parameters for future use
-"src/core/tracing.py" = ["ARG001"]
+"src/deep_research/core/tracing.py" = ["ARG001"]
 # SPA serving uses path but not request
-"src/static_files.py" = ["ARG001"]
+"src/deep_research/static_files.py" = ["ARG001"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["src"]
+known-first-party = ["deep_research"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -118,7 +134,7 @@ filterwarnings = [
 ]
 
 [tool.coverage.run]
-source = ["src"]
+source = ["src/deep_research"]
 branch = true
 omit = [
     "*/tests/*",

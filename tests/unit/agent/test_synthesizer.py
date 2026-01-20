@@ -5,8 +5,8 @@ from uuid import uuid4
 
 import pytest
 
-from src.agent.nodes.synthesizer import run_synthesizer, stream_synthesis
-from src.agent.state import (
+from deep_research.agent.nodes.synthesizer import run_synthesizer, stream_synthesis
+from deep_research.agent.state import (
     Plan,
     PlanStep,
     QueryClassification,
@@ -15,7 +15,7 @@ from src.agent.state import (
     StepStatus,
     StepType,
 )
-from src.services.llm.types import LLMResponse
+from deep_research.services.llm.types import LLMResponse
 
 
 @pytest.fixture
@@ -184,8 +184,8 @@ class TestRunSynthesizer:
     ):
         """Test that synthesizer uses the COMPLEX model tier with depth-appropriate tokens."""
         # Arrange
-        from src.services.llm.types import ModelTier
-        from src.agent.config import get_report_limits
+        from deep_research.services.llm.types import ModelTier
+        from deep_research.agent.config import get_report_limits
 
         mock_llm_client.complete = AsyncMock(
             return_value=LLMResponse(

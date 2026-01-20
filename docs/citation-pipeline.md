@@ -408,6 +408,100 @@ Different depths use different verification settings:
 | Medium | natural | enabled | enabled (1 search) |
 | Extended | strict | enabled | enabled (full budget) |
 
+## Post-Verification for Structured Output
+
+When generating **JSON structured output** (e.g., Pydantic models), the full 7-stage pipeline isn't applicable because there are no ReClaim-style citation markers. Instead, post-verification runs stages 4-6 on claims extracted from the structured output.
+
+### When to Use Post-Verification
+
+| Generation Mode | Verification | Output Format | Use Case |
+|----------------|--------------|---------------|----------|
+| ReClaim | Full 7-stage | Markdown | Standard research reports |
+| **Simple** | **Post-verify (4-6)** | **JSON** | **Structured output with verification** |
+| Simple | None | JSON | Quick structured output without verification |
+| Simple | None | Markdown | Standard synthesis without verification |
+
+### Post-Verification Flow
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. SIMPLE STRUCTURED GENERATION                             │
+│    run_structured_synthesizer(state, llm, MySchema)         │
+│    → LLM generates JSON with structured_output parameter    │
+│    → Pydantic validates schema compliance                   │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 2. CLAIM EXTRACTION FROM STRUCTURED OUTPUT                  │
+│    StructuredClaimExtractor.extract(output)                 │
+│    → Auto-discovers text fields with source_refs            │
+│    → Patterns: field + field_source_refs, or source_refs    │
+│    → No hardcoded schema knowledge required                 │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 3. POST-VERIFICATION (Stages 4-6)                           │
+│    PostVerifier.verify_claims(claims, evidence_pool)        │
+│    → Stage 4: IsolatedVerifier (CoVe pattern)               │
+│    → Stage 5: CitationCorrector (CiteFix pattern)           │
+│    → Stage 6: NumericVerifier (QAFactEval pattern)          │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│ 4. APPLY CORRECTIONS TO STRUCTURED OUTPUT                   │
+│    → Update source_refs with corrected citations            │
+│    → Return verified Pydantic model                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Claim Extraction Auto-Discovery
+
+The `StructuredClaimExtractor` automatically finds verifiable claims by walking the Pydantic model:
+
+**Pattern 1**: `field` + `field_source_refs`
+```python
+class MyOutput(BaseModel):
+    executive_summary: str
+    executive_summary_source_refs: list[str]
+```
+
+**Pattern 2**: Object with `source_refs` sibling
+```python
+class KeyInsight(BaseModel):
+    insight: str
+    source_refs: list[str]
+```
+
+Claims are prioritized by field name (summary, overview = high priority) and text length.
+
+### Configuration
+
+```python
+from deep_research.agent.orchestrator import OrchestrationConfig
+
+config = OrchestrationConfig(
+    output_format="json",
+    output_schema=MyOutputSchema,
+    verify_sources=True,                  # Master toggle
+    enable_post_verification=True,        # Run stages 4-6
+    structured_system_prompt="...",       # Optional custom prompt
+    structured_user_prompt="...",         # Optional custom prompt
+)
+```
+
+YAML configuration:
+```yaml
+citation_verification:
+  post_verification:
+    enabled: true
+    max_claims_to_verify: 50
+    include_stage4_isolation: true   # CoVe pattern
+    include_stage5_correction: true  # CiteFix pattern
+    include_stage6_numeric: true     # QAFactEval pattern
+    confidence_threshold: 0.6
+    skip_low_priority_claims: true
+```
+
 ## Key Files
 
 | File | Lines | Purpose |
@@ -421,6 +515,8 @@ Different depths use different verification settings:
 | `numeric_verifier.py` | 442 | Stage 6 numeric QA |
 | `isolated_verifier.py` | 316 | Stage 4 verification |
 | `confidence_classifier.py` | 243 | Stage 3 classification |
+| `post_verifier.py` | ~300 | Post-verification orchestration |
+| `claim_extractor.py` | ~200 | Extract claims from structured output |
 
 ## See Also
 

@@ -242,7 +242,7 @@ export function useStreamingQuery(
 
     const key = seqNum !== undefined
       ? `seq:${seqNum}`
-      : `${data.event_type}:${(data as unknown as { timestamp?: string }).timestamp || Date.now()}`;
+      : `${data.eventType}:${data.timestamp || Date.now()}`;
 
     if (seenEventKeysRef.current.has(key)) {
       console.log('[Dedup] Skipping duplicate event:', key);
@@ -273,8 +273,7 @@ export function useStreamingQuery(
       return;
     }
 
-    // Handle camelCase runtime keys for session-level properties
-    const currentStepIdx = (session as unknown as { currentStepIndex?: number }).currentStepIndex ?? session.current_step_index;
+    const currentStepIdx = session.currentStepIndex;
 
     console.log('[Hydrate] Session:', {
       status: session.status,
@@ -320,17 +319,17 @@ export function useStreamingQuery(
       return; // Skip duplicate event
     }
 
-    console.log('[External] Processing event:', data.event_type, data);
+    console.log('[External] Processing event:', data.eventType, data);
 
     // Add stable unique ID to each event for React keys
     const eventWithId = {
       ...data,
-      _eventId: `${data.event_type}-${eventCounterRef.current++}-${Date.now()}`,
+      _eventId: `${data.eventType}-${eventCounterRef.current++}-${Date.now()}`,
     } as StreamEvent;
     setEvents((prev) => [...prev, eventWithId]);
 
     // Process event based on type (same logic as SSE handler)
-    switch (data.event_type) {
+    switch (data.eventType) {
       case 'agent_started': {
         if ('agent' in data) {
           const agent = (data as { agent: string }).agent;
@@ -352,8 +351,7 @@ export function useStreamingQuery(
 
       case 'research_started': {
         const startedEvent = data as ResearchStartedEvent;
-        const messageId = (startedEvent as unknown as { messageId?: string }).messageId ?? startedEvent.message_id;
-        setAgentMessageId(messageId);
+        setAgentMessageId(startedEvent.messageId);
         break;
       }
 
@@ -375,7 +373,7 @@ export function useStreamingQuery(
 
       case 'step_started': {
         const stepEvent = data as StepStartedEvent;
-        const stepIndex = (stepEvent as unknown as { stepIndex?: number }).stepIndex ?? stepEvent.step_index;
+        const stepIndex = stepEvent.stepIndex;
         setCurrentStepIndex(stepIndex);
         setCurrentPlan((prev) => {
           if (!prev) return prev;
@@ -391,7 +389,7 @@ export function useStreamingQuery(
 
       case 'step_completed': {
         const stepEvent = data as StepCompletedEvent;
-        const stepIndex = (stepEvent as unknown as { stepIndex?: number }).stepIndex ?? stepEvent.step_index;
+        const stepIndex = stepEvent.stepIndex;
         setCurrentPlan((prev) => {
           if (!prev) return prev;
           const steps = [...prev.steps];
@@ -408,13 +406,10 @@ export function useStreamingQuery(
 
       case 'tool_call': {
         const toolEvent = data as ToolCallEvent;
-        const toolName = (toolEvent as unknown as { toolName?: string }).toolName ?? toolEvent.tool_name;
-        const toolArgs = (toolEvent as unknown as { toolArgs?: Record<string, unknown> }).toolArgs ?? toolEvent.tool_args;
-        const callNumber = (toolEvent as unknown as { callNumber?: number }).callNumber ?? toolEvent.call_number;
         setToolActivity({
-          toolName: toolName as 'web_search' | 'web_crawl',
-          toolArgs,
-          callNumber,
+          toolName: toolEvent.toolName as 'web_search' | 'web_crawl',
+          toolArgs: toolEvent.toolArgs,
+          callNumber: toolEvent.callNumber,
           sourcesCrawled: 0,
         });
         break;
@@ -422,8 +417,7 @@ export function useStreamingQuery(
 
       case 'tool_result': {
         const toolEvent = data as ToolResultEvent;
-        const sourcesCrawled = (toolEvent as unknown as { sourcesCrawled?: number }).sourcesCrawled ?? toolEvent.sources_crawled;
-        setToolActivity((prev) => prev ? { ...prev, toolName: null, sourcesCrawled } : null);
+        setToolActivity((prev) => prev ? { ...prev, toolName: null, sourcesCrawled: toolEvent.sourcesCrawled } : null);
         break;
       }
 
@@ -448,8 +442,7 @@ export function useStreamingQuery(
 
       case 'synthesis_progress': {
         const progressEvent = data as SynthesisProgressEvent;
-        const contentChunk = (progressEvent as unknown as { contentChunk?: string }).contentChunk ?? progressEvent.content_chunk;
-        setStreamingContent((prev) => prev + contentChunk);
+        setStreamingContent((prev) => prev + progressEvent.contentChunk);
         break;
       }
 
@@ -518,25 +511,18 @@ export function useStreamingQuery(
 
       case 'error': {
         const errorEvent = data as StreamErrorEvent;
-        // Handle both camelCase and snake_case for compatibility
-        const errorMessage = (errorEvent as unknown as { errorMessage?: string }).errorMessage ?? errorEvent.error_message;
-        const errorCode = (errorEvent as unknown as { errorCode?: string }).errorCode ?? errorEvent.error_code;
-        const stackTrace = (errorEvent as unknown as { stackTrace?: string }).stackTrace ?? errorEvent.stack_trace;
-        const errorType = (errorEvent as unknown as { errorType?: string }).errorType ?? errorEvent.error_type;
-        const recoverable = errorEvent.recoverable;
-
-        const err = new Error(errorMessage || 'Research failed');
+        const err = new Error(errorEvent.errorMessage || 'Research failed');
 
         // Store full error details for display
         setErrorDetails({
           error: err,
-          errorCode,
-          stackTrace,
-          errorType,
-          recoverable,
+          errorCode: errorEvent.errorCode,
+          stackTrace: errorEvent.stackTrace,
+          errorType: errorEvent.errorType,
+          recoverable: errorEvent.recoverable,
         });
 
-        if (!recoverable) {
+        if (!errorEvent.recoverable) {
           setError(err);
           setAgentStatus('error');
         }
@@ -579,14 +565,14 @@ export function useStreamingQuery(
       // Unwrap job event payload OR use direct event format
       let data: StreamEvent;
       if (rawData.payload && rawData.eventType) {
-        // Job event format: unwrap payload and normalize event_type
+        // Job event format: unwrap payload and set eventType
         data = {
           ...rawData.payload,
-          event_type: rawData.eventType,
+          eventType: rawData.eventType,
           sequenceNumber: rawData.sequenceNumber,
         } as StreamEvent;
-      } else if (rawData.event_type) {
-        // Direct SSE format (old endpoint compatibility)
+      } else if (rawData.eventType) {
+        // Direct SSE format with camelCase
         data = parseStreamEvent(eventData) as StreamEvent;
         if (!data) return false;
       } else {

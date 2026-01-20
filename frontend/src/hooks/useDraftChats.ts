@@ -18,9 +18,9 @@ export interface DraftChat {
   id: string;
   title: string | null;
   status: 'active';
-  created_at: string;
-  updated_at: string;
-  message_count: number;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
   isDraft: true;
   pendingContent?: string; // Unsent message content for beforeunload warning
 }
@@ -43,7 +43,7 @@ function loadDrafts(): Record<string, DraftChat> {
     // Filter out stale drafts (older than 24 hours)
     const validDrafts: Record<string, DraftChat> = {};
     for (const [id, draft] of Object.entries(state.drafts || {})) {
-      const createdAt = new Date(draft.created_at).getTime();
+      const createdAt = new Date(draft.createdAt).getTime();
       if (now - createdAt < DRAFT_MAX_AGE_MS) {
         validDrafts[id] = draft;
       }
@@ -93,9 +93,9 @@ export function useDraftChats() {
       id,
       title: null,
       status: 'active',
-      created_at: now,
-      updated_at: now,
-      message_count: 0,
+      createdAt: now,
+      updatedAt: now,
+      messageCount: 0,
       isDraft: true,
     };
 
@@ -129,7 +129,7 @@ export function useDraftChats() {
       if (!draft) return prev;
       return {
         ...prev,
-        [id]: { ...draft, pendingContent, updated_at: new Date().toISOString() },
+        [id]: { ...draft, pendingContent, updatedAt: new Date().toISOString() },
       };
     });
   }, []);
@@ -151,7 +151,7 @@ export function useDraftChats() {
     // Only consider recent drafts as active
     // Older drafts are stale and shouldn't block message fetching
     const IN_FLIGHT_WINDOW_MS = 60000; // 60 seconds
-    const createdAt = new Date(draft.created_at).getTime();
+    const createdAt = new Date(draft.createdAt).getTime();
     const isRecent = Date.now() - createdAt < IN_FLIGHT_WINDOW_MS;
 
     return isRecent;
@@ -160,11 +160,11 @@ export function useDraftChats() {
   /**
    * Get all drafts as a sorted list (most recent first).
    *
-   * @returns Array of draft chats sorted by updated_at descending.
+   * @returns Array of draft chats sorted by updatedAt descending.
    */
   const getDraftList = useCallback((): DraftChat[] => {
     return Object.values(drafts).sort(
-      (a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
+      (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
     );
   }, [drafts]);
 
@@ -199,7 +199,7 @@ export function useDraftChats() {
       const cleaned: Record<string, DraftChat> = {};
 
       for (const [id, draft] of Object.entries(prev)) {
-        const createdAt = new Date(draft.created_at).getTime();
+        const createdAt = new Date(draft.createdAt).getTime();
         const isRecent = now - createdAt < IN_FLIGHT_WINDOW_MS;
         const existsInApi = apiChatIds.has(id);
 

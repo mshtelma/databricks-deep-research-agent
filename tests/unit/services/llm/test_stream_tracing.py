@@ -6,13 +6,13 @@ MLflow span creation/ending is an implementation detail tested by integration te
 
 import pytest
 
-from src.services.llm.tracing import (
+from deep_research.services.llm.tracing import (
     StreamMetrics,
     TracedAsyncIterator,
     traced_stream,
     traced_stream_with_tools,
 )
-from src.services.llm.types import ModelTier, StreamWithToolsChunk, ToolCall
+from deep_research.services.llm.types import ModelTier, StreamWithToolsChunk, ToolCall
 
 
 async def mock_string_generator():

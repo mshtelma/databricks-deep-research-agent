@@ -6,14 +6,14 @@ numeric markers [0], [1], [2] with [Arxiv], [Zhipu], [Github-2].
 
 import pytest
 
-from src.services.citation.citation_keys import (
+from deep_research.services.citation.citation_keys import (
     extract_domain_key,
     abbreviate_title,
     build_citation_key_map,
     replace_numeric_markers,
     parse_citation_key,
 )
-from src.services.citation.evidence_selector import RankedEvidence
+from deep_research.services.citation.evidence_selector import RankedEvidence
 
 
 class TestExtractDomainKey:

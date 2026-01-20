@@ -6,11 +6,11 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from src.core.auth import UserIdentity
-from src.db.session import get_db
-from src.main import app
-from src.middleware.auth import get_current_user_identity
-from src.models.chat import Chat, ChatStatus
+from deep_research.core.auth import UserIdentity
+from deep_research.db.session import get_db
+from deep_research.main import app
+from deep_research.middleware.auth import get_current_user_identity
+from deep_research.models.chat import Chat, ChatStatus
 
 
 @pytest.fixture
@@ -63,7 +63,7 @@ class TestListChats:
 
     def test_list_chats_empty(self, client: TestClient):
         """Test listing chats when none exist."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.list = AsyncMock(return_value=([], 0))
             MockService.return_value = mock_service
@@ -79,7 +79,7 @@ class TestListChats:
         self, client: TestClient, mock_chat: Chat
     ):
         """Test listing chats with results."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.list = AsyncMock(return_value=([mock_chat], 1))
             MockService.return_value = mock_service
@@ -93,7 +93,7 @@ class TestListChats:
 
     def test_list_chats_with_pagination(self, client: TestClient):
         """Test listing chats with pagination parameters."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.list = AsyncMock(return_value=([], 0))
             MockService.return_value = mock_service
@@ -108,7 +108,7 @@ class TestListChats:
 
     def test_list_chats_with_status_filter(self, client: TestClient):
         """Test listing chats with status filter."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.list = AsyncMock(return_value=([], 0))
             MockService.return_value = mock_service
@@ -122,7 +122,7 @@ class TestListChats:
 
     def test_list_chats_with_search(self, client: TestClient):
         """Test listing chats with search parameter."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.list = AsyncMock(return_value=([], 0))
             MockService.return_value = mock_service
@@ -142,7 +142,7 @@ class TestCreateChat:
         self, client: TestClient, mock_chat: Chat
     ):
         """Test creating a chat with a title."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.create = AsyncMock(return_value=mock_chat)
             MockService.return_value = mock_service
@@ -163,7 +163,7 @@ class TestCreateChat:
         """Test creating a chat without a title."""
         mock_chat.title = None
 
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.create = AsyncMock(return_value=mock_chat)
             MockService.return_value = mock_service
@@ -176,7 +176,7 @@ class TestCreateChat:
         self, client: TestClient, mock_chat: Chat
     ):
         """Test creating a chat with empty body."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.create = AsyncMock(return_value=mock_chat)
             MockService.return_value = mock_service
@@ -194,7 +194,7 @@ class TestGetChat:
         self, client: TestClient, mock_chat: Chat
     ):
         """Test getting an existing chat."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.get_for_user = AsyncMock(return_value=mock_chat)
             MockService.return_value = mock_service
@@ -207,7 +207,7 @@ class TestGetChat:
 
     def test_get_nonexistent_chat(self, client: TestClient):
         """Test getting a chat that doesn't exist."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.get_for_user = AsyncMock(return_value=None)
             MockService.return_value = mock_service
@@ -226,7 +226,7 @@ class TestUpdateChat:
         """Test updating a chat's title."""
         mock_chat.title = "Updated Title"
 
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.update_chat = AsyncMock(return_value=mock_chat)
             MockService.return_value = mock_service
@@ -246,7 +246,7 @@ class TestUpdateChat:
         """Test updating a chat's status."""
         mock_chat.status = ChatStatus.ARCHIVED
 
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.update_chat = AsyncMock(return_value=mock_chat)
             MockService.return_value = mock_service
@@ -262,7 +262,7 @@ class TestUpdateChat:
 
     def test_update_nonexistent_chat(self, client: TestClient):
         """Test updating a chat that doesn't exist."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.update_chat = AsyncMock(return_value=None)
             MockService.return_value = mock_service
@@ -282,7 +282,7 @@ class TestDeleteChat:
         self, client: TestClient, mock_chat: Chat
     ):
         """Test soft deleting an existing chat."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.soft_delete = AsyncMock(return_value=True)
             MockService.return_value = mock_service
@@ -293,7 +293,7 @@ class TestDeleteChat:
 
     def test_delete_nonexistent_chat(self, client: TestClient):
         """Test deleting a chat that doesn't exist."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.soft_delete = AsyncMock(return_value=False)
             MockService.return_value = mock_service
@@ -312,7 +312,7 @@ class TestRestoreChat:
         """Test restoring a soft-deleted chat."""
         mock_chat.status = ChatStatus.ACTIVE
 
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.restore = AsyncMock(return_value=mock_chat)
             MockService.return_value = mock_service
@@ -325,7 +325,7 @@ class TestRestoreChat:
 
     def test_restore_nonexistent_chat(self, client: TestClient):
         """Test restoring a chat that doesn't exist."""
-        with patch("src.api.v1.chats.ChatService") as MockService:
+        with patch("deep_research.api.v1.chats.ChatService") as MockService:
             mock_service = MagicMock()
             mock_service.restore = AsyncMock(return_value=None)
             MockService.return_value = mock_service

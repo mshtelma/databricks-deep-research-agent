@@ -5,14 +5,14 @@ from uuid import uuid4
 
 import pytest
 
-from src.agent.nodes.planner import PlanOutput, PlanStepOutput, run_planner
-from src.agent.state import (
+from deep_research.agent.nodes.planner import PlanOutput, PlanStepOutput, run_planner
+from deep_research.agent.state import (
     ReflectionDecision,
     ReflectionResult,
     ResearchState,
     StepType,
 )
-from src.services.llm.types import LLMResponse
+from deep_research.services.llm.types import LLMResponse
 
 
 @pytest.fixture

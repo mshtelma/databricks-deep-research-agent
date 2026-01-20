@@ -42,7 +42,7 @@ const AGENT_COMPLETED_LABELS: Record<string, string> = {
  * Format a stream event into a human-readable activity label.
  */
 export function formatActivityLabel(event: StreamEvent): string {
-  switch (event.event_type) {
+  switch (event.eventType) {
     case 'agent_started':
       return formatAgentStarted(event)
     case 'agent_completed':
@@ -86,7 +86,7 @@ export function formatActivityLabel(event: StreamEvent): string {
     case 'verification_summary':
       return 'Verification complete'
     default:
-      return (event as StreamEvent).event_type
+      return (event as StreamEvent).eventType
   }
 }
 
@@ -96,9 +96,7 @@ function formatAgentStarted(event: AgentStartedEvent): string {
 
 function formatAgentCompleted(event: AgentCompletedEvent): string {
   const label = AGENT_COMPLETED_LABELS[event.agent] || event.agent
-  // Handle both snake_case (TypeScript types) and camelCase (runtime SSE data)
-  // Runtime SSE events have camelCase keys (durationMs) due to transformation
-  const durationMs = (event as unknown as { durationMs?: number }).durationMs ?? event.duration_ms
+  const durationMs = event.durationMs
   if (durationMs == null || isNaN(durationMs)) {
     console.warn('[Activity] Missing/invalid duration:', event)
   }
@@ -114,26 +112,20 @@ function formatPlanCreated(event: PlanCreatedEvent): string {
 }
 
 function formatStepStarted(event: StepStartedEvent): string {
-  // Handle camelCase runtime keys
-  const stepIndex = (event as unknown as { stepIndex?: number }).stepIndex ?? event.step_index
-  const stepTitle = (event as unknown as { stepTitle?: string }).stepTitle ?? event.step_title
-  const stepNum = stepIndex + 1
-  const title = truncate(stepTitle, 80)
+  const stepNum = event.stepIndex + 1
+  const title = truncate(event.stepTitle, 80)
   return `Step ${stepNum}: ${title}`
 }
 
 function formatStepCompleted(event: StepCompletedEvent): string {
-  // Handle camelCase runtime keys
-  const sources = (event as unknown as { sourcesFound?: number }).sourcesFound ?? event.sources_found
+  const sources = event.sourcesFound
   return `Found ${sources} source${sources !== 1 ? 's' : ''}`
 }
 
 function formatToolCall(event: ToolCallEvent): string {
-  // Handle camelCase runtime keys
-  const toolName = (event as unknown as { toolName?: string }).toolName ?? event.tool_name
+  const toolName = event.toolName
   if (toolName === 'web_search') {
-    const toolArgs = (event as unknown as { toolArgs?: Record<string, unknown> }).toolArgs ?? event.tool_args
-    const query = typeof toolArgs?.query === 'string' ? truncate(toolArgs.query, 80) : ''
+    const query = typeof event.toolArgs?.query === 'string' ? truncate(event.toolArgs.query, 80) : ''
     return `Searching: ${query}`
   } else if (toolName === 'web_crawl') {
     return 'Crawling page...'
@@ -142,8 +134,7 @@ function formatToolCall(event: ToolCallEvent): string {
 }
 
 function formatToolResult(event: ToolResultEvent): string {
-  // Handle camelCase runtime keys
-  const sourcesCrawled = (event as unknown as { sourcesCrawled?: number }).sourcesCrawled ?? event.sources_crawled
+  const sourcesCrawled = event.sourcesCrawled
   if (sourcesCrawled != null && sourcesCrawled > 0) {
     return `Crawled ${sourcesCrawled} page${sourcesCrawled !== 1 ? 's' : ''}`
   }
@@ -165,14 +156,11 @@ function formatReflectionDecision(event: ReflectionDecisionEvent): string {
 }
 
 function formatSynthesisStarted(event: SynthesisStartedEvent): string {
-  // Handle camelCase runtime keys
-  const totalSources = (event as unknown as { totalSources?: number }).totalSources ?? event.total_sources
-  return `Writing (${totalSources} sources)`
+  return `Writing (${event.totalSources} sources)`
 }
 
 function formatResearchCompleted(event: ResearchCompletedEvent): string {
-  // Handle camelCase runtime keys
-  const totalDurationMs = (event as unknown as { totalDurationMs?: number }).totalDurationMs ?? event.total_duration_ms
+  const totalDurationMs = event.totalDurationMs
   const duration = totalDurationMs != null && !isNaN(totalDurationMs)
     ? (totalDurationMs / 1000).toFixed(1)
     : '?'
@@ -180,9 +168,7 @@ function formatResearchCompleted(event: ResearchCompletedEvent): string {
 }
 
 function formatError(event: StreamErrorEvent): string {
-  // Handle camelCase runtime keys
-  const errorMessage = (event as unknown as { errorMessage?: string }).errorMessage ?? event.error_message
-  const message = truncate(errorMessage, 30)
+  const message = truncate(event.errorMessage, 30)
   return message
 }
 
@@ -190,7 +176,7 @@ function formatError(event: StreamErrorEvent): string {
  * Get the Tailwind CSS color class for an event.
  */
 export function getActivityColor(event: StreamEvent): string {
-  switch (event.event_type) {
+  switch (event.eventType) {
     case 'error':
       return 'text-red-500'
     case 'agent_completed':

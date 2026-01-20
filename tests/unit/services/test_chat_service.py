@@ -6,8 +6,8 @@ from uuid import uuid4
 
 import pytest
 
-from src.models.chat import Chat, ChatStatus
-from src.services.chat_service import ChatService
+from deep_research.models.chat import Chat, ChatStatus
+from deep_research.services.chat_service import ChatService
 
 
 class TestChatServiceCreate:

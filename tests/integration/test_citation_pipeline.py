@@ -19,8 +19,8 @@ Run with:
 import pytest
 from tests.integration.conftest import requires_all_credentials
 
-from src.services.llm.client import LLMClient
-from src.services.search.brave import BraveSearchClient
+from deep_research.services.llm.client import LLMClient
+from deep_research.services.search.brave import BraveSearchClient
 
 
 @pytest.mark.integration
@@ -38,7 +38,7 @@ class TestCitationPipelineIntegration:
         This test verifies Stage 2 (Interleaved Generation) works with real LLM.
         """
         # TODO: Import citation pipeline components once paths are verified
-        # from src.services.citation.pipeline import CitationPipeline
+        # from deep_research.services.citation.pipeline import CitationPipeline
 
         # Sample synthesized content with claims
         content = """
@@ -58,7 +58,7 @@ class TestCitationPipelineIntegration:
         ]
 
         # Test that LLM client is working
-        from src.services.llm.types import ModelTier
+        from deep_research.services.llm.types import ModelTier
 
         response = await llm_client.complete(
             messages=[
@@ -81,7 +81,7 @@ class TestCitationPipelineIntegration:
 
         This test verifies Stage 6 (Numeric QA Verification) components.
         """
-        from src.services.llm.types import ModelTier
+        from deep_research.services.llm.types import ModelTier
 
         # Test content with numeric claims
         test_prompt = """
@@ -139,7 +139,7 @@ class TestCitationPipelineIntegration:
 
         This test verifies Stage 4 (Isolated Verification) with real LLM.
         """
-        from src.services.llm.types import ModelTier
+        from deep_research.services.llm.types import ModelTier
 
         # Claim and evidence that should be SUPPORTED
         supported_test = """
@@ -174,7 +174,7 @@ class TestCitationPipelineIntegration:
 
         This test runs a minimal research query and verifies citations are generated.
         """
-        from src.agent.orchestrator import OrchestrationConfig, run_research
+        from deep_research.agent.orchestrator import OrchestrationConfig, run_research
 
         config = OrchestrationConfig(
             max_iterations=1,
@@ -208,8 +208,8 @@ class TestCitationPipelineIntegration:
         This test verifies the fallback mechanism when sources have no content,
         which should trigger classical synthesis instead of interleaved generation.
         """
-        from src.agent.state import ResearchState, SourceInfo
-        from src.services.citation.pipeline import CitationVerificationPipeline, VerificationEvent
+        from deep_research.agent.state import ResearchState, SourceInfo
+        from deep_research.services.citation.pipeline import CitationVerificationPipeline, VerificationEvent
 
         # Create state with sources that have no content (empty strings or None)
         state = ResearchState(

@@ -29,8 +29,8 @@ export function SettingsPage() {
   // Sync local state with fetched preferences
   React.useEffect(() => {
     if (preferences) {
-      setSystemInstructions(preferences.system_instructions || '');
-      setDefaultDepth(preferences.default_depth);
+      setSystemInstructions(preferences.systemInstructions || '');
+      setDefaultDepth(preferences.defaultDepth);
     }
   }, [preferences]);
 
@@ -46,7 +46,7 @@ export function SettingsPage() {
 
   const handleInstructionsChange = (value: string) => {
     setSystemInstructions(value);
-    setHasInstructionChanges(value !== (preferences?.system_instructions || ''));
+    setHasInstructionChanges(value !== (preferences?.systemInstructions || ''));
   };
 
   const handleSaveInstructions = () => {

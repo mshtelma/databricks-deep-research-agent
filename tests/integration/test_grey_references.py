@@ -26,14 +26,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from src.agent.orchestrator import OrchestrationConfig, run_research
-from src.agent.persistence import persist_complete_research
-from src.agent.state import ClaimInfo, ResearchState
-from src.agent.tools.web_crawler import WebCrawler
-from src.models.citation import Citation
-from src.models.claim import Claim
-from src.services.llm.client import LLMClient
-from src.services.search.brave import BraveSearchClient
+from deep_research.agent.orchestrator import OrchestrationConfig, run_research
+from deep_research.agent.persistence import persist_complete_research
+from deep_research.agent.state import ClaimInfo, ResearchState
+from deep_research.agent.tools.web_crawler import WebCrawler
+from deep_research.models.citation import Citation
+from deep_research.models.claim import Claim
+from deep_research.services.llm.client import LLMClient
+from deep_research.services.search.brave import BraveSearchClient
 from tests.integration.conftest import requires_all_credentials
 
 

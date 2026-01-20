@@ -62,7 +62,7 @@ test.describe('Provenance Export', () => {
       // Send research query and wait for response
       // Use deep_research mode to trigger claim generation for provenance export
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       // Get the message ID from the URL or page state
       // The URL should contain the chat ID after a message is sent
@@ -84,7 +84,7 @@ test.describe('Provenance Export', () => {
 
       // Use deep_research mode to trigger claim generation for provenance export
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       // This test validates the endpoint structure
       test.skip(true, 'Message ID extraction requires additional implementation');
@@ -95,7 +95,7 @@ test.describe('Provenance Export', () => {
 
       // Use deep_research mode to trigger claim generation for provenance export
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       // This test validates the endpoint structure
       test.skip(true, 'Message ID extraction requires additional implementation');

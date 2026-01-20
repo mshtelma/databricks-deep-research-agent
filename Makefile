@@ -55,7 +55,7 @@ dev:
 			echo "Servers stopped."; \
 		}; \
 		trap cleanup EXIT INT TERM; \
-		(uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-dev.log) & \
+		(uv run uvicorn deep_research.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-dev.log) & \
 		(cd frontend && npm run dev) & \
 		wait'
 
@@ -64,7 +64,7 @@ dev-backend:
 	@./scripts/kill-server.sh 8000 || true
 	@echo "Starting backend only with hot reload on :8000..."
 	@echo "Logs: /tmp/deep-research-dev.log"
-	uv run uvicorn src.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-dev.log
+	uv run uvicorn deep_research.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-dev.log
 
 dev-frontend:
 	@echo "Stopping any existing server on port 5173..."
@@ -96,7 +96,7 @@ prod: build
 	@./scripts/kill-server.sh 8000 || true
 	@echo "Starting production server on :8000..."
 	@echo "Logs: /tmp/deep-research-prod.log"
-	SERVE_STATIC=true uv run uvicorn src.main:app --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-prod.log
+	SERVE_STATIC=true uv run uvicorn deep_research.main:app --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-prod.log
 
 # =============================================================================
 # Installation
@@ -126,19 +126,19 @@ install-dev:
 
 typecheck:
 	@echo "Type checking backend..."
-	uv run mypy src --strict
+	uv run mypy src/deep_research --strict
 	@echo "Type checking frontend..."
 	cd frontend && npm run typecheck
 
 lint:
 	@echo "Linting backend..."
-	uv run ruff check src
+	uv run ruff check src/deep_research
 	@echo "Linting frontend..."
 	cd frontend && npm run lint
 
 format:
 	@echo "Formatting backend..."
-	uv run ruff format src
+	uv run ruff format src/deep_research
 	@echo "Formatting frontend..."
 	cd frontend && npm run format 2>/dev/null || true
 

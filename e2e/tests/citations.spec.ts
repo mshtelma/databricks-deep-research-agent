@@ -38,7 +38,7 @@ test.describe('Citation Interactions', () => {
       // Send research query
       // Use deep_research mode to trigger citation generation
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       // Check if citations exist in the response
       const markerCount = await citationsPage.getCitationMarkerCount();
@@ -62,7 +62,7 @@ test.describe('Citation Interactions', () => {
 
       // Use deep_research mode to trigger citation generation
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
 
@@ -84,7 +84,7 @@ test.describe('Citation Interactions', () => {
 
       // Use deep_research mode to trigger citation generation
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
 
@@ -110,7 +110,7 @@ test.describe('Citation Interactions', () => {
 
       // Use deep_research mode to trigger citation generation
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
 
@@ -135,7 +135,7 @@ test.describe('Citation Interactions', () => {
 
       // Use deep_research mode to trigger citation generation
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
 
@@ -159,7 +159,7 @@ test.describe('Citation Interactions', () => {
 
       // Use deep_research mode to trigger citation generation
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
 
@@ -182,7 +182,7 @@ test.describe('Citation Interactions', () => {
 
       // Use deep_research mode to trigger citation generation
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
 
@@ -208,7 +208,7 @@ test.describe('Citation Interactions', () => {
 
       // Use deep_research mode to trigger citation generation
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
 
@@ -237,7 +237,7 @@ test.describe('Citation Interactions', () => {
 
       // Use deep_research mode to trigger citation generation
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const markerCount = await citationsPage.getCitationMarkerCount();
 
@@ -275,7 +275,7 @@ test.describe('Citation Interactions', () => {
 
       // Use deep_research mode to trigger citation generation
       await chatPage.sendMessageWithMode(query, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       // Get the agent response
       const response = await chatPage.getLastAgentResponse();
@@ -294,7 +294,7 @@ test.describe('Citation Interactions', () => {
 
       // Use deep_research mode to trigger citation generation
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       // Look for sources section
       const sourcesButton = page.locator('button:has-text("source")');

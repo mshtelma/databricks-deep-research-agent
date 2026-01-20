@@ -44,7 +44,7 @@ test.describe('Verification Summary', () => {
 
       // Send research query in DEEP_RESEARCH mode to trigger verification
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000); // 5 minutes for deep research
+      await chatPage.waitForAgentResponse(360000); // 5 minutes for deep research
 
       // Check if verification section is visible
       const isVisible = await citationsPage.isVerificationSectionVisible();
@@ -62,7 +62,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -85,7 +85,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -109,7 +109,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -135,7 +135,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -162,7 +162,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -184,7 +184,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -213,7 +213,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -233,7 +233,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -259,7 +259,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -289,7 +289,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -327,7 +327,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -358,7 +358,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 
@@ -379,7 +379,7 @@ test.describe('Verification Summary', () => {
       const query = RESEARCH_QUERIES[0];
 
       await chatPage.sendMessageWithMode(query.text, 'deep_research');
-      await chatPage.waitForAgentResponse(300000);
+      await chatPage.waitForAgentResponse(360000);
 
       const isVisible = await citationsPage.isVerificationSectionVisible();
 

@@ -29,10 +29,10 @@ export function LiveReasoningPanel({
 
       // Get step-related events
       const stepStartEvent = events.find(
-        (e) => e.event_type === 'step_started' && 'step_index' in e && e.step_index === index
+        (e) => e.eventType === 'step_started' && 'stepIndex' in e && (e as { stepIndex?: number }).stepIndex === index
       );
       const stepCompleteEvent = events.find(
-        (e) => e.event_type === 'step_completed' && 'step_index' in e && e.step_index === index
+        (e) => e.eventType === 'step_completed' && 'stepIndex' in e && (e as { stepIndex?: number }).stepIndex === index
       );
 
       // Determine status
@@ -47,18 +47,19 @@ export function LiveReasoningPanel({
 
       // Determine step type based on step properties
       let type: StepType = 'analyze';
-      if (step.needs_search) {
+      if (step.needsSearch) {
         type = 'search';
-      } else if (step.step_type === 'analysis') {
+      } else if (step.stepType === 'analysis') {
         type = 'analyze';
       }
 
       // Extract details from events
       const details: ReasoningStepData['details'] = {};
 
-      if (stepCompleteEvent && 'observation_summary' in stepCompleteEvent) {
-        details.observation = stepCompleteEvent.observation_summary;
-        details.sourcesFound = stepCompleteEvent.sources_found;
+      if (stepCompleteEvent && 'observationSummary' in stepCompleteEvent) {
+        const eventData = stepCompleteEvent as unknown as Record<string, unknown>;
+        details.observation = eventData.observationSummary as string | undefined;
+        details.sourcesFound = eventData.sourcesFound as number | undefined;
       }
 
       // Note: search queries and URLs would come from additional events
@@ -159,7 +160,7 @@ interface ReflectionSummaryProps {
 }
 
 function ReflectionSummary({ events }: ReflectionSummaryProps) {
-  const reflectionEvents = events.filter((e) => e.event_type === 'reflection_decision');
+  const reflectionEvents = events.filter((e) => e.eventType === 'reflection_decision');
 
   if (reflectionEvents.length === 0) {
     return null;

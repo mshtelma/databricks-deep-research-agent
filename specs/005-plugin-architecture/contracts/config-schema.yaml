@@ -1,0 +1,186 @@
+# Configuration Schema for Plugin Architecture
+# ============================================
+#
+# This file defines the YAML configuration schema for plugin-related settings
+# in config/app.yaml.
+#
+# Schema follows JSON Schema draft-07 format for validation.
+
+$schema: "http://json-schema.org/draft-07/schema#"
+title: "Plugin Architecture Configuration"
+description: "Configuration schema for Vector Search, Knowledge Assistants, and plugin system"
+
+type: object
+properties:
+
+  # Vector Search Configuration
+  vector_search:
+    type: object
+    description: "Configuration for Databricks Vector Search integration"
+    properties:
+      enabled:
+        type: boolean
+        default: false
+        description: "Enable Vector Search tools (disabled by default)"
+
+      endpoints:
+        type: array
+        description: "List of Vector Search endpoints to expose as tools"
+        items:
+          type: object
+          required:
+            - name
+            - endpoint
+            - index
+            - description
+          properties:
+            name:
+              type: string
+              description: "Tool name suffix (creates tool 'search_<name>')"
+              pattern: "^[a-z][a-z0-9_]*$"
+              examples:
+                - "product_docs"
+                - "case_studies"
+
+            endpoint:
+              type: string
+              description: "Databricks Vector Search endpoint name"
+              examples:
+                - "vs-production-endpoint"
+
+            index:
+              type: string
+              description: "Full index name (catalog.schema.index)"
+              pattern: "^[a-z_][a-z0-9_]*\\.[a-z_][a-z0-9_]*\\.[a-z_][a-z0-9_]*$"
+              examples:
+                - "main.knowledge.product_documentation"
+
+            description:
+              type: string
+              description: "Tool description shown to LLM"
+              minLength: 10
+              maxLength: 500
+
+            num_results:
+              type: integer
+              default: 5
+              minimum: 1
+              maximum: 100
+              description: "Default number of results to return"
+
+            columns_to_return:
+              type: array
+              items:
+                type: string
+              default: []
+              description: "Columns to include in results (empty = all)"
+
+            filters:
+              type: object
+              additionalProperties: true
+              description: "Default filters to apply to searches"
+
+  # Knowledge Assistants Configuration
+  knowledge_assistants:
+    type: object
+    description: "Configuration for Databricks Knowledge Assistant integration"
+    properties:
+      enabled:
+        type: boolean
+        default: false
+        description: "Enable Knowledge Assistant tools (disabled by default)"
+
+      endpoints:
+        type: array
+        description: "List of Knowledge Assistant endpoints to expose as tools"
+        items:
+          type: object
+          required:
+            - name
+            - endpoint_name
+            - description
+          properties:
+            name:
+              type: string
+              description: "Tool name suffix (creates tool 'retrieve_<name>')"
+              pattern: "^[a-z][a-z0-9_]*$"
+              examples:
+                - "product_expert"
+                - "sales_intelligence"
+
+            endpoint_name:
+              type: string
+              description: "Databricks serving endpoint name for the KA"
+              examples:
+                - "product-knowledge-assistant"
+
+            description:
+              type: string
+              description: "Tool description shown to LLM"
+              minLength: 10
+              maxLength: 500
+
+            max_tokens:
+              type: integer
+              default: 2000
+              minimum: 1
+              maximum: 8000
+              description: "Maximum tokens in KA response"
+
+            temperature:
+              type: number
+              default: 0.3
+              minimum: 0.0
+              maximum: 2.0
+              description: "Response temperature for KA inference"
+
+  # Plugin System Configuration
+  plugins:
+    type: object
+    description: "Configuration for external plugin system"
+    properties:
+      enabled:
+        type: boolean
+        default: true
+        description: "Enable plugin discovery and loading"
+
+      discover_entry_points:
+        type: boolean
+        default: true
+        description: "Discover plugins via Python entry points"
+
+    # Additional properties are plugin-specific configs
+    additionalProperties:
+      type: object
+      description: "Plugin-specific configuration (keyed by plugin name)"
+
+# Example configuration
+examples:
+  - vector_search:
+      enabled: true
+      endpoints:
+        - name: product_docs
+          endpoint: vs-production
+          index: main.knowledge.product_documentation
+          description: "Search Databricks product documentation for features and best practices"
+          num_results: 5
+          columns_to_return:
+            - title
+            - content
+            - url
+
+    knowledge_assistants:
+      enabled: true
+      endpoints:
+        - name: product_expert
+          endpoint_name: product-knowledge-assistant
+          description: "Query the product expert for detailed Databricks information"
+          max_tokens: 2000
+          temperature: 0.3
+
+    plugins:
+      enabled: true
+      discover_entry_points: true
+      my_custom_plugin:
+        api_endpoint: "https://api.example.com"
+        enable_feature_x: true

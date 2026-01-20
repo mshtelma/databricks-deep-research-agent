@@ -4,8 +4,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.agent.nodes.researcher import SearchQueriesOutput, _generate_search_queries
-from src.services.llm.types import LLMResponse
+from deep_research.agent.nodes.researcher import SearchQueriesOutput, _generate_search_queries
+from deep_research.services.llm.types import LLMResponse
 
 
 @pytest.fixture

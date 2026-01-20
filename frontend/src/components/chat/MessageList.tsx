@@ -138,11 +138,11 @@ export function MessageList({
           <AgentMessage
             message={{
               id: 'streaming',
-              chat_id: '',
+              chatId: '',
               role: 'agent',
               content: streamingContent,
-              created_at: new Date().toISOString(),
-              is_edited: false,
+              createdAt: new Date().toISOString(),
+              isEdited: false,
             }}
             isStreaming={true}
             // Pass streaming claims for real-time citation display with verdict colors
@@ -158,11 +158,11 @@ export function MessageList({
         <AgentMessage
           message={{
             id: 'completed-stream',
-            chat_id: '',
+            chatId: '',
             role: 'agent',
             content: streamingContent,
-            created_at: new Date().toISOString(),
-            is_edited: false,
+            createdAt: new Date().toISOString(),
+            isEdited: false,
           }}
           isStreaming={false}
           // Pass streaming claims for citation display after streaming completes

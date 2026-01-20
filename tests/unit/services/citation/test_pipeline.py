@@ -19,20 +19,20 @@ from uuid import uuid4
 
 import pytest
 
-from src.agent.state import ClaimInfo, EvidenceInfo, SourceInfo
-from src.services.citation.claim_generator import InterleavedClaim, InterleavedGenerator
-from src.services.citation.confidence_classifier import (
+from deep_research.agent.state import ClaimInfo, EvidenceInfo, SourceInfo
+from deep_research.services.citation.claim_generator import InterleavedClaim, InterleavedGenerator
+from deep_research.services.citation.confidence_classifier import (
     ConfidenceClassifier,
     ConfidenceLevel,
 )
-from src.services.citation.evidence_selector import EvidencePreSelector, RankedEvidence
-from src.services.citation.isolated_verifier import IsolatedVerifier
-from src.services.citation.numeric_verifier import NumericVerifier
-from src.services.citation.pipeline import (
+from deep_research.services.citation.evidence_selector import EvidencePreSelector, RankedEvidence
+from deep_research.services.citation.isolated_verifier import IsolatedVerifier
+from deep_research.services.citation.numeric_verifier import NumericVerifier
+from deep_research.services.citation.pipeline import (
     CitationVerificationPipeline,
     VerificationEvent,
 )
-from src.services.llm.client import LLMClient
+from deep_research.services.llm.client import LLMClient
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +224,7 @@ def mock_app_config():
 @pytest.fixture
 def patch_app_config(mock_app_config: Any) -> Any:
     """Patch get_app_config to return mock config."""
-    with patch("src.core.app_config.get_app_config", return_value=mock_app_config):
+    with patch("deep_research.core.app_config.get_app_config", return_value=mock_app_config):
         yield mock_app_config
 
 
@@ -1069,12 +1069,12 @@ class TestStage7GreyReferencePrevention:
 
         This prevents grey references (claims with citation_key but no evidence).
         """
-        from src.services.citation.atomic_decomposer import (
+        from deep_research.services.citation.atomic_decomposer import (
             AtomicFact,
             ClaimDecomposition,
             ClaimRevision,
         )
-        from src.services.citation.pipeline import CitationVerificationPipeline
+        from deep_research.services.citation.pipeline import CitationVerificationPipeline
 
         pipeline = CitationVerificationPipeline(mock_llm_client)
 
@@ -1173,12 +1173,12 @@ class TestStage7GreyReferencePrevention:
         self, mock_llm_client: MagicMock, patch_app_config: Any
     ) -> None:
         """Stage 7 SHOULD update citation_key when new key IS in evidence map."""
-        from src.services.citation.atomic_decomposer import (
+        from deep_research.services.citation.atomic_decomposer import (
             AtomicFact,
             ClaimDecomposition,
             ClaimRevision,
         )
-        from src.services.citation.pipeline import CitationVerificationPipeline
+        from deep_research.services.citation.pipeline import CitationVerificationPipeline
 
         pipeline = CitationVerificationPipeline(mock_llm_client)
 

@@ -5,8 +5,8 @@ from uuid import uuid4
 
 import pytest
 
-from src.agent.nodes.reflector import ReflectorOutput, run_reflector
-from src.agent.state import (
+from deep_research.agent.nodes.reflector import ReflectorOutput, run_reflector
+from deep_research.agent.state import (
     Plan,
     PlanStep,
     ReflectionDecision,
@@ -14,7 +14,7 @@ from src.agent.state import (
     StepStatus,
     StepType,
 )
-from src.services.llm.types import LLMResponse
+from deep_research.services.llm.types import LLMResponse
 
 
 @pytest.fixture
