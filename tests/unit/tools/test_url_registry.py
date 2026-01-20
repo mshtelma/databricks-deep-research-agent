@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from src.agent.tools.url_registry import IndexedUrl, UrlRegistry
+from deep_research.agent.tools.url_registry import IndexedUrl, UrlRegistry
 
 
 class TestUrlRegistry:

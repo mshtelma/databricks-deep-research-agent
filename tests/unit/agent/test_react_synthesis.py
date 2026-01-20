@@ -13,25 +13,25 @@ from uuid import uuid4
 
 import pytest
 
-from src.agent.nodes.react_synthesizer import (
+from deep_research.agent.nodes.react_synthesizer import (
     deduplicate_report,
     parse_tagged_content,
     strip_thinking_text,
     validate_citations_preserved,
 )
-from src.agent.tools.evidence_registry import (
+from deep_research.agent.tools.evidence_registry import (
     EvidenceRegistry,
     IndexedEvidence,
     RetrievalContext,
 )
-from src.agent.tools.synthesis_tools import (
+from deep_research.agent.tools.synthesis_tools import (
     SYNTHESIS_TOOLS,
     format_search_results,
     format_snippet,
     get_synthesis_tool_by_name,
     get_synthesis_tool_names,
 )
-from src.services.citation.evidence_selector import RankedEvidence
+from deep_research.services.citation.evidence_selector import RankedEvidence
 
 
 # ============================================================================

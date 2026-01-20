@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.core.app_config import (
+from deep_research.core.app_config import (
     AgentsConfig,
     AppConfig,
     BraveSearchConfig,
@@ -248,7 +248,7 @@ class TestLoadAppConfig:
 
     def test_uses_default_when_file_missing(self) -> None:
         """Test falls back to default config when file missing."""
-        with patch("src.core.app_config.DEFAULT_CONFIG_PATH", Path("/nonexistent/path.yaml")):
+        with patch("deep_research.core.app_config.DEFAULT_CONFIG_PATH", Path("/nonexistent/path.yaml")):
             clear_config_cache()
             config = load_app_config()
             assert isinstance(config, AppConfig)

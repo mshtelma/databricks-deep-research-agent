@@ -6,8 +6,8 @@ from uuid import uuid4
 
 import pytest
 
-from src.models.message import MessageRole
-from src.services.message_service import MessageService
+from deep_research.models.message import MessageRole
+from deep_research.services.message_service import MessageService
 
 
 class TestMessageServiceCreate:

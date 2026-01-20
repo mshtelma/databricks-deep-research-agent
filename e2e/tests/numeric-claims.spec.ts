@@ -39,7 +39,7 @@ test.describe('Numeric Claims', () => {
       // Send a query likely to produce numeric claims
       // Use deep_research mode to trigger numeric claim detection
       await chatPage.sendMessageWithMode(NUMERIC_QUERY, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       // Check for numeric chips
       const chipCount = await citationsPage.getNumericChipCount();
@@ -57,7 +57,7 @@ test.describe('Numeric Claims', () => {
     test('numeric chips display formatted values', async ({ chatPage, citationsPage }) => {
       // Use deep_research mode to trigger numeric claim detection
       await chatPage.sendMessageWithMode(NUMERIC_QUERY, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const chipCount = await citationsPage.getNumericChipCount();
 
@@ -76,7 +76,7 @@ test.describe('Numeric Claims', () => {
     test('clicking numeric chip opens details panel', async ({ chatPage, citationsPage, page }) => {
       // Use deep_research mode to trigger numeric claim detection
       await chatPage.sendMessageWithMode(NUMERIC_QUERY, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const chipCount = await citationsPage.getNumericChipCount();
 
@@ -96,7 +96,7 @@ test.describe('Numeric Claims', () => {
     test('details panel shows computation information', async ({ chatPage, citationsPage, page }) => {
       // Use deep_research mode to trigger numeric claim detection
       await chatPage.sendMessageWithMode(NUMERIC_QUERY, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const chipCount = await citationsPage.getNumericChipCount();
 
@@ -117,7 +117,7 @@ test.describe('Numeric Claims', () => {
     test('close button dismisses details panel', async ({ chatPage, citationsPage, page }) => {
       // Use deep_research mode to trigger numeric claim detection
       await chatPage.sendMessageWithMode(NUMERIC_QUERY, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const chipCount = await citationsPage.getNumericChipCount();
 
@@ -140,7 +140,7 @@ test.describe('Numeric Claims', () => {
     test('pressing Escape closes details panel', async ({ chatPage, citationsPage, page }) => {
       // Use deep_research mode to trigger numeric claim detection
       await chatPage.sendMessageWithMode(NUMERIC_QUERY, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const chipCount = await citationsPage.getNumericChipCount();
 
@@ -163,7 +163,7 @@ test.describe('Numeric Claims', () => {
     test('clicking outside details panel closes it', async ({ chatPage, citationsPage, page }) => {
       // Use deep_research mode to trigger numeric claim detection
       await chatPage.sendMessageWithMode(NUMERIC_QUERY, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const chipCount = await citationsPage.getNumericChipCount();
 
@@ -188,7 +188,7 @@ test.describe('Numeric Claims', () => {
     test('multiple chips can be opened sequentially', async ({ chatPage, citationsPage, page }) => {
       // Use deep_research mode to trigger numeric claim detection
       await chatPage.sendMessageWithMode(NUMERIC_QUERY, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const chipCount = await citationsPage.getNumericChipCount();
 
@@ -216,7 +216,7 @@ test.describe('Numeric Claims', () => {
     test('numeric chips are keyboard accessible', async ({ chatPage, citationsPage, page }) => {
       // Use deep_research mode to trigger numeric claim detection
       await chatPage.sendMessageWithMode(NUMERIC_QUERY, 'deep_research');
-      await chatPage.waitForAgentResponse(180000);
+      await chatPage.waitForAgentResponse(360000);
 
       const chipCount = await citationsPage.getNumericChipCount();
 

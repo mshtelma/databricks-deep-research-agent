@@ -208,7 +208,7 @@ def mock_citation_config():
                 self.correction_method = CorrectionMethod()
 
     # Import the real GenerationMode enum to ensure proper comparison
-    from src.core.app_config import GenerationMode as RealGenerationMode
+    from deep_research.core.app_config import GenerationMode as RealGenerationMode
 
     @dataclass
     class CitationVerificationConfig:
@@ -257,7 +257,7 @@ def mock_citation_config():
 @pytest.fixture(autouse=True)
 def reset_config_cache():
     """Reset config cache before and after each test."""
-    from src.core.app_config import clear_config_cache
+    from deep_research.core.app_config import clear_config_cache
     clear_config_cache()
     yield
     clear_config_cache()
@@ -267,14 +267,14 @@ def reset_config_cache():
 def patch_app_config(mock_citation_config):
     """Patch get_app_config to return mock config in all citation modules."""
     with (
-        patch("src.core.app_config.get_app_config", return_value=mock_citation_config),
-        patch("src.core.app_config.load_app_config", return_value=mock_citation_config),
-        patch("src.services.citation.pipeline.get_app_config", return_value=mock_citation_config),
-        patch("src.services.citation.evidence_selector.get_app_config", return_value=mock_citation_config),
-        patch("src.services.citation.claim_generator.get_app_config", return_value=mock_citation_config),
-        patch("src.services.citation.isolated_verifier.get_app_config", return_value=mock_citation_config),
-        patch("src.services.citation.numeric_verifier.get_app_config", return_value=mock_citation_config),
-        patch("src.services.citation.confidence_classifier.get_app_config", return_value=mock_citation_config),
-        patch("src.services.citation.citation_corrector.get_app_config", return_value=mock_citation_config),
+        patch("deep_research.core.app_config.get_app_config", return_value=mock_citation_config),
+        patch("deep_research.core.app_config.load_app_config", return_value=mock_citation_config),
+        patch("deep_research.services.citation.pipeline.get_app_config", return_value=mock_citation_config),
+        patch("deep_research.services.citation.evidence_selector.get_app_config", return_value=mock_citation_config),
+        patch("deep_research.services.citation.claim_generator.get_app_config", return_value=mock_citation_config),
+        patch("deep_research.services.citation.isolated_verifier.get_app_config", return_value=mock_citation_config),
+        patch("deep_research.services.citation.numeric_verifier.get_app_config", return_value=mock_citation_config),
+        patch("deep_research.services.citation.confidence_classifier.get_app_config", return_value=mock_citation_config),
+        patch("deep_research.services.citation.citation_corrector.get_app_config", return_value=mock_citation_config),
     ):
         yield mock_citation_config

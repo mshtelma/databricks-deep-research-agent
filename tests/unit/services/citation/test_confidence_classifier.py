@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.services.citation.confidence_classifier import (
+from deep_research.services.citation.confidence_classifier import (
     ConfidenceClassifier,
     ConfidenceLevel,
     ConfidenceResult,

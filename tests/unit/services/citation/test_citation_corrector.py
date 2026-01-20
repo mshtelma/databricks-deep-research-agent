@@ -5,13 +5,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.services.citation.citation_corrector import (
+from deep_research.services.citation.citation_corrector import (
     CitationCorrector,
     CorrectionMetrics,
     CorrectionResult,
     CorrectionType,
 )
-from src.services.citation.evidence_selector import RankedEvidence
+from deep_research.services.citation.evidence_selector import RankedEvidence
 
 from .conftest import MockLLMResponse
 

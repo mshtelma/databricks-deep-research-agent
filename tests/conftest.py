@@ -26,7 +26,7 @@ if _env_file.exists():
 # Configure logging with third-party suppression
 # This ensures our custom logging (agent transitions, tool calls, etc.) is visible
 # while suppressing verbose DEBUG output from openai, httpx, httpcore, etc.
-from src.middleware.logging import setup_logging
+from deep_research.middleware.logging import setup_logging
 
 _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 setup_logging(log_level=_log_level, log_format="text")

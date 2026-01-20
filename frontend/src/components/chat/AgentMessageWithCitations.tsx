@@ -6,7 +6,7 @@
  */
 
 import * as React from 'react';
-import { Message, Source, ResearchPlan } from '@/types';
+import { Message, Source, ResearchPlan, SourceType } from '@/types';
 import { useCitations } from '@/hooks/useCitations';
 import { AgentMessage } from './AgentMessage';
 
@@ -76,7 +76,9 @@ export function AgentMessageWithCitations({
             url: sourceUrl,
             title: span?.source?.title || span?.sectionHeading || 'Unknown Source',
             snippet: span?.quoteText?.slice(0, 150) ?? null,
-            relevance_score: span?.relevanceScore ?? null,
+            relevanceScore: span?.relevanceScore ?? null,
+            sourceType: ((span?.source as { sourceType?: string })?.sourceType ?? 'web') as SourceType,
+            sourceMetadata: (span?.source as { sourceMetadata?: Record<string, unknown> })?.sourceMetadata ?? null,
           });
         }
       });

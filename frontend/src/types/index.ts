@@ -20,34 +20,38 @@ export interface Chat {
   id: string
   title: string | null
   status: ChatStatus
-  created_at: string
-  updated_at: string
-  message_count: number
+  createdAt: string
+  updatedAt: string
+  messageCount: number
 }
 
 export interface Message {
   id: string
-  chat_id: string
+  chatId: string
   role: MessageRole
   content: string
-  created_at: string
-  is_edited: boolean
-  research_session?: ResearchSession | null
+  createdAt: string
+  isEdited: boolean
+  researchSession?: ResearchSession | null
 }
+
+export type SourceType = 'web' | 'vector_search' | 'knowledge_assistant' | 'custom'
 
 export interface Source {
   id: string
   url: string
   title: string | null
   snippet: string | null
-  relevance_score: number | null
+  relevanceScore: number | null
+  sourceType: SourceType
+  sourceMetadata: Record<string, unknown> | null
 }
 
 export interface QueryClassification {
   complexity: 'simple' | 'moderate' | 'complex'
-  follow_up_type: 'new_topic' | 'clarification' | 'complex_follow_up'
-  is_ambiguous: boolean
-  clarifying_questions: string[]
+  followUpType: 'new_topic' | 'clarification' | 'complex_follow_up'
+  isAmbiguous: boolean
+  clarifyingQuestions: string[]
   reasoning: string
 }
 
@@ -55,8 +59,8 @@ export interface PlanStep {
   id: string
   title: string
   description: string
-  step_type: 'research' | 'analysis'
-  needs_search: boolean
+  stepType: 'research' | 'analysis'
+  needsSearch: boolean
   status: 'pending' | 'in_progress' | 'completed' | 'skipped'
   observation: string | null
 }
@@ -67,29 +71,29 @@ export interface ResearchPlan {
   thought: string
   steps: PlanStep[]
   iteration: number
-  created_at: string
+  createdAt: string
 }
 
 export interface ResearchSession {
   id: string
-  query_classification: QueryClassification | null
-  research_depth: ResearchDepth
+  queryClassification: QueryClassification | null
+  researchDepth: ResearchDepth
   status: ResearchStatus
-  current_agent: string | null
+  currentAgent: string | null
   plan: ResearchPlan | null
-  current_step_index: number | null
-  plan_iterations: number
-  started_at: string
-  completed_at: string | null
+  currentStepIndex: number | null
+  planIterations: number
+  startedAt: string
+  completedAt: string | null
   sources: Source[]
 }
 
 export interface UserPreferences {
-  system_instructions: string | null
-  default_depth: ResearchDepth
-  default_query_mode: QueryMode
-  ui_preferences: Record<string, unknown>
-  updated_at: string
+  systemInstructions: string | null
+  defaultDepth: ResearchDepth
+  defaultQueryMode: QueryMode
+  uiPreferences: Record<string, unknown>
+  updatedAt: string
 }
 
 // API Request/Response Types
@@ -105,13 +109,13 @@ export interface UpdateChatRequest {
 
 export interface SendMessageRequest {
   content: string
-  research_depth?: ResearchDepth
+  researchDepth?: ResearchDepth
 }
 
 export interface SendMessageResponse {
-  user_message: Message
-  agent_message_id: string
-  research_session_id: string
+  userMessage: Message
+  agentMessageId: string
+  researchSessionId: string
 }
 
 export interface PaginatedResponse<T> {
@@ -150,128 +154,128 @@ export type StreamEventType =
   | 'persistence_completed'
 
 export interface BaseStreamEvent {
-  event_type: StreamEventType
+  eventType: StreamEventType
   timestamp: string
   /** Stable unique ID for React keys (added by useStreamingQuery) */
   _eventId?: string
 }
 
 export interface AgentStartedEvent extends BaseStreamEvent {
-  event_type: 'agent_started'
+  eventType: 'agent_started'
   agent: string
-  model_tier: string
+  modelTier: string
 }
 
 export interface AgentCompletedEvent extends BaseStreamEvent {
-  event_type: 'agent_completed'
+  eventType: 'agent_completed'
   agent: string
-  duration_ms: number
+  durationMs: number
 }
 
 export interface ResearchStartedEvent extends BaseStreamEvent {
-  event_type: 'research_started'
-  message_id: string
-  research_session_id: string
+  eventType: 'research_started'
+  messageId: string
+  researchSessionId: string
 }
 
 export interface ClarificationNeededEvent extends BaseStreamEvent {
-  event_type: 'clarification_needed'
+  eventType: 'clarification_needed'
   questions: string[]
   round: number
 }
 
 export interface PlanCreatedEvent extends BaseStreamEvent {
-  event_type: 'plan_created'
-  plan_id: string
+  eventType: 'plan_created'
+  planId: string
   title: string
   thought: string
-  steps: { id: string; title: string; step_type: string; needs_search: boolean }[]
+  steps: { id: string; title: string; stepType: string; needsSearch: boolean }[]
   iteration: number
 }
 
 export interface StepStartedEvent extends BaseStreamEvent {
-  event_type: 'step_started'
-  step_index: number
-  step_id: string
-  step_title: string
-  step_type: string
+  eventType: 'step_started'
+  stepIndex: number
+  stepId: string
+  stepTitle: string
+  stepType: string
 }
 
 export interface StepCompletedEvent extends BaseStreamEvent {
-  event_type: 'step_completed'
-  step_index: number
-  step_id: string
-  observation_summary: string
-  sources_found: number
+  eventType: 'step_completed'
+  stepIndex: number
+  stepId: string
+  observationSummary: string
+  sourcesFound: number
 }
 
 export interface ToolCallEvent extends BaseStreamEvent {
-  event_type: 'tool_call'
-  tool_name: string // 'web_search' | 'web_crawl'
-  tool_args: Record<string, unknown>
-  call_number: number
+  eventType: 'tool_call'
+  toolName: string // 'web_search' | 'web_crawl'
+  toolArgs: Record<string, unknown>
+  callNumber: number
 }
 
 export interface ToolResultEvent extends BaseStreamEvent {
-  event_type: 'tool_result'
-  tool_name: string
-  result_preview: string
-  sources_crawled: number
+  eventType: 'tool_result'
+  toolName: string
+  resultPreview: string
+  sourcesCrawled: number
 }
 
 export interface ReflectionDecisionEvent extends BaseStreamEvent {
-  event_type: 'reflection_decision'
+  eventType: 'reflection_decision'
   decision: 'continue' | 'adjust' | 'complete'
   reasoning: string
-  suggested_changes: string[] | null
+  suggestedChanges: string[] | null
 }
 
 export interface SynthesisStartedEvent extends BaseStreamEvent {
-  event_type: 'synthesis_started'
-  total_observations: number
-  total_sources: number
+  eventType: 'synthesis_started'
+  totalObservations: number
+  totalSources: number
 }
 
 export interface SynthesisProgressEvent extends BaseStreamEvent {
-  event_type: 'synthesis_progress'
-  content_chunk: string
+  eventType: 'synthesis_progress'
+  contentChunk: string
 }
 
 export interface ResearchCompletedEvent extends BaseStreamEvent {
-  event_type: 'research_completed'
-  session_id: string
-  total_steps_executed: number
-  total_steps_skipped: number
-  plan_iterations: number
-  total_duration_ms: number
+  eventType: 'research_completed'
+  sessionId: string
+  totalStepsExecuted: number
+  totalStepsSkipped: number
+  planIterations: number
+  totalDurationMs: number
 }
 
 export interface StreamErrorEvent extends BaseStreamEvent {
-  event_type: 'error'
-  error_code: string
-  error_message: string
+  eventType: 'error'
+  errorCode: string
+  errorMessage: string
   recoverable: boolean
   /** Full Python traceback for debugging */
-  stack_trace?: string
+  stackTrace?: string
   /** Exception class name (e.g., "ValueError") */
-  error_type?: string
+  errorType?: string
 }
 
 export interface PersistenceCompletedEvent extends BaseStreamEvent {
-  event_type: 'persistence_completed'
-  chat_id: string
-  message_id: string
-  research_session_id: string
-  chat_title: string
-  was_draft: boolean
+  eventType: 'persistence_completed'
+  chatId: string
+  messageId: string
+  researchSessionId: string
+  chatTitle: string
+  wasDraft: boolean
   counts: Record<string, number>
 }
 
 // Stage 7 content revision event - sent after verification retrieval applies softening
 export interface ContentRevisedEvent extends BaseStreamEvent {
-  event_type: 'content_revised'
+  eventType: 'content_revised'
   content: string
-  revision_count: number
+  revisionCount: number
 }
 
 // Re-export citation stream events from citation types

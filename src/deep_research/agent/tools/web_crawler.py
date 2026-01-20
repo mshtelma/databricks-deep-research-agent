@@ -1,0 +1,670 @@
+"""Web crawler tool for fetching and parsing web pages.
+
+Provides both:
+1. Legacy functional interface: `web_crawl()` async function, `WebCrawler` class
+2. ResearchTool protocol: `WebCrawlTool` class for plugin system
+"""
+
+import asyncio
+import ipaddress
+import random
+import socket
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+from urllib.parse import urlparse
+
+import httpx
+import mlflow
+from mlflow.entities import SpanType
+from trafilatura import bare_extraction
+
+from deep_research.agent.tools.base import (
+    ResearchContext,
+    ResearchTool,
+    ToolDefinition,
+    ToolResult,
+)
+from deep_research.core.app_config import get_app_config
+from deep_research.core.logging_utils import (
+    get_logger,
+    log_crawl_error,
+    log_crawl_request,
+    log_crawl_response,
+)
+from deep_research.core.tracing_constants import (
+    ATTR_CRAWL_FAILED,
+    ATTR_CRAWL_SUCCESSFUL,
+    ATTR_CRAWL_URLS_COUNT,
+    list_to_attr,
+    tool_span_name,
+)
+from deep_research.services.search.domain_filter import DomainFilter
+
+logger = get_logger(__name__)
+
+# Maximum content length to fetch (50KB)
+MAX_CONTENT_LENGTH = 50000
+
+# Timeout for fetching pages
+FETCH_TIMEOUT = 10.0
+
+# User agents for requests - rotate between common browser UAs to reduce blocking
+# Using browser-like UAs significantly improves crawl success rate on sites with bot detection
+USER_AGENTS = [
+    # Chrome on Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    # Chrome on macOS
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    # Firefox on Windows
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    # Safari on macOS
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+]
+
+# Rate limiting: minimum interval between requests (seconds)
+CRAWL_RATE_LIMIT_INTERVAL = 0.5  # 2 requests per second max
+
+# Retry settings for 403/blocked responses
+MAX_RETRY_ATTEMPTS = 2
+RETRY_BACKOFF_BASE = 1.0  # seconds
+
+# Private IP ranges for SSRF protection
+PRIVATE_IP_RANGES = [
+    ipaddress.ip_network("127.0.0.0/8"),      # Loopback
+    ipaddress.ip_network("10.0.0.0/8"),       # Private Class A
+    ipaddress.ip_network("172.16.0.0/12"),    # Private Class B
+    ipaddress.ip_network("192.168.0.0/16"),   # Private Class C
+    ipaddress.ip_network("169.254.0.0/16"),   # Link-local
+    ipaddress.ip_network("::1/128"),          # IPv6 loopback
+    ipaddress.ip_network("fc00::/7"),         # IPv6 unique local
+    ipaddress.ip_network("fe80::/10"),        # IPv6 link-local
+]
+
+
+def _is_private_ip(hostname: str) -> bool:
+    """Check if hostname resolves to a private/internal IP address.
+
+    Args:
+        hostname: The hostname to check.
+
+    Returns:
+        True if the hostname resolves to a private IP, False otherwise.
+    """
+    try:
+        # Resolve hostname to IP addresses
+        addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC)
+        for family, _, _, _, sockaddr in addr_info:
+            ip_str = sockaddr[0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+                # Check if IP is in any private range
+                if any(ip in network for network in PRIVATE_IP_RANGES):
+                    return True
+                # Also check is_private property (catches some edge cases)
+                if ip.is_private or ip.is_loopback or ip.is_link_local:
+                    return True
+            except ValueError:
+                continue
+        return False
+    except socket.gaierror:
+        # DNS resolution failed - allow the request to fail naturally
+        return False
+
+
+@dataclass
+class CrawlResult:
+    """Result from crawling a single URL."""
+
+    url: str
+    title: str | None
+    content: str
+    success: bool
+    error: str | None = None
+
+
+@dataclass
+class CrawlOutput:
+    """Output from crawling multiple URLs."""
+
+    results: list[CrawlResult]
+    successful_count: int
+    failed_count: int
+
+
+class WebCrawler:
+    """Async web crawler for fetching and parsing pages."""
+
+    def __init__(self, max_concurrent: int = 5):
+        """Initialize web crawler.
+
+        Args:
+            max_concurrent: Maximum concurrent requests.
+        """
+        self._max_concurrent = max_concurrent
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        # Don't set User-Agent here - we'll set it per-request for rotation
+        self._client = httpx.AsyncClient(
+            timeout=FETCH_TIMEOUT,
+            follow_redirects=True,
+        )
+
+        # Rate limiting state
+        self._rate_lock = asyncio.Lock()
+        self._last_request: datetime | None = None
+
+        # Domain filtering (second line of defense after search filtering)
+        search_config = get_app_config().search
+        self._domain_filter = DomainFilter(search_config.domain_filter)
+
+    async def _rate_limit(self) -> None:
+        """Apply rate limiting between crawl requests.
+
+        Enforces minimum interval between requests to reduce blocking.
+        """
+        async with self._rate_lock:
+            if self._last_request:
+                elapsed = (datetime.now(UTC) - self._last_request).total_seconds()
+                if elapsed < CRAWL_RATE_LIMIT_INTERVAL:
+                    await asyncio.sleep(CRAWL_RATE_LIMIT_INTERVAL - elapsed)
+            self._last_request = datetime.now(UTC)
+
+    async def _fetch_url(self, url: str) -> CrawlResult:
+        """Fetch and parse a single URL with retry on 403 errors.
+
+        Implements retry logic with User-Agent rotation to handle sites
+        that block based on User-Agent or rate limiting.
+        """
+        # Apply rate limiting before starting
+        await self._rate_limit()
+
+        # Pre-flight checks (domain filter, URL validation, SSRF) - no retry needed
+        preflight_result = self._preflight_checks(url)
+        if preflight_result is not None:
+            return preflight_result
+
+        # Try with different User-Agents on 403 errors
+        last_result: CrawlResult | None = None
+        for attempt in range(MAX_RETRY_ATTEMPTS + 1):
+            # Rotate User-Agent on each attempt
+            user_agent = USER_AGENTS[attempt % len(USER_AGENTS)]
+
+            result = await self._fetch_single(url, user_agent)
+
+            # Success or non-retryable error - return immediately
+            if result.success:
+                return result
+
+            last_result = result
+
+            # Only retry on 403/blocked errors
+            error = result.error or ""
+            if "403" not in error and "blocked" not in error.lower():
+                return result
+
+            # Don't wait after final attempt
+            if attempt < MAX_RETRY_ATTEMPTS:
+                # Exponential backoff: 1s, 2s, ...
+                wait_time = RETRY_BACKOFF_BASE * (attempt + 1)
+                # Add jitter to avoid thundering herd
+                wait_time += random.uniform(0, 0.5)
+                logger.info(
+                    "CRAWL_RETRY",
+                    url=url[:80],
+                    attempt=attempt + 1,
+                    max_attempts=MAX_RETRY_ATTEMPTS + 1,
+                    wait_seconds=round(wait_time, 2),
+                )
+                await asyncio.sleep(wait_time)
+
+        # All retries exhausted
+        return last_result or CrawlResult(
+            url=url,
+            title=None,
+            content="",
+            success=False,
+            error="Max retries exceeded",
+        )
+
+    def _preflight_checks(self, url: str) -> CrawlResult | None:
+        """Perform pre-flight checks before fetching.
+
+        Returns CrawlResult if checks fail, None if all checks pass.
+        """
+        # Domain filter check (second line of defense)
+        if self._domain_filter.is_active:
+            match_result = self._domain_filter.is_allowed(url)
+            if not match_result.allowed:
+                logger.warning(
+                    "CRAWL_DOMAIN_BLOCKED",
+                    url=url[:80],
+                    reason=match_result.reason,
+                )
+                return CrawlResult(
+                    url=url,
+                    title=None,
+                    content="",
+                    success=False,
+                    error=f"Domain not allowed: {match_result.reason}",
+                )
+
+        # Validate URL
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            error = ValueError("Invalid URL scheme")
+            log_crawl_error(logger, url=url, error=error)
+            return CrawlResult(
+                url=url,
+                title=None,
+                content="",
+                success=False,
+                error="Invalid URL scheme",
+            )
+
+        # SSRF protection: reject requests to private/internal IPs
+        hostname = parsed.hostname
+        if hostname and _is_private_ip(hostname):
+            error = ValueError("Access to private IP ranges is not allowed")
+            log_crawl_error(logger, url=url, error=error)
+            return CrawlResult(
+                url=url,
+                title=None,
+                content="",
+                success=False,
+                error="Access to private IP ranges is not allowed",
+            )
+
+        return None
+
+    async def _fetch_single(self, url: str, user_agent: str) -> CrawlResult:
+        """Fetch and parse a single URL with specified User-Agent."""
+        async with self._semaphore:
+            log_crawl_request(logger, url=url)
+            start_time = time.perf_counter()
+
+            try:
+                # Fetch page with specific User-Agent
+                response = await self._client.get(
+                    url,
+                    headers={"User-Agent": user_agent},
+                )
+                response.raise_for_status()
+
+                duration_ms = (time.perf_counter() - start_time) * 1000
+
+                # Check content type
+                content_type = response.headers.get("content-type", "")
+                if "text/html" not in content_type and "text/plain" not in content_type:
+                    logger.warning(
+                        "CRAWL_UNSUPPORTED_TYPE",
+                        url=url[:80],
+                        content_type=content_type,
+                    )
+                    return CrawlResult(
+                        url=url,
+                        title=None,
+                        content="",
+                        success=False,
+                        error=f"Unsupported content type: {content_type}",
+                    )
+
+                # Parse HTML
+                html = response.text[:MAX_CONTENT_LENGTH * 2]  # Limit HTML size
+                content, title = self._extract_content(html, url)
+
+                # Truncate content if needed
+                if len(content) > MAX_CONTENT_LENGTH:
+                    content = content[:MAX_CONTENT_LENGTH] + "..."
+
+                # Log successful crawl
+                log_crawl_response(
+                    logger,
+                    url=url,
+                    status_code=response.status_code,
+                    content_length=len(content),
+                    duration_ms=duration_ms,
+                )
+
+                return CrawlResult(
+                    url=url,
+                    title=title,
+                    content=content,
+                    success=True,
+                )
+
+            except httpx.HTTPStatusError as e:
+                log_crawl_error(logger, url=url, error=e)
+                return CrawlResult(
+                    url=url,
+                    title=None,
+                    content="",
+                    success=False,
+                    error=f"HTTP {e.response.status_code}",
+                )
+            except httpx.RequestError as e:
+                log_crawl_error(logger, url=url, error=e)
+                return CrawlResult(
+                    url=url,
+                    title=None,
+                    content="",
+                    success=False,
+                    error=str(e),
+                )
+            except Exception as e:
+                log_crawl_error(logger, url=url, error=e)
+                return CrawlResult(
+                    url=url,
+                    title=None,
+                    content="",
+                    success=False,
+                    error=str(e),
+                )
+
+    def _extract_content(self, html: str, base_url: str) -> tuple[str, str | None]:
+        """Extract text content and title from HTML using trafilatura.
+
+        Trafilatura automatically handles boilerplate removal (headers, footers, ads,
+        navigation) using sophisticated heuristics, achieving 0.909 F-Score in
+        content extraction benchmarks.
+
+        Args:
+            html: HTML content.
+            base_url: Base URL for metadata extraction and link resolution.
+
+        Returns:
+            Tuple of (content, title).
+        """
+        # bare_extraction returns a Document object in trafilatura 2.0+
+        # With as_dict=False (default), returns Document with .title and .text attributes
+        doc = bare_extraction(
+            html,
+            url=base_url,
+            include_comments=False,
+            include_tables=True,
+            include_links=False,
+            with_metadata=True,
+            as_dict=False,
+        )
+
+        if doc is None:
+            return "", None
+
+        # Document has .title and .text attributes directly
+        # Type narrowing: as_dict=False guarantees Document, not dict
+        return doc.text or "", doc.title  # type: ignore[union-attr]
+
+    async def crawl(self, urls: list[str]) -> CrawlOutput:
+        """Crawl multiple URLs concurrently.
+
+        Args:
+            urls: List of URLs to crawl.
+
+        Returns:
+            CrawlOutput with results.
+        """
+        # Deduplicate URLs
+        unique_urls = list(dict.fromkeys(urls))
+
+        # Fetch all URLs concurrently
+        tasks = [self._fetch_url(url) for url in unique_urls]
+        results = await asyncio.gather(*tasks)
+
+        successful = sum(1 for r in results if r.success)
+        failed = len(results) - successful
+
+        return CrawlOutput(
+            results=list(results),
+            successful_count=successful,
+            failed_count=failed,
+        )
+
+    async def close(self) -> None:
+        """Close the HTTP client."""
+        await self._client.aclose()
+
+
+async def web_crawl(
+    urls: list[str],
+    crawler: WebCrawler,
+    context: str | None = None,
+) -> CrawlOutput:
+    """Crawl multiple URLs and extract content.
+
+    Args:
+        urls: List of URLs to crawl.
+        crawler: WebCrawler instance (injected via DI).
+        context: Optional context for span naming (e.g., "step_1", "background").
+
+    Returns:
+        CrawlOutput with crawl results.
+    """
+    span_name = tool_span_name("web_crawl", context)
+
+    with mlflow.start_span(name=span_name, span_type=SpanType.TOOL) as span:
+        span.set_attributes({
+            ATTR_CRAWL_URLS_COUNT: len(urls),
+            "crawl.urls": list_to_attr(urls, max_items=5),
+        })
+
+        logger.info(f"Crawling {len(urls)} URLs")
+
+        output = await crawler.crawl(urls)
+
+        logger.info(f"Crawled {output.successful_count} successfully, {output.failed_count} failed")
+
+        # Set output attributes
+        span.set_attributes({
+            ATTR_CRAWL_SUCCESSFUL: output.successful_count,
+            ATTR_CRAWL_FAILED: output.failed_count,
+        })
+
+        return output
+
+
+# =============================================================================
+# ResearchTool Protocol Implementation
+# =============================================================================
+
+
+class WebCrawlTool:
+    """
+    Web crawl tool implementing the ResearchTool protocol.
+
+    This class wraps the WebCrawler for use with the plugin system and ToolRegistry.
+    It supports two modes:
+    1. Index-based: Crawl by source index from search results (requires url_registry in context)
+    2. URL-based: Crawl a direct URL
+
+    The index-based mode is the default for security - it prevents LLM URL hallucination.
+
+    Example:
+        crawler = WebCrawler()
+        tool = WebCrawlTool(crawler)
+        registry.register(tool)
+    """
+
+    def __init__(self, crawler: WebCrawler) -> None:
+        """Initialize the web crawl tool.
+
+        Args:
+            crawler: WebCrawler instance for fetching pages.
+        """
+        self._crawler = crawler
+        self._definition = ToolDefinition(
+            name="web_crawl",
+            description=(
+                "Fetch full content from a source. Use the INDEX number from search results "
+                "(0, 1, 2, etc.). Returns extracted page text for analysis."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "index": {
+                        "type": "integer",
+                        "description": "Index number of the source from search results (0, 1, 2, etc.)",
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "Direct URL to crawl (optional, use index if available)",
+                    },
+                },
+                "required": [],  # Either index or url must be provided
+            },
+        )
+
+    @property
+    def definition(self) -> ToolDefinition:
+        """Return tool definition for LLM function calling."""
+        return self._definition
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ResearchContext,
+    ) -> ToolResult:
+        """Execute web crawl and return page content.
+
+        Args:
+            arguments: Tool arguments containing 'index' or 'url'
+            context: Research context with url_registry for index resolution
+
+        Returns:
+            ToolResult with page content and source tracking
+        """
+        index = arguments.get("index")
+        url = arguments.get("url")
+
+        try:
+            # Resolve URL from index if provided
+            resolved_url: str | None = None
+            source_title: str | None = None
+
+            if index is not None:
+                # Get URL from registry using index
+                url_registry = context.url_registry
+                if not url_registry:
+                    return ToolResult(
+                        content="No URL registry available. Use 'url' parameter instead.",
+                        success=False,
+                        error="URL registry not available",
+                    )
+
+                # UrlRegistry stores entries as list, index maps to position
+                if hasattr(url_registry, "get_by_index"):
+                    entry = url_registry.get_by_index(index)
+                    if entry:
+                        resolved_url = entry.get("url") or entry.get("source_url")
+                        source_title = entry.get("title")
+                elif isinstance(url_registry, dict):
+                    # Fallback: dict-based registry
+                    for key, entry in url_registry.items():
+                        if entry.get("index") == index:
+                            resolved_url = entry.get("url") or entry.get("source_url")
+                            source_title = entry.get("title")
+                            break
+
+                if not resolved_url:
+                    return ToolResult(
+                        content=f"No URL found for index {index}. Valid indices are from search results.",
+                        success=False,
+                        error=f"Invalid index: {index}",
+                    )
+            elif url:
+                resolved_url = url
+            else:
+                return ToolResult(
+                    content="Either 'index' or 'url' must be provided.",
+                    success=False,
+                    error="Missing required parameter",
+                )
+
+            # Crawl the URL
+            output = await web_crawl(
+                urls=[resolved_url],
+                crawler=self._crawler,
+                context=f"chat_{context.chat_id}",
+            )
+
+            if not output.results:
+                return ToolResult(
+                    content="Failed to crawl URL.",
+                    success=False,
+                    error="No results returned",
+                )
+
+            result = output.results[0]
+
+            if not result.success:
+                return ToolResult(
+                    content=f"Failed to fetch page: {result.error}",
+                    success=False,
+                    error=result.error,
+                )
+
+            # Build source for citation tracking
+            sources: list[dict[str, Any]] = [{
+                "type": "web",
+                "url": resolved_url,
+                "title": result.title or source_title or resolved_url,
+                "content_length": len(result.content),
+                "crawled_at": datetime.now(UTC).isoformat(),
+            }]
+
+            # Format content with title header
+            title_display = result.title or source_title or "Web Page"
+            content = f"# {title_display}\n\nURL: {resolved_url}\n\n{result.content}"
+
+            return ToolResult(
+                content=content,
+                success=True,
+                sources=sources,
+                data={
+                    "url": resolved_url,
+                    "title": result.title,
+                    "content_length": len(result.content),
+                },
+            )
+
+        except Exception as e:
+            logger.error("WEB_CRAWL_ERROR", error=str(e))
+            return ToolResult(
+                content=f"Crawl failed: {e}",
+                success=False,
+                error=str(e),
+            )
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> list[str]:
+        """Validate crawl arguments.
+
+        Args:
+            arguments: Raw arguments from LLM
+
+        Returns:
+            List of error messages (empty if valid)
+        """
+        errors: list[str] = []
+
+        index = arguments.get("index")
+        url = arguments.get("url")
+
+        # Must have at least one
+        if index is None and not url:
+            errors.append("Either 'index' or 'url' must be provided")
+            return errors
+
+        # Validate index
+        if index is not None:
+            if not isinstance(index, int):
+                errors.append("'index' must be an integer")
+            elif index < 0:
+                errors.append("'index' must be non-negative")
+
+        # Validate url
+        if url is not None:
+            if not isinstance(url, str):
+                errors.append("'url' must be a string")
+            elif not url.startswith(("http://", "https://")):
+                errors.append("'url' must start with http:// or https://")
+
+        return errors

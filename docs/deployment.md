@@ -35,10 +35,10 @@ make prod
 
 ```bash
 # Deploy to dev workspace
-make deploy TARGET=dev BRAVE_SCOPE=msh
+make deploy TARGET=dev BRAVE_SCOPE=secret-scope-for-brave-key
 
 # Deploy to production
-make deploy TARGET=ais
+make deploy TARGET=databricks-cli-profile
 ```
 
 ## Environment Setup
@@ -162,12 +162,6 @@ Phase 5: Permission Grant
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Profile to Workspace Mapping
-
-| TARGET | Profile | Workspace |
-|--------|---------|-----------|
-| `dev` | `e2-demo-west` | E2 Demo West |
-| `ais` | `ais` | AIS Production |
 
 ## Operations
 
@@ -205,15 +199,127 @@ databricks bundle summary -t dev
 make db-migrate-remote TARGET=dev
 ```
 
-### Manual Permission Grant
+## Bundle Configuration
+
+### databricks.yml Structure
+
+The Databricks Asset Bundle configuration defines all infrastructure:
+
+```yaml
+# databricks.yml
+
+bundle:
+  name: deep-research-agent
+
+variables:
+  app_name:
+    default: "deep-research-agent"
+  lakebase_instance_name:
+    default: "deep-research-lakebase"
+  lakebase_database:
+    default: "deep_research"
+  lakebase_capacity:
+    default: "CU_1"  # CU_1, CU_2, CU_4, etc.
+  brave_secret_scope:
+    default: "deep-research-secrets"
+  resource_suffix:
+    default: "dra"
+
+resources:
+  # Lakebase instance (PostgreSQL)
+  database_instances:
+    deep_research_lakebase:
+      name: ${var.lakebase_instance_name}
+      capacity: ${var.lakebase_capacity}
+
+  # Databricks App
+  apps:
+    deep_research_agent:
+      name: ${var.app_name}-${var.resource_suffix}
+      source_code_path: .
+      resources:
+        # Secret access
+        - name: brave-api-key
+          secret:
+            scope: ${var.brave_secret_scope}
+            key: BRAVE_API_KEY
+            permission: READ
+
+        # Database access
+        - name: database
+          database:
+            database_name: ${var.lakebase_database}
+            instance_name: ${resources.database_instances.deep_research_lakebase.name}
+            permission: CAN_CONNECT_AND_CREATE
+
+        # Model endpoints (CAN_QUERY permission for each)
+        - name: endpoint-sonnet
+          serving_endpoint:
+            name: databricks-claude-sonnet-4-5
+            permission: CAN_QUERY
+        # ... more endpoints
+
+targets:
+  dev:
+    mode: development
+    workspace:
+      profile: <cli profile>
+    variables:
+      resource_suffix: "dev"
+
+  prod:
+    default: true
+    workspace:
+      profile: <cli profile>
+    variables:
+      resource_suffix: "prod"
+```
+
+### app.yaml Structure
+
+The app.yaml configures the runtime environment:
+
+```yaml
+# app.yaml
+
+# Command to start the app (port injected by Databricks)
+command: ["uvicorn", "src.main:app"]
+
+env:
+  # MLflow Integration
+  - name: MLFLOW_TRACKING_URI
+    value: "databricks"
+  - name: MLFLOW_EXPERIMENT_NAME
+    value: "/Shared/deep-research-agent-experiments"
+
+  # App Configuration
+  - name: SERVE_STATIC
+    value: "true"
+  - name: APP_ENV
+    value: "production"
+
+  # Lakebase Configuration
+  - name: LAKEBASE_INSTANCE_NAME
+    value: "deep-research-lakebase"
+  - name: LAKEBASE_DATABASE
+    value: "deep_research"
+
+  # Secrets (injected from bundle resources)
+  - name: BRAVE_API_KEY
+    valueFrom: "brave-api-key"  # References resource name from databricks.yml
+```
+
+### Deploy with Custom Variables
 
 ```bash
-# Grant permissions manually
-./scripts/grant-app-permissions.sh \
-  "deep-research-lakebase-dre-dev" \
-  "e2-demo-west" \
-  "deep_research" \
-  "deep-research-agent-dre-dev"
+# Custom Lakebase capacity
+databricks bundle deploy -t dev --var lakebase_capacity=CU_2
+
+# Custom secret scope
+make deploy TARGET=dev BRAVE_SCOPE=my-scope
+
+# Custom database name
+databricks bundle deploy -t dev --var lakebase_database=my_database
 ```
 
 ## Lakebase Authentication

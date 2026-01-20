@@ -425,7 +425,7 @@ export function AgentMessage({
           {!isStreaming && (
             <div className="flex items-center justify-between mt-2">
               <span className="text-xs text-muted-foreground">
-                {new Date(message.created_at).toLocaleTimeString()}
+                {message.createdAt ? new Date(message.createdAt).toLocaleTimeString() : ''}
               </span>
               {onRegenerate && (
                 <button
@@ -500,7 +500,7 @@ function PlanStepItem({ step }: PlanStepItemProps) {
         >
           {step.title}
         </span>
-        {step.needs_search && (
+        {step.needsSearch && (
           <span className="ml-1 text-[10px] text-blue-600 dark:text-blue-400">[search]</span>
         )}
       </div>

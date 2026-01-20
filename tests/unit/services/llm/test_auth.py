@@ -9,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.core.databricks_auth import (
+from deep_research.core.databricks_auth import (
     DatabricksAuth,
     OAuthCredential,
     TOKEN_LIFETIME,
@@ -61,8 +61,8 @@ class TestDatabricksAuth:
         """Clear singleton after each test."""
         clear_databricks_auth()
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
     def test_profile_auth_mode(
         self, mock_wc_class: MagicMock, mock_get_settings: MagicMock
     ) -> None:
@@ -84,8 +84,8 @@ class TestDatabricksAuth:
         assert auth.auth_mode == "profile"
         assert auth.is_oauth
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
     def test_automatic_auth_mode(
         self, mock_wc_class: MagicMock, mock_get_settings: MagicMock
     ) -> None:
@@ -109,7 +109,7 @@ class TestDatabricksAuth:
         auth.get_client()
         mock_wc_class.assert_called_once_with()  # No args for automatic auth
 
-    @patch("src.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.get_settings")
     def test_direct_token_auth_mode(self, mock_get_settings: MagicMock) -> None:
         """Should use direct token when DATABRICKS_TOKEN is set."""
         mock_settings = MagicMock()
@@ -123,7 +123,7 @@ class TestDatabricksAuth:
         assert not auth.is_oauth
         assert auth.get_token() == "direct-token"
 
-    @patch("src.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.get_settings")
     def test_no_auth_raises_error(self, mock_get_settings: MagicMock) -> None:
         """Should raise error when no auth is configured."""
         mock_settings = MagicMock()
@@ -135,8 +135,8 @@ class TestDatabricksAuth:
         with pytest.raises(ValueError, match="No Databricks auth configured"):
             DatabricksAuth()
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
     def test_get_token_generates_on_first_call(
         self, mock_wc_class: MagicMock, mock_get_settings: MagicMock
     ) -> None:
@@ -159,8 +159,8 @@ class TestDatabricksAuth:
         assert token == "oauth-token"
         mock_wc.config.authenticate.assert_called_once()
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
     def test_get_token_caches_when_valid(
         self, mock_wc_class: MagicMock, mock_get_settings: MagicMock
     ) -> None:
@@ -185,8 +185,8 @@ class TestDatabricksAuth:
         # Should only authenticate once
         assert mock_wc.config.authenticate.call_count == 1
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
     def test_get_token_force_refresh(
         self, mock_wc_class: MagicMock, mock_get_settings: MagicMock
     ) -> None:
@@ -210,8 +210,8 @@ class TestDatabricksAuth:
         # Should authenticate twice
         assert mock_wc.config.authenticate.call_count == 2
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
     def test_get_base_url_from_profile(
         self, mock_wc_class: MagicMock, mock_get_settings: MagicMock
     ) -> None:
@@ -231,7 +231,7 @@ class TestDatabricksAuth:
 
         assert base_url == "https://my-workspace.databricks.com/serving-endpoints"
 
-    @patch("src.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.get_settings")
     def test_get_base_url_from_direct_token(
         self, mock_get_settings: MagicMock
     ) -> None:
@@ -246,8 +246,8 @@ class TestDatabricksAuth:
 
         assert base_url == "https://direct.databricks.com/serving-endpoints"
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
     def test_workspace_client_reused(
         self, mock_wc_class: MagicMock, mock_get_settings: MagicMock
     ) -> None:
@@ -282,6 +282,6 @@ class TestLLMCredential:
 
     def test_llm_credential_is_oauth_credential(self) -> None:
         """LLMCredential should be an alias for OAuthCredential."""
-        from src.services.llm.auth import LLMCredential
+        from deep_research.services.llm.auth import LLMCredential
 
         assert LLMCredential is OAuthCredential

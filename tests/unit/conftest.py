@@ -15,9 +15,9 @@ from uuid import UUID, uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.auth import UserIdentity
-from src.models.chat import Chat, ChatStatus
-from src.models.message import Message, MessageRole
+from deep_research.core.auth import UserIdentity
+from deep_research.models.chat import Chat, ChatStatus
+from deep_research.models.message import Message, MessageRole
 
 # ---------------------------------------------------------------------------
 # Database Session Mocks

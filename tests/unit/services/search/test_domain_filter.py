@@ -2,8 +2,8 @@
 
 import pytest
 
-from src.core.app_config import DomainFilterConfig, DomainFilterMode
-from src.services.search.domain_filter import (
+from deep_research.core.app_config import DomainFilterConfig, DomainFilterMode
+from deep_research.services.search.domain_filter import (
     DomainFilter,
     extract_domain,
     match_domain_pattern,

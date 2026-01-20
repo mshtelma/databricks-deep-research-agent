@@ -25,18 +25,15 @@ test.describe('Grey Reference Detection', () => {
     'Grey reference tests require real research - set RUN_SLOW_TESTS=1 to enable'
   );
 
-  // Use extended timeout for research queries (3 min max for ultra-light)
-  test.setTimeout(180000);
+  // Use extended timeout for research queries (research with real LLM takes 3-5+ min)
+  test.setTimeout(600000);
 
   test('no grey citations after research completes', async ({ chatPage, citationsPage, page }) => {
-    // Select light research mode for fastest execution
-    await chatPage.selectResearchDepth('light');
-
     // Run a simple factual research query with deep_research mode to trigger citations
     await chatPage.sendMessageWithMode('What is the capital of France?', 'deep_research');
 
-    // Wait for agent response (2 min max for ultra-light research)
-    await chatPage.waitForAgentResponse(120000);
+    // Wait for agent response (6 min - research with real LLM takes 3-5+ min)
+    await chatPage.waitForAgentResponse(360000);
 
     // Wait for citation markers to appear
     try {
@@ -68,12 +65,9 @@ test.describe('Grey Reference Detection', () => {
   });
 
   test('all citations resolve within timeout', async ({ chatPage, citationsPage, page }) => {
-    // Select light research mode
-    await chatPage.selectResearchDepth('light');
-
     // Run research query with deep_research mode to trigger citations
     await chatPage.sendMessageWithMode('What programming language did Guido van Rossum create?', 'deep_research');
-    await chatPage.waitForAgentResponse(120000);
+    await chatPage.waitForAgentResponse(360000);
 
     // Check if citations exist
     const markerCount = await citationsPage.getCitationMarkerCount();
@@ -104,12 +98,9 @@ test.describe('Grey Reference Detection', () => {
   });
 
   test('citation resolution stats are accurate', async ({ chatPage, citationsPage, page }) => {
-    // Select light research mode
-    await chatPage.selectResearchDepth('light');
-
     // Run research with deep_research mode to trigger citations
     await chatPage.sendMessageWithMode('What year was Python first released?', 'deep_research');
-    await chatPage.waitForAgentResponse(120000);
+    await chatPage.waitForAgentResponse(360000);
 
     // Wait for citations
     try {
@@ -143,12 +134,9 @@ test.describe('Grey Reference Detection', () => {
     citationsPage,
     page,
   }) => {
-    // Select light research mode
-    await chatPage.selectResearchDepth('light');
-
     // Run research with deep_research mode to trigger citations
     await chatPage.sendMessageWithMode('Who founded Microsoft?', 'deep_research');
-    await chatPage.waitForAgentResponse(120000);
+    await chatPage.waitForAgentResponse(360000);
 
     // Wait for citations
     try {

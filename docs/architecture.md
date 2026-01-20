@@ -132,8 +132,17 @@ The Deep Research Agent is a production-grade multi-agent system built on Databr
 │   │   │   ├── reflector.py        # Step decisions
 │   │   │   └── synthesizer.py      # Report generation
 │   │   └── prompts/                # Agent prompt templates
-│   ├── api/v1/                     # FastAPI routes
+│   ├── api/v1/
+│   │   ├── chats.py                # Chat CRUD endpoints
+│   │   ├── messages.py             # Message endpoints
+│   │   ├── research.py             # SSE streaming research
+│   │   ├── citations.py            # Citation verification
+│   │   └── utils/                  # Shared API utilities
+│   │       ├── authorization.py    # Centralized auth checks
+│   │       └── transformers.py     # Response builders
 │   ├── services/
+│   │   ├── base.py                 # BaseRepository[T] pattern
+│   │   ├── loading.py              # Eager-loading options
 │   │   ├── llm/                    # LLM client, routing
 │   │   ├── citation/               # 7-stage pipeline
 │   │   └── search/                 # Brave Search
@@ -268,6 +277,102 @@ Response (SSE stream with events)
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## Service Layer Patterns
+
+The service layer follows consistent patterns for maintainability and testability.
+
+### BaseRepository Pattern
+
+All CRUD services extend `BaseRepository[T]` for consistent database operations:
+
+```python
+# src/services/base.py
+class BaseRepository(Generic[T]):
+    """Generic repository pattern for SQLAlchemy models."""
+    model: type[T]
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    async def add(self, entity: T) -> T:
+        """Add entity with flush + refresh."""
+        self.session.add(entity)
+        await self.session.flush()
+        await self.session.refresh(entity)
+        return entity
+
+    async def get(self, id: UUID) -> T | None:
+        """Get by primary key."""
+        return await self.session.get(self.model, id)
+
+    async def get_or_raise(self, id: UUID) -> T:
+        """Get by primary key or raise NotFoundError."""
+        entity = await self.get(id)
+        if not entity:
+            raise NotFoundError(self.model.__name__, str(id))
+        return entity
+```
+
+Services extend this base:
+
+```python
+class ChatService(BaseRepository[Chat]):
+    model = Chat
+
+    async def create(self, user_id: str, title: str | None = None) -> Chat:
+        chat = Chat(user_id=user_id, title=title)
+        return await self.add(chat)  # Uses BaseRepository.add()
+```
+
+### Shared Authorization Utilities
+
+Centralized authorization functions in `src/api/v1/utils/authorization.py`:
+
+| Function | Returns | Use Case |
+|----------|---------|----------|
+| `verify_chat_ownership(chat_id, user_id, db)` | `Chat` | Ensure user owns chat |
+| `verify_chat_access(chat_id, user_id, db)` | `(is_draft, Chat \| None)` | Draft chat flow |
+| `verify_message_ownership(message_id, user_id, db)` | `Message` | Ensure user owns message's chat |
+
+```python
+# Usage in API endpoints
+from src.api.v1.utils import verify_chat_ownership
+
+@router.get("/chats/{chat_id}/messages")
+async def list_messages(chat_id: UUID, user: CurrentUser, db: AsyncSession):
+    await verify_chat_ownership(chat_id, user.user_id, db)  # Raises NotFoundError
+    # ... proceed with authorized request
+```
+
+### Response Transformers
+
+Reusable response builders in `src/api/v1/utils/transformers.py`:
+
+| Function | Purpose |
+|----------|---------|
+| `claim_to_response(claim)` | Transform Claim model to ClaimResponse |
+| `build_verification_summary(model)` | Build summary from DB model |
+| `build_citation_response(citation)` | Build citation with evidence |
+| `build_evidence_span_response(span)` | Build evidence span with source |
+
+### Eager-Loading Options
+
+Centralized selectinload chains in `src/services/loading.py`:
+
+```python
+# Full claim graph for claim endpoints
+CLAIM_WITH_CITATIONS_OPTIONS = [
+    selectinload(Claim.citations).selectinload(Citation.evidence_span).selectinload(EvidenceSpan.source),
+    selectinload(Claim.corrections),
+    selectinload(Claim.numeric_detail),
+]
+
+# Usage
+result = await db.execute(
+    select(Claim).options(*CLAIM_WITH_CITATIONS_OPTIONS).where(...)
+)
+```
+
 ## Key Files Reference
 
 | File | Purpose |
@@ -276,6 +381,9 @@ Response (SSE stream with events)
 | `src/agent/state.py` | ResearchState dataclass (532 lines) |
 | `src/services/citation/pipeline.py` | Citation pipeline (2637 lines) |
 | `src/services/llm/client.py` | LLM client with routing |
+| `src/services/base.py` | BaseRepository pattern |
+| `src/api/v1/utils/authorization.py` | Centralized auth utilities |
+| `src/api/v1/utils/transformers.py` | Response builders |
 | `src/core/app_config.py` | Pydantic configuration |
 | `config/app.yaml` | Central YAML configuration |
 

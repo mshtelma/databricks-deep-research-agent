@@ -26,9 +26,9 @@ import os
 import mlflow
 import pytest
 
-from src.agent.tools.web_crawler import WebCrawler
-from src.services.llm.client import LLMClient
-from src.services.search.brave import BraveSearchClient
+from deep_research.agent.tools.web_crawler import WebCrawler
+from deep_research.services.llm.client import LLMClient
+from deep_research.services.search.brave import BraveSearchClient
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ def use_production_config() -> None:
         del os.environ["APP_CONFIG_PATH"]
 
     # Clear any cached config to ensure fresh load
-    from src.core.app_config import clear_config_cache
+    from deep_research.core.app_config import clear_config_cache
 
     clear_config_cache()
     yield

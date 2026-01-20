@@ -5,13 +5,13 @@ from uuid import uuid4
 
 import pytest
 
-from src.agent.nodes.coordinator import (
+from deep_research.agent.nodes.coordinator import (
     CoordinatorOutput,
     handle_simple_query,
     run_coordinator,
 )
-from src.agent.state import ResearchState
-from src.services.llm.types import LLMResponse
+from deep_research.agent.state import ResearchState
+from deep_research.services.llm.types import LLMResponse
 
 
 @pytest.fixture

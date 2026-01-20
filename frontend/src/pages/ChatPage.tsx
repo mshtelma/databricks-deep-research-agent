@@ -202,20 +202,20 @@ export default function ChatPage() {
   // Extract all sources from the latest research session
   // Note: Source URLs are only available after persistence (not in streaming events)
   const allSources = useMemo(() => {
-    // Get from the most recent research_session (after persistence)
+    // Get from the most recent researchSession (after persistence)
     const latestAgentMessage = apiMessages
       .slice()
       .reverse()
-      .find(m => m.role === 'agent' && m.research_session);
+      .find(m => m.role === 'agent' && m.researchSession);
 
-    if (latestAgentMessage?.research_session?.sources) {
-      return latestAgentMessage.research_session.sources.map((s) => ({
+    if (latestAgentMessage?.researchSession?.sources) {
+      return latestAgentMessage.researchSession.sources.map((s) => ({
         url: s.url,
         title: s.title,
         snippet: s.snippet,
-        is_cited: false,  // Default - will be enriched by citation data
-        step_index: undefined as number | undefined,
-        crawl_status: undefined as 'success' | 'failed' | 'timeout' | 'blocked' | undefined,
+        isCited: false,  // Default - will be enriched by citation data
+        stepIndex: undefined as number | undefined,
+        crawlStatus: undefined as 'success' | 'failed' | 'timeout' | 'blocked' | undefined,
       }));
     }
 
@@ -282,7 +282,7 @@ export default function ChatPage() {
 
   // Handle persistence completion - convert draft to real chat
   const handlePersistenceComplete = useCallback((event: PersistenceCompletedEvent) => {
-    if (event.was_draft && chatId) {
+    if (event.wasDraft && chatId) {
       // Remove from local draft storage
       removeDraft(chatId);
       // Navigate to real URL (remove ?draft=1)
@@ -320,18 +320,18 @@ export default function ChatPage() {
           : `session-${Date.now()}-${baseMessages.length}`;
         baseMessages.push({
           id: messageId,
-          chat_id: chatId || '',
+          chatId: chatId || '',
           role: role as 'user' | 'agent',
           content: msg.content,
-          created_at: new Date().toISOString(),
-          is_edited: false,
+          createdAt: new Date().toISOString(),
+          isEdited: false,
         });
       }
     }
 
     // Add pending user message if exists and belongs to current chat
-    // The chat_id check prevents showing stale pending messages in wrong chat
-    if (pendingUserMessage && pendingUserMessage.chat_id === chatId) {
+    // The chatId check prevents showing stale pending messages in wrong chat
+    if (pendingUserMessage && pendingUserMessage.chatId === chatId) {
       // Check it's not already in the list
       const exists = baseMessages.some(
         (m) => m.content === pendingUserMessage.content && m.role === 'user'
@@ -355,11 +355,11 @@ export default function ChatPage() {
       // Create a pending user message
       setPendingUserMessage({
         id: `pending-${Date.now()}`,
-        chat_id: chatId || '',
+        chatId: chatId || '',
         role: 'user',
         content: query,
-        created_at: new Date().toISOString(),
-        is_edited: false,
+        createdAt: new Date().toISOString(),
+        isEdited: false,
       });
 
       // The hook now automatically tracks conversation history
@@ -407,14 +407,14 @@ export default function ChatPage() {
     // Skip if we already have a plan (already hydrated or active session)
     if (currentPlan) return;
 
-    // Find the most recent agent message with research_session
+    // Find the most recent agent message with researchSession
     const agentMessageWithSession = apiMessages
       .slice()
       .reverse()
-      .find(m => m.role === 'agent' && m.research_session);
+      .find(m => m.role === 'agent' && m.researchSession);
 
-    if (agentMessageWithSession?.research_session) {
-      hydrateFromSession(agentMessageWithSession.research_session);
+    if (agentMessageWithSession?.researchSession) {
+      hydrateFromSession(agentMessageWithSession.researchSession);
     }
   }, [apiMessages, isStreaming, currentPlan, hydrateFromSession]);
 

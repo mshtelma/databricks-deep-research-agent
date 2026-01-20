@@ -369,7 +369,86 @@ class CitationVerificationConfig(BaseModel):
 
     evidence_preselection: EvidencePreselectionConfig | None = None
     verification_retrieval: VerificationRetrievalConfig | None = None
+    post_verification: PostVerificationConfig | None = None
 ```
+
+### Post-Verification Configuration
+
+For structured JSON output, post-verification runs stages 4-6 on claims extracted from the output:
+
+```python
+class PostVerificationConfig(BaseModel):
+    enabled: bool = True
+    max_claims_to_verify: int = 50  # High priority claims first
+    include_stage4_isolation: bool = True  # CoVe pattern
+    include_stage5_correction: bool = True  # CiteFix pattern
+    include_stage6_numeric: bool = True  # QAFactEval pattern
+    confidence_threshold: float = 0.6
+    skip_low_priority_claims: bool = True  # Skip claims <300 chars
+```
+
+### Orchestration Configuration
+
+`OrchestrationConfig` controls research execution at runtime:
+
+```python
+from deep_research.agent.orchestrator import OrchestrationConfig
+
+config = OrchestrationConfig(
+    query_mode="deep_research",      # simple, web_search, deep_research
+    research_depth="medium",          # auto, light, medium, extended
+    verify_sources=True,              # Enable citation verification
+
+    # Structured output options
+    output_format="json",             # "markdown" or "json"
+    output_schema=MyPydanticModel,    # Pydantic model for JSON output
+
+    # Synthesis mode and post-verification
+    synthesis_mode="simple",          # "simple" or "reclaim"
+    enable_post_verification=True,    # Run stages 4-6 after simple generation
+
+    # Custom prompts for structured synthesis (plugin can override)
+    structured_system_prompt="...",   # Custom system prompt
+    structured_user_prompt="...",     # Custom user prompt template
+)
+```
+
+#### Structured Output with Verification
+
+For JSON output with citation verification:
+
+```python
+from deep_research.agent.orchestrator import OrchestrationConfig, stream_research
+
+# Plugin provides domain-specific prompts
+CUSTOM_SYSTEM_PROMPT = """You are synthesizing research into structured output..."""
+CUSTOM_USER_PROMPT = """Generate structured output for: {query}\n\n{context}"""
+
+config = OrchestrationConfig(
+    query_mode="deep_research",
+    output_format="json",
+    output_schema=MyOutputSchema,
+
+    # Enable post-verification (requires verify_sources=True)
+    verify_sources=True,
+    enable_post_verification=True,
+
+    # Custom prompts
+    structured_system_prompt=CUSTOM_SYSTEM_PROMPT,
+    structured_user_prompt=CUSTOM_USER_PROMPT,
+)
+
+async for event in stream_research(query, llm, brave, crawler, config=config):
+    # Events include structured output in final event
+    pass
+```
+
+The post-verification pipeline:
+1. Extracts claims from structured output (auto-discovers text+source_refs pairs)
+2. Runs Stage 4 (IsolatedVerifier) for CoVe-style verification
+3. Runs Stage 5 (CitationCorrector) to find better citations
+4. Runs Stage 6 (NumericVerifier) for numeric claim verification
+5. Applies corrections to source_refs in the structured output
 
 ## Validation
 

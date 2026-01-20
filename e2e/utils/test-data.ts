@@ -14,50 +14,53 @@ export interface TestQuery {
 
 /**
  * Smoke test queries - simple, fast responses.
- * Note: The Deep Research Agent performs multi-step research even for simple queries,
- * so we use a longer timeout (3 minutes) to allow the research flow to complete.
+ * Note: The Deep Research Agent performs multi-step research even for simple queries.
+ * With real LLM calls, web searches, and citation verification, research flows
+ * typically take 3-5 minutes. Use 6-minute timeout to provide buffer.
  */
 export const SMOKE_QUERIES: TestQuery[] = [
   {
     text: 'Hello',
     type: 'smoke',
-    expectedResponseTimeMs: 180000,  // 3 minutes - research agent needs time
+    expectedResponseTimeMs: 360000,  // 6 minutes - research agent with citation verification
     description: 'Basic greeting',
   },
   {
     text: 'What is 2+2?',
     type: 'smoke',
-    expectedResponseTimeMs: 180000,
+    expectedResponseTimeMs: 360000,
     description: 'Simple arithmetic',
   },
   {
     text: 'What is Python?',
     type: 'smoke',
-    expectedResponseTimeMs: 180000,
+    expectedResponseTimeMs: 360000,
     description: 'Simple factual question',
   },
 ];
 
 /**
  * Research queries - trigger full research flow, expect citations.
+ * These queries involve web search, crawling, synthesis, and citation verification.
+ * Typical duration is 3-5 minutes. Use 6-minute timeout for reliability.
  */
 export const RESEARCH_QUERIES: TestQuery[] = [
   {
     text: 'What are the latest developments in quantum computing error correction?',
     type: 'research',
-    expectedResponseTimeMs: 180000,
+    expectedResponseTimeMs: 360000,  // 6 minutes for full research with citations
     description: 'Complex research topic',
   },
   {
     text: 'Compare React and Vue.js for enterprise web applications',
     type: 'research',
-    expectedResponseTimeMs: 180000,
+    expectedResponseTimeMs: 360000,
     description: 'Comparison research',
   },
   {
     text: 'What are the current best practices for AI safety?',
     type: 'research',
-    expectedResponseTimeMs: 180000,
+    expectedResponseTimeMs: 360000,
     description: 'Current events research',
   },
 ];
@@ -88,18 +91,19 @@ export const FOLLOW_UP_QUERIES: TestQuery[] = [
 
 /**
  * Long-running queries - for testing stop/cancel functionality.
+ * These are deliberately complex queries that take a long time.
  */
 export const LONG_RUNNING_QUERIES: TestQuery[] = [
   {
     text: 'Write a comprehensive analysis of global economic trends over the past decade',
     type: 'long-running',
-    expectedResponseTimeMs: 180000,
+    expectedResponseTimeMs: 420000,  // 7 minutes for extensive research
     description: 'Very long research task',
   },
   {
     text: 'Provide a detailed comparison of all major cloud computing platforms',
     type: 'long-running',
-    expectedResponseTimeMs: 180000,
+    expectedResponseTimeMs: 420000,
     description: 'Extensive comparison',
   },
 ];

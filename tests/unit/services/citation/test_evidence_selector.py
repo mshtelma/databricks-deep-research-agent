@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.services.citation.evidence_selector import EvidencePreSelector, RankedEvidence
+from deep_research.services.citation.evidence_selector import EvidencePreSelector, RankedEvidence
 
 from .conftest import MockLLMResponse
 

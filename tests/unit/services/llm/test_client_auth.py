@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.core.databricks_auth import TOKEN_LIFETIME, clear_databricks_auth
+from deep_research.core.databricks_auth import TOKEN_LIFETIME, clear_databricks_auth
 
 
 class TestLLMClientTokenRefresh:
@@ -15,9 +15,9 @@ class TestLLMClientTokenRefresh:
         """Clear singleton after each test."""
         clear_databricks_auth()
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.services.llm.client.AsyncOpenAI")
-    @patch("src.services.llm.client.ModelConfig")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.services.llm.client.AsyncOpenAI")
+    @patch("deep_research.services.llm.client.ModelConfig")
     def test_direct_token_no_oauth(
         self,
         mock_model_config: MagicMock,
@@ -30,7 +30,7 @@ class TestLLMClientTokenRefresh:
         mock_settings.return_value.databricks_config_profile = None
         mock_settings.return_value.is_databricks_app = False
 
-        from src.services.llm.client import LLMClient
+        from deep_research.services.llm.client import LLMClient
 
         client = LLMClient()
 
@@ -41,10 +41,10 @@ class TestLLMClientTokenRefresh:
             base_url="https://test.databricks.com/serving-endpoints",
         )
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.core.databricks_auth.WorkspaceClient")
-    @patch("src.services.llm.client.AsyncOpenAI")
-    @patch("src.services.llm.client.ModelConfig")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.services.llm.client.AsyncOpenAI")
+    @patch("deep_research.services.llm.client.ModelConfig")
     def test_profile_auth_uses_oauth(
         self,
         mock_model_config: MagicMock,
@@ -64,7 +64,7 @@ class TestLLMClientTokenRefresh:
         mock_wc.config.authenticate.return_value = {"Authorization": "Bearer oauth-token"}
         mock_wc_class.return_value = mock_wc
 
-        from src.services.llm.client import LLMClient
+        from deep_research.services.llm.client import LLMClient
 
         client = LLMClient()
 
@@ -75,9 +75,9 @@ class TestLLMClientTokenRefresh:
             base_url="https://workspace.databricks.com/serving-endpoints",
         )
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.services.llm.client.AsyncOpenAI")
-    @patch("src.services.llm.client.ModelConfig")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.services.llm.client.AsyncOpenAI")
+    @patch("deep_research.services.llm.client.ModelConfig")
     def test_ensure_fresh_client_noop_for_direct_token(
         self,
         mock_model_config: MagicMock,
@@ -90,7 +90,7 @@ class TestLLMClientTokenRefresh:
         mock_settings.return_value.databricks_config_profile = None
         mock_settings.return_value.is_databricks_app = False
 
-        from src.services.llm.client import LLMClient
+        from deep_research.services.llm.client import LLMClient
 
         client = LLMClient()
         original_client = client._client
@@ -102,10 +102,10 @@ class TestLLMClientTokenRefresh:
         # OpenAI client should only be created once (in __init__)
         assert mock_openai.call_count == 1
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.core.databricks_auth.WorkspaceClient")
-    @patch("src.services.llm.client.AsyncOpenAI")
-    @patch("src.services.llm.client.ModelConfig")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.services.llm.client.AsyncOpenAI")
+    @patch("deep_research.services.llm.client.ModelConfig")
     def test_ensure_fresh_client_recreates_on_token_change(
         self,
         mock_model_config: MagicMock,
@@ -125,7 +125,7 @@ class TestLLMClientTokenRefresh:
         mock_wc.config.authenticate.return_value = {"Authorization": "Bearer token-1"}
         mock_wc_class.return_value = mock_wc
 
-        from src.services.llm.client import LLMClient
+        from deep_research.services.llm.client import LLMClient
 
         client = LLMClient()
         assert client._current_token == "token-1"
@@ -155,10 +155,10 @@ class TestLLMClientTokenRefresh:
             base_url="https://workspace.databricks.com/serving-endpoints",
         )
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.core.databricks_auth.WorkspaceClient")
-    @patch("src.services.llm.client.AsyncOpenAI")
-    @patch("src.services.llm.client.ModelConfig")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.services.llm.client.AsyncOpenAI")
+    @patch("deep_research.services.llm.client.ModelConfig")
     def test_ensure_fresh_client_no_recreate_when_token_same(
         self,
         mock_model_config: MagicMock,
@@ -178,7 +178,7 @@ class TestLLMClientTokenRefresh:
         mock_wc.config.authenticate.return_value = {"Authorization": "Bearer same-token"}
         mock_wc_class.return_value = mock_wc
 
-        from src.services.llm.client import LLMClient
+        from deep_research.services.llm.client import LLMClient
 
         client = LLMClient()
         original_client = client._client
@@ -192,9 +192,9 @@ class TestLLMClientTokenRefresh:
         # OpenAI client should only be created once
         assert mock_openai.call_count == 1
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.services.llm.client.AsyncOpenAI")
-    @patch("src.services.llm.client.ModelConfig")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.services.llm.client.AsyncOpenAI")
+    @patch("deep_research.services.llm.client.ModelConfig")
     def test_raises_without_any_auth(
         self,
         mock_model_config: MagicMock,
@@ -207,15 +207,15 @@ class TestLLMClientTokenRefresh:
         mock_settings.return_value.databricks_config_profile = None
         mock_settings.return_value.is_databricks_app = False
 
-        from src.services.llm.client import LLMClient
+        from deep_research.services.llm.client import LLMClient
 
         with pytest.raises(ValueError, match="No Databricks auth configured"):
             LLMClient()
 
-    @patch("src.core.databricks_auth.get_settings")
-    @patch("src.core.databricks_auth.WorkspaceClient")
-    @patch("src.services.llm.client.AsyncOpenAI")
-    @patch("src.services.llm.client.ModelConfig")
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.services.llm.client.AsyncOpenAI")
+    @patch("deep_research.services.llm.client.ModelConfig")
     def test_databricks_app_uses_automatic_auth(
         self,
         mock_model_config: MagicMock,
@@ -235,7 +235,7 @@ class TestLLMClientTokenRefresh:
         mock_wc.config.authenticate.return_value = {"Authorization": "Bearer app-token"}
         mock_wc_class.return_value = mock_wc
 
-        from src.services.llm.client import LLMClient
+        from deep_research.services.llm.client import LLMClient
 
         client = LLMClient()
 

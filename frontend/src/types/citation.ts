@@ -197,7 +197,7 @@ export interface ProvenanceExport {
 
 /** Claim generated during interleaved synthesis */
 export interface ClaimGeneratedEvent {
-  event_type: 'claim_generated';
+  eventType: 'claim_generated';
   timestamp: string;
   claimText: string;
   positionStart: number;
@@ -208,7 +208,7 @@ export interface ClaimGeneratedEvent {
 
 /** Claim verification completed */
 export interface ClaimVerifiedEvent {
-  event_type: 'claim_verified';
+  eventType: 'claim_verified';
   timestamp: string;
   claimId: string;
   claimText: string;
@@ -226,7 +226,7 @@ export interface ClaimVerifiedEvent {
 
 /** Citation corrected during post-processing */
 export interface CitationCorrectedEvent {
-  event_type: 'citation_corrected';
+  eventType: 'citation_corrected';
   timestamp: string;
   claimId: string;
   correctionType: CorrectionType;
@@ -235,7 +235,7 @@ export interface CitationCorrectedEvent {
 
 /** Numeric claim detected */
 export interface NumericClaimDetectedEvent {
-  event_type: 'numeric_claim_detected';
+  eventType: 'numeric_claim_detected';
   timestamp: string;
   claimId: string;
   rawValue: string;
@@ -247,7 +247,7 @@ export interface NumericClaimDetectedEvent {
 
 /** Verification summary for a message */
 export interface VerificationSummaryEvent {
-  event_type: 'verification_summary';
+  eventType: 'verification_summary';
   timestamp: string;
   messageId: string;
   totalClaims: number;

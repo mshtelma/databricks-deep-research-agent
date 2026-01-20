@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from src.services.citation.evidence_selector import RankedEvidence
-from src.services.citation.isolated_verifier import (
+from deep_research.services.citation.evidence_selector import RankedEvidence
+from deep_research.services.citation.isolated_verifier import (
     IsolatedVerifier,
     Verdict,
     VerificationResult,
@@ -58,7 +58,7 @@ class TestVerifyWithIsolation:
     @pytest.mark.asyncio
     async def test_full_verification(self, mock_llm_client, sample_evidence, patch_app_config):
         """Full verification flow."""
-        from src.services.citation.isolated_verifier import VerificationOutput
+        from deep_research.services.citation.isolated_verifier import VerificationOutput
 
         # Mock LLM to return a structured verification response
         mock_structured = VerificationOutput(

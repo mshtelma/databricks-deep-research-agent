@@ -6,11 +6,11 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from src.core.auth import UserIdentity
-from src.db.session import get_db
-from src.main import app
-from src.middleware.auth import get_current_user_identity
-from src.models.message import Message, MessageRole
+from deep_research.core.auth import UserIdentity
+from deep_research.db.session import get_db
+from deep_research.main import app
+from deep_research.middleware.auth import get_current_user_identity
+from deep_research.models.message import Message, MessageRole
 
 
 @pytest.fixture
@@ -84,7 +84,7 @@ class TestListMessages:
         """Test listing messages when none exist."""
         chat_id = uuid4()
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.list_messages = AsyncMock(return_value=([], 0))
             MockService.return_value = mock_service
@@ -102,7 +102,7 @@ class TestListMessages:
         """Test listing messages with results."""
         chat_id = mock_message.chat_id
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.list_messages = AsyncMock(
                 return_value=([mock_message], 1)
@@ -120,7 +120,7 @@ class TestListMessages:
         """Test listing messages with pagination parameters."""
         chat_id = uuid4()
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.list_messages = AsyncMock(return_value=([], 0))
             MockService.return_value = mock_service
@@ -147,8 +147,8 @@ class TestSendMessage:
         mock_chat.id = chat_id
 
         with (
-            patch("src.api.v1.messages.MessageService") as MockMessageService,
-            patch("src.api.v1.messages.ChatService") as MockChatService,
+            patch("deep_research.api.v1.messages.MessageService") as MockMessageService,
+            patch("deep_research.api.v1.messages.ChatService") as MockChatService,
         ):
             mock_message_service = MagicMock()
             mock_message_service.create = AsyncMock(return_value=mock_message)
@@ -192,7 +192,7 @@ class TestGetMessage:
         chat_id = mock_message.chat_id
         message_id = mock_message.id
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.get_with_chat = AsyncMock(return_value=mock_message)
             MockService.return_value = mock_service
@@ -211,7 +211,7 @@ class TestGetMessage:
         chat_id = uuid4()
         message_id = uuid4()
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.get_with_chat = AsyncMock(return_value=None)
             MockService.return_value = mock_service
@@ -235,7 +235,7 @@ class TestEditMessage:
         mock_message.is_edited = True
         mock_message.content = "Updated content"
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.get_with_chat = AsyncMock(return_value=mock_message)
             mock_service.delete_subsequent = AsyncMock(return_value=2)
@@ -257,7 +257,7 @@ class TestEditMessage:
         chat_id = uuid4()
         message_id = uuid4()
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.get_with_chat = AsyncMock(return_value=None)
             MockService.return_value = mock_service
@@ -276,7 +276,7 @@ class TestEditMessage:
         chat_id = mock_agent_message.chat_id
         message_id = mock_agent_message.id
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.get_with_chat = AsyncMock(
                 return_value=mock_agent_message
@@ -302,7 +302,7 @@ class TestRegenerateMessage:
         chat_id = mock_agent_message.chat_id
         message_id = mock_agent_message.id
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.get_with_chat = AsyncMock(
                 return_value=mock_agent_message
@@ -324,7 +324,7 @@ class TestRegenerateMessage:
         chat_id = uuid4()
         message_id = uuid4()
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.get_with_chat = AsyncMock(return_value=None)
             MockService.return_value = mock_service
@@ -345,7 +345,7 @@ class TestSubmitFeedback:
         """Test submitting positive feedback."""
         from datetime import UTC, datetime
 
-        from src.models.message_feedback import FeedbackRating, MessageFeedback
+        from deep_research.models.message_feedback import FeedbackRating, MessageFeedback
 
         chat_id = mock_agent_message.chat_id
         message_id = mock_agent_message.id
@@ -364,9 +364,9 @@ class TestSubmitFeedback:
         mock_feedback.created_at = datetime.now(UTC)
 
         with (
-            patch("src.api.v1.messages.MessageService") as MockMessageService,
-            patch("src.api.v1.messages.ChatService") as MockChatService,
-            patch("src.api.v1.messages.FeedbackService") as MockFeedbackService,
+            patch("deep_research.api.v1.messages.MessageService") as MockMessageService,
+            patch("deep_research.api.v1.messages.ChatService") as MockChatService,
+            patch("deep_research.api.v1.messages.FeedbackService") as MockFeedbackService,
         ):
             mock_message_service = MagicMock()
             mock_message_service.get_with_chat = AsyncMock(
@@ -398,7 +398,7 @@ class TestSubmitFeedback:
         """Test submitting negative feedback with error report."""
         from datetime import UTC, datetime
 
-        from src.models.message_feedback import FeedbackRating, MessageFeedback
+        from deep_research.models.message_feedback import FeedbackRating, MessageFeedback
 
         chat_id = mock_agent_message.chat_id
         message_id = mock_agent_message.id
@@ -417,9 +417,9 @@ class TestSubmitFeedback:
         mock_feedback.created_at = datetime.now(UTC)
 
         with (
-            patch("src.api.v1.messages.MessageService") as MockMessageService,
-            patch("src.api.v1.messages.ChatService") as MockChatService,
-            patch("src.api.v1.messages.FeedbackService") as MockFeedbackService,
+            patch("deep_research.api.v1.messages.MessageService") as MockMessageService,
+            patch("deep_research.api.v1.messages.ChatService") as MockChatService,
+            patch("deep_research.api.v1.messages.FeedbackService") as MockFeedbackService,
         ):
             mock_message_service = MagicMock()
             mock_message_service.get_with_chat = AsyncMock(
@@ -458,8 +458,8 @@ class TestSubmitFeedback:
         mock_chat.id = chat_id
 
         with (
-            patch("src.api.v1.messages.MessageService") as MockMessageService,
-            patch("src.api.v1.messages.ChatService") as MockChatService,
+            patch("deep_research.api.v1.messages.MessageService") as MockMessageService,
+            patch("deep_research.api.v1.messages.ChatService") as MockChatService,
         ):
             mock_message_service = MagicMock()
             mock_message_service.get_with_chat = AsyncMock(return_value=None)
@@ -487,7 +487,7 @@ class TestGetMessageContent:
         chat_id = mock_message.chat_id
         message_id = mock_message.id
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.get_with_chat = AsyncMock(return_value=mock_message)
             MockService.return_value = mock_service
@@ -505,7 +505,7 @@ class TestGetMessageContent:
         chat_id = uuid4()
         message_id = uuid4()
 
-        with patch("src.api.v1.messages.MessageService") as MockService:
+        with patch("deep_research.api.v1.messages.MessageService") as MockService:
             mock_service = MagicMock()
             mock_service.get_with_chat = AsyncMock(return_value=None)
             MockService.return_value = mock_service
