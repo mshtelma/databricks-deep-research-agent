@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from deep_research.agent.orchestrator import OrchestrationConfig, stream_research
 from deep_research.agent.tools.web_crawler import WebCrawler
 from deep_research.api.v1.utils import verify_chat_access
+from deep_research.core.config import get_settings
 from deep_research.core.exceptions import AuthorizationError, NotFoundError
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
@@ -176,17 +177,6 @@ async def stream_research_endpoint(
         Persistence is handled by the orchestrator after synthesis completes.
         This function only handles event streaming.
         """
-
-        def format_event(event: StreamEvent | str) -> str:
-            """Format an event for SSE."""
-            if isinstance(event, str):
-                # Raw string content (shouldn't happen often)
-                return f"data: {json.dumps({'event_type': 'content', 'content': event})}\n\n"
-            else:
-                # Pydantic model - convert to dict
-                event_dict = _event_to_dict(event)
-                return f"data: {json.dumps(event_dict)}\n\n"
-
         try:
             # Emit research_started with pre-generated IDs for frontend optimistic updates
             research_started = ResearchStartedEvent(
@@ -218,23 +208,15 @@ async def stream_research_endpoint(
                 config=config,
                 db=db,
             ):
-                yield format_event(event)
+                yield _format_sse_event(event)
 
             # Orchestrator persists data on success - nothing to do here
 
         except Exception as e:
             tb = traceback.format_exc()
-            logger.exception(f"Error during research stream: {e}")
-            # No cleanup needed - nothing was written to DB
-            error_event = {
-                "event_type": "error",
-                "error_code": "STREAM_ERROR",
-                "error_message": str(e),
-                "recoverable": False,
-                "stack_trace": tb,
-                "error_type": type(e).__name__,
-            }
-            yield f"data: {json.dumps(error_event)}\n\n"
+            error_id = str(uuid4())[:8]  # Short correlation ID for log lookup
+            logger.exception(f"Error during research stream [error_id={error_id}]: {e}")
+            yield _create_sse_error_event(e, error_id, tb)
 
     return StreamingResponse(
         generate_sse_events(),
@@ -277,6 +259,56 @@ def _event_to_dict(event: StreamEvent) -> dict[str, Any]:
     event_dict = {k: serialize_value(v) for k, v in event_dict.items()}
 
     return event_dict
+
+
+def _format_sse_event(event: StreamEvent | str) -> str:
+    """Format an event for Server-Sent Events (SSE) streaming.
+
+    Args:
+        event: Either a StreamEvent model or raw string content.
+
+    Returns:
+        Formatted SSE data line.
+    """
+    if isinstance(event, str):
+        # Raw string content (shouldn't happen often)
+        return f"data: {json.dumps({'event_type': 'content', 'content': event})}\n\n"
+    else:
+        # Pydantic model - convert to dict
+        event_dict = _event_to_dict(event)
+        return f"data: {json.dumps(event_dict)}\n\n"
+
+
+def _create_sse_error_event(
+    error: Exception,
+    error_id: str,
+    stack_trace: str,
+) -> str:
+    """Create an SSE error event with appropriate detail based on debug mode.
+
+    Args:
+        error: The exception that occurred.
+        error_id: Short correlation ID for log lookup.
+        stack_trace: Full stack trace (only included in debug mode).
+
+    Returns:
+        Formatted SSE data line for the error event.
+    """
+    settings = get_settings()
+    error_event: dict[str, Any] = {
+        "event_type": "error",
+        "error_code": "STREAM_ERROR",
+        "error_message": str(error) if settings.debug else f"An error occurred. Reference: {error_id}",
+        "recoverable": False,
+        "error_id": error_id,
+    }
+
+    # Only include stack trace in debug mode (security)
+    if settings.debug:
+        error_event["stack_trace"] = stack_trace
+        error_event["error_type"] = type(error).__name__
+
+    return f"data: {json.dumps(error_event)}\n\n"
 
 
 @router.post("/{chat_id}/stream")
@@ -374,14 +406,6 @@ async def stream_research_with_history(
 
         Persistence is handled by the orchestrator after synthesis completes.
         """
-
-        def format_event(event: StreamEvent | str) -> str:
-            if isinstance(event, str):
-                return f"data: {json.dumps({'event_type': 'content', 'content': event})}\n\n"
-            else:
-                event_dict = _event_to_dict(event)
-                return f"data: {json.dumps(event_dict)}\n\n"
-
         try:
             # Emit research_started with pre-generated IDs for frontend
             research_started = ResearchStartedEvent(
@@ -413,23 +437,15 @@ async def stream_research_with_history(
                 config=config,
                 db=db,
             ):
-                yield format_event(event)
+                yield _format_sse_event(event)
 
             # Orchestrator persists data on success - nothing to do here
 
         except Exception as e:
             tb = traceback.format_exc()
-            logger.exception(f"Error during research stream: {e}")
-            # No cleanup needed - nothing was written to DB
-            error_event = {
-                "event_type": "error",
-                "error_code": "STREAM_ERROR",
-                "error_message": str(e),
-                "recoverable": False,
-                "stack_trace": tb,
-                "error_type": type(e).__name__,
-            }
-            yield f"data: {json.dumps(error_event)}\n\n"
+            error_id = str(uuid4())[:8]  # Short correlation ID for log lookup
+            logger.exception(f"Error during research stream [error_id={error_id}]: {e}")
+            yield _create_sse_error_event(e, error_id, tb)
 
     return StreamingResponse(
         generate_sse_events(),

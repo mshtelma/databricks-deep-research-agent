@@ -769,6 +769,7 @@ class LLMClient:
                 # Other API errors with status codes
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 is_rate_limit = e.status_code == 429
+                is_not_found = e.status_code == 404
                 health.mark_failure(rate_limited=is_rate_limit)
 
                 span.set_attributes({
@@ -778,9 +779,23 @@ class LLMClient:
                     "llm.is_rate_limit": is_rate_limit,
                 })
 
-                # Check for fallback on rate limit
+                # Enhanced logging for 404 ENDPOINT_NOT_FOUND errors
+                if is_not_found:
+                    logger.error(
+                        "LLM_ENDPOINT_NOT_FOUND",
+                        endpoint_id=endpoint.id,
+                        endpoint_identifier=endpoint.endpoint_identifier,
+                        tier=tier.value,
+                        role=role.name,
+                        status_code=e.status_code,
+                        error_body=str(e.body)[:500] if hasattr(e, "body") else "N/A",
+                        error_message=str(e)[:500],
+                        base_url=str(self._base_url),
+                    )
+
+                # Check for fallback on rate limit or not-found
                 fallback_for_status: tuple[ModelEndpoint, EndpointHealth] | None = None
-                if is_rate_limit:
+                if is_rate_limit or is_not_found:
                     fallback_for_status = self._find_fallback_endpoint(
                         role, endpoint.id, estimated_tokens
                     )
@@ -811,6 +826,24 @@ class LLMClient:
                             structured_output,
                         )
                     raise RateLimitError(retry_after=30, endpoint=endpoint.id) from e
+
+                # Try fallback for 404 errors (endpoint might not exist)
+                if is_not_found and fallback_for_status is not None:
+                    fallback_endpoint, _ = fallback_for_status
+                    logger.warning(
+                        "LLM_ENDPOINT_NOT_FOUND_FALLBACK",
+                        from_endpoint=endpoint.endpoint_identifier,
+                        to_endpoint=fallback_endpoint.endpoint_identifier,
+                    )
+                    return await self._complete_impl(
+                        messages,
+                        tier,
+                        role,
+                        temperature,
+                        max_tokens,
+                        structured_output,
+                    )
+
                 raise LLMError(str(e), endpoint=endpoint.id) from e
 
             except openai.APIConnectionError as e:
@@ -1081,11 +1114,26 @@ class LLMClient:
             except openai.APIStatusError as e:
                 # Other API errors with status codes
                 is_rate_limit = e.status_code == 429
+                is_not_found = e.status_code == 404
                 health.mark_failure(rate_limited=is_rate_limit)
 
-                # Check for fallback on rate limit
+                # Enhanced logging for 404 ENDPOINT_NOT_FOUND errors
+                if is_not_found:
+                    logger.error(
+                        "LLM_ENDPOINT_NOT_FOUND",
+                        endpoint_id=endpoint.id,
+                        endpoint_identifier=endpoint.endpoint_identifier,
+                        tier=tier.value,
+                        role=role.name,
+                        status_code=e.status_code,
+                        error_body=str(e.body)[:500] if hasattr(e, "body") else "N/A",
+                        error_message=str(e)[:500],
+                        base_url=str(self._base_url),
+                    )
+
+                # Check for fallback on rate limit or not-found
                 fallback_for_status: tuple[ModelEndpoint, EndpointHealth] | None = None
-                if is_rate_limit:
+                if is_rate_limit or is_not_found:
                     fallback_for_status = self._find_fallback_endpoint(
                         role, endpoint.id, estimated_tokens + 4000
                     )
@@ -1113,6 +1161,21 @@ class LLMClient:
                             yield retry_chunk
                         return
                     raise RateLimitError(retry_after=30, endpoint=endpoint.id) from e
+
+                # Try fallback for 404 errors (endpoint might not exist)
+                if is_not_found and fallback_for_status is not None:
+                    fallback_endpoint, _ = fallback_for_status
+                    logger.warning(
+                        "LLM_ENDPOINT_NOT_FOUND_FALLBACK",
+                        from_endpoint=endpoint.endpoint_identifier,
+                        to_endpoint=fallback_endpoint.endpoint_identifier,
+                    )
+                    async for retry_chunk in self._stream_impl(
+                        messages, tier, role, temperature, max_tokens
+                    ):
+                        yield retry_chunk
+                    return
+
                 raise LLMError(str(e), endpoint=endpoint.id) from e
 
             except openai.APIConnectionError as e:

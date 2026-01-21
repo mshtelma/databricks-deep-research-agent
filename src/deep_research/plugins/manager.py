@@ -7,9 +7,12 @@ Manages plugin discovery, initialization, and lifecycle.
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING
 
 from deep_research.agent.tools.base import ResearchContext, ResearchTool
+
+if TYPE_CHECKING:
+    from deep_research.core.app_config import AppConfig
 from deep_research.agent.tools.registry import ToolRegistry
 from deep_research.plugins.base import (
     PromptProvider,
@@ -44,7 +47,7 @@ class PluginManager:
     _tool_registry: ToolRegistry = field(default_factory=ToolRegistry)
     _initialized: bool = False
 
-    def discover_and_load(self, app_config: Any) -> None:
+    def discover_and_load(self, app_config: "AppConfig") -> None:
         """
         Discover and initialize all plugins.
 

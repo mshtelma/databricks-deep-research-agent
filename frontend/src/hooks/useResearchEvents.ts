@@ -103,8 +103,12 @@ function categorizeEvent(event: StreamEvent): CategorizedEvent['category'] {
 function generateEventKey(event: StreamEvent, index: number): string {
   const eventType = event.eventType || 'unknown';
   const timestamp = Date.now();
-  return `${eventType}-${index}-${timestamp}`;
+  const random = Math.random().toString(36).substring(2, 6);
+  return `${eventType}-${index}-${timestamp}-${random}`;
 }
+
+/** Maximum number of events to retain (sliding window for memory safety) */
+const MAX_EVENTS = 1000;
 
 /**
  * Hook for managing research events during streaming.
@@ -112,20 +116,24 @@ function generateEventKey(event: StreamEvent, index: number): string {
 export function useResearchEvents(): UseResearchEventsReturn {
   const [events, setEvents] = useState<CategorizedEvent[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [eventCounter, setEventCounter] = useState(0);
 
   const addEvent = useCallback((event: StreamEvent) => {
-    setEventCounter((prev) => prev + 1);
-    setEvents((prev) => [
-      ...prev,
-      {
+    setEvents((prev) => {
+      const newEvent: CategorizedEvent = {
         event,
         category: categorizeEvent(event),
         receivedAt: new Date(),
-        key: generateEventKey(event, eventCounter),
-      },
-    ]);
-  }, [eventCounter]);
+        key: generateEventKey(event, prev.length), // Use prev.length to avoid stale closure
+      };
+
+      // Keep only the most recent MAX_EVENTS (sliding window for memory safety)
+      const updated = [...prev, newEvent];
+      if (updated.length > MAX_EVENTS) {
+        return updated.slice(-MAX_EVENTS);
+      }
+      return updated;
+    });
+  }, []); // No dependencies - all state accessed via functional update
 
   const startStreaming = useCallback(() => {
     setIsStreaming(true);
@@ -137,7 +145,6 @@ export function useResearchEvents(): UseResearchEventsReturn {
 
   const clearEvents = useCallback(() => {
     setEvents([]);
-    setEventCounter(0);
     setIsStreaming(false);
   }, []);
 

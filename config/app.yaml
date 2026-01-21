@@ -330,7 +330,8 @@ query_modes:
 
   web_search:
     model_role: analytical
-    timeout_seconds: 15       # 15 second total budget
+    timeout_seconds: 20       # Per-attempt timeout
+    max_retries: 5            # Retry up to 5 times on timeout before falling back
     emit_events: true         # Stream progress events
     create_session: true      # Lightweight session for source tracking
 

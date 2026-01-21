@@ -844,12 +844,28 @@ async def stream_research(
                         query=truncate(query, 100),
                     )
 
-                    # Get web search mode config (includes timeout_seconds)
+                    # Get web search mode config (includes timeout_seconds and max_retries)
                     mode_config = get_query_mode_config("web_search")
-                    web_search_timeout = getattr(mode_config, "timeout_seconds", 15)
+                    web_search_timeout = getattr(mode_config, "timeout_seconds", 20)
+                    web_search_max_retries = getattr(mode_config, "max_retries", 5)
 
                     # Track start time for timeout
                     web_search_start = time.perf_counter()
+
+                    # For pre-created sessions (JobManager), create event buffer and emit started event
+                    if config.session_pre_created and config.research_session_id is not None:
+                        event_buffer = EventBuffer(config.research_session_id)
+                        logger.info(
+                            "WEB_SEARCH_USING_PRE_CREATED_SESSION",
+                            session_id=str(config.research_session_id)[:8],
+                        )
+                        # Emit research_started event for frontend
+                        started_event = ResearchStartedEvent(
+                            message_id=str(config.message_id) if config.message_id else "",
+                            research_session_id=str(config.research_session_id),
+                        )
+                        yield started_event
+                        await event_buffer.add_event(started_event)
 
                     try:
                         # 1. Create minimal 1-step plan programmatically
@@ -872,52 +888,81 @@ async def stream_research(
                             has_enough_context=False,
                             iteration=1,
                         )
-                        yield _plan_created(state)
+                        ws_evt: StreamEvent = _plan_created(state)
+                        yield ws_evt
+                        await _buffer_event(ws_evt, event_buffer)
 
                         # 2. Run researcher with minimal configuration and timeout
-                        yield _step_started(state)
+                        ws_evt = _step_started(state)
+                        yield ws_evt
+                        await _buffer_event(ws_evt, event_buffer)
                         log_agent_transition(logger, from_agent=None, to_agent="researcher")
-                        yield _agent_started("researcher", "analytical")
+                        ws_evt = _agent_started("researcher", "analytical")
+                        yield ws_evt
+                        await _buffer_event(ws_evt, event_buffer)
                         agent_start = time.perf_counter()
 
                         # Use classic researcher - it loads limits from depth config
                         # For web search, we set effective_depth to 'light' to get minimal limits
                         state.effective_depth = "light"  # Override to use light depth limits
 
-                        # Wrap researcher in timeout
-                        try:
-                            state = await asyncio.wait_for(
-                                run_researcher(
-                                    state,
-                                    llm,
-                                    crawler,
-                                    brave_client,
-                                ),
-                                timeout=web_search_timeout,
-                            )
-                        except asyncio.TimeoutError:
-                            logger.warning(
-                                "WEB_SEARCH_RESEARCHER_TIMEOUT",
-                                elapsed_seconds=time.perf_counter() - web_search_start,
-                                timeout_seconds=web_search_timeout,
-                            )
-                            raise  # Re-raise to trigger fallback
+                        # Wrap researcher in timeout with retry logic
+                        researcher_succeeded = False
+                        for retry_attempt in range(web_search_max_retries):
+                            try:
+                                state = await asyncio.wait_for(
+                                    run_researcher(
+                                        state,
+                                        llm,
+                                        crawler,
+                                        brave_client,
+                                    ),
+                                    timeout=web_search_timeout,
+                                )
+                                researcher_succeeded = True
+                                break  # Success - exit retry loop
+                            except asyncio.TimeoutError:
+                                logger.warning(
+                                    "WEB_SEARCH_RESEARCHER_TIMEOUT_RETRY",
+                                    attempt=retry_attempt + 1,
+                                    max_retries=web_search_max_retries,
+                                    elapsed_seconds=time.perf_counter() - web_search_start,
+                                    timeout_seconds=web_search_timeout,
+                                )
+                                # Continue to next retry attempt
 
-                        yield _agent_completed("researcher", agent_start)
+                        if not researcher_succeeded:
+                            # All retries exhausted - raise to trigger fallback
+                            logger.error(
+                                "WEB_SEARCH_RESEARCHER_ALL_RETRIES_EXHAUSTED",
+                                attempts=web_search_max_retries,
+                                total_elapsed_seconds=time.perf_counter() - web_search_start,
+                            )
+                            raise asyncio.TimeoutError("Web search researcher timed out after all retries")
+
+                        ws_evt = _agent_completed("researcher", agent_start)
+                        yield ws_evt
+                        await _buffer_event(ws_evt, event_buffer)
 
                         # Mark step as complete (skip reflector - always COMPLETE for web search)
                         state.mark_step_complete(state.last_observation)
-                        yield _step_completed(state)
+                        ws_evt = _step_completed(state)
+                        yield ws_evt
+                        await _buffer_event(ws_evt, event_buffer)
                         state.advance_step()
                         steps_executed = 1
 
                         # 3. Synthesize with natural mode ([1], [2] citations)
-                        yield SynthesisStartedEvent(
+                        ws_evt = SynthesisStartedEvent(
                             total_observations=1,
                             total_sources=len(state.sources),
                         )
+                        yield ws_evt
+                        await _buffer_event(ws_evt, event_buffer)
                         log_agent_transition(logger, from_agent="researcher", to_agent="synthesizer")
-                        yield _agent_started("synthesizer", "analytical")
+                        ws_evt = _agent_started("synthesizer", "analytical")
+                        yield ws_evt
+                        await _buffer_event(ws_evt, event_buffer)
                         agent_start = time.perf_counter()
 
                         # Check for structured JSON output first (non-streaming)
@@ -936,7 +981,9 @@ async def stream_research(
                                 if event_type == "content":
                                     chunk = event_dict.get("chunk", "")
                                     web_search_chunks.append(chunk)
-                                    yield SynthesisProgressEvent(content_chunk=chunk)
+                                    ws_evt = SynthesisProgressEvent(content_chunk=chunk)
+                                    yield ws_evt
+                                    await _buffer_event(ws_evt, event_buffer)
                                 elif event_type == "claim_verified":
                                     # Convert claim_id to UUID - generate new one if not valid UUID
                                     raw_claim_id = event_dict.get("claim_id")
@@ -946,7 +993,7 @@ async def stream_research(
                                         # Generate new UUID - claim_id from synthesis may be
                                         # an index or non-UUID string
                                         claim_id_uuid = uuid4()
-                                    yield ClaimVerifiedEvent(
+                                    ws_evt = ClaimVerifiedEvent(
                                         claim_id=claim_id_uuid,
                                         claim_text=event_dict.get("claim_text", ""),
                                         position_start=event_dict.get("position_start", 0),
@@ -958,8 +1005,10 @@ async def stream_research(
                                         citation_key=event_dict.get("citation_key"),
                                         citation_keys=event_dict.get("citation_keys"),
                                     )
+                                    yield ws_evt
+                                    await _buffer_event(ws_evt, event_buffer)
                                 elif event_type == "verification_summary":
-                                    yield VerificationSummaryEvent(
+                                    ws_evt = VerificationSummaryEvent(
                                         message_id=config.message_id or uuid4(),
                                         total_claims=event_dict.get("total_claims", 0),
                                         supported=event_dict.get("supported", 0),
@@ -970,15 +1019,19 @@ async def stream_research(
                                         citation_corrections=event_dict.get("citation_corrections", 0),
                                         warning=event_dict.get("warning", False),
                                     )
+                                    yield ws_evt
+                                    await _buffer_event(ws_evt, event_buffer)
 
                             full_report = "".join(web_search_chunks)
                             state.complete(full_report)
 
-                        yield _agent_completed("synthesizer", agent_start)
+                        ws_evt = _agent_completed("synthesizer", agent_start)
+                        yield ws_evt
+                        await _buffer_event(ws_evt, event_buffer)
 
                         # Emit completion event
                         total_duration_ms = (time.perf_counter() - start_time) * 1000
-                        yield ResearchCompletedEvent(
+                        ws_evt = ResearchCompletedEvent(
                             session_id=state.session_id,
                             total_steps_executed=steps_executed,
                             total_steps_skipped=0,
@@ -990,6 +1043,8 @@ async def stream_research(
                                 if state.final_report_structured else None
                             ),
                         )
+                        yield ws_evt
+                        await _buffer_event(ws_evt, event_buffer)
 
                         # Persist web search session (lightweight - sources only)
                         # Use asyncio.shield with independent session to prevent cancellation
@@ -1001,20 +1056,35 @@ async def stream_research(
                             and chat_id
                             and user_id
                         ):
-                            from deep_research.agent.persistence import persist_complete_research_independent
+                            from deep_research.agent.persistence import (
+                                persist_complete_research_independent,
+                                persist_research_session_complete_update_independent,
+                            )
 
                             try:
-                                await asyncio.shield(
-                                    persist_complete_research_independent(
-                                        chat_id=UUID(chat_id),
-                                        user_id=user_id,
-                                        user_query=query,
-                                        message_id=config.message_id,
-                                        research_session_id=config.research_session_id,
-                                        research_depth="light",  # Web search uses light depth
-                                        state=state,
+                                # Check if session was pre-created (e.g., by JobManager)
+                                # If so, use UPDATE path; otherwise use INSERT path
+                                if config.session_pre_created:
+                                    counts = await asyncio.shield(
+                                        persist_research_session_complete_update_independent(
+                                            chat_id=UUID(chat_id),
+                                            research_session_id=config.research_session_id,
+                                            agent_message_id=config.message_id,
+                                            state=state,
+                                        )
                                     )
-                                )
+                                else:
+                                    counts = await asyncio.shield(
+                                        persist_complete_research_independent(
+                                            chat_id=UUID(chat_id),
+                                            user_id=user_id,
+                                            user_query=query,
+                                            message_id=config.message_id,
+                                            research_session_id=config.research_session_id,
+                                            research_depth="light",  # Web search uses light depth
+                                            state=state,
+                                        )
+                                    )
                             except asyncio.CancelledError:
                                 # INTENTIONAL: Not re-raising CancelledError here.
                                 # asyncio.shield() ensures persistence completes even if client
@@ -1025,14 +1095,17 @@ async def stream_research(
                                     "WEB_SEARCH_PERSISTENCE_CANCELLED",
                                     detail="Persistence cancelled but may have completed",
                                 )
-                            yield PersistenceCompletedEvent(
+                                counts = {"sources": len(state.sources)}  # Fallback count
+                            ws_evt = PersistenceCompletedEvent(
                                 chat_id=chat_id,
                                 message_id=str(config.message_id),
                                 research_session_id=str(config.research_session_id),
                                 chat_title=query[:50] + "..." if len(query) > 50 else query,
-                                was_draft=True,  # Web search always creates new session
-                                counts={"sources": len(state.sources)},
+                                was_draft=not config.session_pre_created,
+                                counts=counts,
                             )
+                            yield ws_evt
+                            await _buffer_event(ws_evt, event_buffer)
                         else:
                             # Log warning when persistence conditions not met
                             logger.warning(
@@ -1043,13 +1116,18 @@ async def stream_research(
                                 chat_id=chat_id,
                                 user_id=user_id,
                             )
-                            yield StreamErrorEvent(
+                            ws_evt = StreamErrorEvent(
                                 error_code="PERSISTENCE_SKIPPED",
                                 error_message="Web search completed but could not persist to database",
                                 recoverable=True,
                                 stack_trace="".join(traceback.format_stack()),
                             )
+                            yield ws_evt
+                            await _buffer_event(ws_evt, event_buffer)
 
+                        # Flush event buffer to ensure all events are persisted
+                        if event_buffer:
+                            await event_buffer.flush()
                         return
 
                     except asyncio.TimeoutError:
@@ -1062,30 +1140,40 @@ async def stream_research(
                         )
 
                         # Notify frontend of fallback
-                        yield StreamErrorEvent(
+                        fallback_evt: StreamEvent = StreamErrorEvent(
                             error_code="WEB_SEARCH_TIMEOUT",
                             error_message="Web search timed out, falling back to direct answer",
                             recoverable=True,
                             stack_trace="".join(traceback.format_stack()),
                         )
+                        yield fallback_evt
+                        await _buffer_event(fallback_evt, event_buffer)
 
                         # Fall back to Simple mode (direct LLM response)
-                        yield SynthesisStartedEvent(total_observations=0, total_sources=0)
-                        yield _agent_started("synthesizer", "simple")
+                        fallback_evt = SynthesisStartedEvent(total_observations=0, total_sources=0)
+                        yield fallback_evt
+                        await _buffer_event(fallback_evt, event_buffer)
+                        fallback_evt = _agent_started("synthesizer", "simple")
+                        yield fallback_evt
+                        await _buffer_event(fallback_evt, event_buffer)
                         fallback_start = time.perf_counter()
 
                         fallback_chunks: list[str] = []
                         async for chunk in handle_simple_query(state, llm):
                             fallback_chunks.append(chunk)
-                            yield SynthesisProgressEvent(content_chunk=chunk)
+                            fallback_evt = SynthesisProgressEvent(content_chunk=chunk)
+                            yield fallback_evt
+                            await _buffer_event(fallback_evt, event_buffer)
 
                         full_report = "".join(fallback_chunks)
-                        yield _agent_completed("synthesizer", fallback_start)
+                        fallback_evt = _agent_completed("synthesizer", fallback_start)
+                        yield fallback_evt
+                        await _buffer_event(fallback_evt, event_buffer)
                         state.complete(full_report)
 
                         # Emit completion event
                         total_duration_ms = (time.perf_counter() - start_time) * 1000
-                        yield ResearchCompletedEvent(
+                        fallback_evt = ResearchCompletedEvent(
                             session_id=state.session_id,
                             total_steps_executed=0,
                             total_steps_skipped=0,
@@ -1097,6 +1185,8 @@ async def stream_research(
                                 if state.final_report_structured else None
                             ),
                         )
+                        yield fallback_evt
+                        await _buffer_event(fallback_evt, event_buffer)
 
                         # Persist fallback response (same pattern as simple mode)
                         # Use asyncio.shield with independent session to survive cancellation
@@ -1106,35 +1196,58 @@ async def stream_research(
                             and chat_id is not None
                             and user_id is not None
                         ):
-                            from deep_research.agent.persistence import persist_simple_message_independent
+                            from deep_research.agent.persistence import (
+                                persist_research_session_complete_update_independent,
+                                persist_simple_message_independent,
+                            )
 
                             try:
                                 chat_id_uuid = UUID(chat_id) if isinstance(chat_id, str) else chat_id
-                                counts = await asyncio.shield(
-                                    persist_simple_message_independent(
-                                        chat_id=chat_id_uuid,
-                                        user_id=user_id,
-                                        user_query=query,
-                                        message_id=config.message_id,
-                                        content=full_report,
+
+                                # Check if session was pre-created (e.g., by JobManager)
+                                # If so, use UPDATE path; otherwise use INSERT path
+                                if config.session_pre_created and config.research_session_id:
+                                    # state.final_report is already set via state.complete(full_report)
+                                    counts = await asyncio.shield(
+                                        persist_research_session_complete_update_independent(
+                                            chat_id=chat_id_uuid,
+                                            research_session_id=config.research_session_id,
+                                            agent_message_id=config.message_id,
+                                            state=state,
+                                        )
                                     )
-                                )
+                                    research_session_id_str: str | None = str(config.research_session_id)
+                                else:
+                                    counts = await asyncio.shield(
+                                        persist_simple_message_independent(
+                                            chat_id=chat_id_uuid,
+                                            user_id=user_id,
+                                            user_query=query,
+                                            message_id=config.message_id,
+                                            content=full_report,
+                                        )
+                                    )
+                                    research_session_id_str = None
+
                                 logger.info(
                                     "WEB_SEARCH_FALLBACK_PERSISTED",
                                     message_id=str(config.message_id),
                                     content_len=len(full_report),
+                                    session_pre_created=config.session_pre_created,
                                 )
 
                                 # Emit persistence_completed event for frontend
                                 chat_title = query[:47] + "..." if len(query) > 50 else query
-                                yield PersistenceCompletedEvent(
+                                fallback_evt = PersistenceCompletedEvent(
                                     chat_id=str(chat_id_uuid),
                                     message_id=str(config.message_id),
-                                    research_session_id=None,  # No research session for fallback
+                                    research_session_id=research_session_id_str,
                                     chat_title=chat_title,
-                                    was_draft=config.is_draft,
+                                    was_draft=not config.session_pre_created,
                                     counts=counts,
                                 )
+                                yield fallback_evt
+                                await _buffer_event(fallback_evt, event_buffer)
                             except asyncio.CancelledError:
                                 # INTENTIONAL: Not re-raising CancelledError here.
                                 # asyncio.shield() ensures persistence completes even if client
@@ -1159,12 +1272,18 @@ async def stream_research(
                                 chat_id=chat_id,
                                 user_id=user_id,
                             )
-                            yield StreamErrorEvent(
+                            fallback_evt = StreamErrorEvent(
                                 error_code="PERSISTENCE_SKIPPED",
                                 error_message="Web search fallback response could not persist to database",
                                 recoverable=True,
                                 stack_trace="".join(traceback.format_stack()),
                             )
+                            yield fallback_evt
+                            await _buffer_event(fallback_evt, event_buffer)
+
+                        # Flush event buffer
+                        if event_buffer:
+                            await event_buffer.flush()
 
                     return
 
