@@ -26,7 +26,6 @@ import { jobsApi } from '../api/client';
 import {
   saveStreamingState,
   getStreamingState,
-  clearStreamingState,
   type ChatStreamingSnapshot,
 } from '@/stores/chatStreamingState';
 
@@ -591,10 +590,7 @@ export function useStreamingQuery(
         console.log('[SSE] Job completed:', rawData.status);
         if (rawData.status === 'completed') {
           setAgentStatus('complete');
-          // Clear saved streaming state - research is persisted to database
-          if (chatId) {
-            clearStreamingState(chatId);
-          }
+          // Don't clear streaming state - currentQueryMode needed for panel visibility
           onStreamComplete?.();
         } else if (rawData.status === 'cancelled') {
           setAgentStatus('idle');

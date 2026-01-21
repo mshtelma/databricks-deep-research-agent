@@ -1326,36 +1326,58 @@ def get_default_config() -> AppConfig:
 
     Returns:
         AppConfig with default endpoints and roles for development.
+
+    Note:
+        Uses modern Databricks-hosted model endpoints (Claude, GPT-5, Gemini).
+        These are the current production endpoints as of 2025.
     """
     return AppConfig(
         default_role="analytical",
         endpoints={
-            "databricks-llama-70b": EndpointConfig(
-                endpoint_identifier="databricks-meta-llama-3-1-70b-instruct",
+            "haiku": EndpointConfig(
+                endpoint_identifier="databricks-claude-haiku-4-5",
+                max_context_window=128000,
+                tokens_per_minute=50000,
+                supports_structured_output=True,
+                supports_prompt_caching=True,
+            ),
+            "sonnet": EndpointConfig(
+                endpoint_identifier="databricks-claude-sonnet-4-5",
+                max_context_window=128000,
+                tokens_per_minute=50000,
+                supports_structured_output=True,
+                supports_prompt_caching=True,
+            ),
+            "opus": EndpointConfig(
+                endpoint_identifier="databricks-claude-opus-4-5",
                 max_context_window=128000,
                 tokens_per_minute=200000,
+                supports_structured_output=True,
+                supports_prompt_caching=True,
             ),
-            "databricks-llama-8b": EndpointConfig(
-                endpoint_identifier="databricks-meta-llama-3-1-8b-instruct",
+            "gpt5mini": EndpointConfig(
+                endpoint_identifier="databricks-gpt-5-mini",
                 max_context_window=128000,
-                tokens_per_minute=300000,
+                tokens_per_minute=50000,
+                supports_structured_output=True,
+                supports_temperature=False,
             ),
         },
         models={
             "simple": ModelRoleConfig(
-                endpoints=["databricks-llama-8b", "databricks-llama-70b"],
-                temperature=0.3,
-                max_tokens=4000,
+                endpoints=["haiku", "gpt5mini"],
+                temperature=0.7,
+                max_tokens=8000,
                 reasoning_effort=ReasoningEffort.LOW,
             ),
             "analytical": ModelRoleConfig(
-                endpoints=["databricks-llama-70b"],
+                endpoints=["haiku", "gpt5mini"],
                 temperature=0.7,
                 max_tokens=8000,
                 reasoning_effort=ReasoningEffort.MEDIUM,
             ),
             "complex": ModelRoleConfig(
-                endpoints=["databricks-llama-70b"],
+                endpoints=["opus", "sonnet"],
                 temperature=0.7,
                 max_tokens=16000,
                 reasoning_effort=ReasoningEffort.HIGH,
