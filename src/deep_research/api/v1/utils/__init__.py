@@ -1,4 +1,9 @@
-"""Shared utilities for API v1 endpoints."""
+"""Shared utilities for API v1 endpoints.
+
+JSONB Migration (Migration 011):
+Legacy transformer functions (claim_to_response, build_citation_response, etc.)
+have been removed. Use the JSONB transformers instead.
+"""
 
 from deep_research.api.v1.utils.authorization import (
     verify_chat_access,
@@ -6,13 +11,10 @@ from deep_research.api.v1.utils.authorization import (
     verify_message_ownership,
 )
 from deep_research.api.v1.utils.transformers import (
-    build_citation_response,
     build_empty_verification_summary,
-    build_evidence_span_response,
-    build_numeric_detail,
-    build_source_metadata,
-    build_verification_summary,
-    claim_to_response,
+    generate_claim_uuid,
+    jsonb_claim_to_response,
+    jsonb_summary_to_response,
 )
 
 __all__ = [
@@ -20,12 +22,9 @@ __all__ = [
     "verify_chat_access",
     "verify_chat_ownership",
     "verify_message_ownership",
-    # Transformers
-    "build_citation_response",
+    # JSONB transformers
     "build_empty_verification_summary",
-    "build_evidence_span_response",
-    "build_numeric_detail",
-    "build_source_metadata",
-    "build_verification_summary",
-    "claim_to_response",
+    "generate_claim_uuid",
+    "jsonb_claim_to_response",
+    "jsonb_summary_to_response",
 ]

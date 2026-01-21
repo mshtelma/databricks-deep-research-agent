@@ -1,4 +1,9 @@
-"""Message SQLAlchemy model."""
+"""Message SQLAlchemy model.
+
+JSONB Migration (Migration 011):
+Claims and verification_summary relationships have been removed.
+This data is now stored in the verification_data JSONB column on research_sessions.
+"""
 
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -13,10 +18,8 @@ from deep_research.db.base import BaseModel
 
 if TYPE_CHECKING:
     from deep_research.models.chat import Chat
-    from deep_research.models.claim import Claim
     from deep_research.models.message_feedback import MessageFeedback
     from deep_research.models.research_session import ResearchSession
-    from deep_research.models.verification_summary import VerificationSummary
 
 
 class MessageRole(str, Enum):
@@ -82,17 +85,8 @@ class Message(BaseModel):
         back_populates="message",
         uselist=False,
     )
-    claims: Mapped[list["Claim"]] = relationship(
-        "Claim",
-        back_populates="message",
-        cascade="all, delete-orphan",
-    )
-    verification_summary: Mapped["VerificationSummary | None"] = relationship(
-        "VerificationSummary",
-        back_populates="message",
-        uselist=False,
-        cascade="all, delete-orphan",
-    )
+    # Note: claims and verification_summary relationships removed in JSONB migration (011)
+    # This data is now stored in verification_data JSONB column on research_sessions
 
     # Indexes
     __table_args__ = (

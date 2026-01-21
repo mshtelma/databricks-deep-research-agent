@@ -13,7 +13,6 @@ from deep_research.models.enums import SourceType
 
 if TYPE_CHECKING:
     from deep_research.models.chat import Chat
-    from deep_research.models.evidence_span import EvidenceSpan
     from deep_research.models.research_session import ResearchSession
 
 
@@ -139,11 +138,8 @@ class Source(Base, UUIDMixin):
         "Chat",
         back_populates="sources",
     )
-    evidence_spans: Mapped[list["EvidenceSpan"]] = relationship(
-        "EvidenceSpan",
-        back_populates="source",
-        cascade="all, delete-orphan",
-    )
+    # Note: evidence_spans relationship removed in JSONB migration (011)
+    # Evidence is now embedded in verification_data JSONB column
 
     def set_content(self, content: str | None = None) -> None:
         """Set fetched content with truncation."""

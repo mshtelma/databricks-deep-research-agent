@@ -1,6 +1,6 @@
 """Persistence layer for research data.
 
-This module handles persisting research artifacts (sources, claims, evidence, citations)
+This module handles persisting research artifacts (sources, verification_data JSONB)
 to the database after synthesis completes.
 
 Key Design: Two-Phase Persistence for Crash Resilience
@@ -12,39 +12,33 @@ Phase 1 - At START (persist_research_session_start_independent):
 
 Phase 2 - At END (persist_research_session_complete_update_independent):
 - Updates agent message with final_report content
-- Updates research_session to COMPLETED status
-- Persists sources, evidence, claims, citations in atomic transaction
+- Updates research_session to COMPLETED status with verification_data JSONB
+- Persists sources in atomic transaction
 
-Benefits:
-- Research survives browser reload/crash (session exists with IN_PROGRESS)
-- Events can be persisted during streaming (FK to session satisfied)
-- No orphaned records - session marked FAILED on error
-- Frontend can reconnect and poll for missed events
+JSONB Migration (Migration 011):
+- Claims, evidence, citations are now stored in verification_data JSONB column
+- This reduces write queries from 45-200+ to 3-5 queries
+- Sources are still persisted separately for deduplication
 
 Draft Chat Support:
 - For draft chats, the chat row is created atomically with messages
 - Uses INSERT ON CONFLICT to handle race conditions safely
 """
 
-import hashlib
 import logging
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from deep_research.agent.state import ResearchState
+from deep_research.agent.state import ClaimInfo, ResearchState
 from deep_research.models.chat import Chat, ChatStatus
 from deep_research.models.source import Source
 from deep_research.models.message import Message, MessageRole
 from deep_research.models.research_session import ResearchSession, ResearchStatus
-from deep_research.services.citation_service import CitationService
-from deep_research.services.claim_service import ClaimService
-from deep_research.services.evidence_span_service import EvidenceSpanService
-# SourceService no longer used - using direct ON CONFLICT upsert for sources
-from deep_research.services.verification_summary_service import VerificationSummaryService
 
 logger = logging.getLogger(__name__)
 
@@ -56,18 +50,15 @@ async def persist_research_data(
     db: AsyncSession,
     chat_id: UUID | None = None,
 ) -> dict[str, int]:
-    """Persist all research data to database after synthesis completes.
+    """Persist sources + JSONB verification_data to database after synthesis.
 
-    This function persists data in the correct order to satisfy foreign key constraints:
-    1. Sources (no FK deps, optional chat_id for source pool)
-    2. Evidence spans (requires source_id)
-    3. Claims (requires message_id)
-    4. Citations (requires claim_id + evidence_span_id)
-    5. Verification summary (computed from claims in DB)
+    This function persists:
+    1. Sources (with ON CONFLICT upsert for deduplication)
+    2. verification_data JSONB (claims + summary in single UPDATE)
 
     Args:
         state: Research state containing sources, evidence, and claims.
-        message_id: ID of the agent message to associate claims with.
+        message_id: ID of the agent message (unused - kept for backwards compat).
         research_session_id: ID of the research session for sources.
         db: Database session.
         chat_id: Optional chat ID for chat-level source pool queries.
@@ -75,34 +66,62 @@ async def persist_research_data(
     Returns:
         Dict with counts of persisted entities.
     """
-    evidence_service = EvidenceSpanService(db)
-    claim_service = ClaimService(db)
-    citation_service = CitationService(db)
-    summary_service = VerificationSummaryService(db)
+    counts: dict[str, int] = {"sources": 0, "claims": len(state.claims)}
 
-    counts = {
-        "sources": 0,
-        "evidence_spans": 0,
-        "claims": 0,
-        "citations": 0,
-    }
+    # Step 1: Persist sources and build URL -> Source mapping
+    url_to_source = await _persist_sources(state, research_session_id, db, chat_id)
+    counts["sources"] = len(url_to_source)
 
-    # Step 1: Persist sources and build URL -> source_id mapping
-    # Uses atomic upsert (ON CONFLICT) to handle race conditions and duplicates
-    url_to_source_id: dict[str, UUID] = {}
+    # Step 2: Build verification_data JSONB
+    verification_data = _build_verification_data(state, url_to_source)
+
+    # Step 3: Update research_session with verification_data
+    if verification_data:
+        await db.execute(
+            update(ResearchSession)
+            .where(ResearchSession.id == research_session_id)
+            .values(verification_data=verification_data)
+        )
+
+    logger.info(
+        "PERSIST_RESEARCH_DATA_COMPLETE sources=%d claims=%d verification_data=%s",
+        counts["sources"],
+        counts["claims"],
+        "present" if verification_data else "empty",
+    )
+
+    return counts
+
+
+async def _persist_sources(
+    state: ResearchState,
+    research_session_id: UUID,
+    db: AsyncSession,
+    chat_id: UUID | None,
+) -> dict[str, Source]:
+    """Persist sources and build URL -> Source mapping.
+
+    Uses atomic upsert (ON CONFLICT) to handle race conditions and duplicates.
+
+    Args:
+        state: Research state containing sources.
+        research_session_id: ID of the research session.
+        db: Database session.
+        chat_id: Optional chat ID for source pool queries.
+
+    Returns:
+        Dict mapping source URL to Source model.
+    """
+    url_to_source: dict[str, Source] = {}
+    sources_failed = 0
 
     for source_info in state.sources:
         try:
-            # Use savepoint to isolate each source insert - if one fails,
-            # the savepoint is rolled back but the main transaction continues
             async with db.begin_nested():
                 # Atomic upsert using ON CONFLICT - no race condition possible
-                # Use (chat_id, url) columns to deduplicate sources at chat level
-                # NOTE: Must use index_elements (not constraint) because uq_sources_chat_url
-                # was created as a UNIQUE INDEX, not a table constraint (migration 006)
                 stmt = pg_insert(Source).values(
                     research_session_id=research_session_id,
-                    chat_id=chat_id,  # For chat-level source pool queries
+                    chat_id=chat_id,
                     url=source_info.url,
                     title=source_info.title,
                     snippet=source_info.snippet,
@@ -115,15 +134,20 @@ async def persist_research_data(
                         "research_session_id": research_session_id,
                         "fetched_at": func.now(),
                     },
-                ).returning(Source.id)
+                ).returning(Source.id, Source.title, Source.url)
 
                 result = await db.execute(stmt)
-                source_id = result.scalar_one()
-                url_to_source_id[source_info.url] = source_id
-                counts["sources"] += 1
+                row = result.one()
+
+                # Create a minimal Source object for mapping
+                source = Source(
+                    id=row.id,
+                    title=row.title or source_info.title,
+                    url=row.url,
+                )
+                url_to_source[source_info.url] = source
         except Exception as e:
-            # Savepoint automatically rolled back on exception - main transaction intact
-            counts["sources_failed"] = counts.get("sources_failed", 0) + 1
+            sources_failed += 1
             logger.warning(
                 "PERSIST_SOURCE_FAILED source_url=%s error=%s",
                 source_info.url[:100],
@@ -131,163 +155,98 @@ async def persist_research_data(
             )
 
     logger.info(
-        "PERSIST_SOURCES_COMPLETE sources_persisted=%d sources_failed=%d url_mappings=%d",
-        counts["sources"],
-        counts.get("sources_failed", 0),
-        len(url_to_source_id),
+        "PERSIST_SOURCES_COMPLETE sources_persisted=%d sources_failed=%d",
+        len(url_to_source),
+        sources_failed,
     )
 
-    # Step 2: Persist evidence spans and build lookup key -> span_id mapping
-    evidence_key_to_id: dict[str, UUID] = {}
-    evidence_skipped_no_source = 0
-
-    for evidence in state.evidence_pool:
-        evidence_source_id = url_to_source_id.get(evidence.source_url)
-        if not evidence_source_id:
-            evidence_skipped_no_source += 1
-            logger.warning(
-                "PERSIST_EVIDENCE_SKIPPED_NO_SOURCE source_url=%s quote=%s - Source failed to persist, evidence cannot be linked",
-                evidence.source_url[:100],
-                evidence.quote_text[:60],
-            )
-            continue
-
-        try:
-            # Use savepoint to isolate each evidence insert - if one fails,
-            # the savepoint is rolled back but the main transaction continues
-            async with db.begin_nested():
-                span = await evidence_service.create(
-                    source_id=evidence_source_id,
-                    quote_text=evidence.quote_text,
-                    start_offset=evidence.start_offset,
-                    end_offset=evidence.end_offset,
-                    section_heading=evidence.section_heading,
-                    relevance_score=evidence.relevance_score,
-                    has_numeric_content=evidence.has_numeric_content,
-                )
-                # Key for lookup: source_url + SHA-256 hash of quote_text
-                key = _make_evidence_key(evidence.source_url, evidence.quote_text)
-                evidence_key_to_id[key] = span.id
-                counts["evidence_spans"] += 1
-        except Exception as e:
-            # Savepoint automatically rolled back on exception - main transaction intact
-            counts["evidence_failed"] = counts.get("evidence_failed", 0) + 1
-            logger.warning(
-                "PERSIST_EVIDENCE_FAILED source_url=%s error=%s",
-                evidence.source_url[:100],
-                str(e)[:200],
-            )
-
-    logger.info(
-        "PERSIST_EVIDENCE_COMPLETE evidence_persisted=%d evidence_failed=%d evidence_skipped_no_source=%d",
-        counts["evidence_spans"],
-        counts.get("evidence_failed", 0),
-        evidence_skipped_no_source,
-    )
-
-    # Step 3: Persist claims and their citations
-    citations_missing_evidence = 0
-    for claim_info in state.claims:
-        try:
-            # Use savepoint to isolate each claim+citation insert - if one fails,
-            # the savepoint is rolled back but the main transaction continues
-            async with db.begin_nested():
-                claim = await claim_service.create(
-                    message_id=message_id,
-                    claim_text=claim_info.claim_text,
-                    claim_type=claim_info.claim_type,
-                    position_start=claim_info.position_start,
-                    position_end=claim_info.position_end,
-                    confidence_level=claim_info.confidence_level,
-                    verification_verdict=claim_info.verification_verdict,
-                    verification_reasoning=claim_info.verification_reasoning,
-                    abstained=claim_info.abstained,
-                    citation_key=claim_info.citation_key,
-                    citation_keys=claim_info.citation_keys,
-                )
-                counts["claims"] += 1
-
-                logger.debug(
-                    "CLAIM_PERSISTED claim_id=%s citation_key=%s verdict=%s text=%s",
-                    str(claim.id),
-                    claim.citation_key,
-                    claim.verification_verdict,
-                    claim.claim_text[:60],
-                )
-
-                # Create citation if claim has evidence
-                if claim_info.evidence:
-                    key = _make_evidence_key(
-                        claim_info.evidence.source_url, claim_info.evidence.quote_text
-                    )
-                    evidence_span_id = evidence_key_to_id.get(key)
-
-                    if evidence_span_id:
-                        await citation_service.create(
-                            claim_id=claim.id,
-                            evidence_span_id=evidence_span_id,
-                            confidence_score=claim_info.evidence.relevance_score,
-                            is_primary=True,
-                        )
-                        counts["citations"] += 1
-                    else:
-                        citations_missing_evidence += 1
-                        logger.warning(
-                            "PERSIST_CITATION_MISSING_EVIDENCE claim=%s source_url=%s - Evidence span not found in lookup table",
-                            claim_info.claim_text[:60],
-                            claim_info.evidence.source_url[:80],
-                        )
-
-        except Exception as e:
-            # Savepoint automatically rolled back on exception - main transaction intact
-            counts["claims_failed"] = counts.get("claims_failed", 0) + 1
-            logger.warning(
-                "PERSIST_CLAIM_FAILED claim=%s error=%s",
-                claim_info.claim_text[:60],
-                str(e)[:200],
-            )
-
-    logger.info(
-        "PERSIST_CLAIMS_COMPLETE claims_persisted=%d claims_failed=%d citations_created=%d citations_missing_evidence=%d",
-        counts["claims"],
-        counts.get("claims_failed", 0),
-        counts["citations"],
-        citations_missing_evidence,
-    )
-
-    # Step 4: Compute and persist verification summary
-    if state.verification_summary or counts["claims"] > 0:
-        try:
-            await summary_service.compute_summary(message_id)
-            logger.info(f"Computed verification summary for message {message_id}")
-        except Exception as e:
-            logger.warning(f"Failed to compute verification summary: {e}")
-
-    return counts
+    return url_to_source
 
 
-def _make_evidence_key(source_url: str, quote_text: str) -> str:
-    """Create a lookup key for evidence span.
-
-    Uses source URL + SHA-256 hash of quote text to create a unique key
-    that can be used to look up the persisted evidence span ID.
-
-    Note: We use SHA-256 instead of Python's hash() because:
-    - SHA-256 is collision-resistant (hash() can have collisions)
-    - SHA-256 is deterministic across process restarts
-    - This key is only used within a single transaction, but SHA-256
-      provides extra safety against citation loss from hash collisions.
+def _build_verification_data(
+    state: ResearchState,
+    url_to_source: dict[str, Source],
+) -> dict[str, Any] | None:
+    """Build JSONB from ResearchState using existing to_dict() methods.
 
     Args:
-        source_url: URL of the source.
-        quote_text: Quote text from the evidence.
+        state: Research state containing claims and verification summary.
+        url_to_source: Mapping from source URL to Source model.
 
     Returns:
-        Unique key string.
+        JSONB-compatible dict or None if no claims.
     """
-    # Use SHA-256 for collision-resistant hashing (first 16 chars is sufficient)
-    quote_hash = hashlib.sha256(quote_text.encode()).hexdigest()[:16]
-    return f"{source_url}:{quote_hash}"
+    if not state.claims and not state.verification_summary:
+        return None
+
+    claims_data = []
+    for claim in state.claims:
+        claim_dict = claim.to_dict()  # Already correct structure!
+
+        # Embed source_title for display (avoid source lookup on read)
+        if claim.evidence and claim.evidence.source_url in url_to_source:
+            source = url_to_source[claim.evidence.source_url]
+            if claim_dict.get("evidence"):
+                claim_dict["evidence"]["source_title"] = source.title
+
+        claims_data.append(claim_dict)
+
+    summary_data = (
+        state.verification_summary.to_dict()
+        if state.verification_summary
+        else _compute_summary_from_claims(state.claims)
+    )
+
+    return {"claims": claims_data, "summary": summary_data}
+
+
+def _compute_summary_from_claims(claims: list[ClaimInfo]) -> dict[str, Any]:
+    """Compute summary from claims (fallback if not provided).
+
+    Args:
+        claims: List of ClaimInfo objects.
+
+    Returns:
+        Summary dict compatible with VerificationSummaryInfo.to_dict().
+    """
+    if not claims:
+        return {
+            "total_claims": 0,
+            "supported_count": 0,
+            "partial_count": 0,
+            "unsupported_count": 0,
+            "contradicted_count": 0,
+            "abstained_count": 0,
+            "unsupported_rate": 0.0,
+            "contradicted_rate": 0.0,
+            "warning": False,
+            "citation_corrections": 0,
+        }
+
+    verdicts = [c.verification_verdict for c in claims if c.verification_verdict]
+    abstained = sum(1 for c in claims if c.abstained)
+    verified = len(verdicts)
+
+    supported = verdicts.count("supported")
+    partial = verdicts.count("partial")
+    unsupported = verdicts.count("unsupported")
+    contradicted = verdicts.count("contradicted")
+
+    unsupported_rate = unsupported / verified if verified > 0 else 0.0
+    contradicted_rate = contradicted / verified if verified > 0 else 0.0
+
+    return {
+        "total_claims": len(claims),
+        "supported_count": supported,
+        "partial_count": partial,
+        "unsupported_count": unsupported,
+        "contradicted_count": contradicted,
+        "abstained_count": abstained,
+        "unsupported_rate": unsupported_rate,
+        "contradicted_rate": contradicted_rate,
+        "warning": unsupported_rate > 0.20 or contradicted_rate > 0.05,
+        "citation_corrections": 0,
+    }
 
 
 async def persist_complete_research(
@@ -314,11 +273,8 @@ async def persist_complete_research(
     2. Agent message (requires chat_id, uses pre-generated UUID)
     3. Research session (requires message_id FK)
     4. Sources (requires research_session_id FK)
-    5. Evidence spans (requires source_id FK)
-    6. Claims (requires message_id FK)
-    7. Citations (requires claim_id + evidence_span_id FKs)
-    8. Verification summary (computed from claims)
-    9. Update chat.updated_at
+    5. verification_data JSONB (claims + summary in single UPDATE)
+    6. Update chat.updated_at
 
     Args:
         db: Database session.
@@ -333,15 +289,13 @@ async def persist_complete_research(
     Returns:
         Dict with counts of persisted entities.
     """
-    counts = {
+    counts: dict[str, int] = {
         "chat_created": 0,
         "user_message": 0,
         "agent_message": 0,
         "research_session": 0,
         "sources": 0,
-        "evidence_spans": 0,
         "claims": 0,
-        "citations": 0,
     }
 
     # Step 0: Create or ensure chat exists (race-safe upsert for draft support)
@@ -412,10 +366,10 @@ async def persist_complete_research(
     counts["research_session"] = 1
     logger.debug(f"Created research session {research_session_id}")
 
-    # Flush to ensure FKs are satisfied before persisting sources/claims
+    # Flush to ensure FKs are satisfied before persisting sources
     await db.flush()
 
-    # Step 4-8: Persist sources, evidence, claims, citations using existing logic
+    # Step 4-5: Persist sources + verification_data JSONB
     # Pass chat_id for chat-level source pool queries in follow-ups
     research_counts = await persist_research_data(
         state=state,
@@ -428,7 +382,7 @@ async def persist_complete_research(
     # Merge counts
     counts.update(research_counts)
 
-    # Step 9: Update chat.updated_at to reflect new activity
+    # Step 6: Update chat.updated_at to reflect new activity
     # This ensures the chat appears at the top of the sidebar list
     await db.execute(
         update(Chat)
@@ -644,7 +598,7 @@ async def persist_research_session_complete_update_independent(
     Called after synthesis succeeds. Updates:
     - Agent message content (final_report)
     - Research session status (COMPLETED) and final state
-    - Sources, evidence, claims, citations
+    - Sources and verification_data JSONB (claims + summary)
 
     Uses independent DB session to survive request cancellation.
 
@@ -669,7 +623,7 @@ async def persist_research_session_complete_update_independent(
                 .values(content=state.final_report, updated_at=datetime.now(UTC))
             )
 
-            # 2. Update research session with final state
+            # 2. Update research session with final state (except verification_data)
             observations_data = (
                 [{"observation": obs} for obs in state.all_observations]
                 if state.all_observations
@@ -693,10 +647,10 @@ async def persist_research_session_complete_update_independent(
                 )
             )
 
-            # Flush to ensure session update is visible for FK constraints
+            # Flush to ensure session update is visible
             await db.flush()
 
-            # 3. Persist sources, evidence, claims, citations
+            # 3. Persist sources + verification_data JSONB
             counts = await persist_research_data(
                 state=state,
                 message_id=agent_message_id,
@@ -809,6 +763,47 @@ async def persist_simple_message_independent(
             )
             await db.commit()
             return counts
+        except Exception:
+            await db.rollback()
+            raise
+
+
+async def persist_simple_message_update_independent(
+    message_id: UUID,
+    content: str,
+) -> dict[str, int]:
+    """Update pre-created simple mode message with content.
+
+    Used when JobManager pre-created the session and agent message placeholder.
+    In this case, the chat, user message, and agent message already exist,
+    we just need to update the agent message content.
+
+    Args:
+        message_id: UUID of the agent message to update.
+        content: The agent's response content.
+
+    Returns:
+        Dict with counts of updated entities.
+    """
+    from deep_research.db.session import get_session_maker
+
+    session_maker = get_session_maker()
+    async with session_maker() as db:
+        try:
+            # Update existing agent message with content
+            await db.execute(
+                update(Message)
+                .where(Message.id == message_id)
+                .values(content=content, updated_at=datetime.now(UTC))
+            )
+            await db.commit()
+
+            logger.info(
+                f"PERSIST_SIMPLE_MESSAGE_UPDATE message={message_id} "
+                f"content_len={len(content)}"
+            )
+
+            return {"messages_updated": 1}
         except Exception:
             await db.rollback()
             raise

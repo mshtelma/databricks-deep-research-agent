@@ -771,23 +771,38 @@ async def stream_research(
                         and chat_id is not None
                         and user_id is not None
                     ):
-                        from deep_research.agent.persistence import persist_simple_message_independent
+                        from deep_research.agent.persistence import (
+                            persist_simple_message_independent,
+                            persist_simple_message_update_independent,
+                        )
 
                         try:
                             chat_id_uuid = UUID(chat_id) if isinstance(chat_id, str) else chat_id
-                            counts = await asyncio.shield(
-                                persist_simple_message_independent(
-                                    chat_id=chat_id_uuid,
-                                    user_id=user_id,
-                                    user_query=query,
-                                    message_id=config.message_id,
-                                    content=full_report,
+
+                            # Check if session was pre-created (e.g., by JobManager)
+                            # If so, use UPDATE path; otherwise use INSERT path
+                            if config.session_pre_created:
+                                counts = await asyncio.shield(
+                                    persist_simple_message_update_independent(
+                                        message_id=config.message_id,
+                                        content=full_report,
+                                    )
                                 )
-                            )
+                            else:
+                                counts = await asyncio.shield(
+                                    persist_simple_message_independent(
+                                        chat_id=chat_id_uuid,
+                                        user_id=user_id,
+                                        user_query=query,
+                                        message_id=config.message_id,
+                                        content=full_report,
+                                    )
+                                )
                             logger.info(
                                 "SIMPLE_MODE_PERSISTED",
                                 message_id=str(config.message_id),
                                 content_len=len(full_report),
+                                session_pre_created=config.session_pre_created,
                             )
 
                             # Emit persistence_completed event for frontend
@@ -853,8 +868,10 @@ async def stream_research(
                     web_search_start = time.perf_counter()
 
                     # For pre-created sessions (JobManager), create event buffer and emit started event
+                    # Use buffer_size=1 for web_search mode to ensure immediate event visibility
+                    # (prevents "waiting for activity" in UI while events accumulate)
                     if config.session_pre_created and config.research_session_id is not None:
-                        event_buffer = EventBuffer(config.research_session_id)
+                        event_buffer = EventBuffer(config.research_session_id, buffer_size=1)
                         logger.info(
                             "WEB_SEARCH_USING_PRE_CREATED_SESSION",
                             session_id=str(config.research_session_id)[:8],
@@ -866,6 +883,8 @@ async def stream_research(
                         )
                         yield started_event
                         await event_buffer.add_event(started_event)
+                        # Explicit flush for immediate visibility (user sees "started" right away)
+                        await event_buffer.flush()
 
                     try:
                         # 1. Create minimal 1-step plan programmatically

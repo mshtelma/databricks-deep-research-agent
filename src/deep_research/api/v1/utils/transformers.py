@@ -1,202 +1,30 @@
 """Shared response transformers for API endpoints.
 
-This module consolidates response transformation logic previously duplicated across:
-- citations.py (_claim_to_response, VerificationSummary construction)
-- export endpoints (similar transformation logic)
+JSONB Migration (Migration 011):
+This module provides JSONB-to-response transformers that read from the
+verification_data JSONB column on research_sessions.
 
-All functions are designed to be pure (no side effects) and reusable.
+Legacy model-based transformers have been removed. All citation/claim data
+is now read from JSONB and transformed to API response schemas.
 """
 
-from typing import TYPE_CHECKING
+from typing import Any
+from uuid import UUID, uuid5, NAMESPACE_DNS
 
 from deep_research.schemas.citation import (
-    CitationCorrectionResponse,
     CitationResponse,
     ClaimResponse,
     ClaimTypeEnum,
     ConfidenceLevelEnum,
-    CorrectionTypeEnum,
-    DerivationTypeEnum,
     EvidenceSpanResponse,
-    NumericClaimDetail,
     SourceMetadataResponse,
     VerificationSummary,
     VerificationVerdictEnum,
 )
 
-if TYPE_CHECKING:
-    from deep_research.models.citation import Citation
-    from deep_research.models.claim import Claim
-    from deep_research.models.evidence_span import EvidenceSpan
-    from deep_research.models.numeric_claim import NumericClaim
-    from deep_research.models.source import Source
-    from deep_research.models.verification_summary import VerificationSummary as VerificationSummaryModel
 
-
-def build_source_metadata(source: "Source | None") -> SourceMetadataResponse | None:
-    """Build SourceMetadataResponse from a Source model.
-
-    Args:
-        source: Source model instance or None.
-
-    Returns:
-        SourceMetadataResponse or None if source is None.
-    """
-    if not source:
-        return None
-    return SourceMetadataResponse(
-        id=source.id,
-        title=source.title,
-        url=source.url,
-        author=None,  # Not stored in current model
-        published_date=None,
-        content_type=source.content_type,
-        total_pages=source.total_pages,
-    )
-
-
-def build_evidence_span_response(
-    span: "EvidenceSpan",
-    *,
-    include_source: bool = True,
-) -> EvidenceSpanResponse:
-    """Build EvidenceSpanResponse from an EvidenceSpan model.
-
-    Args:
-        span: EvidenceSpan model instance.
-        include_source: Whether to include nested source metadata.
-
-    Returns:
-        EvidenceSpanResponse schema.
-    """
-    source_metadata = None
-    if include_source and span.source:
-        source_metadata = build_source_metadata(span.source)
-
-    return EvidenceSpanResponse(
-        id=span.id,
-        source_id=span.source_id,
-        quote_text=span.quote_text,
-        start_offset=span.start_offset,
-        end_offset=span.end_offset,
-        section_heading=span.section_heading,
-        relevance_score=span.relevance_score,
-        has_numeric_content=span.has_numeric_content,
-        source=source_metadata,
-    )
-
-
-def build_citation_response(citation: "Citation") -> CitationResponse:
-    """Build CitationResponse from a Citation model.
-
-    Args:
-        citation: Citation model instance with evidence_span loaded.
-
-    Returns:
-        CitationResponse schema.
-    """
-    span = citation.evidence_span
-    return CitationResponse(
-        evidence_span=build_evidence_span_response(span),
-        confidence_score=citation.confidence_score,
-        is_primary=citation.is_primary,
-    )
-
-
-def build_numeric_detail(nd: "NumericClaim | None") -> NumericClaimDetail | None:
-    """Build NumericClaimDetail from a NumericClaim model.
-
-    Args:
-        nd: NumericClaim model instance or None.
-
-    Returns:
-        NumericClaimDetail schema or None.
-    """
-    if not nd:
-        return None
-    return NumericClaimDetail(
-        raw_value=nd.raw_value,
-        normalized_value=float(nd.normalized_value) if nd.normalized_value else None,
-        unit=nd.unit,
-        entity_reference=nd.entity_reference,
-        derivation_type=DerivationTypeEnum(nd.derivation_type),
-        computation_details=nd.computation_details,
-        assumptions=nd.assumptions,
-        qa_verification=None,  # TODO: Parse QA verification if needed
-    )
-
-
-def claim_to_response(claim: "Claim") -> ClaimResponse:
-    """Transform Claim model to ClaimResponse schema.
-
-    Expects claim to have citations, corrections, and numeric_detail
-    eager-loaded to avoid N+1 queries.
-
-    Args:
-        claim: Claim model with relationships loaded.
-
-    Returns:
-        ClaimResponse schema.
-    """
-    # Build citations list
-    citations = [build_citation_response(c) for c in claim.citations]
-
-    # Build corrections list
-    corrections = [
-        CitationCorrectionResponse(
-            id=c.id,
-            correction_type=CorrectionTypeEnum(c.correction_type),
-            original_evidence=None,  # Simplified for now
-            corrected_evidence=None,
-            reasoning=c.reasoning,
-        )
-        for c in claim.corrections
-    ]
-
-    return ClaimResponse(
-        id=claim.id,
-        claim_text=claim.claim_text,
-        claim_type=ClaimTypeEnum(claim.claim_type),
-        confidence_level=ConfidenceLevelEnum(claim.confidence_level)
-        if claim.confidence_level
-        else None,
-        position_start=claim.position_start,
-        position_end=claim.position_end,
-        verification_verdict=VerificationVerdictEnum(claim.verification_verdict)
-        if claim.verification_verdict
-        else None,
-        verification_reasoning=claim.verification_reasoning,
-        abstained=claim.abstained,
-        citations=citations,
-        corrections=corrections,
-        numeric_detail=build_numeric_detail(claim.numeric_detail),
-        citation_key=claim.citation_key,
-        citation_keys=claim.citation_keys,
-    )
-
-
-def build_verification_summary(
-    summary_model: "VerificationSummaryModel",
-) -> VerificationSummary:
-    """Transform VerificationSummaryModel to VerificationSummary schema.
-
-    Args:
-        summary_model: Database model with verification counts.
-
-    Returns:
-        VerificationSummary schema.
-    """
-    return VerificationSummary(
-        total_claims=summary_model.total_claims,
-        supported_count=summary_model.supported_count,
-        partial_count=summary_model.partial_count,
-        unsupported_count=summary_model.unsupported_count,
-        contradicted_count=summary_model.contradicted_count,
-        abstained_count=summary_model.abstained_count,
-        unsupported_rate=summary_model.unsupported_rate,
-        contradicted_rate=summary_model.contradicted_rate,
-        warning=summary_model.warning,
-    )
+# Namespace for deterministic claim UUIDs
+CLAIM_UUID_NAMESPACE = NAMESPACE_DNS
 
 
 def build_empty_verification_summary() -> VerificationSummary:
@@ -217,4 +45,138 @@ def build_empty_verification_summary() -> VerificationSummary:
         unsupported_rate=0.0,
         contradicted_rate=0.0,
         warning=False,
+    )
+
+
+# =============================================================================
+# JSONB-to-Response Transformers
+# =============================================================================
+#
+# These functions transform JSONB data from the verification_data column
+# into API response schemas. They generate deterministic UUIDs from position
+# data to ensure stable claim IDs without needing to store UUIDs in JSONB.
+
+
+def generate_claim_uuid(message_id: UUID, position_start: int, position_end: int) -> UUID:
+    """Generate deterministic UUID for a claim based on position.
+
+    This ensures the same claim always gets the same UUID across API calls,
+    without needing to store UUIDs in JSONB.
+
+    Args:
+        message_id: The message ID this claim belongs to.
+        position_start: Start character position in the message.
+        position_end: End character position in the message.
+
+    Returns:
+        Deterministic UUID based on position.
+    """
+    name = f"{message_id}:{position_start}:{position_end}"
+    return uuid5(CLAIM_UUID_NAMESPACE, name)
+
+
+def jsonb_claim_to_response(
+    claim_dict: dict[str, Any],
+    message_id: UUID,
+) -> ClaimResponse:
+    """Transform JSONB claim dict to ClaimResponse schema.
+
+    Args:
+        claim_dict: Claim data from JSONB verification_data.claims[].
+        message_id: The message ID for generating deterministic claim UUIDs.
+
+    Returns:
+        ClaimResponse schema ready for API response.
+    """
+    # Generate deterministic UUID from position
+    claim_id = generate_claim_uuid(
+        message_id,
+        claim_dict["position_start"],
+        claim_dict["position_end"],
+    )
+
+    # Build citation from embedded evidence
+    citations: list[CitationResponse] = []
+    evidence = claim_dict.get("evidence")
+    if evidence:
+        # Generate deterministic IDs for evidence and source
+        evidence_id = uuid5(CLAIM_UUID_NAMESPACE, f"{claim_id}:evidence")
+        source_id = uuid5(CLAIM_UUID_NAMESPACE, evidence["source_url"])
+
+        source_metadata = SourceMetadataResponse(
+            id=source_id,
+            title=evidence.get("source_title"),
+            url=evidence["source_url"],
+            author=None,
+            published_date=None,
+            content_type=None,
+            total_pages=None,
+        )
+
+        evidence_span = EvidenceSpanResponse(
+            id=evidence_id,
+            source_id=source_id,
+            quote_text=evidence["quote_text"],
+            start_offset=evidence.get("start_offset"),
+            end_offset=evidence.get("end_offset"),
+            section_heading=evidence.get("section_heading"),
+            relevance_score=evidence.get("relevance_score"),
+            has_numeric_content=evidence.get("has_numeric_content", False),
+            source=source_metadata,
+        )
+
+        citations.append(CitationResponse(
+            evidence_span=evidence_span,
+            confidence_score=evidence.get("relevance_score"),
+            is_primary=True,
+        ))
+
+    # Parse enums safely
+    claim_type = ClaimTypeEnum(claim_dict["claim_type"])
+
+    confidence_level = None
+    if claim_dict.get("confidence_level"):
+        confidence_level = ConfidenceLevelEnum(claim_dict["confidence_level"])
+
+    verification_verdict = None
+    if claim_dict.get("verification_verdict"):
+        verification_verdict = VerificationVerdictEnum(claim_dict["verification_verdict"])
+
+    return ClaimResponse(
+        id=claim_id,
+        claim_text=claim_dict["claim_text"],
+        claim_type=claim_type,
+        confidence_level=confidence_level,
+        position_start=claim_dict["position_start"],
+        position_end=claim_dict["position_end"],
+        verification_verdict=verification_verdict,
+        verification_reasoning=claim_dict.get("verification_reasoning"),
+        abstained=claim_dict.get("abstained", False),
+        citations=citations,
+        corrections=[],  # Corrections not stored in JSONB
+        numeric_detail=None,  # Numeric details not stored in JSONB
+        citation_key=claim_dict.get("citation_key"),
+        citation_keys=claim_dict.get("citation_keys"),
+    )
+
+
+def jsonb_summary_to_response(summary_dict: dict[str, Any]) -> VerificationSummary:
+    """Transform JSONB summary dict to VerificationSummary schema.
+
+    Args:
+        summary_dict: Summary data from JSONB verification_data.summary.
+
+    Returns:
+        VerificationSummary schema ready for API response.
+    """
+    return VerificationSummary(
+        total_claims=summary_dict.get("total_claims", 0),
+        supported_count=summary_dict.get("supported_count", 0),
+        partial_count=summary_dict.get("partial_count", 0),
+        unsupported_count=summary_dict.get("unsupported_count", 0),
+        contradicted_count=summary_dict.get("contradicted_count", 0),
+        abstained_count=summary_dict.get("abstained_count", 0),
+        unsupported_rate=summary_dict.get("unsupported_rate", 0.0),
+        contradicted_rate=summary_dict.get("contradicted_rate", 0.0),
+        warning=summary_dict.get("warning", False),
     )
