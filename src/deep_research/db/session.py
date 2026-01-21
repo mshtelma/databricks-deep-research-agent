@@ -1,5 +1,6 @@
 """Database session management with Lakebase OAuth support."""
 
+import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from typing import Annotated
@@ -21,6 +22,19 @@ logger = logging.getLogger(__name__)
 _engine: AsyncEngine | None = None
 _async_session_maker: async_sessionmaker[AsyncSession] | None = None
 _credential_provider: LakebaseCredentialProvider | None = None
+_pending_disposal_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _dispose_engine_async(engine: AsyncEngine) -> None:
+    """Safely dispose of an async engine.
+
+    Args:
+        engine: The async engine to dispose.
+    """
+    try:
+        await engine.dispose()
+    except Exception as e:
+        logger.warning(f"Error disposing engine: {e}")
 
 
 def get_credential_provider(settings: Settings) -> LakebaseCredentialProvider | None:
@@ -94,17 +108,21 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
             _credential_provider.get_credential(force_refresh=True)
             # Clear engine to force reconnection with new URL
             if _engine is not None:
-                # Schedule engine disposal (can't await in sync function)
-                import asyncio
-
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(_engine.dispose())
-                except RuntimeError:
-                    # No running loop - engine will be garbage collected
-                    pass
+                engine_to_dispose = _engine
                 _engine = None
                 _async_session_maker = None
+
+                # Safely dispose engine (can't await in sync function)
+                try:
+                    loop = asyncio.get_running_loop()
+                    # Running loop exists - schedule and track the task
+                    task = loop.create_task(_dispose_engine_async(engine_to_dispose))
+                    # Store reference to prevent GC before completion
+                    _pending_disposal_tasks.add(task)
+                    task.add_done_callback(_pending_disposal_tasks.discard)
+                except RuntimeError:
+                    # No running loop - create one for cleanup
+                    asyncio.run(_dispose_engine_async(engine_to_dispose))
 
     if _engine is None:
         database_url = get_database_url(settings)

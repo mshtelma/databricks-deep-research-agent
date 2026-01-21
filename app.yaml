@@ -11,7 +11,7 @@
 # Simple command pattern (matching working template)
 # Databricks Apps auto-injects port via --port flag when spawning the process
 # Migrations run in lifespan startup hook via on_startup event
-command: ["uvicorn", "src.main:app"]
+command: ["uvicorn", "deep_research.main:app"]
 
 env:
   # MLflow Integration (automatic within Databricks workspace)

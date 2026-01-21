@@ -13,11 +13,16 @@ atomic facts that can be verified individually. This enables:
 1. More precise evidence retrieval (facts as queries)
 2. Granular verification (per-fact verdicts)
 3. Targeted revision (soften only unverified parts)
+
+Token Optimization Features:
+- Batch decomposition: Process multiple claims in single LLM call (5 claims per batch)
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
@@ -28,6 +33,7 @@ from pydantic import BaseModel, Field
 
 from deep_research.agent.prompts.citation.verification_retrieval import (
     ATOMIC_DECOMPOSITION_PROMPT,
+    BATCH_DECOMPOSITION_PROMPT,
 )
 from deep_research.core.app_config import VerificationRetrievalConfig, get_app_config
 from deep_research.core.logging_utils import get_logger, truncate
@@ -51,6 +57,10 @@ if TYPE_CHECKING:
     from deep_research.services.citation.evidence_selector import RankedEvidence
 
 logger = get_logger(__name__)
+
+
+# Default batch size for decomposition (balances token efficiency vs. reliability)
+DEFAULT_DECOMPOSITION_BATCH_SIZE = 5
 
 
 # =============================================================================
@@ -224,6 +234,27 @@ class AtomicDecompositionOutput(BaseModel):
     reasoning: str = Field(
         default="",
         description="Brief explanation of the decomposition",
+    )
+
+
+# Batch decomposition models (Token Optimization - Phase 2)
+class BatchDecompositionItem(BaseModel):
+    """Single claim decomposition result in a batch."""
+
+    claim_index: int = Field(description="0-based index of claim in input batch")
+    atomic_facts: list[str] = Field(
+        default_factory=list,
+        max_length=7,
+        description="List of atomic facts for this claim",
+    )
+    reasoning: str = Field(default="", max_length=200)
+
+
+class BatchDecompositionOutput(BaseModel):
+    """Output for batched decomposition."""
+
+    decompositions: list[BatchDecompositionItem] = Field(
+        description="Decomposition results in same order as input claims"
     )
 
 
@@ -583,3 +614,350 @@ class AtomicDecomposer:
             )
 
             return decompositions, metrics
+
+    # =========================================================================
+    # Token Optimization: Batch Decomposition (Phase 2)
+    # =========================================================================
+
+    def _format_claims_for_batch_decomposition(
+        self,
+        claims: list[tuple[int, ClaimInfo]],
+    ) -> str:
+        """Format claims for batch decomposition prompt.
+
+        Args:
+            claims: List of (claim_index, claim) tuples.
+
+        Returns:
+            Formatted string for the batch prompt.
+        """
+        sections = []
+        for i, (claim_index, claim) in enumerate(claims):
+            section = f"""### Claim {i} (original index: {claim_index})
+"{claim.claim_text}"
+"""
+            sections.append(section)
+        return "\n".join(sections)
+
+    async def decompose_batch_grouped(
+        self,
+        claims: list[tuple[int, ClaimInfo]],
+        batch_size: int = DEFAULT_DECOMPOSITION_BATCH_SIZE,
+    ) -> list[ClaimDecomposition]:
+        """Decompose multiple claims using batched LLM calls.
+
+        This is a TOKEN OPTIMIZATION method that processes multiple claims
+        in a single LLM call, reducing overhead significantly.
+
+        Args:
+            claims: List of (claim_index, claim) tuples to decompose.
+            batch_size: Number of claims per batch (default: 5).
+
+        Returns:
+            List of ClaimDecomposition objects in same order as input.
+        """
+        if not claims:
+            return []
+
+        span_name = citation_span_name(STAGE_7_ARE, "batch_decompose")
+
+        with mlflow.start_span(name=span_name, span_type=SpanType.CHAIN) as span:
+            results: list[ClaimDecomposition | None] = [None] * len(claims)
+
+            # Group claims into batches
+            batches: list[list[int]] = []
+            for i in range(0, len(claims), batch_size):
+                batches.append(list(range(i, min(i + batch_size, len(claims)))))
+
+            span.set_attributes({
+                "batch.total_claims": len(claims),
+                "batch.batch_size": batch_size,
+                "batch.num_batches": len(batches),
+            })
+
+            logger.info(
+                "BATCH_DECOMPOSITION_START",
+                total_claims=len(claims),
+                batch_size=batch_size,
+                num_batches=len(batches),
+            )
+
+            # Process each batch
+            for batch_num, batch_indices in enumerate(batches):
+                batch_claims = [claims[i] for i in batch_indices]
+
+                try:
+                    batch_results = await self._process_decomposition_batch(batch_claims)
+
+                    # Map results back to original indices
+                    for j, idx in enumerate(batch_indices):
+                        if j < len(batch_results):
+                            results[idx] = batch_results[j]
+                        else:
+                            # Fallback if batch returned fewer results
+                            claim_index, claim = claims[idx]
+                            results[idx] = self._fallback_decomposition(claim, claim_index)
+
+                except Exception as e:
+                    logger.warning(
+                        "BATCH_DECOMPOSITION_ERROR",
+                        batch_num=batch_num,
+                        error=str(e)[:100],
+                    )
+                    # Fall back to sequential decomposition for this batch
+                    for idx in batch_indices:
+                        claim_index, claim = claims[idx]
+                        results[idx] = await self.decompose(claim, claim_index)
+
+            # Fill any remaining None values
+            for i, result in enumerate(results):
+                if result is None:
+                    claim_index, claim = claims[i]
+                    results[i] = self._fallback_decomposition(claim, claim_index)
+
+            final_results = [r for r in results if r is not None]
+
+            span.set_attributes({
+                "batch.results_count": len(final_results),
+                "batch.total_facts": sum(
+                    len(r.atomic_facts) for r in final_results
+                ),
+            })
+
+            logger.info(
+                "BATCH_DECOMPOSITION_COMPLETE",
+                results=len(final_results),
+                total_facts=sum(len(r.atomic_facts) for r in final_results),
+            )
+
+            return final_results
+
+    async def _process_decomposition_batch(
+        self,
+        claims: list[tuple[int, ClaimInfo]],
+    ) -> list[ClaimDecomposition]:
+        """Process a single batch of claims for decomposition.
+
+        Args:
+            claims: List of (claim_index, claim) tuples in this batch.
+
+        Returns:
+            List of ClaimDecomposition objects.
+        """
+        if not claims:
+            return []
+
+        # Filter out very short claims (already atomic)
+        short_claims_results: dict[int, ClaimDecomposition] = {}
+        claims_to_process: list[tuple[int, int, ClaimInfo]] = []  # (batch_idx, claim_idx, claim)
+
+        for batch_idx, (claim_index, claim) in enumerate(claims):
+            if len(claim.claim_text.split()) <= 8:
+                # Short claim - skip LLM, use directly as atomic
+                short_claims_results[batch_idx] = ClaimDecomposition(
+                    original_claim=claim,
+                    atomic_facts=[
+                        AtomicFact(
+                            fact_text=claim.claim_text,
+                            fact_index=0,
+                            parent_claim_id=claim_index,
+                        )
+                    ],
+                    decomposition_reasoning="Claim is short enough to be atomic",
+                )
+            else:
+                claims_to_process.append((batch_idx, claim_index, claim))
+
+        # If all claims were short, return early
+        if not claims_to_process:
+            return [short_claims_results[i] for i in range(len(claims))]
+
+        # Format remaining claims for batch prompt
+        claims_for_prompt = [(idx, claim) for _, idx, claim in claims_to_process]
+        claims_section = self._format_claims_for_batch_decomposition(claims_for_prompt)
+
+        prompt = BATCH_DECOMPOSITION_PROMPT.format(claims_section=claims_section)
+        tier = self._get_model_tier(self.config.decomposition_tier)
+
+        try:
+            response = await asyncio.wait_for(
+                self.llm.complete(
+                    messages=[{"role": "user", "content": prompt}],
+                    tier=tier,
+                    structured_output=BatchDecompositionOutput,
+                ),
+                timeout=self.config.decomposition_timeout_seconds * len(claims_to_process),
+            )
+
+            # Parse results
+            llm_results: dict[int, ClaimDecomposition] = {}
+
+            if response.structured:
+                output: BatchDecompositionOutput = response.structured
+                llm_results = self._parse_batch_decomposition_results(
+                    output, claims_to_process
+                )
+            else:
+                # Fallback: try to parse from content
+                llm_results = self._parse_batch_decomposition_content(
+                    response.content, claims_to_process
+                )
+
+            # Merge results
+            final_results: list[ClaimDecomposition] = []
+            for batch_idx in range(len(claims)):
+                if batch_idx in short_claims_results:
+                    final_results.append(short_claims_results[batch_idx])
+                elif batch_idx in llm_results:
+                    final_results.append(llm_results[batch_idx])
+                else:
+                    # Fallback
+                    claim_index, claim = claims[batch_idx]
+                    final_results.append(self._fallback_decomposition(claim, claim_index))
+
+            return final_results
+
+        except asyncio.TimeoutError:
+            logger.warning("BATCH_DECOMPOSITION_TIMEOUT")
+            raise
+
+    def _parse_batch_decomposition_results(
+        self,
+        output: BatchDecompositionOutput,
+        claims_to_process: list[tuple[int, int, ClaimInfo]],
+    ) -> dict[int, ClaimDecomposition]:
+        """Parse batch decomposition output into results dict.
+
+        Args:
+            output: Structured batch output from LLM.
+            claims_to_process: List of (batch_idx, claim_index, claim) tuples.
+
+        Returns:
+            Dict mapping batch_idx to ClaimDecomposition.
+        """
+        results: dict[int, ClaimDecomposition] = {}
+
+        # Create lookup from prompt index to batch info
+        prompt_idx_to_batch: dict[int, tuple[int, int, ClaimInfo]] = {
+            i: claim_tuple for i, claim_tuple in enumerate(claims_to_process)
+        }
+
+        for item in output.decompositions:
+            prompt_idx = item.claim_index
+            if prompt_idx not in prompt_idx_to_batch:
+                logger.warning(
+                    "BATCH_DECOMPOSITION_INDEX_ERROR",
+                    prompt_idx=prompt_idx,
+                    expected_max=len(claims_to_process) - 1,
+                )
+                continue
+
+            batch_idx, claim_index, claim = prompt_idx_to_batch[prompt_idx]
+
+            # Build atomic facts
+            atomic_facts: list[AtomicFact] = []
+            seen_facts: set[str] = set()
+
+            for i, fact_text in enumerate(item.atomic_facts):
+                fact_normalized = fact_text.strip().lower()
+                if not fact_text.strip() or fact_normalized in seen_facts:
+                    continue
+                seen_facts.add(fact_normalized)
+
+                decontextualized = self._decontextualize(fact_text.strip(), claim.claim_text)
+                atomic_facts.append(
+                    AtomicFact(
+                        fact_text=decontextualized,
+                        fact_index=len(atomic_facts),
+                        parent_claim_id=claim_index,
+                    )
+                )
+
+            # Enforce max facts limit
+            if len(atomic_facts) > self.config.max_atomic_facts_per_claim:
+                atomic_facts = atomic_facts[: self.config.max_atomic_facts_per_claim]
+
+            # If no facts, use original claim
+            if not atomic_facts:
+                atomic_facts = [
+                    AtomicFact(
+                        fact_text=claim.claim_text,
+                        fact_index=0,
+                        parent_claim_id=claim_index,
+                    )
+                ]
+
+            results[batch_idx] = ClaimDecomposition(
+                original_claim=claim,
+                atomic_facts=atomic_facts,
+                decomposition_reasoning=item.reasoning,
+            )
+
+        return results
+
+    def _parse_batch_decomposition_content(
+        self,
+        content: str,
+        claims_to_process: list[tuple[int, int, ClaimInfo]],
+    ) -> dict[int, ClaimDecomposition]:
+        """Fallback parser for batch decomposition when structured output fails.
+
+        Args:
+            content: Raw LLM response content.
+            claims_to_process: List of (batch_idx, claim_index, claim) tuples.
+
+        Returns:
+            Dict mapping batch_idx to ClaimDecomposition.
+        """
+        results: dict[int, ClaimDecomposition] = {}
+
+        try:
+            # Try to extract JSON from response
+            json_match = re.search(r"\{[\s\S]*\}", content)
+            if json_match:
+                data = json.loads(json_match.group())
+                if "decompositions" in data and isinstance(data["decompositions"], list):
+                    # Create lookup from prompt index to batch info
+                    prompt_idx_to_batch: dict[int, tuple[int, int, ClaimInfo]] = {
+                        i: claim_tuple for i, claim_tuple in enumerate(claims_to_process)
+                    }
+
+                    for item in data["decompositions"]:
+                        prompt_idx = item.get("claim_index", -1)
+                        if prompt_idx not in prompt_idx_to_batch:
+                            continue
+
+                        batch_idx, claim_index, claim = prompt_idx_to_batch[prompt_idx]
+                        atomic_facts_raw = item.get("atomic_facts", [])
+
+                        atomic_facts: list[AtomicFact] = []
+                        for i, fact_text in enumerate(atomic_facts_raw):
+                            if not fact_text.strip():
+                                continue
+                            atomic_facts.append(
+                                AtomicFact(
+                                    fact_text=fact_text.strip(),
+                                    fact_index=len(atomic_facts),
+                                    parent_claim_id=claim_index,
+                                )
+                            )
+
+                        if not atomic_facts:
+                            atomic_facts = [
+                                AtomicFact(
+                                    fact_text=claim.claim_text,
+                                    fact_index=0,
+                                    parent_claim_id=claim_index,
+                                )
+                            ]
+
+                        results[batch_idx] = ClaimDecomposition(
+                            original_claim=claim,
+                            atomic_facts=atomic_facts,
+                            decomposition_reasoning=item.get("reasoning", ""),
+                        )
+
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.warning(f"Failed to parse batch decomposition response: {e}")
+
+        return results

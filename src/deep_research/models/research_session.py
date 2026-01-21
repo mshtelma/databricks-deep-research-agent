@@ -210,6 +210,19 @@ class ResearchSession(BaseModel):
     )
 
     # =====================================================================
+    # Citation Verification Data (JSONB)
+    # =====================================================================
+
+    # JSONB blob containing claims and verification summary
+    # Replaces normalized tables: claims, evidence_spans, citations,
+    # numeric_claims, citation_corrections, verification_summaries
+    verification_data: Mapped[dict | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        doc="JSONB blob containing claims and verification summary",
+    )
+
+    # =====================================================================
     # Relationships
     # =====================================================================
 

@@ -90,6 +90,11 @@ build:
 	@echo ""
 	@echo "Frontend built to static/"
 	@ls -la static/
+	@echo ""
+	@echo "Creating symlink for local development..."
+	@rm -f src/deep_research/static
+	@ln -s ../../static src/deep_research/static
+	@echo "Symlink created: src/deep_research/static -> ../../static"
 
 prod: build
 	@echo "Stopping any existing server on port 8000..."
@@ -191,11 +196,38 @@ clean_db:
 	uv run ./scripts/clean-db.sh
 	@echo "Done!"
 
+# Reset database schema (local or remote based on TARGET)
+# Usage: make db-reset                    # Uses local .env config
+#        make db-reset TARGET=dev         # Resets dev Lakebase (e2-demo-west)
+#        make db-reset TARGET=ais         # Resets ais Lakebase
 db-reset:
 	@echo "Resetting database schema (drops all tables and recreates)..."
 	@echo "This will delete ALL data. Use clean_db to preserve schema."
-	uv run alembic downgrade base
-	uv run alembic upgrade head
+	@if [ -z "$(TARGET)" ]; then \
+		echo "Using local environment configuration..."; \
+		uv run alembic downgrade base && \
+		uv run alembic upgrade head; \
+	else \
+		INSTANCE_NAME="deep-research-lakebase"; \
+		case "$(TARGET)" in \
+			dev) PROFILE="e2-demo-west" ;; \
+			ais) PROFILE="ais" ;; \
+			*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
+		esac; \
+		echo "Target: $(TARGET)"; \
+		echo "Lakebase instance: $$INSTANCE_NAME"; \
+		echo "Databricks profile: $$PROFILE"; \
+		echo "Database: deep_research"; \
+		echo ""; \
+		DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
+		LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
+		LAKEBASE_DATABASE="deep_research" \
+		uv run alembic downgrade base && \
+		DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
+		LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
+		LAKEBASE_DATABASE="deep_research" \
+		uv run alembic upgrade head; \
+	fi
 	@echo "Database schema reset complete!"
 
 # Run migrations on deployed Lakebase instance
@@ -230,6 +262,18 @@ db-migrate-remote:
 # Requires: docker compose up -d postgres (or run 'make db' first)
 # =============================================================================
 
+# E2E Test Categories:
+#   fast       - Basic UI tests, no research (~1 min): smoke, chat-management
+#   medium     - Light research operations (2-5 min): edit-message, follow-up, regenerate, stop-cancel, error-handling, provenance-export
+#   slow       - Full research with verification (10 min): citations, grey-references, numeric-claims, research-flow, verification-summary
+#   super-slow - Multiple parallel research sessions (15 min): parallel-research
+
+# File patterns for each category
+E2E_FAST := smoke.spec.ts chat-management.spec.ts
+E2E_MEDIUM := edit-message.spec.ts follow-up.spec.ts regenerate.spec.ts stop-cancel.spec.ts error-handling.spec.ts provenance-export.spec.ts
+E2E_SLOW := citations.spec.ts grey-references.spec.ts numeric-claims.spec.ts research-flow.spec.ts verification-summary.spec.ts
+E2E_SUPER_SLOW := parallel-research.spec.ts
+
 e2e:
 	@echo "Stopping any existing server on port 8000..."
 	@./scripts/kill-server.sh 8000 || true
@@ -239,13 +283,53 @@ e2e:
 	@echo "Note: Requires PostgreSQL running (make db)"
 	cd e2e && npm test
 
+e2e-fast:
+	@echo "Stopping any existing server on port 8000..."
+	@./scripts/kill-server.sh 8000 || true
+	@echo "Building frontend..."
+	@make build
+	@echo "Running FAST E2E tests (~1 min)..."
+	cd e2e && npx playwright test $(E2E_FAST)
+
+e2e-medium:
+	@echo "Stopping any existing server on port 8000..."
+	@./scripts/kill-server.sh 8000 || true
+	@echo "Building frontend..."
+	@make build
+	@echo "Running MEDIUM E2E tests (2-5 min each)..."
+	cd e2e && RUN_SLOW_TESTS=1 RUN_INTEGRATION_TESTS=true npx playwright test $(E2E_MEDIUM)
+
+e2e-slow:
+	@echo "Stopping any existing server on port 8000..."
+	@./scripts/kill-server.sh 8000 || true
+	@echo "Building frontend..."
+	@make build
+	@echo "Running SLOW E2E tests (~10 min each)..."
+	cd e2e && RUN_SLOW_TESTS=1 npx playwright test $(E2E_SLOW)
+
+e2e-super-slow:
+	@echo "Stopping any existing server on port 8000..."
+	@./scripts/kill-server.sh 8000 || true
+	@echo "Building frontend..."
+	@make build
+	@echo "Running SUPER-SLOW E2E tests (parallel research, ~15 min)..."
+	cd e2e && RUN_SLOW_TESTS=1 npx playwright test $(E2E_SUPER_SLOW)
+
+e2e-all:
+	@echo "Stopping any existing server on port 8000..."
+	@./scripts/kill-server.sh 8000 || true
+	@echo "Building frontend..."
+	@make build
+	@echo "Running ALL E2E tests (fast + medium + slow + super-slow)..."
+	cd e2e && RUN_SLOW_TESTS=1 RUN_INTEGRATION_TESTS=true npx playwright test
+
 e2e-ui:
 	@echo "Stopping any existing server on port 8000..."
 	@./scripts/kill-server.sh 8000 || true
 	@echo "Building frontend (ensures fresh static files)..."
 	@make build
 	@echo "Opening Playwright UI..."
-	cd e2e && npm run test:ui
+	cd e2e && RUN_SLOW_TESTS=1 RUN_INTEGRATION_TESTS=true npm run test:ui
 
 e2e-debug:
 	@echo "Stopping any existing server on port 8000..."
@@ -285,7 +369,11 @@ quickstart:
 requirements:
 	@echo "Generating requirements.txt from pyproject.toml..."
 	uv pip compile pyproject.toml -o requirements.txt
-	@echo "requirements.txt updated"
+	@echo "" >> requirements.txt
+	@echo "# Install the local package itself (required for src layout)" >> requirements.txt
+	@echo "# Build timestamp: $$(date -u +%Y%m%d%H%M%S) - forces reinstall on changes" >> requirements.txt
+	@echo "." >> requirements.txt
+	@echo "requirements.txt updated (with local package)"
 
 # =============================================================================
 # Databricks Asset Bundles (DAB) Deployment

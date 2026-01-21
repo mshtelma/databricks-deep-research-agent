@@ -39,7 +39,7 @@ import asyncio
 import logging
 logging.basicConfig(level=logging.INFO)
 
-from src.db.grant_permissions import grant_permissions_to_app
+from deep_research.db.grant_permissions import grant_permissions_to_app
 asyncio.run(grant_permissions_to_app('$APP_NAME'))
 "
 

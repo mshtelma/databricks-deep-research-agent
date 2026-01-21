@@ -23,6 +23,12 @@ import type {
 } from '../types/citation';
 import { parseStreamEvent } from '../schemas/streamEvents';
 import { jobsApi } from '../api/client';
+import {
+  saveStreamingState,
+  getStreamingState,
+  clearStreamingState,
+  type ChatStreamingSnapshot,
+} from '@/stores/chatStreamingState';
 
 type AgentStatus =
   | 'idle'
@@ -142,13 +148,15 @@ interface UseStreamingQueryReturn {
 interface UseStreamingQueryOptions {
   /** Callback invoked when streaming completes successfully */
   onStreamComplete?: () => void;
+  /** Callback invoked when job submission fails (e.g., 409 conflict, network error) */
+  onJobSubmissionError?: (error: Error) => void;
 }
 
 export function useStreamingQuery(
   chatId?: string,
   options?: UseStreamingQueryOptions
 ): UseStreamingQueryReturn {
-  const { onStreamComplete } = options ?? {};
+  const { onStreamComplete, onJobSubmissionError } = options ?? {};
   const [isStreaming, setIsStreaming] = useState(false);
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [streamingContent, setStreamingContent] = useState('');
@@ -228,6 +236,44 @@ export function useStreamingQuery(
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   // Track last sequence number for reconnection support
   const lastSequenceRef = useRef(0);
+
+  // Ref to track latest state for snapshot creation (avoids dependency array issues)
+  const stateForSnapshotRef = useRef<Omit<ChatStreamingSnapshot, 'savedAt'>>({
+    events: [],
+    streamingContent: '',
+    currentPlan: null,
+    currentStepIndex: -1,
+    agentStatus: 'idle',
+    streamingClaims: [],
+    streamingVerificationSummary: null,
+    currentQueryMode: null,
+    startTime: null,
+    currentAgent: null,
+    agentMessageId: null,
+    toolActivity: null,
+  });
+
+  // Keep snapshot ref in sync with latest state
+  useEffect(() => {
+    stateForSnapshotRef.current = {
+      events,
+      streamingContent,
+      currentPlan,
+      currentStepIndex,
+      agentStatus,
+      streamingClaims,
+      streamingVerificationSummary,
+      currentQueryMode,
+      startTime,
+      currentAgent,
+      agentMessageId,
+      toolActivity,
+    };
+  }, [
+    events, streamingContent, currentPlan, currentStepIndex,
+    agentStatus, streamingClaims, streamingVerificationSummary,
+    currentQueryMode, startTime, currentAgent, agentMessageId, toolActivity,
+  ]);
 
   /**
    * Check if an event has already been processed (for reconnection deduplication).
@@ -506,7 +552,8 @@ export function useStreamingQuery(
 
       case 'research_completed':
         setAgentStatus('complete');
-        // Note: Don't stop stream here - we're processing external events
+        // Don't clear streaming state - let it be restored with derived status
+        // This preserves currentQueryMode for panel visibility
         break;
 
       case 'error': {
@@ -529,7 +576,7 @@ export function useStreamingQuery(
         break;
       }
     }
-  }, [isDuplicateEvent]);
+  }, [chatId, isDuplicateEvent]);
 
   /**
    * Handle a single job event from the SSE stream.
@@ -544,6 +591,10 @@ export function useStreamingQuery(
         console.log('[SSE] Job completed:', rawData.status);
         if (rawData.status === 'completed') {
           setAgentStatus('complete');
+          // Clear saved streaming state - research is persisted to database
+          if (chatId) {
+            clearStreamingState(chatId);
+          }
           onStreamComplete?.();
         } else if (rawData.status === 'cancelled') {
           setAgentStatus('idle');
@@ -588,7 +639,7 @@ export function useStreamingQuery(
       console.error('[SSE] Error processing job event:', err);
       return false;
     }
-  }, [stopStream, onStreamComplete, processExternalEvent]);
+  }, [chatId, stopStream, onStreamComplete, processExternalEvent]);
 
   /**
    * Handle SSE connection errors with retry logic.
@@ -713,6 +764,10 @@ export function useStreamingQuery(
         setErrorDetails({ error: submissionError, errorCode, recoverable: true });
         setAgentStatus('error');
         setIsStreaming(false);
+
+        // Notify caller about the failure so they can clear pending state
+        onJobSubmissionError?.(submissionError);
+
         return;
       }
 
@@ -730,7 +785,7 @@ export function useStreamingQuery(
 
       eventSource.onerror = (e) => handleSseError(e, eventSource);
     },
-    [chatId, stopStream, handleJobEvent, handleSseError]
+    [chatId, stopStream, handleJobEvent, handleSseError, onJobSubmissionError]
   );
 
   /**
@@ -797,54 +852,131 @@ export function useStreamingQuery(
     };
   }, [stopStream]);
 
-  // Reset when chat changes (but NOT for draft→real navigation with same chatId)
+  // Save/restore state when chat changes (preserves research panel state across chat switches)
   useEffect(() => {
-    console.log('[useStreamingQuery] Chat change effect triggered:', {
-      prevChatId: prevChatIdRef.current,
-      newChatId: chatId,
-      willReset: prevChatIdRef.current !== chatId,
-    });
-
-    // Only reset if chatId actually changed to a DIFFERENT value
-    // This prevents state reset when URL changes but chatId stays the same (draft→real)
+    // Skip if chatId didn't actually change
     if (prevChatIdRef.current === chatId) {
-      console.log('[useStreamingQuery] SKIPPING reset - same chatId');
-      return; // Same chatId, don't reset - prevents flickering during navigation
+      return;
     }
 
-    console.log('[useStreamingQuery] RESETTING ALL STATE - chatId changed from', prevChatIdRef.current, 'to', chatId);
-    prevChatIdRef.current = chatId;
+    console.log('[useStreamingQuery] Chat change:', prevChatIdRef.current, '→', chatId);
 
-    // CRITICAL: Close any open EventSource BEFORE resetting state!
-    // This prevents events from old chat polluting new chat's state
+    // 1. Save current chat's state before switching (if we have one with meaningful state)
+    if (prevChatIdRef.current) {
+      const snapshot = stateForSnapshotRef.current;
+      // Only save if there's meaningful state (not just defaults)
+      const hasMeaningfulState =
+        snapshot.events.length > 0 ||
+        snapshot.currentPlan !== null ||
+        snapshot.streamingContent.length > 0;
+
+      if (hasMeaningfulState) {
+        saveStreamingState(prevChatIdRef.current, {
+          ...snapshot,
+          savedAt: Date.now(),
+        });
+        console.log('[useStreamingQuery] Saved state for:', prevChatIdRef.current);
+      }
+    }
+
+    // 2. Close any open SSE connection
     console.log('[useStreamingQuery] Stopping stream before chat change');
     stopStream();
 
-    // Reset all state for new chat
-    setEvents([]);
-    setStreamingContent('');
-    setAgentStatus('idle');
-    setCurrentPlan(null);
-    setCurrentStepIndex(-1);
-    setError(null);
-    setErrorDetails(null);
-    setCompletedMessages([]);
-    setStreamingClaims([]);
-    setStreamingVerificationSummary(null);
-    setCitationCorrectionCount(0);
-    setAgentMessageId(null);
-    setToolActivity(null);
-    setPersistenceResult(null);
-    setPersistenceFailed(false);
-    // Reset streaming time and agent tracking
-    setStartTime(null);
-    setCurrentAgent(null);
-    eventCounterRef.current = 0;
-    // Reset deduplication state when switching chats
-    seenEventKeysRef.current.clear();
-    // Reset query mode when switching chats
-    console.log('[useStreamingQuery] Resetting currentQueryMode to null');
-    setCurrentQueryMode(null);
+    // 3. Update ref
+    prevChatIdRef.current = chatId;
+
+    // 4. Restore or reset state for new chat
+    if (chatId) {
+      const savedState = getStreamingState(chatId);
+      if (savedState) {
+        console.log('[useStreamingQuery] Restoring saved state for:', chatId);
+        // Restore UI state for display
+        setEvents(savedState.events);
+        setStreamingContent(savedState.streamingContent);
+        setCurrentPlan(savedState.currentPlan);
+        setCurrentStepIndex(savedState.currentStepIndex);
+        setStreamingClaims(savedState.streamingClaims);
+        setStreamingVerificationSummary(savedState.streamingVerificationSummary);
+        setCurrentQueryMode(savedState.currentQueryMode);
+        setStartTime(savedState.startTime);
+        setCurrentAgent(savedState.currentAgent);
+        setAgentMessageId(savedState.agentMessageId);
+        setToolActivity(savedState.toolActivity);
+
+        // DERIVE agentStatus from state - don't restore directly
+        // This prevents showing "in progress" for completed/failed research
+        const hasContent = savedState.streamingContent.length > 0;
+        const allStepsComplete = savedState.currentPlan?.steps?.every(
+          s => s.status === 'completed' || s.status === 'skipped'
+        ) ?? false;
+
+        if (hasContent && allStepsComplete) {
+          setAgentStatus('complete');
+        } else if (savedState.currentPlan && !hasContent) {
+          // Has plan but no content - was in progress, now treat as idle
+          setAgentStatus('idle');
+        } else {
+          setAgentStatus('idle');
+        }
+
+        // Clear transient state that shouldn't be restored
+        setError(null);
+        setErrorDetails(null);
+        setCompletedMessages([]);
+        setPersistenceResult(null);
+        setPersistenceFailed(false);
+        setCitationCorrectionCount(0);
+        // Restore refs
+        eventCounterRef.current = savedState.events.length;
+        seenEventKeysRef.current.clear();
+      } else {
+        console.log('[useStreamingQuery] No saved state, resetting to defaults');
+        // Reset to defaults
+        setEvents([]);
+        setStreamingContent('');
+        setAgentStatus('idle');
+        setCurrentPlan(null);
+        setCurrentStepIndex(-1);
+        setError(null);
+        setErrorDetails(null);
+        setCompletedMessages([]);
+        setStreamingClaims([]);
+        setStreamingVerificationSummary(null);
+        setCitationCorrectionCount(0);
+        setAgentMessageId(null);
+        setToolActivity(null);
+        setPersistenceResult(null);
+        setPersistenceFailed(false);
+        setStartTime(null);
+        setCurrentAgent(null);
+        setCurrentQueryMode(null);
+        eventCounterRef.current = 0;
+        seenEventKeysRef.current.clear();
+      }
+    } else {
+      // No chatId - reset to defaults
+      setEvents([]);
+      setStreamingContent('');
+      setAgentStatus('idle');
+      setCurrentPlan(null);
+      setCurrentStepIndex(-1);
+      setError(null);
+      setErrorDetails(null);
+      setCompletedMessages([]);
+      setStreamingClaims([]);
+      setStreamingVerificationSummary(null);
+      setCitationCorrectionCount(0);
+      setAgentMessageId(null);
+      setToolActivity(null);
+      setPersistenceResult(null);
+      setPersistenceFailed(false);
+      setStartTime(null);
+      setCurrentAgent(null);
+      setCurrentQueryMode(null);
+      eventCounterRef.current = 0;
+      seenEventKeysRef.current.clear();
+    }
   }, [chatId, stopStream]);
 
   return {

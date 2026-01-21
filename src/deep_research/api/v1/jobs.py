@@ -22,12 +22,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from deep_research.schemas.common import BaseSchema
-
 from deep_research.core.logging_utils import get_logger
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.research_session import ResearchSession, ResearchStatus
+from deep_research.schemas.common import BaseSchema
 from deep_research.services.job_manager import get_job_manager
 from deep_research.services.research_event_service import ResearchEventService
 
@@ -322,11 +321,19 @@ async def stream_job_events(
     ```
     data: {"eventType": "job_completed", "status": "completed|failed|cancelled"}
     ```
+
+    Note:
+        The generator uses an independent session (not the request-scoped `db`)
+        to prevent asyncpg connection pool corruption when clients disconnect
+        during streaming.
     """
-    # Verify ownership
+    # Validate ownership with request-scoped session (fast path)
     session = await db.get(ResearchSession, session_id)
     if not session or session.user_id != user.user_id:
         raise HTTPException(status_code=404, detail="Job not found")
+
+    # Capture validated values for closure (don't capture db!)
+    validated_session_id = session_id
 
     logger.info(
         "JOB_STREAM_STARTED",
@@ -335,52 +342,88 @@ async def stream_job_events(
     )
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        """Generate SSE events from the research session."""
-        event_service = ResearchEventService(db)
+        """Generate SSE events using independent session.
+
+        Creates ONE independent session for the entire generator lifetime.
+        This session is NOT tied to the HTTP request lifecycle, preventing
+        CancelledError from propagating to the connection pool on client disconnect.
+        """
+        from deep_research.db.session import get_session_maker
+
+        session_maker = get_session_maker()
         last_seq = since_sequence
         poll_interval = 0.5  # seconds
 
-        while True:
-            # Get new events since last sequence
-            events = await event_service.get_events_since_sequence(
-                research_session_id=session_id,
-                since_sequence=last_seq,
-                limit=50,
-            )
+        # Single session for entire generator - properly cleaned up by context manager
+        async with session_maker() as independent_db:
+            try:
+                while True:
+                    event_service = ResearchEventService(independent_db)
+                    events = await event_service.get_events_since_sequence(
+                        research_session_id=validated_session_id,
+                        since_sequence=last_seq,
+                        limit=50,
+                    )
 
-            # Emit each event
-            for event in events:
-                event_dict = event_service.event_to_dict(event)
-                yield f"data: {json.dumps(event_dict)}\n\n"
-                if event.sequence_number:
-                    last_seq = event.sequence_number
+                    # Emit each event
+                    for event in events:
+                        event_dict = event_service.event_to_dict(event)
+                        yield f"data: {json.dumps(event_dict)}\n\n"
+                        if event.sequence_number:
+                            last_seq = event.sequence_number
 
-            # Refresh session status
-            await db.refresh(session)
+                    # Get fresh session status (use get() to avoid caching issues)
+                    current_session = await independent_db.get(
+                        ResearchSession, validated_session_id
+                    )
+                    if not current_session:
+                        # Session deleted - client will need to reload
+                        break
 
-            # Check if job completed
-            status_val = (
-                session.status.value
-                if hasattr(session.status, "value")
-                else session.status
-            )
+                    # Force refresh to get latest status from DB
+                    await independent_db.refresh(current_session)
 
-            if status_val != ResearchStatus.IN_PROGRESS.value:
-                # Emit final status event and close
-                final_event = {
-                    "eventType": "job_completed",
-                    "status": status_val,
-                }
-                yield f"data: {json.dumps(final_event)}\n\n"
+                    status_val = (
+                        current_session.status.value
+                        if hasattr(current_session.status, "value")
+                        else current_session.status
+                    )
+
+                    if status_val != ResearchStatus.IN_PROGRESS.value:
+                        # Emit final status event and close
+                        final_event = {
+                            "eventType": "job_completed",
+                            "status": status_val,
+                        }
+                        yield f"data: {json.dumps(final_event)}\n\n"
+                        logger.info(
+                            "JOB_STREAM_COMPLETED",
+                            session_id=str(validated_session_id),
+                            status=status_val,
+                        )
+                        break
+
+                    # Wait before polling again
+                    await asyncio.sleep(poll_interval)
+
+            except asyncio.CancelledError:
+                # Client disconnected - graceful cleanup, no error logging
                 logger.info(
-                    "JOB_STREAM_COMPLETED",
-                    session_id=str(session_id),
-                    status=status_val,
+                    "JOB_STREAM_CLIENT_DISCONNECTED",
+                    session_id=str(validated_session_id),
                 )
-                break
-
-            # Wait before polling again
-            await asyncio.sleep(poll_interval)
+                # Don't re-raise - let context manager clean up session properly
+            except Exception as e:
+                logger.error(
+                    "JOB_STREAM_ERROR",
+                    session_id=str(validated_session_id),
+                    error=str(e),
+                    exc_info=True,
+                )
+                # Yield error event before exiting
+                error_event = {"eventType": "error", "message": "Stream error occurred"}
+                yield f"data: {json.dumps(error_event)}\n\n"
+                # Don't re-raise - let context manager clean up session properly
 
     return StreamingResponse(
         event_generator(),

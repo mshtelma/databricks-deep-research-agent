@@ -18,6 +18,8 @@ interface ChatSidebarProps {
   onRestoreChat?: (chatId: string) => void;
   onDeleteChat?: (chatId: string) => void;
   onExportChat?: (chatId: string) => void;
+  /** Called when user hovers over a chat (for prefetching messages) */
+  onHoverChat?: (chatId: string) => void;
   searchQuery: string;
   onSearchQueryChange: (query: string) => void;
   statusFilter: StatusFilter;
@@ -36,6 +38,7 @@ export function ChatSidebar({
   onRestoreChat,
   onDeleteChat,
   onExportChat,
+  onHoverChat,
   searchQuery,
   onSearchQueryChange,
   statusFilter,
@@ -114,6 +117,9 @@ export function ChatSidebar({
               chat={chat}
               isSelected={chat.id === currentChatId}
               onClick={() => onSelectChat(chat.id)}
+              onHover={
+                !chat.isDraft && onHoverChat ? () => onHoverChat(chat.id) : undefined
+              }
               onRename={
                 !chat.isDraft && onRenameChat ? (title) => onRenameChat(chat.id, title) : undefined
               }
@@ -170,6 +176,7 @@ interface ChatListItemProps {
   chat: ChatListEntry;
   isSelected: boolean;
   onClick: () => void;
+  onHover?: () => void;
   onRename?: (newTitle: string) => void;
   onArchive?: () => void;
   onRestore?: () => void;
@@ -181,6 +188,7 @@ function ChatListItem({
   chat,
   isSelected,
   onClick,
+  onHover,
   onRename,
   onArchive,
   onRestore,
@@ -234,6 +242,7 @@ function ChatListItem({
       <button
         data-testid={`chat-item-${chat.id}`}
         onClick={onClick}
+        onMouseEnter={onHover}
         className={cn(
           'w-full text-left p-3 rounded-lg transition-colors pr-10',
           'hover:bg-accent hover:text-accent-foreground',

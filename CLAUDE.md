@@ -1,816 +1,291 @@
 # Deep Research Agent Development Guidelines
 
-Auto-generated from feature plans. Last updated: 2026-01-06
-
 ## Project Overview
 
-Deep research agent with **5-agent architecture** (Coordinator, Planner, Researcher, Reflector, Synthesizer), step-by-step reflection, web search via Brave API, streaming chat UI with persistence on Databricks Lakebase.
+Deep research agent with multi-agent architecture (Coordinator, Planner, Researcher, Reflector, Synthesizer + specialized variants), step-by-step reflection, web search via Brave API, streaming chat UI with persistence on Databricks Lakebase.
 
 **Key Design Decisions:**
 - **Plain Async Python** orchestration (NOT LangGraph/DSPy/AutoGen)
 - **Step-by-step reflection** after EACH research step (CONTINUE/ADJUST/COMPLETE)
 - **Tiered model routing**: simple (fast), analytical (balanced), complex (reasoning)
 
-## Active Technologies
-- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, httpx, openai (with custom base_url), Pydantic v2, React 18, TanStack Query, trafilatura (001-deep-research-agent)
-- Databricks Lakebase (PostgreSQL) via psycopg3/asyncpg (001-deep-research-agent)
-- TypeScript 5.x (Playwright tests) + Playwright (latest), @playwright/tes (001-deep-research-agent)
-- N/A (tests run against existing application) (001-deep-research-agent)
-- Python 3.11+ (backend), TypeScript 5.x (frontend, E2E) (001-deep-research-agent)
-- Mocked (unit tests), Real PostgreSQL/Lakebase (integration tests optional) (001-deep-research-agent)
-- Python 3.11+ + PyYAML, Pydantic v2, FastAPI (001-deep-research-agent)
-- YAML file (`config/app.yaml`), Pydantic models for validation (001-deep-research-agent)
-- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, AsyncOpenAI, Pydantic v2, React 18, TanStack Query (003-claim-level-citations)
-- Databricks Lakebase (PostgreSQL) via asyncpg, existing schema extensions (003-claim-level-citations)
-- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, Pydantic v2, React 18, TanStack Query, Tailwind CSS (004-tiered-query-modes)
+## Quick Reference - Make Commands
 
-| Component | Technology | Version |
-|-----------|------------|---------|
-| Backend Language | Python | 3.11+ |
-| Frontend Language | TypeScript | 5.x |
-| Agent Orchestration | Plain Async Python | N/A |
-| LLM Client | openai (AsyncOpenAI) | 1.10+ |
-| HTTP Client | httpx | 0.26+ |
-| Backend Framework | FastAPI | 0.109+ |
-| Frontend Framework | React | 18.x |
-| Database | Databricks Lakebase (PostgreSQL) | Preview |
-| Database Client | psycopg3/asyncpg | 3.1+/0.29+ |
-| Observability | MLflow | 3.8+ |
-| UI Components | Tailwind CSS | 3.4+ |
-| State Management | TanStack Query | 5.x |
-| JSON Repair | json-repair | 0.25+ |
-| Web Content Extraction | trafilatura | 2.0+ |
+### Development
+| Command | Description |
+|---------|-------------|
+| `make dev` | Run backend (:8000) + frontend (:5173) with hot reload |
+| `make dev-backend` | Backend only with hot reload |
+| `make dev-frontend` | Frontend only with Vite |
+| `make install` | Install all dependencies (backend + frontend + e2e) |
+| `make quickstart` | Set up local development environment |
 
-## Project Structure
+### Database
+| Command | Description |
+|---------|-------------|
+| `make db` | Start local PostgreSQL via Docker + run migrations |
+| `make db-stop` | Stop local PostgreSQL |
+| `make db-reset` | Reset schema (drops ALL data, recreates tables) |
+| `make clean_db` | Delete all chats/messages (preserves schema) |
+| `make db-migrate-remote TARGET=dev` | Run migrations on deployed Lakebase |
 
-```text
-src/                            # Python backend source
-├── agent/
-│   ├── orchestrator.py         # Main async pipeline
-│   ├── state.py                # ResearchState model
-│   ├── nodes/                  # 5 agent nodes
-│   │   ├── coordinator.py      # Query classification
-│   │   ├── background.py       # Quick web search
-│   │   ├── planner.py          # Research plan
-│   │   ├── researcher.py       # Step execution
-│   │   ├── reflector.py        # Step-by-step decisions
-│   │   └── synthesizer.py      # Final report
-│   ├── prompts/                # Agent prompt templates
-│   └── tools/                  # web_search, web_crawler
-├── api/                        # FastAPI routes
-│   └── v1/
-│       └── utils/              # Shared API utilities
-│           ├── authorization.py  # Centralized auth checks
-│           └── transformers.py   # Response builders
-├── models/                     # Pydantic models
-├── services/
-│   ├── base.py                 # BaseRepository pattern for CRUD
-│   ├── loading.py              # Shared eager-loading options
-│   ├── llm/                    # LLM client, rate limiter, model router
-│   ├── search/                 # Brave Search API
-│   └── storage/                # Session/message repos
-├── core/                       # Config, auth, tracing
-├── static_files.py             # SPA serving for production
-├── db/                         # Database connection
-└── main.py                     # FastAPI app entry point
+### Testing
+| Command | Description |
+|---------|-------------|
+| `make test` | Unit tests only (fast, mocked, no credentials) |
+| `make test-integration` | Integration tests (real LLM/Brave, requires creds) |
+| `make test-complex` | Long-running tests (production config) |
+| `make test-all` | All Python + Frontend tests |
+| `make test-frontend` | Frontend tests only |
+| `make e2e` | Build + run Playwright E2E tests |
+| `make e2e-ui` | E2E tests with Playwright UI |
 
-frontend/                       # React frontend source
-├── src/
-│   ├── components/
-│   │   ├── chat/               # ChatContainer, MessageList, etc.
-│   │   ├── research/           # ReasoningPanel, PlanProgress
-│   │   └── common/             # Shared components
-│   ├── pages/
-│   ├── hooks/                  # useStreamingQuery, useSession
-│   ├── services/               # API client, SSE handling
-│   └── types/
-└── tests/                      # Vitest unit tests
+### Quality & Build
+| Command | Description |
+|---------|-------------|
+| `make typecheck` | Type check backend (mypy) + frontend (tsc) |
+| `make lint` | Lint backend (ruff) + frontend (eslint) |
+| `make format` | Format code (ruff + prettier) |
+| `make build` | Build frontend to `static/` |
+| `make prod` | Build + run unified production server (:8000) |
+| `make clean` | Remove build artifacts |
 
-e2e/                            # Playwright E2E tests (full-stack)
-├── tests/                      # Test spec files
-├── pages/                      # Page Object Models
-├── fixtures/                   # Test fixtures
-└── playwright.config.ts
+### Deployment (Databricks Apps)
+| Command | Description |
+|---------|-------------|
+| `make deploy TARGET=dev` | Full deployment (build, migrate, grant, start) |
+| `make deploy TARGET=ais` | Deploy to AIS workspace |
+| `make logs TARGET=dev` | Download app logs |
+| `make logs TARGET=dev FOLLOW=-f` | Follow logs in real-time |
+| `make logs TARGET=dev SEARCH="--search ERROR"` | Filter logs |
+| `make requirements` | Generate requirements.txt from pyproject.toml |
+| `make bundle-validate` | Validate Databricks bundle config |
+| `make bundle-summary` | Show deployment summary |
 
-tests/                          # Python backend tests (3-tier architecture)
-├── unit/                       # Fast tests with mocks (no credentials needed)
-│   ├── agent/
-│   ├── api/
-│   └── services/
-├── integration/                # Real LLM/Brave tests (uses config/app.test.yaml)
-│   ├── conftest.py            # Shared fixtures, test config
-│   ├── test_e2e_research.py
-│   └── test_citation_pipeline.py
-└── complex/                    # Long-running tests (uses production config)
-    ├── conftest.py
-    └── test_complex_research.py
-
-static/                         # Built frontend (gitignored, created by `make build`)
-```
-
-**Deployment**: Frontend builds to `static/` and is served by FastAPI. No Node.js runtime in production.
-
-## Commands
-
+### Direct Commands
 ```bash
-# Development (single command - runs both backend and frontend)
-make dev                         # Backend (:8000) + Frontend (:5173) → UI at localhost:5173
-make dev-backend                 # Backend only (:8000)
-make dev-frontend                # Frontend only (:5173)
-
-# Production build
-make build                       # Build frontend to static/
-make prod                        # Run unified server on :8000
-
-# Log files (auto-created by make dev/prod)
-# /tmp/deep-research-dev.log     # Dev server logs
-# /tmp/deep-research-prod.log    # Prod server logs
-tail -f /tmp/deep-research-dev.log  # Monitor logs in real-time
-
-# E2E Testing (single command!)
-make e2e                         # Build + start server + run Playwright tests
-make e2e-ui                      # Run E2E tests with Playwright UI
-
-# Quality checks
-make typecheck                   # Type check backend + frontend
-make lint                        # Lint backend + frontend
-
-# Testing (3-tier architecture)
-make test                        # Unit tests only (fast, no credentials)
-make test-integration            # Integration tests (real LLM/Brave, test config)
-make test-complex                # Complex long-running tests (production config)
-make test-all                    # All Python + Frontend tests
-make test-frontend               # Run frontend tests only
-
-# Direct pytest with markers
+# Pytest with markers
 uv run pytest -m "unit"          # Unit tests
 uv run pytest -m "integration"   # Integration tests
 uv run pytest -m "complex"       # Complex tests
 
-# Individual tools (if needed)
-uv run mypy src --strict
-uv run ruff check src
+# Individual tools
+uv run mypy src/deep_research --strict
+uv run ruff check src/deep_research
 cd frontend && npm run typecheck
+
+# View logs
+tail -f /tmp/deep-research-dev.log   # Dev server logs
+tail -f /tmp/deep-research-prod.log  # Prod server logs
 ```
 
-## Databricks Apps Deployment
+## Tech Stack
 
-### Full Deployment (One Command)
+| Component | Technology | Version |
+|-----------|------------|---------|
+| Backend | Python | 3.11+ |
+| Frontend | TypeScript + React | 5.x / 18.x |
+| Agent Orchestration | Plain Async Python | - |
+| LLM Client | openai (AsyncOpenAI) | 1.10+ |
+| Backend Framework | FastAPI | 0.109+ |
+| Database | Databricks Lakebase (PostgreSQL) | Preview |
+| Database Client | psycopg3 / asyncpg | 3.1+ / 0.29+ |
+| Observability | MLflow | 3.8+ |
+| UI | Tailwind CSS, TanStack Query | 3.4+ / 5.x |
 
+## Project Structure
+
+```text
+src/deep_research/               # Python package (pip-installable)
+├── agent/
+│   ├── orchestrator.py          # Main async pipeline
+│   ├── state.py                 # ResearchState model
+│   ├── config.py                # Agent configuration accessors
+│   ├── persistence.py           # DB persistence layer
+│   ├── nodes/                   # Agent nodes
+│   │   ├── coordinator.py       # Query classification
+│   │   ├── background.py        # Quick background search
+│   │   ├── planner.py           # Research plan generation
+│   │   ├── researcher.py        # Classic step execution
+│   │   ├── react_researcher.py  # ReAct-style researcher
+│   │   ├── reflector.py         # Step-by-step decisions
+│   │   ├── synthesizer.py       # Final report generation
+│   │   ├── citation_synthesizer.py   # Citation-aware synthesis
+│   │   └── react_synthesizer.py      # ReAct synthesis mode
+│   ├── prompts/                 # Agent prompt templates
+│   ├── tools/                   # web_search, web_crawler, registries
+│   └── pipeline/                # Pipeline components
+├── api/v1/                      # FastAPI routes
+│   ├── utils/                   # Shared auth & transformers
+│   └── *.py                     # Endpoint files
+├── models/                      # SQLAlchemy models
+├── schemas/                     # Pydantic request/response schemas
+├── services/                    # Business logic
+│   ├── base.py                  # BaseRepository pattern
+│   ├── llm/                     # LLM client, rate limiter
+│   ├── search/                  # Brave Search API
+│   ├── citation/                # Citation pipeline
+│   └── *_service.py             # Domain services
+├── core/                        # Config, auth, tracing
+├── db/                          # Database, migrations
+└── main.py                      # FastAPI app entry point
+
+frontend/src/                    # React frontend
+├── components/                  # UI components
+│   ├── chat/                    # Chat UI components
+│   ├── research/                # Research panel components
+│   ├── citations/               # Citation display components
+│   └── common/                  # Shared components
+├── hooks/                       # Custom React hooks
+├── pages/                       # Page components
+├── api/                         # API client
+└── types/                       # TypeScript types
+
+e2e/                             # Playwright E2E tests
+├── tests/                       # Test spec files
+├── pages/                       # Page Object Models
+└── fixtures/                    # Test fixtures
+
+tests/                           # Python tests (3-tier)
+├── unit/                        # Fast, mocked tests
+├── integration/                 # Real LLM/Brave tests
+└── complex/                     # Long-running tests
+
+config/                          # Configuration files
+├── app.yaml                     # Production config
+├── app.test.yaml                # Test config (minimal iterations)
+├── app.e2e.yaml                 # E2E test config
+└── app.example.yaml             # Documented example
+```
+
+## Key Configuration Files
+
+| File | Purpose |
+|------|---------|
+| `config/app.yaml` | Central config (endpoints, models, agents, search) |
+| `config/app.test.yaml` | Test config (fast models, minimal iterations) |
+| `.env` | Environment variables (credentials, secrets) |
+| `pyproject.toml` | Python package definition |
+| `databricks.yml` | Databricks Asset Bundle config |
+
+## Constitution Principles (MUST FOLLOW)
+
+1. **LLM Calls**: All LLM calls MUST use OpenAI client via WorkspaceClient
+2. **Type Annotations**: ALL functions MUST have type annotations
+3. **Pydantic Models**: Use for data structures and validation
+4. **No Runtime Introspection**: No hasattr/isinstance for type safety
+5. **Linting**: mypy strict + ruff MUST pass before merge
+
+## Code Patterns
+
+### Python Backend
+- Async/await for all I/O operations
+- Pydantic models for request/response schemas
+- Dependency injection via `FastAPI Depends()`
+- Services extend `BaseRepository[T]` from `services/base.py`
+- Use eager-loading from `services/loading.py` to prevent N+1
+
+### API Layer
+- Use auth utilities from `api/v1/utils/authorization`
+- Use response transformers from `api/v1/utils/transformers`
+- Never duplicate `_verify_*` functions in endpoints
+
+### TypeScript Frontend
+- Strict mode enabled
+- TanStack Query for data fetching
+- SSE for streaming (not WebSockets)
+- Use `formatActivityLabel()` from `@/utils/activityLabels`
+
+## Authentication
+
+### Local Development
 ```bash
-# Deploy to dev workspace (builds, migrates, grants permissions, starts app)
-make deploy TARGET=dev BRAVE_SCOPE=msh
+# .env - Profile-based (recommended)
+DATABRICKS_CONFIG_PROFILE=your-profile-name
+LAKEBASE_INSTANCE_NAME=your-instance-name
+LAKEBASE_DATABASE=deep_research
 
-# Deploy to AIS workspace
-make deploy TARGET=ais
+# OR direct token
+DATABRICKS_HOST=https://your-workspace.databricks.com
+DATABRICKS_TOKEN=your-token
 
-# What deploy does (8 steps):
-# 1. Build frontend (npm run build)
-# 2. Generate requirements.txt from pyproject.toml
-# 3. Deploy bundle with postgres DB (bootstrap phase)
-# 4. Wait for Lakebase instance to be ready (~30-60s for new instances)
-# 5. Create deep_research database
-# 6. Re-deploy bundle with deep_research DB
-# 7. Run migrations with developer credentials
-# 8. Grant table permissions to app's service principal
-# 9. Start app and show deployment summary
+# OR local PostgreSQL
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/postgres
 ```
 
-### Operations Commands
-
-```bash
-# Download app logs (via /logz/batch REST API)
-make logs TARGET=dev                         # Fetch logs once
-make logs TARGET=dev FOLLOW=-f               # Follow logs (poll every 5s)
-make logs TARGET=dev SEARCH="--search ERROR" # Filter logs by term
-make logs TARGET=ais FOLLOW=-f               # Follow AIS logs
-
-# Restart app (after config changes)
-databricks bundle run -t dev deep_research_agent
-databricks bundle run -t ais deep_research_agent
-
-# Check deployment status
-databricks bundle summary -t dev
-databricks bundle summary -t ais
-
-# Run migrations manually (usually automatic via deploy)
-make db-migrate-remote TARGET=dev
-make db-migrate-remote TARGET=ais
-
-# Grant permissions manually (usually automatic via deploy)
-./scripts/grant-app-permissions.sh "deep-research-lakebase-dre-dev" "e2-demo-west" "deep_research" "deep-research-agent-dre-dev"
-```
-
-### Two-Phase Deployment Architecture
-
-**Problem**: Chicken-and-egg scenario with Lakebase
-1. App needs `LAKEBASE_DATABASE` environment variable
-2. But database doesn't exist until Lakebase instance is created
-3. Lakebase instance is created by bundle deploy
-
-**Solution**: Two-phase deployment
-1. **Phase 1 (Bootstrap)**: Deploy with `postgres` database (always exists in PostgreSQL)
-2. Wait for Lakebase, create `deep_research` database via `scripts/create-database.sh`
-3. **Phase 2 (Complete)**: Re-deploy with `deep_research` as the configured database
-
-### Permission Model (Why GRANT Statements Are Needed)
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Permission Problem                                              │
-├─────────────────────────────────────────────────────────────────┤
-│  1. Developer runs migrations → Tables owned by developer       │
-│  2. App has CAN_CONNECT_AND_CREATE on database                  │
-│  3. CAN_CONNECT_AND_CREATE ≠ SELECT/INSERT/UPDATE/DELETE        │
-│  4. App service principal cannot access tables it doesn't own   │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│  Solution: Post-Migration GRANT Statements                      │
-├─────────────────────────────────────────────────────────────────┤
-│  GRANT ALL ON ALL TABLES IN SCHEMA public TO <app_sp>;          │
-│  GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO <app_sp>;       │
-│  ALTER DEFAULT PRIVILEGES ... GRANT ALL ON TABLES TO <app_sp>;  │
-│  ALTER DEFAULT PRIVILEGES ... GRANT ALL ON SEQUENCES TO <app_sp>│
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Key files**:
-- `src/db/grant_permissions.py` - Python module to grant table permissions
-- `scripts/grant-app-permissions.sh` - Shell wrapper for the grant script
-- `scripts/create-database.sh` - Create deep_research database
-- `scripts/wait-for-lakebase.sh` - Wait for Lakebase to be connectable
-
-### Lakebase Authentication Flow
-
-```
-Developer Machine                    Databricks Profile              Lakebase Instance
-       │                                    │                              │
-       │ 1. Run migrations                  │                              │
-       │    DATABRICKS_CONFIG_PROFILE=...   │                              │
-       ├───────────────────────────────────>│                              │
-       │                                    │ 2. Get OAuth token           │
-       │                                    │    via generate_database_    │
-       │                                    │    credential()              │
-       │                                    ├─────────────────────────────>│
-       │                                    │                              │
-       │ 3. Connect with OAuth token        │                              │
-       │    user="token", pass=<oauth>      │                              │
-       ├──────────────────────────────────────────────────────────────────>│
-       │                                    │                              │
-       │ 4. Create tables (owned by dev)    │                              │
-       ├──────────────────────────────────────────────────────────────────>│
-       │                                    │                              │
-       │ 5. GRANT permissions to app SP     │                              │
-       ├──────────────────────────────────────────────────────────────────>│
-       │                                    │                              │
-       │                                    │     App Service Principal    │
-       │                                    │            │                 │
-       │                                    │ 6. App connects with its     │
-       │                                    │    own OAuth token           │
-       │                                    │            ├────────────────>│
-       │                                    │            │                 │
-       │                                    │ 7. SELECT/INSERT/UPDATE/     │
-       │                                    │    DELETE now works!         │
-       │                                    │            ├────────────────>│
-```
-
-**Token characteristics**:
-- OAuth tokens have 1-hour lifetime with 5-minute refresh buffer
+### Lakebase OAuth
+- Tokens have 1-hour lifetime with 5-minute refresh buffer
 - Username is always `"token"` for OAuth connections
-- Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
+- Host: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
 
-### Profile to Workspace Mapping
+## Deployment Architecture
 
+### Two-Phase Deployment
+1. **Bootstrap**: Deploy with `postgres` database (always exists)
+2. **Wait**: Lakebase instance becomes ready (~30-60s)
+3. **Create**: `deep_research` database via script
+4. **Complete**: Re-deploy with `deep_research` as configured database
+
+### Permission Model
+```
+Developer runs migrations → Tables owned by developer
+App has CAN_CONNECT_AND_CREATE → But cannot SELECT/INSERT/UPDATE
+Solution: GRANT ALL to app service principal after migrations
+```
+
+### Profile Mapping
 | TARGET | Profile | Workspace |
 |--------|---------|-----------|
 | dev | e2-demo-west | E2 Demo West |
 | ais | ais | AIS Production |
 
-## Constitution Principles (MUST FOLLOW)
-
-### I. Clients and Workspace Integration
-- All LLM calls MUST use OpenAI client via WorkspaceClient
-- All Databricks access MUST use WorkspaceClient
-- No direct API calls bypassing these clients
-
-### II. Typing-First Python
-- ALL functions MUST have type annotations
-- Use Pydantic models for data structures
-- Use TypedDict/dataclasses for complex types
-
-### III. Avoid Runtime Introspection
-- NO hasattr/isinstance for type safety
-- Use Pydantic for validation at boundaries
-- Prefer explicit interfaces/Protocols
-
-### IV. Linting and Static Type Enforcement
-- mypy strict mode MUST pass before merge
-- ruff MUST pass with no errors
-- `# type: ignore` requires justification comment
-
-## Code Style
-
-### Python (Backend)
-- Use async/await for all I/O operations
-- Pydantic models for all request/response schemas
-- Dependency injection via FastAPI Depends()
-- SQLAlchemy async for database operations
-
-### Service Layer Patterns
-- All CRUD services SHOULD extend `BaseRepository[T]` from `src/services/base.py`
-- Use eager-loading constants from `src/services/loading.py` to prevent N+1 queries
-- Use `NotFoundError` for missing entities, `AuthorizationError` for access denied
-- Services support optional dependency injection for testability
-
-### API Layer Patterns
-- Use authorization utilities from `src/api/v1/utils/authorization`
-- Use response transformers from `src/api/v1/utils/transformers`
-- Never duplicate `_verify_*` functions in endpoint files
-- All authorization checks return the entity for further use
-
-### TypeScript (Frontend)
-- Strict mode enabled
-- Use TanStack Query for data fetching
-- SSE for streaming (not WebSockets)
-- Shadcn/UI components for accessibility
-- Activity labels: Use `formatActivityLabel()` and `getActivityColor()` from `@/utils/activityLabels` for event display
-
-## Key Files
-
-- `config/app.yaml` - Central configuration (endpoints, models, agents, search)
-- `config/app.test.yaml` - Test-specific config (minimal iterations, fast models)
-- `config/app.example.yaml` - Documented example configuration
-- `src/core/app_config.py` - Pydantic configuration models (supports APP_CONFIG_PATH env var)
-- `specs/001-deep-research-agent/spec.md` - Feature specification
-- `specs/001-deep-research-agent/plan.md` - Implementation plan
-- `specs/001-deep-research-agent/data-model.md` - Entity definitions
-- `specs/001-deep-research-agent/contracts/openapi.yaml` - API contract
-- `.specify/memory/constitution.md` - Project principles
-
-## Central YAML Configuration
-
-All model endpoints, roles, agent limits, and search settings are configured in `config/app.yaml`.
-
-### Configuration Structure
+## YAML Configuration
 
 ```yaml
-# Default model role (simple, analytical, complex, or custom)
-default_role: analytical
-
-# Model endpoints with rate limits and capabilities
+# Model endpoints with rate limits
 endpoints:
   databricks-llama-70b:
     endpoint_identifier: databricks-meta-llama-3-1-70b-instruct
     max_context_window: 128000
     tokens_per_minute: 200000
-    supports_structured_output: true
 
-# Model roles (tiers) with priority-ordered endpoints
+# Model tiers with fallback
 models:
   analytical:
-    endpoints:
-      - databricks-llama-70b
+    endpoints: [databricks-llama-70b]
     temperature: 0.7
-    max_tokens: 8000
-    reasoning_effort: medium
     fallback_on_429: true
 
-# Agent configuration
-agents:
-  researcher:
-    max_search_queries: 2
-    max_urls_to_crawl: 3
-  planner:
-    max_plan_iterations: 3
-  coordinator:
-    enable_clarification: true
-
-# Search configuration
-search:
-  brave:
-    requests_per_second: 1.0
-    default_result_count: 10
-```
-
-### Research Type Profiles (FR-100)
-
-Research types (light, medium, extended) are configured in `research_types` section:
-
-```yaml
+# Research depth profiles
 research_types:
   light:
-    steps:
-      min: 1
-      max: 3
-      prompt_guidance: "Quick overview with 1-3 focused steps."
-    report_limits:
-      min_words: 800
-      max_words: 1200
-      max_tokens: 2000
-    researcher:
-      mode: classic  # "react" or "classic"
-      max_search_queries: 2
-      max_urls_to_crawl: 3
-      max_tool_calls: 8
-    citation_verification:
-      generation_mode: natural
-      enable_numeric_qa_verification: false
-
-  medium:
-    steps: {min: 3, max: 6}
-    report_limits: {min_words: 1200, max_words: 2000, max_tokens: 4000}
-    researcher: {mode: react, max_tool_calls: 12}
-
+    steps: {min: 1, max: 3}
+    researcher: {mode: classic}
   extended:
     steps: {min: 5, max: 10}
-    report_limits: {min_words: 1500, max_words: 3200, max_tokens: 8000}
     researcher: {mode: react, max_tool_calls: 20}
-    citation_verification: {generation_mode: strict, enable_numeric_qa_verification: true}
 ```
 
-**Researcher Modes**:
-- `classic`: Single-pass researcher with fixed searches/crawls per step (faster)
-- `react`: ReAct loop where LLM controls tool calls with budget limit (more intelligent)
-
-**Config Accessors**:
+### Config Access in Code
 ```python
-from src.agent.config import (
-    get_research_type_config,  # Full config for a depth
-    get_step_limits,           # StepLimits (min, max, prompt_guidance)
-    get_report_limits,         # ReportLimitConfig (min_words, max_words, max_tokens)
-    get_researcher_config_for_depth,  # ResearcherTypeConfig (mode, limits)
-    get_citation_config_for_depth,    # CitationVerificationConfig overrides
+from deep_research.agent.config import (
+    get_research_type_config,
+    get_step_limits,
+    get_researcher_config_for_depth,
 )
+from deep_research.core.app_config import get_app_config
 ```
-
-### Environment Variable Interpolation
-
-```yaml
-# Required variable (fails if not set)
-endpoint_identifier: ${MODEL_ENDPOINT}
-
-# Optional with default
-endpoint_identifier: ${MODEL_ENDPOINT:-databricks-llama-70b}
-```
-
-### Accessing Configuration in Code
-
-```python
-# LLM service loads from central config automatically
-from src.services.llm.config import ModelConfig
-model_config = ModelConfig()  # Loads from app.yaml
-
-# Agent configuration accessors
-from src.agent.config import get_researcher_config, get_planner_config
-researcher_config = get_researcher_config()
-max_queries = researcher_config.max_search_queries
-
-# Direct app config access
-from src.core.app_config import get_app_config
-app_config = get_app_config()
-default_role = app_config.default_role
-```
-
-## Authentication Configuration
-
-### Profile-Based Auth (Recommended)
-
-```bash
-# .env - Profile-based authentication (preferred)
-DATABRICKS_CONFIG_PROFILE=your-profile-name
-
-# Lakebase Configuration
-LAKEBASE_INSTANCE_NAME=your-instance-name  # NOT the full hostname
-LAKEBASE_DATABASE=deep_research
-```
-
-### Direct Token Auth (Fallback)
-
-```bash
-# .env - Direct token authentication (fallback)
-DATABRICKS_HOST=https://your-workspace.databricks.com
-DATABRICKS_TOKEN=your-personal-access-token
-
-# For local PostgreSQL (when Lakebase not configured)
-DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
-```
-
-### Key Authentication Patterns
-
-**LLM Client** (`src/services/llm/client.py`):
-- Supports both `DATABRICKS_TOKEN` and profile-based auth
-- Profile auth: `WorkspaceClient(profile=...).config.authenticate()` then `oauth_token().access_token`
-- Uses `AsyncOpenAI` with custom `base_url` pointing to Databricks serving endpoints
-
-**Lakebase** (`src/db/lakebase_auth.py`):
-- Requires `DATABRICKS_CONFIG_PROFILE` for OAuth token generation
-- Uses `WorkspaceClient.database.generate_database_credential(instance_names=[...])`
-- OAuth username is always `"token"`, actual token is the password
-- Tokens auto-refresh (1-hour lifetime, 5-minute buffer)
-- Host derived from instance name: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
 
 ## Known Issues
 
 ### Web Search Mode Incomplete
 - **Status**: Design complete, implementation pending
-- **Current behavior**: Web Search mode falls through to full Deep Research pipeline
-- **Expected behavior**: Single-step researcher with limited budget (~15s total)
-- **Spec reference**: `specs/004-tiered-query-modes/plan.md` lines 172-176
-- **Note**: The `skip_*` config flags in app.yaml were a superseded design approach and have been removed. Implementation should use programmatic routing per spec.
+- **Current**: Falls through to full Deep Research pipeline
+- **Expected**: Single-step researcher with limited budget (~15s)
 
-### API Case Sensitivity
-- **Status**: Fixed in code review (2026-01-08)
-- **Issue**: Backend emitted snake_case keys but frontend expected camelCase
-- **Fix**: BaseSchema already has `alias_generator=to_camel`. Now all events are serialized with `by_alias=True` to emit camelCase keys consistently.
-- **Key files**: `src/api/v1/research.py`, `src/schemas/common.py`
-
-### Frontend Improvements Applied (2026-01-08)
-- Added Zod validation for SSE events with graceful degradation (`frontend/src/schemas/streamEvents.ts`)
-- Added React Error Boundaries to prevent app crashes (`frontend/src/components/common/ErrorBoundary.tsx`)
-- Debounced auto-scroll to prevent excessive re-renders during streaming
-- Fixed timer cleanup to prevent setState on unmounted components
-- Created shared `snakeToCamel` utility (`frontend/src/utils/caseConversion.ts`)
-
-## Recent Changes
-- Code Quality Refactoring (2026-01-16)
-  - **REFACTOR**: Eliminated code duplication across API and service layers
-  - Created `src/api/v1/utils/authorization.py` - Centralized auth checks (3 functions)
-  - Created `src/api/v1/utils/transformers.py` - Response builders (7 functions)
-  - Created `src/services/base.py` - BaseRepository pattern for CRUD operations
-  - Created `src/services/loading.py` - Shared eager-loading options
-  - Refactored ClaimService, SourceService, EvidenceSpanService, MessageService, ChatService to extend BaseRepository
-  - Fixed ExportService tight coupling with dependency injection
-  - Updated research.py to use shared `verify_chat_access()` function
-  - Key files:
-    - `src/api/v1/utils/__init__.py` - Exports shared utilities
-    - `src/api/v1/utils/authorization.py` - verify_chat_ownership, verify_chat_access, verify_message_ownership
-    - `src/api/v1/utils/transformers.py` - claim_to_response, build_verification_summary, etc.
-    - `src/services/base.py` - BaseRepository[T] with add, add_many, get, update, delete methods
-    - `src/services/loading.py` - CLAIM_WITH_CITATIONS_OPTIONS, MESSAGE_WITH_SESSION_OPTIONS, etc.
-  - Impact: ~95 occurrences of add/flush/refresh boilerplate reduced, 4 duplicate auth functions consolidated
-
-- Lakebase OAuth Token Refresh Bug Fix (2026-01-11)
-  - **BUG FIX**: App failed with `InvalidPasswordError` after ~1 hour due to expired OAuth token
-  - Root cause: `get_session_maker()` cached the session maker and never called `get_engine()` after first request
-  - The token expiry check in `get_engine()` was bypassed, so tokens were never refreshed
-  - Fix: `get_session_maker()` now calls `get_engine()` on every request to trigger proactive token refresh
-  - When token is expired, engine is disposed and recreated with fresh credentials
-  - Key file: `src/db/session.py` (lines 142-145: always call get_engine())
-
-- Deployment Architecture Documentation (2026-01-11)
-  - **NEW DOCUMENTATION**: Comprehensive deployment guide added to CLAUDE.md and plan.md
-  - Documented 8-step deployment pipeline via `make deploy TARGET=dev BRAVE_SCOPE=msh`
-  - Documented two-phase deployment architecture (bootstrap with postgres, then switch to deep_research)
-  - Documented Lakebase permission model (CAN_CONNECT_AND_CREATE doesn't grant table access)
-  - Documented OAuth authentication flow for Lakebase connections
-  - Added operations commands (logs, restart, status, manual migrations)
-  - Key files:
-    - `src/db/grant_permissions.py` - Grant table permissions to app service principal
-    - `scripts/grant-app-permissions.sh` - Shell wrapper for permission grants
-    - `scripts/create-database.sh` - Create deep_research database
-    - `scripts/wait-for-lakebase.sh` - Wait for Lakebase to be connectable
-    - `src/db/lakebase_auth.py` - OAuth credential provider for Lakebase
-  - Related sections: "Databricks Apps Deployment" in CLAUDE.md, "Deployment Architecture" in plan.md
-
-- 004-tiered-query-modes: Message Export Feature (2026-01-10)
-  - **NEW FEATURE**: Export agent messages as markdown via 3-dot menu
-  - Three export options: Export Report, Verification Report, Copy to Clipboard
-  - Export Report: Downloads synthesis with title, metadata, content, and sources list
-  - Verification Report: Downloads claims with verdicts and evidence quotes (only shows when claims exist)
-  - Copy to Clipboard: Copies report markdown to system clipboard with toast notification
-  - New API endpoints:
-    - `GET /messages/{id}/report` - Returns standalone markdown report
-    - `GET /messages/{id}/provenance?format=markdown` - Returns verification report as markdown
-  - Key files:
-    - `src/services/export_service.py` - Added `export_report_markdown()` and `export_provenance_markdown()`
-    - `src/api/v1/citations.py` - Added report endpoint and format param to provenance endpoint
-    - `frontend/src/components/chat/MessageExportMenu.tsx` - New dropdown menu component
-    - `frontend/src/components/chat/AgentMessage.tsx` - Integrated export menu
-    - `frontend/src/api/client.ts` - Added `messagesApi.exportReport()` and `messagesApi.exportProvenance()`
-  - Related FRs: FR-056 through FR-060 in spec.md
-
-- 004-tiered-query-modes: Verify Sources Toggle & Snippet Fallback (2026-01-06)
-  - **NEW FEATURE**: User-controllable "Verify sources" checkbox for Web Search and Deep Research modes
-  - When enabled: runs full citation verification pipeline (claim extraction, evidence selection)
-  - When disabled: uses classical synthesis with `[Title](url)` style citations
-  - Default: `false` for Web Search (prioritize speed), `true` for Deep Research (prioritize accuracy)
-  - **SNIPPET FALLBACK**: Brave Search snippets used as fallback when web fetch fails or not performed
-  - Snippet-based evidence assigned 0.5 relevance score (lower confidence than full content)
-  - Added `is_snippet_based: bool` field to `RankedEvidence` dataclass
-  - Key files:
-    - `src/api/v1/research.py` - Added `verify_sources` query parameter
-    - `src/agent/orchestrator.py` - Added to `OrchestrationConfig`, passed to `ResearchState`
-    - `frontend/src/components/chat/MessageInput.tsx` - Checkbox UI with mode-based defaults
-    - `frontend/src/hooks/useStreamingQuery.ts` - Pass `verify_sources` in URL
-    - `src/services/citation/evidence_selector.py` - Snippet fallback logic
-    - `src/services/citation/pipeline.py` - Include snippet-only sources
-  - Related FRs: FR-046 through FR-055 in spec.md
-
-- 004-tiered-query-modes: Added Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, Pydantic v2, React 18, TanStack Query, Tailwind CSS
-- 003-claim-level-citations: Stage 7 ARE-Style Verification Retrieval (2026-01-02)
-  - **NEW FEATURE**: Post-processing stage for unsupported/partial claims
-  - Implements ARE (Atomic fact decomposition-based Retrieval and Editing) pattern
-  - Decomposes claims into atomic facts for granular verification (FActScore methodology)
-  - Searches internal evidence pool first, then external Brave API if needed
-  - Revises claims: verified facts keep citations, unverified facts get hedging language
-  - Key files:
-    - `src/services/citation/atomic_decomposer.py` - Atomic fact decomposition
-    - `src/services/citation/verification_retriever.py` - Main Stage 7 orchestration
-    - `src/agent/prompts/citation/verification_retrieval.py` - Stage 7 prompts
-  - Config: `verification_retrieval` section in `config/app.yaml`
-  - Per-depth: disabled for light, enabled for medium/extended
-  - Scientific basis: [ARE](https://arxiv.org/abs/2410.16708), [FActScore](https://arxiv.org/abs/2305.14251), [SAFE](https://arxiv.org/abs/2403.18802)
-  - Softening strategies: hedge ("reportedly"), qualify ("some evidence suggests"), parenthetical ("(unverified)")
-
-- 003-claim-level-citations: Per-Depth Config Merge Fix (2026-01-01)
-  - **BUG FIX**: Per-depth `citation_verification` configs were replacing global config instead of merging
-  - Root cause: `get_citation_config_for_depth()` returned per-type config directly without inheriting global values
-  - Fix: Deep merge per-type with global - fields explicitly set in per-type override, unset fields inherit from global
-  - Affected: `synthesis_mode`, `react_synthesis`, and other fields not specified per-type were using Pydantic defaults
-  - Key file: `src/agent/config.py` (get_citation_config_for_depth function)
-
-  - **NEW FEATURE**: Consolidated `research_types` configuration in app.yaml
-  - Each depth (light/medium/extended) now has unified settings:
-    - `steps`: min, max, and optional `prompt_guidance` for planner
-    - `report_limits`: min_words, max_words, max_tokens
-    - `researcher`: mode (react/classic), max_tool_calls, max_search_queries, max_urls_to_crawl
-    - `citation_verification`: per-type overrides (generation_mode, enable_numeric_qa_verification)
-  - Added `ResearcherMode` enum for switching between classic and react researcher
-  - Orchestrator now dynamically selects researcher based on per-depth config
-  - Removed hardcoded `DEPTH_TO_STEPS` from state.py
-  - Key files: `src/core/app_config.py`, `src/agent/config.py`, `src/agent/orchestrator.py`
-  - Config accessors: `get_research_type_config()`, `get_step_limits()`, `get_report_limits()`,
-    `get_researcher_config_for_depth()`, `get_citation_config_for_depth()`
-
-  - **CRITICAL BUG FIX**: Claims were parsed from original content with numeric markers `[0]`, `[1]`
-  - But final_report stored in DB had human-readable keys `[Arxiv]`, `[Zhipu-2]` (different lengths)
-  - This caused position_start/position_end mismatch, making citations unresolvable in frontend
-  - **Root cause**: `_parse_interleaved_content()` parsed from pre-replacement content
-  - **Fix**: Parse claims from `content_with_keys` (after replacement) instead of original `content`
-  - Added `reverse_key_map` to lookup evidence_index from citation keys
-  - Updated regex to match human-readable keys `\[([A-Za-z][A-Za-z0-9-]*(?:-\d+)?)\]`
-  - Key files: `src/services/citation/claim_generator.py` (lines 346-477)
-  - **Related issue**: This is similar to snake_case vs camelCase mismatch fixed in SSE events
-  - **Testing**: All 162 citation unit tests pass
-
-  - **BUG**: Phantom chats appeared after DB clean due to localStorage drafts and stale cache
-  - Reduced TanStack Query `staleTime` from 5 minutes to 30 seconds
-  - Enabled `refetchOnWindowFocus` for fresh data on tab switch
-  - Added `clearStaleDrafts()` function to sync localStorage with API state
-  - Removed drafts older than 60 seconds that don't exist in API response
-  - Key files: `frontend/src/main.tsx`, `frontend/src/hooks/useDraftChats.ts`, `frontend/src/pages/ChatPage.tsx`
-
-  - **BUG**: Frontend event handlers accessed snake_case properties but runtime SSE had camelCase
-  - Fixed all event handlers in `useStreamingQuery.ts` to check camelCase first
-  - Added `formatToolCall()` and `formatToolResult()` to activityLabels.ts
-  - Key files: `frontend/src/hooks/useStreamingQuery.ts`, `frontend/src/utils/activityLabels.ts`
-
-  - Implemented 3-tier test hierarchy: unit, integration, complex
-  - Created `config/app.test.yaml` for integration tests (minimal iterations, fast models)
-  - Added `APP_CONFIG_PATH` env var support in `src/core/app_config.py`
-  - Moved mocked citation pipeline test to `tests/unit/services/citation/`
-  - Created `tests/integration/test_citation_pipeline.py` with real LLM tests
-  - Created `tests/complex/` directory with long-running research tests
-  - Updated Makefile with `test-unit`, `test-integration`, `test-complex` targets
-  - Added pytest markers: `unit`, `integration`, `complex`
-  - Integration tests use test config; complex tests use production config
-  - Key files: `config/app.test.yaml`, `tests/integration/conftest.py`, `tests/complex/conftest.py`
-
-  - When reflector triggers ADJUST, completed steps are now preserved in the plan
-  - Added `get_completed_steps()` method to `ResearchState` in `src/agent/state.py`
-  - Updated planner prompt to include completed steps section (not duplicated by LLM)
-  - Planner merges completed steps with new LLM-generated steps automatically
-  - `current_step_index` now resumes from first non-completed step instead of resetting to 0
-  - Enhanced logging shows `preserving_completed_steps` count during ADJUST
-  - Benefits: Visual progress preserved, no redundant re-execution, better UX
-  - Key files: `src/agent/state.py`, `src/agent/nodes/planner.py`, `src/agent/prompts/planner.py`, `src/agent/orchestrator.py`
-
-  - Database records (messages, research_session) are no longer created before streaming
-  - UUIDs are pre-generated in memory, passed to orchestrator via `OrchestrationConfig`
-  - All data persisted atomically in `persist_complete_research()` after synthesis succeeds
-  - New `research_started` SSE event broadcasts pre-generated IDs to frontend
-  - Benefits: No orphaned records, no cleanup on failure, single atomic transaction
-  - Key files: `src/api/v1/research.py`, `src/agent/persistence.py`, `src/agent/orchestrator.py`
-
-  - Added `PreferencesService` for managing user preferences (get/update)
-  - Added `FeedbackService` for message feedback with MLflow trace correlation
-  - Added `ExportService` for chat export to Markdown/JSON formats
-  - Added system_instructions support in ResearchState and OrchestrationConfig
-  - System instructions from user preferences now applied to all agent prompts
-  - Added `build_system_prompt()` utility for consistent instruction injection
-  - Updated research API endpoints to fetch and pass user preferences
-
-  - Added `src/services/llm/truncation.py` with intelligent message truncation
-  - Preserves system prompt and recent messages when context exceeds limits
-  - `truncate_messages()` and `truncate_text()` with configurable limits
-  - `get_context_window_for_request()` for endpoint-aware truncation
-
-  - Added default value to ResearcherOutput.observation field for validation resilience
-  - Enhanced researcher prompt with explicit "ALWAYS REQUIRED" observation guidance
-  - Added instructions for handling limited/empty search results
-  - Updated output schema comments to emphasize observation is required
-  - Fixes: LLM validation errors when search results are limited or empty
-
-  - Enhanced planner prompt with entity-by-entity decomposition guidance
-  - Added "Multi-Entity Query Handling" section with CRITICAL RULE to never bundle entities
-  - Increased step limit from 2-8 to 2-15 for multi-entity comparisons
-  - Updated researcher search guidelines with "Entity-Focused Search Strategy"
-  - Enhanced SEARCH_QUERY_PROMPT with entity isolation rules and diverse examples
-  - Fixes: broad multi-entity queries now decomposed into focused entity-specific steps
-
-  - Upgraded MLflow from 2.10+ to 3.8+ for production-grade tracing support
-  - Added `@mlflow.trace` decorator to `stream_research()` in orchestrator.py
-  - Fixed traces not appearing from web app - `stream_research()` now has root span like `run_research()`
-  - Added root span attributes (session_id, query, max_iterations, streaming) for trace correlation
-  - `mlflow.update_current_trace()` now called inside span context (was outside before)
-  - Added `mlflow.flush_trace_async_logging()` after streaming completes in API layer
-  - Fixes: orphan traces, context propagation issues, traces not flushed before response ends
-
-  - Added automatic retry with backoff when rate limits are hit at the LLM client layer
-  - All agents benefit automatically without code changes
-  - Configurable via `rate_limiting` section in `config/app.yaml`
-  - Supports both exponential (`2^n`) and linear (`n+1`) backoff strategies
-  - Smart wait time calculation using endpoint health state
-  - New `RateLimitingConfig` model with `calculate_delay()` method
-  - Refactored `LLMClient.complete()` and `LLMClient.stream()` with retry wrappers
-
-  - Added `user_id` and `chat_id` parameters to `run_research()` and `stream_research()` functions
-  - Traces from the same chat conversation are now grouped together via `mlflow.update_current_trace()`
-  - Uses `mlflow.trace.user` (user_id) and `mlflow.trace.session` (chat_id) metadata
-  - API layer passes user context to orchestrator for trace correlation
-  - New FR-099 in spec.md documenting the requirement
-
-  - Enabled async logging via `mlflow.config.enable_async_logging(True)` for FastAPI context
-  - Added MLflow spans to `LLMClient.complete()` with tier, endpoint, and token metrics
-  - Added root span attributes (session_id, query, max_iterations) in orchestrator
-  - LLM calls now visible in MLflow traces as `llm_simple`, `llm_analytical`, `llm_complex` spans
-
-  - Auto-select first chat or create new one when navigating to home page without a chat
-  - Changed "Untitled Chat" label to "New chat..." with italic/muted styling
-  - Fixed plan step status flickering by clearing currentStepIndex on step completion
-  - New FR-093, FR-094, FR-095 in spec.md
-
-  - Fixed HTTP 422 errors from Brave Search when user queries are too long
-  - Added `BACKGROUND_SEARCH_PROMPT` in `src/agent/prompts/background.py`
-  - Background Investigator now uses LLM to generate 2-3 focused search queries
-  - Added `BackgroundConfig` in `src/core/app_config.py` with configurable limits
-  - Added background config section to `config/app.yaml`
-  - Fallback to truncated query (200 chars) if LLM query generation fails
-  - New FR-092 in spec.md documenting the requirement
-
-  - Added `frontend/src/components/common/MarkdownRenderer.tsx` - reusable markdown component
-  - Uses `react-markdown` with `remark-gfm` for GitHub Flavored Markdown support
-  - Added `react-syntax-highlighter` for code block syntax highlighting (vscDarkPlus/vs themes)
-  - Updated `AgentMessage.tsx` to render content with full markdown support
-  - Enhanced CSS prose styles for tables, blockquotes, headings, strikethrough
-  - Links open in new tabs with `target="_blank" rel="noopener noreferrer"`
-  - Streaming content renders as markdown in real-time
-
-  - Added `frontend/src/utils/activityLabels.ts` with event formatting utilities
-  - `formatActivityLabel()`: Converts raw event types to human-readable labels with emojis
-  - `getActivityColor()`: Returns Tailwind color classes (green/amber/blue/red) by event status
-  - Updated `ChatPage.tsx` to use the new formatters for the activity log
-
-  - Added `config/app.yaml` for all model endpoints, roles, agents, and search settings
-  - Environment variable interpolation: `${VAR}` and `${VAR:-default}`
-  - Pydantic v2 models for configuration validation in `src/core/app_config.py`
-  - Agent config accessors in `src/agent/config.py`
-  - Startup validation fails fast if config is invalid
-  - All hardcoded values removed from agent nodes and services
-
-  - **Security**: Added authorization checks to all 9 API endpoints (messages.py, research.py)
-  - **Data integrity**: Fixed model/migration column name mismatches (Source, UserPreferences, MessageFeedback, AuditLog)
-  - **Transaction safety**: Added flush after delete operations, rollback on errors
-  - **Bug fixes**: Fixed UUID collision risk (now uses uuid5), state mutation during streaming
-  - **Race conditions**: Added refresh after JSONB updates in research_session_service.py
-  - **Deprecations**: Replaced all datetime.utcnow() with datetime.now(UTC) across codebase
-  - **Schema updates**: FeedbackRating now uses string values ("positive"/"negative") matching migration
-
-  - Moved `backend/src/` to `/src/` (Python at root)
-  - Moved `backend/tests/` to `/tests/`
-  - Moved `frontend/e2e/` to `/e2e/` (full-stack E2E tests at root)
-  - Single `make e2e` command for E2E testing
-  - Simplified imports: `from src.xxx` instead of `from backend.src.xxx`
-
-  - LLM client supports profile-based auth via `WorkspaceClient.config.oauth_token()`
-  - Lakebase uses `WorkspaceClient.database.generate_database_credential()`
-  - Host derived from `LAKEBASE_INSTANCE_NAME` (not separate host config)
-  - Fallback to direct `DATABASE_URL` for local development
-
-  - TypeScript 5.x + Playwright for browser-based e2e tests
-  - Page Object Model architecture
-  - Tests for User Story 9 acceptance scenarios
-
-  - Frontend builds to `static/` via Vite
-  - FastAPI serves static files in production (SERVE_STATIC=true)
-  - Single container deployment, no Node.js runtime
-  - Use `make build` and `make prod` for unified deployment
-
-  - **DECIDED**: Plain Async Python for agent orchestration (NOT LangGraph)
-  - 5-agent architecture: Coordinator, Planner, Researcher, Reflector, Synthesizer
-  - Step-by-step reflection after EACH research step
-  - Tiered model routing (simple/analytical/complex)
+## Researcher Modes
+- `classic`: Single-pass with fixed searches/crawls per step (faster)
+- `react`: ReAct loop where LLM controls tool calls with budget (more intelligent)
 
 <!-- MANUAL ADDITIONS START -->
 <!-- Add project-specific notes here that should persist across updates -->

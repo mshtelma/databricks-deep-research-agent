@@ -3,7 +3,7 @@ import { useEffect, useState, useCallback, useMemo } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ChatSidebar, MessageList, MessageInput, DeleteChatDialog, ExportChatDialog, type ExportFormat } from '@/components/chat';
 import { AgentStatusIndicator, ResearchPanel } from '@/components/research';
-import { useChats, useMessages, useStreamingQuery, useChatActions, useDraftChats, useCitations } from '@/hooks';
+import { useChats, useMessages, useStreamingQuery, useChatActions, useDraftChats, useCitations, usePrefetchMessages } from '@/hooks';
 import { useResearchReconnection } from '@/hooks/useResearchReconnection';
 import { useChatActiveJob } from '@/hooks/useResearchJobs';
 import type { Chat, Message, PersistenceCompletedEvent, QueryMode } from '@/types';
@@ -16,6 +16,9 @@ export default function ChatPage() {
 
   // Draft chat management
   const { createDraft, removeDraft, isDraft: isDraftChat, getDraftList, clearStaleDrafts } = useDraftChats();
+
+  // Prefetch messages on hover for instant chat switching
+  const { prefetchMessages } = usePrefetchMessages();
 
   // Data hooks
   const { data: chatsData, isLoading: isLoadingChats } = useChats();
@@ -92,6 +95,13 @@ export default function ChatPage() {
     }
   }, [chatId, queryClient]);
 
+  // Callback when job submission fails - clear pending message since job didn't start
+  const handleJobSubmissionError = useCallback(() => {
+    // Clear pending message since job failed to submit
+    // This prevents the message from being stuck in "pending" state
+    setPendingUserMessage(null);
+  }, []);
+
   const {
     streamingContent,
     isStreaming,
@@ -121,7 +131,10 @@ export default function ChatPage() {
     // Error details for error display
     errorDetails,
     clearErrorDetails,
-  } = useStreamingQuery(chatId, { onStreamComplete: handleStreamComplete });
+  } = useStreamingQuery(chatId, {
+    onStreamComplete: handleStreamComplete,
+    onJobSubmissionError: handleJobSubmissionError,
+  });
 
   // Check for active background job for this chat (job-based reconnection)
   const { data: activeJob, isLoading: isLoadingActiveJob } = useChatActiveJob(chatId || null);
@@ -535,6 +548,7 @@ export default function ChatPage() {
         onRestoreChat={handleRestoreChat}
         onDeleteChat={handleDeleteClick}
         onExportChat={handleExportClick}
+        onHoverChat={prefetchMessages}
         searchQuery={searchQuery}
         onSearchQueryChange={setSearchQuery}
         statusFilter={statusFilter}

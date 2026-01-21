@@ -7,37 +7,45 @@ Provides API endpoints for claim-level citation access:
 - GET /messages/{id}/verification-summary - Get verification summary
 - GET /messages/{id}/provenance - Export provenance data for a message (JSON or Markdown)
 - GET /messages/{id}/report - Export research report as Markdown
+
+JSONB Migration (Migration 011):
+Claims and verification data are now read from the verification_data JSONB column
+on the research_sessions table instead of normalized tables.
 """
 
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import PlainTextResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.api.v1.utils import (
-    build_citation_response,
     build_empty_verification_summary,
-    build_verification_summary,
-    claim_to_response,
+    generate_claim_uuid,
+    jsonb_claim_to_response,
+    jsonb_summary_to_response,
     verify_message_ownership,
 )
 from deep_research.core.exceptions import NotFoundError
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
+from deep_research.models.research_session import ResearchSession
 from deep_research.schemas.citation import (
+    CitationResponse,
     ClaimEvidenceResponse,
     ClaimProvenanceExport,
     ClaimResponse,
+    ClaimTypeEnum,
     ConfidenceLevelEnum,
     CorrectionMetrics,
+    EvidenceSpanResponse,
     MessageClaimsResponse,
     ProvenanceExport,
+    SourceMetadataResponse,
     VerificationSummary,
     VerificationVerdictEnum,
 )
-from deep_research.services.claim_service import ClaimService
-from deep_research.services.verification_summary_service import VerificationSummaryService
 
 router = APIRouter()
 
@@ -59,10 +67,10 @@ async def list_message_claims(
     - Message UUID is pre-generated before streaming
     - Claims are persisted after synthesis completes (~10-30s)
     - Frontend polls this endpoint until claims are available
+
+    JSONB Migration: Now reads from verification_data JSONB column.
     """
     # Try to verify ownership - return empty claims if message doesn't exist yet
-    # This handles the race condition where frontend polls for claims before
-    # the message has been persisted to the database
     try:
         await verify_message_ownership(message_id, user.user_id, db)
     except NotFoundError:
@@ -74,32 +82,46 @@ async def list_message_claims(
             correction_metrics=None,
         )
 
-    # Get claims with all relationships
-    claim_service = ClaimService(db)
-    claims = await claim_service.list_by_message(message_id, include_citations=True)
+    # Get research session with verification_data JSONB
+    result = await db.execute(
+        select(ResearchSession).where(ResearchSession.message_id == message_id)
+    )
+    session = result.scalar_one_or_none()
 
-    # Get or compute verification summary
-    summary_service = VerificationSummaryService(db)
-    summary_model = await summary_service.get_or_compute(message_id)
+    if not session or not session.verification_data:
+        return MessageClaimsResponse(
+            message_id=message_id,
+            claims=[],
+            verification_summary=build_empty_verification_summary(),
+            correction_metrics=None,
+        )
 
-    # Get correction metrics if requested
+    # Transform JSONB to response schemas
+    verification_data = session.verification_data
+    claims = [
+        jsonb_claim_to_response(c, message_id)
+        for c in verification_data.get("claims", [])
+    ]
+    summary = jsonb_summary_to_response(verification_data.get("summary", {}))
+
+    # Correction metrics not tracked in JSONB (deprecated feature)
     correction_metrics = None
     if include_corrections:
-        metrics = await summary_service.get_correction_metrics(message_id)
-        total_claims = len(claims) or 1  # Avoid division by zero
+        # Return zero metrics for backwards compatibility
+        total_claims = len(claims) or 1
         correction_metrics = CorrectionMetrics(
-            total_corrections=metrics["total"],
-            keep_count=metrics["keep"],
-            replace_count=metrics["replace"],
-            remove_count=metrics["remove"],
-            add_alternate_count=metrics["add_alternate"],
-            correction_rate=metrics["total"] / total_claims,
+            total_corrections=0,
+            keep_count=0,
+            replace_count=0,
+            remove_count=0,
+            add_alternate_count=0,
+            correction_rate=0.0,
         )
 
     return MessageClaimsResponse(
         message_id=message_id,
-        claims=[claim_to_response(c) for c in claims],
-        verification_summary=build_verification_summary(summary_model),
+        claims=claims,
+        verification_summary=summary,
         correction_metrics=correction_metrics,
     )
 
@@ -109,19 +131,43 @@ async def get_claim(
     claim_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    message_id: UUID | None = Query(None, description="Message ID for JSONB lookup"),
 ) -> ClaimResponse:
-    """Get a specific claim with all its evidence and metadata."""
-    # Get claim with all relationships
-    claim_service = ClaimService(db)
-    claim = await claim_service.get_with_citations(claim_id)
+    """Get a specific claim with all its evidence and metadata.
 
-    if not claim:
+    JSONB Migration: Claims are now stored in JSONB and looked up by position.
+    The claim_id is a deterministic UUID generated from (message_id, position_start, position_end).
+    Requires message_id query parameter for efficient lookup.
+    """
+    if not message_id:
+        # Without message_id, we can't efficiently look up the claim in JSONB
+        # Return 404 as this endpoint requires the new query parameter
         raise NotFoundError("Claim", str(claim_id))
 
-    # Verify ownership through the message's chat
-    await verify_message_ownership(claim.message_id, user.user_id, db)
+    # Verify ownership
+    await verify_message_ownership(message_id, user.user_id, db)
 
-    return claim_to_response(claim)
+    # Get research session with verification_data
+    result = await db.execute(
+        select(ResearchSession).where(ResearchSession.message_id == message_id)
+    )
+    session = result.scalar_one_or_none()
+
+    if not session or not session.verification_data:
+        raise NotFoundError("Claim", str(claim_id))
+
+    # Search for the claim by matching generated UUID
+    verification_data = session.verification_data
+    for claim_dict in verification_data.get("claims", []):
+        generated_id = generate_claim_uuid(
+            message_id,
+            claim_dict["position_start"],
+            claim_dict["position_end"],
+        )
+        if generated_id == claim_id:
+            return jsonb_claim_to_response(claim_dict, message_id)
+
+    raise NotFoundError("Claim", str(claim_id))
 
 
 @router.get("/claims/{claim_id}/evidence", response_model=ClaimEvidenceResponse)
@@ -129,33 +175,89 @@ async def get_claim_evidence(
     claim_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    message_id: UUID | None = Query(None, description="Message ID for JSONB lookup"),
 ) -> ClaimEvidenceResponse:
     """Get evidence for a specific claim.
 
     Returns the claim text and all supporting evidence spans
     with source metadata for evidence card display.
-    """
-    # Get claim with citations
-    claim_service = ClaimService(db)
-    claim = await claim_service.get_with_citations(claim_id)
 
-    if not claim:
+    JSONB Migration: Evidence is now embedded in the claim JSONB.
+    Requires message_id query parameter for efficient lookup.
+    """
+    if not message_id:
         raise NotFoundError("Claim", str(claim_id))
 
     # Verify ownership
-    await verify_message_ownership(claim.message_id, user.user_id, db)
+    await verify_message_ownership(message_id, user.user_id, db)
 
-    # Build citations using shared transformer
-    citations = [build_citation_response(c) for c in claim.citations]
-
-    return ClaimEvidenceResponse(
-        claim_id=claim.id,
-        claim_text=claim.claim_text,
-        verification_verdict=VerificationVerdictEnum(claim.verification_verdict)
-        if claim.verification_verdict
-        else None,
-        citations=citations,
+    # Get research session with verification_data
+    result = await db.execute(
+        select(ResearchSession).where(ResearchSession.message_id == message_id)
     )
+    session = result.scalar_one_or_none()
+
+    if not session or not session.verification_data:
+        raise NotFoundError("Claim", str(claim_id))
+
+    # Search for the claim by matching generated UUID
+    verification_data = session.verification_data
+    for claim_dict in verification_data.get("claims", []):
+        generated_id = generate_claim_uuid(
+            message_id,
+            claim_dict["position_start"],
+            claim_dict["position_end"],
+        )
+        if generated_id == claim_id:
+            # Build citations from embedded evidence
+            citations: list[CitationResponse] = []
+            evidence = claim_dict.get("evidence")
+            if evidence:
+                from uuid import uuid5, NAMESPACE_DNS
+                evidence_id = uuid5(NAMESPACE_DNS, f"{claim_id}:evidence")
+                source_id = uuid5(NAMESPACE_DNS, evidence["source_url"])
+
+                source_metadata = SourceMetadataResponse(
+                    id=source_id,
+                    title=evidence.get("source_title"),
+                    url=evidence["source_url"],
+                    author=None,
+                    published_date=None,
+                    content_type=None,
+                    total_pages=None,
+                )
+
+                evidence_span = EvidenceSpanResponse(
+                    id=evidence_id,
+                    source_id=source_id,
+                    quote_text=evidence["quote_text"],
+                    start_offset=evidence.get("start_offset"),
+                    end_offset=evidence.get("end_offset"),
+                    section_heading=evidence.get("section_heading"),
+                    relevance_score=evidence.get("relevance_score"),
+                    has_numeric_content=evidence.get("has_numeric_content", False),
+                    source=source_metadata,
+                )
+
+                citations.append(CitationResponse(
+                    evidence_span=evidence_span,
+                    confidence_score=evidence.get("relevance_score"),
+                    is_primary=True,
+                ))
+
+            # Parse verdict
+            verdict = None
+            if claim_dict.get("verification_verdict"):
+                verdict = VerificationVerdictEnum(claim_dict["verification_verdict"])
+
+            return ClaimEvidenceResponse(
+                claim_id=claim_id,
+                claim_text=claim_dict["claim_text"],
+                verification_verdict=verdict,
+                citations=citations,
+            )
+
+    raise NotFoundError("Claim", str(claim_id))
 
 
 @router.get("/messages/{message_id}/verification-summary", response_model=VerificationSummary)
@@ -168,15 +270,23 @@ async def get_verification_summary(
 
     Returns aggregated verification statistics including
     counts by verdict and warning status.
+
+    JSONB Migration: Summary is now read from verification_data JSONB.
     """
     # Verify ownership
     await verify_message_ownership(message_id, user.user_id, db)
 
-    # Get or compute summary
-    summary_service = VerificationSummaryService(db)
-    summary_model = await summary_service.get_or_compute(message_id)
+    # Get research session with verification_data
+    result = await db.execute(
+        select(ResearchSession).where(ResearchSession.message_id == message_id)
+    )
+    session = result.scalar_one_or_none()
 
-    return build_verification_summary(summary_model)
+    if not session or not session.verification_data:
+        return build_empty_verification_summary()
+
+    summary_dict = session.verification_data.get("summary", {})
+    return jsonb_summary_to_response(summary_dict)
 
 
 @router.get("/messages/{message_id}/report")
@@ -232,6 +342,8 @@ async def export_provenance(
 
     Args:
         format: Export format - "json" (default) or "markdown"
+
+    JSONB Migration: Now reads from verification_data JSONB.
     """
     # Handle markdown format
     if format == "markdown":
@@ -264,62 +376,66 @@ async def export_provenance(
     # JSON format (default)
     from datetime import datetime, timezone
 
-    from deep_research.api.v1.utils import build_numeric_detail
-    from deep_research.schemas.citation import ClaimTypeEnum
-
     # Verify ownership
     await verify_message_ownership(message_id, user.user_id, db)
 
-    # Get claims with all relationships
-    claim_service = ClaimService(db)
-    claims = await claim_service.list_by_message(message_id, include_citations=True)
+    # Get research session with verification_data
+    result = await db.execute(
+        select(ResearchSession).where(ResearchSession.message_id == message_id)
+    )
+    session = result.scalar_one_or_none()
 
-    # Get verification summary
-    summary_service = VerificationSummaryService(db)
-    summary_model = await summary_service.get_or_compute(message_id)
+    if not session or not session.verification_data:
+        return ProvenanceExport(
+            exported_at=datetime.now(timezone.utc),
+            message_id=message_id,
+            claims=[],
+            summary=build_empty_verification_summary(),
+        )
 
-    # Build export claims
+    verification_data = session.verification_data
+
+    # Build export claims from JSONB
     export_claims: list[ClaimProvenanceExport] = []
-    for claim in claims:
+    for claim_dict in verification_data.get("claims", []):
         # Build citations for export (simplified dict format)
         citations: list[dict[str, str | bool | None]] = []
-        for citation in claim.citations:
-            span = citation.evidence_span
-            source = span.source if span else None
+        evidence = claim_dict.get("evidence")
+        if evidence:
             citations.append({
-                "source_url": source.url if source else None,
-                "source_title": source.title if source else None,
-                "quote": span.quote_text if span else "",
-                "is_primary": citation.is_primary,
+                "source_url": evidence.get("source_url"),
+                "source_title": evidence.get("source_title"),
+                "quote": evidence.get("quote_text", ""),
+                "is_primary": True,
             })
 
-        # Build corrections for export
-        corrections: list[dict[str, str | None]] = []
-        for correction in claim.corrections:
-            corrections.append({
-                "correction_type": correction.correction_type,
-                "reasoning": correction.reasoning,
-            })
+        # Parse enums
+        claim_type = ClaimTypeEnum(claim_dict["claim_type"])
+        verdict = None
+        if claim_dict.get("verification_verdict"):
+            verdict = VerificationVerdictEnum(claim_dict["verification_verdict"])
+        confidence = None
+        if claim_dict.get("confidence_level"):
+            confidence = ConfidenceLevelEnum(claim_dict["confidence_level"])
 
         export_claims.append(
             ClaimProvenanceExport(
-                claim_text=claim.claim_text,
-                claim_type=ClaimTypeEnum(claim.claim_type),
-                verdict=VerificationVerdictEnum(claim.verification_verdict)
-                if claim.verification_verdict
-                else None,
-                confidence_level=ConfidenceLevelEnum(claim.confidence_level)
-                if claim.confidence_level
-                else None,
+                claim_text=claim_dict["claim_text"],
+                claim_type=claim_type,
+                verdict=verdict,
+                confidence_level=confidence,
                 citations=citations,
-                numeric_detail=build_numeric_detail(claim.numeric_detail),
-                corrections=corrections,
+                numeric_detail=None,  # Numeric details not stored in JSONB
+                corrections=[],  # Corrections not stored in JSONB
             )
         )
+
+    # Get summary from JSONB
+    summary = jsonb_summary_to_response(verification_data.get("summary", {}))
 
     return ProvenanceExport(
         exported_at=datetime.now(timezone.utc),
         message_id=message_id,
         claims=export_claims,
-        summary=build_verification_summary(summary_model),
+        summary=summary,
     )

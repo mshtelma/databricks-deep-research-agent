@@ -6,11 +6,10 @@ import os
 import sys
 import time
 import uuid
-from collections.abc import Callable
 from typing import Any
 
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import MutableHeaders
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 logger = logging.getLogger(__name__)
 
@@ -59,35 +58,58 @@ class ColoredFormatter(logging.Formatter):
         return super().format(record)
 
 
-class RequestLoggingMiddleware(BaseHTTPMiddleware):
-    """Middleware for logging HTTP requests and responses."""
+class RequestLoggingMiddleware:
+    """Pure ASGI middleware for request logging.
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        """Process request and log errors only."""
+    Unlike BaseHTTPMiddleware, this does NOT wrap requests in task scopes
+    that get cancelled on client disconnect. This prevents CancelledError
+    from propagating to database connections during SSE streaming.
+
+    Key differences from BaseHTTPMiddleware:
+    - No task wrapping - requests flow directly through
+    - Client disconnects don't trigger task cancellation cascade
+    - Streaming responses flow through uninterrupted
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Process ASGI request."""
+        # Pass through non-HTTP requests unchanged (lifespan, websocket)
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
         # Generate request ID for tracing
         request_id = str(uuid.uuid4())[:8]
-        request.state.request_id = request_id
 
-        # Record start time for error logging
+        # Initialize state dict if not present and add request_id
+        # FastAPI's Request object uses scope["state"] internally,
+        # so request.state.request_id will work in route handlers
+        if "state" not in scope:
+            scope["state"] = {}
+        scope["state"]["request_id"] = request_id
+
         start_time = time.perf_counter()
 
+        async def send_wrapper(message: Message) -> None:
+            """Intercept response start to inject X-Request-ID header."""
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers.append("X-Request-ID", request_id)
+            await send(message)
+
         try:
-            response = await call_next(request)
-
-            # Add request ID to response headers for debugging
-            response.headers["X-Request-ID"] = request_id
-
-            return response
-
+            await self.app(scope, receive, send_wrapper)
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
-
             logger.error(
                 "Request failed",
                 extra={
                     "request_id": request_id,
-                    "method": request.method,
-                    "url": str(request.url),
+                    "method": scope.get("method", ""),
+                    "path": scope.get("path", ""),
                     "error": str(e),
                     "duration_ms": round(duration_ms, 2),
                 },

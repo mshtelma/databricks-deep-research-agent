@@ -18,11 +18,15 @@ Scientific basis:
 - ARE: https://arxiv.org/abs/2410.16708
 - FActScore: https://arxiv.org/abs/2305.14251
 - SAFE: https://arxiv.org/abs/2403.18802
+
+Token Optimization Features:
+- Batch entailment: Process multiple fact-evidence pairs in single LLM call (10 pairs per batch)
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
@@ -33,6 +37,7 @@ from mlflow.entities import SpanType
 from pydantic import BaseModel, Field
 
 from deep_research.agent.prompts.citation.verification_retrieval import (
+    BATCH_ENTAILMENT_PROMPT,
     CLAIM_RECONSTRUCTION_PROMPT,
     CLAIM_SOFTENING_HEDGE_PROMPT,
     CLAIM_SOFTENING_PARENTHETICAL_PROMPT,
@@ -142,6 +147,29 @@ class VerificationQueryOutput(BaseModel):
     query: str = Field(description="Search query to verify fact")
     reasoning: str = Field(default="")
     search_strategy: str = Field(default="")
+
+
+# Batch entailment models (Token Optimization - Phase 3)
+class BatchEntailmentItem(BaseModel):
+    """Single entailment check result in a batch."""
+
+    fact_index: int = Field(description="0-based index of fact in input batch")
+    entails: bool = Field(description="Whether evidence entails the fact")
+    score: float = Field(ge=0.0, le=1.0, description="Entailment confidence score")
+    reasoning: str = Field(default="", max_length=200)
+    supporting_quote: str | None = Field(default=None, max_length=300)
+
+
+class BatchEntailmentOutput(BaseModel):
+    """Output for batched entailment checks."""
+
+    results: list[BatchEntailmentItem] = Field(
+        description="Entailment results in same order as input facts"
+    )
+
+
+# Default batch size for entailment checks
+DEFAULT_ENTAILMENT_BATCH_SIZE = 10
 
 
 # =============================================================================
@@ -1058,6 +1086,218 @@ class VerificationRetriever:
                 })
 
             return False, 0.0
+
+    # =========================================================================
+    # Token Optimization: Batch Entailment Checks (Phase 3)
+    # =========================================================================
+
+    def _format_facts_for_batch_entailment(
+        self,
+        fact_evidence_pairs: list[tuple[AtomicFact, RankedEvidence]],
+    ) -> str:
+        """Format fact-evidence pairs for batch entailment prompt.
+
+        Args:
+            fact_evidence_pairs: List of (fact, evidence) tuples.
+
+        Returns:
+            Formatted string for the batch prompt.
+        """
+        sections = []
+        for i, (fact, evidence) in enumerate(fact_evidence_pairs):
+            section = f"""### Fact {i}
+**Fact:** "{fact.fact_text}"
+**Source:** {evidence.source_url}
+**Evidence:** "{evidence.quote_text[:400]}"
+"""
+            sections.append(section)
+        return "\n".join(sections)
+
+    async def check_entailment_batch(
+        self,
+        fact_evidence_pairs: list[tuple[AtomicFact, RankedEvidence, int]],
+        batch_size: int = DEFAULT_ENTAILMENT_BATCH_SIZE,
+    ) -> list[tuple[bool, float]]:
+        """Check entailment for multiple fact-evidence pairs in batches.
+
+        This is a TOKEN OPTIMIZATION method that processes multiple fact-evidence
+        pairs in a single LLM call, reducing overhead by 80-90%.
+
+        Args:
+            fact_evidence_pairs: List of (fact, evidence, claim_index) tuples.
+            batch_size: Number of pairs per batch (default: 10).
+
+        Returns:
+            List of (entails, score) tuples in same order as input.
+        """
+        if not fact_evidence_pairs:
+            return []
+
+        results: list[tuple[bool, float] | None] = [None] * len(fact_evidence_pairs)
+
+        # Group into batches
+        batches: list[list[int]] = []
+        for i in range(0, len(fact_evidence_pairs), batch_size):
+            batches.append(list(range(i, min(i + batch_size, len(fact_evidence_pairs)))))
+
+        logger.info(
+            "BATCH_ENTAILMENT_START",
+            total_pairs=len(fact_evidence_pairs),
+            batch_size=batch_size,
+            num_batches=len(batches),
+        )
+
+        # Process each batch
+        for batch_num, batch_indices in enumerate(batches):
+            batch_pairs = [
+                (fact_evidence_pairs[i][0], fact_evidence_pairs[i][1])
+                for i in batch_indices
+            ]
+
+            try:
+                batch_results = await self._process_entailment_batch(batch_pairs)
+
+                # Map results back to original indices
+                for j, idx in enumerate(batch_indices):
+                    if j < len(batch_results):
+                        results[idx] = batch_results[j]
+                    else:
+                        results[idx] = (False, 0.0)
+
+            except Exception as e:
+                logger.warning(
+                    "BATCH_ENTAILMENT_ERROR",
+                    batch_num=batch_num,
+                    error=str(e)[:100],
+                )
+                # Fall back to sequential entailment for this batch
+                for idx in batch_indices:
+                    fact, evidence, claim_index = fact_evidence_pairs[idx]
+                    results[idx] = await self._check_entailment(
+                        fact, evidence, claim_index
+                    )
+
+        # Fill any remaining None values
+        for i, result in enumerate(results):
+            if result is None:
+                results[i] = (False, 0.0)
+
+        self.metrics.entailment_checks += len(fact_evidence_pairs)
+
+        logger.info(
+            "BATCH_ENTAILMENT_COMPLETE",
+            total_pairs=len(fact_evidence_pairs),
+            entailed_count=sum(1 for r in results if r and r[0]),
+        )
+
+        return [(r[0], r[1]) if r else (False, 0.0) for r in results]
+
+    async def _process_entailment_batch(
+        self,
+        fact_evidence_pairs: list[tuple[AtomicFact, RankedEvidence]],
+    ) -> list[tuple[bool, float]]:
+        """Process a single batch of fact-evidence pairs for entailment.
+
+        Args:
+            fact_evidence_pairs: List of (fact, evidence) tuples.
+
+        Returns:
+            List of (entails, score) tuples.
+        """
+        if not fact_evidence_pairs:
+            return []
+
+        # Format for batch prompt
+        facts_section = self._format_facts_for_batch_entailment(fact_evidence_pairs)
+
+        prompt = BATCH_ENTAILMENT_PROMPT.format(facts_section=facts_section)
+        tier = self._get_model_tier(self.config.entailment_tier)
+
+        try:
+            response = await self.llm.complete(
+                messages=[{"role": "user", "content": prompt}],
+                tier=tier,
+                structured_output=BatchEntailmentOutput,
+            )
+
+            if response.structured:
+                output: BatchEntailmentOutput = response.structured
+                return self._parse_batch_entailment_results(
+                    output, len(fact_evidence_pairs)
+                )
+
+            # Fallback: try to parse from content
+            return self._parse_batch_entailment_content(
+                response.content, len(fact_evidence_pairs)
+            )
+
+        except Exception as e:
+            logger.error(f"Batch entailment processing failed: {e}")
+            raise
+
+    def _parse_batch_entailment_results(
+        self,
+        output: BatchEntailmentOutput,
+        expected_count: int,
+    ) -> list[tuple[bool, float]]:
+        """Parse batch entailment output into results list.
+
+        Args:
+            output: Structured batch output from LLM.
+            expected_count: Expected number of results.
+
+        Returns:
+            List of (entails, score) tuples in original order.
+        """
+        # Initialize with defaults
+        results: list[tuple[bool, float]] = [(False, 0.0)] * expected_count
+
+        # Map results by fact_index to handle any reordering
+        for item in output.results:
+            if 0 <= item.fact_index < expected_count:
+                results[item.fact_index] = (item.entails, item.score)
+            else:
+                logger.warning(
+                    "BATCH_ENTAILMENT_INDEX_OUT_OF_RANGE",
+                    fact_index=item.fact_index,
+                    expected_count=expected_count,
+                )
+
+        return results
+
+    def _parse_batch_entailment_content(
+        self,
+        content: str,
+        expected_count: int,
+    ) -> list[tuple[bool, float]]:
+        """Fallback parser for batch entailment when structured output fails.
+
+        Args:
+            content: Raw LLM response content.
+            expected_count: Expected number of results.
+
+        Returns:
+            List of (entails, score) tuples.
+        """
+        results: list[tuple[bool, float]] = [(False, 0.0)] * expected_count
+
+        try:
+            # Try to extract JSON from response
+            json_match = re.search(r"\{[\s\S]*\}", content)
+            if json_match:
+                data = json.loads(json_match.group())
+                if "results" in data and isinstance(data["results"], list):
+                    for item in data["results"]:
+                        idx = item.get("fact_index", -1)
+                        if 0 <= idx < expected_count:
+                            entails = item.get("entails", False)
+                            score = float(item.get("score", 0.0))
+                            results[idx] = (entails, score)
+
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            logger.warning(f"Failed to parse batch entailment response: {e}")
+
+        return results
 
     async def _reconstruct_claim(
         self,

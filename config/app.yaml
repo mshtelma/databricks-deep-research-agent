@@ -45,7 +45,7 @@ endpoints:
   opus:
     endpoint_identifier: databricks-claude-opus-4-5
     max_context_window: 128000
-    tokens_per_minute: 50000
+    tokens_per_minute: 200000  # Databricks allows 200k ITPM for Opus 4.5
     supports_structured_output: true
     supports_prompt_caching: true  # Claude supports cache_control
 
@@ -94,8 +94,9 @@ models:
   # TIER 3: COMPLEX - Heavy operations (synthesis, reports)
   complex:
     endpoints:
-      - sonnet
-      - opus
+      - opus    # FIRST: 200k ITPM, preferred for synthesis
+      - sonnet  # SECOND: 50k ITPM, fallback
+      - gpt5    # THIRD: fallback when Claude models rate limited
     temperature: 0.7
     max_tokens: 32000
     reasoning_effort: high
@@ -330,7 +331,8 @@ query_modes:
 
   web_search:
     model_role: analytical
-    timeout_seconds: 15       # 15 second total budget
+    timeout_seconds: 20       # Per-attempt timeout
+    max_retries: 5            # Retry up to 5 times on timeout before falling back
     emit_events: true         # Stream progress events
     create_session: true      # Lightweight session for source tracking
 

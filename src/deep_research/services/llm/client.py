@@ -13,7 +13,8 @@ import openai
 from mlflow.entities import SpanType
 from openai import AsyncOpenAI, AsyncStream
 from openai.types.chat import ChatCompletionChunk
-from pydantic import BaseModel, ValidationError as PydanticValidationError
+from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from deep_research.core.databricks_auth import get_databricks_auth
 from deep_research.core.exceptions import LLMError, RateLimitError
@@ -392,9 +393,12 @@ class LLMClient:
     def _get_earliest_endpoint_available(self, role: ModelRole) -> float:
         """Get seconds until the earliest endpoint becomes available.
 
-        Returns 0 if an endpoint is already available (including endpoints
-        that can be recovered via time-based recovery), otherwise the
-        shortest wait time until any endpoint's rate limit expires.
+        Considers both:
+        - Explicit rate limits (rate_limited_until from actual 429 errors)
+        - Token budget exhaustion (60s window reset time)
+
+        Returns 0 if an endpoint is available now, otherwise the minimum
+        wait seconds until any endpoint becomes available.
 
         Args:
             role: The model role to check endpoints for.
@@ -408,17 +412,28 @@ class LLMClient:
         for endpoint_id in role.endpoints:
             health = self._get_health(endpoint_id)
 
-            # Check for healthy endpoints available now
+            # Check for healthy endpoints
             if health.is_healthy:
                 if not health.rate_limited_until or health.rate_limited_until <= now:
-                    return 0.0  # Available now
+                    # No explicit rate limit - also check token budget reset time
+                    # This fixes the bug where we'd return 0 even when budget exhausted
+                    budget_wait = health.get_budget_reset_wait()
+                    if budget_wait == 0:
+                        return 0.0  # Truly available now
+                    min_wait = min(min_wait, budget_wait)
+                    continue  # Check other endpoints too
 
-            # Check for unhealthy endpoints that can be recovered
+            # Check for unhealthy endpoints that can be recovered via time
             # (rate limit expired, so reset_if_recovered() will succeed)
             elif health.rate_limited_until and health.rate_limited_until <= now:
-                return 0.0  # Will recover on next _select_endpoint() call
+                # Rate limit expired, check budget
+                budget_wait = health.get_budget_reset_wait()
+                if budget_wait == 0:
+                    return 0.0  # Available after recovery
+                min_wait = min(min_wait, budget_wait)
+                continue  # Check other endpoints too
 
-            # Check when rate limit expires (for both healthy and unhealthy)
+            # Track wait time for endpoints with future rate_limited_until
             if health.rate_limited_until and health.rate_limited_until > now:
                 wait = (health.rate_limited_until - now).total_seconds()
                 min_wait = min(min_wait, wait)
@@ -769,6 +784,7 @@ class LLMClient:
                 # Other API errors with status codes
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 is_rate_limit = e.status_code == 429
+                is_not_found = e.status_code == 404
                 health.mark_failure(rate_limited=is_rate_limit)
 
                 span.set_attributes({
@@ -778,9 +794,23 @@ class LLMClient:
                     "llm.is_rate_limit": is_rate_limit,
                 })
 
-                # Check for fallback on rate limit
+                # Enhanced logging for 404 ENDPOINT_NOT_FOUND errors
+                if is_not_found:
+                    logger.error(
+                        "LLM_ENDPOINT_NOT_FOUND",
+                        endpoint_id=endpoint.id,
+                        endpoint_identifier=endpoint.endpoint_identifier,
+                        tier=tier.value,
+                        role=role.name,
+                        status_code=e.status_code,
+                        error_body=str(e.body)[:500] if hasattr(e, "body") else "N/A",
+                        error_message=str(e)[:500],
+                        base_url=str(self._base_url),
+                    )
+
+                # Check for fallback on rate limit or not-found
                 fallback_for_status: tuple[ModelEndpoint, EndpointHealth] | None = None
-                if is_rate_limit:
+                if is_rate_limit or is_not_found:
                     fallback_for_status = self._find_fallback_endpoint(
                         role, endpoint.id, estimated_tokens
                     )
@@ -811,6 +841,24 @@ class LLMClient:
                             structured_output,
                         )
                     raise RateLimitError(retry_after=30, endpoint=endpoint.id) from e
+
+                # Try fallback for 404 errors (endpoint might not exist)
+                if is_not_found and fallback_for_status is not None:
+                    fallback_endpoint, _ = fallback_for_status
+                    logger.warning(
+                        "LLM_ENDPOINT_NOT_FOUND_FALLBACK",
+                        from_endpoint=endpoint.endpoint_identifier,
+                        to_endpoint=fallback_endpoint.endpoint_identifier,
+                    )
+                    return await self._complete_impl(
+                        messages,
+                        tier,
+                        role,
+                        temperature,
+                        max_tokens,
+                        structured_output,
+                    )
+
                 raise LLMError(str(e), endpoint=endpoint.id) from e
 
             except openai.APIConnectionError as e:
@@ -1081,11 +1129,26 @@ class LLMClient:
             except openai.APIStatusError as e:
                 # Other API errors with status codes
                 is_rate_limit = e.status_code == 429
+                is_not_found = e.status_code == 404
                 health.mark_failure(rate_limited=is_rate_limit)
 
-                # Check for fallback on rate limit
+                # Enhanced logging for 404 ENDPOINT_NOT_FOUND errors
+                if is_not_found:
+                    logger.error(
+                        "LLM_ENDPOINT_NOT_FOUND",
+                        endpoint_id=endpoint.id,
+                        endpoint_identifier=endpoint.endpoint_identifier,
+                        tier=tier.value,
+                        role=role.name,
+                        status_code=e.status_code,
+                        error_body=str(e.body)[:500] if hasattr(e, "body") else "N/A",
+                        error_message=str(e)[:500],
+                        base_url=str(self._base_url),
+                    )
+
+                # Check for fallback on rate limit or not-found
                 fallback_for_status: tuple[ModelEndpoint, EndpointHealth] | None = None
-                if is_rate_limit:
+                if is_rate_limit or is_not_found:
                     fallback_for_status = self._find_fallback_endpoint(
                         role, endpoint.id, estimated_tokens + 4000
                     )
@@ -1113,6 +1176,21 @@ class LLMClient:
                             yield retry_chunk
                         return
                     raise RateLimitError(retry_after=30, endpoint=endpoint.id) from e
+
+                # Try fallback for 404 errors (endpoint might not exist)
+                if is_not_found and fallback_for_status is not None:
+                    fallback_endpoint, _ = fallback_for_status
+                    logger.warning(
+                        "LLM_ENDPOINT_NOT_FOUND_FALLBACK",
+                        from_endpoint=endpoint.endpoint_identifier,
+                        to_endpoint=fallback_endpoint.endpoint_identifier,
+                    )
+                    async for retry_chunk in self._stream_impl(
+                        messages, tier, role, temperature, max_tokens
+                    ):
+                        yield retry_chunk
+                    return
+
                 raise LLMError(str(e), endpoint=endpoint.id) from e
 
             except openai.APIConnectionError as e:

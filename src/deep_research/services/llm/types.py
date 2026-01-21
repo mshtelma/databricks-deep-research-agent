@@ -141,6 +141,24 @@ class EndpointHealth:
             return False
         return (self.tokens_used_this_minute + estimated_tokens) <= tokens_per_minute
 
+    def get_budget_reset_wait(self) -> float:
+        """Seconds until token budget window resets.
+
+        The budget window is 60 seconds from minute_started_at (see record_tokens()).
+        After 60s, tokens_used_this_minute resets to 0.
+
+        Returns:
+            0.0 if no tracking started yet or window has already reset.
+            Otherwise, seconds remaining until the 60s window expires.
+        """
+        if self.minute_started_at is None:
+            return 0.0
+        now = datetime.now(UTC)
+        elapsed = (now - self.minute_started_at).total_seconds()
+        if elapsed >= 60.0:
+            return 0.0
+        return 60.0 - elapsed
+
 
 class LLMRequest(BaseModel):
     """Request to LLM service."""

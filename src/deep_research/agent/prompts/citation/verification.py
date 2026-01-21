@@ -206,3 +206,69 @@ Your task is to decide whether to KEEP, REPLACE, or REMOVE the citation.
 ```
 
 Make your correction decision:"""
+
+
+# =============================================================================
+# Batch Verification Prompts (Token Optimization)
+# =============================================================================
+
+BATCH_VERIFICATION_PROMPT = """Verify each claim against its evidence INDEPENDENTLY.
+
+## Claims to Verify
+{claims_section}
+
+## Instructions
+For EACH claim above:
+1. Verify ONLY against its provided evidence
+2. Determine the verdict independently
+3. Include the claim_index in your response
+
+## Verdict Categories
+- SUPPORTED: Evidence fully entails the claim (all facts present, numbers match)
+- PARTIAL: Evidence partially supports (some aspects not mentioned)
+- UNSUPPORTED: Evidence doesn't address the claim
+- CONTRADICTED: Evidence directly opposes the claim
+
+## Response Format (JSON)
+```json
+{{
+  "results": [
+    {{
+      "claim_index": 0,
+      "verdict": "SUPPORTED" | "PARTIAL" | "UNSUPPORTED" | "CONTRADICTED",
+      "reasoning": "Brief explanation (max 100 words)",
+      "key_match": "Specific quote from evidence if relevant"
+    }},
+    ...
+  ]
+}}
+```
+
+CRITICAL: Return one result per claim in the same order as input. Include claim_index to handle any reordering.
+
+Verify all claims:"""
+
+
+BATCH_QUICK_VERIFICATION_PROMPT = """Quickly verify if each claim matches its evidence.
+
+## Claims to Verify
+{claims_section}
+
+## Quick Check Rules
+- SUPPORTED: Core fact present in evidence, no contradiction
+- PARTIAL: Some aspects supported, some not mentioned
+- UNSUPPORTED: Evidence doesn't address the claim
+- CONTRADICTED: Evidence says the opposite
+
+## Response Format (JSON)
+```json
+{{
+  "results": [
+    {{"claim_index": 0, "verdict": "SUPPORTED"}},
+    {{"claim_index": 1, "verdict": "PARTIAL"}},
+    ...
+  ]
+}}
+```
+
+Verify all claims:"""

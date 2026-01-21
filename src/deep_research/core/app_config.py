@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Default config paths
 _this_file = Path(__file__).resolve()
-_src_root = _this_file.parent.parent  # app_config.py -> core -> src
+_src_root = _this_file.parent.parent.parent  # app_config.py -> core -> deep_research -> src
 _project_root = _src_root.parent  # src -> project root
 DEFAULT_CONFIG_PATH = _project_root / "config" / "app.yaml"
 
@@ -812,7 +812,13 @@ class QueryModeConfig(BaseModel):
         default=60,
         ge=5,
         le=600,
-        description="Total timeout for the request",
+        description="Total timeout for the request (per attempt for web_search)",
+    )
+    max_retries: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Maximum retry attempts on timeout (for web_search mode)",
     )
 
     # Note: Web search mode routing is handled programmatically in orchestrator
