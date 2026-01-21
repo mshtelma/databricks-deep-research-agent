@@ -30,6 +30,8 @@ env:
     value: "production"
   - name: LOG_LEVEL
     value: "INFO"
+  - name: APP_CONFIG_PATH
+    value: "config/app.yaml"
 
   # Lakebase Configuration
   # Databricks Apps automatically injects PGHOST, PGUSER, PGDATABASE, PGPORT
