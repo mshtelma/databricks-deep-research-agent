@@ -323,3 +323,87 @@ Previous queries did not find supporting evidence. Try:
 - Alternative source types (official reports, press releases, news articles)
 - Different language or terminology used in the industry
 """
+
+
+# =============================================================================
+# Batch Decomposition Prompt (Token Optimization - Phase 2)
+# =============================================================================
+
+BATCH_DECOMPOSITION_PROMPT = """Decompose each claim into atomic, independently verifiable facts.
+
+## Claims to Decompose
+{claims_section}
+
+## Instructions
+For EACH claim:
+1. Break into independent, self-contained atomic facts
+2. Each fact should be verifiable on its own
+3. Replace all pronouns with explicit references
+4. Do NOT add information not present in the original claim
+5. Include claim_index to identify which claim each decomposition belongs to
+
+## Rules for Atomic Facts
+- Single, simple statement
+- Self-contained (no pronouns)
+- Independently verifiable
+- 3-7 facts per claim (typically)
+
+## Response Format (JSON)
+```json
+{{
+  "decompositions": [
+    {{
+      "claim_index": 0,
+      "atomic_facts": ["Fact 1 about the claim", "Fact 2 about the claim", ...],
+      "reasoning": "Brief explanation"
+    }},
+    ...
+  ]
+}}
+```
+
+Decompose all claims:"""
+
+
+# =============================================================================
+# Batch Entailment Check Prompt (Token Optimization - Phase 3)
+# =============================================================================
+
+BATCH_ENTAILMENT_PROMPT = """Check if each fact is entailed by its evidence.
+
+## Facts to Check
+{facts_section}
+
+## Instructions
+For EACH fact above:
+1. Determine if the evidence ENTAILS (supports) the fact
+2. Provide a confidence score (0.0-1.0)
+3. Include fact_index to identify which fact each result belongs to
+
+## Entailment Scoring
+- 1.0: Evidence directly and explicitly states the fact
+- 0.8: Evidence strongly implies the fact
+- 0.6: Evidence partially supports the fact
+- 0.4: Evidence is tangentially related
+- 0.2: Evidence is about the same topic but doesn't support
+- 0.0: Evidence contradicts the fact
+
+## Response Format (JSON)
+```json
+{{
+  "results": [
+    {{
+      "fact_index": 0,
+      "entails": true,
+      "score": 0.8,
+      "reasoning": "Brief explanation",
+      "supporting_quote": "Relevant quote from evidence"
+    }},
+    ...
+  ]
+}}
+```
+
+CRITICAL: Return one result per fact. Include fact_index to handle any reordering.
+
+Check all facts:"""

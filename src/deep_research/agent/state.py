@@ -348,6 +348,14 @@ class ResearchState:
     verification_summary: VerificationSummaryInfo | None = None  # Post Stage 4
     enable_citation_verification: bool = True  # Feature toggle
 
+    # Token Optimization: Verification result cache (session-scoped)
+    # Maps claim fingerprint -> VerificationResult to avoid redundant verification
+    # of identical/near-identical claims within the same research session.
+    # The cache is NOT persisted - it's cleared when a new research session starts.
+    # Key: 16-char MD5 hash of normalized claim text
+    # Value: VerificationResult from isolated_verifier
+    _verification_cache: dict[str, Any] = field(default_factory=dict, repr=False)
+
     # Final output (Synthesizer phase)
     final_report: str = ""
     final_report_structured: Any | None = None  # Structured Pydantic output
@@ -524,6 +532,59 @@ class ResearchState:
             warning=(unsupported / verified > 0.20 if verified > 0 else False)
             or (contradicted / verified > 0.05 if verified > 0 else False),
         )
+
+    # =========================================================================
+    # Token Optimization: Verification Cache Methods
+    # =========================================================================
+
+    def get_verification_cache(self) -> dict[str, Any]:
+        """Get the verification cache dictionary.
+
+        Returns the internal cache dict that can be passed to
+        IsolatedVerifier.verify_batch_grouped() for cache reuse.
+
+        Returns:
+            Dict mapping claim fingerprints to VerificationResult objects.
+        """
+        return self._verification_cache
+
+    def get_cached_verification(self, claim_fingerprint: str) -> Any | None:
+        """Get a cached verification result by claim fingerprint.
+
+        Args:
+            claim_fingerprint: 16-char MD5 hash of normalized claim.
+
+        Returns:
+            Cached VerificationResult or None if not cached.
+        """
+        return self._verification_cache.get(claim_fingerprint)
+
+    def cache_verification(self, claim_fingerprint: str, result: Any) -> None:
+        """Cache a verification result for future reuse.
+
+        Args:
+            claim_fingerprint: 16-char MD5 hash of normalized claim.
+            result: VerificationResult to cache.
+        """
+        self._verification_cache[claim_fingerprint] = result
+
+    def clear_verification_cache(self) -> None:
+        """Clear the verification cache.
+
+        Called at the start of a new research session or when
+        the evidence pool changes significantly.
+        """
+        self._verification_cache.clear()
+
+    def get_verification_cache_stats(self) -> dict[str, int]:
+        """Get statistics about the verification cache.
+
+        Returns:
+            Dict with cache statistics (size, etc.).
+        """
+        return {
+            "cache_size": len(self._verification_cache),
+        }
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""

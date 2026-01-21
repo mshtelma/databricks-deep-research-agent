@@ -4,6 +4,9 @@ Verifies numeric claims using a QA-based approach (QAFactEval pattern):
 1. Generate questions about numeric values
 2. Answer questions from both claim and evidence separately
 3. Compare answers to detect mismatches
+
+Token Optimization Features:
+- Exact match heuristic: Skip QA when numeric values appear exactly in evidence
 """
 
 import re
@@ -21,6 +24,45 @@ from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.types import ModelTier
 
 logger = get_logger(__name__)
+
+
+def is_exact_numeric_match(claim: str, evidence: str) -> bool:
+    """Check if numeric values in claim appear exactly in evidence.
+
+    This is a TOKEN OPTIMIZATION heuristic that skips full QA verification
+    when simple numeric values can be trivially matched.
+
+    Args:
+        claim: The claim text containing numeric value(s).
+        evidence: The evidence text to check against.
+
+    Returns:
+        True if ALL numeric values from claim appear in evidence.
+    """
+    # Extract numbers from claim (including percentages, decimals)
+    # Patterns: 3.2, 25%, 1,234,567, $5.2B, etc.
+    number_pattern = r"\d+(?:,\d{3})*(?:\.\d+)?%?"
+    claim_numbers = set(re.findall(number_pattern, claim))
+
+    if not claim_numbers:
+        return False
+
+    # Normalize evidence for matching
+    evidence_lower = evidence.lower()
+    claim_lower = claim.lower()
+
+    # Check if ALL numbers appear in evidence
+    matches = 0
+    for num in claim_numbers:
+        # Check direct match
+        if num in evidence:
+            matches += 1
+        # Check without commas
+        elif num.replace(",", "") in evidence.replace(",", ""):
+            matches += 1
+
+    # All numbers must match
+    return matches == len(claim_numbers)
 
 
 # Pydantic models for structured LLM output
@@ -227,6 +269,28 @@ class NumericVerifier:
             claim=truncate(claim_text, 50),
             evidence=truncate(evidence.quote_text, 50),
         )
+
+        # TOKEN OPTIMIZATION: Fast path for exact numeric match
+        # Skip full QA when numeric values appear exactly in evidence
+        if is_exact_numeric_match(claim_text, evidence.quote_text):
+            logger.debug(
+                "NUMERIC_VERIFY_EXACT_MATCH",
+                claim=truncate(claim_text, 50),
+            )
+            parsed = self.parse_numeric_value(claim_text)
+            return NumericVerificationResult(
+                claim_text=claim_text,
+                parsed_value=parsed or NumericValue(
+                    raw_text=claim_text,
+                    normalized_value=None,
+                    unit=None,
+                    entity=None,
+                ),
+                qa_results=[],
+                overall_match=True,
+                derivation_type="direct",
+                confidence=0.95,  # High confidence for exact match
+            )
 
         # Parse numeric value from claim
         parsed = self.parse_numeric_value(claim_text)

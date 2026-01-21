@@ -26,6 +26,7 @@ Draft Chat Support:
 """
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -36,11 +37,53 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.agent.state import ClaimInfo, ResearchState
 from deep_research.models.chat import Chat, ChatStatus
-from deep_research.models.source import Source
 from deep_research.models.message import Message, MessageRole
 from deep_research.models.research_session import ResearchSession, ResearchStatus
+from deep_research.models.source import Source
 
 logger = logging.getLogger(__name__)
+
+# Citation key pattern - matches [Key] or [Key-N] format
+# This pattern is shared across the codebase for consistency:
+# - claim_generator.py (generation)
+# - pipeline.py (extraction)
+# - react_synthesizer.py (validation)
+# - frontend citationPlugin.ts (rendering)
+CITATION_KEY_PATTERN = re.compile(r"\[([A-Za-z][A-Za-z0-9-]*(?:-\d+)?)\]")
+
+
+def _ensure_citation_key(claim: ClaimInfo) -> dict[str, Any]:
+    """Build claim dict, extracting citation_key from claim_text if missing.
+
+    This function is a defensive fallback for the grey references bug. If a claim
+    doesn't have a citation_key set (e.g., due to a bug in an upstream stage), we
+    extract it from the claim_text using the citation key pattern.
+
+    Args:
+        claim: ClaimInfo object to convert.
+
+    Returns:
+        Dict representation of the claim with citation_key ensured.
+    """
+    claim_dict = claim.to_dict()
+
+    # If citation_key is already present, return as-is
+    if claim_dict.get("citation_key"):
+        return claim_dict
+
+    # Fallback: extract citation_key from claim_text
+    matches = CITATION_KEY_PATTERN.findall(claim.claim_text)
+    if matches:
+        claim_dict["citation_key"] = matches[0]
+        if len(matches) > 1:
+            claim_dict["citation_keys"] = matches
+        logger.warning(
+            "CITATION_KEY_EXTRACTED_FALLBACK claim_text=%s extracted_key=%s",
+            claim.claim_text[:50],
+            matches[0],
+        )
+
+    return claim_dict
 
 
 async def persist_research_data(
@@ -169,6 +212,9 @@ def _build_verification_data(
 ) -> dict[str, Any] | None:
     """Build JSONB from ResearchState using existing to_dict() methods.
 
+    Uses _ensure_citation_key() to handle the grey references bug by extracting
+    citation_key from claim_text if missing.
+
     Args:
         state: Research state containing claims and verification summary.
         url_to_source: Mapping from source URL to Source model.
@@ -181,7 +227,8 @@ def _build_verification_data(
 
     claims_data = []
     for claim in state.claims:
-        claim_dict = claim.to_dict()  # Already correct structure!
+        # Use _ensure_citation_key for fallback extraction (grey references fix)
+        claim_dict = _ensure_citation_key(claim)
 
         # Embed source_title for display (avoid source lookup on read)
         if claim.evidence and claim.evidence.source_url in url_to_source:

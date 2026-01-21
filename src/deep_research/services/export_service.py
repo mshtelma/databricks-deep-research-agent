@@ -3,9 +3,15 @@
 JSONB Migration (Migration 011):
 Claims and verification data are now read from the verification_data JSONB column
 on the research_sessions table instead of normalized tables.
+
+N+1 Query Optimization:
+Uses batch loading for sources to avoid O(2n) queries during export.
+The _get_sources_for_messages() method loads all sources for multiple messages
+in a single JOIN query.
 """
 
 import logging
+from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -13,7 +19,6 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from deep_research.api.v1.utils import verify_message_ownership
 from deep_research.core.exceptions import NotFoundError
 from deep_research.models.message import Message
 from deep_research.models.research_session import ResearchSession
@@ -59,6 +64,8 @@ class ExportService:
     ) -> str:
         """Export chat to Markdown format.
 
+        Uses batch loading for sources to avoid N+1 queries.
+
         Args:
             chat_id: Chat ID to export.
             user_id: User ID for ownership verification.
@@ -82,6 +89,14 @@ class ExportService:
             limit=1000,  # Get all messages
             offset=0,
         )
+
+        # Batch load sources for ALL agent messages at once (N+1 fix)
+        sources_by_message: dict[UUID, list[dict[str, Any]]] = {}
+        if include_sources:
+            agent_message_ids = [
+                msg.id for msg in messages if msg.role.value == "agent"
+            ]
+            sources_by_message = await self._get_sources_for_messages(agent_message_ids)
 
         # Build markdown
         lines: list[str] = []
@@ -109,9 +124,9 @@ class ExportService:
                 "",
             ])
 
-            # Add sources for agent messages if available
+            # Add sources for agent messages if available (O(1) lookup)
             if include_sources and msg.role.value == "agent":
-                sources = await self._get_message_sources(msg.id)
+                sources = sources_by_message.get(msg.id, [])
                 if sources:
                     lines.extend([
                         "#### Sources",
@@ -131,12 +146,10 @@ class ExportService:
 
         Returns:
             List of source dictionaries with title and url.
+
+        Note:
+            For batch operations, prefer _get_sources_for_messages() to avoid N+1 queries.
         """
-        from sqlalchemy import select
-
-        from deep_research.models.research_session import ResearchSession
-        from deep_research.models.source import Source
-
         # Get research session for this message
         session_result = await self._session.execute(
             select(ResearchSession).where(ResearchSession.message_id == message_id)
@@ -156,6 +169,44 @@ class ExportService:
             {"title": s.title or s.url, "url": s.url}
             for s in sources
         ]
+
+    async def _get_sources_for_messages(
+        self,
+        message_ids: list[UUID],
+    ) -> dict[UUID, list[dict[str, Any]]]:
+        """Batch load sources for multiple messages in ONE query.
+
+        Uses JOIN to avoid N+1 queries. Returns mapping from message_id
+        to list of source dicts.
+
+        This optimizes export operations from O(2n) queries to O(1) where n
+        is the number of agent messages.
+
+        Args:
+            message_ids: List of message IDs to load sources for.
+
+        Returns:
+            Dict mapping message_id to list of {"title": str, "url": str}.
+        """
+        if not message_ids:
+            return {}
+
+        # Single query with JOIN - O(1) instead of O(2n)
+        result = await self._session.execute(
+            select(Source, ResearchSession.message_id)
+            .join(ResearchSession, Source.research_session_id == ResearchSession.id)
+            .where(ResearchSession.message_id.in_(message_ids))
+        )
+
+        # Group by message_id in memory
+        sources_by_message: dict[UUID, list[dict[str, Any]]] = defaultdict(list)
+        for source, message_id in result.all():
+            sources_by_message[message_id].append({
+                "title": source.title or source.url,
+                "url": source.url,
+            })
+
+        return dict(sources_by_message)
 
     async def export_json(
         self,
@@ -224,6 +275,9 @@ class ExportService:
         Raises:
             ValueError: If message not found or not owned by user.
         """
+        # Local import to avoid circular import through api.v1.__init__.py
+        from deep_research.api.v1.utils.authorization import verify_message_ownership
+
         try:
             return await verify_message_ownership(message_id, user_id, self._session)
         except NotFoundError as e:

@@ -1,6 +1,7 @@
 export { useChats, useCreateChat } from './useChats';
 export { useChatActions } from './useChatActions';
 export { useMessages } from './useMessages';
+export { usePrefetchMessages } from './usePrefetchMessages';
 export { useStreamingQuery } from './useStreamingQuery';
 export type { ToolActivity, ErrorDetails } from './useStreamingQuery';
 export { useCitations } from './useCitations';

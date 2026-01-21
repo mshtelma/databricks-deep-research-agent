@@ -69,6 +69,8 @@ yarn-error.log*
 frontend/dist/
 frontend/build/
 # static/ - NOT ignored: needed for DAB deployment
+# But the symlink inside src is for local dev only
+src/deep_research/static
 .next/
 out/
 

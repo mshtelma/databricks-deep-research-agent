@@ -46,8 +46,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/deep_research"]
 
+[tool.hatch.build.targets.wheel.force-include]
+# Include frontend static assets in the package for deployment
+"static" = "deep_research/static"
+
 [tool.hatch.build.targets.sdist]
-include = ["src/deep_research"]
+include = ["src/deep_research", "static"]
 
 # CLI entry points for deployment utilities
 [project.scripts]
@@ -158,5 +162,6 @@ directory = "htmlcov"
 
 [dependency-groups]
 dev = [
+    "build>=1.4.0",
     "mypy>=1.19.1",
 ]

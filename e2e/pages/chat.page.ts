@@ -284,4 +284,98 @@ export class ChatPage {
     await this.selectQueryMode(mode);
     await this.sendMessage(text);
   }
+
+  // ==================== Parallel Testing Methods ====================
+
+  /**
+   * Extract the chat ID from the current URL.
+   * @returns The chat ID if present, null otherwise
+   */
+  async getChatIdFromUrl(): Promise<string | null> {
+    const url = this.page.url();
+    // URL pattern: /chat/:chatId or /c/:chatId
+    const match = url.match(/\/(?:chat|c)\/([a-zA-Z0-9-]+)/);
+    return match ? match[1] : null;
+  }
+
+  /**
+   * Get the count of user and agent messages in the chat.
+   * @returns Object with user and agent message counts
+   */
+  async getMessageCount(): Promise<{ user: number; agent: number }> {
+    const userMessages = this.page.getByTestId('user-message');
+    const agentResponses = this.page.getByTestId('agent-response');
+
+    const userCount = await userMessages.count();
+    const agentCount = await agentResponses.count();
+
+    return { user: userCount, agent: agentCount };
+  }
+
+  /**
+   * Wait for a specific number of agent responses.
+   * Useful for follow-up scenarios where we expect multiple responses.
+   * @param count The expected number of agent responses
+   * @param timeout Maximum wait time in milliseconds
+   */
+  async waitForAgentResponseCount(count: number, timeout: number = 120000): Promise<void> {
+    const responses = this.page.getByTestId('agent-response');
+    const startTime = Date.now();
+    const pollInterval = 1000;
+
+    while (Date.now() - startTime < timeout) {
+      const currentCount = await responses.count();
+      if (currentCount >= count) {
+        return;
+      }
+      await this.page.waitForTimeout(pollInterval);
+    }
+
+    // Final assertion - will fail with helpful message if count not reached
+    await expect(responses).toHaveCount(count, { timeout: 5000 });
+  }
+
+  /**
+   * Wait for the Nth agent response to appear (1-indexed).
+   * @param n The response number to wait for (1 = first, 2 = second, etc.)
+   * @param timeout Maximum wait time in milliseconds
+   */
+  async waitForNthAgentResponse(n: number, timeout: number = 120000): Promise<void> {
+    const responses = this.page.getByTestId('agent-response');
+    const startTime = Date.now();
+    const pollInterval = 1000;
+
+    // Check if already loading/processing
+    let researchStarted = false;
+
+    while (Date.now() - startTime < timeout) {
+      const currentCount = await responses.count();
+      if (currentCount >= n) {
+        return; // We have the Nth response
+      }
+
+      // Check if research has started (indicators visible)
+      const loadingVisible = await this.loadingIndicator.isVisible().catch(() => false);
+      const streamingVisible = await this.streamingIndicator.isVisible().catch(() => false);
+
+      if (loadingVisible || streamingVisible) {
+        researchStarted = true;
+      }
+
+      // If research started but now both indicators hidden, check for new response
+      if (researchStarted && !loadingVisible && !streamingVisible) {
+        await this.page.waitForTimeout(2000); // DOM update lag
+        const finalCount = await responses.count();
+        if (finalCount >= n) {
+          return;
+        }
+      }
+
+      await this.page.waitForTimeout(pollInterval);
+    }
+
+    // Final check with assertion
+    const finalCount = await responses.count();
+    expect(finalCount).toBeGreaterThanOrEqual(n);
+  }
 }

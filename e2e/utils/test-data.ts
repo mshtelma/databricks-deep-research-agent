@@ -161,3 +161,104 @@ export const ERROR_PATTERNS = {
   serverError: /server|500|internal|error/i,
   rateLimit: /rate limit|too many|slow down/i,
 };
+
+// ==================== Parallel Research Test Data ====================
+
+/**
+ * Query mode types for parallel research tests.
+ */
+export type QueryMode = 'simple' | 'web_search' | 'deep_research';
+
+/**
+ * Parallel research query configuration.
+ */
+export interface ParallelResearchQuery {
+  initial: {
+    text: string;
+    mode: QueryMode;
+    keywords: string[];
+  };
+  followUp: {
+    text: string;
+    mode: QueryMode;
+    expectedContext: string[];
+  };
+}
+
+/**
+ * Parallel research queries - distinct domains for isolation verification.
+ * Each query targets a different domain to detect cross-contamination.
+ */
+export const PARALLEL_RESEARCH_QUERIES: ParallelResearchQuery[] = [
+  {
+    initial: {
+      text: 'quantum computing error correction',
+      mode: 'deep_research',
+      keywords: ['quantum', 'qubit', 'error', 'correction'],
+    },
+    followUp: {
+      text: 'What companies are leading in this field?',
+      mode: 'simple',
+      expectedContext: ['quantum', 'computing'],
+    },
+  },
+  {
+    initial: {
+      text: 'React vs Vue.js for enterprise applications',
+      mode: 'deep_research',
+      keywords: ['react', 'vue', 'enterprise', 'frontend'],
+    },
+    followUp: {
+      text: 'Which framework has better performance?',
+      mode: 'web_search',
+      expectedContext: ['react', 'vue', 'performance'],
+    },
+  },
+  {
+    initial: {
+      text: 'Kubernetes security best practices',
+      mode: 'deep_research',
+      keywords: ['kubernetes', 'container', 'security', 'k8s'],
+    },
+    followUp: {
+      text: 'Give me a simple checklist for securing clusters',
+      mode: 'simple',
+      expectedContext: ['kubernetes', 'security', 'cluster'],
+    },
+  },
+];
+
+/**
+ * Follow-up flow types for testing different mode transitions.
+ */
+export const FOLLOW_UP_FLOWS = {
+  researchToSimple: { initial: 'deep_research' as QueryMode, followUp: 'simple' as QueryMode },
+  researchToWebSearch: { initial: 'deep_research' as QueryMode, followUp: 'web_search' as QueryMode },
+  webSearchToWebSearch: { initial: 'web_search' as QueryMode, followUp: 'web_search' as QueryMode },
+  researchToResearch: { initial: 'deep_research' as QueryMode, followUp: 'deep_research' as QueryMode },
+};
+
+/**
+ * Simple test queries for web_search mode testing.
+ */
+export const WEB_SEARCH_QUERIES = [
+  {
+    text: 'Latest news on electric vehicles 2024',
+    keywords: ['electric', 'ev', 'vehicle', 'car'],
+  },
+  {
+    text: 'Current stock market trends',
+    keywords: ['stock', 'market', 'trading', 'investment'],
+  },
+];
+
+/**
+ * Timeout configuration for parallel tests (in milliseconds).
+ */
+export const PARALLEL_TIMEOUTS = {
+  deepResearch: 360000,    // 6 minutes for deep research
+  webSearch: 60000,        // 1 minute for web search
+  simple: 30000,           // 30 seconds for simple queries
+  parallelAll: 420000,     // 7 minutes for all parallel operations
+  fullScenario: 900000,    // 15 minutes for complete scenario
+};

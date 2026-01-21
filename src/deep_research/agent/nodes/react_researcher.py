@@ -96,6 +96,85 @@ class ReactResearchState:
     crawled_content: dict[str, str] = field(default_factory=dict)  # URL -> content
     url_registry: UrlRegistry = field(default_factory=UrlRegistry)  # Index -> URL mapping
 
+    # Token Optimization: Early stopping tracking
+    # Track information gain per tool call to detect diminishing returns
+    _info_gain_history: list[float] = field(default_factory=list)
+    _last_high_quality_count: int = 0
+    _last_content_length: int = 0
+    _consecutive_low_gain_calls: int = 0
+
+    def record_tool_call_outcome(self) -> None:
+        """Record the outcome of a tool call for early stopping analysis.
+
+        Called after each tool call to track information gain.
+        """
+        # Calculate information gain
+        current_hq_count = len(self.high_quality_sources)
+        current_content_len = sum(len(c) for c in self.crawled_content.values())
+
+        # Info gain based on new sources and content
+        new_sources = current_hq_count - self._last_high_quality_count
+        new_content = current_content_len - self._last_content_length
+
+        # Normalize info gain (0.0 to 1.0 scale)
+        info_gain = 0.0
+        if new_sources > 0:
+            info_gain += 0.5  # New source is valuable
+        if new_content > 1000:
+            info_gain += min(0.5, new_content / 10000)  # Content adds value
+
+        self._info_gain_history.append(info_gain)
+
+        # Track consecutive low-gain calls
+        if info_gain < 0.1:
+            self._consecutive_low_gain_calls += 1
+        else:
+            self._consecutive_low_gain_calls = 0
+
+        # Update tracking
+        self._last_high_quality_count = current_hq_count
+        self._last_content_length = current_content_len
+
+    def should_stop_early(
+        self,
+        min_calls: int = 5,
+        min_sources: int = 3,
+        max_low_gain_calls: int = 5,
+    ) -> tuple[bool, str]:
+        """Determine if ReAct loop should stop early.
+
+        This is a TOKEN OPTIMIZATION that stops the loop when:
+        1. We have enough high-quality sources AND
+        2. Last N calls added no new information (diminishing returns)
+
+        Args:
+            min_calls: Minimum calls before early stopping is allowed.
+            min_sources: Minimum high-quality sources required.
+            max_low_gain_calls: Stop after this many consecutive low-gain calls.
+
+        Returns:
+            Tuple of (should_stop, reason_string).
+        """
+        # Don't stop before minimum calls
+        if self.tool_call_count < min_calls:
+            return False, ""
+
+        # Check for diminishing returns
+        if self._consecutive_low_gain_calls >= max_low_gain_calls:
+            # Only stop if we have minimum sources
+            if len(self.high_quality_sources) >= min_sources:
+                return True, f"diminishing_returns_after_{self._consecutive_low_gain_calls}_low_gain_calls"
+
+        # Check coverage - if we have many high-quality sources, can stop
+        if len(self.high_quality_sources) >= min_sources + 2:
+            # Check recent info gain
+            if len(self._info_gain_history) >= 3:
+                recent_gain = sum(self._info_gain_history[-3:])
+                if recent_gain < 0.3:  # Last 3 calls added little
+                    return True, f"high_coverage_{len(self.high_quality_sources)}_sources_low_recent_gain"
+
+        return False, ""
+
 
 async def run_react_researcher(
     state: ResearchState,
@@ -290,6 +369,33 @@ Start by searching for relevant information.""",
                         "high_quality_count": len(react_state.high_quality_sources),
                     },
                 )
+
+                # TOKEN OPTIMIZATION: Track info gain for early stopping
+                react_state.record_tool_call_outcome()
+
+            # TOKEN OPTIMIZATION: Check for early stopping (diminishing returns)
+            should_stop, stop_reason = react_state.should_stop_early(
+                min_calls=5,  # At least 5 calls before considering early stop
+                min_sources=3,  # Need at least 3 high-quality sources
+                max_low_gain_calls=5,  # Stop after 5 consecutive low-gain calls
+            )
+            if should_stop:
+                logger.info(
+                    "REACT_RESEARCHER_EARLY_STOP",
+                    reason=stop_reason,
+                    tool_calls=react_state.tool_call_count,
+                    high_quality_sources=len(react_state.high_quality_sources),
+                    info_gain_history=react_state._info_gain_history[-5:],
+                )
+                yield ReactResearchEvent(
+                    event_type="research_complete",
+                    data={
+                        "reason": f"early_stop_{stop_reason}",
+                        "tool_calls": react_state.tool_call_count,
+                        "high_quality_sources": len(react_state.high_quality_sources),
+                    },
+                )
+                break
 
             # Check if we have enough high-quality sources
             if len(react_state.high_quality_sources) >= 5:

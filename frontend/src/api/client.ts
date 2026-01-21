@@ -243,8 +243,6 @@ export const researchApi = {
       `/research/${sessionId}/cancel`,
       { method: 'POST' }
     ),
-
-  streamUrl: (chatId: string) => `${API_BASE_URL}/research/chats/${chatId}/stream`,
 }
 
 // Jobs API - Background research job management

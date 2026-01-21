@@ -12,6 +12,10 @@ export function useMessages(
     queryKey: [...MESSAGES_KEY, chatId, params],
     queryFn: () => (chatId ? messagesApi.list(chatId, params) : null),
     enabled: !!chatId,
+    // Keep gcTime: Infinity to prevent garbage collection (memory benefit)
+    // Remove staleTime: Infinity so TanStack Query will background-refetch
+    // This gives: instant display from cache + eventual consistency from refetch
+    gcTime: Infinity,
   })
 }
 

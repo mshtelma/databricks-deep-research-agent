@@ -13,9 +13,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-# Static directory is at project root /static/ (sibling to src/)
-# Path: static_files.py -> deep_research/ -> src/ -> PROJECT_ROOT -> static/
-STATIC_DIR = Path(__file__).parent.parent.parent / "static"
+# Static directory is included in the package via hatch force-include
+# When installed via pip, static files are at deep_research/static/
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 def is_static_serving_enabled() -> bool:
