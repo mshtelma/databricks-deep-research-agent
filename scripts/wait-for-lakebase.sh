@@ -40,8 +40,8 @@ for i in $(seq 1 $MAX_RETRIES); do
        uv run python -c "
 import sys
 try:
-    from src.db.lakebase_auth import LakebaseCredentialProvider
-    from src.core.config import get_settings
+    from deep_research.db.lakebase_auth import LakebaseCredentialProvider
+    from deep_research.core.config import get_settings
 
     settings = get_settings()
     provider = LakebaseCredentialProvider(settings)

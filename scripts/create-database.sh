@@ -30,7 +30,7 @@ import asyncio
 import logging
 logging.basicConfig(level=logging.INFO)
 
-from src.db.bootstrap import ensure_database_exists
+from deep_research.db.bootstrap import ensure_database_exists
 asyncio.run(ensure_database_exists())
 "
 
