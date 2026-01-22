@@ -356,6 +356,10 @@ class ResearchState:
     # Value: VerificationResult from isolated_verifier
     _verification_cache: dict[str, Any] = field(default_factory=dict, repr=False)
 
+    # Custom phase results storage
+    # Maps phase name -> PhaseResult for plugin-provided custom phases
+    _phase_results: dict[str, Any] = field(default_factory=dict, repr=False)
+
     # Final output (Synthesizer phase)
     final_report: str = ""
     final_report_structured: Any | None = None  # Structured Pydantic output
@@ -438,6 +442,44 @@ class ResearchState:
         """Mark research as cancelled."""
         self.is_cancelled = True
         self.completed_at = datetime.now(UTC)
+
+    # =========================================================================
+    # Custom Phase Results Storage
+    # =========================================================================
+
+    def add_phase_result(self, phase_name: str, result: Any) -> None:
+        """Store result from a custom research phase.
+
+        Args:
+            phase_name: Name of the phase that produced the result
+            result: PhaseResult object with output and sources
+        """
+        if not hasattr(self, "_phase_results") or self._phase_results is None:
+            self._phase_results = {}
+        self._phase_results[phase_name] = result
+
+    def get_phase_result(self, phase_name: str) -> Any | None:
+        """Get result from a completed phase.
+
+        Args:
+            phase_name: Name of the phase
+
+        Returns:
+            PhaseResult or None if phase hasn't completed
+        """
+        if not hasattr(self, "_phase_results") or self._phase_results is None:
+            return None
+        return self._phase_results.get(phase_name)
+
+    def get_all_phase_results(self) -> dict[str, Any]:
+        """Get all phase results.
+
+        Returns:
+            Dict mapping phase name to PhaseResult
+        """
+        if not hasattr(self, "_phase_results") or self._phase_results is None:
+            return {}
+        return dict(self._phase_results)
 
     def resolve_depth(self) -> str:
         """Resolve effective research depth.
@@ -611,4 +653,8 @@ class ResearchState:
             "is_cancelled": self.is_cancelled,
             "started_at": self.started_at.isoformat(),
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "phase_results": {
+                name: result.to_dict() if hasattr(result, "to_dict") else str(result)
+                for name, result in self._phase_results.items()
+            } if self._phase_results else {},
         }

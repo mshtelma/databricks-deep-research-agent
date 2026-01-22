@@ -83,17 +83,14 @@ export default function ChatPage() {
   // Note: currentQueryMode is now managed in useStreamingQuery hook (not local state)
   // This ensures it persists correctly throughout the streaming session
 
-  // Callback when streaming completes - refresh messages to enable citation rendering
+  // Callback when streaming completes - DON'T refetch messages immediately
+  // The streaming view with streamingClaims will continue to show colored citations
+  // until persistence_completed triggers the refetch (prevents grey citations)
   const handleStreamComplete = useCallback(() => {
-    if (chatId) {
-      // Force immediate refetch from DB with real UUIDs
-      // This allows AgentMessageWithCitations to fetch claims
-      // Using refetchQueries instead of invalidateQueries for more aggressive refresh
-      queryClient.refetchQueries({ queryKey: ['messages', chatId] });
-      // Note: pendingUserMessage is cleared reactively when API confirms the message
-      // (see the useEffect that watches apiMessages, not here)
-    }
-  }, [chatId, queryClient]);
+    // Note: pendingUserMessage is cleared reactively when API confirms the message
+    // (see the useEffect that watches apiMessages, not here)
+    console.log('[ChatPage] Stream complete, waiting for persistence before refetching messages');
+  }, []);
 
   // Callback when job submission fails - clear pending message since job didn't start
   const handleJobSubmissionError = useCallback(() => {
@@ -293,8 +290,17 @@ export default function ChatPage() {
     }
   }, [messagesError, navigate, chatId, isDraftChat, isStreaming]);
 
-  // Handle persistence completion - convert draft to real chat
+  // Handle persistence completion - convert draft to real chat and refetch messages
+  // This is the ONLY place we refetch messages after streaming completes,
+  // ensuring claims are already persisted when we switch from streaming view to DB view
   const handlePersistenceComplete = useCallback((event: PersistenceCompletedEvent) => {
+    // NOW refetch messages since persistence is complete
+    // This allows AgentMessageWithCitations to fetch claims from DB (they're already there)
+    if (chatId) {
+      console.log('[ChatPage] Persistence complete, now refetching messages');
+      queryClient.refetchQueries({ queryKey: ['messages', chatId] });
+    }
+
     if (event.wasDraft && chatId) {
       // Remove from local draft storage
       removeDraft(chatId);

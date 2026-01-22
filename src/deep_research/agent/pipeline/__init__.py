@@ -48,6 +48,7 @@ from deep_research.agent.pipeline.protocols import (
     PhaseInsertion,
     PhaseProvider,
 )
+from deep_research.agent.pipeline.base_phase import BaseResearchPhase
 from deep_research.agent.pipeline.executor import (
     ExecutionResult,
     PipelineExecutor,
@@ -70,6 +71,8 @@ __all__ = [
     "PipelineCustomizer",
     "PhaseInsertion",
     "PhaseProvider",
+    # Base classes for plugins
+    "BaseResearchPhase",
     # Executor
     "ExecutionResult",
     "PipelineExecutor",

@@ -120,6 +120,16 @@ async def grant_to_app(
             # Service principal names are typically like "user@domain.com"
             quoted_sp = f'"{sp_name}"'
 
+            # Create role if it doesn't exist (app may not have connected yet)
+            # PostgreSQL requires roles to exist before GRANT can target them
+            # Lakebase creates app roles on first connection, but deployment
+            # runs before the app starts, so we need to create the role ourselves
+            try:
+                await conn.execute(f"CREATE ROLE {quoted_sp} WITH LOGIN")
+                logger.debug("Created role %s", sp_name)
+            except asyncpg.exceptions.DuplicateObjectError:
+                logger.debug("Role %s already exists", sp_name)
+
             # Grant on existing tables
             await conn.execute(
                 f"GRANT ALL ON ALL TABLES IN SCHEMA public TO {quoted_sp}"

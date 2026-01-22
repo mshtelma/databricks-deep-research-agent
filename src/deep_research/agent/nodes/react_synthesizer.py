@@ -447,6 +447,66 @@ def _serialize_args(args: dict[str, Any] | str) -> str:
     return json.dumps(args)
 
 
+def normalize_markdown_tables(content: str) -> str:
+    """Normalize markdown tables by replacing literal \\n with actual newlines.
+
+    LLMs sometimes generate tables with escaped newline characters (\\n) instead
+    of actual line breaks, which breaks markdown table rendering.
+
+    This function detects table-like patterns (pipe characters with \\n) and
+    replaces the escaped sequences with real newlines.
+
+    Args:
+        content: Report content that may contain malformed tables.
+
+    Returns:
+        Content with normalized table formatting.
+    """
+    if '\\n' not in content:
+        return content
+
+    # Pattern to detect table rows: starts with |, has content, ends with | followed by \n
+    # This handles the common pattern: "| col1 | col2 |\n|---|---|"
+    table_pattern = r'(\|[^|]+\|(?:[^|]+\|)*)\s*\\n'
+
+    original_len = len(content)
+    normalized = content
+
+    # Replace \n with actual newlines in table contexts
+    # We look for pipe-based patterns that suggest table structure
+    if re.search(table_pattern, content):
+        # Replace literal \n that appears after table row patterns
+        normalized = re.sub(r'\\n(\|)', r'\n\1', normalized)
+        # Also handle \n at the end of separator rows like |---|
+        normalized = re.sub(r'(\|[-:]+\|)\\n', r'\1\n', normalized)
+        # Handle general case: \n followed by pipe or at end of potential table content
+        normalized = re.sub(r'\\n(?=\|)', '\n', normalized)
+
+    # Also handle cases where \n appears in table-like content broadly
+    # Check if content has table indicators (multiple pipes in sequence)
+    if '|' in content and content.count('|') >= 4:
+        # More aggressive replacement for content that looks like tables
+        # Replace \n when surrounded by table-like context
+        lines = normalized.split('\n')
+        fixed_lines = []
+        for line in lines:
+            if '|' in line and '\\n' in line:
+                # This line has both pipes and escaped newlines - likely a broken table
+                line = line.replace('\\n', '\n')
+            fixed_lines.append(line)
+        normalized = '\n'.join(fixed_lines)
+
+    if normalized != content:
+        logger.info(
+            "MARKDOWN_TABLE_NORMALIZED",
+            original_len=original_len,
+            normalized_len=len(normalized),
+            replacements_made=content.count('\\n') - normalized.count('\\n'),
+        )
+
+    return normalized
+
+
 def deduplicate_report(content: str) -> str:
     """Detect and remove duplicated report sections, keeping the complete one.
 
@@ -687,6 +747,9 @@ Remember: search_evidence → read_snippet → write claim with citation.
 
             # Deduplicate if LLM wrote the report twice
             final_report = deduplicate_report(final_report)
+
+            # Normalize markdown tables (replace literal \n with actual newlines)
+            final_report = normalize_markdown_tables(final_report)
             final_report_for_log = final_report  # Track for final logging
 
             # Log parsing results
@@ -810,6 +873,9 @@ Remember: search_evidence → read_snippet → write claim with citation.
 
         # Deduplicate if LLM wrote the report twice
         final_report = deduplicate_report(final_report)
+
+        # Normalize markdown tables (replace literal \n with actual newlines)
+        final_report = normalize_markdown_tables(final_report)
         final_report_for_log = final_report  # Track for final logging
 
         cite_blocks = [b for b in parsed_blocks if b.tag_type == "cite"]
@@ -1176,6 +1242,9 @@ Do not repeat content from previous sections.
         section_report, section_blocks = parse_tagged_content(raw_section_content)
         all_parsed_blocks.extend(section_blocks)
 
+        # Normalize markdown tables in section (replace literal \n with actual newlines)
+        section_report = normalize_markdown_tables(section_report)
+
         # Fallback: If LLM didn't use XML tags, use raw content with warning
         if not section_blocks and raw_section_content.strip():
             logger.warning(
@@ -1239,6 +1308,9 @@ Do not repeat content from previous sections.
         final_report = await _post_process_report(generated_content, state.query, llm, limits)
     else:
         final_report = generated_content
+
+    # Normalize markdown tables (replace literal \n with actual newlines)
+    final_report = normalize_markdown_tables(final_report)
 
     # Calculate totals from all parsed blocks
     total_cite_blocks = len([b for b in all_parsed_blocks if b.tag_type == "cite"])
