@@ -16,8 +16,6 @@ from typing import Any
 from urllib.parse import urlparse
 
 import httpx
-import mlflow
-from mlflow.entities import SpanType
 from trafilatura import bare_extraction
 
 from deep_research.agent.tools.base import (
@@ -33,6 +31,7 @@ from deep_research.core.logging_utils import (
     log_crawl_request,
     log_crawl_response,
 )
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
     ATTR_CRAWL_FAILED,
     ATTR_CRAWL_SUCCESSFUL,
@@ -441,23 +440,25 @@ async def web_crawl(
     """
     span_name = tool_span_name("web_crawl", context)
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.TOOL) as span:
-        span.set_attributes({
+    logger.info(f"Crawling {len(urls)} URLs")
+
+    async with safe_tool_span(
+        span_name,
+        attributes={
             ATTR_CRAWL_URLS_COUNT: len(urls),
             "crawl.urls": list_to_attr(urls, max_items=5),
-        })
-
-        logger.info(f"Crawling {len(urls)} URLs")
-
+        },
+    ) as span:
         output = await crawler.crawl(urls)
 
         logger.info(f"Crawled {output.successful_count} successfully, {output.failed_count} failed")
 
         # Set output attributes
-        span.set_attributes({
-            ATTR_CRAWL_SUCCESSFUL: output.successful_count,
-            ATTR_CRAWL_FAILED: output.failed_count,
-        })
+        if span:
+            span.set_attributes({
+                ATTR_CRAWL_SUCCESSFUL: output.successful_count,
+                ATTR_CRAWL_FAILED: output.failed_count,
+            })
 
         return output
 

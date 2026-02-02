@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -9,12 +10,45 @@ from fastapi.middleware.cors import CORSMiddleware
 from deep_research.api.v1 import router as api_v1_router
 from deep_research.core.app_config import get_app_config
 from deep_research.core.config import get_settings
-from deep_research.core.exceptions import AppException, app_exception_handler, http_exception_handler
-from deep_research.db.session import close_db, get_credential_provider
+from deep_research.core.exceptions import (
+    AppException,
+    app_exception_handler,
+    http_exception_handler,
+)
+from deep_research.db.session import close_db
 from deep_research.middleware.logging import RequestLoggingMiddleware, setup_logging
 from deep_research.static_files import setup_static_files
 
 logger = logging.getLogger(__name__)
+
+# Session cleanup interval in seconds (5 minutes)
+SESSION_CLEANUP_INTERVAL_SECONDS = 300
+
+
+async def cleanup_expired_sessions_task(session_maker) -> None:
+    """Background task to clean up expired incognito sessions periodically.
+
+    Runs every 5 minutes to delete expired sessions and their associated chats.
+    This prevents storage leaks and ensures privacy by removing incognito data
+    after session expiry.
+    """
+    from deep_research.services.session_service import SessionService
+
+    while True:
+        try:
+            await asyncio.sleep(SESSION_CLEANUP_INTERVAL_SECONDS)
+            async with session_maker() as db:
+                service = SessionService(db)
+                count = await service.cleanup_expired()
+                if count > 0:
+                    await db.commit()
+                    logger.info(f"Cleaned up {count} expired incognito sessions")
+        except asyncio.CancelledError:
+            logger.info("Session cleanup task cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Session cleanup failed: {e}", exc_info=True)
+            # Continue running despite errors
 
 
 @asynccontextmanager
@@ -74,6 +108,26 @@ async def lifespan(app: FastAPI):
     app.state.brave_client = BraveSearchClient()
     app.state.web_crawler = WebCrawler()
 
+    # Initialize plugin manager (discovers and loads plugins via entry points)
+    from deep_research.plugins.manager import PluginManager
+
+    plugin_manager = PluginManager()
+    try:
+        plugin_manager.discover_and_load(app_config)
+        app.state.plugin_manager = plugin_manager
+        logger.info(
+            "PluginManager initialized: %d plugins, %d phases",
+            len(plugin_manager),
+            len(plugin_manager.get_all_phases()),
+        )
+        # DIAGNOSTIC: Log plugin_manager storage for instance comparison
+        logger.info(
+            f"MAIN_PLUGIN_MANAGER_STORED instance_id={id(plugin_manager)} num_plugins={len(plugin_manager)} num_phases={len(plugin_manager.get_all_phases())} has_customization={plugin_manager.get_pipeline_customization() is not None}"
+        )
+    except Exception as e:
+        logger.warning("PluginManager initialization failed: %s", e)
+        app.state.plugin_manager = None
+
     # Initialize background job manager
     from deep_research.db.session import get_session_maker
     from deep_research.services.job_manager import initialize_job_manager
@@ -87,6 +141,11 @@ async def lifespan(app: FastAPI):
         job_manager.worker_id,
     )
 
+    # Start session cleanup background task
+    cleanup_task = asyncio.create_task(cleanup_expired_sessions_task(session_maker))
+    app.state.cleanup_task = cleanup_task
+    logger.info("Session cleanup task started (runs every %d seconds)", SESSION_CLEANUP_INTERVAL_SECONDS)
+
     logger.info(
         "Application started: env=%s, is_databricks_app=%s, port=%s",
         settings.app_env,
@@ -98,6 +157,15 @@ async def lifespan(app: FastAPI):
 
     # Graceful shutdown - Databricks Apps requires completion within 15 seconds
     logger.info("Shutdown signal received, cleaning up...")
+
+    # Cancel session cleanup task
+    if hasattr(app.state, "cleanup_task") and app.state.cleanup_task:
+        app.state.cleanup_task.cancel()
+        try:
+            await app.state.cleanup_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Session cleanup task stopped")
 
     # Stop job manager first (cancels running jobs)
     if hasattr(app.state, "job_manager") and app.state.job_manager:

@@ -2,7 +2,6 @@
 
 from typing import Literal
 
-import mlflow
 from mlflow.entities import SpanType
 from pydantic import BaseModel
 
@@ -18,6 +17,7 @@ from deep_research.agent.state import (
     StepStatus,
 )
 from deep_research.core.logging_utils import get_logger, log_agent_decision
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
     ATTR_DECISION,
     ATTR_DECISION_REASONING,
@@ -106,14 +106,13 @@ async def run_reflector(state: ResearchState, llm: LLMClient) -> ResearchState:
     step_number = state.current_step_index + 1
     span_name = research_span_name(PHASE_REFLECT, "reflector", step=step_number)
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
+    async with safe_tool_span(span_name, SpanType.AGENT, {
+        ATTR_STEP_INDEX: step_number,
+        "step.total": len(state.current_plan.steps),
+        "observations_count": len(state.all_observations),
+        "sources_count": len(state.sources),
+    }) as span:
         total_steps = len(state.current_plan.steps)
-        span.set_attributes({
-            ATTR_STEP_INDEX: step_number,
-            "step.total": total_steps,
-            "observations_count": len(state.all_observations),
-            "sources_count": len(state.sources),
-        })
 
         logger.info(
             "REFLECTOR_EVALUATING",
@@ -193,14 +192,15 @@ async def run_reflector(state: ResearchState, llm: LLMClient) -> ResearchState:
             state.reflection_history.append(result)
 
             # Set decision attributes for trace
-            span.set_attributes({
-                ATTR_DECISION: decision.value,
-                ATTR_DECISION_REASONING: truncate_for_attr(output.reasoning, 300),
-                "decision.has_suggested_changes": output.suggested_changes is not None and len(output.suggested_changes) > 0,
-                "coverage.gaps_count": len(output.coverage_gaps),
-                "coverage.covered_topics_count": len(output.covered_topics),
-                "coverage.remaining_topics_count": len(output.remaining_topics),
-            })
+            if span:
+                span.set_attributes({
+                    ATTR_DECISION: decision.value,
+                    ATTR_DECISION_REASONING: truncate_for_attr(output.reasoning, 300),
+                    "decision.has_suggested_changes": output.suggested_changes is not None and len(output.suggested_changes) > 0,
+                    "coverage.gaps_count": len(output.coverage_gaps),
+                    "coverage.covered_topics_count": len(output.covered_topics),
+                    "coverage.remaining_topics_count": len(output.remaining_topics),
+                })
 
             log_agent_decision(
                 logger,
@@ -215,10 +215,11 @@ async def run_reflector(state: ResearchState, llm: LLMClient) -> ResearchState:
                 error_type=type(e).__name__,
                 error=str(e)[:200],
             )
-            span.set_attributes({
-                "error": str(e)[:200],
-                "error_type": type(e).__name__,
-            })
+            if span:
+                span.set_attributes({
+                    "error": str(e)[:200],
+                    "error_type": type(e).__name__,
+                })
             # Default to continue on error
             state.last_reflection = ReflectionResult(
                 decision=ReflectionDecision.CONTINUE,

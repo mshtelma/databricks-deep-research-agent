@@ -178,6 +178,8 @@ def setup_logging(log_level: str = "INFO", log_format: str = "text") -> None:
     # But keep our own loggers at the specified level
     logging.getLogger("backend").setLevel(getattr(logging, log_level.upper()))
     logging.getLogger("src").setLevel(getattr(logging, log_level.upper()))
+    logging.getLogger("sapresalesbot").setLevel(getattr(logging, log_level.upper()))
+    logging.getLogger("deep_research").setLevel(getattr(logging, log_level.upper()))
 
     logger.info(
         f"Logging configured | level={log_level} | format={log_format}"

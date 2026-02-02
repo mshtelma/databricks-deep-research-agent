@@ -5,6 +5,7 @@ import time
 import traceback
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID, uuid4
 
 import mlflow
@@ -49,15 +50,20 @@ from deep_research.core.logging_utils import (
     log_agent_transition,
     truncate,
 )
-from deep_research.core.tracing import log_research_config
+from deep_research.core.tracing import log_research_config, safe_tool_span
 from deep_research.schemas.research import PlanStepSummary
 from deep_research.schemas.streaming import (
     AgentCompletedEvent,
     AgentStartedEvent,
     CitationCorrectedEvent,
     ClaimVerifiedEvent,
+    CustomPhaseModeStartedEvent,
     NumericClaimDetectedEvent,
     PersistenceCompletedEvent,
+    PhaseCompletedEvent,
+    PhaseErrorEvent,
+    PhaseSkippedEvent,
+    PhaseStartedEvent,
     PlanCreatedEvent,
     ReflectionDecisionEvent,
     ResearchCompletedEvent,
@@ -73,8 +79,8 @@ from deep_research.schemas.streaming import (
     VerificationSummaryEvent,
 )
 from deep_research.services.llm.client import LLMClient
-from deep_research.services.search.brave import BraveSearchClient
 from deep_research.services.research_event_buffer import EventBuffer
+from deep_research.services.search.brave import BraveSearchClient
 
 # Import database session type for persistence (optional dependency)
 try:
@@ -82,7 +88,36 @@ try:
 except ImportError:
     AsyncSession = None  # type: ignore[misc, assignment]
 
+# Import PluginManager and PipelineCustomization for custom phase mode
+try:
+    from deep_research.plugins.manager import PluginManager
+except ImportError:
+    PluginManager = None  # type: ignore[misc, assignment]
+
+try:
+    from deep_research.agent.pipeline.protocols import PipelineCustomization
+except ImportError:
+    PipelineCustomization = None  # type: ignore[misc, assignment]
+
 logger = get_logger(__name__)
+
+
+def _get_schema_name(output_schema: type | dict | None) -> str | None:
+    """Get a display name for the output schema.
+
+    Handles both Pydantic class types (with __name__) and JSON schema dicts.
+
+    Args:
+        output_schema: Either a class type or a JSON schema dict
+
+    Returns:
+        Schema name string, or None if no schema
+    """
+    if output_schema is None:
+        return None
+    if isinstance(output_schema, dict):
+        return output_schema.get("title", "dict_schema")
+    return getattr(output_schema, "__name__", str(type(output_schema)))
 
 
 def _get_default_orchestration_config() -> "OrchestrationConfig":
@@ -214,15 +249,13 @@ async def run_research(
     try:
         # Create MLflow run to associate trace with params
         with mlflow.start_run(run_name=f"research_{str(state.session_id)[:8]}", nested=True):
-            with mlflow.start_span(name="research_orchestration", span_type="CHAIN") as root_span:
-                # Add research context to root span for trace correlation
-                root_span.set_attributes({
-                    "research.session_id": str(state.session_id),
-                    "research.query": truncate(query, 200),
-                    "research.max_iterations": config.max_plan_iterations,
-                    "research.enable_background": config.enable_background_investigation,
-                    "research.enable_clarification": config.enable_clarification,
-                })
+            async with safe_tool_span("research_orchestration", "CHAIN", {
+                "research.session_id": str(state.session_id),
+                "research.query": truncate(query, 200),
+                "research.max_iterations": config.max_plan_iterations,
+                "research.enable_background": config.enable_background_investigation,
+                "research.enable_clarification": config.enable_clarification,
+            }) as root_span:
 
                 # Group traces by user and chat session for MLflow trace correlation
                 if user_id or chat_id:
@@ -597,8 +630,13 @@ async def stream_research(
     chat_id: str | None = None,
     config: OrchestrationConfig | None = None,
     db: "AsyncSession | None" = None,
+    plugin_manager: "PluginManager | None" = None,
+    plugin_data: dict[str, Any] | None = None,
 ) -> AsyncGenerator[StreamEvent | str, None]:
     """Stream the research workflow with real-time events.
+
+    Now supports custom phase mode when a plugin disables the planner
+    and provides custom phases via PhaseProvider protocol.
 
     Args:
         query: User's research query.
@@ -611,6 +649,9 @@ async def stream_research(
         chat_id: Optional chat ID for MLflow trace session grouping.
         config: Orchestration configuration.
         db: Optional database session for persisting claims/citations.
+        plugin_manager: Optional PluginManager for custom phase mode.
+        plugin_data: Optional structured context data (account_name, company_name, etc.)
+            to pass to custom phases. When provided, bypasses query extraction.
 
     Yields:
         StreamEvent objects and synthesis content chunks.
@@ -637,6 +678,49 @@ async def stream_research(
     )
     if session_id:
         state.session_id = session_id
+
+    # DIAGNOSTIC: Log state creation for structured output debugging
+    logger.info(
+        "ORCHESTRATION_STATE_CREATED",
+        output_format=state.output_format,
+        output_schema=_get_schema_name(state.output_schema),
+        structured_system_prompt_len=len(state.structured_system_prompt) if state.structured_system_prompt else 0,
+        structured_user_prompt_len=len(state.structured_user_prompt) if state.structured_user_prompt else 0,
+        enable_citation_verification=state.enable_citation_verification,
+        enable_post_verification=state.enable_post_verification,
+    )
+
+    # Emit lifecycle hook: synthesis_config (if plugin manager available)
+    if plugin_manager and state.session_id:
+        try:
+            from deep_research.plugins.lifecycle import EventEmitter
+
+            emitter = EventEmitter(plugin_manager)
+            await emitter.synthesis_config(
+                job_id=state.session_id,
+                output_type=config.output_format or "generic",
+                model_tier="synthesis",  # Default tier
+                temperature=0.7,  # Default from config
+                max_tokens=8000,  # Default from config
+                query_preview=query[:200] if query else "",
+                schema_name=_get_schema_name(state.output_schema),
+                schema_fields=(
+                    list(state.output_schema.model_json_schema().get("properties", {}).keys())
+                    if state.output_schema else None
+                ),
+                schema_required_fields=(
+                    state.output_schema.model_json_schema().get("required", [])
+                    if state.output_schema else None
+                ),
+                verify_sources=state.enable_citation_verification,
+                enable_post_verification=state.enable_post_verification,
+            )
+        except Exception as e:
+            logger.warning(
+                "LIFECYCLE_HOOK_EMISSION_FAILED",
+                hook="on_synthesis_config",
+                error=str(e)[:200],
+            )
 
     # Load existing sources from chat source pool for follow-ups
     # This enables citing previous research without re-crawling
@@ -690,16 +774,14 @@ async def stream_research(
     # Create MLflow run to associate trace with params
     with mlflow.start_run(run_name=f"research_{str(state.session_id)[:8]}", nested=True):
         # Create span INSIDE the run context so trace is properly nested under run
-        with mlflow.start_span(name="stream_research_orchestration", span_type="CHAIN") as root_span:
-            # Add research context to root span for trace correlation
-            root_span.set_attributes({
-                "research.session_id": str(state.session_id),
-                "research.query": truncate(query, 200),
-                "research.max_iterations": config.max_plan_iterations,
-                "research.streaming": True,
-                "research.enable_background": config.enable_background_investigation,
-                "research.enable_clarification": config.enable_clarification,
-            })
+        async with safe_tool_span("stream_research_orchestration", "CHAIN", {
+            "research.session_id": str(state.session_id),
+            "research.query": truncate(query, 200),
+            "research.max_iterations": config.max_plan_iterations,
+            "research.streaming": True,
+            "research.enable_background": config.enable_background_investigation,
+            "research.enable_clarification": config.enable_clarification,
+        }) as root_span:
 
             # Group traces by user and chat session for MLflow trace correlation
             if user_id or chat_id:
@@ -712,11 +794,124 @@ async def stream_research(
 
             try:
                 # =============================================================
+                # Query Context Extraction (Plugin-based)
+                # =============================================================
+                # If a plugin provides ExtractionConfigProvider, extract structured
+                # context from the query using LLM. This provides plugin_data for
+                # custom phases (e.g., company_name, attendees, meeting_purpose).
+                # =============================================================
+
+                extracted_context: dict[str, Any] | None = None
+
+                if plugin_manager and not plugin_data:
+                    # Only extract if plugin_data not already provided
+                    try:
+                        from deep_research.agent.extraction import extract_query_context
+
+                        logger.info(f"EXTRACTION_START query_len={len(query)}")
+
+                        extracted_context = await extract_query_context(
+                            query=query,
+                            llm=llm,
+                            plugin_manager=plugin_manager,
+                        )
+
+                        if extracted_context:
+                            logger.info(
+                                f"EXTRACTION_SUCCESS keys={list(extracted_context.keys())} company={extracted_context.get('company_name', 'N/A')} attendees_count={len(extracted_context.get('attendees', []))}"
+                            )
+                            plugin_data = extracted_context
+                        else:
+                            logger.info("EXTRACTION_NO_RESULT query may not match plugin extraction pattern")
+
+                    except Exception as e:
+                        logger.warning(
+                            f"EXTRACTION_FAILED error={str(e)[:200]} type={type(e).__name__}"
+                        )
+                        # Continue without extraction - not a fatal error
+
+                    # Fallback to regex-based extraction if LLM failed
+                    if not extracted_context or not extracted_context.get("company_name"):
+                        logger.info("EXTRACTION_FALLBACK_REGEX attempting pattern matching")
+
+                        regex_data = _extract_context_from_query(query)
+
+                        if regex_data:
+                            logger.info(
+                                f"EXTRACTION_FALLBACK_SUCCESS keys={list(regex_data.keys())} company={regex_data.get('company_name', 'N/A')}"
+                            )
+                            extracted_context = regex_data
+                            plugin_data = extracted_context
+
+                elif plugin_data:
+                    logger.info(
+                        f"EXTRACTION_SKIPPED_PROVIDED_DATA keys={list(plugin_data.keys())} company={plugin_data.get('company_name', 'N/A')}"
+                    )
+
+                # =============================================================
+                # Custom Phase Mode Check (Plugin-provided phases)
+                # =============================================================
+                # Check if any plugin has disabled planner and defined custom phases
+                # If so, route to custom phase execution instead of planner
+                # =============================================================
+                use_custom_phases = False
+                customization = None
+
+                # DIAGNOSTIC: Track plugin_manager instance and state
+                if plugin_manager:
+                    logger.info(
+                        f"ORCHESTRATOR_PLUGIN_MANAGER_CHECK instance_id={id(plugin_manager)} has_method={hasattr(plugin_manager, 'has_custom_phase_mode')} num_plugins={len(plugin_manager) if hasattr(plugin_manager, '__len__') else 0} num_phases={len(plugin_manager.get_all_phases()) if hasattr(plugin_manager, 'get_all_phases') else 0}"
+                    )
+
+                    # DIAGNOSTIC: Check customization state
+                    customization_result = plugin_manager.get_pipeline_customization()
+                    logger.info(
+                        f"ORCHESTRATOR_CUSTOMIZATION_CHECK has_customization={customization_result is not None} disabled_agents={list(customization_result.disabled_agents) if customization_result else []} num_insertions={len(customization_result.phase_insertions) if customization_result else 0}"
+                    )
+
+                    # DIAGNOSTIC: Check has_custom_phase_mode components
+                    if hasattr(plugin_manager, 'has_custom_phase_mode'):
+                        result = plugin_manager.has_custom_phase_mode()
+                        logger.info(
+                            f"ORCHESTRATOR_CUSTOM_PHASE_CHECK result={result}"
+                        )
+                    else:
+                        logger.error("ORCHESTRATOR_MISSING_METHOD plugin_manager lacks has_custom_phase_mode()")
+                else:
+                    logger.warning("ORCHESTRATOR_NO_PLUGIN_MANAGER plugin_manager is None")
+
+                if plugin_manager and plugin_manager.has_custom_phase_mode():
+                    use_custom_phases = True
+                    customization = plugin_manager.get_pipeline_customization()
+                    logger.info(
+                        "CUSTOM_PHASE_MODE_DETECTED",
+                        phases=list(plugin_manager.get_all_phases().keys()),
+                        disabled_agents=list(customization.disabled_agents) if customization else [],
+                    )
+
+                # Create event buffer early for custom phase mode
+                # Session is pre-created by JobManager, so FK constraint is satisfied
+                if use_custom_phases and config.session_pre_created and config.research_session_id:
+                    event_buffer = EventBuffer(config.research_session_id)
+                    logger.info(
+                        "EVENT_BUFFER_CREATED_FOR_CUSTOM_PHASES",
+                        session_id=str(config.research_session_id)[:8],
+                    )
+                    # Emit research_started event for frontend to show progress
+                    started_event = ResearchStartedEvent(
+                        message_id=str(config.message_id) if config.message_id else "",
+                        research_session_id=str(config.research_session_id),
+                    )
+                    yield started_event
+                    await event_buffer.add_event(started_event)
+
+                # =============================================================
                 # Query Mode Routing (Tiered Query Modes feature)
                 # =============================================================
                 # SIMPLE mode: Direct LLM response, skip coordinator entirely
                 # WEB_SEARCH mode: Lightweight pipeline (handled below in T022)
                 # DEEP_RESEARCH mode: Full pipeline (existing flow)
+                # CUSTOM_PHASE mode: Plugin-provided phases (checked above)
                 # =============================================================
 
                 if config.query_mode == "simple":
@@ -983,6 +1178,16 @@ async def stream_research(
                         yield ws_evt
                         await _buffer_event(ws_evt, event_buffer)
                         agent_start = time.perf_counter()
+
+                        # DIAGNOSTIC: Log synthesis mode decision
+                        will_use_structured = state.output_format == "json" and state.output_schema is not None
+                        logger.info(
+                            "SYNTHESIS_MODE_DECISION",
+                            output_format=state.output_format,
+                            output_schema=_get_schema_name(state.output_schema),
+                            enable_citation_verification=state.enable_citation_verification,
+                            will_use_structured=will_use_structured,
+                        )
 
                         # Check for structured JSON output first (non-streaming)
                         if state.output_format == "json" and state.output_schema:
@@ -1307,6 +1512,115 @@ async def stream_research(
                     return
 
                 # =============================================================
+                # Custom Phase Mode: Execute plugin-provided phases
+                # =============================================================
+                # Activated when a plugin:
+                # 1. Disables the planner via disabled_agents={"planner"}
+                # 2. Provides custom phases via PhaseProvider protocol
+                # 3. Specifies phase execution order via phase_insertions
+                # =============================================================
+                if use_custom_phases and customization and plugin_manager:
+                    logger.info(
+                        f"CUSTOM_PHASE_EXECUTION_START num_phases={len(plugin_manager.get_all_phases())} insertions={len(customization.phase_insertions)}"
+                    )
+
+                    try:
+                        async for event in _stream_research_with_custom_phases(
+                            query=query,
+                            state=state,
+                            llm=llm,
+                            brave_client=brave_client,
+                            crawler=crawler,
+                            plugin_manager=plugin_manager,
+                            customization=customization,
+                            config=config,
+                            db=db,
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            start_time=start_time,
+                            plugin_data=plugin_data,
+                        ):
+                            if event_buffer:
+                                await event_buffer.add_event(event)
+                            yield event
+
+                        logger.info("CUSTOM_PHASE_EXECUTION_COMPLETE")
+
+                        # Flush event buffer to ensure all events are persisted
+                        if event_buffer:
+                            await event_buffer.flush()
+                            logger.info(
+                                "EVENT_BUFFER_FLUSHED_CUSTOM_PHASES",
+                                session_id=str(config.research_session_id)[:8] if config.research_session_id else None,
+                            )
+
+                        # Persist session completion (update status to COMPLETED and save final_report)
+                        # This is critical - without this, the frontend won't see the report!
+                        if (
+                            db is not None
+                            and config.research_session_id
+                            and config.message_id
+                            and chat_id
+                            and user_id
+                            and state.final_report
+                        ):
+                            from deep_research.agent.persistence import (
+                                persist_research_session_complete_update_independent,
+                            )
+
+                            try:
+                                counts = await asyncio.shield(
+                                    persist_research_session_complete_update_independent(
+                                        chat_id=UUID(chat_id),
+                                        research_session_id=config.research_session_id,
+                                        agent_message_id=config.message_id,
+                                        state=state,
+                                    )
+                                )
+                                logger.info(
+                                    "CUSTOM_PHASE_SESSION_COMPLETED",
+                                    session_id=str(config.research_session_id)[:8],
+                                    final_report_length=len(state.final_report) if state.final_report else 0,
+                                    counts=counts,
+                                )
+                            except asyncio.CancelledError:
+                                # asyncio.shield ensures persistence completes even if client disconnects
+                                logger.warning(
+                                    "CUSTOM_PHASE_SESSION_PERSIST_CANCELLED",
+                                    session_id=str(config.research_session_id)[:8],
+                                )
+                            except Exception as persist_err:
+                                logger.error(
+                                    "CUSTOM_PHASE_SESSION_PERSIST_FAILED",
+                                    error=str(persist_err)[:200],
+                                    session_id=str(config.research_session_id)[:8],
+                                )
+                        else:
+                            logger.warning(
+                                "CUSTOM_PHASE_SESSION_PERSIST_SKIPPED",
+                                has_db=db is not None,
+                                has_session_id=config.research_session_id is not None,
+                                has_message_id=config.message_id is not None,
+                                has_chat_id=chat_id is not None,
+                                has_user_id=user_id is not None,
+                                has_final_report=state.final_report is not None and len(state.final_report) > 0 if state.final_report else False,
+                            )
+
+                        return  # Exit after custom phases
+
+                    except Exception as e:
+                        logger.error(
+                            f"CUSTOM_PHASE_EXECUTION_FAILED error={str(e)[:500]} type={type(e).__name__}",
+                            exc_info=True,
+                        )
+                        raise  # Re-raise to trigger error handling
+                else:
+                    # DIAGNOSTIC: Why didn't custom phases run?
+                    logger.info(
+                        f"CUSTOM_PHASE_EXECUTION_SKIPPED use_custom_phases={use_custom_phases} has_customization={customization is not None} has_plugin_manager={plugin_manager is not None}"
+                    )
+
+                # =============================================================
                 # Deep Research mode continues here (existing full pipeline)
                 # =============================================================
 
@@ -1330,7 +1644,9 @@ async def stream_research(
                     and user_id is not None
                     and not config.session_pre_created  # Skip if JobManager already created
                 ):
-                    from deep_research.agent.persistence import persist_research_session_start_independent
+                    from deep_research.agent.persistence import (
+                        persist_research_session_start_independent,
+                    )
 
                     chat_id_uuid = UUID(chat_id) if isinstance(chat_id, str) else chat_id
                     try:
@@ -1576,6 +1892,23 @@ async def stream_research(
                     await _buffer_event(evt, event_buffer)
                     agent_start = time.perf_counter()
 
+                    # Emit lifecycle hook: synthesis_started
+                    if plugin_manager and state.session_id:
+                        try:
+                            from deep_research.plugins.lifecycle import EventEmitter
+
+                            emitter = EventEmitter(plugin_manager)
+                            await emitter.synthesis_started(
+                                job_id=state.session_id,
+                                first_event_type="synthesis_started",
+                                elapsed_ms=(time.perf_counter() - start_time) * 1000,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "LIFECYCLE_HOOK_EMISSION_FAILED hook=on_synthesis_started error=%s",
+                                str(e)[:200],
+                            )
+
                     # Use citation-aware synthesizer if enabled
                     # Collect content chunks for persistence
                     content_chunks: list[str] = []
@@ -1594,6 +1927,25 @@ async def stream_research(
                                 error=str(e)[:200],
                                 falling_back_to="streaming",
                             )
+
+                            # Emit lifecycle hook: validation_error
+                            if plugin_manager and state.session_id:
+                                try:
+                                    from deep_research.plugins.lifecycle import EventEmitter
+
+                                    emitter = EventEmitter(plugin_manager)
+                                    # StructuredSynthesisError wraps the validation error
+                                    await emitter.validation_error(
+                                        job_id=state.session_id,
+                                        error=e.original_error if hasattr(e, "original_error") else e,
+                                        raw_output=str(e)[:1000],
+                                    )
+                                except Exception as hook_error:
+                                    logger.warning(
+                                        "LIFECYCLE_HOOK_EMISSION_FAILED hook=on_validation_error error=%s",
+                                        str(hook_error)[:200],
+                                    )
+
                             state = e.state
                             structured_synthesis_failed = True
                             # Fall back to streaming synthesis - emit chunks for frontend
@@ -1665,30 +2017,9 @@ async def stream_research(
                             content_chunks.append(chunk)
                             yield SynthesisProgressEvent(content_chunk=chunk)
 
-                    # Validate and complete - only for streaming modes
-                    # (structured output is validated by Pydantic and completed internally)
-                    # Also validate when structured synthesis failed and fell back to streaming
-                    if state.output_format != "json" or structured_synthesis_failed:
-                        # Validate synthesis produced content - empty synthesis is an error
-                        if not content_chunks:
-                            logger.error(
-                                "SYNTHESIS_EMPTY: Synthesis produced no content chunks",
-                                enable_citation_verification=state.enable_citation_verification,
-                                total_observations=len(state.all_observations),
-                                total_sources=len(state.sources),
-                            )
-                            raise RuntimeError("Synthesis produced no content")
-
-                        # Aggregate content and update state
-                        final_content = "".join(content_chunks)
-                        if not final_content.strip():
-                            logger.error(
-                                "SYNTHESIS_WHITESPACE_ONLY: Synthesis produced only whitespace content",
-                                content_len=len(final_content),
-                            )
-                            raise RuntimeError("Synthesis produced empty or whitespace-only content")
-
-                        state.complete(final_content)
+                    # Note: Streaming synthesis functions (stream_synthesis, stream_synthesis_with_citations)
+                    # already call state.complete() internally, so we don't call it again here.
+                    # The streaming functions also validate non-empty content internally.
 
                     evt = _agent_completed("synthesizer", agent_start)
                     yield evt
@@ -1726,7 +2057,9 @@ async def stream_research(
                         # Check if session was created at START (event_buffer exists)
                         if event_buffer is not None:
                             # Two-phase: Update existing session to COMPLETED
-                            from deep_research.agent.persistence import persist_research_session_complete_update_independent
+                            from deep_research.agent.persistence import (
+                                persist_research_session_complete_update_independent,
+                            )
 
                             try:
                                 counts = await asyncio.shield(
@@ -1764,7 +2097,9 @@ async def stream_research(
                                     message_id=str(config.message_id) if config.message_id else None,
                                 )
                                 # Mark session as FAILED
-                                from deep_research.agent.persistence import persist_research_session_failed_independent
+                                from deep_research.agent.persistence import (
+                                    persist_research_session_failed_independent,
+                                )
                                 try:
                                     await persist_research_session_failed_independent(
                                         research_session_id=config.research_session_id,
@@ -1775,7 +2110,9 @@ async def stream_research(
                                     pass  # Best effort
                         else:
                             # Fallback: Old single-phase persistence (session not created at START)
-                            from deep_research.agent.persistence import persist_complete_research_independent
+                            from deep_research.agent.persistence import (
+                                persist_complete_research_independent,
+                            )
 
                             try:
                                 counts = await asyncio.shield(
@@ -1854,7 +2191,9 @@ async def stream_research(
                     and config.research_session_id is not None
                     and config.message_id is not None
                 ):
-                    from deep_research.agent.persistence import persist_research_session_failed_independent
+                    from deep_research.agent.persistence import (
+                        persist_research_session_failed_independent,
+                    )
 
                     try:
                         # Flush buffer first to preserve any events collected
@@ -2003,3 +2342,244 @@ def _reflection_decision(state: ResearchState) -> ReflectionDecisionEvent:
         reasoning=state.last_reflection.reasoning,
         suggested_changes=state.last_reflection.suggested_changes,
     )
+
+
+async def _stream_research_with_custom_phases(
+    query: str,
+    state: ResearchState,
+    llm: LLMClient,
+    brave_client: BraveSearchClient,
+    crawler: WebCrawler,
+    plugin_manager: "PluginManager",
+    customization: "PipelineCustomization",
+    config: OrchestrationConfig,
+    db: "AsyncSession | None",
+    chat_id: str | None,
+    user_id: str | None,
+    start_time: float,
+    plugin_data: dict[str, Any] | None = None,
+) -> AsyncGenerator[StreamEvent | str, None]:
+    """Execute research using custom phases instead of planner.
+
+    This mode is activated when a plugin:
+    1. Disables the planner via disabled_agents={"planner"}
+    2. Provides custom phases via PhaseProvider protocol
+    3. Specifies phase execution order via phase_insertions
+
+    Args:
+        query: User's research query
+        state: Initial research state
+        llm: LLM client for completions
+        brave_client: Brave Search client
+        crawler: Web crawler
+        plugin_manager: PluginManager with registered phases
+        customization: PipelineCustomization from plugin
+        config: Orchestration configuration
+        db: Optional database session
+        chat_id: Optional chat ID
+        user_id: Optional user ID
+        start_time: Start time for duration tracking
+        plugin_data: Optional pre-extracted context data. When provided,
+            bypasses query extraction. Pass structured data from SFDC here.
+
+    Yields:
+        StreamEvent objects for custom phase execution
+    """
+    from deep_research.agent.pipeline.phase_executor import PhaseExecutor
+    from deep_research.agent.tools.base import ResearchContext
+
+    phases = plugin_manager.get_all_phases()
+
+    # Emit custom phase mode started
+    yield CustomPhaseModeStartedEvent(
+        total_phases=len(phases),
+        phase_names=list(phases.keys()),
+    )
+
+    # Use provided plugin_data if available, otherwise extract from query
+    if plugin_data:
+        # Structured data passed from caller (e.g., SFDC account info)
+        # This is the preferred path - no regex, no guessing
+        resolved_plugin_data = plugin_data
+        logger.info(
+            "CUSTOM_PHASE_MODE_USING_PROVIDED_PLUGIN_DATA",
+            keys=list(plugin_data.keys()),
+            company_name=plugin_data.get("company_name") or plugin_data.get("account_name"),
+        )
+    else:
+        # Fallback: extract from query (backward compatibility)
+        resolved_plugin_data = _extract_context_from_query(query)
+        logger.info(
+            "CUSTOM_PHASE_MODE_EXTRACTED_PLUGIN_DATA",
+            keys=list(resolved_plugin_data.keys()),
+            company_name=resolved_plugin_data.get("company_name"),
+        )
+
+    # Inject original query into plugin_data so phases can access it
+    # This allows phases to see the full user intent, not just extracted fields
+    resolved_plugin_data["original_query"] = query
+
+    # Create research context with plugin_data and services
+    context = ResearchContext(
+        chat_id=state.session_id,
+        user_id=user_id or "system",
+        research_type=state.resolve_depth(),
+        plugin_data=resolved_plugin_data,
+        llm=llm,
+        brave_client=brave_client,
+        crawler=crawler,
+    )
+
+    steps_executed = 0
+
+    # Run coordinator first (query classification)
+    yield _agent_started("coordinator", "simple")
+    agent_start = time.perf_counter()
+    state = await run_coordinator(state, llm)
+    yield _agent_completed("coordinator", agent_start)
+
+    # Handle simple queries
+    if state.is_simple_query and state.direct_response:
+        state.complete(state.direct_response)
+        yield ResearchCompletedEvent(
+            session_id=state.session_id,
+            total_steps_executed=0,
+            total_steps_skipped=0,
+            plan_iterations=0,
+            total_duration_ms=int((time.perf_counter() - start_time) * 1000),
+            final_report=state.final_report,
+        )
+        return
+
+    # Optional: Background investigation
+    if config.enable_background_investigation:
+        yield _agent_started("background_investigator", "simple")
+        agent_start = time.perf_counter()
+        state = await run_background_investigator(state, llm, brave_client)
+        yield _agent_completed("background_investigator", agent_start)
+
+    # Execute custom phases
+    executor = PhaseExecutor(phases=phases, customization=customization)
+
+    async for phase_event, state in executor.execute_all(context, state):
+        if phase_event.event_type == "started":
+            phase_description = ""
+            if phase_event.phase_name in phases:
+                phase_description = phases[phase_event.phase_name].description
+            yield PhaseStartedEvent(
+                phase_name=phase_event.phase_name,
+                description=phase_description,
+            )
+        elif phase_event.event_type == "completed":
+            steps_executed += 1
+            yield PhaseCompletedEvent(
+                phase_name=phase_event.phase_name,
+                duration_ms=phase_event.duration_ms,
+                sources_count=phase_event.sources_count,
+            )
+        elif phase_event.event_type == "skipped":
+            yield PhaseSkippedEvent(phase_name=phase_event.phase_name)
+        elif phase_event.event_type == "error":
+            yield PhaseErrorEvent(
+                phase_name=phase_event.phase_name,
+                error=phase_event.error or "Unknown error",
+            )
+
+    # Apply synthesizer override if specified
+    synthesizer_prompt = None
+    if "synthesizer" in customization.agent_overrides:
+        override = customization.agent_overrides["synthesizer"]
+        synthesizer_prompt = override.get("prompt_override")
+        if synthesizer_prompt:
+            state.structured_system_prompt = synthesizer_prompt
+            logger.info("Applied custom synthesizer prompt from plugin")
+
+    # Run synthesis
+    yield SynthesisStartedEvent(
+        total_observations=len(state.all_observations),
+        total_sources=len(state.sources),
+    )
+    yield _agent_started("synthesizer", "complex")
+    agent_start = time.perf_counter()
+
+    # Use appropriate synthesizer based on output format
+    if state.output_format == "json" and state.output_schema:
+        state = await run_structured_synthesizer(state, llm)
+        # Run post-verification if enabled
+        if state.enable_post_verification and state.enable_citation_verification:
+            state = await post_verify_structured_output(state, llm)
+    else:
+        # Streaming synthesis
+        # Note: stream_synthesis() internally calls state.complete()
+        # so we don't need to call it again here
+        async for chunk in stream_synthesis(state, llm):
+            yield SynthesisProgressEvent(content_chunk=chunk)
+
+    yield _agent_completed("synthesizer", agent_start)
+
+    # Emit completion
+    total_duration_ms = (time.perf_counter() - start_time) * 1000
+    yield ResearchCompletedEvent(
+        session_id=state.session_id,
+        total_steps_executed=steps_executed,
+        total_steps_skipped=0,
+        plan_iterations=0,
+        total_duration_ms=int(total_duration_ms),
+        final_report=state.final_report,
+        structured_output=(
+            state.final_report_structured.model_dump()
+            if state.final_report_structured else None
+        ),
+    )
+
+
+def _extract_context_from_query(query: str) -> dict[str, str | list | None]:
+    """Extract company and attendee context from query.
+
+    Parses patterns like:
+    - "meeting with Head of AI of Depop"
+    - "prep for Acme Corp"
+    - "company: Microsoft"
+
+    Args:
+        query: User's research query
+
+    Returns:
+        Dict with company_name, account_name, and attendees
+    """
+    import re
+
+    context: dict[str, str | list | None] = {
+        "company_name": None,
+        "account_name": None,
+        "attendees": [],
+    }
+
+    # Extract company name patterns
+    patterns = [
+        r"(?:meeting|prep)\s+(?:with|for)\s+(?:[\w\s]+?\s+(?:of|at|from)\s+)?(\w+)",
+        r"(?:company|customer|account):\s*(\w+)",
+        r"with\s+(\w+)\s+(?:team|leadership|executives)",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, query, re.IGNORECASE)
+        if match:
+            company = match.group(1)
+            # Filter out common false positives
+            if company.lower() not in {
+                "the", "a", "an", "our", "their", "head", "vp", "director"
+            }:
+                context["company_name"] = company
+                context["account_name"] = company
+                break
+
+    # Extract attendee titles
+    attendee_pattern = r"((?:Head|VP|Director|CTO|CEO|CDO|Chief)\s+(?:of\s+)?\w+)"
+    matches = re.findall(attendee_pattern, query, re.IGNORECASE)
+    attendees: list[dict[str, str]] = []
+    for match in matches:
+        attendees.append({"title": match})
+    context["attendees"] = attendees
+
+    return context

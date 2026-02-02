@@ -8,8 +8,10 @@ Plugins can implement one or more protocols:
 - ResearchPlugin: Base lifecycle (required)
 - ToolProvider: Provide custom tools
 - PromptProvider: Customize agent prompts
+- ExtractionConfigProvider: Customize query context extraction
 """
 
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from deep_research.agent.tools.base import ResearchContext, ResearchTool
@@ -148,6 +150,47 @@ class PromptProvider(Protocol):
                 '''
             }
         """
+        ...
+
+
+@dataclass
+class ExtractionConfig:
+    """Configuration for query context extraction.
+
+    Provided by plugins to customize extraction behavior.
+    Framework uses generic logic with this config.
+
+    Attributes:
+        system_prompt: Custom system prompt for extraction (domain-specific examples go here).
+        extraction_model: Pydantic model class for structured output extraction.
+        field_mapping: Mapping from extraction model fields to plugin_data keys.
+            E.g., {"primary_entity": "company_name", "people": "attendees"}
+    """
+
+    system_prompt: str
+    extraction_model: type
+    field_mapping: dict[str, str] = field(default_factory=dict)
+
+
+@runtime_checkable
+class ExtractionConfigProvider(Protocol):
+    """Plugin protocol for providing query extraction configuration.
+
+    Plugins implement this to customize how queries are parsed.
+    Framework remains generic - all domain knowledge lives in plugin.
+
+    Example:
+        class MyPlugin:
+            def get_extraction_config(self) -> ExtractionConfig | None:
+                return ExtractionConfig(
+                    system_prompt="Extract company info...",
+                    extraction_model=MyExtractionModel,
+                    field_mapping={"company": "company_name"},
+                )
+    """
+
+    def get_extraction_config(self) -> ExtractionConfig | None:
+        """Return extraction config or None to skip extraction."""
         ...
 
 

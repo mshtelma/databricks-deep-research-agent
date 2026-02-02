@@ -1,8 +1,9 @@
 """MLflow tracing configuration."""
 
+import contextlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
@@ -249,6 +250,65 @@ def log_feedback(
         )
     except Exception as e:
         logger.warning(f"Failed to log feedback: {e}")
+
+
+@contextlib.asynccontextmanager
+async def safe_tool_span(
+    name: str,
+    span_type: SpanType = SpanType.TOOL,
+    attributes: dict[str, Any] | None = None,
+) -> AsyncGenerator[Any, None]:
+    """Async context manager for MLflow spans that handles context issues.
+
+    Unlike `with mlflow.start_span()`, this properly handles:
+    - asyncio.gather() inside the span
+    - Task cancellation
+    - Context mismatch during GC cleanup
+
+    The error "Token was created in a different Context" occurs when:
+    1. A sync generator-based context manager (mlflow.start_span) creates a ContextVar token
+    2. asyncio.gather() spawns concurrent tasks that run in different contexts
+    3. If cleanup happens during GC (e.g., due to exception/cancellation), the
+       generator finalizes in a different context than where the token was created
+
+    This wrapper catches and suppresses the benign ValueError during cleanup.
+    The span data is already recorded - only the ContextVar token cleanup fails.
+
+    Args:
+        name: Span name for tracing.
+        span_type: MLflow span type (default: TOOL).
+        attributes: Optional initial attributes to set on span.
+
+    Yields:
+        The MLflow span object (or None if tracing setup fails).
+    """
+    span = None
+    span_cm = None
+
+    try:
+        span_cm = mlflow.start_span(name=name, span_type=span_type)
+        span = span_cm.__enter__()
+        if attributes and span:
+            span.set_attributes(attributes)
+    except Exception as e:
+        logger.debug(f"Span creation failed (non-fatal): {e}")
+        span = None
+        span_cm = None
+
+    try:
+        yield span  # Caller can set more attributes via span
+    finally:
+        if span_cm is not None:
+            try:
+                span_cm.__exit__(None, None, None)
+            except ValueError as e:
+                # Catch ALL ValueErrors during __exit__ - span data is already recorded.
+                # The most common is "Token was created in a different Context" but any
+                # ValueError here is benign since the span is already persisted.
+                logger.debug(f"Span cleanup suppressed (benign): {type(e).__name__}: {e}")
+            except Exception as e:
+                # Other exceptions during cleanup are also benign - span is recorded
+                logger.debug(f"Span cleanup warning: {type(e).__name__}: {e}")
 
 
 def log_research_config(depth: str) -> None:

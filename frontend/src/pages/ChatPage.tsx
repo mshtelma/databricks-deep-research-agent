@@ -1,11 +1,12 @@
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ChatSidebar, MessageList, MessageInput, DeleteChatDialog, ExportChatDialog, type ExportFormat } from '@/components/chat';
 import { AgentStatusIndicator, ResearchPanel } from '@/components/research';
 import { useChats, useMessages, useStreamingQuery, useChatActions, useDraftChats, useCitations, usePrefetchMessages } from '@/hooks';
 import { useResearchReconnection } from '@/hooks/useResearchReconnection';
 import { useChatActiveJob } from '@/hooks/useResearchJobs';
+import { ComponentRegistry } from '@/core/plugins';
 import type { Chat, Message, PersistenceCompletedEvent, QueryMode } from '@/types';
 
 export default function ChatPage() {
@@ -50,6 +51,9 @@ export default function ChatPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'all'>('active');
 
+  // Get plugin-provided input configuration (controls mode selector visibility, etc.)
+  const inputConfig = useMemo(() => ComponentRegistry.getInputConfig(), []);
+
   // Merge draft chats with API chats (drafts appear at top)
   // Filter out drafts that already exist in API (handles race condition during persistence)
   const chats: Chat[] = useMemo(() => {
@@ -79,6 +83,10 @@ export default function ChatPage() {
 
   // Track last query for retry functionality
   const [lastQuery, setLastQuery] = useState<string>('');
+
+  // Track whether we've triggered refetch for current session
+  // This prevents duplicate refetches when both persistence_completed and agentStatus='complete' fire
+  const hasTriggeredCompletionRefetchRef = useRef(false);
 
   // Note: currentQueryMode is now managed in useStreamingQuery hook (not local state)
   // This ensures it persists correctly throughout the streaming session
@@ -294,10 +302,16 @@ export default function ChatPage() {
   // This is the ONLY place we refetch messages after streaming completes,
   // ensuring claims are already persisted when we switch from streaming view to DB view
   const handlePersistenceComplete = useCallback((event: PersistenceCompletedEvent) => {
+    console.log('[ChatPage] handlePersistenceComplete called:', {
+      chatId: event.chatId,
+      messageId: event.messageId,
+      wasDraft: event.wasDraft,
+    });
+
     // NOW refetch messages since persistence is complete
     // This allows AgentMessageWithCitations to fetch claims from DB (they're already there)
     if (chatId) {
-      console.log('[ChatPage] Persistence complete, now refetching messages');
+      console.log('[ChatPage] Triggering message refetch');
       queryClient.refetchQueries({ queryKey: ['messages', chatId] });
     }
 
@@ -317,6 +331,94 @@ export default function ChatPage() {
       handlePersistenceComplete(persistenceResult);
     }
   }, [persistenceResult, handlePersistenceComplete]);
+
+  // Reset completion refetch tracking when starting new streaming session
+  useEffect(() => {
+    if (isStreaming) {
+      hasTriggeredCompletionRefetchRef.current = false;
+    }
+  }, [isStreaming]);
+
+  // Trigger message refetch when agent completes
+  // This handles the case where persistence_completed event is lost due to SSE race condition
+  // (job_completed from DB status can close connection before persistence_completed arrives)
+  useEffect(() => {
+    // Only trigger once per session, only when actually complete, only if we have a chat
+    if (
+      agentStatus === 'complete' &&
+      chatId &&
+      !hasTriggeredCompletionRefetchRef.current
+    ) {
+      hasTriggeredCompletionRefetchRef.current = true;
+
+      // Log current state for debugging (capturing values at time of trigger)
+      console.log('[ChatPage] Agent status complete - triggering refetch with retry logic');
+
+      let retryCount = 0;
+      const maxRetries = 5;
+      const initialDelay = 300;
+      let cancelled = false;
+
+      const attemptRefetch = async () => {
+        if (cancelled) return;
+
+        retryCount++;
+        console.log(`[ChatPage] Refetch attempt ${retryCount}/${maxRetries} for chat ${chatId}`);
+
+        try {
+          // Invalidate and refetch - invalidate ensures fresh data
+          await queryClient.invalidateQueries({ queryKey: ['messages', chatId] });
+
+          // Wait a moment for React Query to process the refetch
+          await new Promise(resolve => setTimeout(resolve, 100));
+
+          // Get the current query state to check if we have content
+          const queries = queryClient.getQueriesData<{ items?: Array<{ role: string; content?: string }> }>({
+            queryKey: ['messages', chatId],
+          });
+
+          // Find the query data (there might be multiple with different params)
+          let latestAgentContent: string | undefined;
+          for (const [, data] of queries) {
+            const agentMsgs = data?.items?.filter(m => m.role === 'agent') ?? [];
+            const latest = agentMsgs[agentMsgs.length - 1];
+            if (latest?.content) {
+              latestAgentContent = latest.content;
+              break;
+            }
+          }
+
+          console.log('[ChatPage] Refetch result:', {
+            hasAgentContent: !!latestAgentContent,
+            contentLength: latestAgentContent?.length ?? 0,
+            retryCount,
+            queriesFound: queries.length,
+          });
+
+          // If we don't have content, retry
+          if (!latestAgentContent && retryCount < maxRetries && !cancelled) {
+            console.log(`[ChatPage] No agent message content yet, scheduling retry ${retryCount + 1}`);
+            setTimeout(attemptRefetch, 500); // 500ms between retries
+          } else if (latestAgentContent) {
+            console.log('[ChatPage] Successfully fetched agent message content');
+          }
+        } catch (err) {
+          console.error('[ChatPage] Refetch error:', err);
+          if (retryCount < maxRetries && !cancelled) {
+            setTimeout(attemptRefetch, 500);
+          }
+        }
+      };
+
+      // Initial delay to allow persistence to complete
+      const timer = setTimeout(attemptRefetch, initialDelay);
+
+      return () => {
+        cancelled = true;
+        clearTimeout(timer);
+      };
+    }
+  }, [agentStatus, chatId, queryClient]);
 
   // Build messages list combining API messages, completed in-session messages, and pending
   const messages: Message[] = useMemo(() => {
@@ -365,7 +467,7 @@ export default function ChatPage() {
 
   // Wrapped sendQuery that also sets the pending user message
   const sendQuery = useCallback(
-    (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean) => {
+    (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean, outputType?: string) => {
       // Track query for retry functionality
       setLastQuery(query);
 
@@ -383,7 +485,7 @@ export default function ChatPage() {
 
       // The hook now automatically tracks conversation history
       // and the backend loads history from DB
-      originalSendQuery(query, queryMode, researchDepth, verifySources);
+      originalSendQuery(query, queryMode, researchDepth, verifySources, outputType);
     },
     [chatId, originalSendQuery]
   );
@@ -395,9 +497,10 @@ export default function ChatPage() {
       const queryMode = location.state.queryMode as QueryMode | undefined;
       const researchDepth = location.state.researchDepth as string | undefined;
       const verifySources = location.state.verifySources as boolean | undefined;
+      const outputType = location.state.outputType as string | undefined;
       // Clear state immediately to prevent re-sending on refresh
       window.history.replaceState({}, document.title);
-      sendQuery(query, queryMode, researchDepth, verifySources);
+      sendQuery(query, queryMode, researchDepth, verifySources, outputType);
     }
   }, [chatId, location.state?.pendingQuery, sendQuery]);
 
@@ -476,15 +579,15 @@ export default function ChatPage() {
   }, [chatId, chats, isLoadingChats, navigate, location.state?.newChat]);
 
   // Send message - for draft chats, backend will persist chat on success
-  const handleSendMessage = async (content: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean) => {
+  const handleSendMessage = async (content: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean, outputType?: string) => {
     if (!chatId) {
       // No chat selected - create a draft and navigate
       const draft = createDraft();
-      navigate(`/chat/${draft.id}?draft=1`, { state: { pendingQuery: content, queryMode, researchDepth, verifySources } });
+      navigate(`/chat/${draft.id}?draft=1`, { state: { pendingQuery: content, queryMode, researchDepth, verifySources, outputType } });
     } else {
       // Chat exists (draft or real) - just send the query
       // Backend handles persistence for drafts via deferred materialization
-      sendQuery(content, queryMode, researchDepth, verifySources);
+      sendQuery(content, queryMode, researchDepth, verifySources, outputType);
     }
   };
 
@@ -656,6 +759,7 @@ export default function ChatPage() {
               onStop={stopStream}
               isLoading={isStreaming}
               disabled={isLoadingMessages}
+              inputConfig={inputConfig}
             />
           </div>
 

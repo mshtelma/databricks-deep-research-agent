@@ -41,6 +41,25 @@ async def cancel_research(
 
     Stops the research operation within 2 seconds. Partial results are preserved.
     """
+    from deep_research.models.message import Message
+    from deep_research.models.research_session import ResearchSession
+
+    # SECURITY: Verify ownership via session -> message -> chat -> user_id
+    session = await db.get(ResearchSession, session_id)
+    if not session:
+        raise NotFoundError("ResearchSession", str(session_id))
+
+    message = await db.get(Message, session.message_id)
+    if not message:
+        raise NotFoundError("ResearchSession", str(session_id))
+
+    chat_service = ChatService(db)
+    chat = await chat_service.get_by_id(message.chat_id)
+    if not chat or chat.user_id != user.user_id:
+        # Return 404 to prevent information leakage (don't reveal session exists)
+        raise NotFoundError("ResearchSession", str(session_id))
+
+    # Proceed with cancellation after ownership verified
     service = ResearchSessionService(db)
     session = await service.cancel(session_id)
 

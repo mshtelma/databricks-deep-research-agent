@@ -99,7 +99,7 @@ interface UseStreamingQueryReturn {
   agentStatus: AgentStatus;
   currentPlan: Plan | null;
   currentStepIndex: number;
-  sendQuery: (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean) => Promise<void>;
+  sendQuery: (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean, outputType?: string) => Promise<void>;
   stopStream: () => void;
   error: Error | null;
   /** Full error details including stack trace */
@@ -364,7 +364,10 @@ export function useStreamingQuery(
       return; // Skip duplicate event
     }
 
-    console.log('[External] Processing event:', data.eventType, data);
+    console.log('[useStreamingQuery] processExternalEvent:', {
+      eventType: data.eventType,
+      streamingContentLength: streamingContent?.length ?? 0,
+    });
 
     // Add stable unique ID to each event for React keys
     const eventWithId = {
@@ -549,11 +552,47 @@ export function useStreamingQuery(
         break;
       }
 
-      case 'research_completed':
+      case 'research_completed': {
         setAgentStatus('complete');
-        // Don't clear streaming state - let it be restored with derived status
-        // This preserves currentQueryMode for panel visibility
+
+        // Extract content from event if available (for structured output types like meeting_prep)
+        // Backend sends snake_case, but handle camelCase too for robustness
+        // NOTE: Must cast through 'unknown' first - direct cast to Record fails TypeScript check (TS2352)
+        const completedEvent = data as unknown as Record<string, unknown>;
+
+        // Check for structured output first (e.g., meeting_prep JSON with output_type)
+        const structuredOutput = completedEvent.structured_output ?? completedEvent.structuredOutput;
+        if (structuredOutput && typeof structuredOutput === 'object') {
+          console.log('[useStreamingQuery] research_completed: extracting structured_output', {
+            hasOutputType: 'output_type' in (structuredOutput as Record<string, unknown>),
+          });
+          const jsonContent = JSON.stringify(structuredOutput);
+          setStreamingContent(jsonContent);
+        }
+        // Fall back to final report (markdown for non-structured output types)
+        else {
+          const finalReport = completedEvent.final_report ?? completedEvent.finalReport;
+          if (typeof finalReport === 'string' && finalReport.length > 0) {
+            console.log('[useStreamingQuery] research_completed: using final_report', {
+              length: finalReport.length,
+            });
+            setStreamingContent(finalReport);
+          }
+        }
+
         break;
+      }
+
+      case 'persistence_completed': {
+        const persistenceEvent = data as PersistenceCompletedEvent;
+        console.log('[useStreamingQuery] persistence_completed:', {
+          chatId: persistenceEvent.chatId,
+          messageId: persistenceEvent.messageId,
+          wasDraft: persistenceEvent.wasDraft,
+        });
+        setPersistenceResult(persistenceEvent);
+        break;
+      }
 
       case 'error': {
         const errorEvent = data as StreamErrorEvent;
@@ -587,7 +626,11 @@ export function useStreamingQuery(
 
       // Handle job_completed event (final event from job stream)
       if (rawData.eventType === 'job_completed') {
-        console.log('[SSE] Job completed:', rawData.status);
+        console.log('[useStreamingQuery] job_completed received:', {
+          status: rawData.status,
+          streamingContentLength: streamingContent.length,
+          isStreaming,
+        });
         if (rawData.status === 'completed') {
           setAgentStatus('complete');
           // Don't clear streaming state - currentQueryMode needed for panel visibility
@@ -673,7 +716,7 @@ export function useStreamingQuery(
   }, [stopStream]);
 
   const sendQuery = useCallback(
-    async (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean) => {
+    async (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean, outputType?: string) => {
       if (!chatId) {
         console.error('No chat ID provided');
         return;
@@ -736,6 +779,7 @@ export function useStreamingQuery(
           queryMode: queryMode || 'simple',
           researchDepth: researchDepth || 'auto',
           verifySources: verifySources ?? (queryMode === 'deep_research'),
+          outputType: outputType || undefined,
         });
         sessionId = job.sessionId;
         setActiveSessionId(sessionId);

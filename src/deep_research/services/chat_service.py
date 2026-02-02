@@ -1,12 +1,13 @@
 """Chat service - CRUD operations for chats."""
 
+import builtins
 import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select
 
-from deep_research.models.chat import Chat, ChatStatus
+from deep_research.models.chat import Chat, ChatStatus, ChatType
 from deep_research.services.base import BaseRepository
 
 logger = logging.getLogger(__name__)
@@ -274,3 +275,25 @@ class ChatService(BaseRepository[Chat]):
 
         logger.info(f"Permanently purged {len(chat_ids)} deleted chats")
         return len(chat_ids)
+
+    async def list_incognito_for_session(self, session_id: UUID) -> builtins.list[Chat]:
+        """List incognito chats for a specific session.
+
+        Args:
+            session_id: The incognito session UUID.
+
+        Returns:
+            List of incognito chats for the session.
+        """
+        result = await self._session.execute(
+            select(Chat)
+            .where(
+                and_(
+                    Chat.incognito_session_id == session_id,
+                    Chat.chat_type == ChatType.INCOGNITO,
+                    Chat.deleted_at.is_(None),
+                )
+            )
+            .order_by(Chat.updated_at.desc())
+        )
+        return list(result.scalars().all())

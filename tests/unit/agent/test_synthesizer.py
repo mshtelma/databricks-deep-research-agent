@@ -373,3 +373,97 @@ class TestSourcesFormatting:
 
         # Assert - Should complete without error
         mock_llm_client.complete.assert_called_once()
+
+
+class TestStructuredSynthesizer:
+    """Tests for structured synthesis with Pydantic validation."""
+
+    @pytest.mark.asyncio
+    async def test_pydantic_validation_failure_raises_exception(self, mock_llm_client: AsyncMock):
+        """Test that Pydantic validation errors raise StructuredSynthesisError."""
+        from pydantic import BaseModel, Field
+        from deep_research.core.exceptions import StructuredSynthesisError
+        from deep_research.agent.nodes.synthesizer import run_structured_synthesizer
+
+        class StrictSchema(BaseModel):
+            value: int = Field(..., le=10)
+
+        state = ResearchState(
+            query="test query",
+            output_format="json",
+            output_schema=StrictSchema,
+            all_observations=["test observation"],
+        )
+
+        # Mock LLM to return JSON that violates schema
+        mock_llm_client.complete = AsyncMock(
+            return_value=LLMResponse(
+                content='{"value": 100}',  # Exceeds le=10 constraint
+                structured=None,
+                usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+                endpoint_id="test-endpoint",
+                duration_ms=500.0,
+            )
+        )
+
+        # Should raise StructuredSynthesisError
+        with pytest.raises(StructuredSynthesisError) as exc_info:
+            await run_structured_synthesizer(state, mock_llm_client)
+
+        # Verify exception carries state with raw JSON
+        assert exc_info.value.state == state
+        assert state.final_report == '{"value": 100}'
+
+        # Verify state is NOT yet completed
+        assert state.completed_at is None  # CRITICAL: Not completed yet!
+        assert state.final_report_structured is None
+
+    @pytest.mark.asyncio
+    async def test_streaming_fallback_after_validation_failure(self, mock_llm_client: AsyncMock):
+        """Test that streaming fallback works after validation failure."""
+        from pydantic import BaseModel, Field
+        from deep_research.core.exceptions import StructuredSynthesisError
+        from deep_research.agent.nodes.synthesizer import run_structured_synthesizer
+
+        class StrictSchema(BaseModel):
+            value: int = Field(..., le=10)
+
+        state = ResearchState(
+            query="test query",
+            output_format="json",
+            output_schema=StrictSchema,
+            all_observations=["Analysis of XYZ"],
+        )
+
+        # Mock LLM: first call fails validation, second call streams
+        mock_llm_client.complete = AsyncMock(
+            return_value=LLMResponse(
+                content='{"value": 100}',
+                structured=None,
+                usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+                endpoint_id="test-endpoint",
+                duration_ms=500.0,
+            )
+        )
+
+        async def mock_stream(*args, **kwargs):
+            yield "## Report\n"
+            yield "Analysis results..."
+
+        mock_llm_client.stream = mock_stream
+
+        # Simulate orchestrator behavior
+        try:
+            state = await run_structured_synthesizer(state, mock_llm_client)
+        except StructuredSynthesisError as e:
+            state = e.state
+
+            # Run streaming fallback
+            chunks = []
+            async for chunk in stream_synthesis(state, mock_llm_client):
+                chunks.append(chunk)
+
+            # Verify streaming completed successfully
+            assert state.completed_at is not None  # Now completed
+            assert state.final_report == "".join(chunks)
+            assert "## Report" in state.final_report

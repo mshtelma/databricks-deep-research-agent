@@ -5,15 +5,18 @@ import { ResearchDepthSelector, type ResearchDepth } from './ResearchDepthSelect
 import { QueryModeSelector } from './QueryModeSelector';
 import { useQueryMode } from '@/hooks';
 import type { QueryMode } from '@/types';
+import type { InputConfig } from '@/core/plugins/types';
 
 interface MessageInputProps {
-  onSubmit: (message: string, queryMode?: QueryMode, researchDepth?: ResearchDepth, verifySources?: boolean) => void;
+  onSubmit: (message: string, queryMode?: QueryMode, researchDepth?: ResearchDepth, verifySources?: boolean, outputType?: string) => void;
   onStop?: () => void;
   isLoading?: boolean;
   placeholder?: string;
   disabled?: boolean;
   showModeSelector?: boolean;
   showDepthSelector?: boolean;
+  /** Plugin-provided input configuration (overrides individual props) */
+  inputConfig?: InputConfig;
 }
 
 export function MessageInput({
@@ -24,27 +27,56 @@ export function MessageInput({
   disabled = false,
   showModeSelector = true,
   showDepthSelector = true,
+  inputConfig,
 }: MessageInputProps) {
   const [message, setMessage] = React.useState('');
+
+  // Resolve effective configuration (inputConfig overrides props)
+  const effectiveShowModeSelector = inputConfig?.showModeSelector ?? showModeSelector ?? true;
+  const effectiveShowDepthSelector = inputConfig?.showDepthSelector ?? showDepthSelector ?? true;
+  const effectiveShowVerifySources = inputConfig?.showVerifySources ?? true;
+  const effectivePlaceholder = inputConfig?.placeholder ?? placeholder ?? 'Ask a research question...';
+
   // Use hook for persistence (localStorage + optional API sync)
-  const { mode: queryMode, setMode: setQueryMode } = useQueryMode({
+  // Only sync with preferences when mode selector is visible
+  const { mode: storedMode, setMode: setStoredMode } = useQueryMode({
     initialMode: 'simple',
-    syncWithPreferences: true, // Load user's default from preferences API
+    syncWithPreferences: effectiveShowModeSelector, // Only sync when visible
   });
-  const [researchDepth, setResearchDepth] = React.useState<ResearchDepth>('auto');
-  // Default: true for deep_research (thorough), false for web_search (speed)
-  const [verifySources, setVerifySources] = React.useState<boolean>(false);
+
+  // Effective query mode: plugin default when selector hidden, else user's choice
+  const queryMode = effectiveShowModeSelector
+    ? storedMode
+    : (inputConfig?.defaultQueryMode ?? 'deep_research');
+
+  // Only allow mode changes when selector is visible
+  const setQueryMode = effectiveShowModeSelector ? setStoredMode : () => {};
+
+  // Use plugin default for research depth when selector is hidden
+  const [researchDepth, setResearchDepth] = React.useState<ResearchDepth>(
+    inputConfig?.defaultResearchDepth ?? 'auto'
+  );
+
+  // Default: use plugin config if selector hidden, else true for deep_research
+  const [verifySources, setVerifySources] = React.useState<boolean>(
+    !effectiveShowVerifySources
+      ? (inputConfig?.defaultVerifySources ?? true)
+      : false
+  );
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
 
-  // Reset verifySources when query mode changes
+  // Reset verifySources when query mode changes (only when selector is visible)
+  // Default to OFF - user must explicitly enable source verification
   React.useEffect(() => {
-    setVerifySources(queryMode === 'deep_research');
-  }, [queryMode]);
+    if (effectiveShowVerifySources) {
+      setVerifySources(false);
+    }
+  }, [queryMode, effectiveShowVerifySources]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (message.trim() && !isLoading && !disabled) {
-      onSubmit(message.trim(), queryMode, researchDepth, verifySources);
+      onSubmit(message.trim(), queryMode, researchDepth, verifySources, inputConfig?.defaultOutputType);
       setMessage('');
     }
   };
@@ -65,15 +97,15 @@ export function MessageInput({
     }
   }, [message]);
 
-  // Show depth selector only when Deep Research mode is selected
-  const shouldShowDepthSelector = showDepthSelector && queryMode === 'deep_research';
-  // Show verify sources checkbox when web_search or deep_research is selected
-  const shouldShowVerifyCheckbox = queryMode === 'web_search' || queryMode === 'deep_research';
+  // Show depth selector only when Deep Research mode is selected AND selector is enabled
+  const shouldShowDepthSelector = effectiveShowDepthSelector && queryMode === 'deep_research';
+  // Show verify sources checkbox when web_search or deep_research is selected AND checkbox is enabled
+  const shouldShowVerifyCheckbox = effectiveShowVerifySources && (queryMode === 'web_search' || queryMode === 'deep_research');
 
   return (
     <form onSubmit={handleSubmit} className="border-t bg-background">
       <div className="px-4 pt-2 flex flex-wrap gap-4 items-center">
-        {showModeSelector && (
+        {effectiveShowModeSelector && (
           <QueryModeSelector
             value={queryMode}
             onChange={setQueryMode}
@@ -107,7 +139,7 @@ export function MessageInput({
           value={message}
           onChange={(e) => setMessage(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={placeholder}
+          placeholder={effectivePlaceholder}
           disabled={disabled || isLoading}
           rows={1}
           aria-label="Message input"

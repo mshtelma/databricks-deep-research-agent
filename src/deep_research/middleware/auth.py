@@ -21,11 +21,10 @@ async def get_current_user_identity(
 ) -> UserIdentity:
     """FastAPI dependency to get current user identity.
 
-    In Databricks Apps, uses the app's service principal for all operations.
-    OBO (On-Behalf-Of) authentication is not currently used to avoid conflicts
-    with the auto-injected OAuth credentials in the Databricks Apps environment.
-
-    In development, falls back to configured credentials or anonymous.
+    Priority order:
+    1. OBO token from x-forwarded-access-token (actual user in Databricks Apps)
+    2. Service principal auth (fallback for local development)
+    3. Anonymous (development mode only)
 
     Args:
         request: FastAPI request object.
@@ -35,14 +34,34 @@ async def get_current_user_identity(
         UserIdentity of the authenticated user.
 
     Raises:
-        HTTPException: If all authentication methods fail.
+        HTTPException: If all authentication methods fail in production.
     """
-    # Use service principal auth (WorkspaceClient auto-detects environment)
+    from deep_research.core.auth import extract_obo_token, get_user_workspace_client
+
+    # Priority 1: OBO token (actual user in Databricks Apps)
+    obo_token = extract_obo_token(dict(request.headers))
+    if obo_token:
+        try:
+            user_client = get_user_workspace_client(obo_token)
+            current_user = user_client.current_user.me()
+            user = UserIdentity.from_workspace_user(current_user)
+
+            # Keep service principal client for backend operations
+            sp_client = get_workspace_client()
+            request.state.user = user
+            request.state.workspace_client = sp_client
+
+            logger.info(f"OBO auth successful: user={user.email}, id={user.user_id}")
+            return user
+
+        except Exception as e:
+            logger.warning(f"OBO auth failed, falling back to SP: {e}")
+
+    # Priority 2: Service principal auth (existing logic)
     try:
         client = get_workspace_client()
         user = get_current_user(client)
 
-        # Store in request state for later use
         request.state.user = user
         request.state.workspace_client = client
 
@@ -52,7 +71,7 @@ async def get_current_user_identity(
     except Exception as e:
         logger.warning(f"Service principal auth failed: {e}")
 
-    # Fallback: In development mode, allow anonymous access
+    # Priority 3: Anonymous (development mode only)
     if not settings.is_production:
         user = UserIdentity.anonymous()
         request.state.user = user

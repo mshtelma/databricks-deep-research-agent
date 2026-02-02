@@ -3,7 +3,6 @@
 from collections.abc import AsyncGenerator
 from typing import Any
 
-import mlflow
 from mlflow.entities import SpanType
 
 from deep_research.agent.config import get_report_limits, get_synthesizer_config
@@ -18,11 +17,30 @@ from deep_research.agent.prompts.utils import build_system_prompt
 from deep_research.agent.state import ResearchState
 from deep_research.core.exceptions import StructuredSynthesisError
 from deep_research.core.logging_utils import get_logger, truncate
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import PHASE_SYNTHESIS, research_span_name
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.types import ModelTier
 
 logger = get_logger(__name__)
+
+
+def _get_schema_name(output_schema: type | dict | None) -> str | None:
+    """Get a display name for the output schema.
+
+    Handles both Pydantic class types (with __name__) and JSON schema dicts.
+
+    Args:
+        output_schema: Either a class type or a JSON schema dict
+
+    Returns:
+        Schema name string, or None if no schema
+    """
+    if output_schema is None:
+        return None
+    if isinstance(output_schema, dict):
+        return output_schema.get("title", "dict_schema")
+    return getattr(output_schema, "__name__", str(type(output_schema)))
 
 
 async def run_synthesizer(state: ResearchState, llm: LLMClient) -> ResearchState:
@@ -37,7 +55,7 @@ async def run_synthesizer(state: ResearchState, llm: LLMClient) -> ResearchState
     """
     span_name = research_span_name(PHASE_SYNTHESIS, "synthesizer")
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
+    async with safe_tool_span(span_name, SpanType.AGENT) as span:
         logger.info(
             "SYNTHESIZER_START",
             observations=len(state.all_observations),
@@ -116,11 +134,12 @@ async def run_synthesizer(state: ResearchState, llm: LLMClient) -> ResearchState
             )
 
             # Add span attributes
-            span.set_attributes({
-                "observations_count": len(state.all_observations),
-                "sources_count": len(state.sources),
-                "report_length": len(response.content),
-            })
+            if span:
+                span.set_attributes({
+                    "observations_count": len(state.all_observations),
+                    "sources_count": len(state.sources),
+                    "report_length": len(response.content),
+                })
 
         except Exception as e:
             logger.error(
@@ -150,12 +169,14 @@ async def run_structured_synthesizer(state: ResearchState, llm: LLMClient) -> Re
     """
     span_name = research_span_name(PHASE_SYNTHESIS, "structured_synthesizer")
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
+    async with safe_tool_span(span_name, SpanType.AGENT) as span:
         logger.info(
             "STRUCTURED_SYNTHESIZER_START",
             observations=len(state.all_observations),
             sources=len(state.sources),
-            output_schema=state.output_schema.__name__ if state.output_schema else None,
+            output_schema=_get_schema_name(state.output_schema),
+            has_structured_system_prompt=state.structured_system_prompt is not None,
+            has_structured_user_prompt=state.structured_user_prompt is not None,
             query=truncate(state.query, 60),
         )
 
@@ -214,6 +235,17 @@ async def run_structured_synthesizer(state: ResearchState, llm: LLMClient) -> Re
                 structured_output=state.output_schema,
             )
 
+            # Log LLM response details for diagnostics
+            logger.info(
+                "STRUCTURED_SYNTHESIZER_LLM_RESPONSE",
+                output_schema=_get_schema_name(state.output_schema),
+                has_response_structured=response.structured is not None,
+                response_structured_type=type(response.structured).__name__ if response.structured else None,
+                content_len=len(response.content) if response.content else 0,
+                content_is_json=response.content.strip().startswith("{") if response.content else False,
+                content_preview=truncate(response.content, 200) if response.content else None,
+            )
+
             # Get structured result
             if response.structured:
                 state.final_report_structured = response.structured
@@ -222,7 +254,7 @@ async def run_structured_synthesizer(state: ResearchState, llm: LLMClient) -> Re
                 logger.info(
                     "STRUCTURED_SYNTHESIZER_COMPLETE",
                     report_len=len(state.final_report),
-                    schema=state.output_schema.__name__,
+                    schema=_get_schema_name(state.output_schema),
                 )
             else:
                 # Fallback: try to parse response as JSON
@@ -236,22 +268,44 @@ async def run_structured_synthesizer(state: ResearchState, llm: LLMClient) -> Re
                         report_len=len(state.final_report),
                     )
                 except Exception as parse_error:
+                    # Log full error for debugging (increased truncation)
                     logger.error(
                         "STRUCTURED_SYNTHESIZER_PARSE_ERROR",
-                        error=str(parse_error)[:200],
+                        error=str(parse_error)[:1000],  # Increased from 200
+                        error_type=type(parse_error).__name__,
                     )
-                    # Last resort: return raw content as markdown
+
+                    # Store raw JSON content before raising
+                    # This preserves the content for downstream handlers
                     state.final_report = response.content
+
+                    # DO NOT call state.complete() here!
+                    # Reason: Streaming fallback will call complete() again, causing overwrite.
+                    # Instead, let the orchestrator or fallback handler complete the state.
+
+                    # Raise exception to signal validation failure
+                    raise StructuredSynthesisError(
+                        f"Pydantic validation failed: {parse_error}",
+                        state  # State has raw JSON but is not yet "completed"
+                    ) from parse_error
 
             state.complete(state.final_report)
 
+            # Log final result
+            logger.info(
+                "STRUCTURED_SYNTHESIZER_RESULT",
+                final_report_structured_set=state.final_report_structured is not None,
+                final_report_len=len(state.final_report) if state.final_report else 0,
+            )
+
             # Add span attributes
-            span.set_attributes({
-                "observations_count": len(state.all_observations),
-                "sources_count": len(state.sources),
-                "report_length": len(state.final_report),
-                "structured_output_success": state.final_report_structured is not None,
-            })
+            if span:
+                span.set_attributes({
+                    "observations_count": len(state.all_observations),
+                    "sources_count": len(state.sources),
+                    "report_length": len(state.final_report),
+                    "structured_output_success": state.final_report_structured is not None,
+                })
 
             # CRITICAL: Inject actual sources into structured output
             # The LLM only uses source indices in source_refs - it doesn't populate the sources array
@@ -398,12 +452,12 @@ async def post_verify_structured_output(
 
     span_name = research_span_name(PHASE_SYNTHESIS, "post_verification")
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
+    async with safe_tool_span(span_name, SpanType.AGENT) as span:
         if not state.final_report_structured:
             logger.warning("POST_VERIFY_SKIP", reason="no_structured_output")
             return state
 
-        schema_name = state.output_schema.__name__ if state.output_schema else "unknown"
+        schema_name = _get_schema_name(state.output_schema) or "unknown"
         logger.info(
             "POST_VERIFY_START",
             schema=schema_name,
@@ -445,12 +499,13 @@ async def post_verify_structured_output(
             state.final_report = state.final_report_structured.model_dump_json(indent=2)
 
         # Add span attributes
-        span.set_attributes({
-            "claims_extracted": len(claims),
-            "claims_verified": len(result.verified_claims),
-            "support_rate": result.support_rate,
-            "corrections_applied": result.corrections_applied,
-        })
+        if span:
+            span.set_attributes({
+                "claims_extracted": len(claims),
+                "claims_verified": len(result.verified_claims),
+                "support_rate": result.support_rate,
+                "corrections_applied": result.corrections_applied,
+            })
 
         logger.info(
             "POST_VERIFY_COMPLETE",

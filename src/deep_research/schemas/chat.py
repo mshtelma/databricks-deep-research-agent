@@ -4,7 +4,7 @@ from uuid import UUID
 
 from pydantic import Field
 
-from deep_research.models.chat import ChatStatus
+from deep_research.models.chat import ChatStatus, ChatType
 from deep_research.schemas.common import BaseSchema, TimestampMixin
 
 
@@ -15,7 +15,10 @@ class ChatBase(BaseSchema):
 
 
 class ChatCreate(ChatBase):
-    """Schema for creating a chat."""
+    """Schema for creating a chat.
+
+    Note: Incognito chats use a separate endpoint (POST /chats/incognito).
+    """
 
     pass
 
@@ -32,6 +35,7 @@ class ChatResponse(ChatBase, TimestampMixin):
 
     id: UUID
     status: ChatStatus
+    chat_type: ChatType = ChatType.REGULAR
     message_count: int = 0
 
 

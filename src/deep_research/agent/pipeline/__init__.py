@@ -54,6 +54,11 @@ from deep_research.agent.pipeline.executor import (
     PipelineExecutor,
     create_executor_for_pipeline,
 )
+from deep_research.agent.pipeline.phase_executor import (
+    PhaseEvent,
+    PhaseExecutionGroup,
+    PhaseExecutor,
+)
 
 __all__ = [
     # Configuration
@@ -77,4 +82,8 @@ __all__ = [
     "ExecutionResult",
     "PipelineExecutor",
     "create_executor_for_pipeline",
+    # Phase Executor (for custom phase mode)
+    "PhaseEvent",
+    "PhaseExecutionGroup",
+    "PhaseExecutor",
 ]

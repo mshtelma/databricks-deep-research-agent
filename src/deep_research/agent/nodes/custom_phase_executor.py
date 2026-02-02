@@ -10,7 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import mlflow
 from mlflow.entities import SpanType
 
 from deep_research.agent.state import SourceInfo
@@ -21,6 +20,7 @@ from deep_research.core.logging_utils import (
     log_tool_call,
     truncate,
 )
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
     ATTR_SEARCH_QUERY,
     ATTR_SEARCH_RESULTS_COUNT,
@@ -85,12 +85,11 @@ async def execute_custom_phase(
     """
     span_name = research_span_name(PHASE_EXECUTE, f"phase:{phase_name}")
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
-        span.set_attributes({
-            "phase.name": phase_name,
-            "phase.tools": ",".join(tools),
-            "phase.prompt_length": len(prompt),
-        })
+    async with safe_tool_span(span_name, SpanType.AGENT, {
+        "phase.name": phase_name,
+        "phase.tools": ",".join(tools),
+        "phase.prompt_length": len(prompt),
+    }) as span:
 
         logger.info(
             "CUSTOM_PHASE_EXECUTING",
@@ -100,13 +99,27 @@ async def execute_custom_phase(
         )
 
         try:
-            # Get services from app context
-            from deep_research.app import get_app_services
+            # Get services from context
+            llm = context.llm
+            brave_client = context.brave_client
+            crawler = context.crawler
 
-            services = get_app_services()
-            llm: LLMClient = services.llm
-            crawler: WebCrawler = services.crawler
-            brave_client: BraveSearchClient = services.brave_client
+            # Validate services are available (fail fast with clear error)
+            if not llm:
+                raise RuntimeError(
+                    f"Phase '{phase_name}' requires LLM client but it is not in context. "
+                    f"Ensure ResearchContext is created with llm parameter when executing custom phases."
+                )
+            if not brave_client:
+                raise RuntimeError(
+                    f"Phase '{phase_name}' requires Brave Search client but it is not in context. "
+                    f"Ensure ResearchContext is created with brave_client parameter when executing custom phases."
+                )
+            if not crawler:
+                raise RuntimeError(
+                    f"Phase '{phase_name}' requires web crawler but it is not in context. "
+                    f"Ensure ResearchContext is created with crawler parameter when executing custom phases."
+                )
 
             # Gather content based on available tools
             search_results_text = ""
@@ -133,10 +146,11 @@ async def execute_custom_phase(
                             error=str(e)[:100],
                         )
 
-                span.set_attributes({
-                    ATTR_SEARCH_QUERY: truncate_for_attr(", ".join(search_queries), 200),
-                    ATTR_SEARCH_RESULTS_COUNT: len(all_results),
-                })
+                if span:
+                    span.set_attributes({
+                        ATTR_SEARCH_QUERY: truncate_for_attr(", ".join(search_queries), 200),
+                        ATTR_SEARCH_RESULTS_COUNT: len(all_results),
+                    })
 
                 if all_results:
                     search_results_text = "\n\n".join(
@@ -224,10 +238,11 @@ Provide structured findings with source attribution."""
 
             output = response.content
 
-            span.set_attributes({
-                "output.length": len(output),
-                "output.sources_count": len(sources_collected),
-            })
+            if span:
+                span.set_attributes({
+                    "output.length": len(output),
+                    "output.sources_count": len(sources_collected),
+                })
 
             logger.info(
                 "CUSTOM_PHASE_COMPLETED",
@@ -249,10 +264,11 @@ Provide structured findings with source attribution."""
                 error_type=type(e).__name__,
                 error=str(e)[:200],
             )
-            span.set_attributes({
-                "error": str(e)[:200],
-                "error_type": type(e).__name__,
-            })
+            if span:
+                span.set_attributes({
+                    "error": str(e)[:200],
+                    "error_type": type(e).__name__,
+                })
             return PhaseResult(
                 output=f"Phase {phase_name} failed: {e}",
                 success=False,
@@ -285,7 +301,7 @@ async def _generate_search_queries(
 RESEARCH PHASE: {phase_name}
 
 PROMPT:
-{prompt[:2000]}
+{prompt[:5000]}
 
 Return ONLY a JSON array of search query strings, no explanation.
 Example: ["query 1", "query 2", "query 3"]""",

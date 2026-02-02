@@ -2,7 +2,18 @@
 
 from fastapi import APIRouter
 
-from deep_research.api.v1 import agent, chats, citations, health, jobs, messages, preferences, research
+from deep_research.api.v1 import (
+    agent,
+    chats,
+    citations,
+    debug,
+    health,
+    jobs,
+    messages,
+    preferences,
+    research,
+    user,
+)
 
 router = APIRouter()
 
@@ -18,3 +29,7 @@ router.include_router(preferences.router, prefix="/preferences", tags=["Preferen
 router.include_router(citations.router, tags=["Citations"])
 # Background job management routes
 router.include_router(jobs.router, tags=["Jobs"])
+# Debug endpoints for troubleshooting auth
+router.include_router(debug.router, tags=["Debug"])
+# User profile routes
+router.include_router(user.router, tags=["User"])

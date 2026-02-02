@@ -23,11 +23,15 @@ Deep research agent with multi-agent architecture (Coordinator, Planner, Researc
 ### Database
 | Command | Description |
 |---------|-------------|
-| `make db` | Start local PostgreSQL via Docker + run migrations |
-| `make db-stop` | Stop local PostgreSQL |
+| `make db-migrate` | Run migrations on configured Lakebase (standard for local dev) |
+| `make db-status` | Check current migration status |
+| `make db-migrate-remote TARGET=dev` | Run migrations on deployed Lakebase instance |
 | `make db-reset` | Reset schema (drops ALL data, recreates tables) |
 | `make clean_db` | Delete all chats/messages (preserves schema) |
-| `make db-migrate-remote TARGET=dev` | Run migrations on deployed Lakebase |
+| `make db-local` | Start local PostgreSQL via Docker (fallback only) |
+| `make db-local-stop` | Stop local PostgreSQL |
+
+**Note:** Local development uses **remote Lakebase** by default. Configure via `LAKEBASE_*` env vars in `.env`. The `make db-local` command is only for offline/fallback scenarios.
 
 ### Testing
 | Command | Description |
@@ -198,20 +202,28 @@ config/                          # Configuration files
 
 ## Authentication
 
-### Local Development
+### Local Development (Remote Lakebase - Standard)
 ```bash
-# .env - Profile-based (recommended)
+# .env - Profile-based with Lakebase (RECOMMENDED)
 DATABRICKS_CONFIG_PROFILE=your-profile-name
 LAKEBASE_INSTANCE_NAME=your-instance-name
 LAKEBASE_DATABASE=deep_research
 
-# OR direct token
+# OR direct token with Lakebase
 DATABRICKS_HOST=https://your-workspace.databricks.com
 DATABRICKS_TOKEN=your-token
+LAKEBASE_INSTANCE_NAME=your-instance-name
+LAKEBASE_DATABASE=deep_research
+```
 
-# OR local PostgreSQL
+### Local PostgreSQL (Fallback Only)
+```bash
+# Only for offline development or when Lakebase is unavailable
+# Requires: make db (starts Docker PostgreSQL)
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/postgres
 ```
+
+**Important:** This project uses **remote Lakebase** for local development. Local PostgreSQL is a fallback option only.
 
 ### Lakebase OAuth
 - Tokens have 1-hour lifetime with 5-minute refresh buffer
@@ -290,3 +302,12 @@ from deep_research.core.app_config import get_app_config
 <!-- MANUAL ADDITIONS START -->
 <!-- Add project-specific notes here that should persist across updates -->
 <!-- MANUAL ADDITIONS END -->
+
+## Active Technologies
+- Python 3.11+ + FastAPI, Databricks SDK (WorkspaceClient), SQLAlchemy, Pydantic (006-user-chat-isolation)
+- PostgreSQL (Databricks Lakebase) (006-user-chat-isolation)
+- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, SQLAlchemy (async), React 18, TanStack Query (006-user-chat-isolation)
+- PostgreSQL (Databricks Lakebase) - existing + server-side session store for incognito (006-user-chat-isolation)
+
+## Recent Changes
+- 006-user-chat-isolation: Added Python 3.11+ + FastAPI, Databricks SDK (WorkspaceClient), SQLAlchemy, Pydantic

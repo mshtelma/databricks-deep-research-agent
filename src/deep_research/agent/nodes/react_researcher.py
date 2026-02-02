@@ -18,7 +18,6 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-import mlflow
 from mlflow.entities import SpanType
 
 from deep_research.agent.config import get_researcher_config, get_researcher_config_for_depth
@@ -28,6 +27,7 @@ from deep_research.agent.tools.url_registry import UrlRegistry
 from deep_research.agent.tools.web_crawler import WebCrawler, web_crawl
 from deep_research.agent.tools.web_search import format_search_results_indexed, web_search
 from deep_research.core.logging_utils import get_logger, truncate
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
     ATTR_STEP_INDEX,
     ATTR_STEP_TITLE,
@@ -221,13 +221,12 @@ async def run_react_researcher(
     step_number = state.current_step_index + 1
     span_name = research_span_name(PHASE_EXECUTE, "react_researcher", step=step_number)
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
-        span.set_attributes({
-            ATTR_STEP_INDEX: step_number,
-            ATTR_STEP_TITLE: truncate_for_attr(step.title, 100),
-            "max_tool_calls": effective_max_tool_calls,
-            "depth": depth,
-        })
+    async with safe_tool_span(span_name, SpanType.AGENT, {
+        ATTR_STEP_INDEX: step_number,
+        ATTR_STEP_TITLE: truncate_for_attr(step.title, 100),
+        "max_tool_calls": effective_max_tool_calls,
+        "depth": depth,
+    }) as span:
 
         logger.info(
             "REACT_RESEARCHER_START",
@@ -458,11 +457,12 @@ Start by searching for relevant information.""",
         state.all_observations.append(observation)
 
         # Update span with final metrics
-        span.set_attributes({
-            "total_tool_calls": react_state.tool_call_count,
-            "high_quality_sources": len(react_state.high_quality_sources),
-            "low_quality_sources": len(react_state.low_quality_sources),
-        })
+        if span:
+            span.set_attributes({
+                "total_tool_calls": react_state.tool_call_count,
+                "high_quality_sources": len(react_state.high_quality_sources),
+                "low_quality_sources": len(react_state.low_quality_sources),
+            })
 
         logger.info(
             "REACT_RESEARCHER_COMPLETE",

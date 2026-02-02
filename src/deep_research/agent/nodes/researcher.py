@@ -3,7 +3,6 @@
 import json
 from typing import TYPE_CHECKING
 
-import mlflow
 from mlflow.entities import SpanType
 from pydantic import BaseModel, Field
 
@@ -23,6 +22,7 @@ from deep_research.core.logging_utils import (
     log_urls_selected,
     truncate,
 )
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
     ATTR_CRAWL_SUCCESSFUL,
     ATTR_CRAWL_URLS_COUNT,
@@ -94,14 +94,12 @@ async def run_researcher(
     step_number = state.current_step_index + 1
     span_name = research_span_name(PHASE_EXECUTE, "researcher", step=step_number)
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
-        span.set_attributes({
-            ATTR_STEP_INDEX: step_number,
-            ATTR_STEP_TITLE: truncate_for_attr(step.title, 100),
-            ATTR_STEP_TYPE: step.step_type.value,
-            "step.needs_search": step.needs_search,
-        })
-
+    async with safe_tool_span(span_name, SpanType.AGENT, {
+        ATTR_STEP_INDEX: step_number,
+        ATTR_STEP_TITLE: truncate_for_attr(step.title, 100),
+        ATTR_STEP_TYPE: step.step_type.value,
+        "step.needs_search": step.needs_search,
+    }) as span:
         logger.info(
             "RESEARCHER_EXECUTING_STEP",
             step_title=truncate(step.title, 60),
@@ -192,12 +190,13 @@ async def run_researcher(
                         )
 
                     # Update span with search/crawl stats
-                    span.set_attributes({
-                        ATTR_SEARCH_QUERY: truncate_for_attr(", ".join(search_queries_used), 200),
-                        ATTR_SEARCH_RESULTS_COUNT: search_results_count,
-                        ATTR_CRAWL_URLS_COUNT: len(top_urls),
-                        ATTR_CRAWL_SUCCESSFUL: crawl_successful,
-                    })
+                    if span:
+                        span.set_attributes({
+                            ATTR_SEARCH_QUERY: truncate_for_attr(", ".join(search_queries_used), 200),
+                            ATTR_SEARCH_RESULTS_COUNT: search_results_count,
+                            ATTR_CRAWL_URLS_COUNT: len(top_urls),
+                            ATTR_CRAWL_SUCCESSFUL: crawl_successful,
+                        })
 
                     # Log source content statistics for debugging citation pipeline issues
                     sources_with_content = sum(1 for s in state.sources if s.content)
@@ -251,11 +250,12 @@ async def run_researcher(
             state.mark_step_complete(output.observation)
 
             # Set output attributes
-            span.set_attributes({
-                "output.key_points_count": len(output.key_points),
-                "output.sources_used_count": len(output.sources_used),
-                "output.observation_length": len(output.observation),
-            })
+            if span:
+                span.set_attributes({
+                    "output.key_points_count": len(output.key_points),
+                    "output.sources_used_count": len(output.sources_used),
+                    "output.observation_length": len(output.observation),
+                })
 
             logger.info(
                 "RESEARCHER_STEP_COMPLETED",
@@ -271,10 +271,11 @@ async def run_researcher(
                 error_type=type(e).__name__,
                 error=str(e)[:200],
             )
-            span.set_attributes({
-                "error": str(e)[:200],
-                "error_type": type(e).__name__,
-            })
+            if span:
+                span.set_attributes({
+                    "error": str(e)[:200],
+                    "error_type": type(e).__name__,
+                })
             # Mark step complete with error observation
             state.mark_step_complete(f"Step failed due to error: {e}")
 

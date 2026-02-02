@@ -137,6 +137,13 @@ class BaseResearchPhase(ABC):
 
         # Store result in state
         state.add_phase_result(self.name, result)
+
+        # CRITICAL FIX: Add phase output to observations for synthesizer
+        # Without this, synthesizer shows "(No research observations available)"
+        if result.output:
+            observation = f"## {self.name.replace('_', ' ').title()}\n\n{result.output}"
+            state.all_observations.append(observation)
+
         return state
 
 

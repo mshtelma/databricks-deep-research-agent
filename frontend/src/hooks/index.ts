@@ -21,3 +21,13 @@ export {
   useJobEventPolling,
   useResearchJob,
 } from './useResearchJobs';
+export { useUserProfile } from './useUserProfile';
+export {
+  useIncognitoChats,
+  useIncognitoSessionStatus,
+  useCreateIncognitoChat,
+  useConvertToRegular,
+  useCanCreateIncognito,
+  useIncognitoQuota,
+  incognitoKeys,
+} from './useIncognitoChats';

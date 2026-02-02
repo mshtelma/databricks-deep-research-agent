@@ -6,7 +6,6 @@ import json
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
-import mlflow
 from mlflow.entities import SpanType
 from pydantic import BaseModel
 
@@ -18,6 +17,7 @@ from deep_research.agent.prompts.coordinator import (
 )
 from deep_research.agent.state import QueryClassification, ResearchState
 from deep_research.core.logging_utils import get_logger, log_agent_decision, truncate
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
     ATTR_DECISION_COMPLEXITY,
     ATTR_DECISION_REASONING,
@@ -60,11 +60,10 @@ async def run_coordinator(state: ResearchState, llm: LLMClient) -> ResearchState
     """
     span_name = research_span_name(PHASE_CLASSIFY, "coordinator")
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
-        span.set_attributes({
-            "query": truncate_for_attr(state.query, 150),
-            "conversation_history_length": len(state.conversation_history),
-        })
+    async with safe_tool_span(span_name, SpanType.AGENT, {
+        "query": truncate_for_attr(state.query, 150),
+        "conversation_history_length": len(state.conversation_history),
+    }) as span:
 
         logger.info(
             "COORDINATOR_ANALYZING",
@@ -129,15 +128,16 @@ async def run_coordinator(state: ResearchState, llm: LLMClient) -> ResearchState
                 )
 
             # Set decision attributes for trace
-            span.set_attributes({
-                ATTR_DECISION_VALUE: "simple_query" if output.is_simple_query else "research",
-                ATTR_DECISION_COMPLEXITY: output.complexity,
-                ATTR_DECISION_REASONING: truncate_for_attr(output.reasoning, 300),
-                "decision.is_simple_query": output.is_simple_query,
-                "decision.is_ambiguous": output.is_ambiguous,
-                "decision.follow_up_type": output.follow_up_type,
-                "decision.recommended_depth": output.recommended_depth,
-            })
+            if span:
+                span.set_attributes({
+                    ATTR_DECISION_VALUE: "simple_query" if output.is_simple_query else "research",
+                    ATTR_DECISION_COMPLEXITY: output.complexity,
+                    ATTR_DECISION_REASONING: truncate_for_attr(output.reasoning, 300),
+                    "decision.is_simple_query": output.is_simple_query,
+                    "decision.is_ambiguous": output.is_ambiguous,
+                    "decision.follow_up_type": output.follow_up_type,
+                    "decision.recommended_depth": output.recommended_depth,
+                })
 
             log_agent_decision(
                 logger,
@@ -155,10 +155,11 @@ async def run_coordinator(state: ResearchState, llm: LLMClient) -> ResearchState
                 error_type=type(e).__name__,
                 error=str(e)[:200],
             )
-            span.set_attributes({
-                "error": str(e)[:200],
-                "error_type": type(e).__name__,
-            })
+            if span:
+                span.set_attributes({
+                    "error": str(e)[:200],
+                    "error_type": type(e).__name__,
+                })
             # Default classification on error
             state.query_classification = QueryClassification(
                 complexity="moderate",

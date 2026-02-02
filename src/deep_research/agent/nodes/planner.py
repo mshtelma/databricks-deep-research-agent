@@ -2,7 +2,6 @@
 
 from uuid import uuid4
 
-import mlflow
 from mlflow.entities import SpanType
 from pydantic import BaseModel
 
@@ -10,6 +9,7 @@ from deep_research.agent.config import get_step_limits
 from deep_research.agent.prompts.planner import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT
 from deep_research.agent.state import Plan, PlanStep, ResearchState, StepStatus, StepType
 from deep_research.core.logging_utils import get_logger, truncate
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
     ATTR_PLAN_ITERATION,
     ATTR_PLAN_STEPS_COUNT,
@@ -59,12 +59,11 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
     iteration = state.plan_iterations + 1
     span_name = research_span_name(PHASE_PLAN, "planner", iteration=iteration)
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
-        span.set_attributes({
-            ATTR_PLAN_ITERATION: iteration,
-            "query": truncate_for_attr(state.query, 100),
-            "previous_observations_count": len(state.all_observations),
-        })
+    async with safe_tool_span(span_name, SpanType.AGENT, {
+        ATTR_PLAN_ITERATION: iteration,
+        "query": truncate_for_attr(state.query, 100),
+        "previous_observations_count": len(state.all_observations),
+    }) as span:
 
         logger.info(
             "PLANNER_CREATING_PLAN",
@@ -81,7 +80,8 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
                 "MAX_PLAN_ITERATIONS_REACHED",
                 max_iterations=state.max_plan_iterations,
             )
-            span.set_attributes({"max_iterations_reached": True})
+            if span:
+                span.set_attributes({"max_iterations_reached": True})
             return state
 
         # Get completed steps from previous plan (for preservation during ADJUST)
@@ -89,7 +89,8 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
         if state.current_plan:
             completed_steps = state.get_completed_steps()
 
-        span.set_attributes({"preserved_steps_count": len(completed_steps)})
+        if span:
+            span.set_attributes({"preserved_steps_count": len(completed_steps)})
 
         # Format completed steps for prompt
         completed_steps_str = ""
@@ -204,13 +205,14 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
             state.current_step_index = len(completed_steps)
 
             # Set output attributes for trace
-            span.set_attributes({
-                ATTR_PLAN_STEPS_COUNT: len(final_steps),
-                ATTR_PLAN_THOUGHT: truncate_for_attr(output.thought, 200),
-                "plan.title": truncate_for_attr(output.title, 100),
-                "plan.new_steps_count": len(new_steps),
-                "plan.has_enough_context": output.has_enough_context,
-            })
+            if span:
+                span.set_attributes({
+                    ATTR_PLAN_STEPS_COUNT: len(final_steps),
+                    ATTR_PLAN_THOUGHT: truncate_for_attr(output.thought, 200),
+                    "plan.title": truncate_for_attr(output.title, 100),
+                    "plan.new_steps_count": len(new_steps),
+                    "plan.has_enough_context": output.has_enough_context,
+                })
 
             # Log step details
             step_summaries = [f"{s.step_type.value}:{truncate(s.title, 30)}" for s in final_steps[:5]]
@@ -231,10 +233,11 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
                 error_type=type(e).__name__,
                 error=str(e)[:200],
             )
-            span.set_attributes({
-                "error": str(e)[:200],
-                "error_type": type(e).__name__,
-            })
+            if span:
+                span.set_attributes({
+                    "error": str(e)[:200],
+                    "error_type": type(e).__name__,
+                })
             # Create minimal fallback plan
             state.current_plan = Plan(
                 id=str(uuid4()),

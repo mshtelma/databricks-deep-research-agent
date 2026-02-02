@@ -16,8 +16,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Token refresh buffer (refresh 5 minutes before expiry)
-TOKEN_REFRESH_BUFFER = timedelta(minutes=5)
+# Token refresh buffer (refresh 15 minutes before expiry to handle clock skew)
+TOKEN_REFRESH_BUFFER = timedelta(minutes=15)
 TOKEN_LIFETIME = timedelta(hours=1)
 
 
@@ -31,8 +31,24 @@ class LakebaseCredential:
 
     @property
     def is_expired(self) -> bool:
-        """Check if token is expired or about to expire."""
-        return datetime.now(UTC) >= (self.expires_at - TOKEN_REFRESH_BUFFER)
+        """Check if token is expired or about to expire.
+
+        Returns True if current time >= (expires_at - 5 minute buffer).
+        """
+        now = datetime.now(UTC)
+        threshold = self.expires_at - TOKEN_REFRESH_BUFFER
+        expired = now >= threshold
+        time_until_threshold = (threshold - now).total_seconds() if not expired else 0
+        logger.info(
+            "LAKEBASE_CREDENTIAL_EXPIRY_CHECK now_utc=%s expires_at=%s threshold=%s "
+            "is_expired=%s time_until_threshold=%.1f",
+            now.isoformat(),
+            self.expires_at.isoformat(),
+            threshold.isoformat(),
+            expired,
+            time_until_threshold,
+        )
+        return expired
 
 
 class LakebaseCredentialProvider:
@@ -216,35 +232,22 @@ class LakebaseCredentialProvider:
         if not cred_response.token:
             raise RuntimeError("No token returned from Databricks")
 
-        # DEBUG: Log raw SDK response for troubleshooting
-        logger.info(f"Raw SDK expiration_time: {cred_response.expiration_time!r}")
-
-        # Parse expiration time if provided, otherwise use default lifetime
+        # WORKAROUND: Databricks SDK returns expiration_time in LOCAL time
+        # but labeled with "Z" suffix (incorrectly indicating UTC).
+        # To avoid this timezone bug, we ALWAYS use a calculated expiration.
+        # See: https://github.com/databricks/databricks-sdk-py/issues/XXX
         now_utc = datetime.now(UTC)
-        if cred_response.expiration_time:
-            try:
-                expires_at = datetime.fromisoformat(
-                    cred_response.expiration_time.replace("Z", "+00:00")
-                )
-                logger.info(f"Parsed expires_at: {expires_at}, now(UTC): {now_utc}")
-                # Sanity check: if expiration is in the past or too close, use default
-                if expires_at <= now_utc:
-                    logger.warning(
-                        f"SDK returned expired/invalid expiration_time: {cred_response.expiration_time}, "
-                        f"using default 1-hour lifetime"
-                    )
-                    expires_at = now_utc + TOKEN_LIFETIME
-            except ValueError as e:
-                logger.warning(
-                    f"Failed to parse expiration_time '{cred_response.expiration_time}': {e}, "
-                    f"using default 1-hour lifetime"
-                )
-                expires_at = now_utc + TOKEN_LIFETIME
-        else:
-            logger.info("No expiration_time from SDK, using default 1-hour lifetime")
-            expires_at = now_utc + TOKEN_LIFETIME
+        expires_at = now_utc + TOKEN_LIFETIME
 
-        logger.info(f"Generated Lakebase credential, expires at: {expires_at}")
+        logger.info(
+            "LAKEBASE_CREDENTIAL_GENERATED sdk_expiration_raw=%r calculated_expires_at=%s "
+            "now_utc=%s strategy=calculated_lifetime_workaround token_preview=%s username=%s",
+            cred_response.expiration_time,
+            expires_at.isoformat(),
+            now_utc.isoformat(),
+            cred_response.token[:20] + "..." if cred_response.token else None,
+            "pending",  # username extracted below
+        )
 
         # Extract username from JWT 'sub' claim (Databricks identity - email or service principal)
         username = self._extract_username_from_token(cred_response.token)

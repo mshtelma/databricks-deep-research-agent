@@ -13,6 +13,7 @@ import type {
   SourceBadgeConfig,
   RenderContext,
   PanelSlot,
+  InputConfig,
 } from './types';
 
 /**
@@ -273,6 +274,23 @@ export class ComponentRegistry {
    */
   static hasPlugin(pluginId: string): boolean {
     return this.plugins.has(pluginId);
+  }
+
+  /**
+   * Get merged input configuration from all plugins.
+   * Later-registered plugins override earlier ones.
+   * Returns undefined if no plugin provides inputConfig.
+   */
+  static getInputConfig(): InputConfig | undefined {
+    let mergedConfig: InputConfig | undefined;
+
+    for (const plugin of this.plugins.values()) {
+      if (plugin.inputConfig) {
+        mergedConfig = { ...mergedConfig, ...plugin.inputConfig };
+      }
+    }
+
+    return mergedConfig;
   }
 
   /**
