@@ -38,6 +38,7 @@ export type {
   EventLabelFormatter,
   SourceBadgeConfig,
   RenderContext,
+  InputConfig,
 } from './types';
 
 // Default output renderers

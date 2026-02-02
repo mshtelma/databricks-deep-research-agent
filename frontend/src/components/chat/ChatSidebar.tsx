@@ -4,6 +4,9 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ChatSearchInput } from './ChatSearchInput';
 import { ActiveJobsIndicator } from '@/components/jobs/ActiveJobsIndicator';
+import { UserProfile } from '@/components/user';
+import { IncognitoSection } from '@/components/incognito';
+import { useIncognitoSessionStatus, useCreateIncognitoChat } from '@/hooks';
 
 type StatusFilter = 'active' | 'archived' | 'all';
 type ChatListEntry = Chat & { isDraft?: boolean };
@@ -13,6 +16,7 @@ interface ChatSidebarProps {
   currentChatId?: string;
   onSelectChat: (chatId: string) => void;
   onNewChat: () => void;
+  onNewIncognitoChat?: () => void;
   onRenameChat?: (chatId: string, newTitle: string) => void;
   onArchiveChat?: (chatId: string) => void;
   onRestoreChat?: (chatId: string) => void;
@@ -33,6 +37,7 @@ export function ChatSidebar({
   currentChatId,
   onSelectChat,
   onNewChat,
+  onNewIncognitoChat,
   onRenameChat,
   onArchiveChat,
   onRestoreChat,
@@ -46,6 +51,43 @@ export function ChatSidebar({
   isLoading = false,
   className,
 }: ChatSidebarProps) {
+  const [showNewChatMenu, setShowNewChatMenu] = React.useState(false);
+  const newChatButtonRef = React.useRef<HTMLDivElement>(null);
+  const { data: sessionStatus } = useIncognitoSessionStatus();
+  const createIncognito = useCreateIncognitoChat();
+
+  // Close menu on click outside
+  React.useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (
+        newChatButtonRef.current &&
+        !newChatButtonRef.current.contains(e.target as Node)
+      ) {
+        setShowNewChatMenu(false);
+      }
+    };
+
+    if (showNewChatMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showNewChatMenu]);
+
+  const canCreateIncognito = !sessionStatus || sessionStatus.chatCount < sessionStatus.maxChats;
+
+  const handleNewIncognitoChat = async () => {
+    setShowNewChatMenu(false);
+    if (onNewIncognitoChat) {
+      onNewIncognitoChat();
+    } else {
+      try {
+        const chat = await createIncognito.mutateAsync({});
+        onSelectChat(chat.id);
+      } catch (error) {
+        console.error('Failed to create incognito chat:', error);
+      }
+    }
+  };
   // Filter chats by status and search query
   const filteredChats = React.useMemo(() => {
     return chats.filter((chat) => {
@@ -69,10 +111,62 @@ export function ChatSidebar({
     <aside className={cn('w-64 border-r bg-muted/40 flex flex-col', className)}>
       {/* Header */}
       <div className="p-4 border-b space-y-3">
-        <Button data-testid="new-chat-button" onClick={onNewChat} className="w-full" variant="outline">
-          <PlusIcon className="w-4 h-4 mr-2" />
-          New Chat
-        </Button>
+        <div ref={newChatButtonRef} className="relative">
+          <div className="flex gap-1">
+            <Button
+              data-testid="new-chat-button"
+              onClick={onNewChat}
+              className="flex-1"
+              variant="outline"
+            >
+              <PlusIcon className="w-4 h-4 mr-2" />
+              New Chat
+            </Button>
+            <Button
+              data-testid="new-chat-menu-trigger"
+              onClick={() => setShowNewChatMenu(!showNewChatMenu)}
+              variant="outline"
+              size="icon"
+              className="shrink-0"
+              aria-label="More options"
+              aria-expanded={showNewChatMenu}
+            >
+              <ChevronDownIcon className="w-4 h-4" />
+            </Button>
+          </div>
+
+          {/* New chat dropdown menu */}
+          {showNewChatMenu && (
+            <div
+              className={cn(
+                'absolute left-0 right-0 top-full z-50 mt-1',
+                'rounded-md border bg-popover p-1 shadow-md',
+                'animate-in fade-in-0 zoom-in-95'
+              )}
+            >
+              <button
+                type="button"
+                data-testid="new-incognito-chat-button"
+                onClick={handleNewIncognitoChat}
+                disabled={!canCreateIncognito || createIncognito.isPending}
+                className={cn(
+                  'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-sm',
+                  'hover:bg-accent hover:text-accent-foreground',
+                  'transition-colors cursor-pointer',
+                  !canCreateIncognito && 'opacity-50 cursor-not-allowed'
+                )}
+              >
+                <EyeOffIcon className="w-4 h-4" />
+                <span>New Incognito Chat</span>
+                {!canCreateIncognito && (
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    ({sessionStatus?.maxChats}/{sessionStatus?.maxChats})
+                  </span>
+                )}
+              </button>
+            </div>
+          )}
+        </div>
 
         <ChatSearchInput
           value={searchQuery}
@@ -140,10 +234,20 @@ export function ChatSidebar({
         )}
       </div>
 
-      {/* Active Jobs Indicator - shown at bottom of sidebar */}
+      {/* Incognito chats section */}
+      <IncognitoSection
+        currentChatId={currentChatId}
+        onSelectChat={onSelectChat}
+        onHoverChat={onHoverChat}
+      />
+
+      {/* Active Jobs Indicator */}
       <div className="p-2 border-t">
         <ActiveJobsIndicator onNavigateToChat={onSelectChat} />
       </div>
+
+      {/* User Profile - shown at bottom of sidebar */}
+      <UserProfile />
     </aside>
   );
 }
@@ -528,6 +632,43 @@ function TrashIcon({ className }: { className?: string }) {
       <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
       <line x1="10" x2="10" y1="11" y2="17" />
       <line x1="14" x2="14" y1="11" y2="17" />
+    </svg>
+  );
+}
+
+function ChevronDownIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
+function EyeOffIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
+      <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+      <path d="m1 1 22 22" />
+      <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
     </svg>
   );
 }

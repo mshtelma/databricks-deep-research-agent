@@ -72,6 +72,17 @@ export function MessageList({
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
   const scrollTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Check if we have an agent message with substantial content (>50 chars)
+  // This is used to determine when to stop showing the streaming fallback
+  // and switch to the persisted DB message
+  const hasValidAgentMessage = React.useMemo(() => {
+    return messages.some(m =>
+      m.role === 'agent' &&
+      m.content &&
+      m.content.length > 50
+    );
+  }, [messages]);
+
   // Debounced auto-scroll to bottom on new messages (100ms debounce)
   // This prevents excessive scrolling during rapid streaming updates
   React.useEffect(() => {
@@ -153,8 +164,21 @@ export function MessageList({
         </div>
       )}
 
-      {/* Completed streamed message (shown after streaming completes, before messages are refreshed) */}
-      {!isStreaming && streamingContent && messages.filter(m => m.role === 'agent').length === 0 && (
+      {/* Log the completed-stream rendering decision */}
+      {(() => {
+        console.log('[MessageList] completed-stream check:', {
+          isStreaming,
+          hasStreamingContent: !!streamingContent,
+          streamingContentLength: streamingContent?.length ?? 0,
+          agentMessagesCount: messages.filter(m => m.role === 'agent').length,
+          hasValidAgentMessage,
+          shouldShowCompletedStream: !isStreaming && !!streamingContent && !hasValidAgentMessage,
+        });
+        return null;
+      })()}
+
+      {/* Completed streamed message (shown after streaming completes, until DB message has real content) */}
+      {!isStreaming && streamingContent && !hasValidAgentMessage && (
         <AgentMessage
           message={{
             id: 'completed-stream',

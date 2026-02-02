@@ -9,7 +9,8 @@ The enum types (ClaimType, VerificationVerdict, etc.) are kept for use in schema
 """
 
 from deep_research.models.audit_log import AuditAction, AuditLog
-from deep_research.models.chat import Chat, ChatStatus
+from deep_research.models.chat import Chat, ChatStatus, ChatType
+from deep_research.models.incognito_session import IncognitoSession
 from deep_research.models.enums import (
     ClaimType,
     ConfidenceLevel,
@@ -33,6 +34,9 @@ __all__ = [
     # Chat
     "Chat",
     "ChatStatus",
+    "ChatType",
+    # Incognito Session
+    "IncognitoSession",
     # Message
     "Message",
     "MessageRole",

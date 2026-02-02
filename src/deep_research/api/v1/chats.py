@@ -1,25 +1,52 @@
 """Chat endpoints."""
 
+import json as json_module
+from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Cookie, Depends, Query, Response
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from deep_research.core.exceptions import NotFoundError
+from deep_research.core.config import get_settings
+from deep_research.core.exceptions import NotFoundError, ValidationError
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
-from deep_research.models.chat import Chat, ChatStatus
+from deep_research.models.chat import Chat, ChatStatus, ChatType
+from deep_research.models.incognito_session import MAX_INCOGNITO_CHATS, SESSION_TTL_HOURS
 from deep_research.schemas.chat import (
     ChatCreate,
     ChatListResponse,
     ChatResponse,
     ChatUpdate,
 )
+from deep_research.schemas.session import IncognitoChatListResponse, IncognitoSessionStatus
 from deep_research.services.chat_service import ChatService
 from deep_research.services.export_service import ExportService
+from deep_research.services.session_service import SessionService
 
 router = APIRouter()
+
+# Cookie name for incognito session
+INCOGNITO_SESSION_COOKIE = "incognito_session"
+
+
+def _chat_to_response(chat: "Chat") -> ChatResponse:
+    """Convert Chat model to ChatResponse schema."""
+    return ChatResponse(
+        id=chat.id,
+        title=chat.title,
+        status=chat.status,
+        chat_type=chat.chat_type or ChatType.REGULAR,
+        message_count=0,  # TODO: Add message count relationship
+        created_at=chat.created_at,
+        updated_at=chat.updated_at,
+    )
+
+
+# =============================================================================
+# Static Routes (must come before dynamic /{chat_id} routes)
+# =============================================================================
 
 
 @router.get("", response_model=ChatListResponse)
@@ -67,6 +94,145 @@ async def create_chat(
     )
     await db.commit()
     return _chat_to_response(chat)
+
+
+# =============================================================================
+# Static Incognito Routes
+# =============================================================================
+
+
+@router.post("/incognito", response_model=ChatResponse, status_code=201)
+async def create_incognito_chat(
+    response: Response,
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+    request: ChatCreate | None = None,
+    incognito_session: str | None = Cookie(None, alias=INCOGNITO_SESSION_COOKIE),
+) -> ChatResponse:
+    """Create a new incognito (ephemeral) chat.
+
+    Incognito chats are:
+    - Stored server-side (survives page refresh)
+    - Associated with a browser session via httpOnly cookie
+    - Automatically deleted when session expires (1-hour idle timeout)
+    - Limited to 5 concurrent chats per session
+
+    Sets a session cookie if one doesn't exist.
+    """
+    session_service = SessionService(db)
+    chat_service = ChatService(db)
+
+    # Get or create session
+    session, token, is_new = await session_service.get_or_create_session(
+        user_id=user.user_id,
+        session_token=incognito_session,
+    )
+
+    # Check quota
+    can_create = await session_service.can_create_chat(session.id)
+    if not can_create:
+        raise ValidationError(
+            f"Maximum {MAX_INCOGNITO_CHATS} incognito chats reached. "
+            "Please close some incognito chats or convert them to regular chats."
+        )
+
+    # Create incognito chat
+    chat = Chat(
+        user_id=user.user_id,
+        title=request.title if request else None,
+        chat_type=ChatType.INCOGNITO,
+        incognito_session_id=session.id,
+    )
+    chat = await chat_service.add(chat)
+    await db.commit()
+
+    # Set session cookie if new
+    if is_new:
+        settings = get_settings()
+        response.set_cookie(
+            key=INCOGNITO_SESSION_COOKIE,
+            value=token,
+            httponly=True,
+            # Use 'lax' in dev (allows cross-port requests), 'strict' in production
+            samesite="strict" if settings.is_production else "lax",
+            max_age=SESSION_TTL_HOURS * 3600,  # 1 hour
+            # secure=True requires HTTPS; browsers silently reject secure cookies over HTTP
+            secure=settings.is_production,
+            # Restrict cookie to API paths for additional security
+            path="/api/v1",
+        )
+
+    return _chat_to_response(chat)
+
+
+@router.get("/incognito", response_model=IncognitoChatListResponse)
+async def list_incognito_chats(
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+    incognito_session: str | None = Cookie(None, alias=INCOGNITO_SESSION_COOKIE),
+) -> IncognitoChatListResponse:
+    """List incognito chats for the current browser session.
+
+    Returns only chats associated with the session token in the cookie.
+    """
+    if not incognito_session:
+        return IncognitoChatListResponse(
+            items=[],
+            total=0,
+            session_expires_at=None,
+        )
+
+    session_service = SessionService(db)
+    # Use secure method that verifies user ownership
+    session = await session_service.get_by_token_for_user(incognito_session, user.user_id)
+
+    if not session:
+        return IncognitoChatListResponse(
+            items=[],
+            total=0,
+            session_expires_at=None,
+        )
+
+    # Touch session to extend TTL
+    session.touch()
+    await session_service.update(session)
+
+    # Get incognito chats for this session
+    chat_service = ChatService(db)
+    chats = await chat_service.list_incognito_for_session(session.id)
+
+    return IncognitoChatListResponse(
+        items=[_chat_to_response(chat) for chat in chats],
+        total=len(chats),
+        session_expires_at=session.expires_at,
+    )
+
+
+@router.get("/session/incognito", response_model=IncognitoSessionStatus)
+async def get_incognito_session_status(
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+    incognito_session: str | None = Cookie(None, alias=INCOGNITO_SESSION_COOKIE),
+) -> IncognitoSessionStatus:
+    """Get incognito session status and quota information.
+
+    Returns whether a session exists, current chat count, and expiry time.
+    """
+    session_service = SessionService(db)
+    # Pass user_id for ownership verification
+    status = await session_service.get_session_status(incognito_session, user.user_id)
+
+    return IncognitoSessionStatus(
+        has_session=status["has_session"],
+        chat_count=status["chat_count"],
+        max_chats=status["max_chats"],
+        expires_at=datetime.fromisoformat(status["expires_at"]) if status["expires_at"] else None,
+    )
+
+
+# =============================================================================
+# Dynamic Routes (/{chat_id} patterns - must come after static routes)
+# =============================================================================
 
 
 @router.get("/{chat_id}", response_model=ChatResponse)
@@ -174,8 +340,6 @@ async def export_chat(
                 },
             )
         else:  # json
-            import json as json_module
-
             data = await export_service.export_json(
                 chat_id=chat_id,
                 user_id=user.user_id,
@@ -192,13 +356,39 @@ async def export_chat(
         raise NotFoundError("Chat", str(chat_id)) from e
 
 
-def _chat_to_response(chat: "Chat") -> ChatResponse:
-    """Convert Chat model to ChatResponse schema."""
-    return ChatResponse(
-        id=chat.id,
-        title=chat.title,
-        status=chat.status,
-        message_count=0,  # TODO: Add message count relationship
-        created_at=chat.created_at,
-        updated_at=chat.updated_at,
-    )
+@router.post("/{chat_id}/convert", response_model=ChatResponse)
+async def convert_incognito_to_regular(
+    chat_id: UUID,
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+    incognito_session: str | None = Cookie(None, alias=INCOGNITO_SESSION_COOKIE),
+) -> ChatResponse:
+    """Convert an incognito chat to a regular (permanent) chat.
+
+    Preserves the chat ID and all content. The chat will no longer
+    be deleted when the session expires.
+    """
+    chat_service = ChatService(db)
+    session_service = SessionService(db)
+
+    # Get the chat
+    chat = await chat_service.get_for_user(chat_id, user.user_id)
+    if not chat:
+        raise NotFoundError("Chat", str(chat_id))
+
+    # Verify it's an incognito chat
+    if chat.chat_type != ChatType.INCOGNITO:
+        raise ValidationError("Chat is not an incognito chat")
+
+    # Verify session ownership - use secure method that validates user_id
+    if incognito_session:
+        session = await session_service.get_by_token_for_user(incognito_session, user.user_id)
+        if session and chat.incognito_session_id != session.id:
+            raise NotFoundError("Chat", str(chat_id))
+
+    # Convert to regular
+    chat.convert_to_regular()
+    await chat_service.update(chat)
+    await db.commit()
+
+    return _chat_to_response(chat)

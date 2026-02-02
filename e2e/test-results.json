@@ -10,7 +10,9 @@
     "grep": {},
     "grepInvert": null,
     "maxFailures": 0,
-    "metadata": {},
+    "metadata": {
+      "actualWorkers": 1
+    },
     "preserveOutput": "always",
     "reporter": [
       [
@@ -40,7 +42,9 @@
         "outputDir": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results",
         "repeatEach": 1,
         "retries": 1,
-        "metadata": {},
+        "metadata": {
+          "actualWorkers": 1
+        },
         "id": "chromium",
         "name": "chromium",
         "testDir": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests",
@@ -82,11 +86,11 @@
           "specs": [
             {
               "title": "three parallel deep research sessions complete without interference",
-              "ok": true,
+              "ok": false,
               "tags": [],
               "tests": [
                 {
-                  "timeout": 900000,
+                  "timeout": 2700000,
                   "annotations": [
                     {
                       "type": "slow",
@@ -95,22 +99,143 @@
                         "line": 58,
                         "column": 8
                       }
+                    }
+                  ],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 0,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 97624,
+                      "error": {
+                        "message": "Error: Session 0 should have substantive response\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeGreaterThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: > \u001b[32m100\u001b[39m\nReceived:   \u001b[31m10\u001b[39m",
+                        "stack": "Error: Session 0 should have substantive response\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeGreaterThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: > \u001b[32m100\u001b[39m\nReceived:   \u001b[31m10\u001b[39m\n    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts:97:11",
+                        "location": {
+                          "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                          "column": 11,
+                          "line": 97
+                        },
+                        "snippet": "\u001b[0m \u001b[90m  95 |\u001b[39m           result\u001b[33m.\u001b[39mresponse\u001b[33m.\u001b[39mlength\u001b[33m,\u001b[39m\n \u001b[90m  96 |\u001b[39m           \u001b[32m`Session ${result.sessionId} should have substantive response`\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m  97 |\u001b[39m         )\u001b[33m.\u001b[39mtoBeGreaterThan(\u001b[35m100\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m     |\u001b[39m           \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m  98 |\u001b[39m       }\n \u001b[90m  99 |\u001b[39m\n \u001b[90m 100 |\u001b[39m       \u001b[90m// 5. Verify no cross-contamination\u001b[39m\u001b[0m"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                            "column": 11,
+                            "line": 97
+                          },
+                          "message": "Error: Session 0 should have substantive response\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeGreaterThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: > \u001b[32m100\u001b[39m\nReceived:   \u001b[31m10\u001b[39m\n\n\u001b[0m \u001b[90m  95 |\u001b[39m           result\u001b[33m.\u001b[39mresponse\u001b[33m.\u001b[39mlength\u001b[33m,\u001b[39m\n \u001b[90m  96 |\u001b[39m           \u001b[32m`Session ${result.sessionId} should have substantive response`\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m  97 |\u001b[39m         )\u001b[33m.\u001b[39mtoBeGreaterThan(\u001b[35m100\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m     |\u001b[39m           \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m  98 |\u001b[39m       }\n \u001b[90m  99 |\u001b[39m\n \u001b[90m 100 |\u001b[39m       \u001b[90m// 5. Verify no cross-contamination\u001b[39m\u001b[0m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts:97:11\u001b[22m"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-21T15:01:56.510Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                            "line": 58,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": [
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-812e6-mplete-without-interference-chromium/test-failed-1.png"
+                        },
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-812e6-mplete-without-interference-chromium/test-failed-3.png"
+                        },
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-812e6-mplete-without-interference-chromium/test-failed-2.png"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                        "column": 11,
+                        "line": 97
+                      }
                     },
                     {
-                      "type": "skip",
-                      "description": "Parallel research tests are slow - set RUN_SLOW_TESTS=1 to enable",
-                      "location": {
+                      "workerIndex": 1,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 95465,
+                      "error": {
+                        "message": "Error: Session 0 should have substantive response\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeGreaterThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: > \u001b[32m100\u001b[39m\nReceived:   \u001b[31m10\u001b[39m",
+                        "stack": "Error: Session 0 should have substantive response\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeGreaterThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: > \u001b[32m100\u001b[39m\nReceived:   \u001b[31m10\u001b[39m\n    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts:97:11",
+                        "location": {
+                          "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                          "column": 11,
+                          "line": 97
+                        },
+                        "snippet": "\u001b[0m \u001b[90m  95 |\u001b[39m           result\u001b[33m.\u001b[39mresponse\u001b[33m.\u001b[39mlength\u001b[33m,\u001b[39m\n \u001b[90m  96 |\u001b[39m           \u001b[32m`Session ${result.sessionId} should have substantive response`\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m  97 |\u001b[39m         )\u001b[33m.\u001b[39mtoBeGreaterThan(\u001b[35m100\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m     |\u001b[39m           \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m  98 |\u001b[39m       }\n \u001b[90m  99 |\u001b[39m\n \u001b[90m 100 |\u001b[39m       \u001b[90m// 5. Verify no cross-contamination\u001b[39m\u001b[0m"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                            "column": 11,
+                            "line": 97
+                          },
+                          "message": "Error: Session 0 should have substantive response\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBeGreaterThan\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m)\u001b[22m\n\nExpected: > \u001b[32m100\u001b[39m\nReceived:   \u001b[31m10\u001b[39m\n\n\u001b[0m \u001b[90m  95 |\u001b[39m           result\u001b[33m.\u001b[39mresponse\u001b[33m.\u001b[39mlength\u001b[33m,\u001b[39m\n \u001b[90m  96 |\u001b[39m           \u001b[32m`Session ${result.sessionId} should have substantive response`\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m  97 |\u001b[39m         )\u001b[33m.\u001b[39mtoBeGreaterThan(\u001b[35m100\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m     |\u001b[39m           \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m  98 |\u001b[39m       }\n \u001b[90m  99 |\u001b[39m\n \u001b[90m 100 |\u001b[39m       \u001b[90m// 5. Verify no cross-contamination\u001b[39m\u001b[0m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts:97:11\u001b[22m"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 1,
+                      "startTime": "2026-01-21T15:03:35.147Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                            "line": 58,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": [
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-812e6-mplete-without-interference-chromium-retry1/test-failed-1.png"
+                        },
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-812e6-mplete-without-interference-chromium-retry1/test-failed-3.png"
+                        },
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-812e6-mplete-without-interference-chromium-retry1/test-failed-2.png"
+                        },
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-812e6-mplete-without-interference-chromium-retry1/trace.zip"
+                        }
+                      ],
+                      "errorLocation": {
                         "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
-                        "line": 61,
-                        "column": 8
+                        "column": 11,
+                        "line": 97
                       }
                     }
                   ],
-                  "expectedStatus": "skipped",
-                  "projectId": "chromium",
-                  "projectName": "chromium",
-                  "results": [],
-                  "status": "skipped"
+                  "status": "unexpected"
                 }
               ],
               "id": "e6723a06b5ad56a065c2-f32753ce6c9a91b97cc1",
@@ -120,11 +245,11 @@
             },
             {
               "title": "parallel sessions handle follow-up questions with proper context",
-              "ok": true,
+              "ok": false,
               "tags": [],
               "tests": [
                 {
-                  "timeout": 900000,
+                  "timeout": 2700000,
                   "annotations": [
                     {
                       "type": "slow",
@@ -133,22 +258,133 @@
                         "line": 58,
                         "column": 8
                       }
+                    }
+                  ],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
+                    {
+                      "workerIndex": 2,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 595090,
+                      "error": {
+                        "message": "Error: Session 0 follow-up should maintain context. Expected keywords: quantum, computing, found: \n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m",
+                        "stack": "Error: Session 0 follow-up should maintain context. Expected keywords: quantum, computing, found: \n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts:192:11",
+                        "location": {
+                          "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                          "column": 11,
+                          "line": 192
+                        },
+                        "snippet": "\u001b[0m \u001b[90m 190 |\u001b[39m           contextCheck\u001b[33m.\u001b[39mmaintained\u001b[33m,\u001b[39m\n \u001b[90m 191 |\u001b[39m           \u001b[32m`Session ${i} follow-up should maintain context. Expected keywords: ${expectedContext.join(', ')}, found: ${contextCheck.foundKeywords.join(', ')}`\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 192 |\u001b[39m         )\u001b[33m.\u001b[39mtoBe(\u001b[36mtrue\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m     |\u001b[39m           \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 193 |\u001b[39m       }\n \u001b[90m 194 |\u001b[39m\n \u001b[90m 195 |\u001b[39m       \u001b[90m// PHASE 4: Verify message history\u001b[39m\u001b[0m"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                            "column": 11,
+                            "line": 192
+                          },
+                          "message": "Error: Session 0 follow-up should maintain context. Expected keywords: quantum, computing, found: \n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\n\u001b[0m \u001b[90m 190 |\u001b[39m           contextCheck\u001b[33m.\u001b[39mmaintained\u001b[33m,\u001b[39m\n \u001b[90m 191 |\u001b[39m           \u001b[32m`Session ${i} follow-up should maintain context. Expected keywords: ${expectedContext.join(', ')}, found: ${contextCheck.foundKeywords.join(', ')}`\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 192 |\u001b[39m         )\u001b[33m.\u001b[39mtoBe(\u001b[36mtrue\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m     |\u001b[39m           \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 193 |\u001b[39m       }\n \u001b[90m 194 |\u001b[39m\n \u001b[90m 195 |\u001b[39m       \u001b[90m// PHASE 4: Verify message history\u001b[39m\u001b[0m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts:192:11\u001b[22m"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 0,
+                      "startTime": "2026-01-21T15:05:13.561Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                            "line": 58,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": [
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-1212c-estions-with-proper-context-chromium/test-failed-1.png"
+                        },
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-1212c-estions-with-proper-context-chromium/test-failed-2.png"
+                        }
+                      ],
+                      "errorLocation": {
+                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                        "column": 11,
+                        "line": 192
+                      }
                     },
                     {
-                      "type": "skip",
-                      "description": "Parallel research tests are slow - set RUN_SLOW_TESTS=1 to enable",
-                      "location": {
+                      "workerIndex": 3,
+                      "parallelIndex": 0,
+                      "status": "failed",
+                      "duration": 381813,
+                      "error": {
+                        "message": "Error: Initial query for session 0 should succeed\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m",
+                        "stack": "Error: Initial query for session 0 should succeed\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts:159:96",
+                        "location": {
+                          "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                          "column": 96,
+                          "line": 159
+                        },
+                        "snippet": "\u001b[0m \u001b[90m 157 |\u001b[39m       \u001b[90m// Verify initial queries succeeded\u001b[39m\n \u001b[90m 158 |\u001b[39m       \u001b[36mfor\u001b[39m (\u001b[36mconst\u001b[39m result \u001b[36mof\u001b[39m initialResults) {\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 159 |\u001b[39m         expect(result\u001b[33m.\u001b[39msuccess\u001b[33m,\u001b[39m \u001b[32m`Initial query for session ${result.sessionId} should succeed`\u001b[39m)\u001b[33m.\u001b[39mtoBe(\n \u001b[90m     |\u001b[39m                                                                                                \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 160 |\u001b[39m           \u001b[36mtrue\u001b[39m\n \u001b[90m 161 |\u001b[39m         )\u001b[33m;\u001b[39m\n \u001b[90m 162 |\u001b[39m       }\u001b[0m"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                            "column": 96,
+                            "line": 159
+                          },
+                          "message": "Error: Initial query for session 0 should succeed\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\n\u001b[0m \u001b[90m 157 |\u001b[39m       \u001b[90m// Verify initial queries succeeded\u001b[39m\n \u001b[90m 158 |\u001b[39m       \u001b[36mfor\u001b[39m (\u001b[36mconst\u001b[39m result \u001b[36mof\u001b[39m initialResults) {\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 159 |\u001b[39m         expect(result\u001b[33m.\u001b[39msuccess\u001b[33m,\u001b[39m \u001b[32m`Initial query for session ${result.sessionId} should succeed`\u001b[39m)\u001b[33m.\u001b[39mtoBe(\n \u001b[90m     |\u001b[39m                                                                                                \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 160 |\u001b[39m           \u001b[36mtrue\u001b[39m\n \u001b[90m 161 |\u001b[39m         )\u001b[33m;\u001b[39m\n \u001b[90m 162 |\u001b[39m       }\u001b[0m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts:159:96\u001b[22m"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [],
+                      "retry": 1,
+                      "startTime": "2026-01-21T15:15:09.307Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                            "line": 58,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": [
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-1212c-estions-with-proper-context-chromium-retry1/test-failed-1.png"
+                        },
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-1212c-estions-with-proper-context-chromium-retry1/test-failed-2.png"
+                        },
+                        {
+                          "name": "trace",
+                          "contentType": "application/zip",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-1212c-estions-with-proper-context-chromium-retry1/trace.zip"
+                        }
+                      ],
+                      "errorLocation": {
                         "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
-                        "line": 61,
-                        "column": 8
+                        "column": 96,
+                        "line": 159
                       }
                     }
                   ],
-                  "expectedStatus": "skipped",
-                  "projectId": "chromium",
-                  "projectName": "chromium",
-                  "results": [],
-                  "status": "skipped"
+                  "status": "unexpected"
                 }
               ],
               "id": "e6723a06b5ad56a065c2-08f9de3c0b5e3c9ae02a",
@@ -162,7 +398,7 @@
               "tags": [],
               "tests": [
                 {
-                  "timeout": 900000,
+                  "timeout": 2700000,
                   "annotations": [
                     {
                       "type": "slow",
@@ -171,21 +407,69 @@
                         "line": 58,
                         "column": 8
                       }
-                    },
+                    }
+                  ],
+                  "expectedStatus": "passed",
+                  "projectId": "chromium",
+                  "projectName": "chromium",
+                  "results": [
                     {
-                      "type": "skip",
-                      "description": "Parallel research tests are slow - set RUN_SLOW_TESTS=1 to enable",
-                      "location": {
+                      "workerIndex": 4,
+                      "parallelIndex": 0,
+                      "status": "interrupted",
+                      "duration": 118446,
+                      "error": {
+                        "message": "Error: Initial research should succeed\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m",
+                        "stack": "Error: Initial research should succeed\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts:223:72",
+                        "location": {
+                          "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                          "column": 72,
+                          "line": 223
+                        },
+                        "snippet": "\u001b[0m \u001b[90m 221 |\u001b[39m       )\u001b[33m;\u001b[39m\n \u001b[90m 222 |\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 223 |\u001b[39m       expect(initialResult\u001b[33m.\u001b[39msuccess\u001b[33m,\u001b[39m \u001b[32m'Initial research should succeed'\u001b[39m)\u001b[33m.\u001b[39mtoBe(\u001b[36mtrue\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m     |\u001b[39m                                                                        \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 224 |\u001b[39m       expect(initialResult\u001b[33m.\u001b[39mresponse\u001b[33m.\u001b[39mlength)\u001b[33m.\u001b[39mtoBeGreaterThan(\u001b[35m100\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m 225 |\u001b[39m\n \u001b[90m 226 |\u001b[39m       \u001b[90m// Simple follow-up\u001b[39m\u001b[0m"
+                      },
+                      "errors": [
+                        {
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                            "column": 72,
+                            "line": 223
+                          },
+                          "message": "Error: Initial research should succeed\n\n\u001b[2mexpect(\u001b[22m\u001b[31mreceived\u001b[39m\u001b[2m).\u001b[22mtoBe\u001b[2m(\u001b[22m\u001b[32mexpected\u001b[39m\u001b[2m) // Object.is equality\u001b[22m\n\nExpected: \u001b[32mtrue\u001b[39m\nReceived: \u001b[31mfalse\u001b[39m\n\n\u001b[0m \u001b[90m 221 |\u001b[39m       )\u001b[33m;\u001b[39m\n \u001b[90m 222 |\u001b[39m\n\u001b[31m\u001b[1m>\u001b[22m\u001b[39m\u001b[90m 223 |\u001b[39m       expect(initialResult\u001b[33m.\u001b[39msuccess\u001b[33m,\u001b[39m \u001b[32m'Initial research should succeed'\u001b[39m)\u001b[33m.\u001b[39mtoBe(\u001b[36mtrue\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m     |\u001b[39m                                                                        \u001b[31m\u001b[1m^\u001b[22m\u001b[39m\n \u001b[90m 224 |\u001b[39m       expect(initialResult\u001b[33m.\u001b[39mresponse\u001b[33m.\u001b[39mlength)\u001b[33m.\u001b[39mtoBeGreaterThan(\u001b[35m100\u001b[39m)\u001b[33m;\u001b[39m\n \u001b[90m 225 |\u001b[39m\n \u001b[90m 226 |\u001b[39m       \u001b[90m// Simple follow-up\u001b[39m\u001b[0m\n\u001b[2m    at /Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts:223:72\u001b[22m"
+                        }
+                      ],
+                      "stdout": [],
+                      "stderr": [
+                        {
+                          "text": "Failed to close context for session 0: browserContext.close: Target page, context or browser has been closed\n    at \u001b[90m/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/\u001b[39mutils/parallel-helpers.ts:109:7\n    at cleanupParallelSessions \u001b[90m(/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/\u001b[39mutils/parallel-helpers.ts:116:3\u001b[90m)\u001b[39m\n    at \u001b[90m/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/\u001b[39mtests/parallel-research.spec.ts:247:7\n"
+                        }
+                      ],
+                      "retry": 0,
+                      "startTime": "2026-01-21T15:21:41.217Z",
+                      "annotations": [
+                        {
+                          "type": "slow",
+                          "location": {
+                            "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
+                            "line": 58,
+                            "column": 8
+                          }
+                        }
+                      ],
+                      "attachments": [
+                        {
+                          "name": "screenshot",
+                          "contentType": "image/png",
+                          "path": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/test-results/parallel-research-Parallel-7492e-follow-up-maintains-context-chromium/test-failed-1.png"
+                        }
+                      ],
+                      "errorLocation": {
                         "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
-                        "line": 61,
-                        "column": 8
+                        "column": 72,
+                        "line": 223
                       }
                     }
                   ],
-                  "expectedStatus": "skipped",
-                  "projectId": "chromium",
-                  "projectName": "chromium",
-                  "results": [],
                   "status": "skipped"
                 }
               ],
@@ -209,18 +493,9 @@
                         "line": 58,
                         "column": 8
                       }
-                    },
-                    {
-                      "type": "skip",
-                      "description": "Parallel research tests are slow - set RUN_SLOW_TESTS=1 to enable",
-                      "location": {
-                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
-                        "line": 61,
-                        "column": 8
-                      }
                     }
                   ],
-                  "expectedStatus": "skipped",
+                  "expectedStatus": "passed",
                   "projectId": "chromium",
                   "projectName": "chromium",
                   "results": [],
@@ -247,18 +522,9 @@
                         "line": 58,
                         "column": 8
                       }
-                    },
-                    {
-                      "type": "skip",
-                      "description": "Parallel research tests are slow - set RUN_SLOW_TESTS=1 to enable",
-                      "location": {
-                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
-                        "line": 61,
-                        "column": 8
-                      }
                     }
                   ],
-                  "expectedStatus": "skipped",
+                  "expectedStatus": "passed",
                   "projectId": "chromium",
                   "projectName": "chromium",
                   "results": [],
@@ -285,18 +551,9 @@
                         "line": 58,
                         "column": 8
                       }
-                    },
-                    {
-                      "type": "skip",
-                      "description": "Parallel research tests are slow - set RUN_SLOW_TESTS=1 to enable",
-                      "location": {
-                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
-                        "line": 61,
-                        "column": 8
-                      }
                     }
                   ],
-                  "expectedStatus": "skipped",
+                  "expectedStatus": "passed",
                   "projectId": "chromium",
                   "projectName": "chromium",
                   "results": [],
@@ -323,18 +580,9 @@
                         "line": 58,
                         "column": 8
                       }
-                    },
-                    {
-                      "type": "skip",
-                      "description": "Parallel research tests are slow - set RUN_SLOW_TESTS=1 to enable",
-                      "location": {
-                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
-                        "line": 61,
-                        "column": 8
-                      }
                     }
                   ],
-                  "expectedStatus": "skipped",
+                  "expectedStatus": "passed",
                   "projectId": "chromium",
                   "projectName": "chromium",
                   "results": [],
@@ -369,18 +617,9 @@
                         "line": 462,
                         "column": 8
                       }
-                    },
-                    {
-                      "type": "skip",
-                      "description": "Parallel research tests are slow - set RUN_SLOW_TESTS=1 to enable",
-                      "location": {
-                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
-                        "line": 463,
-                        "column": 8
-                      }
                     }
                   ],
-                  "expectedStatus": "skipped",
+                  "expectedStatus": "passed",
                   "projectId": "chromium",
                   "projectName": "chromium",
                   "results": [],
@@ -407,18 +646,9 @@
                         "line": 462,
                         "column": 8
                       }
-                    },
-                    {
-                      "type": "skip",
-                      "description": "Parallel research tests are slow - set RUN_SLOW_TESTS=1 to enable",
-                      "location": {
-                        "file": "/Users/michael.shtelma/Development/github/genai/deep-research/databricks-deep-research-agent/databricks-deep-research-agent/e2e/tests/parallel-research.spec.ts",
-                        "line": 463,
-                        "column": 8
-                      }
                     }
                   ],
-                  "expectedStatus": "skipped",
+                  "expectedStatus": "passed",
                   "projectId": "chromium",
                   "projectName": "chromium",
                   "results": [],
@@ -437,11 +667,11 @@
   ],
   "errors": [],
   "stats": {
-    "startTime": "2026-01-21T13:33:38.527Z",
-    "duration": 11.492999999999995,
+    "startTime": "2026-01-21T15:01:47.458Z",
+    "duration": 1312515.114,
     "expected": 0,
-    "skipped": 9,
-    "unexpected": 0,
+    "skipped": 7,
+    "unexpected": 2,
     "flaky": 0
   }
 }

@@ -7,6 +7,7 @@ Provides utilities for creating and managing databases on Lakebase.
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
 from deep_research.deployment.lakebase_connection import (
@@ -40,9 +41,10 @@ async def database_exists(
 
             workspace_client = WorkspaceClient()
 
-        # Get credentials
+        # Get credentials (request_id required by Databricks API)
         cred = workspace_client.database.generate_database_credential(
-            instance_names=[instance_name]
+            instance_names=[instance_name],
+            request_id=str(uuid.uuid4()),
         )
 
         # Get correct hostname (from PGHOST or API lookup, not derived from instance name)
@@ -99,9 +101,10 @@ async def create_database(
 
             workspace_client = WorkspaceClient()
 
-        # Get credentials
+        # Get credentials (request_id required by Databricks API)
         cred = workspace_client.database.generate_database_credential(
-            instance_names=[instance_name]
+            instance_names=[instance_name],
+            request_id=str(uuid.uuid4()),
         )
 
         # Get correct hostname (from PGHOST or API lookup, not derived from instance name)

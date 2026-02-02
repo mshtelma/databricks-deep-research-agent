@@ -4,6 +4,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 import './styles/globals.css'
 
+// External plugin entry point - child projects override via Vite alias
+import { registerExternalPlugins } from '@plugins/external'
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -13,6 +16,14 @@ const queryClient = new QueryClient({
     },
   },
 })
+
+// Register external plugins BEFORE React renders
+// This allows plugins to register output renderers, panels, etc.
+try {
+  registerExternalPlugins()
+} catch (error) {
+  console.error('[plugins] Failed to register external plugins:', error)
+}
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

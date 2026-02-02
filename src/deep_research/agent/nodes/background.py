@@ -1,6 +1,5 @@
 """Background Investigator agent - quick context gathering before planning."""
 
-import mlflow
 from mlflow.entities import SpanType
 from pydantic import BaseModel, Field
 
@@ -13,6 +12,7 @@ from deep_research.agent.prompts.background import (
 from deep_research.agent.state import ResearchState, SourceInfo
 from deep_research.agent.tools.web_search import web_search
 from deep_research.core.logging_utils import get_logger, log_tool_call, truncate
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import PHASE_BACKGROUND, research_span_name
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.types import ModelTier
@@ -99,7 +99,7 @@ async def run_background_investigator(
     """
     span_name = research_span_name(PHASE_BACKGROUND, "investigator")
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.AGENT) as span:
+    async with safe_tool_span(span_name, SpanType.AGENT) as span:
         config = get_background_config()
 
         logger.info(
@@ -199,10 +199,11 @@ async def run_background_investigator(
             )
 
             # Add span attributes
-            span.set_attributes({
-                "sources_added": len(final_results),
-                "search_queries_count": len(search_queries),
-            })
+            if span:
+                span.set_attributes({
+                    "sources_added": len(final_results),
+                    "search_queries_count": len(search_queries),
+                })
 
         except Exception as e:
             logger.error(

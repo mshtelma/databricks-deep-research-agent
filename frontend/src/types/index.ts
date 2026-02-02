@@ -1,6 +1,7 @@
 // API Types
 
 export type ChatStatus = 'active' | 'archived' | 'deleted'
+export type ChatType = 'regular' | 'incognito'
 export type MessageRole = 'user' | 'agent' | 'system'
 export type ResearchDepth = 'auto' | 'light' | 'medium' | 'extended'
 export type QueryMode = 'simple' | 'web_search' | 'deep_research'
@@ -20,9 +21,26 @@ export interface Chat {
   id: string
   title: string | null
   status: ChatStatus
+  chatType: ChatType
   createdAt: string
   updatedAt: string
   messageCount: number
+}
+
+// User Profile Types
+export interface UserProfile {
+  userId: string
+  email: string
+  displayName: string
+  workspace: string | null
+}
+
+// Incognito Session Types
+export interface IncognitoSessionStatus {
+  hasSession: boolean
+  chatCount: number
+  maxChats: number
+  expiresAt: string | null
 }
 
 export interface Message {
@@ -248,6 +266,11 @@ export interface ResearchCompletedEvent extends BaseStreamEvent {
   totalStepsSkipped: number
   planIterations: number
   totalDurationMs: number
+  // Content fields for structured output types (both snake_case and camelCase for compatibility)
+  final_report?: string | null
+  finalReport?: string | null
+  structured_output?: Record<string, unknown> | null
+  structuredOutput?: Record<string, unknown> | null
 }
 
 export interface StreamErrorEvent extends BaseStreamEvent {

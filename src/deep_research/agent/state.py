@@ -424,17 +424,29 @@ class ResearchState:
             return []
         return [s for s in self.current_plan.steps if s.status == StepStatus.COMPLETED]
 
-    def complete(self, final_report: str) -> None:
+    def complete(self, final_report: str, allow_overwrite: bool = False) -> None:
         """Mark research as complete.
 
         Args:
             final_report: The final synthesized report content.
+            allow_overwrite: If False (default), raises error if already completed.
+                Set to True to explicitly allow overwriting (use with caution).
 
         Raises:
             ValueError: If final_report is empty or contains only whitespace.
+            RuntimeError: If already completed and allow_overwrite=False.
         """
         if not final_report or not final_report.strip():
             raise ValueError("Cannot complete research with empty report")
+
+        # Idempotency guard: prevent accidental double completion
+        if self.completed_at is not None and not allow_overwrite:
+            raise RuntimeError(
+                f"Research already completed at {self.completed_at}. "
+                f"Current final_report length: {len(self.final_report) if self.final_report else 0}. "
+                f"Use allow_overwrite=True to explicitly overwrite."
+            )
+
         self.final_report = final_report
         self.completed_at = datetime.now(UTC)
 

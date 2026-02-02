@@ -8,7 +8,6 @@ Provides both:
 from dataclasses import dataclass
 from typing import Any
 
-import mlflow
 from mlflow.entities import SpanType
 
 from deep_research.agent.tools.base import (
@@ -19,6 +18,7 @@ from deep_research.agent.tools.base import (
 )
 from deep_research.agent.tools.url_registry import UrlRegistry
 from deep_research.core.logging_utils import get_logger, truncate
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
     ATTR_SEARCH_COUNT,
     ATTR_SEARCH_QUERY,
@@ -74,13 +74,11 @@ async def web_search(
     """
     span_name = tool_span_name("web_search", context)
 
-    with mlflow.start_span(name=span_name, span_type=SpanType.TOOL) as span:
-        span.set_attributes({
-            ATTR_SEARCH_QUERY: truncate_for_attr(query, 150),
-            ATTR_SEARCH_COUNT: count,
-            "search.freshness": freshness or "any",
-        })
-
+    async with safe_tool_span(span_name, SpanType.TOOL, {
+        ATTR_SEARCH_QUERY: truncate_for_attr(query, 150),
+        ATTR_SEARCH_COUNT: count,
+        "search.freshness": freshness or "any",
+    }) as span:
         search_client = client
 
         logger.info(
@@ -116,10 +114,11 @@ async def web_search(
         )
 
         # Set output attributes
-        span.set_attributes({
-            ATTR_SEARCH_RESULTS_COUNT: len(results),
-            ATTR_SEARCH_TOP_URLS: list_to_attr(urls, max_items=5),
-        })
+        if span:
+            span.set_attributes({
+                ATTR_SEARCH_RESULTS_COUNT: len(results),
+                ATTR_SEARCH_TOP_URLS: list_to_attr(urls, max_items=5),
+            })
 
         return WebSearchOutput(
             results=results,

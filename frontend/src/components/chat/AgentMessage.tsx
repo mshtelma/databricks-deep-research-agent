@@ -17,6 +17,23 @@ import { MarkdownRenderer, CitationContext } from '@/components/common';
 import { EvidenceCard, SourceGroupedCitations } from '@/components/citations';
 import { MessageExportMenu } from './MessageExportMenu';
 import type { Claim, VerificationSummary } from '@/types/citation';
+import { ComponentRegistry } from '@/core/plugins';
+
+/**
+ * Parse structured output from message content.
+ * Detects JSON with output_type field for plugin renderer lookup.
+ */
+function parseStructuredOutput(content: string): { outputType: string; data: Record<string, unknown> } | null {
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === 'object' && parsed.output_type) {
+      return { outputType: parsed.output_type, data: parsed };
+    }
+  } catch {
+    // Not JSON, ignore
+  }
+  return null;
+}
 
 interface ReasoningSummary {
   planTitle?: string;
@@ -78,6 +95,21 @@ export function AgentMessage({
 
   const hasReasoning = reasoning || (plan && plan.steps && plan.steps.length > 0);
   const hasCitations = enableCitations && claims.length > 0;
+
+  // Check for structured output with custom renderer
+  const structuredOutput = React.useMemo(
+    () => parseStructuredOutput(message.content),
+    [message.content]
+  );
+
+  // Look up custom renderer from ComponentRegistry
+  const CustomRenderer = React.useMemo(() => {
+    if (structuredOutput) {
+      const renderer = ComponentRegistry.getRenderer(structuredOutput.outputType);
+      return renderer?.component ?? null;
+    }
+    return null;
+  }, [structuredOutput]);
 
   // Floating UI setup for smart popover positioning
   const isPopoverOpen = popoverClaim !== null;
@@ -213,20 +245,28 @@ export function AgentMessage({
 
           {/* Message content with markdown rendering and citation support */}
           <div className="relative">
-            <MarkdownRenderer
-              content={message.content}
-              enableCitations={enableCitations || !isStreaming}
-              // IMPORTANT:
-              // - When we have verified claims, force numeric/key parsing so [Arxiv] / [1] markers become interactive.
-              // - When we DON'T have claims yet (e.g., deferred persistence / slow DB), use 'auto' so we still
-              //   parse numeric markers OR link citations depending on what the model produced.
-              citationMode={claims.length > 0 ? 'numeric' : 'auto'}
-              citationData={citationData}
-              onCitationClick={handleCitationClick}
-              onCitationHover={handleCitationHover}
-              activeCitationKey={activeCitationKey}
-            />
-            {isStreaming && (
+            {/* Use custom renderer if available for structured output */}
+            {CustomRenderer && structuredOutput ? (
+              <CustomRenderer
+                data={structuredOutput.data}
+                context={{ theme: 'light', userId: null }}
+              />
+            ) : (
+              <MarkdownRenderer
+                content={message.content}
+                enableCitations={enableCitations || !isStreaming}
+                // IMPORTANT:
+                // - When we have verified claims, force numeric/key parsing so [Arxiv] / [1] markers become interactive.
+                // - When we DON'T have claims yet (e.g., deferred persistence / slow DB), use 'auto' so we still
+                //   parse numeric markers OR link citations depending on what the model produced.
+                citationMode={claims.length > 0 ? 'numeric' : 'auto'}
+                citationData={citationData}
+                onCitationClick={handleCitationClick}
+                onCitationHover={handleCitationHover}
+                activeCitationKey={activeCitationKey}
+              />
+            )}
+            {isStreaming && !CustomRenderer && (
               <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 align-text-bottom" />
             )}
 

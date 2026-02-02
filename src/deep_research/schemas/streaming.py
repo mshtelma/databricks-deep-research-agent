@@ -238,6 +238,49 @@ class PersistenceCompletedEvent(BaseStreamEvent):
     counts: dict[str, int]  # Entity counts from persistence
 
 
+# Custom phase execution events
+class PhaseStartedEvent(BaseStreamEvent):
+    """Emitted when a custom research phase starts execution."""
+
+    event_type: Literal["phase_started"] = "phase_started"
+    phase_name: str
+    description: str = ""
+
+
+class PhaseCompletedEvent(BaseStreamEvent):
+    """Emitted when a custom research phase completes successfully."""
+
+    event_type: Literal["phase_completed"] = "phase_completed"
+    phase_name: str
+    duration_ms: float = 0
+    sources_count: int = 0
+
+
+class PhaseSkippedEvent(BaseStreamEvent):
+    """Emitted when a phase is skipped (should_run=False)."""
+
+    event_type: Literal["phase_skipped"] = "phase_skipped"
+    phase_name: str
+    reason: str = "should_run returned False"
+
+
+class PhaseErrorEvent(BaseStreamEvent):
+    """Emitted when a custom research phase fails."""
+
+    event_type: Literal["phase_error"] = "phase_error"
+    phase_name: str
+    error: str
+    recoverable: bool = True
+
+
+class CustomPhaseModeStartedEvent(BaseStreamEvent):
+    """Emitted when research enters custom phase mode (planner disabled)."""
+
+    event_type: Literal["custom_phase_mode_started"] = "custom_phase_mode_started"
+    total_phases: int
+    phase_names: list[str]
+
+
 # Union type for all stream events
 StreamEvent = (
     AgentStartedEvent
@@ -262,4 +305,10 @@ StreamEvent = (
     # Lifecycle events
     | ResearchStartedEvent
     | PersistenceCompletedEvent
+    # Custom phase execution events
+    | PhaseStartedEvent
+    | PhaseCompletedEvent
+    | PhaseSkippedEvent
+    | PhaseErrorEvent
+    | CustomPhaseModeStartedEvent
 )

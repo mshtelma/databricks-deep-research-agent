@@ -14,6 +14,7 @@ import base64
 import json
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -156,9 +157,10 @@ def get_lakebase_connection_info(
     # Get port from environment or default
     port = int(os.environ.get("PGPORT", "5432"))
 
-    # Generate credential
+    # Generate credential (request_id required by Databricks API)
     cred = workspace_client.database.generate_database_credential(
-        instance_names=[instance_name]
+        instance_names=[instance_name],
+        request_id=str(uuid.uuid4()),
     )
 
     if not cred.token:

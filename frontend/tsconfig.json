@@ -24,7 +24,8 @@
     /* Paths */
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@plugins/external": ["./src/plugins/external.ts"]
     }
   },
   "include": ["src"],

@@ -10,6 +10,7 @@ The solution is TracedAsyncIterator which:
 - Captures metrics incrementally during streaming
 """
 
+import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -19,6 +20,8 @@ import mlflow
 from mlflow.entities import SpanType
 
 from deep_research.services.llm.types import ModelTier, StreamWithToolsChunk
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_messages_for_span(messages: list[dict[str, Any]] | None) -> list[dict[str, str]] | None:
@@ -187,6 +190,26 @@ class TracedAsyncIterator(AsyncIterator[T]):
             "llm.has_tools": self._has_tools,
         })
 
+    def __del__(self) -> None:
+        """Cleanup on garbage collection.
+
+        When an async iterator is abandoned (e.g., task cancelled), Python's GC
+        eventually finalizes the object. We need to clean up the span context
+        manager here to prevent "Token was created in a different Context" errors.
+
+        Note: We silently swallow ALL exceptions because:
+        1. The span data is already recorded to MLflow
+        2. Only the ContextVar token detach fails, which is benign
+        3. Raising exceptions in __del__ is problematic
+        """
+        if self._span_cm is not None and not self._finished:
+            try:
+                self._span_cm.__exit__(None, None, None)
+            except Exception:
+                pass  # Silently ignore - cannot raise in __del__
+            finally:
+                self._finished = True
+
     def _end_span(self) -> None:
         """End the MLflow span with final metrics."""
         if self._finished or self._span is None:
@@ -217,7 +240,19 @@ class TracedAsyncIterator(AsyncIterator[T]):
         self._span.set_outputs({"content": accumulated})
 
         # Exit the context manager properly - this ends the span and cleans up trace context
-        self._span_cm.__exit__(None, None, None)
+        # Note: In async contexts, the ContextVar token may have been created in a different
+        # context due to asyncio task scheduling. The span data is already recorded - only
+        # the cleanup token detach may fail, which is benign.
+        try:
+            self._span_cm.__exit__(None, None, None)
+        except ValueError as e:
+            # Catch ALL ValueErrors during __exit__ - span data is already recorded.
+            # The most common is "Token was created in a different Context" but any
+            # ValueError here is benign since the span is already persisted.
+            logger.debug(f"Span cleanup suppressed (benign): {type(e).__name__}: {e}")
+        except Exception as e:
+            # Other exceptions during cleanup are also benign - span is recorded
+            logger.debug(f"Span cleanup warning: {type(e).__name__}: {e}")
 
     def __aiter__(self) -> "TracedAsyncIterator[T]":
         """Return self as the async iterator."""

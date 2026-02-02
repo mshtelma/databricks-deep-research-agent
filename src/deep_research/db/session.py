@@ -22,7 +22,6 @@ logger = logging.getLogger(__name__)
 _engine: AsyncEngine | None = None
 _async_session_maker: async_sessionmaker[AsyncSession] | None = None
 _credential_provider: LakebaseCredentialProvider | None = None
-_pending_disposal_tasks: set[asyncio.Task[None]] = set()
 
 
 async def _dispose_engine_async(engine: AsyncEngine) -> None:
@@ -102,27 +101,42 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
     # Proactive token refresh check (Lakebase only)
     if settings.use_lakebase and _credential_provider is not None:
         cred = _credential_provider._credential
+        if cred is not None:
+            logger.info(
+                "LAKEBASE_ENGINE_CHECK credential_exists=True expires_at=%s "
+                "is_expired=%s engine_exists=%s",
+                cred.expires_at.isoformat(),
+                cred.is_expired,
+                _engine is not None,
+            )
         if cred is not None and cred.is_expired:
-            logger.info("Lakebase token expired or expiring soon, recreating engine...")
-            # Force credential refresh
+            logger.info("LAKEBASE_ENGINE_REFRESH_TRIGGERED reason=token_expired_or_expiring")
+            # Force credential refresh FIRST
             _credential_provider.get_credential(force_refresh=True)
-            # Clear engine to force reconnection with new URL
+            # Clear engine and schedule disposal in the SAME event loop
             if _engine is not None:
                 engine_to_dispose = _engine
                 _engine = None
                 _async_session_maker = None
 
-                # Safely dispose engine (can't await in sync function)
+                # Schedule disposal in the SAME event loop where connections live.
+                # This avoids "Future attached to a different loop" errors that occur
+                # when asyncio.run() creates a NEW event loop in a thread.
+                #
+                # Safety guarantees if disposal is delayed:
+                # - pool_pre_ping=True validates connections before use
+                # - pool_recycle=2700 refreshes connections every 45 min
+                # - _dispose_engine_async() has try/except for safe disposal
                 try:
                     loop = asyncio.get_running_loop()
-                    # Running loop exists - schedule and track the task
-                    task = loop.create_task(_dispose_engine_async(engine_to_dispose))
-                    # Store reference to prevent GC before completion
-                    _pending_disposal_tasks.add(task)
-                    task.add_done_callback(_pending_disposal_tasks.discard)
+                    # Fire-and-forget: schedule in same loop, don't block
+                    loop.create_task(_dispose_engine_async(engine_to_dispose))
+                    logger.info("LAKEBASE_ENGINE_DISPOSED scheduled=True")
                 except RuntimeError:
-                    # No running loop - create one for cleanup
-                    asyncio.run(_dispose_engine_async(engine_to_dispose))
+                    # No running loop - extremely rare since get_engine() is always
+                    # called from async contexts (get_db, job_manager, etc.)
+                    # pool_pre_ping will validate connections on next use
+                    logger.info("LAKEBASE_ENGINE_DISPOSED deferred=True no_running_loop=True")
 
     if _engine is None:
         database_url = get_database_url(settings)
@@ -138,8 +152,10 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
             pool_size=10,
             max_overflow=20,
             pool_pre_ping=True,
-            # For Lakebase: shorter pool recycle to handle token expiry
-            pool_recycle=3000 if settings.use_lakebase else 3600,
+            # For Lakebase: recycle connections at 45 min (2700s) to ensure they're
+            # refreshed BEFORE the 5-minute token expiry buffer kicks in at 55 min.
+            # This prevents pooled connections from holding stale tokens.
+            pool_recycle=2700 if settings.use_lakebase else 3600,
             connect_args=connect_args,
         )
 

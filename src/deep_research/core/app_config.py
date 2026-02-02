@@ -1175,11 +1175,56 @@ class PluginConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class LifecycleHooksConfig(BaseModel):
+    """Configuration for plugin lifecycle hooks feature.
+
+    Controls gradual rollout and performance tuning of lifecycle callbacks.
+
+    Gradual rollout strategy (via YAML config):
+    - Phase 1: enabled: false (default, no hooks)
+    - Phase 2: enabled: true, allowlist: [on_job_submitted]
+    - Phase 3: allowlist: [on_job_submitted, on_job_completed, on_job_failed]
+    - Phase 4: allowlist: [] (empty = all enabled)
+    - Phase 5: Remove feature flag entirely (always enabled)
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable lifecycle hooks (experimental - gradual rollout)",
+    )
+    allowlist: set[str] = Field(
+        default_factory=set,
+        description="Only these hooks are enabled (empty = all allowed)",
+    )
+    denylist: set[str] = Field(
+        default_factory=set,
+        description="These hooks are explicitly disabled",
+    )
+    timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=300,
+        description="Timeout for plugin hooks (prevents infinite hangs)",
+    )
+    max_sync_workers: int = Field(
+        default=4,
+        ge=1,
+        le=32,
+        description="Max thread pool workers for sync hooks",
+    )
+
+    model_config = {"frozen": True}
+
+
 class PluginsConfig(BaseModel):
     """Container for all plugin configurations.
 
     Example YAML:
         plugins:
+          lifecycle_hooks:
+            enabled: true
+            allowlist: ["on_job_submitted", "on_job_completed"]
+            timeout_seconds: 30
           vector_search:
             enabled: true
             settings:
@@ -1196,6 +1241,12 @@ class PluginsConfig(BaseModel):
     configs: dict[str, PluginConfig] = Field(
         default_factory=dict,
         description="Per-plugin configuration by name",
+    )
+
+    # Lifecycle hooks configuration
+    lifecycle_hooks: LifecycleHooksConfig = Field(
+        default_factory=LifecycleHooksConfig,
+        description="Plugin lifecycle callback configuration",
     )
 
     model_config = {"frozen": True}

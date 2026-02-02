@@ -8,7 +8,6 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any, cast
 
-import mlflow
 import openai
 from mlflow.entities import SpanType
 from openai import AsyncOpenAI, AsyncStream
@@ -26,6 +25,7 @@ from deep_research.core.logging_utils import (
     log_llm_request,
     log_llm_response,
 )
+from deep_research.core.tracing import safe_tool_span
 from deep_research.services.llm.config import ModelConfig
 from deep_research.services.llm.types import (
     EndpointHealth,
@@ -567,19 +567,17 @@ class LLMClient:
         log_llm_prompt(logger, system_prompt=system_msg, user_prompt=user_msg or "")
 
         # Wrap LLM call in MLflow span for tracing
-        with mlflow.start_span(
-            name=f"llm_{tier.value}", span_type=SpanType.CHAT_MODEL
-        ) as span:
-            span.set_attributes({
-                "llm.tier": tier.value,
-                "llm.endpoint": endpoint.endpoint_identifier,
-                "llm.message_count": len(messages),
-                "llm.max_tokens": config.get("max_tokens"),
-                "llm.temperature": config.get("temperature"),
-            })
+        async with safe_tool_span(f"llm_{tier.value}", SpanType.CHAT_MODEL, {
+            "llm.tier": tier.value,
+            "llm.endpoint": endpoint.endpoint_identifier,
+            "llm.message_count": len(messages),
+            "llm.max_tokens": config.get("max_tokens"),
+            "llm.temperature": config.get("temperature"),
+        }) as span:
             # Capture input messages for tracing visibility
             # Normalize to avoid Pydantic serialization warnings with list content
-            span.set_inputs({"messages": normalize_messages_for_logging(messages)})
+            if span:
+                span.set_inputs({"messages": normalize_messages_for_logging(messages)})
 
             start_time = time.perf_counter()
 
@@ -595,18 +593,21 @@ class LLMClient:
                 }
 
                 # Add structured output if requested and supported
-                if structured_output and endpoint.supports_structured_output:
-                    request_kwargs["response_format"] = {
-                        "type": "json_schema",
-                        "json_schema": {
-                            "name": structured_output.__name__,
-                            "schema": structured_output.model_json_schema(),
-                        },
-                    }
-                    logger.debug(
-                        "Using structured output",
-                        schema=structured_output.__name__,
+                if structured_output:
+                    logger.info(
+                        "LLM_STRUCTURED_OUTPUT_REQUEST",
+                        schema_name=structured_output.__name__,
+                        endpoint_supports_structured=endpoint.supports_structured_output,
+                        will_use_response_format=endpoint.supports_structured_output,
                     )
+                    if endpoint.supports_structured_output:
+                        request_kwargs["response_format"] = {
+                            "type": "json_schema",
+                            "json_schema": {
+                                "name": structured_output.__name__,
+                                "schema": structured_output.model_json_schema(),
+                            },
+                        }
 
                 response = await self._client.chat.completions.create(**request_kwargs)
 
@@ -625,6 +626,12 @@ class LLMClient:
                 if structured_output:
                     try:
                         structured = structured_output.model_validate_json(content)
+                        logger.info(
+                            "LLM_STRUCTURED_OUTPUT_PARSE",
+                            schema_name=structured_output.__name__,
+                            parse_success=True,
+                            content_len=len(content) if content else 0,
+                        )
                     except (json.JSONDecodeError, ValueError, PydanticValidationError) as e:
                         logger.warning(
                             "Structured output parse failed, attempting repair",
@@ -639,7 +646,13 @@ class LLMClient:
                             structured = structured_output.model_validate(
                                 json.loads(repaired)
                             )
-                            logger.debug("JSON repair successful")
+                            logger.info(
+                                "LLM_STRUCTURED_OUTPUT_PARSE",
+                                schema_name=structured_output.__name__,
+                                parse_success=True,
+                                content_len=len(content) if content else 0,
+                                repair_used=True,
+                            )
                         except (json.JSONDecodeError, ValueError, PydanticValidationError) as repair_e:
                             # Repair fixed JSON but validation still failed (e.g., max_length)
                             logger.warning(
@@ -647,6 +660,12 @@ class LLMClient:
                                 original_error=str(e)[:100],
                                 repair_error=str(repair_e)[:100],
                                 schema=structured_output.__name__,
+                            )
+                            logger.info(
+                                "LLM_STRUCTURED_OUTPUT_PARSE",
+                                schema_name=structured_output.__name__,
+                                parse_success=False,
+                                content_len=len(content) if content else 0,
                             )
                             # structured remains None - caller handles fallback
 
@@ -666,12 +685,13 @@ class LLMClient:
                 health.record_tokens(usage["total_tokens"])
 
                 # Add response metrics to span
-                span.set_attributes({
-                    "llm.input_tokens": usage["prompt_tokens"],
-                    "llm.output_tokens": usage["completion_tokens"],
-                    "llm.total_tokens": usage["total_tokens"],
-                    "llm.latency_ms": duration_ms,
-                })
+                if span:
+                    span.set_attributes({
+                        "llm.input_tokens": usage["prompt_tokens"],
+                        "llm.output_tokens": usage["completion_tokens"],
+                        "llm.total_tokens": usage["total_tokens"],
+                        "llm.latency_ms": duration_ms,
+                    })
 
                 # Log the response
                 log_llm_response(
@@ -688,7 +708,8 @@ class LLMClient:
                 )
 
                 # Capture output for tracing visibility
-                span.set_outputs({"content": content, "usage": usage})
+                if span:
+                    span.set_outputs({"content": content, "usage": usage})
 
                 # Reset auth retry count on successful request
                 self._reset_auth_retry_count()
@@ -711,11 +732,12 @@ class LLMClient:
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 health.mark_failure(rate_limited=False)
 
-                span.set_attributes({
-                    "llm.error": True,
-                    "llm.error_type": type(e).__name__,
-                    "llm.auth_retry": True,
-                })
+                if span:
+                    span.set_attributes({
+                        "llm.error": True,
+                        "llm.error_type": type(e).__name__,
+                        "llm.auth_retry": True,
+                    })
 
                 logger.warning(
                     "LLM_AUTH_ERROR",
@@ -744,11 +766,12 @@ class LLMClient:
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 health.mark_failure(rate_limited=True)
 
-                span.set_attributes({
-                    "llm.error": True,
-                    "llm.error_type": "RateLimitError",
-                    "llm.is_rate_limit": True,
-                })
+                if span:
+                    span.set_attributes({
+                        "llm.error": True,
+                        "llm.error_type": "RateLimitError",
+                        "llm.is_rate_limit": True,
+                    })
 
                 # Check for fallback endpoint (uses helper with time-based recovery)
                 fallback = self._find_fallback_endpoint(role, endpoint.id, estimated_tokens)
@@ -787,12 +810,13 @@ class LLMClient:
                 is_not_found = e.status_code == 404
                 health.mark_failure(rate_limited=is_rate_limit)
 
-                span.set_attributes({
-                    "llm.error": True,
-                    "llm.error_type": type(e).__name__,
-                    "llm.status_code": e.status_code,
-                    "llm.is_rate_limit": is_rate_limit,
-                })
+                if span:
+                    span.set_attributes({
+                        "llm.error": True,
+                        "llm.error_type": type(e).__name__,
+                        "llm.status_code": e.status_code,
+                        "llm.is_rate_limit": is_rate_limit,
+                    })
 
                 # Enhanced logging for 404 ENDPOINT_NOT_FOUND errors
                 if is_not_found:
@@ -866,10 +890,11 @@ class LLMClient:
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 health.mark_failure(rate_limited=False)
 
-                span.set_attributes({
-                    "llm.error": True,
-                    "llm.error_type": "APIConnectionError",
-                })
+                if span:
+                    span.set_attributes({
+                        "llm.error": True,
+                        "llm.error_type": "APIConnectionError",
+                    })
 
                 log_llm_error(
                     logger,
@@ -888,10 +913,11 @@ class LLMClient:
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 health.mark_failure(rate_limited=False)
 
-                span.set_attributes({
-                    "llm.error": True,
-                    "llm.error_type": type(e).__name__,
-                })
+                if span:
+                    span.set_attributes({
+                        "llm.error": True,
+                        "llm.error_type": type(e).__name__,
+                    })
 
                 log_llm_error(
                     logger,

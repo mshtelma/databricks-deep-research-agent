@@ -46,6 +46,11 @@ export const ResearchCompletedEventSchema = BaseEventSchema.extend({
   planIterations: z.number().optional(), // camelCase variant
   total_duration_ms: z.number().optional(),
   totalDurationMs: z.number().optional(), // camelCase variant
+  // Content fields for structured output types (e.g., meeting_prep)
+  final_report: z.string().nullable().optional(),
+  finalReport: z.string().nullable().optional(), // camelCase variant
+  structured_output: z.record(z.string(), z.unknown()).nullable().optional(),
+  structuredOutput: z.record(z.string(), z.unknown()).nullable().optional(), // camelCase variant
 });
 
 // Plan events

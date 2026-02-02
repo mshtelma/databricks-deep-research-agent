@@ -8,6 +8,7 @@ for instances to become available.
 
 import asyncio
 import logging
+import uuid
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -36,8 +37,10 @@ async def check_lakebase_health(
             workspace_client = WorkspaceClient()
 
         # Try to generate a credential - this validates the instance is ready
+        # request_id is required by the Databricks API (even though SDK marks it optional)
         response = workspace_client.database.generate_database_credential(
-            instance_names=[instance_name]
+            instance_names=[instance_name],
+            request_id=str(uuid.uuid4()),
         )
 
         # Check that we got a valid token back

@@ -53,6 +53,7 @@ from deep_research.core.app_config import (
     get_app_config,
 )
 from deep_research.core.logging_utils import get_logger, truncate
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
     ATTR_CLAIM_INDEX,
     ATTR_CLAIM_TEXT,
@@ -407,7 +408,7 @@ class VerificationRetriever:
         """
         span_name = citation_span_name(STAGE_7_ARE, OP_RETRIEVE_AND_REVISE)
 
-        with mlflow.start_span(name=span_name, span_type=SpanType.CHAIN) as span:
+        async with safe_tool_span(span_name, SpanType.CHAIN) as span:
             # Initialize metrics and tracking
             self.metrics = VerificationRetrievalMetrics()
             self._new_external_evidence_with_keys = []
@@ -423,19 +424,21 @@ class VerificationRetriever:
             claims_to_process = self._filter_claims(claims)
 
             # Set input attributes
-            span.set_attributes({
-                ATTR_INPUT_CLAIMS_COUNT: len(claims),
-                "input.filtered_claims": len(claims_to_process),
-                ATTR_INPUT_EVIDENCE_POOL_SIZE: len(evidence_pool),
-                "input.trigger_verdicts": str(list(self.config.trigger_on_verdicts)),
-            })
+            if span:
+                span.set_attributes({
+                    ATTR_INPUT_CLAIMS_COUNT: len(claims),
+                    "input.filtered_claims": len(claims_to_process),
+                    ATTR_INPUT_EVIDENCE_POOL_SIZE: len(evidence_pool),
+                    "input.trigger_verdicts": str(list(self.config.trigger_on_verdicts)),
+                })
 
             if not claims_to_process:
                 logger.info("STAGE_7_SKIP", reason="No claims to process")
-                span.set_attributes({
-                    "output.skipped": True,
-                    "output.skip_reason": "No unsupported or partial claims",
-                })
+                if span:
+                    span.set_attributes({
+                        "output.skipped": True,
+                        "output.skip_reason": "No unsupported or partial claims",
+                    })
                 yield VerificationEvent(
                     "stage_7_skipped",
                     {"reason": "No unsupported or partial claims"},
@@ -501,18 +504,19 @@ class VerificationRetriever:
                     )
 
             # Set output attributes
-            span.set_attributes({
-                "output.skipped": False,
-                "output.claims_processed": self.metrics.total_claims_processed,
-                "output.facts_verified": self.metrics.facts_verified,
-                "output.facts_softened": self.metrics.facts_softened,
-                ATTR_OUTPUT_FULLY_VERIFIED: self.metrics.claims_fully_verified,
-                ATTR_OUTPUT_PARTIALLY_SOFTENED: self.metrics.claims_partially_softened,
-                ATTR_OUTPUT_FULLY_SOFTENED: self.metrics.claims_fully_softened,
-                "output.internal_searches": self.metrics.internal_searches,
-                "output.external_searches": self.metrics.external_searches,
-                "output.entailment_checks": self.metrics.entailment_checks,
-            })
+            if span:
+                span.set_attributes({
+                    "output.skipped": False,
+                    "output.claims_processed": self.metrics.total_claims_processed,
+                    "output.facts_verified": self.metrics.facts_verified,
+                    "output.facts_softened": self.metrics.facts_softened,
+                    ATTR_OUTPUT_FULLY_VERIFIED: self.metrics.claims_fully_verified,
+                    ATTR_OUTPUT_PARTIALLY_SOFTENED: self.metrics.claims_partially_softened,
+                    ATTR_OUTPUT_FULLY_SOFTENED: self.metrics.claims_fully_softened,
+                    "output.internal_searches": self.metrics.internal_searches,
+                    "output.external_searches": self.metrics.external_searches,
+                    "output.entailment_checks": self.metrics.entailment_checks,
+                })
 
             # Final summary
             yield VerificationEvent("stage_7_complete", self.metrics.to_dict())
@@ -575,14 +579,11 @@ class VerificationRetriever:
         """
         span_name = citation_span_name(STAGE_7_ARE, OP_PROCESS, claim_index)
 
-        with mlflow.start_span(name=span_name, span_type=SpanType.CHAIN) as span:
-            # Set input attributes
-            span.set_attributes({
-                ATTR_CLAIM_INDEX: claim_index,
-                ATTR_CLAIM_TEXT: truncate_for_attr(claim.claim_text, 150),
-                ATTR_CLAIM_VERDICT: claim.verification_verdict or "unknown",
-            })
-
+        async with safe_tool_span(span_name, SpanType.CHAIN, {
+            ATTR_CLAIM_INDEX: claim_index,
+            ATTR_CLAIM_TEXT: truncate_for_attr(claim.claim_text, 150),
+            ATTR_CLAIM_VERDICT: claim.verification_verdict or "unknown",
+        }) as span:
             # Step 1: Decompose claim into atomic facts
             decomposition = await self.decomposer.decompose(claim, claim_index)
             self.metrics.total_atomic_facts += len(decomposition.atomic_facts)
@@ -593,9 +594,10 @@ class VerificationRetriever:
                 fact_count=len(decomposition.atomic_facts),
             )
 
-            span.set_attributes({
-                ATTR_DECOMPOSITION_FACT_COUNT: len(decomposition.atomic_facts),
-            })
+            if span:
+                span.set_attributes({
+                    ATTR_DECOMPOSITION_FACT_COUNT: len(decomposition.atomic_facts),
+                })
 
             # Step 2: Verify each atomic fact
             for fact in decomposition.atomic_facts:
@@ -629,13 +631,14 @@ class VerificationRetriever:
                 revision_type = "fully_softened"
 
             # Set output attributes
-            span.set_attributes({
-                ATTR_REVISION_TYPE: revision_type,
-                ATTR_VERIFIED_COUNT: decomposition.verified_count,
-                ATTR_SOFTENED_COUNT: decomposition.total_count - decomposition.verified_count,
-                "revision.all_verified": decomposition.all_verified,
-                "revision.partial_verified": decomposition.partial_verified,
-            })
+            if span:
+                span.set_attributes({
+                    ATTR_REVISION_TYPE: revision_type,
+                    ATTR_VERIFIED_COUNT: decomposition.verified_count,
+                    ATTR_SOFTENED_COUNT: decomposition.total_count - decomposition.verified_count,
+                    "revision.all_verified": decomposition.all_verified,
+                    "revision.partial_verified": decomposition.partial_verified,
+                })
 
             return ClaimRevision(
                 original_claim=claim.claim_text,
@@ -676,26 +679,24 @@ class VerificationRetriever:
         """
         span_name = citation_span_name(STAGE_7_ARE, OP_VERIFY, claim_index, fact.fact_index)
 
-        with mlflow.start_span(name=span_name, span_type=SpanType.CHAIN) as span:
-            # Set input attributes
-            span.set_attributes({
-                ATTR_CLAIM_INDEX: claim_index,
-                ATTR_FACT_INDEX: fact.fact_index,
-                ATTR_FACT_TEXT: truncate_for_attr(fact.fact_text, 150),
-            })
-
+        async with safe_tool_span(span_name, SpanType.CHAIN, {
+            ATTR_CLAIM_INDEX: claim_index,
+            ATTR_FACT_INDEX: fact.fact_index,
+            ATTR_FACT_TEXT: truncate_for_attr(fact.fact_text, 150),
+        }) as span:
             # Step 1: Search internal evidence pool
             internal_span_name = citation_span_name(STAGE_7_ARE, OP_INTERNAL_SEARCH, claim_index, fact.fact_index)
-            with mlflow.start_span(name=internal_span_name, span_type=SpanType.RETRIEVER) as internal_span:
+            async with safe_tool_span(internal_span_name, SpanType.RETRIEVER) as internal_span:
                 self.metrics.internal_searches += 1
                 internal_results = internal_searcher.search(
                     fact.fact_text,
                     threshold=self.config.internal_search_threshold,
                 )
-                internal_span.set_attributes({
-                    "search.results_count": len(internal_results),
-                    "search.threshold": self.config.internal_search_threshold,
-                })
+                if internal_span:
+                    internal_span.set_attributes({
+                        "search.results_count": len(internal_results),
+                        "search.threshold": self.config.internal_search_threshold,
+                    })
 
                 for evidence, score in internal_results:
                     # Check entailment
@@ -714,18 +715,21 @@ class VerificationRetriever:
                             fact=truncate(fact.fact_text, 50),
                             score=f"{ent_score:.2f}",
                         )
-                        internal_span.set_attributes({
-                            ATTR_VERIFIED: True,
-                            ATTR_ENTAILMENT_SCORE: ent_score,
-                        })
-                        span.set_attributes({
-                            ATTR_VERIFIED: True,
-                            ATTR_EVIDENCE_SOURCE: "internal",
-                            ATTR_ENTAILMENT_SCORE: ent_score,
-                        })
+                        if internal_span:
+                            internal_span.set_attributes({
+                                ATTR_VERIFIED: True,
+                                ATTR_ENTAILMENT_SCORE: ent_score,
+                            })
+                        if span:
+                            span.set_attributes({
+                                ATTR_VERIFIED: True,
+                                ATTR_EVIDENCE_SOURCE: "internal",
+                                ATTR_ENTAILMENT_SCORE: ent_score,
+                            })
                         return
 
-                internal_span.set_attributes({ATTR_VERIFIED: False})
+                if internal_span:
+                    internal_span.set_attributes({ATTR_VERIFIED: False})
 
             # Step 2: External search if internal didn't find supporting evidence
             if not fact.is_verified and self.brave_client and self.web_crawler:
@@ -736,23 +740,24 @@ class VerificationRetriever:
                     sources=sources,
                 )
 
-            if fact.is_verified:
-                span.set_attributes({
-                    ATTR_VERIFIED: True,
-                    ATTR_EVIDENCE_SOURCE: fact.evidence_source.value,
-                    ATTR_ENTAILMENT_SCORE: fact.entailment_score,
-                })
-            else:
-                logger.debug(
-                    "FACT_UNVERIFIED",
-                    fact=truncate(fact.fact_text, 50),
-                    searches=len(fact.search_queries),
-                )
-                span.set_attributes({
-                    ATTR_VERIFIED: False,
-                    ATTR_EVIDENCE_SOURCE: "none",
-                    "search.external_attempts": len(fact.search_queries),
-                })
+            if span:
+                if fact.is_verified:
+                    span.set_attributes({
+                        ATTR_VERIFIED: True,
+                        ATTR_EVIDENCE_SOURCE: fact.evidence_source.value,
+                        ATTR_ENTAILMENT_SCORE: fact.entailment_score,
+                    })
+                else:
+                    logger.debug(
+                        "FACT_UNVERIFIED",
+                        fact=truncate(fact.fact_text, 50),
+                        searches=len(fact.search_queries),
+                    )
+                    span.set_attributes({
+                        ATTR_VERIFIED: False,
+                        ATTR_EVIDENCE_SOURCE: "none",
+                        "search.external_attempts": len(fact.search_queries),
+                    })
 
     async def _search_external(
         self,
@@ -774,13 +779,11 @@ class VerificationRetriever:
 
         span_name = citation_span_name(STAGE_7_ARE, OP_EXTERNAL_SEARCH, claim_index, fact.fact_index)
 
-        with mlflow.start_span(name=span_name, span_type=SpanType.RETRIEVER) as span:
-            span.set_attributes({
-                ATTR_FACT_INDEX: fact.fact_index,
-                ATTR_FACT_TEXT: truncate_for_attr(fact.fact_text, 100),
-                "search.max_attempts": self.config.max_searches_per_fact,
-            })
-
+        async with safe_tool_span(span_name, SpanType.RETRIEVER, {
+            ATTR_FACT_INDEX: fact.fact_index,
+            ATTR_FACT_TEXT: truncate_for_attr(fact.fact_text, 100),
+            "search.max_attempts": self.config.max_searches_per_fact,
+        }) as span:
             for search_attempt in range(self.config.max_searches_per_fact):
                 # Generate search query
                 query = await self._generate_search_query(
@@ -868,14 +871,15 @@ class VerificationRetriever:
                                 score=f"{ent_score:.2f}",
                                 citation_key=citation_key,
                             )
-                            span.set_attributes({
-                                ATTR_VERIFIED: True,
-                                ATTR_SEARCH_ATTEMPT: search_attempt + 1,
-                                ATTR_SEARCH_QUERY: truncate_for_attr(query, 100),
-                                ATTR_ENTAILMENT_SCORE: ent_score,
-                                "search.source_url": crawl_result.url,
-                                "search.citation_key": citation_key,
-                            })
+                            if span:
+                                span.set_attributes({
+                                    ATTR_VERIFIED: True,
+                                    ATTR_SEARCH_ATTEMPT: search_attempt + 1,
+                                    ATTR_SEARCH_QUERY: truncate_for_attr(query, 100),
+                                    ATTR_ENTAILMENT_SCORE: ent_score,
+                                    "search.source_url": crawl_result.url,
+                                    "search.citation_key": citation_key,
+                                })
                             return
 
                 except asyncio.TimeoutError:
@@ -892,11 +896,12 @@ class VerificationRetriever:
                     )
 
             # If we get here, external search didn't verify the fact
-            span.set_attributes({
-                ATTR_VERIFIED: False,
-                "search.attempts": len(fact.search_queries),
-                "search.queries": str(fact.search_queries[:3]),  # First 3 queries
-            })
+            if span:
+                span.set_attributes({
+                    ATTR_VERIFIED: False,
+                    "search.attempts": len(fact.search_queries),
+                    "search.queries": str(fact.search_queries[:3]),  # First 3 queries
+                })
 
     async def _generate_search_query(
         self,
@@ -1034,13 +1039,11 @@ class VerificationRetriever:
         """
         span_name = citation_span_name(STAGE_7_ARE, OP_ENTAILMENT_CHECK, claim_index, fact.fact_index)
 
-        with mlflow.start_span(name=span_name, span_type=SpanType.CHAIN) as span:
-            span.set_attributes({
-                ATTR_FACT_TEXT: truncate_for_attr(fact.fact_text, 100),
-                "evidence.url": evidence.source_url,
-                "evidence.quote": truncate_for_attr(evidence.quote_text, 150),
-            })
-
+        async with safe_tool_span(span_name, SpanType.CHAIN, {
+            ATTR_FACT_TEXT: truncate_for_attr(fact.fact_text, 100),
+            "evidence.url": evidence.source_url,
+            "evidence.quote": truncate_for_attr(evidence.quote_text, 150),
+        }) as span:
             try:
                 prompt = ENTAILMENT_CHECK_PROMPT.format(
                     fact_text=fact.fact_text,
@@ -1058,20 +1061,22 @@ class VerificationRetriever:
 
                 if response.structured:
                     output: EntailmentCheckOutput = response.structured
-                    span.set_attributes({
-                        ATTR_ENTAILS: output.entails,
-                        ATTR_ENTAILMENT_SCORE: output.score,
-                        ATTR_ENTAILMENT_REASONING: truncate_for_attr(output.reasoning, 150),
-                        "entailment.threshold": self.config.entailment_threshold,
-                        "entailment.passes_threshold": output.score >= self.config.entailment_threshold,
-                    })
+                    if span:
+                        span.set_attributes({
+                            ATTR_ENTAILS: output.entails,
+                            ATTR_ENTAILMENT_SCORE: output.score,
+                            ATTR_ENTAILMENT_REASONING: truncate_for_attr(output.reasoning, 150),
+                            "entailment.threshold": self.config.entailment_threshold,
+                            "entailment.passes_threshold": output.score >= self.config.entailment_threshold,
+                        })
                     return output.entails, output.score
 
-                span.set_attributes({
-                    ATTR_ENTAILS: False,
-                    ATTR_ENTAILMENT_SCORE: 0.0,
-                    "entailment.error": "no structured output",
-                })
+                if span:
+                    span.set_attributes({
+                        ATTR_ENTAILS: False,
+                        ATTR_ENTAILMENT_SCORE: 0.0,
+                        "entailment.error": "no structured output",
+                    })
 
             except Exception as e:
                 logger.warning(
@@ -1079,11 +1084,12 @@ class VerificationRetriever:
                     fact=truncate(fact.fact_text, 50),
                     error=str(e)[:100],
                 )
-                span.set_attributes({
-                    ATTR_ENTAILS: False,
-                    ATTR_ENTAILMENT_SCORE: 0.0,
-                    "entailment.error": str(e)[:100],
-                })
+                if span:
+                    span.set_attributes({
+                        ATTR_ENTAILS: False,
+                        ATTR_ENTAILMENT_SCORE: 0.0,
+                        "entailment.error": str(e)[:100],
+                    })
 
             return False, 0.0
 
@@ -1319,31 +1325,32 @@ class VerificationRetriever:
         """
         span_name = citation_span_name(STAGE_7_ARE, OP_RECONSTRUCT, claim_index)
 
-        with mlflow.start_span(name=span_name, span_type=SpanType.CHAIN) as span:
-            span.set_attributes({
-                ATTR_CLAIM_INDEX: claim_index,
-                ATTR_VERIFIED_COUNT: decomposition.verified_count,
-                ATTR_SOFTENED_COUNT: decomposition.total_count - decomposition.verified_count,
-                "reconstruction.all_verified": decomposition.all_verified,
-                "reconstruction.partial_verified": decomposition.partial_verified,
-                ATTR_SOFTENING_STRATEGY: self.config.softening_strategy,
-            })
-
+        async with safe_tool_span(span_name, SpanType.CHAIN, {
+            ATTR_CLAIM_INDEX: claim_index,
+            ATTR_VERIFIED_COUNT: decomposition.verified_count,
+            ATTR_SOFTENED_COUNT: decomposition.total_count - decomposition.verified_count,
+            "reconstruction.all_verified": decomposition.all_verified,
+            "reconstruction.partial_verified": decomposition.partial_verified,
+            ATTR_SOFTENING_STRATEGY: self.config.softening_strategy,
+        }) as span:
             # If all verified, return original with any new citations
             if decomposition.all_verified:
-                span.set_attributes({"reconstruction.action": "keep_original"})
+                if span:
+                    span.set_attributes({"reconstruction.action": "keep_original"})
                 return decomposition.original_claim.claim_text
 
             # If all unverified, apply simple softening
             if not decomposition.partial_verified and decomposition.total_count > 0:
-                span.set_attributes({"reconstruction.action": "full_softening"})
+                if span:
+                    span.set_attributes({"reconstruction.action": "full_softening"})
                 return await self._apply_softening(
                     decomposition.original_claim.claim_text,
                     claim_index,
                 )
 
             # Mixed verified/unverified: use reconstruction prompt
-            span.set_attributes({"reconstruction.action": "mixed_reconstruction"})
+            if span:
+                span.set_attributes({"reconstruction.action": "mixed_reconstruction"})
             facts_status = self._format_facts_with_status(decomposition)
 
             try:
@@ -1360,10 +1367,11 @@ class VerificationRetriever:
                 )
 
                 if response.content:
-                    span.set_attributes({
-                        "reconstruction.success": True,
-                        "reconstruction.output_length": len(response.content),
-                    })
+                    if span:
+                        span.set_attributes({
+                            "reconstruction.success": True,
+                            "reconstruction.output_length": len(response.content),
+                        })
                     return response.content.strip()
 
             except Exception as e:
@@ -1371,13 +1379,15 @@ class VerificationRetriever:
                     "RECONSTRUCTION_ERROR",
                     error=str(e)[:100],
                 )
-                span.set_attributes({
-                    "reconstruction.success": False,
-                    "reconstruction.error": str(e)[:100],
-                })
+                if span:
+                    span.set_attributes({
+                        "reconstruction.success": False,
+                        "reconstruction.error": str(e)[:100],
+                    })
 
             # Fallback: return original with hedge prefix
-            span.set_attributes({"reconstruction.fallback": True})
+            if span:
+                span.set_attributes({"reconstruction.fallback": True})
             return f"Reportedly, {decomposition.original_claim.claim_text.lower()}"
 
     def _format_facts_with_status(
@@ -1475,13 +1485,12 @@ class VerificationRetriever:
         """
         span_name = citation_span_name(STAGE_7_ARE, OP_SOFTEN, claim_index)
 
-        with mlflow.start_span(name=span_name, span_type=SpanType.CHAIN) as span:
+        async with safe_tool_span(span_name, SpanType.CHAIN, {
+            ATTR_CLAIM_INDEX: claim_index,
+            ATTR_SOFTENING_STRATEGY: self.config.softening_strategy,
+            ATTR_SOFTENING_INPUT: truncate_for_attr(claim_text, 150),
+        }) as span:
             strategy = self.config.softening_strategy
-            span.set_attributes({
-                ATTR_CLAIM_INDEX: claim_index,
-                ATTR_SOFTENING_STRATEGY: strategy,
-                ATTR_SOFTENING_INPUT: truncate_for_attr(claim_text, 150),
-            })
 
             # Select prompt based on strategy
             if strategy == SofteningStrategy.HEDGE:
@@ -1504,10 +1513,11 @@ class VerificationRetriever:
 
                 if response.content:
                     output = response.content.strip()
-                    span.set_attributes({
-                        "softening.success": True,
-                        ATTR_SOFTENING_OUTPUT: truncate_for_attr(output, 150),
-                    })
+                    if span:
+                        span.set_attributes({
+                            "softening.success": True,
+                            ATTR_SOFTENING_OUTPUT: truncate_for_attr(output, 150),
+                        })
                     return output
 
             except Exception as e:
@@ -1515,13 +1525,15 @@ class VerificationRetriever:
                     "SOFTENING_ERROR",
                     error=str(e)[:100],
                 )
-                span.set_attributes({
-                    "softening.success": False,
-                    "softening.error": str(e)[:100],
-                })
+                if span:
+                    span.set_attributes({
+                        "softening.success": False,
+                        "softening.error": str(e)[:100],
+                    })
 
             # Fallback based on strategy
-            span.set_attributes({"softening.fallback": True})
+            if span:
+                span.set_attributes({"softening.fallback": True})
             if strategy == SofteningStrategy.PARENTHETICAL:
                 output = f"{claim_text} (unverified)"
             elif strategy == SofteningStrategy.QUALIFY:
@@ -1529,7 +1541,8 @@ class VerificationRetriever:
             else:
                 output = f"Reportedly, {claim_text.lower()}"
 
-            span.set_attributes({ATTR_SOFTENING_OUTPUT: truncate_for_attr(output, 150)})
+            if span:
+                span.set_attributes({ATTR_SOFTENING_OUTPUT: truncate_for_attr(output, 150)})
             return output
 
     def _get_model_tier(self, tier_name: str) -> ModelTier:

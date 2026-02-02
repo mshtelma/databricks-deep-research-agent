@@ -8,6 +8,8 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
+      // External plugin entry point - child projects override this alias
+      '@plugins/external': fileURLToPath(new URL('./src/plugins/external.ts', import.meta.url)),
     },
   },
   build: {

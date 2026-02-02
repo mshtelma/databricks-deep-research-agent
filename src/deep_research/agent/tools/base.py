@@ -8,8 +8,13 @@ and plugin-provided tools follow this protocol.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from deep_research.services.llm.client import LLMClient
+    from deep_research.services.search.brave import BraveSearchClient
+    from deep_research.agent.tools.web_crawler import WebCrawler
 
 
 @dataclass(frozen=True)
@@ -75,9 +80,11 @@ class ToolResult:
 @dataclass
 class ResearchContext:
     """
-    Contextual information passed to tool execution.
+    Contextual information passed to tool execution and custom phase execution.
 
-    Provides identity, configuration, and shared registries for tools.
+    Provides identity, configuration, shared registries, and service dependencies.
+    Services (llm, brave_client, crawler) must be provided for custom phases that
+    perform web research. Tool registration can use minimal context without services.
     """
 
     # Identity
@@ -104,6 +111,16 @@ class ResearchContext:
     # Plugin-provided data
     plugin_data: dict[str, Any] = field(default_factory=dict)
     """Data injected by plugins for cross-tool communication."""
+
+    # Services for phase execution (optional - required only for phases that do web research)
+    llm: "LLMClient | None" = None
+    """LLM client for generating search queries and synthesizing results."""
+
+    brave_client: "BraveSearchClient | None" = None
+    """Brave Search client for web search operations."""
+
+    crawler: "WebCrawler | None" = None
+    """Web crawler for fetching and extracting web page content."""
 
     # Execution limits
     tool_call_count: int = 0

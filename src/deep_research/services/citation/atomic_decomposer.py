@@ -37,6 +37,7 @@ from deep_research.agent.prompts.citation.verification_retrieval import (
 )
 from deep_research.core.app_config import VerificationRetrievalConfig, get_app_config
 from deep_research.core.logging_utils import get_logger, truncate
+from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
     ATTR_BATCH_FILTERED,
     ATTR_BATCH_TOTAL,
@@ -312,15 +313,12 @@ class AtomicDecomposer:
         """
         span_name = citation_span_name(STAGE_7_ARE, "decompose", claim_index)
 
-        with mlflow.start_span(name=span_name, span_type=SpanType.CHAIN) as span:
+        async with safe_tool_span(span_name, SpanType.CHAIN, {
+            ATTR_CLAIM_INDEX: claim_index,
+            ATTR_CLAIM_TEXT: truncate_for_attr(claim.claim_text, 150),
+            "claim.word_count": len(claim.claim_text.split()),
+        }) as span:
             claim_text = claim.claim_text
-
-            # Set input attributes
-            span.set_attributes({
-                ATTR_CLAIM_INDEX: claim_index,
-                ATTR_CLAIM_TEXT: truncate_for_attr(claim_text, 150),
-                "claim.word_count": len(claim_text.split()),
-            })
 
             # Skip very short claims (likely already atomic)
             if len(claim_text.split()) <= 8:
@@ -329,11 +327,12 @@ class AtomicDecomposer:
                     claim=truncate(claim_text, 50),
                     word_count=len(claim_text.split()),
                 )
-                span.set_attributes({
-                    ATTR_DECOMPOSITION_SKIPPED: True,
-                    ATTR_DECOMPOSITION_FACT_COUNT: 1,
-                    ATTR_DECOMPOSITION_REASONING: "Claim is short enough to be atomic",
-                })
+                if span:
+                    span.set_attributes({
+                        ATTR_DECOMPOSITION_SKIPPED: True,
+                        ATTR_DECOMPOSITION_FACT_COUNT: 1,
+                        ATTR_DECOMPOSITION_REASONING: "Claim is short enough to be atomic",
+                    })
                 return ClaimDecomposition(
                     original_claim=claim,
                     atomic_facts=[
@@ -369,12 +368,13 @@ class AtomicDecomposer:
                         claim=truncate(claim_text, 50),
                     )
                     result = self._fallback_decomposition(claim, claim_index)
-                    span.set_attributes({
-                        ATTR_DECOMPOSITION_SKIPPED: False,
-                        ATTR_DECOMPOSITION_FACT_COUNT: len(result.atomic_facts),
-                        ATTR_DECOMPOSITION_REASONING: "Fallback: no structured output",
-                        "decomposition.fallback": True,
-                    })
+                    if span:
+                        span.set_attributes({
+                            ATTR_DECOMPOSITION_SKIPPED: False,
+                            ATTR_DECOMPOSITION_FACT_COUNT: len(result.atomic_facts),
+                            ATTR_DECOMPOSITION_REASONING: "Fallback: no structured output",
+                            "decomposition.fallback": True,
+                        })
                     return result
 
                 output: AtomicDecompositionOutput = response.structured
@@ -430,13 +430,14 @@ class AtomicDecomposer:
                 )
 
                 # Set output attributes
-                span.set_attributes({
-                    ATTR_DECOMPOSITION_SKIPPED: False,
-                    ATTR_DECOMPOSITION_FACT_COUNT: len(atomic_facts),
-                    ATTR_DECOMPOSITION_REASONING: truncate_for_attr(output.reasoning, 200),
-                    "decomposition.truncated": truncated,
-                    "decomposition.fallback": False,
-                })
+                if span:
+                    span.set_attributes({
+                        ATTR_DECOMPOSITION_SKIPPED: False,
+                        ATTR_DECOMPOSITION_FACT_COUNT: len(atomic_facts),
+                        ATTR_DECOMPOSITION_REASONING: truncate_for_attr(output.reasoning, 200),
+                        "decomposition.truncated": truncated,
+                        "decomposition.fallback": False,
+                    })
 
                 return ClaimDecomposition(
                     original_claim=claim,
@@ -451,12 +452,13 @@ class AtomicDecomposer:
                     timeout=self.config.decomposition_timeout_seconds,
                 )
                 result = self._fallback_decomposition(claim, claim_index)
-                span.set_attributes({
-                    ATTR_DECOMPOSITION_FACT_COUNT: len(result.atomic_facts),
-                    ATTR_DECOMPOSITION_REASONING: "Fallback: timeout",
-                    "decomposition.timeout": True,
-                    "decomposition.fallback": True,
-                })
+                if span:
+                    span.set_attributes({
+                        ATTR_DECOMPOSITION_FACT_COUNT: len(result.atomic_facts),
+                        ATTR_DECOMPOSITION_REASONING: "Fallback: timeout",
+                        "decomposition.timeout": True,
+                        "decomposition.fallback": True,
+                    })
                 return result
 
             except Exception as e:
@@ -466,12 +468,13 @@ class AtomicDecomposer:
                     error=str(e)[:100],
                 )
                 result = self._fallback_decomposition(claim, claim_index)
-                span.set_attributes({
-                    ATTR_DECOMPOSITION_FACT_COUNT: len(result.atomic_facts),
-                    ATTR_DECOMPOSITION_REASONING: f"Fallback: {str(e)[:100]}",
-                    "decomposition.error": str(e)[:100],
-                    "decomposition.fallback": True,
-                })
+                if span:
+                    span.set_attributes({
+                        ATTR_DECOMPOSITION_FACT_COUNT: len(result.atomic_facts),
+                        ATTR_DECOMPOSITION_REASONING: f"Fallback: {str(e)[:100]}",
+                        "decomposition.error": str(e)[:100],
+                        "decomposition.fallback": True,
+                    })
                 return result
 
     def _fallback_decomposition(
@@ -553,7 +556,7 @@ class AtomicDecomposer:
         """
         span_name = citation_span_name(STAGE_7_ARE, "decompose_batch")
 
-        with mlflow.start_span(name=span_name, span_type=SpanType.CHAIN) as span:
+        async with safe_tool_span(span_name, SpanType.CHAIN) as span:
             if verdicts_to_process is None:
                 verdicts_to_process = set(self.config.trigger_on_verdicts)
 
@@ -567,11 +570,12 @@ class AtomicDecomposer:
             ]
 
             # Set input attributes
-            span.set_attributes({
-                ATTR_BATCH_TOTAL: len(claims),
-                ATTR_BATCH_FILTERED: len(claims_to_process),
-                "batch.verdicts": str(list(verdicts_to_process)),
-            })
+            if span:
+                span.set_attributes({
+                    ATTR_BATCH_TOTAL: len(claims),
+                    ATTR_BATCH_FILTERED: len(claims_to_process),
+                    "batch.verdicts": str(list(verdicts_to_process)),
+                })
 
             logger.info(
                 "DECOMPOSITION_BATCH_START",
@@ -596,13 +600,14 @@ class AtomicDecomposer:
             metrics.compute_avg()
 
             # Set output attributes
-            span.set_attributes({
-                "metrics.claims_processed": metrics.total_claims_processed,
-                "metrics.total_facts": metrics.total_atomic_facts,
-                "metrics.avg_facts_per_claim": round(metrics.avg_facts_per_claim, 2),
-                "metrics.single_fact_claims": metrics.single_fact_claims,
-                "metrics.multi_fact_claims": metrics.multi_fact_claims,
-            })
+            if span:
+                span.set_attributes({
+                    "metrics.claims_processed": metrics.total_claims_processed,
+                    "metrics.total_facts": metrics.total_atomic_facts,
+                    "metrics.avg_facts_per_claim": round(metrics.avg_facts_per_claim, 2),
+                    "metrics.single_fact_claims": metrics.single_fact_claims,
+                    "metrics.multi_fact_claims": metrics.multi_fact_claims,
+                })
 
             logger.info(
                 "DECOMPOSITION_BATCH_COMPLETE",
@@ -661,7 +666,10 @@ class AtomicDecomposer:
 
         span_name = citation_span_name(STAGE_7_ARE, "batch_decompose")
 
-        with mlflow.start_span(name=span_name, span_type=SpanType.CHAIN) as span:
+        async with safe_tool_span(span_name, SpanType.CHAIN, {
+            "batch.total_claims": len(claims),
+            "batch.batch_size": batch_size,
+        }) as span:
             results: list[ClaimDecomposition | None] = [None] * len(claims)
 
             # Group claims into batches
@@ -669,11 +677,10 @@ class AtomicDecomposer:
             for i in range(0, len(claims), batch_size):
                 batches.append(list(range(i, min(i + batch_size, len(claims)))))
 
-            span.set_attributes({
-                "batch.total_claims": len(claims),
-                "batch.batch_size": batch_size,
-                "batch.num_batches": len(batches),
-            })
+            if span:
+                span.set_attributes({
+                    "batch.num_batches": len(batches),
+                })
 
             logger.info(
                 "BATCH_DECOMPOSITION_START",
@@ -717,12 +724,13 @@ class AtomicDecomposer:
 
             final_results = [r for r in results if r is not None]
 
-            span.set_attributes({
-                "batch.results_count": len(final_results),
-                "batch.total_facts": sum(
-                    len(r.atomic_facts) for r in final_results
-                ),
-            })
+            if span:
+                span.set_attributes({
+                    "batch.results_count": len(final_results),
+                    "batch.total_facts": sum(
+                        len(r.atomic_facts) for r in final_results
+                    ),
+                })
 
             logger.info(
                 "BATCH_DECOMPOSITION_COMPLETE",

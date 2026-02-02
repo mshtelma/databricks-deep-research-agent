@@ -67,6 +67,36 @@ class TestResearchStateComplete:
 
         assert state.final_report == "  Report with spaces  "
 
+    def test_complete_idempotency_guard(self) -> None:
+        """Test that complete() prevents double completion by default."""
+        state = ResearchState(query="test query")
+
+        # First completion succeeds
+        state.complete("First report")
+        assert state.final_report == "First report"
+        assert state.completed_at is not None
+        first_timestamp = state.completed_at
+
+        # Second completion raises error
+        with pytest.raises(RuntimeError, match="already completed"):
+            state.complete("Second report")
+
+        # State unchanged
+        assert state.final_report == "First report"
+        assert state.completed_at == first_timestamp
+
+    def test_complete_explicit_overwrite(self) -> None:
+        """Test that allow_overwrite=True permits overwriting."""
+        state = ResearchState(query="test query")
+
+        state.complete("First report")
+        original_timestamp = state.completed_at
+
+        # Explicit overwrite succeeds
+        state.complete("Second report", allow_overwrite=True)
+        assert state.final_report == "Second report"
+        assert state.completed_at >= original_timestamp  # Should be same or later
+
 
 class TestResearchStateCancel:
     """Tests for ResearchState.cancel() method."""

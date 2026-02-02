@@ -288,6 +288,7 @@ export const jobsApi = {
     queryMode?: string
     researchDepth?: string
     verifySources?: boolean
+    outputType?: string
   }) =>
     request<Job>('/research/jobs', {
       method: 'POST',
@@ -297,6 +298,7 @@ export const jobsApi = {
         query_mode: data.queryMode || 'deep_research',
         research_depth: data.researchDepth || 'auto',
         verify_sources: data.verifySources ?? true,
+        output_type: data.outputType || null,
       }),
     }),
 
@@ -348,6 +350,39 @@ export const preferencesApi = {
 // Health API
 export const healthApi = {
   check: () => request<{ status: string; database: string; version: string }>('/health'),
+}
+
+// User API
+export const userApi = {
+  getProfile: () => request<import('../types').UserProfile>('/user/profile'),
+}
+
+// Incognito API
+export const incognitoApi = {
+  // List incognito chats for current session
+  list: () =>
+    request<{
+      items: import('../types').Chat[]
+      total: number
+      sessionExpiresAt: string | null
+    }>('/chats/incognito'),
+
+  // Create a new incognito chat
+  create: (data?: { title?: string }) =>
+    request<import('../types').Chat>('/chats/incognito', {
+      method: 'POST',
+      body: data ? JSON.stringify(data) : undefined,
+    }),
+
+  // Convert incognito chat to permanent
+  convert: (chatId: string) =>
+    request<import('../types').Chat>(`/chats/${chatId}/convert`, {
+      method: 'POST',
+    }),
+
+  // Get session status
+  getSessionStatus: () =>
+    request<import('../types').IncognitoSessionStatus>('/chats/session/incognito'),
 }
 
 export { ApiError }

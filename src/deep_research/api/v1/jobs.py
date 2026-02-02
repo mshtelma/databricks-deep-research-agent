@@ -58,6 +58,10 @@ class SubmitJobRequest(BaseModel):
         default=True,
         description="Enable citation verification pipeline",
     )
+    output_type: str | None = Field(
+        default=None,
+        description="Output type for structured output (e.g., 'meeting_prep'). If not specified, uses default synthesis_report.",
+    )
 
 
 class JobResponse(BaseSchema):
@@ -150,6 +154,8 @@ async def submit_job(
     llm = request.app.state.llm_client
     brave_client = request.app.state.brave_client
     crawler = request.app.state.web_crawler
+    # Get PluginManager for custom phase mode (may be None if not available)
+    plugin_manager = getattr(request.app.state, "plugin_manager", None)
 
     # Get conversation history from database
     conversation_history: list[dict[str, str]] = []
@@ -199,6 +205,8 @@ async def submit_job(
         crawler=crawler,
         conversation_history=conversation_history,
         system_instructions=system_instructions,
+        output_type=body.output_type,
+        plugin_manager=plugin_manager,
         db=db,
     )
 

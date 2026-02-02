@@ -124,6 +124,17 @@ class OutputTypeProvider(Protocol):
         """
         ...
 
+    def get_output_model(self) -> type | None:
+        """Get the Pydantic model class for structured output.
+
+        Returns the actual Pydantic BaseModel class (not JSON schema)
+        for use with LLM structured output generation.
+
+        Returns:
+            Pydantic model class, or None if not available
+        """
+        ...
+
 
 class DefaultOutputTypeProvider:
     """Default implementation of OutputTypeProvider.
@@ -153,4 +164,8 @@ class DefaultOutputTypeProvider:
 
     def get_synthesizer_prompt(self) -> str | None:
         """Return None to use default prompt."""
+        return None
+
+    def get_output_model(self) -> type | None:
+        """Return None - default uses markdown, not structured output."""
         return None

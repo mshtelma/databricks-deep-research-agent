@@ -6,7 +6,7 @@
  */
 
 import type { ComponentType } from 'react';
-import type { SourceType } from '@/types/index';
+import type { SourceType, QueryMode, ResearchDepth } from '@/types/index';
 
 /**
  * Render context passed to custom renderers
@@ -120,6 +120,29 @@ export interface SourceBadgeConfig {
 }
 
 /**
+ * Configuration for the message input component.
+ * Plugins can override default input behavior.
+ */
+export interface InputConfig {
+  /** Show query mode selector (simple/web_search/deep_research). Default: true */
+  showModeSelector?: boolean;
+  /** Show research depth selector. Default: true */
+  showDepthSelector?: boolean;
+  /** Show "verify sources" checkbox. Default: true */
+  showVerifySources?: boolean;
+  /** Custom placeholder text for input field */
+  placeholder?: string;
+  /** Default query mode when selector is hidden. Used instead of localStorage. */
+  defaultQueryMode?: QueryMode;
+  /** Default research depth when selector is hidden */
+  defaultResearchDepth?: ResearchDepth;
+  /** Default verify sources value when checkbox is hidden */
+  defaultVerifySources?: boolean;
+  /** Default output type for structured output. When set, jobs use this output type. */
+  defaultOutputType?: string;
+}
+
+/**
  * Plugin registration interface
  */
 export interface FrontendPlugin {
@@ -137,6 +160,8 @@ export interface FrontendPlugin {
   eventLabelFormatters?: EventLabelFormatter[];
   /** Source badge configurations */
   sourceBadgeConfigs?: SourceBadgeConfig[];
+  /** Configuration for message input component */
+  inputConfig?: InputConfig;
   /** Initialization callback */
   initialize?: (context: RenderContext) => void | Promise<void>;
   /** Cleanup callback */

@@ -60,6 +60,12 @@ resources:
       description: "AI-powered deep research agent with 5-agent architecture"
       source_code_path: .
 
+      # On-behalf-of-user authorization:
+      # Default scopes (iam.current-user:read, iam.access-control:read) are
+      # automatically assigned by Databricks when user_api_scopes is omitted.
+      # These defaults allow the app to retrieve basic user identity information.
+      # Only add user_api_scopes if you need additional permissions like 'sql'.
+
       # App resources - grant service principal access to platform resources
       resources:
         # =================================================================

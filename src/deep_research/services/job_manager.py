@@ -158,6 +158,8 @@ class JobManager:
         crawler: WebCrawler,
         conversation_history: list[dict[str, str]],
         system_instructions: str | None,
+        output_type: str | None,
+        plugin_manager: Any | None,
         db: AsyncSession,
     ) -> ResearchSession:
         """Submit a new research job.
@@ -180,6 +182,8 @@ class JobManager:
             crawler: Web crawler for fetching pages.
             conversation_history: Previous conversation messages.
             system_instructions: User's custom system instructions.
+            output_type: Output type name from registry (e.g., 'meeting_prep').
+            plugin_manager: Plugin manager for custom phase mode (optional).
             db: Database session.
 
         Returns:
@@ -243,7 +247,30 @@ class JobManager:
             chat_id=str(chat_id),
             query_mode=query_mode,
             research_depth=research_depth,
+            output_type=output_type,
         )
+
+        # Emit lifecycle hook: job_submitted
+        if plugin_manager:
+            try:
+                from deep_research.plugins.lifecycle import EventEmitter
+
+                emitter = EventEmitter(plugin_manager)
+                await emitter.job_submitted(
+                    job_id=session_id,
+                    chat_id=str(chat_id),
+                    query=query,
+                    user_id=user_id,
+                    query_mode=query_mode,
+                    research_depth=research_depth,
+                    verify_sources=verify_sources,
+                    output_type=output_type,
+                )
+            except Exception as e:
+                logger.warning(
+                    "LIFECYCLE_HOOK_EMISSION_FAILED hook=on_job_submitted error=%s",
+                    str(e)[:200],
+                )
 
         # Start background task
         task = asyncio.create_task(
@@ -261,6 +288,8 @@ class JobManager:
                 crawler=crawler,
                 conversation_history=conversation_history,
                 system_instructions=system_instructions,
+                output_type=output_type,
+                plugin_manager=plugin_manager,
             )
         )
         self._active_tasks[session_id] = task
@@ -387,23 +416,81 @@ class JobManager:
         crawler: WebCrawler,
         conversation_history: list[dict[str, str]],
         system_instructions: str | None,
+        output_type: str | None = None,
+        plugin_manager: Any | None = None,
     ) -> None:
         """Execute research job in background.
 
         This method runs the full research pipeline in the background,
         persisting events as they occur. The job status is updated
         automatically on completion, cancellation, or error.
+
+        Args:
+            session_id: Research session ID.
+            message_id: Agent message ID.
+            user_id: User ID.
+            chat_id: Chat ID.
+            query: Research query.
+            query_mode: Query mode.
+            research_depth: Research depth.
+            verify_sources: Whether to verify sources.
+            llm: LLM client.
+            brave_client: Brave search client.
+            crawler: Web crawler.
+            conversation_history: Conversation history.
+            system_instructions: Custom system instructions.
+            output_type: Output type name from registry (e.g., 'meeting_prep').
+            plugin_manager: Plugin manager for custom phase mode (optional).
         """
         from deep_research.agent.orchestrator import OrchestrationConfig, stream_research
         from deep_research.db.session import get_session_maker
+        from deep_research.output.registry import get_output_registry
 
         logger.info(
             "JOB_STARTING",
             session_id=str(session_id),
             query=query[:100],
+            output_type=output_type,
         )
 
         try:
+            # Get output configuration from registry if output_type is specified
+            output_schema = None
+            output_format = "markdown"
+            structured_system_prompt = None
+            structured_user_prompt = None
+
+            if output_type:
+                registry = get_output_registry()
+                provider = registry.get(output_type)
+                if provider:
+                    synth_config = provider.get_synthesizer_config()
+                    # Use get_output_model() to get the Pydantic class (not JSON schema dict)
+                    # The synthesizer expects a class type with __name__ attribute
+                    output_schema = (
+                        provider.get_output_model()
+                        if hasattr(provider, "get_output_model")
+                        else None
+                    )
+                    structured_system_prompt = synth_config.custom_prompt
+                    structured_user_prompt = provider.get_synthesizer_prompt()
+                    output_format = "json" if output_schema else "markdown"
+                    logger.info(
+                        "JOB_OUTPUT_TYPE_RESOLVED",
+                        session_id=str(session_id),
+                        output_type=output_type,
+                        has_schema=output_schema is not None,
+                        schema_name=getattr(output_schema, "__name__", None) if output_schema else None,
+                        has_system_prompt=structured_system_prompt is not None,
+                        has_user_prompt=structured_user_prompt is not None,
+                    )
+                else:
+                    logger.warning(
+                        "JOB_OUTPUT_TYPE_NOT_FOUND",
+                        session_id=str(session_id),
+                        output_type=output_type,
+                    )
+
             config = OrchestrationConfig(
                 query_mode=query_mode,
                 research_depth=research_depth,
@@ -413,6 +500,10 @@ class JobManager:
                 is_draft=False,  # Chat already created
                 verify_sources=verify_sources,
                 session_pre_created=True,  # Session already created by JobManager
+                output_format=output_format,
+                output_schema=output_schema,
+                structured_system_prompt=structured_system_prompt,
+                structured_user_prompt=structured_user_prompt,
             )
 
             # Use fresh session maker to trigger token refresh check
@@ -428,6 +519,7 @@ class JobManager:
                     chat_id=str(chat_id),
                     config=config,
                     db=db,
+                    plugin_manager=plugin_manager,
                 ):
                     # Events are persisted by the orchestrator
                     # We just iterate to completion
@@ -436,6 +528,11 @@ class JobManager:
                 # Mark completed
                 session = await db.get(ResearchSession, session_id)
                 if session and session.status == ResearchStatus.IN_PROGRESS:
+                    duration_seconds = (
+                        (datetime.now(UTC) - session.created_at).total_seconds()
+                        if session.created_at
+                        else 0.0
+                    )
                     session.status = ResearchStatus.COMPLETED
                     session.completed_at = datetime.now(UTC)
                     await db.commit()
@@ -443,6 +540,25 @@ class JobManager:
                         "JOB_COMPLETED",
                         session_id=str(session_id),
                     )
+
+                    # Emit lifecycle hook: job_completed
+                    if plugin_manager:
+                        try:
+                            from deep_research.plugins.lifecycle import EventEmitter
+
+                            emitter = EventEmitter(plugin_manager)
+                            await emitter.job_completed(
+                                job_id=session_id,
+                                duration_seconds=duration_seconds,
+                                output=None,  # Output not available in job_manager context
+                                output_type=output_type or "generic",
+                                event_count=0,  # Not tracked here
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                "LIFECYCLE_HOOK_EMISSION_FAILED hook=on_job_completed error=%s",
+                                str(e)[:200],
+                            )
 
         except asyncio.CancelledError:
             logger.info(
@@ -474,6 +590,42 @@ class JobManager:
                     session.error_message = str(e)[:500]  # Truncate error message
                     session.completed_at = datetime.now(UTC)
                     await db.commit()
+
+                    # Emit lifecycle hook: job_failed
+                    if plugin_manager:
+                        try:
+                            from deep_research.plugins.lifecycle import EventEmitter
+
+                            # Classify error
+                            error_class = type(e).__name__
+                            error_category = "unknown"
+                            is_recoverable = False
+
+                            if "Database" in error_class or "Operational" in error_class:
+                                error_category = "database"
+                                is_recoverable = True
+                            elif "Timeout" in error_class or "Connection" in error_class:
+                                error_category = "network"
+                                is_recoverable = True
+                            elif "Validation" in error_class or "JSONDecode" in error_class:
+                                error_category = "validation"
+                                is_recoverable = False
+                            elif "rate" in str(e).lower() or "quota" in str(e).lower():
+                                error_category = "rate_limit"
+                                is_recoverable = True
+
+                            emitter = EventEmitter(plugin_manager)
+                            await emitter.job_failed(
+                                job_id=session_id,
+                                error=e,
+                                error_category=error_category,
+                                is_recoverable=is_recoverable,
+                            )
+                        except Exception as hook_error:
+                            logger.warning(
+                                "LIFECYCLE_HOOK_EMISSION_FAILED hook=on_job_failed error=%s",
+                                str(hook_error)[:200],
+                            )
 
         finally:
             self._active_tasks.pop(session_id, None)
