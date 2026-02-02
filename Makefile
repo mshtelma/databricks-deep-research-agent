@@ -11,7 +11,8 @@
 # Databricks Apps Deployment:
 #   make deploy TARGET=dev BRAVE_SCOPE=msh  - Full deployment (recommended)
 #   make quickstart     - Set up local development environment
-#   make db-migrate-remote  - Run migrations manually (usually not needed)
+#   make db-migrate     - Run migrations on configured Lakebase (local dev)
+#   make db-migrate-remote TARGET=dev  - Run migrations on deployed instance
 #   make requirements   - Generate requirements.txt from pyproject.toml
 #
 # Testing:
@@ -32,7 +33,7 @@
 #   make lint           - Run linting (backend + frontend)
 #   make logs TARGET=dev - Download app logs (add FOLLOW=-f to follow)
 
-.PHONY: dev dev-backend dev-frontend build prod clean clean_db db-reset db-migrate-remote typecheck lint install e2e e2e-ui e2e-debug test test-integration test-complex test-all-python test-frontend test-all quickstart deploy requirements bundle-validate bundle-summary logs
+.PHONY: dev dev-backend dev-frontend build prod clean clean_db db-migrate db-status db-reset db-migrate-remote db-local db-local-stop typecheck lint install e2e e2e-ui e2e-debug test test-integration test-complex test-all-python test-frontend test-all quickstart deploy requirements bundle-validate bundle-summary logs
 
 # =============================================================================
 # Development
@@ -175,20 +176,40 @@ test-frontend:
 test-all: test-all-python test-frontend
 
 # =============================================================================
-# Database (local development via Docker)
+# Database (Remote Lakebase - Standard for Local Development)
 # =============================================================================
 
-db:
-	@echo "Starting PostgreSQL via docker compose..."
+# Run migrations using .env configuration (remote Lakebase)
+# This is the standard command for local development
+db-migrate:
+	@echo "Running migrations on configured Lakebase instance..."
+	@echo "Using LAKEBASE_* configuration from .env"
+	uv run alembic upgrade head
+	@echo "Migrations complete!"
+
+# Check current migration status
+db-status:
+	@echo "Checking migration status..."
+	uv run alembic current
+
+# =============================================================================
+# Database (Local PostgreSQL - Fallback Only)
+# =============================================================================
+# NOTE: Local PostgreSQL is for offline/fallback scenarios only.
+# Standard local development uses remote Lakebase configured via .env
+
+db-local:
+	@echo "Starting local PostgreSQL via docker compose (fallback mode)..."
+	@echo "NOTE: Standard local dev uses remote Lakebase. This is for offline use only."
 	docker compose up -d postgres
 	@echo "Waiting for PostgreSQL to be ready..."
 	@sleep 3
-	@echo "Running migrations..."
+	@echo "Running migrations against local PostgreSQL..."
 	DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/postgres \
 		LAKEBASE_INSTANCE_NAME= \
 		uv run alembic upgrade head || echo "Note: Run migrations manually if needed"
 
-db-stop:
+db-local-stop:
 	docker compose down
 
 clean_db:
@@ -259,7 +280,7 @@ db-migrate-remote:
 # =============================================================================
 # E2E Testing with Playwright
 # Auto-starts server if not running (webServer in playwright.config.ts)
-# Requires: docker compose up -d postgres (or run 'make db' first)
+# Requires: Lakebase configured via .env (run 'make db-migrate' to ensure schema)
 # =============================================================================
 
 # E2E Test Categories:
@@ -280,7 +301,7 @@ e2e:
 	@echo "Building frontend (ensures fresh static files)..."
 	@make build
 	@echo "Running E2E tests with Playwright..."
-	@echo "Note: Requires PostgreSQL running (make db)"
+	@echo "Note: Requires Lakebase configured in .env"
 	cd e2e && npm test
 
 e2e-fast:
