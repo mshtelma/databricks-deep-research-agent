@@ -167,3 +167,10 @@ targets:
       profile: ais
     variables:
       resource_suffix: "dre-ais"
+
+  digitalc:
+    mode: development
+    workspace:
+      profile: digitalc
+    variables:
+      resource_suffix: "dgc"

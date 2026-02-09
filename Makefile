@@ -233,7 +233,8 @@ db-reset:
 		case "$(TARGET)" in \
 			dev) PROFILE="e2-demo-west" ;; \
 			ais) PROFILE="ais" ;; \
-			*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
+			digitalc) PROFILE="digitalc" ;; \
+			*) echo "ERROR: Unknown target $(TARGET). Use 'dev', 'ais', or 'digitalc'."; exit 1 ;; \
 		esac; \
 		echo "Target: $(TARGET)"; \
 		echo "Lakebase instance: $$INSTANCE_NAME"; \
@@ -265,7 +266,8 @@ db-migrate-remote:
 	case "$(TARGET)" in \
 		dev) PROFILE="e2-demo-west" ;; \
 		ais) PROFILE="ais" ;; \
-		*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
+		digitalc) PROFILE="digitalc" ;; \
+		*) echo "ERROR: Unknown target $(TARGET). Use 'dev', 'ais', or 'digitalc'."; exit 1 ;; \
 	esac; \
 	echo "Lakebase instance: $$INSTANCE_NAME"; \
 	echo "Databricks profile: $$PROFILE"; \
@@ -434,7 +436,8 @@ deploy: build requirements
 	case "$(TARGET)" in \
 		dev) PROFILE="e2-demo-west" ;; \
 		ais) PROFILE="ais" ;; \
-		*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
+		digitalc) PROFILE="digitalc" ;; \
+		*) echo "ERROR: Unknown target $(TARGET). Use 'dev', 'ais', or 'digitalc'."; exit 1 ;; \
 	esac; \
 	DEPLOY_ARGS="-t $(TARGET)"; \
 	if [ -n "$(BRAVE_SCOPE)" ]; then \
@@ -515,6 +518,7 @@ logs:
 	@case "$(TARGET)" in \
 		dev) PROFILE="e2-demo-west" ;; \
 		ais) PROFILE="ais" ;; \
-		*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
+		digitalc) PROFILE="digitalc" ;; \
+		*) echo "ERROR: Unknown target $(TARGET). Use 'dev', 'ais', or 'digitalc'."; exit 1 ;; \
 	esac; \
 	./scripts/download-app-logs.sh "deep-research-agent-dre-$(TARGET)" "$$PROFILE" $(FOLLOW) $(SEARCH)

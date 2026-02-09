@@ -53,6 +53,8 @@ interface MessageListProps {
   onRetry?: () => void;
   /** Callback to dismiss error */
   onDismissError?: () => void;
+  /** Callback to send message content to AIditor for editing */
+  onSendToAIditor?: (content: string) => void;
 }
 
 export function MessageList({
@@ -68,6 +70,7 @@ export function MessageList({
   errorDetails = null,
   onRetry,
   onDismissError,
+  onSendToAIditor,
 }: MessageListProps) {
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
   const scrollTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -129,6 +132,7 @@ export function MessageList({
             <AgentMessageWithCitations
               message={message}
               hideSourcesSection={hideAgentSourcesSection}
+              onSendToAIditor={onSendToAIditor}
             />
           )}
         </ErrorBoundary>

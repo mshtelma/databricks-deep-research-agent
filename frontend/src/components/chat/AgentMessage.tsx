@@ -15,6 +15,8 @@ import { cn } from '@/lib/utils';
 import { Card, CardContent } from '@/components/ui/card';
 import { MarkdownRenderer, CitationContext } from '@/components/common';
 import { EvidenceCard, SourceGroupedCitations } from '@/components/citations';
+import { messagesApi } from '@/api/client';
+import { Button } from '@/components/ui/button';
 import { MessageExportMenu } from './MessageExportMenu';
 import type { Claim, VerificationSummary } from '@/types/citation';
 import { ComponentRegistry } from '@/core/plugins';
@@ -60,6 +62,8 @@ interface AgentMessageProps {
   enableCitations?: boolean;
   /** Hide the Sources & Citations section (when shown in ResearchPanel) */
   hideSourcesSection?: boolean;
+  /** Callback to send message content to AIditor for editing */
+  onSendToAIditor?: (content: string) => void;
 }
 
 export function AgentMessage({
@@ -74,6 +78,7 @@ export function AgentMessage({
   verificationSummary,
   enableCitations = false,
   hideSourcesSection = false,
+  onSendToAIditor,
 }: AgentMessageProps) {
   const [showSources, setShowSources] = React.useState(false);
   const [showReasoning, setShowReasoning] = React.useState(false);
@@ -233,9 +238,12 @@ export function AgentMessage({
     <div data-testid="agent-response" className={cn('flex justify-start', className)}>
       <Card className="max-w-[90%] bg-muted">
         <CardContent className="p-4">
-          {/* Export menu in top-right corner - only show when not streaming and has valid ID */}
+          {/* Action buttons in top-right corner - only show when not streaming and has valid ID */}
           {!isStreaming && isValidMessageId && (
-            <div className="flex justify-end -mt-1 -mr-1 mb-2">
+            <div className="flex items-center justify-end gap-1 -mt-1 -mr-1 mb-2">
+              {onSendToAIditor && (
+                <EditInAIditorButton messageId={message.id} onSendToAIditor={onSendToAIditor} />
+              )}
               <MessageExportMenu
                 messageId={message.id}
                 hasClaims={claims.length > 0}
@@ -779,6 +787,67 @@ function CheckIcon({ className }: { className?: string }) {
       className={className}
     >
       <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
+/**
+ * Standalone button to send message content to AIditor for editing.
+ */
+function EditInAIditorButton({
+  messageId,
+  onSendToAIditor,
+}: {
+  messageId: string;
+  onSendToAIditor: (content: string) => void;
+}) {
+  const [isLoading, setIsLoading] = React.useState(false);
+
+  const handleClick = async () => {
+    setIsLoading(true);
+    try {
+      const { content } = await messagesApi.exportReport(messageId);
+      onSendToAIditor(content);
+    } catch (error) {
+      console.error('Send to AIditor failed:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="h-7 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+      onClick={handleClick}
+      disabled={isLoading}
+      data-testid="edit-in-aiditor-button"
+    >
+      {isLoading ? (
+        <span className="h-3.5 w-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+      ) : (
+        <PencilEditIcon className="h-3.5 w-3.5" />
+      )}
+      <span>Edit in AIditor</span>
+    </Button>
+  );
+}
+
+function PencilEditIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" />
+      <path d="m15 5 4 4" />
     </svg>
   );
 }

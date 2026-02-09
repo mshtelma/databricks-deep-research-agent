@@ -1,0 +1,33 @@
+# =============================================================================
+# .databricksignore - Exclude files from Databricks bundle uploads
+# Applied ON TOP of .gitignore patterns during `databricks bundle deploy`
+# =============================================================================
+
+# Frontend source (built output lives in static/)
+frontend/
+
+# Tests (not needed at runtime)
+tests/
+e2e/
+
+# Documentation & specifications
+docs/
+specs/
+
+# AI assistant / tooling config
+.claude/
+.specify/
+.cursor/
+
+# Lock files (not needed at runtime; requirements.txt is used)
+uv.lock
+
+# Root-level markdown files
+*.md
+# Keep CLAUDE.md out too (matched by *.md above)
+
+# Misc dev files
+Makefile
+.flake8
+.pre-commit-config.yaml
+renovate.json

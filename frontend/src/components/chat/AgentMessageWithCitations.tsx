@@ -29,6 +29,8 @@ interface AgentMessageWithCitationsProps {
   className?: string;
   /** Hide the Sources & Citations section (when shown in ResearchPanel) */
   hideSourcesSection?: boolean;
+  /** Callback to send message content to AIditor for editing */
+  onSendToAIditor?: (content: string) => void;
 }
 
 // Helper to validate UUID format (8-4-4-4-12 hex characters)
@@ -44,6 +46,7 @@ export function AgentMessageWithCitations({
   onRegenerate,
   className,
   hideSourcesSection = false,
+  onSendToAIditor,
 }: AgentMessageWithCitationsProps) {
   // Fetch citations for this message
   // Only fetch if message has a valid UUID (not a placeholder like 'streaming-*', 'session-*', etc.)
@@ -102,6 +105,7 @@ export function AgentMessageWithCitations({
       verificationSummary={verificationSummary}
       enableCitations={enableCitations}
       hideSourcesSection={hideSourcesSection}
+      onSendToAIditor={onSendToAIditor}
     />
   );
 }

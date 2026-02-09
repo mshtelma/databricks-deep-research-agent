@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from deep_research.api.v1 import router as api_v1_router
+from deep_research.api.aiditor import router as aiditor_router
 from deep_research.core.app_config import get_app_config
 from deep_research.core.config import get_settings
 from deep_research.core.exceptions import (
@@ -214,6 +215,9 @@ def create_app() -> FastAPI:
 
     # Include API routers
     app.include_router(api_v1_router, prefix="/api/v1")
+
+    # Include AIditor API router
+    app.include_router(aiditor_router, prefix="/api/aiditor", tags=["aiditor"])
 
     # Health check endpoint
     @app.get("/health")

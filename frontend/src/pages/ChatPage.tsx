@@ -1,13 +1,19 @@
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
+import { lazy, Suspense, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ChatSidebar, MessageList, MessageInput, DeleteChatDialog, ExportChatDialog, type ExportFormat } from '@/components/chat';
 import { AgentStatusIndicator, ResearchPanel } from '@/components/research';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useChats, useMessages, useStreamingQuery, useChatActions, useDraftChats, useCitations, usePrefetchMessages } from '@/hooks';
 import { useResearchReconnection } from '@/hooks/useResearchReconnection';
 import { useChatActiveJob } from '@/hooks/useResearchJobs';
 import { ComponentRegistry } from '@/core/plugins';
 import type { Chat, Message, PersistenceCompletedEvent, QueryMode } from '@/types';
+
+// Lazy-load AIditor so the bundle only ships when the tab is activated
+const AIditor = lazy(() =>
+  import('@/components/aiditor/aiditor').then((m) => ({ default: m.AIditor }))
+);
 
 export default function ChatPage() {
   const { chatId } = useParams<{ chatId?: string }>();
@@ -50,6 +56,36 @@ export default function ChatPage() {
   // Sidebar filter state
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'all'>('active');
+
+  // Page-level tab: "chat" (default) or "aiditor"
+  const [pageTab, setPageTab] = useState<'chat' | 'aiditor'>('chat');
+
+  // Shared state for sending content between Chat and AIditor
+  const [aiditorContent, setAiditorContent] = useState<string | null>(null);
+
+  // Send chat response content to AIditor and switch tab
+  const handleSendToAIditor = useCallback((content: string) => {
+    setAiditorContent(content);
+    setPageTab('aiditor');
+  }, []);
+
+  // Export from AIditor back to chat input (copy to clipboard + switch tab)
+  const handleExportFromAIditor = useCallback(async (content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      // Clipboard API may fail in iframes / non-secure contexts — use fallback
+      const textarea = document.createElement('textarea');
+      textarea.value = content;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+    setPageTab('chat');
+  }, []);
 
   // Get plugin-provided input configuration (controls mode selector visibility, etc.)
   const inputConfig = useMemo(() => ComponentRegistry.getInputConfig(), []);
@@ -667,103 +703,137 @@ export default function ChatPage() {
 
       {/* Main content */}
       <main className="flex-1 flex flex-col min-w-0">
-        {/* Header with status */}
+        {/* Header with status and page-level tabs */}
         <header className="flex items-center justify-between px-4 py-2 border-b">
-          <h1 className="font-semibold truncate">
-            {chatId
-              ? chats.find((c) => c.id === chatId)?.title || (isDraftChat(chatId || '') ? 'New chat...' : 'New chat')
-              : 'Deep Research Agent'}
-          </h1>
-          <AgentStatusIndicator status={agentStatus} />
+          <div className="flex items-center gap-4 min-w-0">
+            <h1 className="font-semibold truncate">
+              {chatId
+                ? chats.find((c) => c.id === chatId)?.title || (isDraftChat(chatId || '') ? 'New chat...' : 'New chat')
+                : 'Deep Research Agent'}
+            </h1>
+            <Tabs value={pageTab} onValueChange={(v) => setPageTab(v as 'chat' | 'aiditor')}>
+              <TabsList className="h-7">
+                <TabsTrigger value="chat" className="text-xs px-2 py-0.5">Chat</TabsTrigger>
+                <TabsTrigger value="aiditor" className="text-xs px-2 py-0.5">AIditor</TabsTrigger>
+              </TabsList>
+            </Tabs>
+          </div>
+          {pageTab === 'chat' && <AgentStatusIndicator status={agentStatus} />}
         </header>
 
-        {/* Persistence failure banner for draft chats */}
-        {persistenceFailed && chatId && isDraftChat(chatId) && (
-          <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2 flex items-center justify-between">
-            <span className="text-sm text-destructive">
-              Failed to save your research. Your content is preserved.
-            </span>
-            <button
-              onClick={() => lastQuery && sendQuery(lastQuery)}
-              className="text-sm text-destructive underline hover:no-underline"
-            >
-              Retry
-            </button>
-          </div>
-        )}
+        {/* Chat tab content */}
+        {pageTab === 'chat' && (
+          <>
+            {/* Persistence failure banner for draft chats */}
+            {persistenceFailed && chatId && isDraftChat(chatId) && (
+              <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2 flex items-center justify-between">
+                <span className="text-sm text-destructive">
+                  Failed to save your research. Your content is preserved.
+                </span>
+                <button
+                  onClick={() => lastQuery && sendQuery(lastQuery)}
+                  className="text-sm text-destructive underline hover:no-underline"
+                >
+                  Retry
+                </button>
+              </div>
+            )}
 
-        {/* Reconnection indicator */}
-        {isReconnecting && (
-          <div className="bg-blue-500/10 border-b border-blue-500/20 px-4 py-2">
-            <span className="text-sm text-blue-600 animate-pulse">
-              Reconnecting to research session...
-            </span>
-          </div>
-        )}
+            {/* Reconnection indicator */}
+            {isReconnecting && (
+              <div className="bg-blue-500/10 border-b border-blue-500/20 px-4 py-2">
+                <span className="text-sm text-blue-600 animate-pulse">
+                  Reconnecting to research session...
+                </span>
+              </div>
+            )}
 
-        {/* Reconnection error */}
-        {reconnectionError && (
-          <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2">
-            <span className="text-sm text-destructive">
-              Failed to reconnect: {reconnectionError}
-            </span>
-          </div>
-        )}
+            {/* Reconnection error */}
+            {reconnectionError && (
+              <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2">
+                <span className="text-sm text-destructive">
+                  Failed to reconnect: {reconnectionError}
+                </span>
+              </div>
+            )}
 
-        {/* Messages area */}
-        <div className="flex-1 flex min-h-0">
-          {/* Messages */}
-          <div className="flex-1 flex flex-col min-w-0">
-            {/* Compute whether to show research panel (for hiding duplicate sources) */}
-            {(() => {
-              const showResearchPanel = (currentQueryMode === 'deep_research' || currentQueryMode === 'web_search') &&
-                (isStreaming || !!currentPlan || events.length > 0 || claims.length > 0);
+            {/* Messages area */}
+            <div className="flex-1 flex min-h-0">
+              {/* Messages */}
+              <div className="flex-1 flex flex-col min-w-0">
+                {/* Compute whether to show research panel (for hiding duplicate sources) */}
+                {(() => {
+                  const showResearchPanel = (currentQueryMode === 'deep_research' || currentQueryMode === 'web_search') &&
+                    (isStreaming || !!currentPlan || events.length > 0 || claims.length > 0);
 
-              return (
-                <MessageList
-                  messages={messages}
-                  streamingContent={streamingContent}
-                  isStreaming={isStreaming}
+                  return (
+                    <MessageList
+                      messages={messages}
+                      streamingContent={streamingContent}
+                      isStreaming={isStreaming}
+                      isLoading={isStreaming}
+                      className="flex-1"
+                      hideAgentSourcesSection={showResearchPanel}
+                      // Pass streaming claims for real-time citation display during streaming
+                      streamingClaims={streamingClaims}
+                      streamingVerificationSummary={streamingVerificationSummary}
+                      // Error display with stack trace
+                      errorDetails={errorDetails}
+                      onRetry={errorDetails?.recoverable ? () => lastQuery && sendQuery(lastQuery) : undefined}
+                      onDismissError={clearErrorDetails}
+                      // AIditor integration
+                      onSendToAIditor={handleSendToAIditor}
+                      researchPanel={
+                        showResearchPanel ? (
+                          <ResearchPanel
+                            isStreaming={isStreaming}
+                            events={events}
+                            plan={currentPlan}
+                            currentStepIndex={currentStepIndex}
+                            startTime={startTime ?? undefined}
+                            currentAgent={currentAgent ?? undefined}
+                            claims={claims}
+                            allSources={allSources}
+                            verificationSummary={verificationSummary}
+                          />
+                        ) : null
+                      }
+                    />
+                  );
+                })()}
+
+                {/* Input */}
+                <MessageInput
+                  onSubmit={handleSendMessage}
+                  onStop={stopStream}
                   isLoading={isStreaming}
-                  className="flex-1"
-                  hideAgentSourcesSection={showResearchPanel}
-                  // Pass streaming claims for real-time citation display during streaming
-                  streamingClaims={streamingClaims}
-                  streamingVerificationSummary={streamingVerificationSummary}
-                  // Error display with stack trace
-                  errorDetails={errorDetails}
-                  onRetry={errorDetails?.recoverable ? () => lastQuery && sendQuery(lastQuery) : undefined}
-                  onDismissError={clearErrorDetails}
-                  researchPanel={
-                    showResearchPanel ? (
-                      <ResearchPanel
-                        isStreaming={isStreaming}
-                        events={events}
-                        plan={currentPlan}
-                        currentStepIndex={currentStepIndex}
-                        startTime={startTime ?? undefined}
-                        currentAgent={currentAgent ?? undefined}
-                        claims={claims}
-                        allSources={allSources}
-                        verificationSummary={verificationSummary}
-                      />
-                    ) : null
-                  }
+                  disabled={isLoadingMessages}
+                  inputConfig={inputConfig}
                 />
-              );
-            })()}
+              </div>
 
-            {/* Input */}
-            <MessageInput
-              onSubmit={handleSendMessage}
-              onStop={stopStream}
-              isLoading={isStreaming}
-              disabled={isLoadingMessages}
-              inputConfig={inputConfig}
-            />
+            </div>
+          </>
+        )}
+
+        {/* AIditor tab content */}
+        {pageTab === 'aiditor' && (
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center text-muted-foreground">
+                  Loading AIditor...
+                </div>
+              }
+            >
+              <AIditor
+                initialContent={aiditorContent}
+                onContentConsumed={() => setAiditorContent(null)}
+                onExportToChat={handleExportFromAIditor}
+              />
+            </Suspense>
           </div>
-
-        </div>
+        )}
       </main>
 
       {/* Delete confirmation dialog */}
