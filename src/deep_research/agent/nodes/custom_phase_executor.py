@@ -15,6 +15,7 @@ from mlflow.entities import SpanType
 from deep_research.agent.state import SourceInfo
 from deep_research.agent.tools.web_crawler import WebCrawler, web_crawl
 from deep_research.agent.tools.web_search import web_search
+from deep_research.services.search.domain_filter import DomainFilter
 from deep_research.core.logging_utils import (
     get_logger,
     log_tool_call,
@@ -91,6 +92,9 @@ async def execute_custom_phase(
         "phase.prompt_length": len(prompt),
     }) as span:
 
+        # Build domain filter once for all searches in this phase
+        _agent_domain_filter = DomainFilter(state.domain_filter) if state.domain_filter else None
+
         logger.info(
             "CUSTOM_PHASE_EXECUTING",
             phase_name=phase_name,
@@ -136,7 +140,7 @@ async def execute_custom_phase(
                 for query in search_queries[:3]:
                     try:
                         log_tool_call(logger, tool_name="web_search", params={"query": query})
-                        results = await web_search(query=query, count=5, client=brave_client)
+                        results = await web_search(query=query, count=5, client=brave_client, domain_filter=_agent_domain_filter)
                         all_results.extend(results.results)
                     except Exception as e:
                         logger.warning(

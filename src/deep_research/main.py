@@ -105,8 +105,8 @@ async def lifespan(app: FastAPI):
 
     app.state.model_config = ModelConfig()
     app.state.llm_client = LLMClient(app.state.model_config)
-    app.state.brave_client = BraveSearchClient()
-    app.state.web_crawler = WebCrawler()
+    app.state.brave_client = BraveSearchClient(verify_ssl=settings.brave_verify_ssl)
+    app.state.web_crawler = WebCrawler(verify_ssl=settings.brave_verify_ssl)
 
     # Initialize plugin manager (discovers and loads plugins via entry points)
     from deep_research.plugins.manager import PluginManager
@@ -171,6 +171,14 @@ async def lifespan(app: FastAPI):
     if hasattr(app.state, "job_manager") and app.state.job_manager:
         await app.state.job_manager.stop()
         logger.info("Job manager stopped")
+
+    # Flush MLflow traces before closing connections
+    try:
+        from deep_research.core.tracing import shutdown_tracing
+
+        shutdown_tracing()
+    except ImportError:
+        pass
 
     # Cleanup shared services
     await app.state.llm_client.close()

@@ -16,11 +16,12 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import RLock
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from deep_research.agent.tools.base import ResearchContext, ResearchTool
 
@@ -39,7 +40,6 @@ from deep_research.plugins.base import (
     ToolProvider,
 )
 from deep_research.plugins.discovery import discover_plugins
-from deep_research.plugins.lifecycle.protocol import JobLifecycleListener
 
 logger = logging.getLogger(__name__)
 
@@ -202,13 +202,15 @@ class PluginManager:
                 plugin = plugin_cls()
 
                 # Check if plugin is disabled via configuration
-                if plugins_config is not None:
-                    if not plugins_config.is_enabled(plugin.name):
-                        logger.info(
-                            "Skipping disabled plugin: %s",
-                            plugin.name,
-                        )
-                        continue
+                if (
+                    plugins_config is not None
+                    and not plugins_config.is_enabled(plugin.name)
+                ):
+                    logger.info(
+                        "Skipping disabled plugin: %s",
+                        plugin.name,
+                    )
+                    continue
 
                 plugin.initialize(app_config)
                 self._plugins.append(plugin)
@@ -335,7 +337,7 @@ class PluginManager:
                         e,
                     )
 
-    def get_tools(self, context: ResearchContext) -> list[ResearchTool]:
+    def get_tools(self, context: ResearchContext) -> list[ResearchTool]:  # noqa: ARG002
         """
         Get all registered tools.
 
@@ -540,17 +542,26 @@ class PluginManager:
 
         # All possible hooks from JobLifecycleListener protocol
         all_hooks = [
+            # Job lifecycle hooks
             "on_job_submitted",
             "on_job_started",
             "on_job_completed",
             "on_job_failed",
+            # Synthesis lifecycle hooks
             "on_synthesis_config",
             "on_synthesis_started",
             "on_synthesis_chunk",
             "on_synthesis_completed",
+            # Validation hooks
             "on_validation_error",
             "on_validation_success",
+            # Generic hooks
             "on_stream_event",
+            # Enterprise data source hooks (007-enterprise-data-sources, T064)
+            "on_data_source_query",
+            "on_template_applied",
+            "on_custom_agent_selected",
+            "on_data_landscape_built",
         ]
 
         for hook_name in all_hooks:
@@ -677,7 +688,7 @@ class PluginManager:
                 metrics.total_duration_ms += duration_ms
                 metrics.last_call_time = datetime.now()
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 stats["timed_out"] += 1
                 stats["errors"].append({
                     "plugin": plugin_name,

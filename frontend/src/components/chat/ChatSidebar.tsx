@@ -1,4 +1,5 @@
 import * as React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { Chat } from '@/types';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -52,9 +53,23 @@ export function ChatSidebar({
   className,
 }: ChatSidebarProps) {
   const [showNewChatMenu, setShowNewChatMenu] = React.useState(false);
+  const [enableAuxQueries, setEnableAuxQueries] = React.useState(false);
   const newChatButtonRef = React.useRef<HTMLDivElement>(null);
-  const { data: sessionStatus } = useIncognitoSessionStatus();
+  const activateAuxQueries = React.useCallback(() => {
+    setEnableAuxQueries(true);
+  }, []);
+  const { data: sessionStatus } = useIncognitoSessionStatus({
+    enabled: enableAuxQueries || showNewChatMenu,
+  });
   const createIncognito = useCreateIncognitoChat();
+
+  // Defer non-essential sidebar queries so main chat UI is interactive first.
+  React.useEffect(() => {
+    const timer = setTimeout(() => {
+      setEnableAuxQueries(true);
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Close menu on click outside
   React.useEffect(() => {
@@ -76,6 +91,7 @@ export function ChatSidebar({
   const canCreateIncognito = !sessionStatus || sessionStatus.chatCount < sessionStatus.maxChats;
 
   const handleNewIncognitoChat = async () => {
+    activateAuxQueries();
     setShowNewChatMenu(false);
     if (onNewIncognitoChat) {
       onNewIncognitoChat();
@@ -107,8 +123,14 @@ export function ChatSidebar({
     });
   }, [chats, statusFilter, searchQuery]);
 
+  const showChatListLoading = isLoading && filteredChats.length === 0;
+
   return (
-    <aside className={cn('w-64 border-r bg-muted/40 flex flex-col', className)}>
+    <aside
+      className={cn('w-64 border-r bg-muted/40 flex flex-col', className)}
+      onMouseEnter={activateAuxQueries}
+      onFocusCapture={activateAuxQueries}
+    >
       {/* Header */}
       <div className="p-4 border-b space-y-3">
         <div ref={newChatButtonRef} className="relative">
@@ -124,7 +146,13 @@ export function ChatSidebar({
             </Button>
             <Button
               data-testid="new-chat-menu-trigger"
-              onClick={() => setShowNewChatMenu(!showNewChatMenu)}
+              onClick={() => {
+                const next = !showNewChatMenu;
+                setShowNewChatMenu(next);
+                if (next) {
+                  activateAuxQueries();
+                }
+              }}
               variant="outline"
               size="icon"
               className="shrink-0"
@@ -196,7 +224,7 @@ export function ChatSidebar({
 
       {/* Chat list */}
       <div data-testid="chat-list" className="flex-1 overflow-y-auto p-2 space-y-1">
-        {isLoading ? (
+        {showChatListLoading ? (
           <div data-testid="chat-list-loading" className="p-4 text-center text-muted-foreground">
             Loading chats...
           </div>
@@ -239,16 +267,56 @@ export function ChatSidebar({
         currentChatId={currentChatId}
         onSelectChat={onSelectChat}
         onHoverChat={onHoverChat}
+        enabled={enableAuxQueries}
       />
 
       {/* Active Jobs Indicator */}
       <div className="p-2 border-t">
-        <ActiveJobsIndicator onNavigateToChat={onSelectChat} />
+        <ActiveJobsIndicator onNavigateToChat={onSelectChat} enabled={enableAuxQueries} />
       </div>
+
+      {/* Navigation Links */}
+      <SidebarNavLinks />
 
       {/* User Profile - shown at bottom of sidebar */}
       <UserProfile />
     </aside>
+  );
+}
+
+/**
+ * Navigation links section at the bottom of the sidebar.
+ */
+function SidebarNavLinks() {
+  const navigate = useNavigate();
+
+  return (
+    <div className="px-2 pb-2 border-t pt-2 space-y-0.5">
+      <button
+        type="button"
+        onClick={() => navigate('/agents')}
+        className={cn(
+          'w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm',
+          'text-muted-foreground hover:text-foreground hover:bg-accent',
+          'transition-colors'
+        )}
+      >
+        <AgentIcon className="h-4 w-4" />
+        Agents
+      </button>
+      <button
+        type="button"
+        onClick={() => navigate('/templates')}
+        className={cn(
+          'w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm',
+          'text-muted-foreground hover:text-foreground hover:bg-accent',
+          'transition-colors'
+        )}
+      >
+        <TemplateIcon className="h-4 w-4" />
+        Templates
+      </button>
+    </div>
   );
 }
 
@@ -669,6 +737,46 @@ function EyeOffIcon({ className }: { className?: string }) {
       <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
       <path d="m1 1 22 22" />
       <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+    </svg>
+  );
+}
+
+function AgentIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M12 8V4H8" />
+      <rect width="16" height="12" x="4" y="8" rx="2" />
+      <path d="M2 14h2M20 14h2M15 13v2M9 13v2" />
+    </svg>
+  );
+}
+
+function TemplateIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+      <polyline points="14 2 14 8 20 8" />
+      <line x1="16" x2="8" y1="13" y2="13" />
+      <line x1="16" x2="8" y1="17" y2="17" />
+      <polyline points="10 9 9 9 8 9" />
     </svg>
   );
 }

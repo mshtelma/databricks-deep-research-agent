@@ -1,0 +1,223 @@
+# OpenAPI Schema Fragment: SubmitJobRequest with Source Scope Fields
+# Feature: 008-data-source-selection
+# Date: 2026-02-05
+
+openapi: 3.0.3
+info:
+  title: Deep Research Agent - Job Submission API
+  version: 2.0.0
+  description: Extended job submission endpoint with source scope selection
+
+paths:
+  /api/v1/research/jobs:
+    post:
+      operationId: submitJob
+      summary: Submit a new research job
+      description: |
+        Creates a new research job with optional source scope configuration.
+        Source scope parameters are optional for backward compatibility.
+      tags:
+        - Research Jobs
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitJobRequest'
+            examples:
+              minimal:
+                summary: Minimal request (existing behavior)
+                value:
+                  chat_id: "550e8400-e29b-41d4-a716-446655440000"
+                  query: "What is quantum computing?"
+                  query_mode: "deep_research"
+                  research_depth: "standard"
+                  verify_sources: true
+              enterprise_only:
+                summary: Enterprise sources only
+                value:
+                  chat_id: "550e8400-e29b-41d4-a716-446655440000"
+                  query: "What is our company policy on remote work?"
+                  query_mode: "deep_research"
+                  research_depth: "standard"
+                  verify_sources: true
+                  source_scope: "enterprise_only"
+                  enabled_sources: null
+                  disabled_sources: []
+              web_only:
+                summary: Web search only
+                value:
+                  chat_id: "550e8400-e29b-41d4-a716-446655440000"
+                  query: "Latest AI research papers 2026"
+                  query_mode: "web_search"
+                  research_depth: "light"
+                  verify_sources: false
+                  source_scope: "web_only"
+              selective_sources:
+                summary: Selective enterprise sources
+                value:
+                  chat_id: "550e8400-e29b-41d4-a716-446655440000"
+                  query: "Revenue projections for Q1"
+                  query_mode: "deep_research"
+                  research_depth: "extended"
+                  verify_sources: true
+                  source_scope: "all"
+                  enabled_sources:
+                    - "catalog.schema.financial_docs"
+                    - "genie-space-123"
+                  disabled_sources: []
+      responses:
+        '202':
+          description: Job accepted and queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobResponse'
+        '400':
+          description: Invalid request (e.g., enterprise_only with no sources enabled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+        '403':
+          description: Insufficient permissions
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    SourceScope:
+      type: string
+      enum:
+        - enterprise_only
+        - web_only
+        - all
+      description: |
+        Determines which category of sources to query:
+        - `enterprise_only`: Only Vector Search, Genie, Knowledge Assistant sources
+        - `web_only`: Only web search (Brave API)
+        - `all`: Both enterprise and web sources (default)
+
+    SubmitJobRequest:
+      type: object
+      required:
+        - chat_id
+        - query
+        - query_mode
+        - research_depth
+        - verify_sources
+      properties:
+        # Existing fields (unchanged)
+        chat_id:
+          type: string
+          format: uuid
+          description: Chat session ID to associate with this job
+        query:
+          type: string
+          minLength: 1
+          maxLength: 10000
+          description: Research query text
+        query_mode:
+          type: string
+          enum:
+            - simple
+            - web_search
+            - deep_research
+          description: Query processing mode
+        research_depth:
+          type: string
+          enum:
+            - light
+            - standard
+            - extended
+          description: Research thoroughness level
+        verify_sources:
+          type: boolean
+          description: Enable citation verification pipeline
+        output_type:
+          type: string
+          nullable: true
+          description: Output format type (optional)
+
+        # NEW FIELDS (Feature 008)
+        source_scope:
+          $ref: '#/components/schemas/SourceScope'
+          nullable: true
+          description: |
+            High-level source category selection.
+            If null, defaults to 'all'.
+        enabled_sources:
+          type: array
+          items:
+            type: string
+          nullable: true
+          description: |
+            Whitelist of specific source IDs to query.
+            If null, no whitelist is applied (all sources in scope are queried).
+            If empty array, same as null.
+          example:
+            - "catalog.schema.product_docs"
+            - "genie-space-456"
+        disabled_sources:
+          type: array
+          items:
+            type: string
+          default: []
+          description: |
+            Blacklist of source IDs to exclude.
+            Applied after scope and whitelist filtering.
+            Defaults to empty array (no exclusions).
+          example:
+            - "catalog.schema.legacy_docs"
+
+    JobResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique job identifier
+        chat_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - pending
+            - running
+            - completed
+            - failed
+            - cancelled
+        created_at:
+          type: string
+          format: date-time
+        # Note: source_scope fields not included in response
+        # (they're request-only configuration)
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error code
+        message:
+          type: string
+          description: Human-readable error message
+        details:
+          type: object
+          additionalProperties: true
+          description: Additional error context
+      example:
+        error: "INVALID_SOURCE_CONFIG"
+        message: "Cannot use 'enterprise_only' scope with no enterprise sources enabled"
+        details:
+          source_scope: "enterprise_only"
+          enabled_sources: []

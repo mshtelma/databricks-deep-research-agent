@@ -14,11 +14,19 @@ from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.chat import Chat, ChatStatus, ChatType
 from deep_research.models.incognito_session import MAX_INCOGNITO_CHATS, SESSION_TTL_HOURS
+from deep_research.api.v1.utils.transformers import (
+    jsonb_claim_to_response,
+    jsonb_summary_to_response,
+)
+from deep_research.schemas.agent import SourceResponse
 from deep_research.schemas.chat import (
     ChatCreate,
+    ChatFullResponse,
     ChatListResponse,
     ChatResponse,
     ChatUpdate,
+    MessageInline,
+    ResearchSessionInline,
 )
 from deep_research.schemas.session import IncognitoChatListResponse, IncognitoSessionStatus
 from deep_research.services.chat_service import ChatService
@@ -233,6 +241,93 @@ async def get_incognito_session_status(
 # =============================================================================
 # Dynamic Routes (/{chat_id} patterns - must come after static routes)
 # =============================================================================
+
+
+@router.get("/{chat_id}/full", response_model=ChatFullResponse)
+async def get_chat_full(
+    chat_id: UUID,
+    user: CurrentUser,
+    db: AsyncSession = Depends(get_db),
+) -> ChatFullResponse:
+    """Load complete chat with all messages, research sessions, sources, and claims.
+
+    Single API call replaces the waterfall of:
+    - GET /chats/{id}/messages
+    - GET /messages/{id}/claims
+    """
+    service = ChatService(db)
+    chat = await service.get_full(chat_id, user.user_id)
+    if not chat:
+        raise NotFoundError("Chat", str(chat_id))
+
+    messages: list[MessageInline] = []
+    for msg in sorted(chat.messages, key=lambda m: m.created_at):
+        session_schema = None
+        claims = []
+        verification_summary = None
+
+        if msg.research_session:
+            rs = msg.research_session
+            sources = [
+                SourceResponse(
+                    id=s.id,
+                    url=s.url,
+                    title=s.title,
+                    snippet=s.snippet,
+                    relevance_score=s.relevance_score,
+                    source_type=s.source_type or "web",
+                    source_metadata=s.source_metadata,
+                    is_cited=s.is_cited,
+                )
+                for s in (rs.sources or [])
+            ]
+            session_schema = ResearchSessionInline(
+                id=rs.id,
+                query_classification=rs.query_classification,
+                research_depth=rs.research_depth,
+                reasoning_steps=rs.reasoning_steps or [],
+                status=rs.status,
+                current_agent=rs.current_agent,
+                plan=rs.plan,
+                current_step_index=rs.current_step_index,
+                plan_iterations=rs.plan_iterations,
+                started_at=rs.started_at,
+                completed_at=rs.completed_at,
+                sources=sources,
+            )
+
+            # Pre-parse claims using existing JSONB transformers
+            if rs.verification_data:
+                claims = [
+                    jsonb_claim_to_response(c, msg.id)
+                    for c in rs.verification_data.get("claims", [])
+                ]
+                raw_summary = rs.verification_data.get("summary")
+                if raw_summary:
+                    verification_summary = jsonb_summary_to_response(raw_summary)
+
+        messages.append(MessageInline(
+            id=msg.id,
+            chat_id=msg.chat_id,
+            role=msg.role,
+            content=msg.content or "",
+            created_at=msg.created_at,
+            is_edited=msg.is_edited,
+            research_session=session_schema,
+            claims=claims,
+            verification_summary=verification_summary,
+        ))
+
+    return ChatFullResponse(
+        id=chat.id,
+        title=chat.title,
+        status=chat.status,
+        chat_type=chat.chat_type or ChatType.REGULAR,
+        created_at=chat.created_at,
+        updated_at=chat.updated_at,
+        messages=messages,
+        message_count=len(messages),
+    )
 
 
 @router.get("/{chat_id}", response_model=ChatResponse)

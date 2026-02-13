@@ -3,7 +3,7 @@
 import contextlib
 import json
 import logging
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Generator
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 
 P = ParamSpec("P")
 R = TypeVar("R")
+
+# Module-level flag: set to True only when setup_tracing() completes successfully
+_tracing_enabled: bool = False
+
+
+def is_tracing_enabled() -> bool:
+    """Check if MLflow tracing was successfully initialized."""
+    return _tracing_enabled
 
 
 # ---------------------------------------------------------------------------
@@ -68,37 +76,115 @@ def set_trace_attributes(attributes: dict[str, Any]) -> None:
 
 
 def setup_tracing() -> None:
-    """Configure MLflow tracing for the application."""
+    """Configure MLflow tracing for the application.
+
+    Each initialization step is isolated so that a failure in one
+    (e.g. set_experiment on a misconfigured workspace) does not
+    prevent the remaining steps from executing.
+
+    When MLFLOW_ENABLED=false, skips all MLflow setup and leaves
+    _tracing_enabled as False so all safe wrappers become no-ops.
+    """
+    global _tracing_enabled
     settings = get_settings()
 
+    if not settings.mlflow_enabled:
+        logger.info("MLflow tracing disabled via MLFLOW_ENABLED=false")
+        _tracing_enabled = False
+        return
+
+    # Step 1: async logging
     try:
-        # Enable async logging for FastAPI/async context
-        # This ensures traces are properly flushed in async applications
         mlflow.config.enable_async_logging(True)  # type: ignore[no-untyped-call]
-
-        # Set tracking URI
-        mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
-
-        # Set experiment
-        mlflow.set_experiment(settings.mlflow_experiment_name)
-
-        # Enable tracing
-        mlflow.tracing.enable()
-
-        # Enable automatic tracing for OpenAI SDK calls
-        # This captures all streaming calls automatically
-        try:
-            mlflow.openai.autolog()
-            logger.info("MLflow OpenAI autolog enabled")
-        except Exception as e:
-            logger.warning(f"Could not enable OpenAI autolog: {e}")
-
-        logger.info(
-            f"MLflow tracing enabled (async): {settings.mlflow_tracking_uri} / "
-            f"{settings.mlflow_experiment_name}"
-        )
     except Exception as e:
-        logger.warning(f"Failed to configure MLflow tracing: {e}")
+        logger.warning("MLflow async logging setup failed: %s", e)
+
+    # Step 2: tracking URI
+    try:
+        mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
+    except Exception as e:
+        logger.warning("MLflow tracking URI setup failed: %s", e)
+
+    # Step 3: experiment
+    experiment_ok = False
+    try:
+        mlflow.set_experiment(settings.mlflow_experiment_name)
+        experiment_ok = True
+    except Exception as e:
+        logger.warning("MLflow set_experiment failed: %s", e)
+
+    # Step 4: tracing
+    try:
+        mlflow.tracing.enable()
+    except Exception as e:
+        logger.warning("MLflow tracing.enable() failed: %s", e)
+
+    # Step 5: OpenAI autolog
+    try:
+        mlflow.openai.autolog()
+    except Exception as e:
+        logger.warning("MLflow OpenAI autolog failed: %s", e)
+
+    _tracing_enabled = True
+    logger.info(
+        "MLflow tracing setup complete: tracking_uri=%s, experiment=%s, experiment_ok=%s",
+        settings.mlflow_tracking_uri,
+        settings.mlflow_experiment_name,
+        experiment_ok,
+    )
+
+
+def shutdown_tracing() -> None:
+    """Flush buffered async traces on shutdown.
+
+    Should be called during application shutdown to ensure all
+    pending traces are written before the process exits.
+    """
+    if not _tracing_enabled:
+        return
+    try:
+        mlflow.flush_trace_async_logging(terminate=True)
+        logger.info("MLflow traces flushed")
+    except Exception as e:
+        logger.warning("MLflow trace flush failed: %s", e)
+
+
+@contextlib.contextmanager
+def safe_mlflow_run(run_name: str) -> Generator[None, None, None]:
+    """Context manager wrapping mlflow.start_run() with graceful fallback.
+
+    When tracing is disabled or MLflow fails to start the run,
+    yields control without an active run. Caller code always executes.
+    """
+    if not _tracing_enabled:
+        yield
+        return
+
+    run_started = False
+    try:
+        mlflow.start_run(run_name=run_name, nested=True)
+        run_started = True
+    except Exception as e:
+        logger.warning("MLflow start_run failed (non-fatal): %s", e)
+
+    try:
+        yield
+    finally:
+        if run_started:
+            try:
+                mlflow.end_run()
+            except Exception as e:
+                logger.warning("MLflow end_run failed (non-fatal): %s", e)
+
+
+def safe_update_trace(metadata: dict[str, str]) -> None:
+    """Update current trace metadata. No-op when tracing is disabled."""
+    if not _tracing_enabled:
+        return
+    try:
+        mlflow.update_current_trace(metadata=metadata)
+    except Exception:
+        pass  # Non-fatal: tracing metadata is purely observational
 
 
 def trace_agent(
@@ -208,6 +294,8 @@ def log_research_session(
         sources_count: Number of sources used.
         plan_iterations: Number of plan iterations.
     """
+    if not _tracing_enabled:
+        return
     try:
         mlflow.log_metrics(
             {
@@ -241,6 +329,8 @@ def log_feedback(
         rating: Feedback rating (-1 or 1).
         has_error_report: Whether error report was provided.
     """
+    if not _tracing_enabled:
+        return
     try:
         mlflow.log_metrics(
             {
@@ -291,7 +381,7 @@ async def safe_tool_span(
         if attributes and span:
             span.set_attributes(attributes)
     except Exception as e:
-        logger.debug(f"Span creation failed (non-fatal): {e}")
+        logger.warning(f"Span creation failed (non-fatal): {e}")
         span = None
         span_cm = None
 
@@ -326,6 +416,8 @@ def log_research_config(depth: str) -> None:
     Args:
         depth: Research depth (light, medium, extended).
     """
+    if not _tracing_enabled:
+        return
     from deep_research.agent.config import get_citation_config_for_depth, get_research_type_config
     from deep_research.core.app_config import get_app_config
 

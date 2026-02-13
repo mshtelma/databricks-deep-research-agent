@@ -22,13 +22,15 @@ def create_test_context() -> ResearchContext:
     )
 
 
-def create_mock_client(
+def _build_responses_api_dict(
     answer: str = "Test answer",
     citations: list[dict[str, Any]] | None = None,
-) -> MagicMock:
-    """Create a mock WorkspaceClient with serving_endpoints."""
-    mock_client = MagicMock()
+) -> dict[str, Any]:
+    """Build a Responses API raw dict mimicking the KA endpoint format.
 
+    Each citation becomes a separate ``output_text`` item preceded by the
+    text it annotates, matching the real endpoint behaviour.
+    """
     if citations is None:
         citations = [
             {
@@ -39,22 +41,45 @@ def create_mock_client(
             }
         ]
 
-    mock_response = MagicMock()
-    mock_response.predictions = [
-        {
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": answer,
-                        "citations": citations,
-                    }
-                }
-            ]
-        }
+    # Build content items.  The real KA endpoint interleaves text chunks
+    # with annotated chunks.  For simplicity the mock puts the full answer
+    # in one item and each citation in its own annotated item.
+    content_items: list[dict[str, Any]] = [
+        {"type": "output_text", "text": answer, "annotations": []},
     ]
+    for cit in citations:
+        content_items.append({
+            "type": "output_text",
+            "text": cit.get("snippet", ""),
+            "annotations": [
+                {
+                    "type": "url_citation",
+                    "url": cit.get("url", ""),
+                    "title": cit.get("title", ""),
+                }
+            ],
+        })
 
-    mock_client.serving_endpoints.query.return_value = mock_response
+    return {
+        "model": "test-model",
+        "object": "response",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": content_items,
+            }
+        ],
+    }
+
+
+def create_mock_client(
+    answer: str = "Test answer",
+    citations: list[dict[str, Any]] | None = None,
+) -> MagicMock:
+    """Create a mock WorkspaceClient with api_client.do() returning Responses API dict."""
+    mock_client = MagicMock()
+    mock_client.api_client.do.return_value = _build_responses_api_dict(answer, citations)
     return mock_client
 
 
@@ -220,7 +245,7 @@ class TestKnowledgeAssistantToolExecution:
         """Should handle query errors gracefully."""
         tool = KnowledgeAssistantTool(endpoint_name="test-ka")
         mock_client = create_mock_client()
-        mock_client.serving_endpoints.query.side_effect = Exception("API error")
+        mock_client.api_client.do.side_effect = Exception("API error")
         tool._client = mock_client
 
         context = create_test_context()
@@ -256,27 +281,14 @@ class TestKnowledgeAssistantToolResponseParsing:
     """Tests for response parsing edge cases."""
 
     @pytest.mark.asyncio
-    async def test_parses_dict_response(self) -> None:
-        """Should parse dict-based response."""
+    async def test_parses_responses_api_dict(self) -> None:
+        """Should parse Responses API dict format."""
         tool = KnowledgeAssistantTool(endpoint_name="test-ka")
 
-        # Create response with dict structure
-        mock_response = MagicMock()
-        mock_response.predictions = [
-            {
-                "choices": [
-                    {
-                        "message": {
-                            "content": "Dict answer",
-                            "citations": [],
-                        }
-                    }
-                ]
-            }
-        ]
-
         mock_client = MagicMock()
-        mock_client.serving_endpoints.query.return_value = mock_response
+        mock_client.api_client.do.return_value = _build_responses_api_dict(
+            answer="Dict answer", citations=[],
+        )
         tool._client = mock_client
 
         context = create_test_context()
@@ -286,15 +298,16 @@ class TestKnowledgeAssistantToolResponseParsing:
         assert "Dict answer" in result.content
 
     @pytest.mark.asyncio
-    async def test_handles_empty_predictions(self) -> None:
-        """Should handle empty predictions list."""
+    async def test_handles_empty_output(self) -> None:
+        """Should handle response with empty output list."""
         tool = KnowledgeAssistantTool(endpoint_name="test-ka")
 
-        mock_response = MagicMock()
-        mock_response.predictions = []
-
         mock_client = MagicMock()
-        mock_client.serving_endpoints.query.return_value = mock_response
+        mock_client.api_client.do.return_value = {
+            "model": "test",
+            "object": "response",
+            "output": [],
+        }
         tool._client = mock_client
 
         context = create_test_context()

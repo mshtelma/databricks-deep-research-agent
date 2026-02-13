@@ -1,9 +1,14 @@
 """Agent configuration accessors - loads from central AppConfig."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from deep_research.core.app_config import (
     BackgroundConfig,
     CitationVerificationConfig,
     CoordinatorConfig,
+    ParallelToolExecutionConfig,
     PlannerConfig,
     QueryModeConfig,
     QueryModesConfig,
@@ -41,6 +46,15 @@ def get_synthesizer_config() -> SynthesizerConfig:
 def get_background_config() -> BackgroundConfig:
     """Get Background Investigator agent configuration."""
     return get_app_config().agents.background
+
+
+def get_parallel_tool_execution_config() -> ParallelToolExecutionConfig:
+    """Get parallel tool execution configuration.
+
+    Returns:
+        ParallelToolExecutionConfig with enabled, timeouts, and limits.
+    """
+    return get_app_config().agents.researcher.parallel_tool_execution
 
 
 def get_truncation_limit(limit_name: str) -> int:
@@ -248,3 +262,59 @@ def get_query_mode_config(mode: str) -> QueryModeConfig:
         ValueError: If mode is not a valid query mode
     """
     return get_app_config().query_modes.get(mode)
+
+
+def get_query_rewrite_config(source_type: str) -> QueryRewriteConfig | None:
+    """Get query rewriting config for a source type from app config.
+
+    Converts the YAML-level QueryRewriteStrategyConfig into the tool-level
+    QueryRewriteConfig that the rewriter module expects.
+
+    Args:
+        source_type: Source type identifier (vector_search, genie, knowledge_assistant).
+
+    Returns:
+        QueryRewriteConfig if rewriting is enabled for this source type, None otherwise.
+    """
+    from deep_research.agent.tools.query_rewriter import QueryRewriteConfig
+
+    app_config = get_app_config()
+    rewriting_config = app_config.query_rewriting
+
+    if not rewriting_config.enabled:
+        return None
+
+    strategy_config = rewriting_config.strategies.get(source_type)
+    if not strategy_config:
+        return None
+
+    return QueryRewriteConfig(
+        enabled=True,
+        strategy=strategy_config.strategy,
+        max_alternate_queries=strategy_config.max_alternate_queries,
+        enable_query2doc=strategy_config.enable_query2doc,
+        model_tier=strategy_config.model_tier,
+        timeout_seconds=strategy_config.timeout_seconds,
+        fallback_on_failure=strategy_config.fallback_on_failure,
+    )
+
+
+if TYPE_CHECKING:
+    from deep_research.agent.state import ResearchState
+    from deep_research.agent.tools.query_rewriter import QueryRewriteConfig
+    from deep_research.services.llm.config import ModelTier
+
+
+def get_endpoint_override(state: ResearchState, tier: ModelTier) -> str | None:
+    """Get endpoint override for a tier from state's model_overrides.
+
+    Args:
+        state: Current research state.
+        tier: Model tier to check for override.
+
+    Returns:
+        Endpoint ID string if override is set, None otherwise.
+    """
+    if not state.model_overrides:
+        return None
+    return state.model_overrides.get(tier.value)

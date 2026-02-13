@@ -66,6 +66,9 @@ Step {current_step}/{total_steps}: {step_title}
 ## Sources Collected ({sources_count} total)
 {source_topics}
 
+## Enterprise Source Quality
+{source_quality}
+
 ## Progress
 - Minimum steps for this depth: {min_steps}
 - Steps completed: {steps_completed}

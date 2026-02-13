@@ -450,6 +450,50 @@ The post-verification pipeline:
 4. Runs Stage 6 (NumericVerifier) for numeric claim verification
 5. Applies corrections to source_refs in the structured output
 
+## Custom Agent Runtime Configuration
+
+When a custom agent is selected for a research query, its configuration is applied to the `OrchestrationConfig` at runtime. This section describes how each agent-level setting maps to the orchestration pipeline.
+
+### Model Overrides
+
+Per-agent model overrides remap tier-to-endpoint assignments. The `model_overrides` field is a dictionary mapping tier names to endpoint identifiers:
+
+```python
+# Agent defines: {"complex": "databricks-claude-sonnet-er", "analytical": "databricks-gemini-flash"}
+# At runtime, the LLM client uses these endpoints instead of the YAML defaults for those tiers.
+```
+
+Overrides only affect the tiers specified — unspecified tiers use the system default from `config/app.yaml`. If an overridden endpoint no longer exists, the system logs a warning and falls back to the default.
+
+### Source Scope
+
+The agent's `source_scope` field (`all`, `enterprise_only`, `web_only`) is applied to `OrchestrationConfig.source_scope`, which propagates to `ResearchState.source_scope_config`. This controls which tools the researcher and background nodes are allowed to use.
+
+When preset steps define per-step `source_scope` overrides, the step-level scope takes precedence during that step's execution.
+
+### Domain Filtering
+
+Agent-level domain filters override the system-wide YAML filters:
+
+```python
+# Agent: domain_filter_mode="include", include_domains=["*.gov", "*.edu"]
+# At runtime: web search results are restricted to .gov and .edu domains
+# System-level filters from config/app.yaml are NOT merged — agent filters replace them entirely.
+```
+
+When no domain filter is configured on the agent (`domain_filter_mode` is null), the system-wide filter applies unchanged.
+
+### Prompt Templates
+
+Two template slots are available:
+
+| Slot | Applied To |
+|------|-----------|
+| `system_prompt_template_id` | Injected into the agent's system prompt for all LLM calls |
+| `synthesis_template_id` | Injected into the synthesis (report generation) phase |
+
+Templates are resolved from the database at query time. If a referenced template has been deleted, the slot is silently cleared (no error).
+
 ## Validation
 
 Configuration is validated at startup:
@@ -552,5 +596,6 @@ Configuration is validated at startup, not at first use. This catches errors imm
 ## See Also
 
 - [Architecture](./architecture.md) - System overview
+- [Custom Agents](./custom-agents.md) - Custom agent configuration guide
 - [Deployment](./deployment.md) - Environment setup
 - [LLM Interaction](./llm-interaction.md) - Model tier routing

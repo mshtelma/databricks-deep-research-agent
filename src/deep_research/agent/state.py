@@ -1,10 +1,20 @@
 """ResearchState model for multi-agent workflow."""
 
+from __future__ import annotations
+
+import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
+
+from deep_research.core.logging_utils import get_logger
+
+logger = get_logger(__name__)
+
+if TYPE_CHECKING:
+    from deep_research.schemas.source_scope import SourceScopeConfig
 
 
 class StepType(str, Enum):
@@ -121,19 +131,30 @@ class QueryClassification:
         }
 
 
+ENTERPRISE_URL_PREFIXES = ("genie://", "vs://", "enterprise://", "ka://")
+"""URL prefixes used by enterprise sources (backward compat fallback classifier)."""
+
+
 @dataclass
 class SourceInfo:
-    """Information about a web source."""
+    """Information about a research source (web or enterprise)."""
 
     url: str
     title: str | None = None
     snippet: str | None = None
     content: str | None = None
     relevance_score: float | None = None
+    source_type: str = "web"
+    """Source type: 'genie', 'vector_search', 'knowledge_assistant', 'web', 'file'."""
     # Extended fields for citation verification
     total_pages: int | None = None
     detected_sections: list[str] | None = None
     content_type: str | None = None
+
+    @property
+    def is_enterprise(self) -> bool:
+        """Check if this source is from an enterprise data source."""
+        return self.source_type in ("genie", "vector_search", "knowledge_assistant")
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -143,6 +164,8 @@ class SourceInfo:
             "snippet": self.snippet,
             "content": self.content,
             "relevance_score": self.relevance_score,
+            "source_type": self.source_type,
+            "is_enterprise": self.is_enterprise,
             "total_pages": self.total_pages,
             "detected_sections": self.detected_sections,
             "content_type": self.content_type,
@@ -280,6 +303,22 @@ class ResearchDepth(str, Enum):
     EXTENDED = "extended"  # 6-10 search iterations, thorough analysis
 
 
+class WorkflowMode(str, Enum):
+    """Workflow mode controlling how research steps are determined.
+
+    Part of 007-enterprise-data-sources feature (T051).
+    """
+
+    PLANNER = "planner"
+    """Let the AI planner determine research steps (default)."""
+
+    MANUAL = "manual"
+    """User defines all steps explicitly, bypass planner."""
+
+    HYBRID = "hybrid"
+    """User defines initial steps, planner can add more."""
+
+
 # Mapping from query complexity to default depth
 COMPLEXITY_TO_DEPTH: dict[str, str] = {
     "simple": "light",
@@ -325,6 +364,70 @@ class ResearchState:
     # Background investigation (pre-planning)
     background_investigation_results: str = ""
 
+    # =========================================================================
+    # Enterprise Data Source Discovery (007-enterprise-data-sources, T035)
+    # =========================================================================
+
+    # Source scope configuration (controls which sources are available)
+    source_scope_config: SourceScopeConfig | None = None
+
+    # Data landscape from background discovery (US10)
+    data_landscape: Any | None = None  # DataLandscape from schemas
+
+    # Per-source query tracking for budgeting
+    source_query_counts: dict[str, int] = field(default_factory=dict)
+
+    # Per-source results for attribution
+    source_results: dict[str, list[SourceInfo]] = field(default_factory=dict)
+
+    # User's OBO token for enterprise data source access
+    user_token: str | None = None
+
+    # Enterprise tools loaded from user data sources (007-enterprise-data-sources Phase 2)
+    # Populated by orchestrator from get_enabled_tools_for_user()
+    enterprise_tools: list[Any] = field(default_factory=list)
+    """Enterprise tools (GenieTool, UserVectorSearchTool) loaded from user data sources."""
+
+    source_quality_history: dict[str, list[str]] = field(default_factory=dict)
+    """Per-source quality signal history: source_name -> ['good', 'empty', 'low_content', ...]."""
+
+    # =========================================================================
+    # File Upload and Custom Agent Support
+    # =========================================================================
+    file_ids: list[str] = field(default_factory=list)
+    """Uploaded file IDs attached to this research session."""
+
+    file_contents: list[dict[str, Any]] = field(default_factory=list)
+    """Pre-loaded file contents for inline prompt injection.
+
+    Each entry: {file_id, filename, file_type, file_size, content, strategy, char_count}
+    strategy: 'inline' | 'hybrid' | 'retrieval'
+    """
+
+    agent_id: str | None = None
+    """Custom agent ID used for this research session."""
+
+    # Per-agent model overrides (009-custom-agent-config)
+    model_overrides: dict[str, str] | None = None
+    """Tier-to-endpoint overrides from custom agent configuration."""
+
+    # Per-agent domain filter (009-custom-agent-config)
+    domain_filter: Any | None = None  # DomainFilterConfig
+    """Domain filter override from custom agent configuration."""
+
+    # =========================================================================
+    # Manual Workflow Mode (007-enterprise-data-sources, T051)
+    # =========================================================================
+
+    # Workflow mode: planner, manual, or hybrid
+    workflow_mode: str = "planner"  # WorkflowMode enum value
+
+    # Manual steps defined by user (for MANUAL/HYBRID modes)
+    manual_steps: list[Any] = field(default_factory=list)  # ManualStepDefinition
+
+    # Per-step source constraints (from manual steps or planner hints)
+    step_source_constraints: dict[str, Any] = field(default_factory=dict)  # step_id -> SourceConstraint
+
     # Planning
     current_plan: Plan | None = None
     plan_iterations: int = 0
@@ -360,6 +463,20 @@ class ResearchState:
     # Maps phase name -> PhaseResult for plugin-provided custom phases
     _phase_results: dict[str, Any] = field(default_factory=dict, repr=False)
 
+    # =========================================================================
+    # Async Locks for Parallel Tool Execution (Phase 1: State Safety)
+    # =========================================================================
+    # CRITICAL: Use asyncio.Lock (NOT threading.RLock) because tool execution
+    # is async. threading.RLock would block the event loop and cause deadlocks.
+    # Granular locks (one per collection) reduce contention when tools update
+    # different collections simultaneously.
+    _sources_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _claims_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _evidence_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _cache_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _phase_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _step_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+
     # Final output (Synthesizer phase)
     final_report: str = ""
     final_report_structured: Any | None = None  # Structured Pydantic output
@@ -383,6 +500,101 @@ class ResearchState:
     # Cancellation support
     is_cancelled: bool = False
 
+    # =========================================================================
+    # Source Scope Helper Methods (008-data-source-selection)
+    # =========================================================================
+
+    def is_web_search_allowed(self) -> bool:
+        """Check if web search is allowed based on source scope configuration.
+
+        Returns:
+            True if web search is allowed (no scope or scope permits web).
+            False if scope is 'enterprise_only'.
+        """
+        if self.source_scope_config is None:
+            return True  # No restriction, backward compatible
+
+        # SourceScopeConfig.is_type_enabled() handles all logic:
+        # - ENTERPRISE_ONLY: returns False for 'web_search'
+        # - WEB_ONLY: returns True for 'web_search'
+        # - ALL: returns True for 'web_search'
+        return self.source_scope_config.is_type_enabled("web_search")
+
+    def is_enterprise_search_allowed(self) -> bool:
+        """Check if enterprise sources are allowed based on source scope.
+
+        Returns:
+            True if enterprise sources allowed (no scope or scope permits enterprise).
+            False if scope is 'web_only'.
+        """
+        if self.source_scope_config is None:
+            return True
+
+        return (
+            self.source_scope_config.is_type_enabled("vector_search")
+            or self.source_scope_config.is_type_enabled("genie")
+            or self.source_scope_config.is_type_enabled("knowledge_assistant")
+        )
+
+    def get_active_scope(self) -> str:
+        """Get the active source scope as a string.
+
+        Returns:
+            'all', 'enterprise_only', 'web_only', or 'all' if not set.
+        """
+        if self.source_scope_config is None:
+            return "all"
+        scope = self.source_scope_config.scope
+        return scope.value if hasattr(scope, "value") else str(scope)
+
+    # =========================================================================
+    # File Content Helper Methods
+    # =========================================================================
+
+    def get_file_context_for_prompt(self, max_chars: int = 0) -> str:
+        """Build formatted file content string for LLM prompt injection.
+
+        Returns empty string if no files. When max_chars > 0, enforces total budget
+        across all file entries (inline, hybrid, retrieval).
+        """
+        if not self.file_contents:
+            return ""
+
+        parts: list[str] = []
+        total = 0
+
+        for fc in self.file_contents:
+            strategy = fc.get("strategy", "retrieval")
+            filename = fc.get("filename", "unknown")
+            content = fc.get("content", "")
+
+            if strategy == "inline":
+                entry = f"### File: {filename}\n{content}"
+            elif strategy == "hybrid":
+                entry = f"### File: {filename} (preview; use file_search for full content)\n{content}"
+            else:
+                entry = f"### File: {filename} (use file_search tool to search this file)"
+
+            entry_len = len(entry)
+            if max_chars > 0 and total + entry_len > max_chars:
+                remaining = max_chars - total - 50  # room for truncation marker
+                if remaining > 200:
+                    parts.append(entry[:remaining] + "\n...[truncated due to size limit]")
+                break
+            parts.append(entry)
+            total += entry_len
+
+        if not parts:
+            return ""
+        return "## Uploaded File Contents\n\n" + "\n\n".join(parts)
+
+    def has_inline_file_content(self) -> bool:
+        """Check if any files have inline or hybrid content."""
+        return any(
+            fc.get("strategy") in ("inline", "hybrid")
+            for fc in self.file_contents
+        )
+
     def get_current_step(self) -> PlanStep | None:
         """Get the current step being executed."""
         if self.current_plan and self.current_step_index < len(self.current_plan.steps):
@@ -400,7 +612,11 @@ class ResearchState:
         self.current_step_index += 1
 
     def mark_step_complete(self, observation: str) -> None:
-        """Mark current step as complete with observation."""
+        """Mark current step as complete with observation (sync version).
+
+        WARNING: This sync version is NOT safe for concurrent access.
+        Use mark_step_complete_async() for parallel tool execution.
+        """
         step = self.get_current_step()
         if step:
             step.status = StepStatus.COMPLETED
@@ -408,11 +624,35 @@ class ResearchState:
             self.last_observation = observation
             self.all_observations.append(observation)
 
+    async def mark_step_complete_async(self, observation: str) -> None:
+        """Mark current step as complete with observation (async-safe)."""
+        async with self._step_lock:
+            step = self.get_current_step()
+            if step:
+                step.status = StepStatus.COMPLETED
+                step.observation = observation
+                self.last_observation = observation
+                self.all_observations.append(observation)
+
     def add_source(self, source: SourceInfo) -> None:
-        """Add a source to the collection."""
+        """Add a source to the collection (sync version for backward compatibility).
+
+        WARNING: This sync version is NOT safe for concurrent access.
+        Use add_source_async() for parallel tool execution.
+        """
         # Avoid duplicates
         if not any(s.url == source.url for s in self.sources):
             self.sources.append(source)
+
+    async def add_source_async(self, source: SourceInfo) -> None:
+        """Add a source to the collection (async-safe, deduplicates by URL).
+
+        Uses asyncio.Lock to prevent race conditions when multiple tools
+        try to add sources concurrently.
+        """
+        async with self._sources_lock:
+            if not any(s.url == source.url for s in self.sources):
+                self.sources.append(source)
 
     def get_completed_steps(self) -> list[PlanStep]:
         """Get list of completed steps from current plan.
@@ -441,9 +681,19 @@ class ResearchState:
 
         # Idempotency guard: prevent accidental double completion
         if self.completed_at is not None and not allow_overwrite:
+            # Idempotent: same content → silently skip (log for visibility)
+            if self.final_report == final_report:
+                logger.warning(
+                    "RESEARCH_COMPLETE_IDEMPOTENT_SKIP",
+                    completed_at=str(self.completed_at),
+                    report_len=len(final_report),
+                )
+                return
+            # Different content → real bug, raise
             raise RuntimeError(
-                f"Research already completed at {self.completed_at}. "
-                f"Current final_report length: {len(self.final_report) if self.final_report else 0}. "
+                f"Research already completed at {self.completed_at} with "
+                f"report_len={len(self.final_report) if self.final_report else 0}. "
+                f"New report_len={len(final_report)}. "
                 f"Use allow_overwrite=True to explicitly overwrite."
             )
 
@@ -460,7 +710,10 @@ class ResearchState:
     # =========================================================================
 
     def add_phase_result(self, phase_name: str, result: Any) -> None:
-        """Store result from a custom research phase.
+        """Store result from a custom research phase (sync version).
+
+        WARNING: This sync version is NOT safe for concurrent access.
+        Use add_phase_result_async() for parallel tool execution.
 
         Args:
             phase_name: Name of the phase that produced the result
@@ -469,6 +722,18 @@ class ResearchState:
         if not hasattr(self, "_phase_results") or self._phase_results is None:
             self._phase_results = {}
         self._phase_results[phase_name] = result
+
+    async def add_phase_result_async(self, phase_name: str, result: Any) -> None:
+        """Store result from a custom research phase (async-safe).
+
+        Args:
+            phase_name: Name of the phase that produced the result
+            result: PhaseResult object with output and sources
+        """
+        async with self._phase_lock:
+            if not hasattr(self, "_phase_results") or self._phase_results is None:
+                self._phase_results = {}
+            self._phase_results[phase_name] = result
 
     def get_phase_result(self, phase_name: str) -> Any | None:
         """Get result from a completed phase.
@@ -548,12 +813,30 @@ class ResearchState:
         return step_limits.min
 
     def add_evidence(self, evidence: EvidenceInfo) -> None:
-        """Add an evidence span to the pool."""
+        """Add an evidence span to the pool (sync version for backward compatibility).
+
+        WARNING: This sync version is NOT safe for concurrent access.
+        Use add_evidence_async() for parallel tool execution.
+        """
         self.evidence_pool.append(evidence)
 
+    async def add_evidence_async(self, evidence: EvidenceInfo) -> None:
+        """Add an evidence span to the pool (async-safe)."""
+        async with self._evidence_lock:
+            self.evidence_pool.append(evidence)
+
     def add_claim(self, claim: ClaimInfo) -> None:
-        """Add a claim to the claims list."""
+        """Add a claim to the claims list (sync version for backward compatibility).
+
+        WARNING: This sync version is NOT safe for concurrent access.
+        Use add_claim_async() for parallel tool execution.
+        """
         self.claims.append(claim)
+
+    async def add_claim_async(self, claim: ClaimInfo) -> None:
+        """Add a claim to the claims list (async-safe)."""
+        async with self._claims_lock:
+            self.claims.append(claim)
 
     def update_verification_summary(self) -> None:
         """Update verification summary from current claims."""
@@ -614,13 +897,26 @@ class ResearchState:
         return self._verification_cache.get(claim_fingerprint)
 
     def cache_verification(self, claim_fingerprint: str, result: Any) -> None:
-        """Cache a verification result for future reuse.
+        """Cache a verification result for future reuse (sync version).
+
+        WARNING: This sync version is NOT safe for concurrent access.
+        Use cache_verification_async() for parallel tool execution.
 
         Args:
             claim_fingerprint: 16-char MD5 hash of normalized claim.
             result: VerificationResult to cache.
         """
         self._verification_cache[claim_fingerprint] = result
+
+    async def cache_verification_async(self, claim_fingerprint: str, result: Any) -> None:
+        """Cache a verification result for future reuse (async-safe).
+
+        Args:
+            claim_fingerprint: 16-char MD5 hash of normalized claim.
+            result: VerificationResult to cache.
+        """
+        async with self._cache_lock:
+            self._verification_cache[claim_fingerprint] = result
 
     def clear_verification_cache(self) -> None:
         """Clear the verification cache.
@@ -639,6 +935,201 @@ class ResearchState:
         return {
             "cache_size": len(self._verification_cache),
         }
+
+    # =========================================================================
+    # Enterprise Data Source Methods (007-enterprise-data-sources, T035)
+    # =========================================================================
+
+    def record_source_quality(self, source_name: str, signal: str) -> None:
+        """Record a quality signal for a source.
+
+        Args:
+            source_name: Name of the data source tool.
+            signal: Quality signal: 'good' | 'low_content' | 'empty'.
+        """
+        self.source_quality_history.setdefault(source_name, []).append(signal)
+
+    def get_source_budget(self, source_name: str, default_budget: int = 10) -> int:
+        """Get remaining query budget for a source.
+
+        Args:
+            source_name: Name of the data source.
+            default_budget: Default budget if not configured.
+
+        Returns:
+            Number of queries remaining for this source.
+        """
+        # Default budgets by source type
+        default_budgets: dict[str, int] = {
+            "vector_search": 15,
+            "genie": 5,
+            "knowledge_assistant": 5,
+            "web_search": 20,
+        }
+
+        # Get budget for this source type (extract type from name if needed)
+        total_budget = default_budgets.get(source_name, default_budget)
+
+        used = self.source_query_counts.get(source_name, 0)
+        return max(0, total_budget - used)
+
+    def record_source_query(self, source_name: str, count: int = 1) -> None:
+        """Record that queries were made to a source (sync version).
+
+        WARNING: This sync version is NOT safe for concurrent access.
+        Use record_source_query_async() for parallel tool execution.
+
+        Args:
+            source_name: Name of the data source.
+            count: Number of queries to record.
+        """
+        current = self.source_query_counts.get(source_name, 0)
+        self.source_query_counts[source_name] = current + count
+
+    async def record_source_query_async(self, source_name: str, count: int = 1) -> None:
+        """Record that queries were made to a source (async-safe).
+
+        Args:
+            source_name: Name of the data source.
+            count: Number of queries to record.
+        """
+        async with self._step_lock:  # Reuse step lock for source tracking
+            current = self.source_query_counts.get(source_name, 0)
+            self.source_query_counts[source_name] = current + count
+
+    def add_source_result(
+        self, source_name: str, result: "SourceInfo"
+    ) -> None:
+        """Add a result from a specific source (sync version).
+
+        WARNING: This sync version is NOT safe for concurrent access.
+        Use add_source_result_async() for parallel tool execution.
+
+        Args:
+            source_name: Name of the source that produced the result.
+            result: The SourceInfo result to add.
+        """
+        if source_name not in self.source_results:
+            self.source_results[source_name] = []
+        self.source_results[source_name].append(result)
+        # Also add to main sources list
+        self.add_source(result)
+
+    async def add_source_result_async(
+        self, source_name: str, result: "SourceInfo"
+    ) -> None:
+        """Add a result from a specific source (async-safe).
+
+        Args:
+            source_name: Name of the source that produced the result.
+            result: The SourceInfo result to add.
+        """
+        async with self._sources_lock:
+            if source_name not in self.source_results:
+                self.source_results[source_name] = []
+            self.source_results[source_name].append(result)
+            # Also add to main sources list (already under lock)
+            if not any(s.url == result.url for s in self.sources):
+                self.sources.append(result)
+
+    def get_source_results(self, source_name: str) -> list["SourceInfo"]:
+        """Get all results from a specific source.
+
+        Args:
+            source_name: Name of the source.
+
+        Returns:
+            List of SourceInfo results from that source.
+        """
+        return self.source_results.get(source_name, [])
+
+    def get_source_stats(self) -> dict[str, dict[str, int]]:
+        """Get statistics about source usage.
+
+        Returns:
+            Dict mapping source name to {queries: N, results: M}.
+        """
+        stats: dict[str, dict[str, int]] = {}
+
+        for source_name in set(self.source_query_counts.keys()) | set(self.source_results.keys()):
+            stats[source_name] = {
+                "queries": self.source_query_counts.get(source_name, 0),
+                "results": len(self.source_results.get(source_name, [])),
+            }
+
+        return stats
+
+    # =========================================================================
+    # Manual Workflow Mode Methods (007-enterprise-data-sources, T051)
+    # =========================================================================
+
+    def is_manual_mode(self) -> bool:
+        """Check if workflow is in manual mode."""
+        return self.workflow_mode == WorkflowMode.MANUAL.value
+
+    def is_hybrid_mode(self) -> bool:
+        """Check if workflow is in hybrid mode."""
+        return self.workflow_mode == WorkflowMode.HYBRID.value
+
+    def is_planner_mode(self) -> bool:
+        """Check if workflow is in planner mode (default)."""
+        return self.workflow_mode == WorkflowMode.PLANNER.value
+
+    def get_source_constraint(self, step_id: str) -> Any | None:
+        """Get source constraint for a specific step.
+
+        Args:
+            step_id: ID of the step.
+
+        Returns:
+            SourceConstraint or None if no constraint defined.
+        """
+        return self.step_source_constraints.get(step_id)
+
+    def set_source_constraint(self, step_id: str, constraint: Any) -> None:
+        """Set source constraint for a step.
+
+        Args:
+            step_id: ID of the step.
+            constraint: SourceConstraint to apply.
+        """
+        self.step_source_constraints[step_id] = constraint
+
+    def get_manual_step(self, step_id: str) -> Any | None:
+        """Get a manual step definition by ID.
+
+        Args:
+            step_id: ID of the step.
+
+        Returns:
+            ManualStepDefinition or None if not found.
+        """
+        for step in self.manual_steps:
+            if hasattr(step, "id") and step.id == step_id:
+                return step
+        return None
+
+    def get_manual_steps_in_order(self) -> list[Any]:
+        """Get manual steps sorted by order.
+
+        Returns:
+            List of ManualStepDefinition sorted by order field.
+        """
+        return sorted(
+            self.manual_steps,
+            key=lambda s: getattr(s, "order", 0)
+        )
+
+    def should_use_planner(self) -> bool:
+        """Determine if planner should be used based on workflow mode.
+
+        Returns:
+            True if planner should create/extend the plan.
+        """
+        # Planner mode always uses planner
+        # Hybrid mode: planner runs AFTER manual steps are converted
+        # Manual mode: skip planner entirely
+        return self.is_planner_mode() or self.is_hybrid_mode()
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
@@ -669,4 +1160,27 @@ class ResearchState:
                 name: result.to_dict() if hasattr(result, "to_dict") else str(result)
                 for name, result in self._phase_results.items()
             } if self._phase_results else {},
+            # Enterprise data source fields (007-enterprise-data-sources)
+            "source_scope_config": self.source_scope_config.to_dict()
+            if self.source_scope_config and hasattr(self.source_scope_config, "to_dict")
+            else None,
+            "data_landscape": self.data_landscape.to_dict()
+            if self.data_landscape and hasattr(self.data_landscape, "to_dict")
+            else None,
+            "source_quality_history": self.source_quality_history,
+            "source_query_counts": self.source_query_counts,
+            "source_results": {
+                name: [s.to_dict() for s in results]
+                for name, results in self.source_results.items()
+            },
+            # Workflow mode fields (007-enterprise-data-sources)
+            "workflow_mode": self.workflow_mode,
+            "manual_steps": [
+                s.model_dump() if hasattr(s, "model_dump") else s.dict() if hasattr(s, "dict") else str(s)
+                for s in self.manual_steps
+            ] if self.manual_steps else [],
+            "step_source_constraints": {
+                step_id: c.model_dump() if hasattr(c, "model_dump") else c.dict() if hasattr(c, "dict") else str(c)
+                for step_id, c in self.step_source_constraints.items()
+            } if self.step_source_constraints else {},
         }

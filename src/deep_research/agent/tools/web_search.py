@@ -29,6 +29,7 @@ from deep_research.core.tracing_constants import (
     truncate_for_attr,
 )
 from deep_research.services.search.brave import BraveSearchClient
+from deep_research.services.search.domain_filter import DomainFilter
 
 logger = get_logger(__name__)
 
@@ -59,6 +60,7 @@ async def web_search(
     *,
     client: BraveSearchClient,
     context: str | None = None,
+    domain_filter: DomainFilter | None = None,
 ) -> WebSearchOutput:
     """Execute a web search using Brave Search API.
 
@@ -92,6 +94,7 @@ async def web_search(
             query=query,
             count=count,
             freshness=freshness,
+            domain_filter=domain_filter,
         )
 
         results = [
@@ -217,6 +220,7 @@ class WebSearchTool:
                 },
                 "required": ["query"],
             },
+            source_type="web_search",
         )
 
     @property

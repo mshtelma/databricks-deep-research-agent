@@ -1,6 +1,8 @@
 import * as React from 'react';
 import { cn } from '@/lib/utils';
 import type { StreamEvent } from '@/types';
+import { computeEventStats } from '@/utils/eventStats';
+import { filterInterestingEvents } from '@/utils/eventFilters';
 import { EnhancedEventLabel } from './EnhancedEventLabel';
 import { PlanProgress } from './PlanProgress';
 
@@ -66,31 +68,7 @@ function useElapsedTime(startTime: number | undefined, isLive: boolean): string 
  * Compute stats from events for display in stats bar.
  */
 function useEventStats(events: StreamEvent[]) {
-  return React.useMemo(() => {
-    let searchQueries = 0;
-    let sourcesFound = 0;
-    let claimsVerified = 0;
-    let claimsSupported = 0;
-
-    for (const event of events) {
-      if (event.eventType === 'tool_call') {
-        const toolCall = event as unknown as { toolName?: string; tool_name?: string };
-        const toolName = toolCall.toolName ?? toolCall.tool_name;
-        if (toolName === 'web_search') searchQueries++;
-      }
-      if (event.eventType === 'tool_result') {
-        const result = event as unknown as { urlsCrawled?: number; urls_crawled?: number };
-        sourcesFound += result.urlsCrawled ?? result.urls_crawled ?? 0;
-      }
-      if (event.eventType === 'claim_verified') {
-        claimsVerified++;
-        const claim = event as unknown as { verdict?: string };
-        if (claim.verdict === 'supported') claimsSupported++;
-      }
-    }
-
-    return { searchQueries, sourcesFound, claimsVerified, claimsSupported };
-  }, [events]);
+  return React.useMemo(() => computeEventStats(events), [events]);
 }
 
 /**
@@ -200,7 +178,7 @@ export function CenteredActivityPanel({
 
           {/* Search queries */}
           {stats.searchQueries > 0 && (
-            <span>{stats.searchQueries} searches</span>
+            <span>{stats.searchQueries} queries</span>
           )}
 
           {/* Sources */}
@@ -279,40 +257,4 @@ export function CenteredActivityPanel({
       ) : null}
     </div>
   );
-}
-
-/**
- * Filter to keep only interesting events for live display.
- */
-function filterInterestingEvents(events: StreamEvent[]): StreamEvent[] {
-  return events.filter((event) => {
-    // Always show errors
-    if (event.eventType === 'error') return true;
-
-    // Skip synthesis_progress (too noisy during writing)
-    if (event.eventType === 'synthesis_progress') return false;
-
-    // Skip tool_result events with no useful info (web_search results or failed crawls)
-    if (event.eventType === 'tool_result') {
-      const result = event as unknown as { sourcesCrawled?: number; sources_crawled?: number };
-      const sourcesCrawled = result.sourcesCrawled ?? result.sources_crawled;
-      return sourcesCrawled != null && sourcesCrawled > 0;
-    }
-
-    // Keep meaningful milestone events
-    return [
-      'agent_started',
-      'agent_completed',
-      'plan_created',
-      'step_started',
-      'step_completed',
-      'tool_call',
-      // 'tool_result' - handled above with conditional check
-      'reflection_decision',
-      'synthesis_started',
-      'research_completed',
-      'claim_verified',
-      'verification_summary',
-    ].includes(event.eventType);
-  });
 }

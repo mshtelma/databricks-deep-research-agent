@@ -45,6 +45,10 @@ class ToolDefinition:
     }
     """
 
+    source_type: str = "unknown"
+    """Source type identifier: 'genie', 'vector_search', 'knowledge_assistant',
+    'web_search', 'web_crawl', 'file_search', or 'unknown'."""
+
 
 @dataclass
 class ToolResult:
@@ -128,6 +132,10 @@ class ResearchContext:
 
     max_tool_calls: int = 20
     """Maximum tool calls allowed per step."""
+
+    # OBO authentication (for enterprise data sources)
+    user_token: str | None = None
+    """User's OAuth token for OBO-authenticated data source access."""
 
 
 @runtime_checkable

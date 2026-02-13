@@ -69,10 +69,10 @@ export function useResearchPanel(
       // Streaming just ended
       handledCompletionRef.current = true;
 
-      // Only auto-collapse if user hasn't manually interacted
+      // Only auto-switch tab if user hasn't manually interacted
       if (!userInteractedRef.current) {
         const timer = setTimeout(() => {
-          setIsExpanded(false);
+          // Switch to cited tab but DON'T collapse — content is ready to view
           if (switchToCitedOnCollapse) {
             setActiveTab('cited');
           }

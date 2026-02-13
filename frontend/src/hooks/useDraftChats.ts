@@ -86,8 +86,8 @@ export function useDraftChats() {
    *
    * @returns The newly created draft chat.
    */
-  const createDraft = useCallback((): DraftChat => {
-    const id = crypto.randomUUID();
+  const createDraft = useCallback((draftId?: string): DraftChat => {
+    const id = draftId ?? crypto.randomUUID();
     const now = new Date().toISOString();
     const draft: DraftChat = {
       id,

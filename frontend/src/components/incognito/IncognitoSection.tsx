@@ -14,6 +14,7 @@ interface IncognitoSectionProps {
   currentChatId?: string
   onSelectChat: (chatId: string) => void
   onHoverChat?: (chatId: string) => void
+  enabled?: boolean
   className?: string
 }
 
@@ -21,9 +22,14 @@ export function IncognitoSection({
   currentChatId,
   onSelectChat,
   onHoverChat,
+  enabled = true,
   className,
 }: IncognitoSectionProps) {
-  const { data, isLoading } = useIncognitoChats()
+  const { data, isLoading } = useIncognitoChats({ enabled })
+
+  if (!enabled) {
+    return null
+  }
 
   // Don't render if no incognito chats
   if (!isLoading && (!data || data.items.length === 0)) {

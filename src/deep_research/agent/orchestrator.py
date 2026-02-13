@@ -5,10 +5,8 @@ import time
 import traceback
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
-
-import mlflow
 
 from deep_research.agent.config import (
     get_coordinator_config,
@@ -23,7 +21,7 @@ from deep_research.agent.nodes.citation_synthesizer import (
 )
 from deep_research.agent.nodes.coordinator import handle_simple_query, run_coordinator
 from deep_research.agent.nodes.planner import run_planner
-from deep_research.agent.nodes.react_researcher import run_react_researcher
+from deep_research.agent.nodes.react_researcher import ReactResearchEvent, run_react_researcher
 from deep_research.agent.nodes.reflector import run_reflector
 from deep_research.agent.nodes.researcher import run_researcher
 from deep_research.agent.nodes.synthesizer import (
@@ -42,7 +40,10 @@ from deep_research.agent.state import (
     StepType,
 )
 from deep_research.agent.tools.web_crawler import WebCrawler
-from deep_research.core.app_config import ResearcherMode
+from deep_research.core.app_config import DomainFilterConfig, DomainFilterMode, ResearcherMode
+
+if TYPE_CHECKING:
+    from deep_research.models.custom_agent import CustomAgent
 from deep_research.core.exceptions import StructuredSynthesisError
 from deep_research.core.logging_utils import (
     get_logger,
@@ -50,7 +51,7 @@ from deep_research.core.logging_utils import (
     log_agent_transition,
     truncate,
 )
-from deep_research.core.tracing import log_research_config, safe_tool_span
+from deep_research.core.tracing import log_research_config, safe_mlflow_run, safe_tool_span, safe_update_trace
 from deep_research.schemas.research import PlanStepSummary
 from deep_research.schemas.streaming import (
     AgentCompletedEvent,
@@ -65,6 +66,10 @@ from deep_research.schemas.streaming import (
     PhaseSkippedEvent,
     PhaseStartedEvent,
     PlanCreatedEvent,
+    PlanForReview,
+    PlanReviewEvent,
+    PlanReviewTimeoutEvent,
+    PlanStepForReview,
     ReflectionDecisionEvent,
     ResearchCompletedEvent,
     ResearchStartedEvent,
@@ -76,6 +81,7 @@ from deep_research.schemas.streaming import (
     SynthesisStartedEvent,
     ToolCallEvent,
     ToolResultEvent,
+    ToolSkippedEvent,
     VerificationSummaryEvent,
 )
 from deep_research.services.llm.client import LLMClient
@@ -102,6 +108,30 @@ except ImportError:
 logger = get_logger(__name__)
 
 
+def _convert_react_event(react_event: ReactResearchEvent) -> StreamEvent | None:
+    """Convert internal ReactResearchEvent to a public StreamEvent.
+
+    Shared by all researcher modes (ReAct, classic, background)
+    to avoid duplicating event conversion logic.
+    """
+    if react_event.event_type == "tool_call":
+        return ToolCallEvent(
+            tool_name=react_event.data.get("tool", ""),
+            tool_args=react_event.data.get("args", {}),
+            call_number=react_event.data.get("call_number", 0),
+            source_type=react_event.data.get("source_type"),
+        )
+    elif react_event.event_type == "tool_result":
+        return ToolResultEvent(
+            tool_name=react_event.data.get("tool", ""),
+            result_preview=react_event.data.get("result_preview", "")[:200],
+            sources_crawled=react_event.data.get("high_quality_count", 0),
+            sources_added=react_event.data.get("sources_added", 0),
+            source_type=react_event.data.get("source_type"),
+        )
+    return None
+
+
 def _get_schema_name(output_schema: type | dict | None) -> str | None:
     """Get a display name for the output schema.
 
@@ -118,6 +148,34 @@ def _get_schema_name(output_schema: type | dict | None) -> str | None:
     if isinstance(output_schema, dict):
         return output_schema.get("title", "dict_schema")
     return getattr(output_schema, "__name__", str(type(output_schema)))
+
+
+def _get_tool_name(tool: Any) -> str | None:
+    """Safely extract tool definition name from a ResearchTool-like object."""
+    definition = getattr(tool, "definition", None)
+    name = getattr(definition, "name", None)
+    if isinstance(name, str) and name:
+        return name
+    return None
+
+
+def _append_unique_tools(target: list[Any], incoming: list[Any]) -> None:
+    """Append tools to target, deduplicating by tool definition name."""
+    known_names = {_get_tool_name(tool) for tool in target}
+    for tool in incoming:
+        tool_name = _get_tool_name(tool)
+        if tool_name in known_names:
+            continue
+        target.append(tool)
+        known_names.add(tool_name)
+
+
+def _has_non_file_tools(tools: list[Any]) -> bool:
+    """Return True if there is at least one tool other than file_search."""
+    for tool in tools:
+        if _get_tool_name(tool) != "file_search":
+            return True
+    return False
 
 
 def _get_default_orchestration_config() -> "OrchestrationConfig":
@@ -168,6 +226,343 @@ class OrchestrationConfig:
     # Custom prompts for structured synthesis (plugin can override)
     structured_system_prompt: str | None = None
     structured_user_prompt: str | None = None
+
+    # =========================================================================
+    # Manual Workflow Mode (007-enterprise-data-sources, T052)
+    # =========================================================================
+    workflow_mode: str = "planner"  # WorkflowMode: planner, manual, hybrid
+    manual_steps: list[Any] | None = None  # ManualStepDefinition list
+
+    # =========================================================================
+    # Plan Review Configuration (007-enterprise-data-sources, US12, T040)
+    # =========================================================================
+    enable_plan_review: bool = False
+    """If True, pause after plan creation and yield PlanReviewEvent."""
+
+    require_plan_approval: bool = False
+    """If True, do not auto-proceed; wait indefinitely for user response."""
+
+    plan_review_timeout_seconds: int = 300
+    """Timeout in seconds before auto-proceeding (when require_plan_approval=False)."""
+
+    # =========================================================================
+    # Source Scope Configuration (007-enterprise-data-sources, US12, T041)
+    # =========================================================================
+    source_scope: str | None = None
+    """SourceScope value: 'enterprise_only', 'web_only', or 'all'."""
+
+    enabled_sources: list[str] | None = None
+    """Explicit whitelist of source names to enable."""
+
+    disabled_sources: list[str] | None = None
+    """List of source names to disable."""
+
+    # =========================================================================
+    # OBO Authentication (007-enterprise-data-sources, Phase 2)
+    # =========================================================================
+    user_token: str | None = None
+    """User OAuth token for OBO authentication with enterprise data sources."""
+
+    # =========================================================================
+    # File Upload and Custom Agent Support
+    # =========================================================================
+    file_ids: list[str] | None = None
+    """Uploaded file IDs to include in research context."""
+
+    agent_id: str | None = None
+    """Custom agent ID to use for this research job."""
+
+    # =========================================================================
+    # Per-Agent Overrides (009-custom-agent-config)
+    # =========================================================================
+    model_overrides: dict[str, str] | None = None
+    """Per-tier model endpoint overrides from custom agent."""
+
+    domain_filter: Any | None = None  # DomainFilterConfig
+    """Per-agent domain filter overrides from custom agent."""
+
+
+def _convert_manual_steps_to_plan(
+    manual_steps: list[Any],
+    query: str,
+) -> Plan:
+    """Convert manual step definitions to a Plan object.
+
+    Used when workflow_mode is MANUAL or HYBRID to create a plan
+    from user-defined steps instead of using the AI planner.
+
+    Args:
+        manual_steps: List of ManualStepDefinition objects.
+        query: The original user query.
+
+    Returns:
+        Plan object with steps converted from manual definitions.
+    """
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    plan_steps: list[PlanStep] = []
+
+    for manual_step in manual_steps:
+        # Extract fields from ManualStepDefinition
+        step_id = getattr(manual_step, "id", str(uuid4())[:8])
+        title = getattr(manual_step, "title", "Manual Step")
+        objective = getattr(manual_step, "objective", "")
+
+        # Determine step type based on sources
+        sources = getattr(manual_step, "sources", [])
+        needs_search = any(
+            getattr(s, "source_type", "") in ("web_search", "vector_search", "genie")
+            for s in sources
+        )
+
+        plan_step = PlanStep(
+            id=step_id,
+            title=title,
+            description=objective,
+            step_type=StepType.RESEARCH if needs_search else StepType.ANALYSIS,
+            needs_search=needs_search,
+            status=StepStatus.PENDING,
+        )
+        plan_steps.append(plan_step)
+
+    return Plan(
+        id=str(uuid4())[:8],
+        title=f"Manual Research Plan: {query[:50]}...",
+        thought="User-defined manual research workflow",
+        steps=plan_steps,
+        has_enough_context=False,
+        iteration=1,
+        created_at=datetime.now(UTC),
+    )
+
+
+def _convert_preset_steps_to_manual_steps(
+    preset_steps: list[Any],
+) -> list[Any]:
+    """Convert AgentPresetStep models to ManualStepDefinition-like objects.
+
+    Used when applying a custom agent's preset steps to the orchestration config.
+
+    Args:
+        preset_steps: List of AgentPresetStep model instances.
+
+    Returns:
+        List of objects compatible with ManualStepDefinition expectations.
+    """
+    from deep_research.schemas.manual_step import (
+        ManualStepDefinition,
+        SourceConstraint,
+        StepSourceAttachment,
+    )
+
+    manual_steps: list[ManualStepDefinition] = []
+
+    for idx, step in enumerate(sorted(preset_steps, key=lambda s: s.order)):
+        # Build source attachments from hints
+        sources: list[StepSourceAttachment] = []
+        if step.source_hints:
+            preferred = step.source_hints.get("preferred_sources", [])
+            for source_name in preferred:
+                sources.append(
+                    StepSourceAttachment(
+                        source_name=source_name,
+                        source_type="web_search",  # Default, will be resolved
+                        priority=1,
+                    )
+                )
+
+        # Build constraint if step has scope override
+        constraint = None
+        if step.source_scope:
+            constraint = SourceConstraint(
+                allowed_types=None,
+                allowed_sources=None,
+            )
+
+        manual_step = ManualStepDefinition(
+            id=str(step.id)[:8],
+            title=step.title,
+            objective=step.description or step.title,
+            sources=sources,
+            constraints=constraint,
+            order=idx + 1,
+            is_required=step.is_required,
+            source_scope=getattr(step, "source_scope", None),
+        )
+        manual_steps.append(manual_step)
+
+    return manual_steps
+
+
+def apply_custom_agent_to_config(
+    config: "OrchestrationConfig",
+    agent: "CustomAgent",
+    query_overrides: dict[str, Any] | None = None,
+) -> "OrchestrationConfig":
+    """Apply custom agent settings to an orchestration config.
+
+    This helper merges a CustomAgent's configuration into an OrchestrationConfig,
+    respecting per-query overrides when provided.
+
+    The merge priority is (lowest to highest):
+    1. Agent defaults
+    2. Query-level overrides
+
+    Applied settings include:
+    - Source scope (enterprise_only, web_only, all)
+    - Enabled/disabled sources
+    - Research depth
+    - Workflow mode
+    - Clarification toggle
+    - Output format and schema
+    - Preset steps (when use_planner=False)
+
+    Args:
+        config: Base orchestration config to modify.
+        agent: CustomAgent model instance with settings.
+        query_overrides: Optional per-query overrides that take precedence.
+
+    Returns:
+        Modified OrchestrationConfig with agent settings applied.
+
+    Part of US6 - Custom Agent Configurations (T080).
+    """
+    overrides = query_overrides or {}
+
+    # Source scope configuration
+    # Agent default, then query override
+    if "source_scope" in overrides:
+        config.source_scope = overrides["source_scope"]
+    elif agent.source_scope:
+        config.source_scope = agent.source_scope
+
+    # Enabled/disabled sources
+    # Note: Source existence can't be validated here — enterprise tools aren't
+    # loaded until stream_research(). Invalid source references are silently
+    # skipped by the tool factory at runtime (T050).
+    if "enabled_sources" in overrides:
+        config.enabled_sources = overrides["enabled_sources"]
+    elif agent.enabled_sources:
+        config.enabled_sources = agent.enabled_sources
+        if len(agent.enabled_sources) > 0:
+            logger.info(
+                "AGENT_ENABLED_SOURCES_SET",
+                extra={
+                    "agent_id": str(agent.id),
+                    "source_count": len(agent.enabled_sources),
+                },
+            )
+
+    if "disabled_sources" in overrides:
+        config.disabled_sources = overrides["disabled_sources"]
+    elif agent.disabled_sources:
+        config.disabled_sources = agent.disabled_sources
+
+    # Research depth
+    config.research_depth = overrides.get("research_depth", agent.default_depth)
+
+    # Workflow mode
+    config.workflow_mode = overrides.get("workflow_mode", agent.default_mode)
+
+    # Clarification toggle
+    config.enable_clarification = overrides.get(
+        "enable_clarification", agent.enable_clarification
+    )
+
+    # Output format and schema
+    config.output_format = overrides.get("output_format", agent.output_format)
+
+    if "output_schema" in overrides:
+        config.output_schema = overrides["output_schema"]
+    elif agent.output_schema:
+        config.output_schema = agent.output_schema
+
+    # Handle preset steps in MANUAL or HYBRID mode
+    if config.workflow_mode in ("manual", "hybrid") and agent.preset_steps:
+        config.manual_steps = _convert_preset_steps_to_manual_steps(agent.preset_steps)
+
+    # Model overrides (009-custom-agent-config)
+    if "model_overrides" not in overrides and agent.model_overrides:
+        from deep_research.core.app_config import get_app_config
+
+        app_config = get_app_config()
+        validated: dict[str, str] = {}
+        for tier_name, endpoint_id in agent.model_overrides.items():
+            if not endpoint_id or not endpoint_id.strip():
+                continue
+            endpoint_id = endpoint_id.strip()
+            validated[tier_name] = endpoint_id
+            if endpoint_id not in app_config.endpoints:
+                logger.info(
+                    "AGENT_MODEL_OVERRIDE_DIRECT_ENDPOINT",
+                    extra={
+                        "agent_id": str(agent.id),
+                        "tier": tier_name,
+                        "endpoint": endpoint_id,
+                        "note": "not in YAML, will be used as direct endpoint identifier",
+                    },
+                )
+        if validated:
+            config.model_overrides = validated
+            logger.info(
+                "AGENT_MODEL_OVERRIDE_APPLIED",
+                extra={
+                    "agent_id": str(agent.id),
+                    "override_count": len(validated),
+                    "tiers": list(validated.keys()),
+                },
+            )
+
+    # Domain filter (009-custom-agent-config)
+    if "domain_filter" not in overrides and agent.domain_filter_mode:
+        try:
+            domain_filter = DomainFilterConfig(
+                mode=DomainFilterMode(agent.domain_filter_mode),
+                include_domains=agent.include_domains or [],
+                exclude_domains=agent.exclude_domains or [],
+            )
+            config.domain_filter = domain_filter
+            logger.info(
+                "AGENT_DOMAIN_FILTER_APPLIED",
+                extra={
+                    "agent_id": str(agent.id),
+                    "mode": agent.domain_filter_mode,
+                    "include_count": len(agent.include_domains or []),
+                    "exclude_count": len(agent.exclude_domains or []),
+                },
+            )
+        except ValueError:
+            logger.warning(
+                "AGENT_DOMAIN_FILTER_INVALID",
+                extra={
+                    "agent_id": str(agent.id),
+                    "mode": agent.domain_filter_mode,
+                },
+            )
+
+    # System instructions from template
+    if agent.system_prompt_template and agent.system_prompt_template.content:
+        config.system_instructions = agent.system_prompt_template.content
+    if agent.synthesis_template and agent.synthesis_template.content:
+        config.structured_system_prompt = agent.synthesis_template.content
+
+    logger.info(
+        "Applied custom agent config",
+        extra={
+            "agent_id": str(agent.id),
+            "agent_name": agent.name,
+            "source_scope": config.source_scope,
+            "workflow_mode": config.workflow_mode,
+            "research_depth": config.research_depth,
+            "output_format": config.output_format,
+            "has_preset_steps": len(agent.preset_steps) > 0 if agent.preset_steps else False,
+            "has_model_overrides": config.model_overrides is not None,
+            "has_domain_filter": config.domain_filter is not None,
+        },
+    )
+
+    return config
 
 
 @dataclass
@@ -227,9 +622,123 @@ async def run_research(
         enable_post_verification=config.enable_post_verification,
         structured_system_prompt=config.structured_system_prompt,
         structured_user_prompt=config.structured_user_prompt,
+        # Workflow mode configuration (007-enterprise-data-sources)
+        workflow_mode=config.workflow_mode,
+        manual_steps=config.manual_steps or [],
     )
     if session_id:
         state.session_id = session_id
+
+    # Wire source scope from OrchestrationConfig to ResearchState (008-data-source-selection)
+    if config.source_scope:
+        from deep_research.schemas.source_scope import SourceScope, SourceScopeConfig
+
+        try:
+            scope_enum = SourceScope(config.source_scope)
+            state.source_scope_config = SourceScopeConfig(
+                scope=scope_enum,
+                enabled_sources=config.enabled_sources,
+                disabled_sources=config.disabled_sources or [],
+            )
+            logger.info(
+                "ORCHESTRATION_SOURCE_SCOPE_SET",
+                scope=config.source_scope,
+                enabled_count=len(config.enabled_sources or []),
+                disabled_count=len(config.disabled_sources or []),
+            )
+        except ValueError as e:
+            logger.warning(
+                "ORCHESTRATION_INVALID_SOURCE_SCOPE",
+                scope=config.source_scope,
+                error=str(e),
+            )
+            # Default to ALL scope on invalid input
+            state.source_scope_config = SourceScopeConfig(scope=SourceScope.ALL)
+
+    # Wire user_token for OBO authentication (007-enterprise-data-sources Phase 2)
+    if config.user_token:
+        state.user_token = config.user_token
+
+    # Wire file_ids and agent_id from config to state
+    if config.file_ids:
+        state.file_ids = config.file_ids
+        logger.warning(
+            "ORCHESTRATION_FILE_SEARCH_UNAVAILABLE",
+            reason="run_research has no database session for file_search",
+            file_count=len(config.file_ids),
+        )
+    if config.agent_id:
+        state.agent_id = config.agent_id
+    if config.model_overrides:
+        state.model_overrides = config.model_overrides
+    if config.domain_filter:
+        state.domain_filter = config.domain_filter
+
+    # Create enterprise tools from discovery cache (run_research has no db param)
+    if (
+        not state.enterprise_tools
+        and state.source_scope_config
+        and state.source_scope_config.enabled_sources
+        and state.is_enterprise_search_allowed()
+    ):
+        try:
+            from deep_research.agent.tools.factory import create_tools_from_discovered_sources
+            from deep_research.services.discovery_cache import get_discovery_cache
+
+            cache = get_discovery_cache()
+            cached_sources = await cache.get(user_id=user_id)
+
+            if cached_sources:
+                enabled_ids = set(state.source_scope_config.enabled_sources)
+                matching = [s for s in cached_sources if s.source_id in enabled_ids]
+
+                if matching:
+                    type_filtered = [
+                        s for s in matching
+                        if state.source_scope_config.is_type_enabled(s.source_type)
+                    ]
+
+                    if type_filtered:
+                        discovery_tools = await create_tools_from_discovered_sources(
+                            type_filtered
+                        )
+                        state.enterprise_tools = discovery_tools
+                        logger.info(
+                            "ORCHESTRATION_ENTERPRISE_TOOLS_FROM_DISCOVERY",
+                            tool_count=len(discovery_tools),
+                            tool_names=[t.definition.name for t in discovery_tools],
+                            source_ids=[s.source_id for s in type_filtered],
+                        )
+                else:
+                    logger.warning(
+                        "ORCHESTRATION_NO_MATCHING_DISCOVERY_SOURCES",
+                        enabled_ids=list(enabled_ids)[:5],
+                        cached_count=len(cached_sources),
+                    )
+            else:
+                logger.warning(
+                    "ORCHESTRATION_DISCOVERY_CACHE_EMPTY",
+                    user_id=user_id,
+                )
+        except Exception as e:
+            logger.error(
+                "ORCHESTRATION_DISCOVERY_TOOLS_FAILED",
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True,
+            )
+
+    # Handle manual workflow mode: convert manual steps to plan
+    if state.is_manual_mode() and state.manual_steps:
+        state.current_plan = _convert_manual_steps_to_plan(
+            state.manual_steps, query
+        )
+        # Also set source constraints from manual steps
+        for manual_step in state.manual_steps:
+            step_id = getattr(manual_step, "id", "")
+            constraint = getattr(manual_step, "constraints", None)
+            if step_id and constraint:
+                state.set_source_constraint(step_id, constraint)
 
     events: list[StreamEvent] = []
     steps_executed = 0
@@ -248,7 +757,7 @@ async def run_research(
 
     try:
         # Create MLflow run to associate trace with params
-        with mlflow.start_run(run_name=f"research_{str(state.session_id)[:8]}", nested=True):
+        with safe_mlflow_run(f"research_{str(state.session_id)[:8]}"):
             async with safe_tool_span("research_orchestration", "CHAIN", {
                 "research.session_id": str(state.session_id),
                 "research.query": truncate(query, 200),
@@ -264,7 +773,7 @@ async def run_research(
                         trace_metadata["mlflow.trace.user"] = user_id
                     if chat_id:
                         trace_metadata["mlflow.trace.session"] = chat_id
-                    mlflow.update_current_trace(metadata=trace_metadata)
+                    safe_update_trace(trace_metadata)
 
                 # Phase 1: Coordinator - Query Classification
                 log_agent_transition(logger, from_agent=None, to_agent="coordinator")
@@ -309,7 +818,10 @@ async def run_research(
                     events.append(_agent_started("background_investigator", "simple"))
                     agent_start = time.perf_counter()
 
-                    state = await run_background_investigator(state, llm, brave_client)
+                    async for react_event in run_background_investigator(state, llm, brave_client):
+                        stream_evt = _convert_react_event(react_event)
+                        if stream_evt:
+                            events.append(stream_evt)
 
                     background_ms = (time.perf_counter() - agent_start) * 1000
                     log_agent_phase(
@@ -405,37 +917,26 @@ async def run_research(
 
                             if researcher_config.mode == ResearcherMode.REACT:
                                 # ReAct mode: LLM controls the research loop
-                                async for react_event in run_react_researcher(
-                                    state, llm, crawler, brave_client
-                                ):
-                                    if react_event.event_type == "tool_call":
-                                        events.append(
-                                            ToolCallEvent(
-                                                tool_name=react_event.data.get("tool", ""),
-                                                tool_args=react_event.data.get("args", {}),
-                                                call_number=react_event.data.get("call_number", 0),
-                                            )
-                                        )
-                                    elif react_event.event_type == "tool_result":
-                                        events.append(
-                                            ToolResultEvent(
-                                                tool_name=react_event.data.get("tool", ""),
-                                                result_preview=react_event.data.get("result_preview", "")[:200],
-                                                sources_crawled=react_event.data.get("high_quality_count", 0),
-                                            )
-                                        )
-                                    elif react_event.event_type == "research_complete":
-                                        logger.info(
-                                            "REACT_RESEARCH_COMPLETE",
-                                            reason=react_event.data.get("reason", ""),
-                                            tool_calls=react_event.data.get("tool_calls", 0),
-                                            high_quality=react_event.data.get("high_quality_sources", 0),
-                                        )
-                            else:
-                                # Classic mode: single-pass fixed searches/crawls
-                                state = await run_researcher(
+                                researcher_gen = run_react_researcher(
                                     state, llm, crawler, brave_client
                                 )
+                            else:
+                                # Classic mode: single-pass fixed searches/crawls
+                                researcher_gen = run_researcher(
+                                    state, llm, crawler, brave_client
+                                )
+
+                            async for react_event in researcher_gen:
+                                stream_evt = _convert_react_event(react_event)
+                                if stream_evt:
+                                    events.append(stream_evt)
+                                elif react_event.event_type == "research_complete":
+                                    logger.info(
+                                        "REACT_RESEARCH_COMPLETE",
+                                        reason=react_event.data.get("reason", ""),
+                                        tool_calls=react_event.data.get("tool_calls", 0),
+                                        high_quality=react_event.data.get("high_quality_sources", 0),
+                                    )
 
                             researcher_ms = (time.perf_counter() - agent_start) * 1000
                             log_agent_phase(
@@ -619,6 +1120,198 @@ async def run_research(
     )
 
 
+# --- File content loading thresholds ---
+_FILE_INLINE_THRESHOLD = 15_000    # ~4K tokens -> full text in prompts
+_FILE_HYBRID_THRESHOLD = 50_000    # ~13K tokens -> preview + file_search
+# Above hybrid -> retrieval only (metadata + file_search)
+
+# Preview chunk count for hybrid strategy
+_HYBRID_PREVIEW_CHUNKS = 3
+
+
+def _determine_strategy(char_count: int) -> str:
+    """Determine file loading strategy from character count."""
+    if char_count <= _FILE_INLINE_THRESHOLD:
+        return "inline"
+    elif char_count <= _FILE_HYBRID_THRESHOLD:
+        return "hybrid"
+    else:
+        return "retrieval"
+
+
+def _build_prompt_content(
+    strategy: str,
+    chunks: list[Any],
+    char_count: int,
+    chunk_count: int,
+) -> str:
+    """Build the content string for prompt injection based on strategy.
+
+    Args:
+        strategy: One of "inline", "hybrid", "retrieval".
+        chunks: Loaded chunk objects (all for inline, first N for hybrid, empty for retrieval).
+        char_count: Total extracted character count.
+        chunk_count: Total chunk count (from uploaded_file.chunk_count).
+
+    Returns:
+        Content string appropriate for the strategy.
+    """
+    if strategy == "inline":
+        return "\n\n".join(c.content for c in chunks)
+    elif strategy == "hybrid":
+        preview = "\n\n".join(c.content for c in chunks)
+        preview_len = len(preview)
+        remaining = char_count - preview_len
+        if remaining > 0:
+            return (
+                preview
+                + f"\n\n[... ~{remaining:,} more chars — "
+                f"use file_search for details.]"
+            )
+        # All content fit in preview chunks — treat as effectively inline
+        return preview
+    else:  # retrieval
+        return (
+            f"[Large file: ~{char_count:,} chars across {chunk_count} chunks. "
+            f"Use file_search to query specific sections.]"
+        )
+
+
+async def _load_file_contents(
+    state: ResearchState,
+    db: "AsyncSession",
+    user_id: str,
+) -> None:
+    """Load file contents into state and register SourceInfo entries.
+
+    Uses a two-path strategy for efficiency:
+    - Fast path: When total_extracted_chars is available in metadata,
+      decides strategy BEFORE loading chunks. Loads only what's needed:
+      all chunks (inline), first 3 (hybrid), or none (retrieval).
+    - Fallback path: For legacy files without total_extracted_chars,
+      loads all chunks to compute char_count (same as previous behavior).
+    """
+    if not state.file_ids:
+        return
+
+    from uuid import UUID as _UUID
+
+    from deep_research.agent.state import SourceInfo
+    from deep_research.services.file_upload_service import FileUploadService
+
+    service = FileUploadService(db)
+
+    for file_id_str in state.file_ids:
+        try:
+            file_id = _UUID(file_id_str)
+            uploaded_file = await service.get_for_user(file_id, user_id)
+            if not uploaded_file or not uploaded_file.is_ready:
+                logger.warning(
+                    "FILE_CONTENT_LOAD_SKIP",
+                    file_id=file_id_str,
+                    reason="not_found_or_not_ready",
+                )
+                continue
+
+            # --- Determine strategy and load chunks ---
+            precomputed_chars = uploaded_file.total_extracted_chars
+
+            if precomputed_chars is not None:
+                # FAST PATH: strategy known before loading any chunks
+                strategy = _determine_strategy(precomputed_chars)
+                char_count = precomputed_chars
+
+                if strategy == "inline":
+                    chunks = await service.get_file_chunks(file_id, limit=500)
+                elif strategy == "hybrid":
+                    chunks = await service.get_file_chunks(
+                        file_id, limit=_HYBRID_PREVIEW_CHUNKS
+                    )
+                else:  # retrieval
+                    chunks = []
+
+                if strategy == "inline" and not chunks:
+                    # File marked ready but has no chunks — skip
+                    logger.warning(
+                        "FILE_CONTENT_LOAD_SKIP",
+                        file_id=file_id_str,
+                        reason="no_chunks_despite_ready",
+                    )
+                    continue
+
+            else:
+                # FALLBACK PATH: legacy file without precomputed chars
+                chunks = await service.get_file_chunks(file_id, limit=500)
+                if not chunks:
+                    logger.warning(
+                        "FILE_CONTENT_LOAD_SKIP",
+                        file_id=file_id_str,
+                        reason="no_chunks",
+                    )
+                    continue
+
+                full_content = "\n\n".join(c.content for c in chunks)
+                char_count = len(full_content)
+                strategy = _determine_strategy(char_count)
+
+                logger.info(
+                    "FILE_CONTENT_STRATEGY_FALLBACK",
+                    file_id=file_id_str,
+                    char_count=char_count,
+                    strategy=strategy,
+                )
+
+            # --- Build prompt content ---
+            content_for_prompt = _build_prompt_content(
+                strategy, chunks, char_count, uploaded_file.chunk_count,
+            )
+
+            state.file_contents.append({
+                "file_id": file_id_str,
+                "filename": uploaded_file.filename,
+                "file_type": uploaded_file.file_type,
+                "file_size": uploaded_file.file_size,
+                "content": content_for_prompt,
+                "strategy": strategy,
+                "char_count": char_count,
+            })
+
+            # --- Register SourceInfo for citation tracking ---
+            if strategy == "inline":
+                source_content = content_for_prompt
+                snippet = content_for_prompt[:300] if content_for_prompt else None
+            elif strategy == "hybrid":
+                source_content = content_for_prompt
+                snippet = content_for_prompt[:300] if content_for_prompt else None
+            else:
+                source_content = None
+                snippet = None
+
+            state.add_source(
+                SourceInfo(
+                    url=f"uploaded-file://{file_id_str}",
+                    title=uploaded_file.filename,
+                    snippet=snippet,
+                    content=source_content[:50_000] if source_content else None,
+                    content_type="uploaded_file",
+                )
+            )
+
+            logger.info(
+                "FILE_CONTENT_LOADED",
+                file_id=file_id_str,
+                filename=uploaded_file.filename,
+                file_size_bytes=uploaded_file.file_size,
+                total_extracted_chars=char_count,
+                strategy=strategy,
+                chunks_loaded=len(chunks),
+                fast_path=precomputed_chars is not None,
+            )
+
+        except Exception as e:
+            logger.error("FILE_CONTENT_LOAD_ERROR", file_id=file_id_str, error=str(e))
+
+
 async def stream_research(
     query: str,
     llm: LLMClient,
@@ -678,6 +1371,270 @@ async def stream_research(
     )
     if session_id:
         state.session_id = session_id
+
+    # Wire source scope from OrchestrationConfig to ResearchState (008-data-source-selection)
+    if config.source_scope:
+        from deep_research.schemas.source_scope import SourceScope, SourceScopeConfig
+
+        try:
+            scope_enum = SourceScope(config.source_scope)
+            state.source_scope_config = SourceScopeConfig(
+                scope=scope_enum,
+                enabled_sources=config.enabled_sources,
+                disabled_sources=config.disabled_sources or [],
+            )
+            logger.info(
+                "ORCHESTRATION_SOURCE_SCOPE_SET",
+                scope=config.source_scope,
+                enabled_count=len(config.enabled_sources or []),
+                disabled_count=len(config.disabled_sources or []),
+            )
+        except ValueError as e:
+            logger.warning(
+                "ORCHESTRATION_INVALID_SOURCE_SCOPE",
+                scope=config.source_scope,
+                error=str(e),
+            )
+            # Default to ALL scope on invalid input
+            state.source_scope_config = SourceScopeConfig(scope=SourceScope.ALL)
+
+    # Wire user_token for OBO authentication (007-enterprise-data-sources Phase 2)
+    if config.user_token:
+        state.user_token = config.user_token
+
+    # Wire file_ids and agent_id from config to state
+    if config.file_ids:
+        state.file_ids = config.file_ids
+        if db is not None and user_id:
+            try:
+                from deep_research.agent.tools.file_search import create_file_search_tool
+
+                file_search_tool = create_file_search_tool(
+                    session=db,
+                    owner_id=user_id,
+                    file_ids=config.file_ids,
+                )
+                _append_unique_tools(state.enterprise_tools, [file_search_tool])
+                logger.info(
+                    "ORCHESTRATION_FILE_SEARCH_TOOL_ATTACHED",
+                    file_count=len(config.file_ids),
+                )
+            except Exception as e:
+                logger.error(
+                    "ORCHESTRATION_FILE_SEARCH_TOOL_FAILED",
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    exc_info=True,
+                )
+        else:
+            logger.warning(
+                "ORCHESTRATION_FILE_SEARCH_TOOL_SKIPPED",
+                reason="missing_db_or_user_id",
+                has_db=db is not None,
+                has_user_id=bool(user_id),
+                file_count=len(config.file_ids),
+            )
+
+    elif db is not None and user_id and chat_id:
+        # AUTO-DISCOVERY: Look up files for this chat when frontend didn't
+        # pass file_ids (e.g., component re-mount lost the state).
+        try:
+            from uuid import UUID as _UUID
+
+            from deep_research.services.file_upload_service import FileUploadService
+
+            discovery_service = FileUploadService(db)
+            chat_files, _ = await discovery_service.get_session_files(
+                user_id, _UUID(chat_id), limit=20
+            )
+            ready_files = [f for f in chat_files if f.is_ready]
+
+            if ready_files:
+                state.file_ids = [str(f.id) for f in ready_files]
+                logger.info(
+                    "ORCHESTRATION_FILE_IDS_AUTO_DISCOVERED",
+                    file_count=len(state.file_ids),
+                    chat_id=chat_id,
+                )
+
+                # Create file_search tool (same as explicit path)
+                try:
+                    from deep_research.agent.tools.file_search import create_file_search_tool
+
+                    file_search_tool = create_file_search_tool(
+                        session=db,
+                        owner_id=user_id,
+                        file_ids=state.file_ids,
+                    )
+                    _append_unique_tools(state.enterprise_tools, [file_search_tool])
+                    logger.info(
+                        "ORCHESTRATION_FILE_SEARCH_TOOL_ATTACHED",
+                        file_count=len(state.file_ids),
+                        source="auto_discovery",
+                    )
+                except Exception as e:
+                    logger.error(
+                        "ORCHESTRATION_FILE_SEARCH_TOOL_FAILED",
+                        error=str(e),
+                        error_type=type(e).__name__,
+                    )
+        except Exception as e:
+            logger.warning(
+                "ORCHESTRATION_FILE_DISCOVERY_FAILED",
+                error=str(e),
+                chat_id=chat_id,
+            )
+
+    if config.agent_id:
+        state.agent_id = config.agent_id
+    if config.model_overrides:
+        state.model_overrides = config.model_overrides
+    if config.domain_filter:
+        state.domain_filter = config.domain_filter
+
+    # Load file contents for inline injection and citation tracking
+    if state.file_ids and db is not None and user_id:
+        try:
+            await _load_file_contents(state, db, user_id)
+            if state.file_contents:
+                strategies = [fc["strategy"] for fc in state.file_contents]
+                logger.info(
+                    "ORCHESTRATION_FILE_CONTENTS_LOADED",
+                    file_count=len(state.file_contents),
+                    strategies=strategies,
+                )
+        except Exception as e:
+            logger.error("ORCHESTRATION_FILE_CONTENT_LOAD_FAILED", error=str(e))
+
+    # Optimization: remove file_search when all files are inline
+    # (their full content is already in every prompt)
+    if state.file_contents and state.enterprise_tools:
+        all_inline = all(fc.get("strategy") == "inline" for fc in state.file_contents)
+        if all_inline:
+            state.enterprise_tools = [
+                t for t in state.enterprise_tools
+                if getattr(getattr(t, "definition", None), "name", None) != "file_search"
+            ]
+            logger.info(
+                "ORCHESTRATION_FILE_SEARCH_REMOVED_ALL_INLINE",
+                inline_count=len(state.file_contents),
+            )
+
+    # Load enterprise tools from user data sources (007-enterprise-data-sources Phase 2)
+    # Only load if enterprise search is allowed and we have db and user_id
+    if state.is_enterprise_search_allowed() and db is not None and user_id:
+        try:
+            from deep_research.agent.tools.factory import get_enabled_tools_for_user
+
+            enterprise_tools = await get_enabled_tools_for_user(
+                user_id=user_id,
+                user_token=state.user_token,
+                session=db,
+            )
+            _append_unique_tools(state.enterprise_tools, enterprise_tools)
+            logger.info(
+                "ORCHESTRATION_ENTERPRISE_TOOLS_LOADED",
+                loaded_count=len(enterprise_tools),
+                total_count=len(state.enterprise_tools),
+                tool_names=[t.definition.name for t in state.enterprise_tools],
+            )
+        except Exception as e:
+            logger.error(
+                "ORCHESTRATION_ENTERPRISE_TOOLS_FAILED",
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True,
+            )
+            # Continue without enterprise tools - not critical
+
+    # Fallback: create tools from discovered sources if DB-based loading returned empty.
+    # This handles the case where user selected sources from discovery UI
+    # but hasn't saved them as UserDataSource records in the DB.
+    if (
+        not _has_non_file_tools(state.enterprise_tools)
+        and state.source_scope_config
+        and state.source_scope_config.enabled_sources
+        and state.is_enterprise_search_allowed()
+    ):
+        try:
+            from deep_research.agent.tools.factory import create_tools_from_discovered_sources
+            from deep_research.services.discovery_cache import get_discovery_cache
+
+            cache = get_discovery_cache()
+            cached_sources = await cache.get(user_id=user_id)
+
+            if cached_sources:
+                enabled_ids = set(state.source_scope_config.enabled_sources)
+                matching = [s for s in cached_sources if s.source_id in enabled_ids]
+
+                if matching:
+                    # Filter by source-type toggles (e.g., enable_vector_search=False)
+                    type_filtered = [
+                        s for s in matching
+                        if state.source_scope_config.is_type_enabled(s.source_type)
+                    ]
+
+                    if type_filtered:
+                        discovery_tools = await create_tools_from_discovered_sources(
+                            type_filtered
+                        )
+                        _append_unique_tools(state.enterprise_tools, discovery_tools)
+                        logger.info(
+                            "ORCHESTRATION_ENTERPRISE_TOOLS_FROM_DISCOVERY",
+                            loaded_count=len(discovery_tools),
+                            total_count=len(state.enterprise_tools),
+                            tool_names=[t.definition.name for t in state.enterprise_tools],
+                            source_ids=[s.source_id for s in type_filtered],
+                        )
+                else:
+                    logger.warning(
+                        "ORCHESTRATION_NO_MATCHING_DISCOVERY_SOURCES",
+                        enabled_ids=list(enabled_ids)[:5],
+                        cached_count=len(cached_sources),
+                    )
+            else:
+                logger.warning(
+                    "ORCHESTRATION_DISCOVERY_CACHE_EMPTY",
+                    user_id=user_id,
+                )
+        except Exception as e:
+            logger.error(
+                "ORCHESTRATION_DISCOVERY_TOOLS_FAILED",
+                error=str(e),
+                error_type=type(e).__name__,
+                exc_info=True,
+            )
+
+    # Last resort: create tools directly from source IDs (no cache/DB needed).
+    # The source_id format (e.g. "assistant:endpoint_name") encodes enough
+    # information to construct the tool without any API calls.
+    if (
+        not _has_non_file_tools(state.enterprise_tools)
+        and state.source_scope_config
+        and state.source_scope_config.enabled_sources
+        and state.is_enterprise_search_allowed()
+    ):
+        try:
+            from deep_research.agent.tools.factory import create_tools_from_source_ids
+
+            direct_tools = create_tools_from_source_ids(
+                state.source_scope_config.enabled_sources
+            )
+            _append_unique_tools(state.enterprise_tools, direct_tools)
+            if direct_tools:
+                logger.info(
+                    "ORCHESTRATION_ENTERPRISE_TOOLS_FROM_SOURCE_IDS",
+                    loaded_count=len(direct_tools),
+                    total_count=len(state.enterprise_tools),
+                    tool_names=[t.definition.name for t in direct_tools],
+                    source_ids=state.source_scope_config.enabled_sources[:5],
+                )
+        except Exception as e:
+            logger.error(
+                "ORCHESTRATION_SOURCE_ID_TOOLS_FAILED",
+                error=str(e)[:200],
+                error_type=type(e).__name__,
+            )
 
     # DIAGNOSTIC: Log state creation for structured output debugging
     logger.info(
@@ -772,7 +1729,7 @@ async def stream_research(
     event_buffer: EventBuffer | None = None  # Initialize before try block for exception handler
 
     # Create MLflow run to associate trace with params
-    with mlflow.start_run(run_name=f"research_{str(state.session_id)[:8]}", nested=True):
+    with safe_mlflow_run(f"research_{str(state.session_id)[:8]}"):
         # Create span INSIDE the run context so trace is properly nested under run
         async with safe_tool_span("stream_research_orchestration", "CHAIN", {
             "research.session_id": str(state.session_id),
@@ -790,7 +1747,7 @@ async def stream_research(
                     trace_metadata["mlflow.trace.user"] = user_id
                 if chat_id:
                     trace_metadata["mlflow.trace.session"] = chat_id
-                mlflow.update_current_trace(metadata=trace_metadata)
+                safe_update_trace(trace_metadata)
 
             try:
                 # =============================================================
@@ -1124,18 +2081,27 @@ async def stream_research(
                         researcher_succeeded = False
                         for retry_attempt in range(web_search_max_retries):
                             try:
-                                state = await asyncio.wait_for(
-                                    run_researcher(
-                                        state,
-                                        llm,
-                                        crawler,
-                                        brave_client,
-                                    ),
+                                # Drain the generator within the timeout
+                                async def _run_researcher_to_completion() -> None:
+                                    async for react_event in run_researcher(
+                                        state, llm, crawler, brave_client
+                                    ):
+                                        stream_evt = _convert_react_event(react_event)
+                                        if stream_evt:
+                                            yield_buf.append(stream_evt)
+
+                                yield_buf: list[StreamEvent] = []
+                                await asyncio.wait_for(
+                                    _run_researcher_to_completion(),
                                     timeout=web_search_timeout,
                                 )
+                                # Emit buffered events
+                                for buffered_evt in yield_buf:
+                                    yield buffered_evt
+                                    await _buffer_event(buffered_evt, event_buffer)
                                 researcher_succeeded = True
                                 break  # Success - exit retry loop
-                            except asyncio.TimeoutError:
+                            except TimeoutError:
                                 logger.warning(
                                     "WEB_SEARCH_RESEARCHER_TIMEOUT_RETRY",
                                     attempt=retry_attempt + 1,
@@ -1152,7 +2118,7 @@ async def stream_research(
                                 attempts=web_search_max_retries,
                                 total_elapsed_seconds=time.perf_counter() - web_search_start,
                             )
-                            raise asyncio.TimeoutError("Web search researcher timed out after all retries")
+                            raise TimeoutError("Web search researcher timed out after all retries")
 
                         ws_evt = _agent_completed("researcher", agent_start)
                         yield ws_evt
@@ -1246,8 +2212,9 @@ async def stream_research(
                                     yield ws_evt
                                     await _buffer_event(ws_evt, event_buffer)
 
-                            full_report = "".join(web_search_chunks)
-                            state.complete(full_report)
+                            # Note: stream_synthesis_with_citations() already calls
+                            # state.complete() internally via the synthesis pipeline.
+                            # (Same pattern as orchestrator.py deep_research path)
 
                         ws_evt = _agent_completed("synthesizer", agent_start)
                         yield ws_evt
@@ -1354,7 +2321,7 @@ async def stream_research(
                             await event_buffer.flush()
                         return
 
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # Web search timed out - fall back to Simple mode
                         logger.warning(
                             "WEB_SEARCH_TIMEOUT_FALLBACK",
@@ -1393,7 +2360,15 @@ async def stream_research(
                         fallback_evt = _agent_completed("synthesizer", fallback_start)
                         yield fallback_evt
                         await _buffer_event(fallback_evt, event_buffer)
-                        state.complete(full_report)
+                        if state.completed_at is None:
+                            state.complete(full_report)
+                        else:
+                            logger.warning(
+                                "TIMEOUT_FALLBACK_SKIP_ALREADY_COMPLETE",
+                                completed_at=str(state.completed_at),
+                                existing_report_len=len(state.final_report) if state.final_report else 0,
+                                fallback_report_len=len(full_report),
+                            )
 
                         # Emit completion event
                         total_duration_ms = (time.perf_counter() - start_time) * 1000
@@ -1741,7 +2716,11 @@ async def stream_research(
                         yield evt
                         await _buffer_event(evt, event_buffer)
                         agent_start = time.perf_counter()
-                        state = await run_background_investigator(state, llm, brave_client)
+                        async for react_event in run_background_investigator(state, llm, brave_client):
+                            stream_evt = _convert_react_event(react_event)
+                            if stream_evt:
+                                yield stream_evt
+                                await _buffer_event(stream_evt, event_buffer)
                         evt = _agent_completed("background_investigator", agent_start)
                         yield evt
                         await _buffer_event(evt, event_buffer)
@@ -1801,37 +2780,27 @@ async def stream_research(
 
                                 if researcher_config.mode == ResearcherMode.REACT:
                                     # ReAct mode: LLM controls the research loop
-                                    async for react_event in run_react_researcher(
-                                        state, llm, crawler, brave_client
-                                    ):
-                                        if react_event.event_type == "tool_call":
-                                            evt = ToolCallEvent(
-                                                tool_name=react_event.data.get("tool", ""),
-                                                tool_args=react_event.data.get("args", {}),
-                                                call_number=react_event.data.get("call_number", 0),
-                                            )
-                                            yield evt
-                                            await _buffer_event(evt, event_buffer)
-                                        elif react_event.event_type == "tool_result":
-                                            evt = ToolResultEvent(
-                                                tool_name=react_event.data.get("tool", ""),
-                                                result_preview=react_event.data.get("result_preview", "")[:200],
-                                                sources_crawled=react_event.data.get("high_quality_count", 0),
-                                            )
-                                            yield evt
-                                            await _buffer_event(evt, event_buffer)
-                                        elif react_event.event_type == "research_complete":
-                                            logger.info(
-                                                "REACT_RESEARCH_COMPLETE",
-                                                reason=react_event.data.get("reason", ""),
-                                                tool_calls=react_event.data.get("tool_calls", 0),
-                                                high_quality=react_event.data.get("high_quality_sources", 0),
-                                            )
-                                else:
-                                    # Classic mode: single-pass fixed searches/crawls
-                                    state = await run_researcher(
+                                    researcher_gen = run_react_researcher(
                                         state, llm, crawler, brave_client
                                     )
+                                else:
+                                    # Classic mode: single-pass fixed searches/crawls
+                                    researcher_gen = run_researcher(
+                                        state, llm, crawler, brave_client
+                                    )
+
+                                async for react_event in researcher_gen:
+                                    stream_evt = _convert_react_event(react_event)
+                                    if stream_evt:
+                                        yield stream_evt
+                                        await _buffer_event(stream_evt, event_buffer)
+                                    elif react_event.event_type == "research_complete":
+                                        logger.info(
+                                            "REACT_RESEARCH_COMPLETE",
+                                            reason=react_event.data.get("reason", ""),
+                                            tool_calls=react_event.data.get("tool_calls", 0),
+                                            high_quality=react_event.data.get("high_quality_sources", 0),
+                                        )
 
                                 evt = _agent_completed("researcher", agent_start)
                                 yield evt
@@ -2234,6 +3203,249 @@ async def stream_research(
             )
 
 
+# =============================================================================
+# Plan Review Functions (007-enterprise-data-sources, US12, T040)
+# =============================================================================
+
+
+def _create_plan_for_review(state: ResearchState) -> PlanForReview:
+    """Create a PlanForReview from current state for user review.
+
+    Converts the internal Plan dataclass to the PlanForReview schema
+    that includes source hints for display to the user.
+
+    Args:
+        state: Current research state with plan.
+
+    Returns:
+        PlanForReview schema ready for serialization.
+
+    Raises:
+        ValueError: If no plan exists in state.
+    """
+    plan = state.current_plan
+    if not plan:
+        raise ValueError("No plan in state for review")
+
+    # Convert steps to PlanStepForReview with source hints
+    steps_for_review: list[PlanStepForReview] = []
+    for step in plan.steps:
+        # Check if we have source constraints for this step
+        constraint = state.get_source_constraint(step.id)
+
+        source_hints: list[dict[str, Any]] = []
+        exclude_sources: list[str] = []
+
+        if constraint:
+            # Extract source hints from constraint if available
+            if hasattr(constraint, "source_hints"):
+                source_hints = [
+                    h.to_dict() if hasattr(h, "to_dict") else dict(h)
+                    for h in constraint.source_hints
+                ]
+            if hasattr(constraint, "exclude_sources"):
+                exclude_sources = list(constraint.exclude_sources)
+
+        steps_for_review.append(
+            PlanStepForReview(
+                id=step.id,
+                title=step.title,
+                description=step.description,
+                step_type=step.step_type.value,
+                needs_search=step.needs_search,
+                source_hints=source_hints,
+                exclude_sources=exclude_sources,
+            )
+        )
+
+    return PlanForReview(
+        id=plan.id,
+        title=plan.title,
+        thought=plan.thought,
+        steps=steps_for_review,
+        iteration=plan.iteration,
+        data_landscape_summary=None,  # TODO: Add if available in state
+    )
+
+
+def apply_user_edits(
+    state: ResearchState,
+    edited_plan: PlanForReview,
+) -> ResearchState:
+    """Apply user edits from plan review to state.
+
+    Updates the current plan in state with user modifications
+    from the PlanReviewResponseEvent.
+
+    Args:
+        state: Current research state.
+        edited_plan: User-modified plan from review.
+
+    Returns:
+        Updated state with modified plan.
+    """
+    if not state.current_plan:
+        logger.warning("APPLY_USER_EDITS_NO_PLAN", detail="No plan to modify")
+        return state
+
+    # Update plan metadata
+    state.current_plan.title = edited_plan.title
+    state.current_plan.thought = edited_plan.thought
+
+    # Update steps - match by ID
+    existing_step_map = {s.id: s for s in state.current_plan.steps}
+    new_steps: list[PlanStep] = []
+
+    for edited_step in edited_plan.steps:
+        if edited_step.id in existing_step_map:
+            # Update existing step
+            existing = existing_step_map[edited_step.id]
+            existing.title = edited_step.title
+            existing.description = edited_step.description
+            existing.needs_search = edited_step.needs_search
+            new_steps.append(existing)
+        else:
+            # Create new step from user addition
+            new_steps.append(
+                PlanStep(
+                    id=edited_step.id,
+                    title=edited_step.title,
+                    description=edited_step.description,
+                    step_type=StepType(edited_step.step_type),
+                    needs_search=edited_step.needs_search,
+                    status=StepStatus.PENDING,
+                )
+            )
+
+        # Update source constraints from edited step
+        if edited_step.source_hints or edited_step.exclude_sources:
+            # Create a simple constraint dict to store
+            constraint_dict = {
+                "source_hints": edited_step.source_hints,
+                "exclude_sources": edited_step.exclude_sources,
+            }
+            state.set_source_constraint(edited_step.id, constraint_dict)
+
+    state.current_plan.steps = new_steps
+
+    logger.info(
+        "PLAN_EDITS_APPLIED",
+        step_count=len(new_steps),
+        edited_plan_id=edited_plan.id,
+    )
+
+    return state
+
+
+async def execute_with_plan_review(
+    state: ResearchState,
+    config: OrchestrationConfig,
+    response_queue: "asyncio.Queue[dict[str, Any]]",
+) -> AsyncGenerator[StreamEvent, None]:
+    """Wait for user review of plan with optional timeout.
+
+    This generator yields PlanReviewEvent and waits for user response
+    via the response_queue. Supports timeout with auto-proceed.
+
+    Args:
+        state: Current research state with plan.
+        config: Orchestration config with review settings.
+        response_queue: Queue to receive user response events.
+
+    Yields:
+        PlanReviewEvent, then PlanReviewTimeoutEvent if timeout occurs.
+
+    Note:
+        The caller is responsible for:
+        1. Setting up the response_queue
+        2. Feeding user responses into the queue
+        3. Applying edits via apply_user_edits() if user edited the plan
+    """
+    if not config.enable_plan_review:
+        return
+
+    if not state.current_plan:
+        logger.warning("PLAN_REVIEW_NO_PLAN", detail="No plan to review")
+        return
+
+    review_id = str(uuid4())
+    plan_for_review = _create_plan_for_review(state)
+
+    # Emit plan review event
+    yield PlanReviewEvent(
+        plan=plan_for_review,
+        timeout_seconds=config.plan_review_timeout_seconds,
+        review_id=review_id,
+        require_approval=config.require_plan_approval,
+        available_sources=[],  # TODO: Populate from data landscape
+    )
+
+    # Wait for response or timeout
+    timeout = None if config.require_plan_approval else config.plan_review_timeout_seconds
+
+    try:
+        if timeout is not None:
+            response = await asyncio.wait_for(
+                response_queue.get(),
+                timeout=float(timeout),
+            )
+        else:
+            # No timeout - wait indefinitely
+            response = await response_queue.get()
+
+        # Process response
+        action = response.get("action", "")
+        response_review_id = response.get("review_id", "")
+
+        if response_review_id != review_id:
+            logger.warning(
+                "PLAN_REVIEW_ID_MISMATCH",
+                expected=review_id,
+                received=response_review_id,
+            )
+            # Continue with original plan
+
+        if action == "reject":
+            logger.info(
+                "PLAN_REVIEW_REJECTED",
+                review_id=review_id,
+                reason=response.get("rejection_reason", ""),
+            )
+            # Set state to indicate rejection
+            state.is_cancelled = True
+            return
+
+        if action == "approve_with_edits":
+            edited_plan_dict = response.get("edited_plan")
+            if edited_plan_dict:
+                # Parse and apply edits
+                edited_plan = PlanForReview.model_validate(edited_plan_dict)
+                apply_user_edits(state, edited_plan)
+                logger.info(
+                    "PLAN_REVIEW_EDITS_APPLIED",
+                    review_id=review_id,
+                )
+
+        # action == "approve" or edits applied - continue with research
+        logger.info(
+            "PLAN_REVIEW_APPROVED",
+            review_id=review_id,
+            action=action,
+        )
+
+    except TimeoutError:
+        logger.info(
+            "PLAN_REVIEW_TIMEOUT",
+            review_id=review_id,
+            timeout_seconds=config.plan_review_timeout_seconds,
+        )
+        yield PlanReviewTimeoutEvent(
+            review_id=review_id,
+            timeout_seconds=config.plan_review_timeout_seconds,
+        )
+        # Continue with original plan
+
+
 # Helper functions for creating events
 async def _buffer_event(
     event: StreamEvent, event_buffer: "EventBuffer | None"
@@ -2325,11 +3537,17 @@ def _step_completed(state: ResearchState) -> StepCompletedEvent:
     ):
         step_id = state.current_plan.steps[state.current_step_index].id
 
+    file_source_count = sum(
+        1 for s in state.sources
+        if s.url and s.url.startswith("uploaded-file://")
+    )
+
     return StepCompletedEvent(
         step_index=state.current_step_index,
         step_id=step_id,
         observation_summary=state.last_observation[:200] if state.last_observation else "",
         sources_found=len(state.sources),
+        file_sources_found=file_source_count,
     )
 
 
@@ -2455,7 +3673,10 @@ async def _stream_research_with_custom_phases(
     if config.enable_background_investigation:
         yield _agent_started("background_investigator", "simple")
         agent_start = time.perf_counter()
-        state = await run_background_investigator(state, llm, brave_client)
+        async for react_event in run_background_investigator(state, llm, brave_client):
+            stream_evt = _convert_react_event(react_event)
+            if stream_evt:
+                yield stream_evt
         yield _agent_completed("background_investigator", agent_start)
 
     # Execute custom phases

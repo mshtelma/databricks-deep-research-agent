@@ -60,8 +60,11 @@ class Settings(BaseSettings):
 
     # Brave Search
     brave_api_key: str | None = None
+    # SSL Verification (disable behind corporate proxies with SSL inspection)
+    brave_verify_ssl: bool = True
 
     # MLflow
+    mlflow_enabled: bool = True
     mlflow_tracking_uri: str = "databricks"
     mlflow_experiment_name: str = "deep-research-agent"
 

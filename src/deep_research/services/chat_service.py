@@ -6,8 +6,11 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select
+from sqlalchemy.orm import selectinload
 
 from deep_research.models.chat import Chat, ChatStatus, ChatType
+from deep_research.models.message import Message
+from deep_research.models.research_session import ResearchSession
 from deep_research.services.base import BaseRepository
 
 logger = logging.getLogger(__name__)
@@ -79,6 +82,41 @@ class ChatService(BaseRepository[Chat]):
                     Chat.id == chat_id,
                     Chat.deleted_at.is_(None),
                 )
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_full(self, chat_id: UUID, user_id: str) -> Chat | None:
+        """Load complete chat with messages, research sessions, and sources.
+
+        Uses selectinload chains to batch-load the full object graph:
+        - Query 1: SELECT chat WHERE id=? AND user_id=? AND deleted_at IS NULL
+        - Query 2: SELECT messages WHERE chat_id IN (?)              [selectinload]
+        - Query 3: SELECT research_sessions WHERE message_id IN (?)  [selectinload]
+        - Query 4: SELECT sources WHERE research_session_id IN (?)   [selectinload]
+
+        Total: 4 queries (vs 8-10+ in current waterfall).
+
+        Args:
+            chat_id: Chat ID.
+            user_id: User ID (for ownership check).
+
+        Returns:
+            Fully loaded Chat or None if not found/not owned.
+        """
+        result = await self._session.execute(
+            select(Chat)
+            .where(
+                and_(
+                    Chat.id == chat_id,
+                    Chat.user_id == user_id,
+                    Chat.deleted_at.is_(None),
+                )
+            )
+            .options(
+                selectinload(Chat.messages)
+                .selectinload(Message.research_session)
+                .selectinload(ResearchSession.sources)
             )
         )
         return result.scalar_one_or_none()

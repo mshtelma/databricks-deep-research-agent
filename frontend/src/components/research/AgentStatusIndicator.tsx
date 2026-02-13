@@ -52,36 +52,58 @@ export function AgentStatusIndicator({
   );
 }
 
+/** Extract the most likely query argument from tool args, regardless of key name. */
+function findQueryArg(args: Record<string, unknown> | undefined): string | null {
+  if (!args) return null;
+  // Check common query key names first
+  for (const key of ['question', 'query', 'query_text', 'search_query']) {
+    if (typeof args[key] === 'string' && args[key]) return args[key] as string;
+  }
+  // Fallback: first non-empty string argument
+  for (const val of Object.values(args)) {
+    if (typeof val === 'string' && val.length > 0 && val.length < 200) return val;
+  }
+  return null;
+}
+
+function truncateStr(str: string, max: number): string {
+  return str.length > max ? str.substring(0, max) + '...' : str;
+}
+
 function getToolLabel(toolActivity: ToolActivity | null | undefined): string {
   if (!toolActivity || !toolActivity.toolName) {
     return 'Researching...';
   }
 
-  if (toolActivity.toolName === 'web_search') {
-    const query = toolActivity.toolArgs?.query as string | undefined;
+  const { toolName, toolArgs } = toolActivity;
+
+  if (toolName === 'web_search') {
+    const query = toolArgs?.query as string | undefined;
     if (query) {
-      // Truncate query for display
-      const displayQuery = query.length > 30 ? query.substring(0, 30) + '...' : query;
-      return `🔍 Searching: "${displayQuery}"`;
+      return `Searching: "${truncateStr(query, 30)}"`;
     }
-    return '🔍 Searching...';
+    return 'Searching...';
   }
 
-  if (toolActivity.toolName === 'web_crawl') {
-    const url = toolActivity.toolArgs?.url as string | undefined;
+  if (toolName === 'web_crawl') {
+    const url = toolArgs?.url as string | undefined;
     if (url) {
-      // Extract domain for display
       try {
         const domain = new URL(url).hostname;
-        return `📄 Crawling: ${domain}`;
+        return `Crawling: ${domain}`;
       } catch {
-        return '📄 Crawling...';
+        return 'Crawling...';
       }
     }
-    return '📄 Crawling...';
+    return 'Crawling...';
   }
 
-  return 'Researching...';
+  // Generic handler for enterprise/future tools
+  const queryArg = findQueryArg(toolArgs);
+  if (queryArg) {
+    return `Querying ${toolName}: "${truncateStr(queryArg, 25)}"`;
+  }
+  return `Querying ${toolName}...`;
 }
 
 function getStatusInfo(
@@ -109,7 +131,9 @@ function getStatusInfo(
         label: getToolLabel(toolActivity),
         icon: toolActivity?.toolName === 'web_crawl'
           ? <PageIcon className="w-4 h-4 text-amber-500 animate-pulse" />
-          : <SearchIcon className="w-4 h-4 text-amber-500 animate-pulse" />,
+          : toolActivity?.toolName && !['web_search', 'web_crawl'].includes(toolActivity.toolName)
+            ? <DatabaseIcon className="w-4 h-4 text-amber-500 animate-pulse" />
+            : <SearchIcon className="w-4 h-4 text-amber-500 animate-pulse" />,
         bgClass: 'bg-amber-50 dark:bg-amber-950',
         textClass: 'text-amber-600 dark:text-amber-400',
       };
@@ -267,6 +291,25 @@ function ErrorIcon({ className }: { className?: string }) {
       <circle cx="12" cy="12" r="10" />
       <path d="m15 9-6 6" />
       <path d="m9 9 6 6" />
+    </svg>
+  );
+}
+
+function DatabaseIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <ellipse cx="12" cy="5" rx="9" ry="3" />
+      <path d="M3 5V19A9 3 0 0 0 21 19V5" />
+      <path d="M3 12A9 3 0 0 0 21 12" />
     </svg>
   );
 }

@@ -51,6 +51,11 @@ async def get_current_user_identity(
             request.state.user = user
             request.state.workspace_client = sp_client
 
+            # T002: Preserve OBO token for enterprise data source access
+            # Used by VectorSearchTool, GenieTool, KnowledgeAssistantTool
+            request.state.obo_token = obo_token
+            request.state.user_workspace_client = user_client
+
             logger.info(f"OBO auth successful: user={user.email}, id={user.user_id}")
             return user
 

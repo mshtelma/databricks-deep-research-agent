@@ -1,0 +1,409 @@
+openapi: 3.1.0
+info:
+  title: Data Source Discovery API
+  description: API for discovering and browsing available enterprise data sources
+  version: 1.0.0
+
+paths:
+  /api/v1/discovery/sources:
+    get:
+      summary: Discover all available data sources
+      description: |
+        Returns all data sources the authenticated user has access to via OBO authentication.
+        Results are cached for 5 minutes per user.
+      operationId: discoverSources
+      tags:
+        - Discovery
+      parameters:
+        - name: source_type
+          in: query
+          description: Filter by source type
+          schema:
+            $ref: '#/components/schemas/DataSourceType'
+        - name: refresh
+          in: query
+          description: Force cache refresh
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Successfully retrieved discovered sources
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryResponse'
+        '401':
+          description: Not authenticated
+        '503':
+          description: Discovery service unavailable
+
+  /api/v1/discovery/sources/{source_id}/metadata:
+    get:
+      summary: Get detailed metadata for a source
+      description: Returns expanded metadata for a specific discovered source
+      operationId: getSourceMetadata
+      tags:
+        - Discovery
+      parameters:
+        - name: source_id
+          in: path
+          required: true
+          description: Source identifier (e.g., "vs:catalog.schema.index")
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Successfully retrieved source metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SourceMetadataResponse'
+        '404':
+          description: Source not found
+
+  /api/v1/discovery/refresh:
+    post:
+      summary: Force refresh discovery cache
+      description: Invalidates the discovery cache and re-queries Databricks APIs
+      operationId: refreshDiscovery
+      tags:
+        - Discovery
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                source_types:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/DataSourceType'
+                  description: Source types to refresh (all if omitted)
+      responses:
+        '200':
+          description: Cache refreshed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryResponse'
+
+components:
+  schemas:
+    DataSourceType:
+      type: string
+      enum:
+        - vector_search
+        - genie
+        - knowledge_assistant
+        - web_search
+        - uploaded_file
+
+    DiscoveryStatus:
+      type: string
+      enum:
+        - ready
+        - syncing
+        - unavailable
+        - error
+
+    DiscoveredSource:
+      type: object
+      required:
+        - source_id
+        - source_type
+        - name
+        - endpoint_name
+        - status
+        - capabilities
+        - discovered_at
+      properties:
+        source_id:
+          type: string
+          description: Unique identifier (e.g., "vs:catalog.schema.index")
+          example: "vs:main.docs.product_index"
+        source_type:
+          $ref: '#/components/schemas/DataSourceType'
+        name:
+          type: string
+          description: Display name
+          example: "Product Documentation Index"
+        endpoint_name:
+          type: string
+          description: Databricks endpoint/space/index identifier
+        description:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/DiscoveryStatus'
+        capabilities:
+          type: array
+          items:
+            type: string
+          description: Supported query capabilities
+          example: ["ann", "hybrid", "reranking"]
+        metadata:
+          type: object
+          description: Type-specific metadata
+        discovered_at:
+          type: string
+          format: date-time
+        cached_until:
+          type: string
+          format: date-time
+
+    DiscoveryResponse:
+      type: object
+      required:
+        - sources
+        - total_count
+        - by_type
+        - discovered_at
+        - cached
+      properties:
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiscoveredSource'
+        total_count:
+          type: integer
+        by_type:
+          type: object
+          additionalProperties:
+            type: array
+            items:
+              $ref: '#/components/schemas/DiscoveredSource'
+        discovered_at:
+          type: string
+          format: date-time
+        cached:
+          type: boolean
+        cache_expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiscoveryError'
+          nullable: true
+
+    DiscoveryError:
+      type: object
+      required:
+        - source_type
+        - error_code
+        - error_message
+        - retryable
+      properties:
+        source_type:
+          $ref: '#/components/schemas/DataSourceType'
+        error_code:
+          type: string
+          example: "PERMISSION_DENIED"
+        error_message:
+          type: string
+        retryable:
+          type: boolean
+
+    VectorSearchMetadata:
+      type: object
+      required:
+        - index_name
+        - endpoint_name
+        - primary_key
+        - index_type
+        - supported_query_types
+        - is_ready
+      properties:
+        index_name:
+          type: string
+          example: "main.docs.product_index"
+        endpoint_name:
+          type: string
+          example: "vs-endpoint-prod"
+        primary_key:
+          type: string
+          example: "id"
+        index_type:
+          type: string
+          enum: ["DELTA_SYNC", "DIRECT_ACCESS"]
+        embedding_columns:
+          type: array
+          items:
+            type: string
+        embedding_dimension:
+          type: integer
+          nullable: true
+        embedding_model:
+          type: string
+          nullable: true
+        filter_columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/FilterColumnInfo'
+        supported_query_types:
+          type: array
+          items:
+            type: string
+            enum: ["ANN", "HYBRID", "FULL_TEXT"]
+        supports_reranking:
+          type: boolean
+        row_count:
+          type: integer
+          nullable: true
+        is_ready:
+          type: boolean
+
+    FilterColumnInfo:
+      type: object
+      required:
+        - name
+        - data_type
+        - operators
+      properties:
+        name:
+          type: string
+        data_type:
+          type: string
+          enum: ["string", "integer", "float", "timestamp", "boolean"]
+        operators:
+          type: array
+          items:
+            type: string
+          example: ["=", "!=", "<", ">", "LIKE", "IN"]
+
+    GenieSpaceMetadata:
+      type: object
+      required:
+        - space_id
+        - title
+      properties:
+        space_id:
+          type: string
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        warehouse_id:
+          type: string
+          nullable: true
+        owner:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ServingEndpointMetadata:
+      type: object
+      required:
+        - endpoint_name
+        - endpoint_type
+        - state
+      properties:
+        endpoint_name:
+          type: string
+        endpoint_type:
+          type: string
+        state:
+          type: string
+          enum: ["READY", "NOT_READY", "PENDING"]
+        tags:
+          type: object
+          additionalProperties:
+            type: string
+        is_knowledge_assistant:
+          type: boolean
+        assistant_type:
+          type: string
+          nullable: true
+        creator:
+          type: string
+          nullable: true
+
+    SourceMetadataResponse:
+      type: object
+      required:
+        - source
+      properties:
+        source:
+          $ref: '#/components/schemas/DiscoveredSource'
+        vector_search:
+          $ref: '#/components/schemas/VectorSearchMetadata'
+          nullable: true
+        genie:
+          $ref: '#/components/schemas/GenieSpaceMetadata'
+          nullable: true
+        serving_endpoint:
+          $ref: '#/components/schemas/ServingEndpointMetadata'
+          nullable: true
+        saved_config:
+          $ref: '#/components/schemas/VectorSearchQueryConfig'
+          nullable: true
+
+    VectorSearchQueryConfig:
+      type: object
+      properties:
+        query_type:
+          type: string
+          enum: ["ANN", "HYBRID", "FULL_TEXT"]
+          default: "ANN"
+        num_results:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 10
+        score_threshold:
+          type: number
+          minimum: 0
+          maximum: 1
+          nullable: true
+        columns:
+          type: array
+          items:
+            type: string
+          nullable: true
+        enable_reranking:
+          type: boolean
+          default: false
+        columns_to_rerank:
+          type: array
+          items:
+            type: string
+          nullable: true
+        filters:
+          type: array
+          items:
+            $ref: '#/components/schemas/FilterExpression'
+          default: []
+        filter_syntax:
+          type: string
+          enum: ["sql", "dict"]
+          default: "sql"
+
+    FilterExpression:
+      type: object
+      required:
+        - column
+        - operator
+        - value
+      properties:
+        column:
+          type: string
+        operator:
+          type: string
+          enum: ["=", "!=", "<", "<=", ">", ">=", "LIKE", "NOT LIKE", "IN"]
+        value:
+          oneOf:
+            - type: string
+            - type: integer
+            - type: number
+            - type: array
+              items:
+                oneOf:
+                  - type: string
+                  - type: integer
+                  - type: number

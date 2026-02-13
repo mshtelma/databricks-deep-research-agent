@@ -447,6 +447,7 @@ class LLMClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         structured_output: type[BaseModel] | None = None,
+        endpoint_override: str | None = None,
     ) -> LLMResponse:
         """Complete a chat request with automatic retry on rate limits.
 
@@ -474,7 +475,8 @@ class LLMClient:
         for attempt in range(rate_config.max_retries + 1):
             try:
                 return await self._complete_impl(
-                    messages, tier, role, temperature, max_tokens, structured_output
+                    messages, tier, role, temperature, max_tokens, structured_output,
+                    endpoint_override,
                 )
             except RateLimitError as e:
                 last_error = e
@@ -520,6 +522,7 @@ class LLMClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         structured_output: type[BaseModel] | None = None,
+        endpoint_override: str | None = None,
     ) -> LLMResponse:
         """Internal implementation of complete (called by retry wrapper).
 
@@ -530,6 +533,7 @@ class LLMClient:
             temperature: Optional temperature override.
             max_tokens: Optional max tokens override.
             structured_output: Optional Pydantic model for structured output.
+            endpoint_override: Optional endpoint ID to use instead of rotation.
 
         Returns:
             LLMResponse with content and metadata.
@@ -541,8 +545,12 @@ class LLMClient:
         estimated_input = sum(len(m.get("content", "")) for m in messages) // 4
         estimated_tokens = estimated_input + (max_tokens or role.max_tokens)
 
-        # Select endpoint
-        endpoint, health = self._select_endpoint(role, estimated_tokens)
+        # Select endpoint (with optional override)
+        if endpoint_override:
+            endpoint = self._config.get_or_create_endpoint(endpoint_override)
+            health = self._get_health(endpoint.id)
+        else:
+            endpoint, health = self._select_endpoint(role, estimated_tokens)
         config = self._merge_config(role, endpoint, temperature, max_tokens)
 
         # Log the request
@@ -935,6 +943,7 @@ class LLMClient:
         tier: ModelTier,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        endpoint_override: str | None = None,
     ) -> AsyncIterator[str]:
         """Stream a chat completion with automatic retry on rate limits.
 
@@ -961,7 +970,8 @@ class LLMClient:
         for attempt in range(rate_config.max_retries + 1):
             try:
                 async for chunk in self._stream_impl(
-                    messages, tier, role, temperature, max_tokens
+                    messages, tier, role, temperature, max_tokens,
+                    endpoint_override,
                 ):
                     yield chunk
                 return  # Success - exit retry loop
@@ -1007,6 +1017,7 @@ class LLMClient:
         role: ModelRole,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        endpoint_override: str | None = None,
     ) -> AsyncIterator[str]:
         """Internal implementation of stream (called by retry wrapper).
 
@@ -1016,6 +1027,7 @@ class LLMClient:
             role: Model role configuration.
             temperature: Optional temperature override.
             max_tokens: Optional max tokens override.
+            endpoint_override: Optional endpoint ID to use instead of rotation.
 
         Yields:
             Content chunks as they arrive.
@@ -1026,7 +1038,11 @@ class LLMClient:
         self._ensure_fresh_client()
 
         estimated_tokens = sum(len(m.get("content", "")) for m in messages) // 4
-        endpoint, health = self._select_endpoint(role, estimated_tokens + 4000)
+        if endpoint_override:
+            endpoint = self._config.get_or_create_endpoint(endpoint_override)
+            health = self._get_health(endpoint.id)
+        else:
+            endpoint, health = self._select_endpoint(role, estimated_tokens + 4000)
         config = self._merge_config(role, endpoint, temperature, max_tokens)
 
         # Apply cache control for supported endpoints (transparent to callers)
@@ -1271,6 +1287,7 @@ class LLMClient:
         tier: ModelTier,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        endpoint_override: str | None = None,
     ) -> AsyncIterator[StreamWithToolsChunk]:
         """Stream a chat completion with tool calling support.
 
@@ -1301,7 +1318,8 @@ class LLMClient:
         for attempt in range(rate_config.max_retries + 1):
             try:
                 async for chunk in self._stream_with_tools_impl(
-                    messages, tools, tier, role, temperature, max_tokens
+                    messages, tools, tier, role, temperature, max_tokens,
+                    endpoint_override,
                 ):
                     yield chunk
                 return  # Success
@@ -1349,6 +1367,7 @@ class LLMClient:
         role: ModelRole,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        endpoint_override: str | None = None,
     ) -> AsyncIterator[StreamWithToolsChunk]:
         """Internal implementation of stream_with_tools.
 
@@ -1362,6 +1381,7 @@ class LLMClient:
             role: Model role configuration.
             temperature: Optional temperature override.
             max_tokens: Optional max tokens override.
+            endpoint_override: Optional endpoint ID to use instead of rotation.
 
         Yields:
             StreamWithToolsChunk with content and/or tool calls.
@@ -1374,7 +1394,11 @@ class LLMClient:
         estimated_tokens = sum(
             len(str(m.get("content", ""))) for m in messages
         ) // 4
-        endpoint, health = self._select_endpoint(role, estimated_tokens + 4000)
+        if endpoint_override:
+            endpoint = self._config.get_or_create_endpoint(endpoint_override)
+            health = self._get_health(endpoint.id)
+        else:
+            endpoint, health = self._select_endpoint(role, estimated_tokens + 4000)
         config = self._merge_config(role, endpoint, temperature, max_tokens)
 
         # Apply cache control for supported endpoints (transparent to callers)

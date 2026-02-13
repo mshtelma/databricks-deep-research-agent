@@ -194,6 +194,201 @@ class ExtractionConfigProvider(Protocol):
         ...
 
 
+# =============================================================================
+# Enterprise Data Source Protocols (007-enterprise-data-sources)
+# =============================================================================
+
+
+@dataclass
+class DataSourceDefinition:
+    """Definition of a queryable data source.
+
+    Used to describe data sources provided by plugins. System and user
+    data sources use the schema version (from data_source.py).
+    """
+
+    type: str  # DataSourceType value
+    name: str
+    description: str
+    endpoint_identifier: str
+    capabilities: list[str] = field(default_factory=list)
+    filter_schema: dict[str, Any] | None = None
+    example_queries: list[str] = field(default_factory=list)
+    source: str = "plugin"
+
+
+@dataclass
+class SourceConstraints:
+    """Constraints on which sources can be used.
+
+    Applied by plugins to restrict source selection during research.
+    """
+
+    allowed_types: set[str] | None = None  # None = all allowed
+    allowed_sources: list[str] | None = None
+    required_sources: list[str] = field(default_factory=list)
+    excluded_sources: list[str] = field(default_factory=list)
+
+
+@dataclass
+class PromptTemplateDefinition:
+    """Definition of a prompt template provided by a plugin."""
+
+    id: str
+    name: str
+    type: str  # 'system', 'step', 'synthesis', 'query'
+    content: str
+    variables: list[dict[str, Any]] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CustomAgentDefinition:
+    """Definition of a custom agent provided by a plugin."""
+
+    id: str
+    name: str
+    description: str
+    system_prompt: str
+    source_scope: str | None = None  # SourceScope value
+    enabled_sources: list[str] = field(default_factory=list)
+    disabled_sources: list[str] = field(default_factory=list)
+    preset_steps: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class FileChunk:
+    """A chunk of content extracted from a file."""
+
+    content: str
+    chunk_index: int
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@runtime_checkable
+class DataSourceProvider(Protocol):
+    """Protocol for plugins that provide data sources (T004).
+
+    Implement this to register data sources (Vector Search, Genie spaces,
+    Knowledge Assistants) that appear in the source browser.
+    """
+
+    def get_data_sources(self, context: ResearchContext) -> list[DataSourceDefinition]:
+        """Return data sources provided by this plugin.
+
+        Called when building the source browser. Sources may be filtered
+        based on context (user, research type, etc.).
+
+        Args:
+            context: Research context for source filtering
+
+        Returns:
+            List of DataSourceDefinition objects
+        """
+        ...
+
+    def get_source_constraints(self, context: ResearchContext) -> SourceConstraints | None:
+        """Return default constraints for this plugin's sources.
+
+        If provided, these constraints are applied when the plugin's
+        sources are active.
+
+        Args:
+            context: Research context
+
+        Returns:
+            SourceConstraints or None if no constraints
+        """
+        ...
+
+
+@runtime_checkable
+class TemplateProvider(Protocol):
+    """Protocol for plugins that provide prompt templates (T005).
+
+    Implement this to register prompt templates that users can select
+    in the template library.
+    """
+
+    def get_templates(self, context: ResearchContext) -> list[PromptTemplateDefinition]:
+        """Return templates provided by this plugin.
+
+        Args:
+            context: Research context for template filtering
+
+        Returns:
+            List of PromptTemplateDefinition objects
+        """
+        ...
+
+    def resolve_variable(
+        self, variable_name: str, context: ResearchContext
+    ) -> str | None:
+        """Dynamically resolve a template variable value.
+
+        Called during template rendering for plugin-owned variables.
+        Return None to use default resolution.
+
+        Args:
+            variable_name: Name of the variable to resolve
+            context: Research context
+
+        Returns:
+            Resolved value or None to use default
+        """
+        ...
+
+
+@runtime_checkable
+class CustomAgentProvider(Protocol):
+    """Protocol for plugins that provide custom agents (T006).
+
+    Implement this to register custom research agents that users
+    can select in the agent selector.
+    """
+
+    def get_custom_agents(self, context: ResearchContext) -> list[CustomAgentDefinition]:
+        """Return custom agents provided by this plugin.
+
+        Args:
+            context: Research context for agent filtering
+
+        Returns:
+            List of CustomAgentDefinition objects
+        """
+        ...
+
+
+@runtime_checkable
+class FileProcessorProvider(Protocol):
+    """Protocol for plugins that provide file processing (T007).
+
+    Implement this to handle custom file types during file upload.
+    """
+
+    def get_supported_extensions(self) -> set[str]:
+        """Return file extensions this processor handles.
+
+        Returns:
+            Set of extensions (e.g., {'.pdf', '.docx', '.xlsx'})
+        """
+        ...
+
+    async def process_file(
+        self, file_path: str, context: ResearchContext
+    ) -> list[FileChunk]:
+        """Process file into searchable chunks.
+
+        Args:
+            file_path: Path to the uploaded file
+            context: Research context
+
+        Returns:
+            List of FileChunk objects
+        """
+        ...
+
+
 # Combined plugin type for plugins implementing multiple protocols
 class FullPlugin(ResearchPlugin, ToolProvider, PromptProvider, Protocol):
     """

@@ -147,6 +147,15 @@ agents:
     page_contents_limit: 8000
     max_generated_queries: 3
 
+    # Parallel tool execution (007-enterprise-data-sources)
+    # Enables cross-source parallelism for Web + Vector Search + Genie queries
+    # Expected improvement: 20-40% latency reduction for cross-source queries
+    parallel_tool_execution:
+      enabled: true
+      max_parallel_per_batch: 5   # Max concurrent tools per batch
+      tool_timeout_seconds: 30    # Per-tool timeout
+      batch_timeout_seconds: 60   # Per-batch timeout
+
   planner:
     max_plan_iterations: 3
 
@@ -162,6 +171,84 @@ agents:
     max_search_queries: 4
     max_results_per_query: 5
     max_total_results: 8
+
+    # Data source discovery (007-enterprise-data-sources, T039)
+    # Pre-planning phase that explores available enterprise data sources
+    discovery:
+      enabled: true               # Enable background discovery phase
+      timeout_seconds: 5          # Max time for discovery (FR-088)
+      max_sources: 10             # Max sources to query during discovery
+      exploration_queries: 3      # Number of exploratory queries to generate
+      min_relevance_score: 0.3    # Min score to consider source relevant
+
+# =============================================================================
+# Enterprise Data Source Configuration (007-enterprise-data-sources)
+# =============================================================================
+# Controls how enterprise data sources (Vector Search, Genie, Knowledge Assistants)
+# are discovered, prioritized, and queried during research.
+
+# Source routing configuration
+source_routing:
+  enabled: true                   # Enable source-aware planning
+  default_scope: all              # Default scope: all, enterprise_only, web_only
+
+  # Per-source query budgets (max queries per research session)
+  # Prevents over-querying expensive sources
+  source_budgets:
+    vector_search: 15             # Higher budget for fast vector queries
+    genie: 5                      # Lower budget for slower SQL queries
+    knowledge_assistant: 5        # Lower budget for assistant calls
+    web_search: 20                # Standard web search budget
+    uploaded_file: 10             # Local file search budget
+
+  # Source type priorities (1-10, higher = preferred)
+  # Used by planner to decide source order within steps
+  type_priorities:
+    vector_search: 8              # Prefer enterprise knowledge
+    genie: 7                      # Good for data/analytics
+    knowledge_assistant: 6        # Good for domain expertise
+    web_search: 5                 # General purpose
+    uploaded_file: 4              # Context documents
+
+  # Discovery phase configuration
+  discovery:
+    # Query generation for each source type
+    query_templates:
+      vector_search: "What information is available about {{topic}}?"
+      genie: "What data do you have related to {{topic}}?"
+      web_search: "{{topic}}"
+    # Sample result limits during discovery
+    sample_results_limit: 3
+
+# =============================================================================
+# Query Rewriting (Enterprise Query Optimization)
+# =============================================================================
+# Source-specific query rewriting transforms naive queries into optimized ones
+# for each enterprise data source type. Uses FAST model tier (~150 tokens).
+# On failure: silently falls back to original query (never blocks research).
+
+query_rewriting:
+  enabled: true
+  strategies:
+    vector_search:
+      strategy: multi_query              # Generate 3 reformulated queries, merge with RRF
+      max_alternate_queries: 3
+      enable_query2doc: false            # Query2Doc text expansion (works with ALL index types)
+      model_tier: fast
+      timeout_seconds: 10.0
+      fallback_on_failure: true
+    genie:
+      strategy: schema_aware             # Extract entities, metrics, time periods
+      model_tier: fast
+      timeout_seconds: 10.0
+      fallback_on_failure: true
+    knowledge_assistant:
+      strategy: step_back                # Broaden narrow queries, inject research context
+      model_tier: fast
+      timeout_seconds: 10.0
+      fallback_on_failure: true
+    web_search:
+      strategy: direct                   # Web search already has LLM-optimized query generation
 
 # =============================================================================
 # Research Type Profiles (FR-100)

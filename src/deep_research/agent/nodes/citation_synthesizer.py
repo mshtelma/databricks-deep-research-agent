@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 import mlflow
 
-from deep_research.agent.config import get_report_limits
+from deep_research.agent.config import get_endpoint_override, get_report_limits
 from deep_research.agent.prompts.synthesizer import (
     STREAMING_SYNTHESIZER_SYSTEM_PROMPT,
 )
@@ -112,8 +112,19 @@ async def stream_synthesis_with_citations(
             "message": f"Citation verification failed: {e}. Falling back to standard synthesis.",
             "recoverable": True,
         }
-        async for chunk in _standard_stream_synthesis(state, llm):
-            yield {"type": "content", "chunk": chunk}
+        if state.completed_at is None:
+            # Pipeline didn't complete state — run fallback synthesis
+            async for chunk in _standard_stream_synthesis(state, llm):
+                yield {"type": "content", "chunk": chunk}
+        else:
+            # Pipeline completed state before failing — use existing report
+            logger.warning(
+                "CITATION_FALLBACK_SKIPPED_ALREADY_COMPLETE",
+                completed_at=str(state.completed_at),
+                report_len=len(state.final_report) if state.final_report else 0,
+            )
+            if state.final_report:
+                yield {"type": "content", "chunk": state.final_report}
 
     logger.info(
         "CITATION_SYNTHESIZER_COMPLETE",
@@ -156,22 +167,24 @@ async def _standard_stream_synthesis(
         state.system_instructions,
     )
 
+    # Include uploaded file content for synthesis
+    file_context = state.get_file_context_for_prompt(max_chars=15_000)
+    file_section = ""
+    if file_context:
+        file_section = f"\n\n{file_context}"
+
     messages = [
         {"role": "system", "content": system_prompt},
         {
             "role": "user",
-            "content": f"""Create a comprehensive research report.
-
-## Query
-{state.query}
-
-## Research Findings
-{observations_str}
-
-## Available Sources
-{sources_list}
-
-Provide a well-structured markdown response with inline citations.""",
+            "content": (
+                f"Create a comprehensive research report.\n\n"
+                f"## Query\n{state.query}\n\n"
+                f"## Research Findings\n{observations_str}"
+                f"{file_section}\n\n"
+                f"## Available Sources\n{sources_list}\n\n"
+                f"Provide a well-structured markdown response with inline citations."
+            ),
         },
     ]
 
@@ -180,6 +193,7 @@ Provide a well-structured markdown response with inline citations.""",
         async for chunk in llm.stream(
             messages=messages,
             tier=ModelTier.COMPLEX,
+            endpoint_override=get_endpoint_override(state, ModelTier.COMPLEX),
             max_tokens=4000,
         ):
             full_content += chunk

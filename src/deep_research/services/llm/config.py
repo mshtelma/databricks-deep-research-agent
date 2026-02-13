@@ -74,6 +74,38 @@ class ModelConfig:
             raise ValueError(f"Unknown endpoint: {endpoint_id}")
         return self._endpoints[endpoint_id]
 
+    def get_or_create_endpoint(self, endpoint_id: str) -> ModelEndpoint:
+        """Get endpoint by YAML alias, or create ad-hoc for direct identifiers.
+
+        Resolution order:
+        1. YAML alias lookup (returns rich metadata)
+        2. Ad-hoc creation with conservative defaults
+
+        Args:
+            endpoint_id: YAML alias (e.g., "haiku") or direct endpoint name
+                         (e.g., "databricks-meta-llama-3-1-70b-instruct").
+
+        Returns:
+            ModelEndpoint instance — from YAML or ad-hoc with defaults.
+        """
+        if endpoint_id in self._endpoints:
+            return self._endpoints[endpoint_id]
+
+        # Direct endpoint identifier — create ad-hoc with conservative defaults
+        logger.info(
+            "ADHOC_ENDPOINT_CREATED",
+            extra={"endpoint_id": endpoint_id},
+        )
+        return ModelEndpoint(
+            id=endpoint_id,
+            endpoint_identifier=endpoint_id,
+            max_context_window=128_000,
+            tokens_per_minute=50_000,
+            supports_structured_output=False,
+            supports_temperature=True,
+            supports_prompt_caching=False,
+        )
+
     def get_endpoints_for_role(self, role_name: str) -> list[ModelEndpoint]:
         """Get all endpoints for a role in priority order."""
         role = self.get_role(role_name)

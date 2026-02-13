@@ -12,7 +12,7 @@ Provides the tool infrastructure for research agents:
 ResearchTool Implementations:
 - WebSearchTool: Web search via Brave API
 - WebCrawlTool: Web page content extraction
-- VectorSearchTool: Databricks Vector Search
+- UserVectorSearchTool: Databricks Vector Search (with OBO, hybrid, reranking, multi-query RRF)
 - KnowledgeAssistantTool: Databricks Knowledge Assistants
 """
 
@@ -25,19 +25,11 @@ from deep_research.agent.tools.base import (
     ToolMap,
     ToolResult,
 )
-from deep_research.agent.tools.registry import ToolRegistry, ToolRegistryError
-
-# ResearchTool implementations
-from deep_research.agent.tools.web_crawler import WebCrawler, WebCrawlTool, web_crawl
-from deep_research.agent.tools.web_search import WebSearchTool, web_search
-from deep_research.agent.tools.vector_search import (
-    VectorSearchTool,
-    create_vector_search_tools_from_config,
-)
 from deep_research.agent.tools.knowledge_assistant import (
     KnowledgeAssistantTool,
     create_knowledge_assistant_tools_from_config,
 )
+from deep_research.agent.tools.registry import ToolRegistry, ToolRegistryError
 
 # Legacy tool interface (for backward compatibility with OpenAI format)
 from deep_research.agent.tools.research_tools import (
@@ -45,6 +37,25 @@ from deep_research.agent.tools.research_tools import (
     get_tool_by_name,
     get_tool_names,
 )
+
+# Source routing for enterprise data sources (007-enterprise-data-sources, T053)
+from deep_research.agent.tools.source_routing import (
+    filter_tool_definitions_by_constraint,
+    filter_tools_by_constraint,
+    get_prioritized_sources,
+    get_tool_source_type,
+    prompt_for_required_sources,
+    should_force_required_source_query,
+    validate_required_sources_consulted,
+)
+from deep_research.agent.tools.user_vector_search import (
+    UserVectorSearchTool,
+    reciprocal_rank_fusion,
+)
+
+# ResearchTool implementations
+from deep_research.agent.tools.web_crawler import WebCrawler, WebCrawlTool, web_crawl
+from deep_research.agent.tools.web_search import WebSearchTool, web_search
 
 __all__ = [
     # Tool infrastructure (protocol and registry)
@@ -59,8 +70,8 @@ __all__ = [
     # ResearchTool implementations
     "WebSearchTool",
     "WebCrawlTool",
-    "VectorSearchTool",
-    "create_vector_search_tools_from_config",
+    "UserVectorSearchTool",
+    "reciprocal_rank_fusion",
     "KnowledgeAssistantTool",
     "create_knowledge_assistant_tools_from_config",
     # Legacy functional interface (still used by agents)
@@ -71,4 +82,12 @@ __all__ = [
     "RESEARCH_TOOLS",
     "get_tool_names",
     "get_tool_by_name",
+    # Source routing (007-enterprise-data-sources, T053)
+    "filter_tools_by_constraint",
+    "filter_tool_definitions_by_constraint",
+    "validate_required_sources_consulted",
+    "prompt_for_required_sources",
+    "get_tool_source_type",
+    "get_prioritized_sources",
+    "should_force_required_source_query",
 ]

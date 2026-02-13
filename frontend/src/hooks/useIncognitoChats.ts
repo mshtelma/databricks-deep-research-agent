@@ -25,27 +25,37 @@ interface IncognitoChatsResponse {
   sessionExpiresAt: string | null
 }
 
+interface IncognitoQueryOptions {
+  enabled?: boolean
+}
+
 /**
  * Query for listing incognito chats for the current browser session.
  */
-export function useIncognitoChats() {
+export function useIncognitoChats(options?: IncognitoQueryOptions) {
+  const enabled = options?.enabled !== false
   return useQuery<IncognitoChatsResponse>({
     queryKey: incognitoKeys.chats(),
     queryFn: () => incognitoApi.list(),
+    enabled,
     staleTime: 30 * 1000, // 30 seconds - shorter stale time for session data
     refetchInterval: 60 * 1000, // Refresh every minute to update expiry
+    refetchOnWindowFocus: false,
   })
 }
 
 /**
  * Query for incognito session status (quota info, expiry).
  */
-export function useIncognitoSessionStatus() {
+export function useIncognitoSessionStatus(options?: IncognitoQueryOptions) {
+  const enabled = options?.enabled !== false
   return useQuery<IncognitoSessionStatus>({
     queryKey: incognitoKeys.session(),
     queryFn: () => incognitoApi.getSessionStatus(),
+    enabled,
     staleTime: 30 * 1000, // 30 seconds
     refetchInterval: 60 * 1000, // Refresh every minute
+    refetchOnWindowFocus: false,
   })
 }
 

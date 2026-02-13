@@ -27,6 +27,7 @@ from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.research_session import ResearchSession, ResearchStatus
 from deep_research.schemas.common import BaseSchema
+from deep_research.schemas.source_scope import SourceScope
 from deep_research.services.job_manager import get_job_manager
 from deep_research.services.research_event_service import ResearchEventService
 
@@ -61,6 +62,31 @@ class SubmitJobRequest(BaseModel):
     output_type: str | None = Field(
         default=None,
         description="Output type for structured output (e.g., 'meeting_prep'). If not specified, uses default synthesis_report.",
+    )
+    # Source selection fields (Feature 008)
+    source_scope: SourceScope | None = Field(
+        default=None,
+        description="Source scope: enterprise_only, web_only, or all. Defaults to all if not specified.",
+    )
+    enabled_sources: list[str] | None = Field(
+        default=None,
+        description="Whitelist of source IDs to use. If None, all sources in scope are used.",
+    )
+    disabled_sources: list[str] = Field(
+        default=[],
+        description="Blacklist of source IDs to exclude from research.",
+    )
+    file_ids: list[str] | None = Field(
+        default=None,
+        description="Uploaded file IDs to include in research context.",
+    )
+    agent_id: str | None = Field(
+        default=None,
+        description="Custom agent ID to use for this research job.",
+    )
+    enable_plan_review: bool = Field(
+        default=False,
+        description="If true, pause after plan creation for user review.",
     )
 
 
@@ -192,6 +218,9 @@ async def submit_job(
             error=str(e),
         )
 
+    # Get OBO token for enterprise data source authentication (007-enterprise Phase 2)
+    user_token = getattr(request.state, "obo_token", None)
+
     # Submit job
     session = await job_manager.submit_job(
         user_id=user.user_id,
@@ -206,8 +235,15 @@ async def submit_job(
         conversation_history=conversation_history,
         system_instructions=system_instructions,
         output_type=body.output_type,
+        source_scope=body.source_scope.value if body.source_scope else None,
+        enabled_sources=body.enabled_sources,
+        disabled_sources=body.disabled_sources,
         plugin_manager=plugin_manager,
         db=db,
+        user_token=user_token,
+        file_ids=body.file_ids,
+        agent_id=body.agent_id,
+        enable_plan_review=body.enable_plan_review,
     )
 
     logger.info(

@@ -70,15 +70,17 @@ class StepCompletedEvent(BaseStreamEvent):
     step_id: str
     observation_summary: str
     sources_found: int
+    file_sources_found: int = 0  # Sources from uploaded files
 
 
 class ToolCallEvent(BaseStreamEvent):
     """Tool called during ReAct research loop."""
 
     event_type: Literal["tool_call"] = "tool_call"
-    tool_name: str  # web_search, web_crawl
+    tool_name: str  # web_search, web_crawl, query_genie_*, search_*, ask_*
     tool_args: dict[str, Any]
     call_number: int
+    source_type: str | None = None  # genie, vector_search, knowledge_assistant, web_search, web_crawl
 
 
 class ToolResultEvent(BaseStreamEvent):
@@ -88,6 +90,22 @@ class ToolResultEvent(BaseStreamEvent):
     tool_name: str
     result_preview: str  # First 200 chars of result
     sources_crawled: int  # Total sources with content so far
+    sources_added: int = 0  # Sources added by THIS specific call
+    source_type: str | None = None  # genie, vector_search, knowledge_assistant, web_search, web_crawl
+
+
+class ToolSkippedEvent(BaseStreamEvent):
+    """Emitted when a tool is skipped due to source scope restrictions.
+
+    Part of 008-data-source-selection feature.
+    """
+
+    event_type: Literal["tool_skipped"] = "tool_skipped"
+    tool_name: str  # web_search, web_crawl, etc.
+    source_type: str  # web_search, vector_search, genie, etc.
+    reason: str  # Why the tool was skipped
+    scope: str  # Active source scope that caused the skip
+    step_index: int | None = None
 
 
 class ReflectionDecisionEvent(BaseStreamEvent):
@@ -281,6 +299,136 @@ class CustomPhaseModeStartedEvent(BaseStreamEvent):
     phase_names: list[str]
 
 
+# =============================================================================
+# Plan Review Events (007-enterprise-data-sources, US12, T040)
+# =============================================================================
+
+
+class PlanStepForReview(BaseSchema):
+    """A plan step with source hints for user review.
+
+    Extended version of PlanStepSummary that includes source routing
+    information so users can see which data sources will be queried.
+    """
+
+    id: str
+    title: str
+    description: str
+    step_type: str  # "research" or "analysis"
+    needs_search: bool
+    source_hints: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="List of source hints with name, type, priority, and query hints",
+    )
+    exclude_sources: list[str] = Field(
+        default_factory=list,
+        description="Sources explicitly excluded from this step",
+    )
+
+
+class PlanForReview(BaseSchema):
+    """Complete research plan awaiting user review.
+
+    Contains the full plan with source routing information so
+    the user can understand and modify the research approach.
+    """
+
+    id: str
+    title: str
+    thought: str
+    steps: list[PlanStepForReview]
+    iteration: int
+    data_landscape_summary: str | None = None
+
+
+class PlanReviewEvent(BaseStreamEvent):
+    """Emitted when plan review is enabled and plan is ready for user review.
+
+    This event signals that the research is paused and waiting for user
+    input. The frontend should display the plan for review and provide
+    approve/edit/reject controls.
+
+    Part of 007-enterprise-data-sources feature (US12, T040).
+    """
+
+    event_type: Literal["plan_review"] = "plan_review"
+
+    plan: PlanForReview = Field(
+        ...,
+        description="The research plan with steps and source hints for review",
+    )
+
+    timeout_seconds: int = Field(
+        default=300,
+        description="Seconds until auto-proceed (if require_plan_approval=False)",
+    )
+
+    review_id: str = Field(
+        ...,
+        description="Unique ID for this review session (for response correlation)",
+    )
+
+    require_approval: bool = Field(
+        default=False,
+        description="If True, research will not proceed without explicit approval",
+    )
+
+    available_sources: list[str] = Field(
+        default_factory=list,
+        description="List of all available data sources that can be used",
+    )
+
+
+class PlanReviewResponseEvent(BaseStreamEvent):
+    """User response to plan review.
+
+    This event is sent by the frontend when the user responds to a
+    PlanReviewEvent. It can approve, modify, or reject the plan.
+    """
+
+    event_type: Literal["plan_review_response"] = "plan_review_response"
+
+    review_id: str = Field(
+        ...,
+        description="Review ID from the PlanReviewEvent being responded to",
+    )
+
+    action: str = Field(
+        ...,
+        description="User action: 'approve', 'approve_with_edits', 'reject'",
+    )
+
+    edited_plan: PlanForReview | None = Field(
+        default=None,
+        description="Modified plan if action is 'approve_with_edits'",
+    )
+
+    rejection_reason: str | None = Field(
+        default=None,
+        description="Reason if action is 'reject'",
+    )
+
+
+class PlanReviewTimeoutEvent(BaseStreamEvent):
+    """Emitted when plan review times out and auto-proceeds.
+
+    This event signals that the review timeout has elapsed and
+    research is proceeding with the original plan.
+    """
+
+    event_type: Literal["plan_review_timeout"] = "plan_review_timeout"
+
+    review_id: str = Field(
+        ...,
+        description="Review ID that timed out",
+    )
+
+    timeout_seconds: int = Field(
+        ...,
+        description="Timeout duration that elapsed",
+    )
+
+
 # Union type for all stream events
 StreamEvent = (
     AgentStartedEvent
@@ -291,6 +439,7 @@ StreamEvent = (
     | StepCompletedEvent
     | ToolCallEvent
     | ToolResultEvent
+    | ToolSkippedEvent  # 008-data-source-selection
     | ReflectionDecisionEvent
     | SynthesisStartedEvent
     | SynthesisProgressEvent
@@ -311,4 +460,8 @@ StreamEvent = (
     | PhaseSkippedEvent
     | PhaseErrorEvent
     | CustomPhaseModeStartedEvent
+    # Plan review events (007-enterprise-data-sources)
+    | PlanReviewEvent
+    | PlanReviewResponseEvent
+    | PlanReviewTimeoutEvent
 )

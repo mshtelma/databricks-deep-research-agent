@@ -78,6 +78,7 @@ class ToolRegistry:
                     name=new_name,
                     description=wrapped.definition.description,
                     parameters=wrapped.definition.parameters,
+                    source_type=wrapped.definition.source_type,
                 )
 
             @property

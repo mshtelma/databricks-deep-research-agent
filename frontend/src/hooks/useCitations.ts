@@ -23,9 +23,9 @@ import type {
   VerificationVerdict,
 } from '@/types/citation';
 
-// Max retries for polling empty claims (prevents infinite polling)
-// Increased from 10 to 30 to handle long-running ReAct synthesis (~5-7 min)
-const MAX_CLAIM_POLL_RETRIES = 30;
+// Max retries for polling empty claims (prevents infinite polling).
+// Keep this low to avoid request storms when historical messages have no claims.
+const MAX_CLAIM_POLL_RETRIES = 3;
 // Polling interval in milliseconds
 const CLAIM_POLL_INTERVAL_MS = 3000;
 

@@ -6,12 +6,18 @@ from deep_research.api.v1 import (
     agent,
     chats,
     citations,
+    config,
+    custom_agents,
+    data_sources,
     debug,
+    discovery,
+    files,
     health,
     jobs,
     messages,
     preferences,
     research,
+    templates,
     user,
 )
 
@@ -33,3 +39,15 @@ router.include_router(jobs.router, tags=["Jobs"])
 router.include_router(debug.router, tags=["Debug"])
 # User profile routes
 router.include_router(user.router, tags=["User"])
+# Data source management routes (007-enterprise-data-sources)
+router.include_router(data_sources.router, tags=["Data Sources"])
+# Data source discovery routes (US9a - auto-discover available sources)
+router.include_router(discovery.router, tags=["Discovery"])
+# Prompt template management routes (US5)
+router.include_router(templates.router, tags=["Templates"])
+# Custom agent management routes (US6)
+router.include_router(custom_agents.router, tags=["Custom Agents"])
+# File upload management routes (US7)
+router.include_router(files.router, tags=["Files"])
+# Configuration catalog routes (009-custom-agent-config)
+router.include_router(config.router, tags=["Config"])

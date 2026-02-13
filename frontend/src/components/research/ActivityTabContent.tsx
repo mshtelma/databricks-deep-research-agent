@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { cn } from '@/lib/utils';
 import type { StreamEvent } from '@/types';
+import { computeEventStats } from '@/utils/eventStats';
 import { PlanProgress } from './PlanProgress';
 import { EventFeed } from './EventFeed';
 
@@ -60,31 +61,7 @@ function useElapsedTime(startTime: number | undefined, isLive: boolean): string 
  * Compute stats from events for display in stats bar.
  */
 function useEventStats(events: StreamEvent[]) {
-  return React.useMemo(() => {
-    let searchQueries = 0;
-    let sourcesFound = 0;
-    let claimsVerified = 0;
-    let claimsSupported = 0;
-
-    for (const event of events) {
-      if (event.eventType === 'tool_call') {
-        const toolCall = event as unknown as { toolName?: string; tool_name?: string };
-        const toolName = toolCall.toolName ?? toolCall.tool_name;
-        if (toolName === 'web_search') searchQueries++;
-      }
-      if (event.eventType === 'tool_result') {
-        const result = event as unknown as { urlsCrawled?: number; urls_crawled?: number };
-        sourcesFound += result.urlsCrawled ?? result.urls_crawled ?? 0;
-      }
-      if (event.eventType === 'claim_verified') {
-        claimsVerified++;
-        const claim = event as unknown as { verdict?: string };
-        if (claim.verdict === 'supported') claimsSupported++;
-      }
-    }
-
-    return { searchQueries, sourcesFound, claimsVerified, claimsSupported };
-  }, [events]);
+  return React.useMemo(() => computeEventStats(events), [events]);
 }
 
 /**
@@ -137,9 +114,20 @@ export function ActivityTabContent({
             <span className="font-medium">{currentAgent}</span>
           )}
 
-          {/* Search queries */}
-          {stats.searchQueries > 0 && (
-            <span>{stats.searchQueries} searches</span>
+          {/* Search queries with source breakdown */}
+          {stats.webQueries > 0 && (
+            <span>{stats.webQueries} web {stats.webQueries === 1 ? 'query' : 'queries'}</span>
+          )}
+          {stats.enterpriseQueries > 0 && (
+            <span className="text-indigo-500 dark:text-indigo-400">
+              {stats.enterpriseQueries} enterprise {stats.enterpriseQueries === 1 ? 'query' : 'queries'}
+            </span>
+          )}
+          {stats.fileQueries > 0 && (
+            <span>{stats.fileQueries} file {stats.fileQueries === 1 ? 'search' : 'searches'}</span>
+          )}
+          {stats.webQueries === 0 && stats.enterpriseQueries === 0 && stats.fileQueries === 0 && stats.searchQueries > 0 && (
+            <span>{stats.searchQueries} queries</span>
           )}
 
           {/* Sources */}

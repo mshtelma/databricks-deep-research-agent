@@ -115,6 +115,28 @@ async def persist_research_data(
     url_to_source = await _persist_sources(state, research_session_id, db, chat_id)
     counts["sources"] = len(url_to_source)
 
+    # Step 1b: Compute and persist is_cited from claims evidence
+    cited_urls: set[str] = set()
+    for claim in state.claims:
+        if claim.evidence and claim.evidence.source_url:
+            cited_urls.add(claim.evidence.source_url)
+
+    if cited_urls and url_to_source:
+        cited_source_ids = [
+            s.id for url, s in url_to_source.items() if url in cited_urls
+        ]
+        if cited_source_ids:
+            await db.execute(
+                update(Source)
+                .where(Source.id.in_(cited_source_ids))
+                .values(is_cited=True)
+            )
+            logger.info(
+                "PERSIST_IS_CITED_UPDATED cited_sources=%d total_cited_urls=%d",
+                len(cited_source_ids),
+                len(cited_urls),
+            )
+
     # Step 2: Build verification_data JSONB
     verification_data = _build_verification_data(state, url_to_source)
 
@@ -170,11 +192,13 @@ async def _persist_sources(
                     snippet=source_info.snippet,
                     content=source_info.content,
                     relevance_score=source_info.relevance_score,
+                    source_type=source_info.source_type or "web",
                 ).on_conflict_do_update(
                     index_elements=["chat_id", "url"],
                     set_={
                         "content": source_info.content,
                         "research_session_id": research_session_id,
+                        "source_type": source_info.source_type or "web",
                         "fetched_at": func.now(),
                     },
                 ).returning(Source.id, Source.title, Source.url)

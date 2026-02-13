@@ -182,6 +182,7 @@ class CitationVerificationPipeline:
                 "title": source.title,
                 "content": source.content,
                 "snippet": source.snippet,  # Fallback when content unavailable
+                "source_type": getattr(source, "source_type", "web"),
             }
             for source in sources
             if source.content or source.snippet  # Include snippet-only sources
@@ -192,11 +193,31 @@ class CitationVerificationPipeline:
             return []
 
         # Filter sources by content quality - discard abstract-only, paywalled, low-quality
-        # Snippet-only sources bypass quality filter (already lower confidence)
+        # Enterprise sources and snippet-only sources bypass quality filter
         high_quality_sources = []
         for source in source_dicts:
             content = source.get("content") or ""
             snippet = source.get("snippet") or ""
+            source_type = source.get("source_type", "web")
+
+            # Enterprise sources are authoritative — bypass quality filter
+            if source_type in ("genie", "vector_search", "knowledge_assistant"):
+                if content or snippet:
+                    high_quality_sources.append(source)
+                    logger.info(
+                        "SOURCE_ENTERPRISE_ACCEPTED",
+                        source_type=source_type,
+                        url=truncate(source.get("url", ""), 50),
+                        content_len=len(content),
+                    )
+                    continue
+                # Enterprise source with zero content — log and skip
+                logger.warning(
+                    "SOURCE_ENTERPRISE_EMPTY",
+                    source_type=source_type,
+                    url=truncate(source.get("url", ""), 50),
+                )
+                continue
 
             # Snippet-only sources: accept without quality evaluation
             # Evidence selector will handle them with lower confidence
@@ -675,8 +696,7 @@ class CitationVerificationPipeline:
             full_content += chunk
             yield chunk
 
-        # Complete state with full content
-        state.complete(full_content)
+        # Note: stream_synthesis() already calls state.complete() internally
 
         logger.info(
             "CLASSICAL_SYNTHESIS_COMPLETE",

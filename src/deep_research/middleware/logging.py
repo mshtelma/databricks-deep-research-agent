@@ -170,10 +170,13 @@ def setup_logging(log_level: str = "INFO", log_format: str = "text") -> None:
         "databricks.sdk",
         "git",
         "git.cmd",
-        "mlflow",
     ]
     for logger_name in third_party_loggers:
         logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+    # MLflow: show diagnostics in dev (DEBUG/INFO), suppress in production
+    mlflow_level = logging.INFO if log_level.upper() in ("DEBUG", "INFO") else logging.WARNING
+    logging.getLogger("mlflow").setLevel(mlflow_level)
 
     # But keep our own loggers at the specified level
     logging.getLogger("backend").setLevel(getattr(logging, log_level.upper()))

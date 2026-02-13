@@ -56,6 +56,99 @@ class ResearcherMode(str, Enum):
     CLASSIC = "classic"  # Single-pass with fixed searches/crawls per step
 
 
+class QueryRewriteStrategyConfig(BaseModel):
+    """Per-source-type query rewriting strategy configuration.
+
+    Controls how queries are transformed before being sent to each source type.
+    Part of enterprise query optimization feature.
+    """
+
+    strategy: str = Field(
+        default="direct",
+        description="Rewrite strategy: direct | multi_query | query2doc | schema_aware | step_back",
+    )
+    max_alternate_queries: int = Field(
+        default=3, ge=1, le=5,
+        description="Max alternate queries for multi-query strategy",
+    )
+    enable_query2doc: bool = Field(
+        default=False,
+        description="Generate pseudo-doc expansion (works with ALL index types)",
+    )
+    model_tier: str = Field(
+        default="fast",
+        description="Model tier for rewriting LLM calls",
+    )
+    timeout_seconds: float = Field(
+        default=10.0, gt=0,
+        description="Timeout for each rewrite call",
+    )
+    fallback_on_failure: bool = Field(
+        default=True,
+        description="If rewrite fails, use original query (never block research)",
+    )
+
+    model_config = {"frozen": True}
+
+
+class QueryRewritingConfig(BaseModel):
+    """Global query rewriting configuration.
+
+    Controls whether and how enterprise tool queries are rewritten
+    before execution. Each source type can have its own strategy.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Master toggle for query rewriting",
+    )
+    strategies: dict[str, QueryRewriteStrategyConfig] = Field(
+        default_factory=dict,
+        description="Per-source-type strategy configuration",
+    )
+
+    model_config = {"frozen": True}
+
+
+class ParallelToolExecutionConfig(BaseModel):
+    """Configuration for parallel tool execution (007-enterprise-data-sources).
+
+    Enables parallel execution of tools from different sources (web, vector_search,
+    genie) to reduce latency. Same-source tools may still be serialized by rate
+    limiters. Dependencies like (web_crawl -> web_search) are respected.
+
+    Expected performance improvement:
+    - Cross-source queries (Web + VS + Genie): 20-40% latency reduction
+    - Same-source queries: 10-20% (rate limiters serialize)
+    - Single tool: No improvement (no parallelism)
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Enable parallel tool execution for cross-source queries",
+    )
+    max_parallel_per_batch: int = Field(
+        default=5,
+        ge=1,
+        le=20,
+        description="Maximum concurrent tools per execution batch",
+    )
+    tool_timeout_seconds: float = Field(
+        default=30.0,
+        ge=5.0,
+        le=120.0,
+        description="Per-tool timeout in seconds",
+    )
+    batch_timeout_seconds: float = Field(
+        default=60.0,
+        ge=10.0,
+        le=300.0,
+        description="Per-batch timeout in seconds (covers all tools in batch)",
+    )
+
+    model_config = {"frozen": True}
+
+
 class EndpointConfig(BaseModel):
     """Configuration for a single model endpoint."""
 
@@ -103,6 +196,12 @@ class ResearcherConfig(BaseModel):
     max_previous_observations: int = Field(default=3, ge=1, le=10)
     page_contents_limit: int = Field(default=8000, ge=1000)
     max_generated_queries: int = Field(default=3, ge=1, le=10)
+
+    # Parallel tool execution (007-enterprise-data-sources)
+    parallel_tool_execution: ParallelToolExecutionConfig = Field(
+        default_factory=ParallelToolExecutionConfig,
+        description="Configuration for parallel tool execution",
+    )
 
     model_config = {"frozen": True}
 
@@ -1347,6 +1446,11 @@ class AppConfig(BaseModel):
     jobs: JobConfig = Field(
         default_factory=JobConfig,
         description="Background job management configuration (concurrency limits, heartbeats).",
+    )
+    # Query rewriting configuration (enterprise query optimization)
+    query_rewriting: QueryRewritingConfig = Field(
+        default_factory=QueryRewritingConfig,
+        description="Source-specific query rewriting configuration for enterprise tools.",
     )
 
     @model_validator(mode="after")
