@@ -275,6 +275,78 @@ def create_synthesis_config_event(
     )
 
 
+# ============================================================================
+# Data Source Lifecycle Events (007-enterprise-data-sources, T009)
+# ============================================================================
+
+
+@dataclass(frozen=True)
+class DataSourceQueryEvent:
+    """Emitted when a data source is queried (T009).
+
+    Tracks queries to enterprise data sources (Vector Search, Genie,
+    Knowledge Assistants) for observability and analytics.
+    """
+
+    job_id: str
+    source_type: str  # DataSourceType value
+    source_name: str
+    query: str
+    filters: dict[str, Any] | None
+    result_count: int
+    duration_ms: float
+    timestamp: datetime
+
+    # Optional success/error info
+    success: bool = True
+    error_message: str | None = None
+
+
+@dataclass(frozen=True)
+class TemplateAppliedEvent:
+    """Emitted when a template is applied (T009).
+
+    Tracks template usage for analytics and debugging.
+    """
+
+    job_id: str
+    template_id: str
+    template_type: str  # 'system', 'step', 'synthesis', 'query'
+    template_source: str  # 'system', 'plugin', 'user'
+    variables: dict[str, Any]
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class CustomAgentSelectedEvent:
+    """Emitted when a custom agent is selected (T009).
+
+    Tracks custom agent usage for analytics.
+    """
+
+    job_id: str
+    agent_id: str
+    agent_name: str
+    agent_source: str  # 'plugin', 'user'
+    timestamp: datetime
+
+
+@dataclass(frozen=True)
+class DataLandscapeBuiltEvent:
+    """Emitted when discovery builds the DataLandscape.
+
+    Tracks discovery phase performance and source relevance.
+    """
+
+    job_id: str
+    sources_queried: int
+    sources_with_results: int
+    top_source: str | None
+    top_source_relevance: float | None
+    total_duration_ms: float
+    timestamp: datetime
+
+
 def create_validation_error_event(
     job_id: UUID,
     error: Exception,

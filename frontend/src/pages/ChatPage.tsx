@@ -3,11 +3,16 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { ChatSidebar, MessageList, MessageInput, DeleteChatDialog, ExportChatDialog, type ExportFormat } from '@/components/chat';
 import { AgentStatusIndicator, ResearchPanel } from '@/components/research';
-import { useChats, useMessages, useStreamingQuery, useChatActions, useDraftChats, useCitations, usePrefetchMessages } from '@/hooks';
-import { useResearchReconnection } from '@/hooks/useResearchReconnection';
+import { useChats, useStreamingQuery, useChatActions, useDraftChats, usePrefetchMessages, useChatFull, CHAT_FULL_KEY } from '@/hooks';
 import { useChatActiveJob } from '@/hooks/useResearchJobs';
 import { ComponentRegistry } from '@/core/plugins';
-import type { Chat, Message, PersistenceCompletedEvent, QueryMode } from '@/types';
+import { PlanReviewModal } from '@/components/research/PlanReviewModal';
+import { usePlanReview } from '@/hooks/usePlanReview';
+import { useDiscoveredSources } from '@/hooks/useDiscoveredSources';
+import type { Chat, Message, MessageRole, PersistenceCompletedEvent } from '@/types';
+import type { Claim } from '@/types/citation';
+import type { QuerySubmission } from '@/types/querySubmission';
+import type { AvailableSource } from '@/types/dataSources';
 
 export default function ChatPage() {
   const { chatId } = useParams<{ chatId?: string }>();
@@ -17,6 +22,8 @@ export default function ChatPage() {
 
   // Draft chat management
   const { createDraft, removeDraft, isDraft: isDraftChat, getDraftList, clearStaleDrafts } = useDraftChats();
+  // Pre-allocate a draft session ID so composer/upload works even before chat selection.
+  const preallocatedDraftIdRef = useRef<string>(crypto.randomUUID());
 
   // Prefetch messages on hover for instant chat switching
   const { prefetchMessages } = usePrefetchMessages();
@@ -25,7 +32,7 @@ export default function ChatPage() {
   const { data: chatsData, isLoading: isLoadingChats } = useChats();
   // Skip messages fetch for drafts (they don't exist in DB)
   const shouldFetchMessages = chatId && !isDraftChat(chatId);
-  const { data: messagesData, isLoading: isLoadingMessages, error: messagesError } = useMessages(
+  const { data: chatFullData, error: chatFullError } = useChatFull(
     shouldFetchMessages ? chatId : undefined
   );
 
@@ -76,7 +83,19 @@ export default function ChatPage() {
     }
   }, [chatsData, isLoadingChats, clearStaleDrafts]);
 
-  const apiMessages = messagesData?.items ?? [];
+  // Derive Message[] from chatFullData (FullMessage is a superset of Message)
+  const apiMessages: Message[] = useMemo(() => {
+    if (!chatFullData?.messages) return [];
+    return chatFullData.messages.map((m) => ({
+      id: m.id,
+      chatId: m.chatId,
+      role: m.role as MessageRole,
+      content: m.content,
+      createdAt: m.createdAt,
+      isEdited: m.isEdited,
+      researchSession: m.researchSession,
+    }));
+  }, [chatFullData?.messages]);
 
   // Local state for pending user message (displayed while waiting for API persistence)
   const [pendingUserMessage, setPendingUserMessage] = useState<Message | null>(null);
@@ -97,7 +116,6 @@ export default function ChatPage() {
   const handleStreamComplete = useCallback(() => {
     // Note: pendingUserMessage is cleared reactively when API confirms the message
     // (see the useEffect that watches apiMessages, not here)
-    console.log('[ChatPage] Stream complete, waiting for persistence before refetching messages');
   }, []);
 
   // Callback when job submission fails - clear pending message since job didn't start
@@ -121,13 +139,9 @@ export default function ChatPage() {
     persistenceResult,
     persistenceFailed,
     hydrateFromSession,
-    processExternalEvent,
-    setIsStreaming,
-    setStreamingContent,
     startTime,
     currentAgent,
     currentQueryMode,
-    setCurrentQueryMode,
     activeSessionId,
     reconnectToJob,
     // Streaming claims for real-time citation display
@@ -136,154 +150,135 @@ export default function ChatPage() {
     // Error details for error display
     errorDetails,
     clearErrorDetails,
+    // Plan review event bridge
+    planReviewEvent,
+    clearPlanReviewEvent,
   } = useStreamingQuery(chatId, {
     onStreamComplete: handleStreamComplete,
     onJobSubmissionError: handleJobSubmissionError,
   });
 
-  // Check for active background job for this chat (job-based reconnection)
-  const { data: activeJob, isLoading: isLoadingActiveJob } = useChatActiveJob(chatId || null);
-
-  // Reconnection hook for crash resilience
-  const {
-    isReconnecting,
-    reconnectionError,
-    checkAndReconnect,
-  } = useResearchReconnection({
-    chatId: chatId ?? null,
-    onEvent: processExternalEvent,
-    onComplete: (finalReport) => {
-      // Set the final content and mark as complete
-      setStreamingContent(finalReport);
-      setIsStreaming(false);
-      // Refresh messages to get the fully persisted state
-      queryClient.invalidateQueries({ queryKey: ['messages', chatId] });
-    },
-    onError: (error) => {
-      console.error('[Reconnection] Error:', error);
-      setIsStreaming(false);
-    },
-    // Only enable reconnection when not already streaming
-    enabled: !isStreaming,
+  // Plan review hook
+  const planReview = usePlanReview({
+    sessionId: activeSessionId ?? null,
   });
 
-  // Check for active research on page load (legacy reconnection - OLD SSE flow)
+  // Discover sources only when plan review is active.
+  const { data: discoveryData } = useDiscoveredSources({
+    enabled: planReview.isReviewPending,
+  });
+  const availableSourcesForReview: AvailableSource[] = useMemo(() => {
+    if (!discoveryData?.sources) return [];
+    return discoveryData.sources
+      .filter((s) => s.status === 'ready')
+      .map((source) => ({
+        id: source.source_id,
+        name: source.name,
+        type: source.source_type,
+        description: source.description ?? null,
+        isEnabled: true,
+      }));
+  }, [discoveryData?.sources]);
+
+  // Bridge plan_review SSE events to usePlanReview hook
+  const { handlePlanReviewEvent } = planReview;
   useEffect(() => {
-    if (!chatId || isStreaming || isDraftChat(chatId)) return;
-    // Skip if we have a job-based active session (new flow takes precedence)
-    if (activeJob) return;
+    if (planReviewEvent) {
+      handlePlanReviewEvent(planReviewEvent);
+      clearPlanReviewEvent();
+    }
+  }, [planReviewEvent, handlePlanReviewEvent, clearPlanReviewEvent]);
 
-    // Check if there's an active research session to reconnect to (old flow)
-    checkAndReconnect().then((result) => {
-      if (result.reconnected) {
-        console.log('[ChatPage] Reconnected to active research session (legacy):', result);
+  // Check for active background job for this chat (job-based reconnection)
+  // Skip while already streaming/connected to avoid redundant polling.
+  const activeJobChatId = chatId && !isDraftChat(chatId) && !isStreaming && !activeSessionId ? chatId : null;
+  const { data: activeJob, isLoading: isLoadingActiveJob } = useChatActiveJob(activeJobChatId);
 
-        // Restore query mode for panel visibility (CRITICAL!)
-        if (result.queryMode) {
-          setCurrentQueryMode(result.queryMode as QueryMode);
-        }
-
-        // Enable streaming UI to show live updates
-        setIsStreaming(true);
-      }
-    });
-  }, [chatId, activeJob]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Job-based reconnection - NEW FLOW
-  // This takes precedence over the legacy reconnection above
+  // Job-based reconnection
   useEffect(() => {
     if (!chatId || isStreaming || isDraftChat(chatId) || isLoadingActiveJob) return;
     // Skip if we already have an active session connected
     if (activeSessionId) return;
 
     if (activeJob && activeJob.status === 'in_progress') {
-      console.log('[ChatPage] Found active background job, reconnecting:', activeJob.sessionId);
       reconnectToJob(activeJob.sessionId);
     }
   }, [chatId, isStreaming, activeJob, isLoadingActiveJob, activeSessionId, reconnectToJob, isDraftChat]);
 
-  // Get the latest agent message ID for citation fetching
-  const latestAgentMessageId = useMemo(() => {
-    // During streaming, use the backend-provided agentMessageId
-    if (agentMessageId) return agentMessageId;
-    // After completion, find the most recent agent message
-    const agentMessages = apiMessages.filter(m => m.role === 'agent');
-    return agentMessages[agentMessages.length - 1]?.id ?? null;
-  }, [agentMessageId, apiMessages]);
-
-  // Fetch claims for the latest agent message (for Research Panel)
-  const {
-    claims,
-    verificationSummary,
-  } = useCitations(latestAgentMessageId);
-
-  // Extract all sources from the latest research session
-  // Note: Source URLs are only available after persistence (not in streaming events)
-  const allSources = useMemo(() => {
-    // Get from the most recent researchSession (after persistence)
-    const latestAgentMessage = apiMessages
+  // Get the latest agent message with research session from chatFullData
+  // This provides claims, verification summary, and sources inline (no separate API call)
+  const latestAgentFullMessage = useMemo(() => {
+    if (!chatFullData?.messages) return null;
+    return chatFullData.messages
       .slice()
       .reverse()
-      .find(m => m.role === 'agent' && m.researchSession);
+      .find((m) => m.role === 'agent' && m.researchSession) ?? null;
+  }, [chatFullData?.messages]);
 
-    if (latestAgentMessage?.researchSession?.sources) {
-      return latestAgentMessage.researchSession.sources.map((s) => ({
-        url: s.url,
-        title: s.title,
-        snippet: s.snippet,
-        isCited: false,  // Default - will be enriched by citation data
-        stepIndex: undefined as number | undefined,
-        crawlStatus: undefined as 'success' | 'failed' | 'timeout' | 'blocked' | undefined,
-      }));
-    }
+  // Claims and verification summary from inline data (replaces useCitations for page load)
+  // During streaming, streamingClaims from SSE events are used instead
+  const claims = latestAgentFullMessage?.claims ?? [];
+  const verificationSummary = latestAgentFullMessage?.verificationSummary ?? null;
 
-    // During streaming, source URLs are not available in events
-    // Return empty array - ResearchPanel will show placeholder
-    return [];
-  }, [apiMessages]);
+  // Extract all sources from the latest research session (now populated from DB)
+  const allSources = useMemo(() => {
+    const session = latestAgentFullMessage?.researchSession;
+    if (!session?.sources?.length) return [];
+    return session.sources.map((s) => ({
+      url: s.url,
+      title: s.title,
+      snippet: s.snippet,
+      is_cited: s.isCited ?? false,
+      step_index: undefined as number | undefined,
+      crawl_status: undefined as 'success' | 'failed' | 'timeout' | 'blocked' | undefined,
+    }));
+  }, [latestAgentFullMessage]);
 
-  // ===== DEBUG LOGGING START =====
-  // Track component mount/unmount
-  useEffect(() => {
-    const mountId = Math.random().toString(36).slice(2, 8);
-    console.log('[ChatPage] MOUNTED - mountId:', mountId, 'chatId:', chatId);
-    return () => {
-      console.log('[ChatPage] UNMOUNTING - mountId:', mountId, 'chatId:', chatId);
-    };
-  }, []);
-
-  // Track all panel visibility conditions
-  useEffect(() => {
-    const isDeepOrWeb = currentQueryMode === 'deep_research' || currentQueryMode === 'web_search';
-    const hasActivity = isStreaming || currentPlan !== null || events.length > 0;
-    const shouldShow = isDeepOrWeb && hasActivity;
-
-    console.log('[ChatPage] Panel visibility:', {
-      currentQueryMode,
-      isDeepOrWeb,
-      isStreaming,
-      currentPlan: currentPlan ? `Plan with ${currentPlan.steps?.length} steps` : null,
-      eventsCount: events.length,
-      hasActivity,
-      shouldShow,
-      time: new Date().toISOString(),
-    });
-
-    if (!shouldShow && (isStreaming || currentPlan || events.length > 0)) {
-      console.error('[ChatPage] WARNING: Panel hidden but has activity!', {
-        reason: !isDeepOrWeb ? `currentQueryMode is "${currentQueryMode}"` : 'hasActivity is false',
-      });
-    }
-  }, [currentQueryMode, isStreaming, currentPlan, events.length]);
-
-  // Track currentQueryMode specifically
-  useEffect(() => {
-    console.log('[ChatPage] currentQueryMode changed:', currentQueryMode);
-    if (currentQueryMode === null) {
-      console.warn('[ChatPage] currentQueryMode is NULL - panel will not show!');
-    }
-  }, [currentQueryMode]);
-  // ===== DEBUG LOGGING END =====
+  // Convert streaming claims for ResearchPanel during streaming
+  const panelClaims = useMemo((): Claim[] => {
+    // Prefer DB claims (complete data) when available
+    if (claims.length > 0) return claims;
+    // Fall back to streaming claims during active streaming
+    if (streamingClaims.length === 0) return [];
+    // Convert StreamingClaim[] → Claim[] with all required fields
+    return streamingClaims.map((sc): Claim => ({
+      id: sc.id,
+      claimText: sc.claimText,
+      claimType: 'general',
+      confidenceLevel: sc.confidenceLevel,
+      positionStart: sc.positionStart,
+      positionEnd: sc.positionEnd,
+      verificationVerdict: sc.verificationVerdict,
+      verificationReasoning: sc.reasoning,
+      abstained: false,
+      citations: sc.citationKey ? [{
+        evidenceSpan: {
+          id: `evidence-${sc.id}`,
+          sourceId: `source-${sc.citationKey}`,
+          quoteText: sc.evidencePreview || '',
+          startOffset: null,
+          endOffset: null,
+          sectionHeading: null,
+          relevanceScore: null,
+          hasNumericContent: false,
+          source: {
+            id: `source-${sc.citationKey}`,
+            title: sc.citationKey,
+            url: null,
+            author: null,
+            publishedDate: null,
+            contentType: null,
+          },
+        },
+        confidenceScore: null,
+        isPrimary: true,
+      }] : [],
+      corrections: [],
+      numericDetail: null,
+      citationKey: sc.citationKey,
+      citationKeys: sc.citationKeys,
+    }));
+  }, [claims, streamingClaims]);
 
   // Redirect to /chat if chat doesn't exist (404 error)
   // Skip for draft chats - they don't exist in DB yet
@@ -291,39 +286,39 @@ export default function ChatPage() {
   useEffect(() => {
     if (chatId && isDraftChat(chatId)) return; // Draft chats won't be in DB
     if (isStreaming) return; // Don't redirect during streaming - chat persistence may be pending
-    if (messagesError && 'status' in messagesError && messagesError.status === 404) {
+    if (activeSessionId) return; // Don't redirect while a job is still attached to this view
+    if (pendingUserMessage) return; // Don't redirect while user message is pending persistence
+    if (chatFullError && 'status' in chatFullError && chatFullError.status === 404) {
       // Chat not found - redirect to new chat
-      console.log('[ChatPage] 404 redirect - chat not found:', chatId);
       navigate('/chat', { replace: true });
     }
-  }, [messagesError, navigate, chatId, isDraftChat, isStreaming]);
+  }, [
+    chatFullError,
+    navigate,
+    chatId,
+    isDraftChat,
+    isStreaming,
+    activeSessionId,
+    pendingUserMessage,
+  ]);
 
   // Handle persistence completion - convert draft to real chat and refetch messages
   // This is the ONLY place we refetch messages after streaming completes,
   // ensuring claims are already persisted when we switch from streaming view to DB view
   const handlePersistenceComplete = useCallback((event: PersistenceCompletedEvent) => {
-    console.log('[ChatPage] handlePersistenceComplete called:', {
-      chatId: event.chatId,
-      messageId: event.messageId,
-      wasDraft: event.wasDraft,
-    });
+    // NOW refetch since persistence is complete — chatFull includes claims inline
+    queryClient.invalidateQueries({ queryKey: ['messages', event.chatId] });
+    queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, event.chatId] });
 
-    // NOW refetch messages since persistence is complete
-    // This allows AgentMessageWithCitations to fetch claims from DB (they're already there)
-    if (chatId) {
-      console.log('[ChatPage] Triggering message refetch');
-      queryClient.refetchQueries({ queryKey: ['messages', chatId] });
-    }
-
-    if (event.wasDraft && chatId) {
+    if (event.wasDraft) {
       // Remove from local draft storage
-      removeDraft(chatId);
+      removeDraft(event.chatId);
       // Navigate to real URL (remove ?draft=1)
-      navigate(`/chat/${chatId}`, { replace: true });
+      navigate(`/chat/${event.chatId}`, { replace: true });
       // Invalidate chats list to fetch the new chat from API
       queryClient.invalidateQueries({ queryKey: ['chats'] });
     }
-  }, [chatId, removeDraft, navigate, queryClient]);
+  }, [removeDraft, navigate, queryClient]);
 
   // Effect for persistence result
   useEffect(() => {
@@ -343,82 +338,24 @@ export default function ChatPage() {
   // This handles the case where persistence_completed event is lost due to SSE race condition
   // (job_completed from DB status can close connection before persistence_completed arrives)
   useEffect(() => {
-    // Only trigger once per session, only when actually complete, only if we have a chat
-    if (
-      agentStatus === 'complete' &&
-      chatId &&
-      !hasTriggeredCompletionRefetchRef.current
-    ) {
-      hasTriggeredCompletionRefetchRef.current = true;
-
-      // Log current state for debugging (capturing values at time of trigger)
-      console.log('[ChatPage] Agent status complete - triggering refetch with retry logic');
-
-      let retryCount = 0;
-      const maxRetries = 5;
-      const initialDelay = 300;
-      let cancelled = false;
-
-      const attemptRefetch = async () => {
-        if (cancelled) return;
-
-        retryCount++;
-        console.log(`[ChatPage] Refetch attempt ${retryCount}/${maxRetries} for chat ${chatId}`);
-
-        try {
-          // Invalidate and refetch - invalidate ensures fresh data
-          await queryClient.invalidateQueries({ queryKey: ['messages', chatId] });
-
-          // Wait a moment for React Query to process the refetch
-          await new Promise(resolve => setTimeout(resolve, 100));
-
-          // Get the current query state to check if we have content
-          const queries = queryClient.getQueriesData<{ items?: Array<{ role: string; content?: string }> }>({
-            queryKey: ['messages', chatId],
-          });
-
-          // Find the query data (there might be multiple with different params)
-          let latestAgentContent: string | undefined;
-          for (const [, data] of queries) {
-            const agentMsgs = data?.items?.filter(m => m.role === 'agent') ?? [];
-            const latest = agentMsgs[agentMsgs.length - 1];
-            if (latest?.content) {
-              latestAgentContent = latest.content;
-              break;
-            }
-          }
-
-          console.log('[ChatPage] Refetch result:', {
-            hasAgentContent: !!latestAgentContent,
-            contentLength: latestAgentContent?.length ?? 0,
-            retryCount,
-            queriesFound: queries.length,
-          });
-
-          // If we don't have content, retry
-          if (!latestAgentContent && retryCount < maxRetries && !cancelled) {
-            console.log(`[ChatPage] No agent message content yet, scheduling retry ${retryCount + 1}`);
-            setTimeout(attemptRefetch, 500); // 500ms between retries
-          } else if (latestAgentContent) {
-            console.log('[ChatPage] Successfully fetched agent message content');
-          }
-        } catch (err) {
-          console.error('[ChatPage] Refetch error:', err);
-          if (retryCount < maxRetries && !cancelled) {
-            setTimeout(attemptRefetch, 500);
-          }
-        }
-      };
-
-      // Initial delay to allow persistence to complete
-      const timer = setTimeout(attemptRefetch, initialDelay);
-
-      return () => {
-        cancelled = true;
-        clearTimeout(timer);
-      };
+    if (agentStatus !== 'complete' || !chatId || hasTriggeredCompletionRefetchRef.current) {
+      return;
     }
-  }, [agentStatus, chatId, queryClient]);
+
+    // persistence_completed already triggers a refresh for this chat.
+    if (persistenceResult?.chatId === chatId) {
+      hasTriggeredCompletionRefetchRef.current = true;
+      return;
+    }
+
+    hasTriggeredCompletionRefetchRef.current = true;
+    const timer = setTimeout(() => {
+      queryClient.invalidateQueries({ queryKey: ['messages', chatId] });
+      queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, chatId] });
+    }, 1200);
+
+    return () => clearTimeout(timer);
+  }, [agentStatus, chatId, persistenceResult?.chatId, queryClient]);
 
   // Build messages list combining API messages, completed in-session messages, and pending
   const messages: Message[] = useMemo(() => {
@@ -467,9 +404,9 @@ export default function ChatPage() {
 
   // Wrapped sendQuery that also sets the pending user message
   const sendQuery = useCallback(
-    (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean, outputType?: string) => {
+    (submission: QuerySubmission) => {
       // Track query for retry functionality
-      setLastQuery(query);
+      setLastQuery(submission.message);
 
       // Note: queryMode is now tracked in useStreamingQuery hook
 
@@ -478,31 +415,27 @@ export default function ChatPage() {
         id: `pending-${Date.now()}`,
         chatId: chatId || '',
         role: 'user',
-        content: query,
+        content: submission.message,
         createdAt: new Date().toISOString(),
         isEdited: false,
       });
 
       // The hook now automatically tracks conversation history
       // and the backend loads history from DB
-      originalSendQuery(query, queryMode, researchDepth, verifySources, outputType);
+      originalSendQuery(submission);
     },
     [chatId, originalSendQuery]
   );
 
   // Handle pending query from router state after chat creation and navigation
   useEffect(() => {
-    if (chatId && location.state?.pendingQuery) {
-      const query = location.state.pendingQuery;
-      const queryMode = location.state.queryMode as QueryMode | undefined;
-      const researchDepth = location.state.researchDepth as string | undefined;
-      const verifySources = location.state.verifySources as boolean | undefined;
-      const outputType = location.state.outputType as string | undefined;
+    if (chatId && location.state?.pendingSubmission) {
+      const submission = location.state.pendingSubmission as QuerySubmission;
       // Clear state immediately to prevent re-sending on refresh
       window.history.replaceState({}, document.title);
-      sendQuery(query, queryMode, researchDepth, verifySources, outputType);
+      sendQuery(submission);
     }
-  }, [chatId, location.state?.pendingQuery, sendQuery]);
+  }, [chatId, location.state?.pendingSubmission, sendQuery]);
 
   // Clear pending user message when it appears in API messages
   // This prevents the race condition where it's cleared before API returns
@@ -514,7 +447,6 @@ export default function ChatPage() {
         (m) => m.content === pendingUserMessage.content && m.role === 'user'
       );
       if (exists) {
-        console.log('[ChatPage] pendingUserMessage cleared by API confirmation');
         setPendingUserMessage(null);
       }
     }
@@ -555,39 +487,26 @@ export default function ChatPage() {
   // Create new draft chat - instant, no API call
   // Chat will be persisted when first message is successfully processed
   const handleNewChat = useCallback(() => {
-    const draft = createDraft();
-    navigate(`/chat/${draft.id}?draft=1`);
-  }, [createDraft, navigate]);
-
-  // Auto-select first chat when navigating to /chat without chatId
-  // NOTE: We do NOT auto-create empty chats - lazy chat creation happens in handleSendMessage
-  useEffect(() => {
-    // Skip if we already have a chatId or still loading
-    if (chatId || isLoadingChats) return;
-
-    // Skip auto-select if user explicitly requested new chat mode
-    // This allows "New Chat" button to show empty input without redirecting
-    if (location.state?.newChat) return;
-
-    const firstChat = chats[0];
-    if (firstChat) {
-      // Auto-select the most recent chat
-      navigate(`/chat/${firstChat.id}`, { replace: true });
+    const draft = chatId ? createDraft() : createDraft(preallocatedDraftIdRef.current);
+    if (!chatId) {
+      preallocatedDraftIdRef.current = crypto.randomUUID();
     }
-    // If no chats exist, stay on /chat - user will see empty input
-    // Chat is created when user sends first message (lazy creation)
-  }, [chatId, chats, isLoadingChats, navigate, location.state?.newChat]);
+    navigate(`/chat/${draft.id}?draft=1`);
+  }, [createDraft, navigate, chatId]);
 
   // Send message - for draft chats, backend will persist chat on success
-  const handleSendMessage = async (content: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean, outputType?: string) => {
+  const handleSendMessage = async (submission: QuerySubmission) => {
     if (!chatId) {
       // No chat selected - create a draft and navigate
-      const draft = createDraft();
-      navigate(`/chat/${draft.id}?draft=1`, { state: { pendingQuery: content, queryMode, researchDepth, verifySources, outputType } });
+      const draft = createDraft(preallocatedDraftIdRef.current);
+      preallocatedDraftIdRef.current = crypto.randomUUID();
+      navigate(`/chat/${draft.id}?draft=1`, {
+        state: { pendingSubmission: submission },
+      });
     } else {
       // Chat exists (draft or real) - just send the query
       // Backend handles persistence for drafts via deferred materialization
-      sendQuery(content, queryMode, researchDepth, verifySources, outputType);
+      sendQuery(submission);
     }
   };
 
@@ -684,29 +603,11 @@ export default function ChatPage() {
               Failed to save your research. Your content is preserved.
             </span>
             <button
-              onClick={() => lastQuery && sendQuery(lastQuery)}
+              onClick={() => lastQuery && sendQuery({ message: lastQuery })}
               className="text-sm text-destructive underline hover:no-underline"
             >
               Retry
             </button>
-          </div>
-        )}
-
-        {/* Reconnection indicator */}
-        {isReconnecting && (
-          <div className="bg-blue-500/10 border-b border-blue-500/20 px-4 py-2">
-            <span className="text-sm text-blue-600 animate-pulse">
-              Reconnecting to research session...
-            </span>
-          </div>
-        )}
-
-        {/* Reconnection error */}
-        {reconnectionError && (
-          <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-2">
-            <span className="text-sm text-destructive">
-              Failed to reconnect: {reconnectionError}
-            </span>
           </div>
         )}
 
@@ -716,8 +617,11 @@ export default function ChatPage() {
           <div className="flex-1 flex flex-col min-w-0">
             {/* Compute whether to show research panel (for hiding duplicate sources) */}
             {(() => {
-              const showResearchPanel = (currentQueryMode === 'deep_research' || currentQueryMode === 'web_search') &&
-                (isStreaming || !!currentPlan || events.length > 0 || claims.length > 0);
+              const showResearchPanel = (
+                currentQueryMode === 'deep_research' || currentQueryMode === 'web_search' ||
+                // Fallback for page reload: show if research session exists with content
+                (!!latestAgentFullMessage?.researchSession && (claims.length > 0 || allSources.length > 0))
+              ) && (isStreaming || !!currentPlan || events.length > 0 || claims.length > 0 || allSources.length > 0);
 
               return (
                 <MessageList
@@ -732,7 +636,7 @@ export default function ChatPage() {
                   streamingVerificationSummary={streamingVerificationSummary}
                   // Error display with stack trace
                   errorDetails={errorDetails}
-                  onRetry={errorDetails?.recoverable ? () => lastQuery && sendQuery(lastQuery) : undefined}
+                  onRetry={errorDetails?.recoverable ? () => lastQuery && sendQuery({ message: lastQuery }) : undefined}
                   onDismissError={clearErrorDetails}
                   researchPanel={
                     showResearchPanel ? (
@@ -743,9 +647,9 @@ export default function ChatPage() {
                         currentStepIndex={currentStepIndex}
                         startTime={startTime ?? undefined}
                         currentAgent={currentAgent ?? undefined}
-                        claims={claims}
+                        claims={panelClaims}
                         allSources={allSources}
-                        verificationSummary={verificationSummary}
+                        verificationSummary={verificationSummary ?? streamingVerificationSummary}
                       />
                     ) : null
                   }
@@ -758,7 +662,7 @@ export default function ChatPage() {
               onSubmit={handleSendMessage}
               onStop={stopStream}
               isLoading={isStreaming}
-              disabled={isLoadingMessages}
+              sessionId={chatId ?? preallocatedDraftIdRef.current}
               inputConfig={inputConfig}
             />
           </div>
@@ -782,6 +686,18 @@ export default function ChatPage() {
         onClose={handleCloseExportDialog}
         onExport={handleConfirmExport}
         isExporting={chatActions.isExporting}
+      />
+
+      {/* Plan review modal */}
+      <PlanReviewModal
+        isOpen={planReview.isReviewPending}
+        plan={planReview.planForReview}
+        availableSources={availableSourcesForReview}
+        timeoutSeconds={planReview.timeoutSeconds}
+        onApprove={planReview.handleApprove}
+        onApproveWithEdits={planReview.handleApproveWithEdits}
+        onReject={planReview.handleReject}
+        onClose={planReview.clearReview}
       />
     </div>
   );

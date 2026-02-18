@@ -137,6 +137,12 @@ The Deep Research Agent is a production-grade multi-agent system built on Databr
 │   │   ├── messages.py             # Message endpoints
 │   │   ├── research.py             # SSE streaming research
 │   │   ├── citations.py            # Citation verification
+│   │   ├── custom_agents.py        # Custom agent CRUD + preset steps
+│   │   ├── templates.py            # Prompt template CRUD + rendering
+│   │   ├── files.py                # File upload + preview
+│   │   ├── config.py               # Model catalog + serving endpoints
+│   │   ├── discovery.py            # Enterprise source discovery
+│   │   ├── data_sources.py         # Data source management
 │   │   └── utils/                  # Shared API utilities
 │   │       ├── authorization.py    # Centralized auth checks
 │   │       └── transformers.py     # Response builders
@@ -147,6 +153,23 @@ The Deep Research Agent is a production-grade multi-agent system built on Databr
 │   │   ├── citation/               # 7-stage pipeline
 │   │   └── search/                 # Brave Search
 │   ├── models/                     # SQLAlchemy models
+│   │   ├── chat.py                 # Chat, Message, UserPreferences
+│   │   ├── research_session.py     # Session, Source, Claim, Citation
+│   │   ├── custom_agent.py         # CustomAgent, AgentPresetStep
+│   │   ├── prompt_template.py      # PromptTemplate
+│   │   ├── data_source.py          # UserDataSource
+│   │   └── uploaded_file.py        # UploadedFile, FileChunk
+│   ├── services/
+│   │   ├── base.py                 # BaseRepository[T] pattern
+│   │   ├── loading.py              # Eager-loading options
+│   │   ├── llm/                    # LLM client, routing
+│   │   ├── citation/               # 7-stage pipeline
+│   │   ├── search/                 # Brave Search
+│   │   ├── custom_agent_service.py # Custom agent business logic
+│   │   ├── template_service.py     # Prompt template business logic
+│   │   ├── file_upload_service.py  # File upload + chunking
+│   │   ├── data_source_service.py  # Data source management
+│   │   └── discovery_service.py    # Enterprise source discovery
 │   ├── core/                       # Config, auth, tracing
 │   └── db/                         # Database connection
 │
@@ -154,7 +177,10 @@ The Deep Research Agent is a production-grade multi-agent system built on Databr
 │   ├── src/
 │   │   ├── components/
 │   │   │   ├── chat/               # Chat UI components
-│   │   │   └── research/           # Research display
+│   │   │   ├── research/           # Research display
+│   │   │   ├── agents/             # Agent selector + editor
+│   │   │   ├── sources/            # Data source browser
+│   │   │   └── templates/          # Template management
 │   │   ├── hooks/                  # useStreamingQuery, etc.
 │   │   └── pages/                  # ChatPage
 │   └── tests/                      # Vitest tests
@@ -172,7 +198,10 @@ The Deep Research Agent is a production-grade multi-agent system built on Databr
 ├── specs/                          # Feature specifications
 │   ├── 001-deep-research-agent/
 │   ├── 003-claim-level-citations/
-│   └── 004-tiered-query-modes/
+│   ├── 004-tiered-query-modes/
+│   ├── 007-enterprise-data-sources/
+│   ├── 008-data-source-selection/
+│   └── 009-custom-agent-config/
 │
 └── static/                         # Built frontend (gitignored)
 ```
@@ -218,6 +247,10 @@ User Query
     ↓
 Response (SSE stream with events)
 ```
+
+## Custom Agent Configuration Flow
+
+When a custom agent is selected, the frontend sends only the `agent_id` with the research request. The backend resolves the full agent configuration from the database and applies it to `OrchestrationConfig` before the pipeline starts. This includes model tier overrides (routing specific tiers to different endpoints), source scope enforcement (restricting research to web, enterprise, or both), web domain filtering (whitelist/blacklist patterns), and prompt template injection (system and synthesis prompts). Preset steps, if defined, replace or supplement the AI planner's output depending on the workflow mode (`planner`, `manual`, or `hybrid`). See [Custom Agents](./custom-agents.md) for details.
 
 ## Authentication Flow
 

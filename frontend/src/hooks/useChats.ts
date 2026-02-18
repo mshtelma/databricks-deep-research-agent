@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { chatsApi } from '../api/client'
+import { CHAT_FULL_KEY } from './useChatFull'
 import { clearStreamingState } from '@/stores/chatStreamingState'
 import type { ChatStatus } from '../types'
 
@@ -14,6 +15,7 @@ export function useChats(params?: {
   return useQuery({
     queryKey: [...CHATS_KEY, params],
     queryFn: () => chatsApi.list(params),
+    staleTime: 2 * 60 * 1000, // Chat list rarely changes unexpectedly within a session
     // Keep gcTime: Infinity to prevent garbage collection (memory benefit)
     // Remove staleTime: Infinity - allow background refetch for consistency
     gcTime: Infinity,
@@ -25,6 +27,7 @@ export function useChat(chatId: string | undefined) {
     queryKey: [...CHATS_KEY, chatId],
     queryFn: () => (chatId ? chatsApi.get(chatId) : null),
     enabled: !!chatId,
+    staleTime: 2 * 60 * 1000,
     // Keep gcTime: Infinity to prevent garbage collection (memory benefit)
     // Remove staleTime: Infinity - allow background refetch for consistency
     gcTime: Infinity,
@@ -64,6 +67,8 @@ export function useDeleteChat() {
       queryClient.invalidateQueries({ queryKey: CHATS_KEY })
       // Remove messages cache for deleted chat (prevents memory leak)
       queryClient.removeQueries({ queryKey: ['messages', chatId] })
+      // Remove chatFull cache for deleted chat
+      queryClient.removeQueries({ queryKey: [...CHAT_FULL_KEY, chatId] })
       // Clean up streaming state cache
       clearStreamingState(chatId)
     },

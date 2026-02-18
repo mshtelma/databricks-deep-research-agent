@@ -13,7 +13,9 @@ RESEARCHER_SYSTEM_PROMPT = """You are the Researcher agent for a deep research s
 
 ## Search Guidelines
 
-- Generate 1-3 specific search queries
+- You may receive evidence from enterprise data sources (Genie databases, vector search indexes, knowledge assistants) in addition to or instead of web search results
+- Enterprise data is authoritative — treat it as a primary source, not a secondary reference
+- Generate 1-3 specific search queries (used only if web search is available)
 - Focus on authoritative sources
 - Look for recent information when relevant
 - Consider multiple perspectives
@@ -69,13 +71,14 @@ Step Type: {step_type}
 Original Query: {query}
 Previous Observations: {previous_observations}
 
-## Search Results (if available)
+## Research Evidence
+The following evidence was gathered from available data sources (enterprise databases, vector search indexes, knowledge assistants, web search, uploaded files).
 {search_results}
 
 ## Page Contents (if available)
 {page_contents}
 
-Based on the search results and page contents, provide your observation.
+Based on ALL available evidence above, provide your observation. Treat enterprise data source results as authoritative primary sources.
 
 ## Output Schema
 {{

@@ -1,11 +1,21 @@
 """Chat-related Pydantic schemas."""
 
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import Field
 
 from deep_research.models.chat import ChatStatus, ChatType
+from deep_research.schemas.agent import SourceResponse
+from deep_research.schemas.citation import ClaimResponse, VerificationSummary
 from deep_research.schemas.common import BaseSchema, TimestampMixin
+from deep_research.schemas.research import (
+    QueryClassification,
+    ReflectionStepSchema,
+    ResearchDepth,
+    ResearchPlan,
+    ResearchStatus,
+)
 
 
 class ChatBase(BaseSchema):
@@ -46,3 +56,45 @@ class ChatListResponse(BaseSchema):
     total: int
     limit: int
     offset: int
+
+
+class ResearchSessionInline(BaseSchema):
+    """Research session with sources, for inline inclusion in full chat response."""
+
+    id: UUID
+    query_classification: QueryClassification | None = None
+    research_depth: ResearchDepth
+    reasoning_steps: list[ReflectionStepSchema] = Field(default_factory=list)
+    status: ResearchStatus
+    current_agent: str | None = None
+    plan: ResearchPlan | None = None
+    current_step_index: int | None = None
+    plan_iterations: int
+    started_at: datetime
+    completed_at: datetime | None = None
+    sources: list[SourceResponse] = Field(default_factory=list)
+
+
+class MessageInline(BaseSchema):
+    """Message with inline research session + pre-parsed claims."""
+
+    id: UUID
+    chat_id: UUID
+    role: str  # 'user' | 'agent'
+    content: str
+    created_at: datetime
+    is_edited: bool = False
+    research_session: ResearchSessionInline | None = None
+    claims: list[ClaimResponse] = Field(default_factory=list)
+    verification_summary: VerificationSummary | None = None
+
+
+class ChatFullResponse(BaseSchema, TimestampMixin):
+    """Complete chat payload — chat + all messages + sessions + sources + claims."""
+
+    id: UUID
+    title: str | None = None
+    status: ChatStatus
+    chat_type: ChatType = ChatType.REGULAR
+    messages: list[MessageInline] = Field(default_factory=list)
+    message_count: int = 0

@@ -7,6 +7,7 @@ numeric markers [0], [1], [2] with [Arxiv], [Zhipu], [Github-2].
 import pytest
 
 from deep_research.services.citation.citation_keys import (
+    _is_enterprise_url,
     extract_domain_key,
     abbreviate_title,
     build_citation_key_map,
@@ -265,3 +266,105 @@ class TestParseCitationKey:
         assert parse_citation_key("Arxiv]") is None  # Missing open
         assert parse_citation_key("[]") is None  # Empty
         assert parse_citation_key("[-Arxiv]") is None  # Starts with hyphen
+
+
+class TestIsEnterpriseUrl:
+    """Tests for enterprise URL detection."""
+
+    def test_genie_custom_scheme(self) -> None:
+        assert _is_enterprise_url("genie://01f0b5ab/msg_123") is True
+
+    def test_vs_custom_scheme(self) -> None:
+        assert _is_enterprise_url("vs://endpoint/catalog.schema.index/r1") is True
+
+    def test_ka_custom_scheme(self) -> None:
+        assert _is_enterprise_url("ka://my-endpoint/abc123/0") is True
+
+    def test_enterprise_custom_scheme(self) -> None:
+        assert _is_enterprise_url("enterprise://genie") is True
+
+    def test_workspace_genie_url(self) -> None:
+        assert _is_enterprise_url(
+            "https://adb-123.azuredatabricks.net/sql/genie/spaces/abc#msg1"
+        ) is True
+
+    def test_workspace_endpoint_url(self) -> None:
+        assert _is_enterprise_url(
+            "https://adb-123.azuredatabricks.net/ml/endpoints/my-ep#hash-0"
+        ) is True
+
+    def test_workspace_catalog_url(self) -> None:
+        assert _is_enterprise_url(
+            "https://adb-123.azuredatabricks.net/explore/data/cat/sch/tbl#r1"
+        ) is True
+
+    def test_regular_web_url_not_enterprise(self) -> None:
+        assert _is_enterprise_url("https://arxiv.org/abs/123") is False
+        assert _is_enterprise_url("https://github.com/repo") is False
+
+    def test_empty_url_not_enterprise(self) -> None:
+        assert _is_enterprise_url("") is False
+
+
+class TestBuildCitationKeyMapEnterprise:
+    """Enterprise sources should use title-based keys, not domain-based."""
+
+    def _make_evidence(
+        self, url: str, title: str | None, quote: str = "quote"
+    ) -> RankedEvidence:
+        return RankedEvidence(
+            source_url=url,
+            source_title=title,
+            quote_text=quote,
+            relevance_score=0.9,
+            source_id=None,
+            start_offset=0,
+            end_offset=10,
+            section_heading=None,
+            has_numeric_content=False,
+        )
+
+    def test_genie_workspace_url_uses_title(self) -> None:
+        pool = [self._make_evidence(
+            "https://adb-123.net/sql/genie/spaces/abc#msg1",
+            "Portfolio Analytics",
+        )]
+        assert build_citation_key_map(pool)[0] == "Portfo"
+
+    def test_genie_custom_scheme_uses_title(self) -> None:
+        pool = [self._make_evidence(
+            "genie://01f0b5ab5b841281858ae25da3f58125/msg1",
+            "FSI Portfolio Explorer",
+        )]
+        assert build_citation_key_map(pool)[0] == "FSI"
+
+    def test_vs_workspace_url_uses_title(self) -> None:
+        pool = [self._make_evidence(
+            "https://adb-123.net/explore/data/cat/sch/docs#r1",
+            "Internal Docs",
+        )]
+        assert build_citation_key_map(pool)[0] == "Intern"
+
+    def test_enterprise_without_title_uses_source_fallback(self) -> None:
+        pool = [self._make_evidence("genie://space_id/msg_id", None)]
+        assert build_citation_key_map(pool)[0] == "Source"
+
+    def test_web_url_still_uses_domain(self) -> None:
+        """Regression: web sources must continue using domain-based keys."""
+        pool = [self._make_evidence(
+            "https://arxiv.org/abs/123", "Some Paper Title"
+        )]
+        assert build_citation_key_map(pool)[0] == "Arxiv"
+
+    def test_mixed_web_and_enterprise(self) -> None:
+        """Mixed pool: web uses domain, enterprise uses title."""
+        pool = [
+            self._make_evidence("https://arxiv.org/abs/123", "Paper"),
+            self._make_evidence(
+                "https://adb.net/sql/genie/spaces/abc#m1",
+                "Portfolio Analytics",
+            ),
+        ]
+        key_map = build_citation_key_map(pool)
+        assert key_map[0] == "Arxiv"
+        assert key_map[1] == "Portfo"

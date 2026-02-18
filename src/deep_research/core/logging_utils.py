@@ -79,6 +79,11 @@ def format_log_dict(data: dict[str, Any]) -> str:
     return " | ".join(parts)
 
 
+# Standard logging kwargs that must be forwarded to the underlying logger,
+# not formatted as structured data fields.
+_FORWARDED_LOGGING_KWARGS = frozenset({"exc_info", "stack_info", "stacklevel"})
+
+
 class StructuredLogger:
     """Logger wrapper that adds structured context to all log messages."""
 
@@ -98,25 +103,43 @@ class StructuredLogger:
             return f"{prefix} | {message}"
         return message
 
+    @staticmethod
+    def _split_logging_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Extract standard logging kwargs that should be forwarded to the underlying logger.
+
+        Mutates *kwargs* in-place (removes forwarded keys).
+        Returns dict of extracted logging kwargs.
+        """
+        forwarded: dict[str, Any] = {}
+        for key in _FORWARDED_LOGGING_KWARGS:
+            if key in kwargs:
+                forwarded[key] = kwargs.pop(key)
+        return forwarded
+
     def debug(self, message: str, **kwargs: Any) -> None:
         """Log debug message with context."""
-        self._logger.debug(self._format_message(message, **kwargs))
+        fwd = self._split_logging_kwargs(kwargs)
+        self._logger.debug(self._format_message(message, **kwargs), **fwd)
 
     def info(self, message: str, **kwargs: Any) -> None:
         """Log info message with context."""
-        self._logger.info(self._format_message(message, **kwargs))
+        fwd = self._split_logging_kwargs(kwargs)
+        self._logger.info(self._format_message(message, **kwargs), **fwd)
 
     def warning(self, message: str, **kwargs: Any) -> None:
         """Log warning message with context."""
-        self._logger.warning(self._format_message(message, **kwargs))
+        fwd = self._split_logging_kwargs(kwargs)
+        self._logger.warning(self._format_message(message, **kwargs), **fwd)
 
     def error(self, message: str, **kwargs: Any) -> None:
         """Log error message with context."""
-        self._logger.error(self._format_message(message, **kwargs))
+        fwd = self._split_logging_kwargs(kwargs)
+        self._logger.error(self._format_message(message, **kwargs), **fwd)
 
     def exception(self, message: str, **kwargs: Any) -> None:
         """Log exception with context and traceback."""
-        self._logger.exception(self._format_message(message, **kwargs))
+        fwd = self._split_logging_kwargs(kwargs)
+        self._logger.exception(self._format_message(message, **kwargs), **fwd)
 
     def with_context(self, **kwargs: Any) -> "StructuredLogger":
         """Create new logger with additional context."""

@@ -17,6 +17,7 @@ import type {
   ToolCallEvent,
   ToolResultEvent,
 } from '../types'
+import { inferSourceType } from './eventStats'
 
 /** Human-readable labels for each agent (no emojis - EnhancedEventLabel adds icons) */
 const AGENT_STARTED_LABELS: Record<string, string> = {
@@ -37,6 +38,8 @@ const AGENT_COMPLETED_LABELS: Record<string, string> = {
   reflector: 'Evaluated',
   synthesizer: 'Report done',
 }
+
+const ENTERPRISE_SOURCE_TYPES = new Set(['genie', 'vector_search', 'knowledge_assistant']);
 
 /**
  * Format a stream event into a human-readable activity label.
@@ -118,28 +121,79 @@ function formatStepStarted(event: StepStartedEvent): string {
 }
 
 function formatStepCompleted(event: StepCompletedEvent): string {
-  const sources = event.sourcesFound
-  return `Found ${sources} source${sources !== 1 ? 's' : ''}`
+  const total = event.sourcesFound
+  const fileSources = event.fileSourcesFound ?? 0
+  const webSources = total - fileSources
+
+  if (fileSources > 0 && webSources > 0) {
+    return `Found ${webSources} source${webSources !== 1 ? 's' : ''} + file evidence`
+  }
+  if (fileSources > 0) {
+    return 'Found file evidence'
+  }
+  return `Found ${total} source${total !== 1 ? 's' : ''}`
 }
 
 function formatToolCall(event: ToolCallEvent): string {
-  const toolName = event.toolName
-  if (toolName === 'web_search') {
-    const query = typeof event.toolArgs?.query === 'string' ? truncate(event.toolArgs.query, 80) : ''
-    return `Searching: ${query}`
-  } else if (toolName === 'web_crawl') {
-    return 'Crawling page...'
+  const sourceType = inferSourceType(event)
+  const query = findQueryArg(event.toolArgs)
+
+  switch (sourceType) {
+    case 'web_search':
+      return query ? `Searching: ${truncate(query, 80)}` : 'Searching...'
+    case 'web_crawl':
+      return 'Crawling page...'
+    case 'genie':
+      return query ? `Querying Genie: ${truncate(query, 60)}` : 'Querying enterprise database...'
+    case 'vector_search':
+      return query ? `Searching docs: ${truncate(query, 60)}` : 'Searching enterprise documents...'
+    case 'knowledge_assistant':
+      return query ? `Asking assistant: ${truncate(query, 60)}` : 'Asking knowledge assistant...'
+    case 'file_search':
+      return query ? `Searching files: ${truncate(query, 60)}` : 'Searching files...'
+    default:
+      return query ? `${event.toolName}: ${truncate(query, 60)}` : `${event.toolName}...`
   }
-  return `${toolName}...`
+}
+
+/** Extract the most likely query argument from tool args. */
+function findQueryArg(args: Record<string, unknown> | undefined): string | null {
+  if (!args) return null
+  for (const key of ['question', 'query', 'query_text', 'search_query']) {
+    if (typeof args[key] === 'string' && args[key]) return args[key] as string
+  }
+  for (const val of Object.values(args)) {
+    if (typeof val === 'string' && val.length > 0 && val.length < 200) return val
+  }
+  return null
 }
 
 function formatToolResult(event: ToolResultEvent): string {
-  const sourcesCrawled = event.sourcesCrawled
-  if (sourcesCrawled != null && sourcesCrawled > 0) {
-    return `Crawled ${sourcesCrawled} page${sourcesCrawled !== 1 ? 's' : ''}`
+  const sourceType = inferSourceType(event)
+  const count = event.sourcesAdded ?? event.sourcesCrawled ?? 0
+
+  switch (sourceType) {
+    case 'genie':
+      return count > 0 ? `Genie: ${count} result${count !== 1 ? 's' : ''}` : 'Genie query complete'
+    case 'vector_search':
+      return count > 0 ? `Found ${count} document${count !== 1 ? 's' : ''}` : 'Search complete'
+    case 'knowledge_assistant':
+      return 'Assistant answered'
+    case 'file_search':
+      return count > 0 ? `Searched files (${count} match${count !== 1 ? 'es' : ''})` : 'Searched files'
+    case 'web_crawl': {
+      if (count > 0) return `Crawled ${count} page${count !== 1 ? 's' : ''}`
+      return ''
+    }
+    default: {
+      // Web search or unknown: show preview
+      const preview = event.resultPreview
+      if (preview && preview.length > 0) {
+        return truncate(preview, 60)
+      }
+      return ''
+    }
   }
-  // For web_search results or failed crawls, return empty to skip display
-  return ''
 }
 
 function formatReflectionDecision(event: ReflectionDecisionEvent): string {
@@ -183,13 +237,22 @@ export function getActivityColor(event: StreamEvent): string {
     case 'step_completed':
     case 'plan_created':
     case 'research_completed':
-    case 'tool_result':
       return 'text-green-600 dark:text-green-400'
+    case 'tool_result': {
+      const trSt = inferSourceType(event)
+      if (ENTERPRISE_SOURCE_TYPES.has(trSt))
+        return 'text-indigo-600 dark:text-indigo-400'
+      return 'text-green-600 dark:text-green-400'
+    }
     case 'reflection_decision':
     case 'clarification_needed':
       return 'text-blue-500 dark:text-blue-400'
-    case 'tool_call':
+    case 'tool_call': {
+      const tcSt = inferSourceType(event)
+      if (ENTERPRISE_SOURCE_TYPES.has(tcSt))
+        return 'text-indigo-500 dark:text-indigo-400'
       return 'text-cyan-500 dark:text-cyan-400'
+    }
     case 'research_started':
       return 'text-blue-500 dark:text-blue-400'
     case 'claim_generated':
@@ -217,5 +280,5 @@ export function getActivityColor(event: StreamEvent): string {
 function truncate(str: string, maxLength: number): string {
   if (!str) return ''
   if (str.length <= maxLength) return str
-  return str.slice(0, maxLength - 1) + '…'
+  return str.slice(0, maxLength - 1) + '\u2026'
 }

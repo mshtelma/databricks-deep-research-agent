@@ -33,6 +33,10 @@ function streamingClaimsToClaims(streamingClaims: StreamingClaim[]): Claim[] {
   }));
 }
 
+// Helper to validate UUID format (8-4-4-4-12 hex characters)
+const isValidUUID = (id: string): boolean =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
 interface MessageListProps {
   messages: Message[];
   streamingContent?: string;
@@ -83,6 +87,16 @@ export function MessageList({
     );
   }, [messages]);
 
+  // Fetch citations only for the latest persisted agent message.
+  // This avoids N network calls for long chat histories on initial load.
+  const latestAgentMessageIdForCitations = React.useMemo(() => {
+    const latestAgent = messages
+      .slice()
+      .reverse()
+      .find((m) => m.role === 'agent' && isValidUUID(m.id) && !!m.researchSession);
+    return latestAgent?.id ?? null;
+  }, [messages]);
+
   // Debounced auto-scroll to bottom on new messages (100ms debounce)
   // This prevents excessive scrolling during rapid streaming updates
   React.useEffect(() => {
@@ -128,6 +142,7 @@ export function MessageList({
           ) : (
             <AgentMessageWithCitations
               message={message}
+              enableCitationFetch={message.id === latestAgentMessageIdForCitations}
               hideSourcesSection={hideAgentSourcesSection}
             />
           )}
@@ -163,19 +178,6 @@ export function MessageList({
           />
         </div>
       )}
-
-      {/* Log the completed-stream rendering decision */}
-      {(() => {
-        console.log('[MessageList] completed-stream check:', {
-          isStreaming,
-          hasStreamingContent: !!streamingContent,
-          streamingContentLength: streamingContent?.length ?? 0,
-          agentMessagesCount: messages.filter(m => m.role === 'agent').length,
-          hasValidAgentMessage,
-          shouldShowCompletedStream: !isStreaming && !!streamingContent && !hasValidAgentMessage,
-        });
-        return null;
-      })()}
 
       {/* Completed streamed message (shown after streaming completes, until DB message has real content) */}
       {!isStreaming && streamingContent && !hasValidAgentMessage && (

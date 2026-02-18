@@ -52,6 +52,7 @@ class BraveSearchClient:
         requests_per_second: float | None = None,
         default_result_count: int | None = None,
         default_freshness: str | None = None,
+        verify_ssl: bool = True,
     ):
         """Initialize Brave Search client.
 
@@ -60,6 +61,7 @@ class BraveSearchClient:
             requests_per_second: Rate limit for API calls. If None, uses central config.
             default_result_count: Default number of results. If None, uses central config.
             default_freshness: Default freshness filter. If None, uses central config.
+            verify_ssl: Whether to verify SSL certificates. Disable behind corporate proxies.
         """
         settings = get_settings()
         self._api_key = api_key or settings.brave_api_key
@@ -82,9 +84,12 @@ class BraveSearchClient:
         self._lock = asyncio.Lock()
 
         # HTTP client
+        if not verify_ssl:
+            logger.warning("SSL verification disabled for Brave Search API client")
         self._client = httpx.AsyncClient(
             timeout=30.0,
             headers={"Accept": "application/json"},
+            verify=verify_ssl,
         )
 
     async def _rate_limit(self) -> None:
@@ -102,6 +107,7 @@ class BraveSearchClient:
         query: str,
         count: int | None = None,
         freshness: str | None = None,
+        domain_filter: "DomainFilter | None" = None,
     ) -> SearchResponse:
         """Execute a web search.
 
@@ -110,6 +116,7 @@ class BraveSearchClient:
             count: Number of results to return (max 20). Uses config default if None.
             freshness: Time filter ("pd" = past day, "pw" = past week, etc.).
                       Uses config default if None.
+            domain_filter: Optional override for domain filtering. Uses instance default if None.
 
         Returns:
             SearchResponse with results.
@@ -179,11 +186,12 @@ class BraveSearchClient:
                     )
                 )
 
-            # Apply domain filtering
+            # Apply domain filtering (use override if provided)
+            active_filter = domain_filter if domain_filter is not None else self._domain_filter
             filtered_count = len(results)
-            if self._domain_filter.is_active:
+            if active_filter.is_active:
                 results = [
-                    r for r in results if self._domain_filter.is_allowed(r.url).allowed
+                    r for r in results if active_filter.is_allowed(r.url).allowed
                 ]
                 filtered_count = filtered_count - len(results)
                 if filtered_count > 0:

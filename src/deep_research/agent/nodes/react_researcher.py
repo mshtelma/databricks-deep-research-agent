@@ -12,20 +12,32 @@ The key difference from the standard researcher is:
 - No fixed number of URLs crawled
 - Quality-based decisions on content
 - Stops when sufficient high-quality content is collected
+
+Parallel Tool Execution (007-enterprise-data-sources):
+- Tools from different sources (web, vector_search, genie) can execute in parallel
+- Same-source tools are batched but serialized by rate limiters
+- Dependencies (web_crawl -> web_search) are respected
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mlflow.entities import SpanType
 
-from deep_research.agent.config import get_researcher_config, get_researcher_config_for_depth
+from deep_research.agent.config import (
+    get_endpoint_override,
+    get_parallel_tool_execution_config,
+    get_researcher_config,
+    get_researcher_config_for_depth,
+)
 from deep_research.agent.state import ResearchState, SourceInfo
 from deep_research.agent.tools.research_tools import RESEARCH_TOOLS
 from deep_research.agent.tools.url_registry import UrlRegistry
 from deep_research.agent.tools.web_crawler import WebCrawler, web_crawl
 from deep_research.agent.tools.web_search import format_search_results_indexed, web_search
+from deep_research.services.search.domain_filter import DomainFilter
 from deep_research.core.logging_utils import get_logger, truncate
 from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
@@ -56,13 +68,23 @@ Quality > Quantity: 3 excellent sources beats 10 mediocre ones.
 ## Tools
 - **web_search**: Search the web. Returns numbered results with titles and snippets.
 - **web_crawl**: Fetch full content using the INDEX number (0, 1, 2, etc.) from search results.
+- **file_search** (if available): Search user-uploaded files for relevant passages.
+
+When enterprise tools are available (query_genie_*, search_*, ask_*):
+- These provide authoritative internal data — use results as primary evidence
+- Genie tools query enterprise SQL databases and return structured data
+- Vector search tools return semantically relevant enterprise documents
+- Knowledge assistant tools return expert answers with citations
+- Always cite enterprise data in your observations
 
 ## Research Loop
-1. Search for relevant information
-2. Review snippets - identify sources by INDEX that look promising (specific facts, not overviews)
-3. Crawl promising sources using their INDEX numbers to get full content
-4. Read the content - YOU decide if it's high quality
-5. Repeat until you have 3+ sources with good specific content
+1. **Check uploaded files first**: If file content is provided in the user message, use it directly as evidence
+2. If file_search is available, search uploaded files for additional passages
+3. Search for relevant information from web/enterprise sources
+4. Review snippets - identify sources by INDEX that look promising (specific facts, not overviews)
+5. Crawl promising sources using their INDEX numbers to get full content
+6. Read the content - YOU decide if it's high quality
+7. Repeat until you have 3+ sources with good specific content
 
 ## Quality Judgment (YOU decide after reading content)
 - **GOOD**: Specific numbers, exact quotes, research findings, detailed analysis
@@ -77,6 +99,32 @@ CRITICAL: When satisfied, respond WITHOUT calling any tools. No tool calls = don
 """
 
 
+def _is_uploaded_file_search_enabled(state: ResearchState) -> bool:
+    """Check whether uploaded-file search is enabled in source scope."""
+    if state.source_scope_config is None:
+        return True
+    return state.source_scope_config.is_type_enabled("uploaded_file")
+
+
+def _get_scope_allowed_non_web_tools(state: ResearchState) -> list[Any]:
+    """Return non-web tools currently allowed by source-scope settings."""
+    if not state.enterprise_tools:
+        return []
+
+    allowed: list[Any] = []
+    for tool in state.enterprise_tools:
+        tool_name = tool.definition.name
+        if tool_name == "file_search":
+            if _is_uploaded_file_search_enabled(state):
+                allowed.append(tool)
+            continue
+
+        if state.is_enterprise_search_allowed():
+            allowed.append(tool)
+
+    return allowed
+
+
 @dataclass
 class ReactResearchEvent:
     """Event emitted during ReAct research loop."""
@@ -87,7 +135,13 @@ class ReactResearchEvent:
 
 @dataclass
 class ReactResearchState:
-    """Internal state for the ReAct research loop."""
+    """Internal state for the ReAct research loop.
+
+    Thread Safety (007-enterprise-data-sources):
+    Uses asyncio.Lock for state accessed during parallel tool execution.
+    CRITICAL: Use asyncio.Lock (NOT threading.RLock) because tool execution
+    is async. threading.RLock would block the event loop and cause deadlocks.
+    """
 
     messages: list[dict[str, Any]] = field(default_factory=list)
     high_quality_sources: list[str] = field(default_factory=list)  # URLs
@@ -102,6 +156,37 @@ class ReactResearchState:
     _last_high_quality_count: int = 0
     _last_content_length: int = 0
     _consecutive_low_gain_calls: int = 0
+
+    # =========================================================================
+    # Async Locks for Parallel Tool Execution
+    # =========================================================================
+    # Granular locks to reduce contention when tools update different collections
+    _tool_count_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _content_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _sources_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+
+    async def increment_tool_count(self) -> int:
+        """Atomically increment tool call count and return new value (async-safe)."""
+        async with self._tool_count_lock:
+            self.tool_call_count += 1
+            return self.tool_call_count
+
+    async def add_crawled_content(self, url: str, content: str) -> None:
+        """Add crawled content (async-safe)."""
+        async with self._content_lock:
+            self.crawled_content[url] = content
+
+    async def add_high_quality_source(self, url: str) -> None:
+        """Add high quality source (async-safe, deduplicates)."""
+        async with self._sources_lock:
+            if url not in self.high_quality_sources:
+                self.high_quality_sources.append(url)
+
+    async def add_low_quality_source(self, url: str) -> None:
+        """Add low quality source (async-safe, deduplicates)."""
+        async with self._sources_lock:
+            if url not in self.low_quality_sources:
+                self.low_quality_sources.append(url)
 
     def record_tool_call_outcome(self) -> None:
         """Record the outcome of a tool call for early stopping analysis.
@@ -238,19 +323,70 @@ async def run_react_researcher(
 
         # Initialize ReAct state
         react_state = ReactResearchState()
+
+        # Build dynamic tool list including enterprise and uploaded-file tools.
+        available_tools = list(RESEARCH_TOOLS)  # Start with web tools
+        non_web_tools = _get_scope_allowed_non_web_tools(state)
+
+        # Source-type-specific query guidance for tool descriptions
+        # This costs zero latency — the LLM naturally generates better queries
+        _QUERY_GUIDANCE: dict[str, str] = {
+            "vector_search": (
+                "\n\nQuery guidance: Provide natural language sentences, not keywords. "
+                "Describe what the ideal document would say about your topic."
+            ),
+            "genie": (
+                "\n\nQuery guidance: Be specific about metrics, time periods, and entity names. "
+                "Ask a clear data question."
+            ),
+            "knowledge_assistant": (
+                "\n\nQuery guidance: Ask a single focused question. "
+                "Include context from your prior findings."
+            ),
+        }
+
+        if non_web_tools:
+            for tool in non_web_tools:
+                desc = tool.definition.description
+                guidance = _QUERY_GUIDANCE.get(tool.definition.source_type, "")
+                available_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.definition.name,
+                        "description": desc + guidance,
+                        "parameters": tool.definition.parameters,
+                    },
+                })
+            logger.info(
+                "REACT_NON_WEB_TOOLS_ADDED",
+                tool_count=len(non_web_tools),
+                tool_names=[t.definition.name for t in non_web_tools],
+                total_tools=len(available_tools),
+            )
+
+        # Build file context for the initial prompt
+        file_context = state.get_file_context_for_prompt(max_chars=8_000)
+        file_instruction = ""
+        if file_context:
+            file_instruction = (
+                f"\n\n{file_context}\n\n"
+                "The user uploaded these files. Use this content directly as evidence where relevant. "
+                "For large files, use file_search tool for specific lookups."
+            )
+
         react_state.messages = [
             {"role": "system", "content": REACT_SYSTEM_PROMPT},
             {
                 "role": "user",
-                "content": f"""Research this topic and find high-quality sources:
-
-**Research Query:** {state.query}
-
-**Current Step:** {step.title}
-{step.description or ''}
-
-Find sources with specific facts, numbers, and quotes that can be cited.
-Start by searching for relevant information.""",
+                "content": (
+                    f"Research this topic and find high-quality sources:\n\n"
+                    f"**Research Query:** {state.query}\n\n"
+                    f"**Current Step:** {step.title}\n"
+                    f"{step.description or ''}"
+                    f"{file_instruction}\n\n"
+                    f"Find sources with specific facts, numbers, and quotes that can be cited.\n"
+                    f"Start by searching for relevant information."
+                ),
             },
         ]
 
@@ -263,8 +399,9 @@ Start by searching for relevant information.""",
             try:
                 async for chunk in llm.stream_with_tools(
                     messages=react_state.messages,
-                    tools=RESEARCH_TOOLS,
+                    tools=available_tools,  # Dynamic tools including enterprise
                     tier=ModelTier.ANALYTICAL,
+                    endpoint_override=get_endpoint_override(state, ModelTier.ANALYTICAL),
                     max_tokens=2000,
                 ):
                     if chunk.content:
@@ -330,47 +467,120 @@ Start by searching for relevant information.""",
                 ],
             })
 
-            # Execute each tool call
-            for tc in tool_calls_this_turn:
-                react_state.tool_call_count += 1
+            # Execute tool calls - parallel when multiple tools and enabled, sequential otherwise
+            # Parallel execution provides 20-40% latency reduction for cross-source queries
+            parallel_config = get_parallel_tool_execution_config()
+            use_parallel = (
+                parallel_config.enabled
+                and len(tool_calls_this_turn) > 1
+            )
 
-                yield ReactResearchEvent(
-                    event_type="tool_call",
-                    data={
-                        "tool": tc.name,
-                        "args": tc.arguments,
-                        "call_number": react_state.tool_call_count,
-                    },
+            if use_parallel:
+                # PARALLEL EXECUTION: Execute tools concurrently
+                logger.debug(
+                    "REACT_PARALLEL_TOOLS",
+                    tool_count=len(tool_calls_this_turn),
+                    tools=[tc.name for tc in tool_calls_this_turn],
                 )
 
-                # Execute tool
-                tool_result = await _execute_tool(
-                    tc,
+                # Emit tool_call events first (for UI streaming)
+                for tc in tool_calls_this_turn:
+                    yield ReactResearchEvent(
+                        event_type="tool_call",
+                        data={
+                            "tool": tc.name,
+                            "args": tc.arguments,
+                            "call_number": react_state.tool_call_count + 1,
+                            "parallel": True,
+                        },
+                    )
+
+                # Execute tools in parallel with cross-source parallelism
+                tool_results: dict[str, str] = {}
+                async for tc, result, sources_added in execute_tools_parallel(
+                    tool_calls_this_turn,
                     state,
                     react_state,
                     crawler,
                     brave_client,
                     config,
-                )
+                    tool_timeout_seconds=parallel_config.tool_timeout_seconds,
+                    batch_timeout_seconds=parallel_config.batch_timeout_seconds,
+                    llm=llm,
+                ):
+                    # Increment tool count (async-safe)
+                    await react_state.increment_tool_count()
+                    tool_results[tc.id] = result
 
-                # Add tool result to message history
-                react_state.messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": tool_result,
-                })
+                    # Emit result event for UI streaming
+                    yield ReactResearchEvent(
+                        event_type="tool_result",
+                        data={
+                            "tool": tc.name,
+                            "result_preview": truncate(result, 200),
+                            "high_quality_count": len(react_state.high_quality_sources),
+                            "sources_added": sources_added,
+                            "parallel": True,
+                        },
+                    )
 
-                yield ReactResearchEvent(
-                    event_type="tool_result",
-                    data={
-                        "tool": tc.name,
-                        "result_preview": truncate(tool_result, 200),
-                        "high_quality_count": len(react_state.high_quality_sources),
-                    },
-                )
+                # Add all results to message history in original order (for LLM context)
+                for tc in tool_calls_this_turn:
+                    react_state.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": tool_results.get(tc.id, "Error: Missing result"),
+                    })
 
-                # TOKEN OPTIMIZATION: Track info gain for early stopping
+                # Track info gain for early stopping (once after batch)
                 react_state.record_tool_call_outcome()
+
+            else:
+                # SEQUENTIAL EXECUTION: Single tool, no parallelism benefit
+                for tc in tool_calls_this_turn:
+                    react_state.tool_call_count += 1
+
+                    yield ReactResearchEvent(
+                        event_type="tool_call",
+                        data={
+                            "tool": tc.name,
+                            "args": tc.arguments,
+                            "call_number": react_state.tool_call_count,
+                        },
+                    )
+
+                    # Execute tool
+                    sources_before = len(state.sources)
+                    tool_result = await _execute_tool(
+                        tc,
+                        state,
+                        react_state,
+                        crawler,
+                        brave_client,
+                        config,
+                        llm=llm,
+                    )
+                    sources_added = max(0, len(state.sources) - sources_before)
+
+                    # Add tool result to message history
+                    react_state.messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": tool_result,
+                    })
+
+                    yield ReactResearchEvent(
+                        event_type="tool_result",
+                        data={
+                            "tool": tc.name,
+                            "result_preview": truncate(tool_result, 200),
+                            "high_quality_count": len(react_state.high_quality_sources),
+                            "sources_added": sources_added,
+                        },
+                    )
+
+                    # TOKEN OPTIMIZATION: Track info gain for early stopping
+                    react_state.record_tool_call_outcome()
 
             # TOKEN OPTIMIZATION: Check for early stopping (diminishing returns)
             should_stop, stop_reason = react_state.should_stop_early(
@@ -481,6 +691,7 @@ async def _execute_tool(
     crawler: WebCrawler,
     brave_client: BraveSearchClient,
     config: Any,
+    llm: "LLMClient | None" = None,
 ) -> str:
     """Execute a tool call and return the result string.
 
@@ -491,16 +702,33 @@ async def _execute_tool(
         crawler: Web crawler.
         brave_client: Search client.
         config: Researcher configuration.
+        llm: LLM client (needed for enterprise query rewriting).
 
     Returns:
         Tool result as a string for the LLM.
     """
+    # Build domain filter once for all searches in this tool execution
+    _agent_domain_filter = DomainFilter(state.domain_filter) if state.domain_filter else None
+
     try:
         if tc.name == "web_search":
+            # Check source scope before web search (008-data-source-selection)
+            if not state.is_web_search_allowed():
+                logger.info(
+                    "REACT_SKIP_WEB_SEARCH",
+                    query=truncate(tc.arguments.get("query", ""), 60),
+                    scope=state.get_active_scope(),
+                    tool_call_number=react_state.tool_call_count,
+                )
+                return (
+                    "[Web search skipped: Source scope is set to 'enterprise_only'. "
+                    "Enterprise data source integration is coming in a future update.]"
+                )
+
             query = tc.arguments.get("query", "")
             count = min(tc.arguments.get("count", 5), 10)
 
-            results = await web_search(query=query, count=count, client=brave_client)
+            results = await web_search(query=query, count=count, client=brave_client, domain_filter=_agent_domain_filter)
 
             # Add sources to state
             for r in results.results:
@@ -517,6 +745,15 @@ async def _execute_tool(
             return format_search_results_indexed(results, react_state.url_registry)
 
         elif tc.name == "web_crawl":
+            # Check source scope before web crawl (008-data-source-selection)
+            if not state.is_web_search_allowed():
+                logger.info(
+                    "REACT_SKIP_WEB_CRAWL",
+                    url_index=tc.arguments.get("index"),
+                    scope=state.get_active_scope(),
+                )
+                return "[Web crawl skipped: Source scope restricts web sources.]"
+
             # Accept index instead of URL (security: LLM cannot hallucinate URLs)
             index = tc.arguments.get("index")
 
@@ -562,13 +799,149 @@ async def _execute_tool(
             )
 
         else:
+            # Check if it's an enterprise tool (007-enterprise-data-sources Phase 2)
+            enterprise_tool = None
+            for tool in state.enterprise_tools:
+                if tool.definition.name == tc.name:
+                    enterprise_tool = tool
+                    break
+
+            if enterprise_tool:
+                from deep_research.agent.tools.base import ResearchContext
+                from uuid import uuid4
+
+                context = ResearchContext(
+                    chat_id=state.session_id or uuid4(),
+                    user_id="",  # Not tracked in ReAct researcher
+                    user_token=state.user_token,
+                )
+
+                # Pre-execution query rewriting (enterprise query optimization)
+                from deep_research.agent.config import get_query_rewrite_config
+                from deep_research.agent.tools.query_rewriter import rewrite_for_source_type
+
+                rewrite_config = get_query_rewrite_config(enterprise_tool.definition.source_type)
+                if rewrite_config and rewrite_config.enabled and llm is not None:
+                    # Determine the primary argument key (query or question)
+                    tool_params = enterprise_tool.definition.parameters
+                    required_keys = tool_params.get("required", [])
+                    arg_key = required_keys[0] if required_keys else "query"
+                    original_query = tc.arguments.get(arg_key, "")
+
+                    step = state.get_current_step()
+                    rewritten = await rewrite_for_source_type(
+                        llm=llm,
+                        source_type=enterprise_tool.definition.source_type,
+                        step_title=step.title if step else "",
+                        step_description=step.description if step else "",
+                        original_query=original_query,
+                        source_description=enterprise_tool.definition.description,
+                        config=rewrite_config,
+                        previous_observations=state.all_observations[-3:] if state.all_observations else None,
+                    )
+                    tc.arguments[arg_key] = rewritten.primary_query
+                    # Store alternates for multi-query execution (M2)
+                    tc.arguments["_alternate_queries"] = rewritten.alternate_queries
+                    logger.info(
+                        "REACT_QUERY_REWRITTEN",
+                        tool=tc.name,
+                        strategy=rewritten.strategy_used,
+                        original_len=len(original_query),
+                        rewritten_len=len(rewritten.primary_query),
+                    )
+
+                # Validate before execution
+                validation_errors = enterprise_tool.validate_arguments(tc.arguments)
+                if validation_errors:
+                    logger.warning(
+                        "REACT_ENTERPRISE_TOOL_VALIDATION_FAILED",
+                        tool=tc.name,
+                        errors=validation_errors,
+                        arguments_keys=list(tc.arguments.keys()),
+                    )
+                    return f"Validation error: {'; '.join(validation_errors)}"
+
+                result = await enterprise_tool.execute(
+                    arguments=tc.arguments,
+                    context=context,
+                )
+
+                if result.success:
+                    fallback_url = f"enterprise://{tc.name}"
+
+                    # Determine the canonical URL — must match what goes into state.sources
+                    # so the post-processing loop can link content back
+                    primary_url = fallback_url
+                    if result.sources:
+                        first_url = result.sources[0].get("url")
+                        if first_url:
+                            primary_url = first_url
+
+                    await react_state.add_high_quality_source(primary_url)
+                    await react_state.add_crawled_content(primary_url, result.content)
+
+                    # Add sources to main state for citation tracking
+                    ent_source_type = enterprise_tool.definition.source_type
+                    if result.sources:
+                        for src in result.sources:
+                            state.add_source(
+                                SourceInfo(
+                                    url=src.get("url", fallback_url),
+                                    title=src.get("title", tc.name),
+                                    snippet=src.get("content", "")[:500],
+                                    content=src.get("content"),
+                                    source_type=src.get("type", ent_source_type),
+                                )
+                            )
+                    else:
+                        # No structured sources — add generic entry so content can be linked
+                        state.add_source(
+                            SourceInfo(
+                                url=primary_url,
+                                title=tc.name,
+                                snippet=result.content[:500] if result.content else "",
+                                content=result.content,
+                                source_type=ent_source_type,
+                            )
+                        )
+
+                    logger.info(
+                        "REACT_ENTERPRISE_TOOL_SUCCESS",
+                        tool=tc.name,
+                        content_len=len(result.content),
+                        primary_url=primary_url,
+                        source_count=len(result.sources) if result.sources else 0,
+                    )
+
+                    # Heuristic quality signal (no LLM cost)
+                    content_len = len(result.content) if result.content else 0
+                    if content_len == 0:
+                        quality_signal = "empty"
+                    elif content_len < 100:
+                        quality_signal = "low_content"
+                    else:
+                        quality_signal = "good"
+                    state.record_source_quality(tc.name, quality_signal)
+
+                    return result.content
+                else:
+                    logger.error(
+                        "REACT_ENTERPRISE_TOOL_FAILED",
+                        tool=tc.name,
+                        error=result.error if result.error else "unknown",
+                    )
+                    state.record_source_quality(tc.name, "error")
+                    return f"Tool error: {result.error or 'Unknown error'}"
+
             return f"Unknown tool: {tc.name}"
 
     except Exception as e:
-        logger.warning(
+        logger.error(
             "REACT_TOOL_ERROR",
             tool=tc.name,
-            error=str(e)[:200],
+            error=str(e),
+            error_type=type(e).__name__,
+            exc_info=True,
         )
         return f"Tool error: {str(e)[:200]}"
 
@@ -577,3 +950,298 @@ def _serialize_args(args: dict[str, Any]) -> str:
     """Serialize tool arguments to JSON string."""
     import json
     return json.dumps(args)
+
+
+# =============================================================================
+# Parallel Tool Execution (007-enterprise-data-sources)
+# =============================================================================
+
+# Tool source mapping - tools from different sources can run in parallel
+# Same-source tools may be serialized by rate limiters anyway
+TOOL_SOURCE_MAPPING: dict[str, str] = {
+    "web_search": "web",
+    "web_crawl": "web",  # Depends on web_search completing first
+    "vector_search": "vector",
+    "genie_query": "genie",
+    "file_search": "uploaded_file",
+}
+
+# Dependencies: tools that must complete before others can start
+# web_crawl needs web_search to populate the URL registry
+TOOL_DEPENDENCIES: dict[str, list[str]] = {
+    "web_crawl": ["web_search"],
+}
+
+
+@dataclass
+class ToolBatch:
+    """A batch of tools that can execute in parallel."""
+
+    tool_types: list[str]
+    tool_calls: list[ToolCall]
+
+    def __repr__(self) -> str:
+        return f"ToolBatch(types={self.tool_types}, count={len(self.tool_calls)})"
+
+
+def _get_tool_source(tool_name: str) -> str:
+    """Get source type for a tool (for parallel execution grouping).
+
+    Enterprise tools are identified by naming patterns:
+    - query_genie_* -> genie
+    - search_* or *_vector_search -> vector
+    - *_assistant or knowledge_* -> assistant
+
+    Args:
+        tool_name: Name of the tool.
+
+    Returns:
+        Source type string for grouping.
+    """
+    if tool_name in TOOL_SOURCE_MAPPING:
+        return TOOL_SOURCE_MAPPING[tool_name]
+
+    # Enterprise tools: identify by naming patterns
+    if tool_name.startswith("query_genie_") or "genie" in tool_name.lower():
+        return "genie"
+    if tool_name.startswith("search_") or "vector" in tool_name.lower():
+        return "vector"
+    if "assistant" in tool_name.lower() or "knowledge" in tool_name.lower():
+        return "assistant"
+
+    # Default: use tool name as source type (unique source per unknown tool)
+    return tool_name
+
+
+def _group_tools_by_source(tool_calls: list[ToolCall]) -> dict[str, list[ToolCall]]:
+    """Group tool calls by source type for parallel execution.
+
+    Different sources (web, vector_search, genie) can run in parallel.
+    Same-source tools may be serialized by rate limiters anyway.
+
+    Args:
+        tool_calls: List of tool calls from the LLM.
+
+    Returns:
+        Dict mapping source type to list of tool calls.
+    """
+    from collections import defaultdict
+
+    groups: dict[str, list[ToolCall]] = defaultdict(list)
+    for tc in tool_calls:
+        source = _get_tool_source(tc.name)
+        groups[source].append(tc)
+    return dict(groups)
+
+
+def _get_execution_batches(tool_calls: list[ToolCall]) -> list[ToolBatch]:
+    """Build execution batches respecting tool dependencies.
+
+    web_crawl depends on web_search, so if both are present:
+    - Batch 1: all web_search calls
+    - Batch 2: everything else (including web_crawl)
+
+    If no dependencies, all tools go in one batch.
+
+    Args:
+        tool_calls: List of tool calls from the LLM.
+
+    Returns:
+        List of ToolBatch (earlier batches must complete before later ones).
+    """
+    # Check for dependency conflicts
+    has_crawl = any(tc.name == "web_crawl" for tc in tool_calls)
+    has_search = any(tc.name == "web_search" for tc in tool_calls)
+
+    batches: list[ToolBatch] = []
+
+    if has_search and has_crawl:
+        # Split: search first, then everything else (including crawl)
+        search_calls = [tc for tc in tool_calls if tc.name == "web_search"]
+        other_calls = [tc for tc in tool_calls if tc.name != "web_search"]
+
+        if search_calls:
+            batches.append(ToolBatch(
+                tool_types=["web_search"],
+                tool_calls=search_calls,
+            ))
+        if other_calls:
+            batches.append(ToolBatch(
+                tool_types=list(set(tc.name for tc in other_calls)),
+                tool_calls=other_calls,
+            ))
+    else:
+        # No dependencies - all tools in one batch
+        if tool_calls:
+            batches.append(ToolBatch(
+                tool_types=list(set(tc.name for tc in tool_calls)),
+                tool_calls=tool_calls,
+            ))
+
+    return batches
+
+
+async def _execute_tool_with_timeout(
+    tc: ToolCall,
+    state: ResearchState,
+    react_state: ReactResearchState,
+    crawler: WebCrawler,
+    brave_client: BraveSearchClient,
+    config: Any,
+    timeout_seconds: float = 30.0,
+    llm: "LLMClient | None" = None,
+) -> tuple[str, str, int]:
+    """Execute a single tool with timeout.
+
+    Args:
+        tc: Tool call to execute.
+        state: Main research state.
+        react_state: ReAct loop state.
+        crawler: Web crawler.
+        brave_client: Search client.
+        config: Researcher configuration.
+        timeout_seconds: Per-tool timeout.
+        llm: LLM client (needed for enterprise query rewriting).
+
+    Returns:
+        Tuple of (tool_call_id, result_string, sources_added).
+    """
+    try:
+        sources_before = len(state.sources)
+        result = await asyncio.wait_for(
+            _execute_tool(tc, state, react_state, crawler, brave_client, config, llm=llm),
+            timeout=timeout_seconds,
+        )
+        sources_added = max(0, len(state.sources) - sources_before)
+        return (tc.id, result, sources_added)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "PARALLEL_TOOL_TIMEOUT",
+            tool=tc.name,
+            tool_call_id=tc.id,
+            timeout_seconds=timeout_seconds,
+        )
+        return (tc.id, f"Error: {tc.name} timed out after {timeout_seconds}s", 0)
+    except Exception as e:
+        logger.error(
+            "PARALLEL_TOOL_ERROR",
+            tool=tc.name,
+            tool_call_id=tc.id,
+            error=str(e),
+            error_type=type(e).__name__,
+            exc_info=True,
+        )
+        return (tc.id, f"Error executing {tc.name}: {str(e)[:200]}", 0)
+
+
+async def execute_tools_parallel(
+    tool_calls: list[ToolCall],
+    state: ResearchState,
+    react_state: ReactResearchState,
+    crawler: WebCrawler,
+    brave_client: BraveSearchClient,
+    config: Any,
+    tool_timeout_seconds: float = 30.0,
+    batch_timeout_seconds: float = 60.0,
+    llm: "LLMClient | None" = None,
+) -> AsyncGenerator[tuple[ToolCall, str, int], None]:
+    """Execute tool calls with cross-source parallelism.
+
+    Different sources (web, vector_search, genie) execute in parallel.
+    Dependencies (web_crawl -> web_search) are respected.
+
+    Args:
+        tool_calls: List of tool calls from the LLM.
+        state: Main research state.
+        react_state: ReAct loop state.
+        crawler: Web crawler.
+        brave_client: Search client.
+        config: Researcher configuration.
+        tool_timeout_seconds: Per-tool timeout.
+        batch_timeout_seconds: Per-batch timeout.
+        llm: LLM client (needed for enterprise query rewriting).
+
+    Yields:
+        (tool_call, result, sources_added) tuples as they complete.
+    """
+    if not tool_calls:
+        return
+
+    # Build execution batches respecting dependencies
+    batches = _get_execution_batches(tool_calls)
+
+    logger.info(
+        "PARALLEL_TOOL_EXECUTION_START",
+        total_tools=len(tool_calls),
+        batches=len(batches),
+        batch_details=[str(b) for b in batches],
+    )
+
+    results_by_id: dict[str, str] = {}
+
+    for batch_idx, batch in enumerate(batches):
+        logger.debug(
+            "PARALLEL_BATCH_START",
+            batch_index=batch_idx,
+            tool_types=batch.tool_types,
+            tool_count=len(batch.tool_calls),
+        )
+
+        # Create tasks for all tools in this batch
+        tasks: dict[str, asyncio.Task[tuple[str, str, int]]] = {
+            tc.id: asyncio.create_task(
+                _execute_tool_with_timeout(
+                    tc, state, react_state, crawler, brave_client, config,
+                    timeout_seconds=tool_timeout_seconds,
+                    llm=llm,
+                )
+            )
+            for tc in batch.tool_calls
+        }
+
+        # Process results as they complete (for streaming)
+        try:
+            for coro in asyncio.as_completed(list(tasks.values()), timeout=batch_timeout_seconds):
+                try:
+                    tc_id, result, sources_added = await coro
+                    results_by_id[tc_id] = result
+
+                    # Find the tool call and yield immediately
+                    tc = next(t for t in batch.tool_calls if t.id == tc_id)
+                    yield (tc, result, sources_added)
+
+                except Exception as e:
+                    logger.error(
+                        "PARALLEL_TOOL_EXECUTION_ERROR",
+                        batch_index=batch_idx,
+                        error=str(e)[:200],
+                    )
+
+        except asyncio.TimeoutError:
+            logger.warning(
+                "PARALLEL_BATCH_TIMEOUT",
+                batch_index=batch_idx,
+                timeout_seconds=batch_timeout_seconds,
+            )
+            # Mark remaining tasks as timed out and cancel them
+            for tc_id, task in tasks.items():
+                if tc_id not in results_by_id:
+                    task.cancel()
+                    results_by_id[tc_id] = f"Error: Batch timed out after {batch_timeout_seconds}s"
+                    # Yield timeout result
+                    matching_tc = next((t for t in batch.tool_calls if t.id == tc_id), None)
+                    if matching_tc is not None:
+                        yield (matching_tc, results_by_id[tc_id], 0)
+
+        logger.debug(
+            "PARALLEL_BATCH_COMPLETE",
+            batch_index=batch_idx,
+            results_count=len([r for r in results_by_id.values() if not r.startswith("Error:")]),
+        )
+
+    logger.info(
+        "PARALLEL_TOOL_EXECUTION_COMPLETE",
+        total_tools=len(tool_calls),
+        successful=len([r for r in results_by_id.values() if not r.startswith("Error:")]),
+        failed=len([r for r in results_by_id.values() if r.startswith("Error:")]),
+    )

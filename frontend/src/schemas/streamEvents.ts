@@ -93,6 +93,8 @@ export const StepCompletedEventSchema = BaseEventSchema.extend({
   observationSummary: z.string().optional(), // camelCase variant
   sources_found: z.number().optional(),
   sourcesFound: z.number().optional(), // camelCase variant
+  file_sources_found: z.number().optional(),
+  fileSourcesFound: z.number().optional(), // camelCase variant
 });
 
 // Tool events
@@ -104,6 +106,8 @@ export const ToolCallEventSchema = BaseEventSchema.extend({
   toolArgs: z.record(z.string(), z.unknown()).optional(), // camelCase variant
   call_number: z.number().optional(),
   callNumber: z.number().optional(), // camelCase variant
+  source_type: z.string().optional(),
+  sourceType: z.string().optional(), // camelCase variant
 });
 
 export const ToolResultEventSchema = BaseEventSchema.extend({
@@ -114,6 +118,10 @@ export const ToolResultEventSchema = BaseEventSchema.extend({
   resultPreview: z.string().optional(), // camelCase variant
   sources_crawled: z.number().optional(),
   sourcesCrawled: z.number().optional(), // camelCase variant
+  sources_added: z.number().optional(),
+  sourcesAdded: z.number().optional(), // camelCase variant
+  source_type: z.string().optional(),
+  sourceType: z.string().optional(), // camelCase variant
 });
 
 // Reflection event
@@ -215,6 +223,16 @@ export const ClarificationNeededEventSchema = BaseEventSchema.extend({
   round: z.number().optional(),
 });
 
+// Plan review event (sent when enable_plan_review is true)
+export const PlanReviewEventSchema = BaseEventSchema.extend({
+  eventType: z.literal('plan_review'),
+  plan: z.unknown(), // PlanWithSources structure
+  timeoutSeconds: z.number().optional(),
+  timeout_seconds: z.number().optional(),
+  reviewId: z.string().optional(),
+  review_id: z.string().optional(),
+});
+
 // Discriminated union of all known event types
 export const StreamEventSchema = z.discriminatedUnion('eventType', [
   AgentStartedEventSchema,
@@ -236,6 +254,7 @@ export const StreamEventSchema = z.discriminatedUnion('eventType', [
   PersistenceCompletedEventSchema,
   StreamErrorEventSchema,
   ClarificationNeededEventSchema,
+  PlanReviewEventSchema,
 ]);
 
 // Type inferred from schema

@@ -1,6 +1,7 @@
 import * as React from 'react';
 import { cn } from '@/lib/utils';
 import type { StreamEvent } from '@/types';
+import { filterInterestingEvents } from '@/utils/eventFilters';
 import { EnhancedEventLabel } from './EnhancedEventLabel';
 
 interface EventFeedProps {
@@ -18,41 +19,6 @@ interface EventFeedProps {
 function getEventId(event: StreamEvent, index: number): string {
   const eventWithId = event as unknown as { _eventId?: string };
   return eventWithId._eventId ?? `${event.eventType}-fallback-${index}`;
-}
-
-/**
- * Filter to keep only interesting events for display.
- */
-function filterInterestingEvents(events: StreamEvent[]): StreamEvent[] {
-  return events.filter((event) => {
-    // Always show errors
-    if (event.eventType === 'error') return true;
-
-    // Skip synthesis_progress (too noisy during writing)
-    if (event.eventType === 'synthesis_progress') return false;
-
-    // Skip tool_result events with no useful info (web_search results or failed crawls)
-    if (event.eventType === 'tool_result') {
-      const result = event as unknown as { sourcesCrawled?: number; sources_crawled?: number };
-      const sourcesCrawled = result.sourcesCrawled ?? result.sources_crawled;
-      return sourcesCrawled != null && sourcesCrawled > 0;
-    }
-
-    // Keep meaningful milestone events
-    return [
-      'agent_started',
-      'agent_completed',
-      'plan_created',
-      'step_started',
-      'step_completed',
-      'tool_call',
-      'reflection_decision',
-      'synthesis_started',
-      'research_completed',
-      'claim_verified',
-      'verification_summary',
-    ].includes(event.eventType);
-  });
 }
 
 /**

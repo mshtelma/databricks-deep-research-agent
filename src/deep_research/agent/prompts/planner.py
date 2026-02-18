@@ -25,6 +25,12 @@ PLANNER_SYSTEM_PROMPT = """You are the Planner agent for a deep research system.
   - Set `needs_search: false`
   - Used for comparing findings, drawing conclusions
 
+## Available Evidence Sources
+
+- **Web search**: Public information (news, docs, industry data)
+- **Uploaded files**: User-provided documents. If file content appears in the prompt,
+  use it directly as authoritative evidence. For large files, the file_search tool is available.
+
 ## Planning Guidelines
 
 - Be specific and actionable in each step
@@ -118,6 +124,9 @@ Target: {min_steps} to {max_steps} research steps
 
 ## Background Investigation
 {background_results}
+
+## Uploaded File Contents
+{file_context}
 
 ## Completed Steps (PRESERVED AUTOMATICALLY)
 {completed_steps}

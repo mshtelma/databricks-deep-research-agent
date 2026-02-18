@@ -389,7 +389,7 @@ quickstart:
 # Generate requirements.txt for Databricks Apps
 requirements:
 	@echo "Generating requirements.txt from pyproject.toml..."
-	uv pip compile pyproject.toml -o requirements.txt
+	uv pip compile pyproject.toml --python-platform x86_64-unknown-linux-gnu -o requirements.txt
 	@echo "" >> requirements.txt
 	@echo "# Install the local package itself (required for src layout)" >> requirements.txt
 	@echo "# Build timestamp: $$(date -u +%Y%m%d%H%M%S) - forces reinstall on changes" >> requirements.txt

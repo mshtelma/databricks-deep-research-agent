@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import type {
   StreamEvent,
   PlanCreatedEvent,
@@ -16,6 +17,8 @@ import type {
   ResearchSession,
   QueryMode,
 } from '../types';
+import type { QuerySubmission } from '../types/querySubmission';
+import type { PlanReviewEvent } from '../types/dataSources';
 import type {
   VerificationSummary,
   VerificationVerdict,
@@ -74,7 +77,7 @@ export interface StreamingClaim {
 
 /** Current tool activity during ReAct research loop */
 export interface ToolActivity {
-  toolName: 'web_search' | 'web_crawl' | null;
+  toolName: string | null;
   toolArgs: Record<string, unknown>;
   callNumber: number;
   sourcesCrawled: number;
@@ -99,7 +102,7 @@ interface UseStreamingQueryReturn {
   agentStatus: AgentStatus;
   currentPlan: Plan | null;
   currentStepIndex: number;
-  sendQuery: (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean, outputType?: string) => Promise<void>;
+  sendQuery: (submission: QuerySubmission) => Promise<void>;
   stopStream: () => void;
   error: Error | null;
   /** Full error details including stack trace */
@@ -142,6 +145,10 @@ interface UseStreamingQueryReturn {
   activeSessionId: string | null;
   /** Reconnect to an existing job's event stream */
   reconnectToJob: (sessionId: string) => Promise<void>;
+  /** Plan review event from SSE stream (for PlanReviewModal) */
+  planReviewEvent: PlanReviewEvent | null;
+  /** Clear plan review event after consumption */
+  clearPlanReviewEvent: () => void;
 }
 
 interface UseStreamingQueryOptions {
@@ -155,6 +162,7 @@ export function useStreamingQuery(
   chatId?: string,
   options?: UseStreamingQueryOptions
 ): UseStreamingQueryReturn {
+  const queryClient = useQueryClient();
   const { onStreamComplete, onJobSubmissionError } = options ?? {};
   const [isStreaming, setIsStreaming] = useState(false);
   const [events, setEvents] = useState<StreamEvent[]>([]);
@@ -191,30 +199,16 @@ export function useStreamingQuery(
   const [persistenceResult, setPersistenceResult] = useState<PersistenceCompletedEvent | null>(null);
   const [persistenceFailed, setPersistenceFailed] = useState(false);
 
+  // Plan review event state (bridged to usePlanReview via ChatPage)
+  const [planReviewEvent, setPlanReviewEvent] = useState<PlanReviewEvent | null>(null);
+  const clearPlanReviewEvent = useCallback(() => setPlanReviewEvent(null), []);
+
   // Streaming time and agent tracking for activity panel
   const [startTime, setStartTime] = useState<number | null>(null);
   const [currentAgent, setCurrentAgent] = useState<string | null>(null);
 
   // Query mode for the current streaming session (used for UI visibility)
   const [currentQueryMode, setCurrentQueryMode] = useState<QueryMode | null>(null);
-
-  // ===== DEBUG LOGGING =====
-  useEffect(() => {
-    console.log('[useStreamingQuery] currentQueryMode is now:', currentQueryMode);
-  }, [currentQueryMode]);
-
-  useEffect(() => {
-    console.log('[useStreamingQuery] isStreaming is now:', isStreaming);
-  }, [isStreaming]);
-
-  useEffect(() => {
-    console.log('[useStreamingQuery] currentPlan changed:', currentPlan ? `has plan with ${currentPlan.steps?.length} steps` : 'null');
-  }, [currentPlan]);
-
-  useEffect(() => {
-    console.log('[useStreamingQuery] events count:', events.length);
-  }, [events.length]);
-  // ===== END DEBUG LOGGING =====
 
   // Event counter for stable unique keys (prevents blinking on re-renders)
   const eventCounterRef = useRef(0);
@@ -230,11 +224,14 @@ export function useStreamingQuery(
   const lastSseErrorTimeRef = useRef(0);
 
   const eventSourceRef = useRef<EventSource | null>(null);
+  const blockedReconnectSessionIdsRef = useRef<Set<string>>(new Set());
 
   // Track active job session ID for background job architecture
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   // Track last sequence number for reconnection support
   const lastSequenceRef = useRef(0);
+  // Handles stop pressed before job submission returns a session ID.
+  const stopRequestedRef = useRef(false);
 
   // Ref to track latest state for snapshot creation (avoids dependency array issues)
   const stateForSnapshotRef = useRef<Omit<ChatStreamingSnapshot, 'savedAt'>>({
@@ -290,7 +287,6 @@ export function useStreamingQuery(
       : `${data.eventType}:${data.timestamp || Date.now()}`;
 
     if (seenEventKeysRef.current.has(key)) {
-      console.log('[Dedup] Skipping duplicate event:', key);
       return true;
     }
 
@@ -298,7 +294,7 @@ export function useStreamingQuery(
     return false;
   }, []);
 
-  const stopStream = useCallback(() => {
+  const disconnectStream = useCallback(() => {
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
       eventSourceRef.current = null;
@@ -307,6 +303,31 @@ export function useStreamingQuery(
     setActiveSessionId(null);
   }, []);
 
+  const stopStream = useCallback(() => {
+    stopRequestedRef.current = true;
+    const sessionId = activeSessionId;
+    if (sessionId) {
+      blockedReconnectSessionIdsRef.current.add(sessionId);
+    }
+
+    // Always detach stream immediately so UI unblocks instantly.
+    disconnectStream();
+    setAgentStatus('idle');
+
+    if (!sessionId) {
+      return;
+    }
+
+    void jobsApi.cancel(sessionId)
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      })
+      .catch((err) => {
+        // If job already completed/cancelled, keep local UI stopped.
+        console.warn('[useStreamingQuery] Failed to cancel job:', err);
+      });
+  }, [activeSessionId, disconnectStream, queryClient]);
+
   /**
    * Hydrate state from a persisted research session (for page reload).
    * This restores the research panel from data loaded via API.
@@ -314,18 +335,10 @@ export function useStreamingQuery(
   const hydrateFromSession = useCallback((session: ResearchSession) => {
     // Only hydrate if we have plan data
     if (!session.plan?.steps) {
-      console.log('[Hydrate] No plan steps to hydrate');
       return;
     }
 
     const currentStepIdx = session.currentStepIndex;
-
-    console.log('[Hydrate] Session:', {
-      status: session.status,
-      planSteps: session.plan.steps.length,
-      stepsWithStatus: session.plan.steps.map(s => ({ title: s.title, status: s.status })),
-      currentStepIndex: currentStepIdx,
-    });
 
     // Convert persisted plan to UI plan format
     // Default to 'pending' if status is missing - safer than assuming 'completed'
@@ -363,11 +376,6 @@ export function useStreamingQuery(
     if (isDuplicateEvent(data)) {
       return; // Skip duplicate event
     }
-
-    console.log('[useStreamingQuery] processExternalEvent:', {
-      eventType: data.eventType,
-      streamingContentLength: streamingContent?.length ?? 0,
-    });
 
     // Add stable unique ID to each event for React keys
     const eventWithId = {
@@ -419,6 +427,14 @@ export function useStreamingQuery(
         break;
       }
 
+      case 'plan_review': {
+        // Capture plan review event for bridging to usePlanReview hook via ChatPage
+        const reviewEvent = data as unknown as PlanReviewEvent;
+        setPlanReviewEvent(reviewEvent);
+        setAgentStatus('planning');
+        break;
+      }
+
       case 'step_started': {
         const stepEvent = data as StepStartedEvent;
         const stepIndex = stepEvent.stepIndex;
@@ -455,7 +471,7 @@ export function useStreamingQuery(
       case 'tool_call': {
         const toolEvent = data as ToolCallEvent;
         setToolActivity({
-          toolName: toolEvent.toolName as 'web_search' | 'web_crawl',
+          toolName: toolEvent.toolName,
           toolArgs: toolEvent.toolArgs,
           callNumber: toolEvent.callNumber,
           sourcesCrawled: 0,
@@ -563,9 +579,6 @@ export function useStreamingQuery(
         // Check for structured output first (e.g., meeting_prep JSON with output_type)
         const structuredOutput = completedEvent.structured_output ?? completedEvent.structuredOutput;
         if (structuredOutput && typeof structuredOutput === 'object') {
-          console.log('[useStreamingQuery] research_completed: extracting structured_output', {
-            hasOutputType: 'output_type' in (structuredOutput as Record<string, unknown>),
-          });
           const jsonContent = JSON.stringify(structuredOutput);
           setStreamingContent(jsonContent);
         }
@@ -573,9 +586,6 @@ export function useStreamingQuery(
         else {
           const finalReport = completedEvent.final_report ?? completedEvent.finalReport;
           if (typeof finalReport === 'string' && finalReport.length > 0) {
-            console.log('[useStreamingQuery] research_completed: using final_report', {
-              length: finalReport.length,
-            });
             setStreamingContent(finalReport);
           }
         }
@@ -585,11 +595,6 @@ export function useStreamingQuery(
 
       case 'persistence_completed': {
         const persistenceEvent = data as PersistenceCompletedEvent;
-        console.log('[useStreamingQuery] persistence_completed:', {
-          chatId: persistenceEvent.chatId,
-          messageId: persistenceEvent.messageId,
-          wasDraft: persistenceEvent.wasDraft,
-        });
         setPersistenceResult(persistenceEvent);
         break;
       }
@@ -626,11 +631,6 @@ export function useStreamingQuery(
 
       // Handle job_completed event (final event from job stream)
       if (rawData.eventType === 'job_completed') {
-        console.log('[useStreamingQuery] job_completed received:', {
-          status: rawData.status,
-          streamingContentLength: streamingContent.length,
-          isStreaming,
-        });
         if (rawData.status === 'completed') {
           setAgentStatus('complete');
           // Don't clear streaming state - currentQueryMode needed for panel visibility
@@ -643,7 +643,8 @@ export function useStreamingQuery(
           setError(err);
           setErrorDetails({ error: err, errorCode: 'JOB_FAILED', recoverable: false });
         }
-        stopStream();
+        queryClient.invalidateQueries({ queryKey: ['jobs'] });
+        disconnectStream();
         return true; // Signal to close connection
       }
 
@@ -678,7 +679,7 @@ export function useStreamingQuery(
       console.error('[SSE] Error processing job event:', err);
       return false;
     }
-  }, [chatId, stopStream, onStreamComplete, processExternalEvent]);
+  }, [disconnectStream, onStreamComplete, processExternalEvent, queryClient]);
 
   /**
    * Handle SSE connection errors with retry logic.
@@ -704,26 +705,39 @@ export function useStreamingQuery(
 
     // EventSource auto-reconnects, so only give up after multiple rapid errors
     if (sseErrorCountRef.current >= 3 || eventSource.readyState === 2) {
-      console.log('[SSE] ERROR - Multiple errors or connection closed, stopping stream');
       const err = new Error('Stream connection failed');
       setError(err);
       setErrorDetails({ error: err, errorCode: 'CONNECTION_FAILED', recoverable: true });
       setAgentStatus('error');
-      stopStream();
-    } else {
-      console.log('[SSE] ERROR - Waiting for auto-reconnect (error count:', sseErrorCountRef.current, ')');
+      disconnectStream();
     }
-  }, [stopStream]);
+  }, [disconnectStream]);
 
   const sendQuery = useCallback(
-    async (query: string, queryMode?: QueryMode, researchDepth?: string, verifySources?: boolean, outputType?: string) => {
+    async (submission: QuerySubmission) => {
       if (!chatId) {
         console.error('No chat ID provided');
         return;
       }
 
+      const {
+        message: query,
+        queryMode,
+        researchDepth,
+        verifySources,
+        outputType,
+        sourceScope,
+        enabledSources,
+        disabledSources,
+        fileIds,
+        agentId,
+        enablePlanReview,
+      } = submission;
+
+      stopRequestedRef.current = false;
+
       // Close any existing connection
-      stopStream();
+      disconnectStream();
 
       // Store current query for later
       currentQueryRef.current = query;
@@ -763,7 +777,6 @@ export function useStreamingQuery(
       setActiveSessionId(null);
 
       // Store query mode for the session (used for activity panel visibility)
-      console.log('[useStreamingQuery] sendQuery: Setting currentQueryMode to:', queryMode || 'simple');
       setCurrentQueryMode(queryMode || 'simple');
 
       // =========================================================================
@@ -772,7 +785,6 @@ export function useStreamingQuery(
       // =========================================================================
       let sessionId: string;
       try {
-        console.log('[useStreamingQuery] Submitting job via jobs API');
         const job = await jobsApi.submit({
           chatId,
           query,
@@ -780,10 +792,30 @@ export function useStreamingQuery(
           researchDepth: researchDepth || 'auto',
           verifySources: verifySources ?? (queryMode === 'deep_research'),
           outputType: outputType || undefined,
+          sourceScope: sourceScope,
+          enabledSources: enabledSources,
+          disabledSources: disabledSources || [],
+          fileIds: fileIds,
+          agentId: agentId,
+          enablePlanReview: enablePlanReview,
         });
         sessionId = job.sessionId;
         setActiveSessionId(sessionId);
-        console.log('[useStreamingQuery] Job submitted, sessionId:', sessionId);
+        queryClient.invalidateQueries({ queryKey: ['jobs'] });
+
+        if (stopRequestedRef.current) {
+          blockedReconnectSessionIdsRef.current.add(sessionId);
+          void jobsApi.cancel(sessionId)
+            .then(() => {
+              queryClient.invalidateQueries({ queryKey: ['jobs'] });
+            })
+            .catch((err) => {
+              console.warn('[useStreamingQuery] Failed to cancel just-submitted job:', err);
+            });
+          setIsStreaming(false);
+          setAgentStatus('idle');
+          return;
+        }
       } catch (err) {
         console.error('[useStreamingQuery] Job submission failed:', err);
         const errorMessage = err instanceof Error ? err.message : 'Failed to submit research job';
@@ -811,9 +843,14 @@ export function useStreamingQuery(
         return;
       }
 
+      if (stopRequestedRef.current) {
+        setIsStreaming(false);
+        setAgentStatus('idle');
+        return;
+      }
+
       // Connect to job event stream (with sinceSequence=0 for new job)
       const streamUrl = jobsApi.streamUrl(sessionId, 0);
-      console.log('[useStreamingQuery] Connecting to job stream:', streamUrl);
 
       const eventSource = new EventSource(streamUrl);
       eventSourceRef.current = eventSource;
@@ -825,7 +862,7 @@ export function useStreamingQuery(
 
       eventSource.onerror = (e) => handleSseError(e, eventSource);
     },
-    [chatId, stopStream, handleJobEvent, handleSseError, onJobSubmissionError]
+    [chatId, disconnectStream, handleJobEvent, handleSseError, onJobSubmissionError, queryClient]
   );
 
   /**
@@ -834,22 +871,22 @@ export function useStreamingQuery(
    */
   const reconnectToJob = useCallback(
     async (sessionId: string) => {
-      console.log('[useStreamingQuery] Reconnecting to job:', sessionId);
+      if (blockedReconnectSessionIdsRef.current.has(sessionId)) {
+        return;
+      }
 
       // Close any existing connection
-      stopStream();
+      disconnectStream();
 
       // Fetch job to verify it's still in progress
       try {
         const job = await jobsApi.get(sessionId);
         if (job.status !== 'in_progress') {
-          console.log('[useStreamingQuery] Job not in progress, skipping reconnection. Status:', job.status);
           return;
         }
 
         // Restore query mode from the job
         if (job.queryMode) {
-          console.log('[useStreamingQuery] Restoring query mode from job:', job.queryMode);
           setCurrentQueryMode(job.queryMode as QueryMode);
         }
       } catch (err) {
@@ -870,7 +907,6 @@ export function useStreamingQuery(
 
       // Connect to job event stream (from beginning to replay all events)
       const streamUrl = jobsApi.streamUrl(sessionId, 0);
-      console.log('[useStreamingQuery] Connecting to job stream for reconnection:', streamUrl);
 
       const eventSource = new EventSource(streamUrl);
       eventSourceRef.current = eventSource;
@@ -881,16 +917,15 @@ export function useStreamingQuery(
 
       eventSource.onerror = (e) => handleSseError(e, eventSource);
     },
-    [stopStream, handleJobEvent, handleSseError]
+    [disconnectStream, handleJobEvent, handleSseError]
   );
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      console.log('[useStreamingQuery] Cleanup on unmount');
-      stopStream();
+      disconnectStream();
     };
-  }, [stopStream]);
+  }, [disconnectStream]);
 
   // Save/restore state when chat changes (preserves research panel state across chat switches)
   useEffect(() => {
@@ -898,8 +933,6 @@ export function useStreamingQuery(
     if (prevChatIdRef.current === chatId) {
       return;
     }
-
-    console.log('[useStreamingQuery] Chat change:', prevChatIdRef.current, '→', chatId);
 
     // 1. Save current chat's state before switching (if we have one with meaningful state)
     if (prevChatIdRef.current) {
@@ -915,13 +948,11 @@ export function useStreamingQuery(
           ...snapshot,
           savedAt: Date.now(),
         });
-        console.log('[useStreamingQuery] Saved state for:', prevChatIdRef.current);
       }
     }
 
     // 2. Close any open SSE connection
-    console.log('[useStreamingQuery] Stopping stream before chat change');
-    stopStream();
+    disconnectStream();
 
     // 3. Update ref
     prevChatIdRef.current = chatId;
@@ -930,7 +961,6 @@ export function useStreamingQuery(
     if (chatId) {
       const savedState = getStreamingState(chatId);
       if (savedState) {
-        console.log('[useStreamingQuery] Restoring saved state for:', chatId);
         // Restore UI state for display
         setEvents(savedState.events);
         setStreamingContent(savedState.streamingContent);
@@ -971,7 +1001,6 @@ export function useStreamingQuery(
         eventCounterRef.current = savedState.events.length;
         seenEventKeysRef.current.clear();
       } else {
-        console.log('[useStreamingQuery] No saved state, resetting to defaults');
         // Reset to defaults
         setEvents([]);
         setStreamingContent('');
@@ -1017,7 +1046,7 @@ export function useStreamingQuery(
       eventCounterRef.current = 0;
       seenEventKeysRef.current.clear();
     }
-  }, [chatId, stopStream]);
+  }, [chatId, disconnectStream]);
 
   return {
     isStreaming,
@@ -1049,5 +1078,7 @@ export function useStreamingQuery(
     setCurrentQueryMode,
     activeSessionId,
     reconnectToJob,
+    planReviewEvent,
+    clearPlanReviewEvent,
   };
 }

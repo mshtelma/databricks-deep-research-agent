@@ -6,17 +6,22 @@
  */
 
 import * as React from 'react'
-import { useActiveJobs, useCancelJob } from '@/hooks/useResearchJobs'
+import { useActiveJobsWithOptions, useCancelJob } from '@/hooks/useResearchJobs'
 import { cn } from '@/lib/utils'
 import type { Job } from '@/api/client'
 
 interface ActiveJobsIndicatorProps {
   className?: string
   onNavigateToChat?: (chatId: string) => void
+  enabled?: boolean
 }
 
-export function ActiveJobsIndicator({ className, onNavigateToChat }: ActiveJobsIndicatorProps) {
-  const { data, isLoading } = useActiveJobs()
+export function ActiveJobsIndicator({
+  className,
+  onNavigateToChat,
+  enabled = true,
+}: ActiveJobsIndicatorProps) {
+  const { data, isLoading } = useActiveJobsWithOptions({ enabled })
   const cancelMutation = useCancelJob()
   const [isOpen, setIsOpen] = React.useState(false)
   const dropdownRef = React.useRef<HTMLDivElement>(null)
@@ -56,8 +61,8 @@ export function ActiveJobsIndicator({ className, onNavigateToChat }: ActiveJobsI
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [isOpen])
 
-  // Don't render if loading or no active jobs
-  if (isLoading || activeCount === 0) {
+  // Don't render if disabled, loading, or no active jobs
+  if (!enabled || isLoading || activeCount === 0) {
     return null
   }
 

@@ -5,6 +5,7 @@ from typing import Literal
 from mlflow.entities import SpanType
 from pydantic import BaseModel
 
+from deep_research.agent.config import get_endpoint_override
 from deep_research.agent.prompts.reflector import (
     REFLECTOR_SYSTEM_PROMPT,
     REFLECTOR_USER_PROMPT,
@@ -88,6 +89,24 @@ def _format_source_topics(state: ResearchState) -> str:
     return "\n".join(topics)
 
 
+def _format_source_quality(state: ResearchState) -> str:
+    """Format source quality history for reflector prompt.
+
+    Args:
+        state: Current research state.
+
+    Returns:
+        Formatted string of source quality signals.
+    """
+    if not state.source_quality_history:
+        return "(No enterprise source data yet)"
+    lines = []
+    for source, signals in state.source_quality_history.items():
+        summary = ", ".join(signals[-5:])  # Last 5 signals
+        lines.append(f"- {source}: [{summary}]")
+    return "\n".join(lines)
+
+
 async def run_reflector(state: ResearchState, llm: LLMClient) -> ResearchState:
     """Run the Reflector agent to evaluate research progress.
 
@@ -143,6 +162,7 @@ async def run_reflector(state: ResearchState, llm: LLMClient) -> ResearchState:
         # Coverage analysis data
         remaining_steps = _format_remaining_steps(state)
         source_topics = _format_source_topics(state)
+        source_quality = _format_source_quality(state)
         min_steps = state.get_min_steps()
         steps_completed = len(state.get_completed_steps())
 
@@ -162,6 +182,7 @@ async def run_reflector(state: ResearchState, llm: LLMClient) -> ResearchState:
                     all_observations=observations_str or "(No observations yet)",
                     sources_count=len(state.sources),
                     source_topics=source_topics,
+                    source_quality=source_quality,
                     min_steps=min_steps,
                     steps_completed=steps_completed,
                 ),
@@ -172,6 +193,7 @@ async def run_reflector(state: ResearchState, llm: LLMClient) -> ResearchState:
             response = await llm.complete(
                 messages=messages,
                 tier=ModelTier.BULK_ANALYSIS,  # Use Gemini for decision classification
+                endpoint_override=get_endpoint_override(state, ModelTier.BULK_ANALYSIS),
                 structured_output=ReflectorOutput,
             )
 

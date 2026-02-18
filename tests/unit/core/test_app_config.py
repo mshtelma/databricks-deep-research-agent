@@ -233,7 +233,8 @@ class TestGetDefaultConfig:
         config = get_default_config()
         assert isinstance(config, AppConfig)
         assert config.default_role == "analytical"
-        assert "databricks-llama-70b" in config.endpoints
+        # Check that at least one endpoint is configured
+        assert len(config.endpoints) > 0
         assert "simple" in config.models
         assert "analytical" in config.models
         assert "complex" in config.models

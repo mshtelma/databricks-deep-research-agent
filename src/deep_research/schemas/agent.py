@@ -46,6 +46,7 @@ class SourceResponse(BaseSchema):
     relevance_score: float | None = None
     source_type: str = SourceType.WEB.value
     source_metadata: dict[str, Any] | None = None
+    is_cited: bool = False
 
 
 class AgentQueryResponse(BaseSchema):

@@ -10,17 +10,21 @@ Framework uses hasattr() to check which hooks each plugin implements.
 from typing import Protocol, runtime_checkable
 
 from .events import (
-    JobSubmittedEvent,
-    JobStartedEvent,
+    CustomAgentSelectedEvent,
+    DataLandscapeBuiltEvent,
+    DataSourceQueryEvent,
     JobCompletedEvent,
     JobFailedEvent,
-    SynthesisConfigEvent,
-    SynthesisStartedEvent,
+    JobStartedEvent,
+    JobSubmittedEvent,
+    StreamEvent,
     SynthesisChunkEvent,
     SynthesisCompletedEvent,
+    SynthesisConfigEvent,
+    SynthesisStartedEvent,
+    TemplateAppliedEvent,
     ValidationErrorEvent,
     ValidationSuccessEvent,
-    StreamEvent,
 )
 
 
@@ -181,5 +185,74 @@ class JobLifecycleListener(Protocol):
         WARNING: Called VERY frequently. Keep implementation fast!
 
         Timing: For every event from stream_research.
+        """
+        ...
+
+    # ========================================================================
+    # Enterprise Data Source Hooks (007-enterprise-data-sources, T064)
+    # ========================================================================
+
+    def on_data_source_query(self, event: DataSourceQueryEvent) -> None:
+        """
+        Called when an enterprise data source is queried.
+
+        Use for: Query tracking, analytics, performance monitoring.
+
+        Timing: After each Vector Search, Genie, or Knowledge Assistant query.
+
+        Event includes:
+        - source_type: 'vector_search', 'genie', 'knowledge_assistant'
+        - source_name: Specific source identifier
+        - query: The query that was executed
+        - result_count: Number of results returned
+        - duration_ms: Query execution time
+        """
+        ...
+
+    def on_template_applied(self, event: TemplateAppliedEvent) -> None:
+        """
+        Called when a prompt template is applied.
+
+        Use for: Template usage analytics, debugging.
+
+        Timing: When a template is rendered during research.
+
+        Event includes:
+        - template_id: ID of the applied template
+        - template_type: 'system', 'step', 'synthesis', 'query'
+        - template_source: 'system', 'plugin', 'user'
+        - variables: Variables used in rendering
+        """
+        ...
+
+    def on_custom_agent_selected(self, event: CustomAgentSelectedEvent) -> None:
+        """
+        Called when a custom agent is selected for research.
+
+        Use for: Agent usage tracking, analytics.
+
+        Timing: When user or system selects a custom agent.
+
+        Event includes:
+        - agent_id: ID of the selected agent
+        - agent_name: Human-readable agent name
+        - agent_source: 'plugin' or 'user'
+        """
+        ...
+
+    def on_data_landscape_built(self, event: DataLandscapeBuiltEvent) -> None:
+        """
+        Called when discovery phase builds the data landscape.
+
+        Use for: Discovery performance tracking, source effectiveness analysis.
+
+        Timing: After discovery phase completes source relevance assessment.
+
+        Event includes:
+        - sources_queried: Number of sources queried
+        - sources_with_results: Number of sources that returned results
+        - top_source: Most relevant source name
+        - top_source_relevance: Relevance score of top source
+        - total_duration_ms: Total discovery duration
         """
         ...

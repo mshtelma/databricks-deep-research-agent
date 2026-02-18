@@ -1,7 +1,7 @@
 """Unit tests for VectorSearchTool class."""
 
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -10,6 +10,12 @@ from deep_research.agent.tools.base import ResearchContext, ResearchTool
 from deep_research.agent.tools.vector_search import (
     VectorSearchTool,
     create_vector_search_tools_from_config,
+)
+from deep_research.services.vector_search_query import (
+    ColumnRoles,
+    VectorSearchQueryService,
+    VectorSearchResult,
+    extract_queryable_columns,
 )
 
 
@@ -22,35 +28,40 @@ def create_test_context() -> ResearchContext:
     )
 
 
-def create_mock_index(results: list[list[Any]] | None = None) -> MagicMock:
-    """Create a mock Vector Search index."""
-    mock_index = MagicMock()
-
+def make_mock_query_results(
+    results: list[list[Any]] | None = None,
+) -> list[VectorSearchResult]:
+    """Create mock VectorSearchResult list from raw rows."""
     if results is None:
-        # Default test results
-        results = [
-            ["Product Guide", "Content about products...", "https://example.com/1", 0.95],
-            ["API Reference", "API documentation...", "https://example.com/2", 0.87],
+        return [
+            VectorSearchResult(
+                id="doc_0",
+                title="Product Guide",
+                content="Content about products...",
+                url="https://example.com/1",
+                score=0.95,
+                metadata={},
+            ),
+            VectorSearchResult(
+                id="doc_1",
+                title="API Reference",
+                content="API documentation...",
+                url="https://example.com/2",
+                score=0.87,
+                metadata={},
+            ),
         ]
-
-    mock_response = {
-        "manifest": {
-            "column_count": 4,
-            "columns": [
-                {"name": "title", "type": "string"},
-                {"name": "content", "type": "string"},
-                {"name": "url", "type": "string"},
-                {"name": "score", "type": "double"},
-            ],
-        },
-        "result": {
-            "row_count": len(results),
-            "data_array": results,
-        },
-    }
-
-    mock_index.similarity_search.return_value = mock_response
-    return mock_index
+    return [
+        VectorSearchResult(
+            id=f"doc_{i}",
+            title=row[0] if len(row) > 0 else "Untitled",
+            content=row[1] if len(row) > 1 else "",
+            url=row[2] if len(row) > 2 else None,
+            score=row[3] if len(row) > 3 else 0.0,
+            metadata={},
+        )
+        for i, row in enumerate(results)
+    ]
 
 
 class TestVectorSearchToolDefinition:
@@ -203,28 +214,31 @@ class TestVectorSearchToolValidation:
 
 
 class TestVectorSearchToolExecution:
-    """Tests for VectorSearchTool execute method."""
+    """Tests for VectorSearchTool execute method using WorkspaceClient."""
 
     @pytest.mark.asyncio
     async def test_successful_search(self) -> None:
-        """Should execute search and return formatted results."""
+        """Should execute search via query service and return formatted results."""
         tool = VectorSearchTool(
             endpoint_name="test-endpoint",
             index_name="catalog.schema.test_index",
         )
 
-        mock_index = create_mock_index()
-        tool._index = mock_index  # Inject mock
+        mock_results = make_mock_query_results()
 
-        context = create_test_context()
-        result = await tool.execute({"query": "test query"}, context)
+        with patch.object(tool._query_service, "query", return_value=mock_results), \
+             patch("deep_research.agent.tools.vector_search.get_workspace_client") as mock_get_client:
+            mock_get_client.return_value = MagicMock()
+
+            context = create_test_context()
+            result = await tool.execute({"query": "test query"}, context)
 
         assert result.success
         assert "[0]" in result.content
         assert "[1]" in result.content
         assert "Product Guide" in result.content
         assert "API Reference" in result.content
-        assert "0.95" in result.content  # Score displayed
+        assert "0.95" in result.content
 
     @pytest.mark.asyncio
     async def test_search_returns_sources(self) -> None:
@@ -234,11 +248,14 @@ class TestVectorSearchToolExecution:
             index_name="catalog.schema.test_index",
         )
 
-        mock_index = create_mock_index()
-        tool._index = mock_index
+        mock_results = make_mock_query_results()
 
-        context = create_test_context()
-        result = await tool.execute({"query": "test query"}, context)
+        with patch.object(tool._query_service, "query", return_value=mock_results), \
+             patch("deep_research.agent.tools.vector_search.get_workspace_client") as mock_get_client:
+            mock_get_client.return_value = MagicMock()
+
+            context = create_test_context()
+            result = await tool.execute({"query": "test query"}, context)
 
         assert result.sources is not None
         assert len(result.sources) == 2
@@ -254,11 +271,14 @@ class TestVectorSearchToolExecution:
             index_name="catalog.schema.test_index",
         )
 
-        mock_index = create_mock_index()
-        tool._index = mock_index
+        mock_results = make_mock_query_results()
 
-        context = create_test_context()
-        result = await tool.execute({"query": "test query", "num_results": 5}, context)
+        with patch.object(tool._query_service, "query", return_value=mock_results), \
+             patch("deep_research.agent.tools.vector_search.get_workspace_client") as mock_get_client:
+            mock_get_client.return_value = MagicMock()
+
+            context = create_test_context()
+            result = await tool.execute({"query": "test query", "num_results": 5}, context)
 
         assert result.data is not None
         assert result.data["query"] == "test query"
@@ -273,31 +293,33 @@ class TestVectorSearchToolExecution:
             index_name="catalog.schema.test_index",
         )
 
-        mock_index = create_mock_index(results=[])
-        tool._index = mock_index
+        with patch.object(tool._query_service, "query", return_value=[]), \
+             patch("deep_research.agent.tools.vector_search.get_workspace_client") as mock_get_client:
+            mock_get_client.return_value = MagicMock()
 
-        context = create_test_context()
-        result = await tool.execute({"query": "no results query"}, context)
+            context = create_test_context()
+            result = await tool.execute({"query": "no results query"}, context)
 
         assert result.success
         assert "No results found" in result.content
 
     @pytest.mark.asyncio
     async def test_search_with_custom_num_results(self) -> None:
-        """Should pass num_results to search."""
+        """Should pass num_results to query service."""
         tool = VectorSearchTool(
             endpoint_name="test-endpoint",
             index_name="catalog.schema.test_index",
         )
 
-        mock_index = create_mock_index()
-        tool._index = mock_index
+        with patch.object(tool._query_service, "query", return_value=[]) as mock_query, \
+             patch("deep_research.agent.tools.vector_search.get_workspace_client") as mock_get_client:
+            mock_get_client.return_value = MagicMock()
 
-        context = create_test_context()
-        await tool.execute({"query": "test", "num_results": 15}, context)
+            context = create_test_context()
+            await tool.execute({"query": "test", "num_results": 15}, context)
 
-        mock_index.similarity_search.assert_called_once()
-        call_kwargs = mock_index.similarity_search.call_args.kwargs
+        mock_query.assert_called_once()
+        call_kwargs = mock_query.call_args.kwargs
         assert call_kwargs["num_results"] == 15
 
     @pytest.mark.asyncio
@@ -308,12 +330,12 @@ class TestVectorSearchToolExecution:
             index_name="catalog.schema.test_index",
         )
 
-        mock_index = create_mock_index()
-        mock_index.similarity_search.side_effect = Exception("Search failed")
-        tool._index = mock_index
+        with patch.object(tool._query_service, "query", side_effect=Exception("Search failed")), \
+             patch("deep_research.agent.tools.vector_search.get_workspace_client") as mock_get_client:
+            mock_get_client.return_value = MagicMock()
 
-        context = create_test_context()
-        result = await tool.execute({"query": "test"}, context)
+            context = create_test_context()
+            result = await tool.execute({"query": "test"}, context)
 
         assert not result.success
         assert result.error is not None
@@ -327,25 +349,23 @@ class TestVectorSearchToolExecution:
             index_name="catalog.schema.test_index",
         )
 
-        # Results with only title and score, missing content and url
-        mock_response = {
-            "manifest": {
-                "columns": [
-                    {"name": "title", "type": "string"},
-                    {"name": "score", "type": "double"},
-                ],
-            },
-            "result": {
-                "row_count": 1,
-                "data_array": [["Only Title", 0.9]],
-            },
-        }
-        mock_index = MagicMock()
-        mock_index.similarity_search.return_value = mock_response
-        tool._index = mock_index
+        mock_results = [
+            VectorSearchResult(
+                id="doc_0",
+                title="Only Title",
+                content="",
+                url=None,
+                score=0.9,
+                metadata={},
+            ),
+        ]
 
-        context = create_test_context()
-        result = await tool.execute({"query": "test"}, context)
+        with patch.object(tool._query_service, "query", return_value=mock_results), \
+             patch("deep_research.agent.tools.vector_search.get_workspace_client") as mock_get_client:
+            mock_get_client.return_value = MagicMock()
+
+            context = create_test_context()
+            result = await tool.execute({"query": "test"}, context)
 
         assert result.success
         assert "Only Title" in result.content
@@ -466,3 +486,478 @@ class TestCreateVectorSearchToolsFromConfig:
         tools = create_vector_search_tools_from_config(mock_config)
         assert len(tools) == 1
         assert tools[0].definition.name == "search_good_endpoint"
+
+
+class TestVectorSearchQueryService:
+    """Tests for the VectorSearchQueryService."""
+
+    def test_parse_response_sdk_objects(self) -> None:
+        """Should parse SDK-style response with attribute access."""
+        from deep_research.services.vector_search_query import VectorSearchQueryService
+
+        # Create mock SDK response with attribute access
+        col1 = MagicMock()
+        col1.name = "title"
+        col2 = MagicMock()
+        col2.name = "content"
+        col3 = MagicMock()
+        col3.name = "url"
+        col4 = MagicMock()
+        col4.name = "score"
+
+        response = MagicMock()
+        response.manifest.columns = [col1, col2, col3, col4]
+        response.result.data_array = [
+            ["Product Guide", "Content...", "https://example.com/1", 0.95],
+            ["API Docs", "API info...", "https://example.com/2", 0.87],
+        ]
+
+        service = VectorSearchQueryService()
+        results = service._parse_response(response, ["title", "content", "url"])
+
+        assert len(results) == 2
+        assert results[0].title == "Product Guide"
+        assert results[0].url == "https://example.com/1"
+        assert results[0].score == 0.95
+        assert results[1].title == "API Docs"
+
+    def test_parse_response_dict_format(self) -> None:
+        """Should parse dict-style response (legacy/testing)."""
+        from deep_research.services.vector_search_query import VectorSearchQueryService
+
+        response = {
+            "manifest": {
+                "columns": [
+                    {"name": "title"},
+                    {"name": "content"},
+                    {"name": "score"},
+                ],
+            },
+            "result": {
+                "data_array": [
+                    ["Title 1", "Content 1", 0.9],
+                ],
+            },
+        }
+
+        service = VectorSearchQueryService()
+        results = service._parse_response(response, ["title", "content"])
+
+        assert len(results) == 1
+        assert results[0].title == "Title 1"
+        assert results[0].score == 0.9
+
+    def test_parse_response_empty(self) -> None:
+        """Should return empty list for empty data_array."""
+        from deep_research.services.vector_search_query import VectorSearchQueryService
+
+        response = MagicMock()
+        response.manifest.columns = []
+        response.result.data_array = []
+
+        service = VectorSearchQueryService()
+        results = service._parse_response(response, [])
+
+        assert results == []
+
+    def test_build_filters_json_from_dict(self) -> None:
+        """Should convert dict filters to JSON string."""
+        from deep_research.services.vector_search_query import VectorSearchQueryService
+
+        result = VectorSearchQueryService.build_filters_json(
+            filters_dict={"category": "docs", "year >": 2023}
+        )
+        assert result is not None
+        import json
+        parsed = json.loads(result)
+        assert parsed["category"] == "docs"
+        assert parsed["year >"] == 2023
+
+    def test_build_filters_json_from_sql(self) -> None:
+        """Should pass through SQL filter string."""
+        from deep_research.services.vector_search_query import VectorSearchQueryService
+
+        result = VectorSearchQueryService.build_filters_json(
+            filters_sql="category = 'docs' AND year > 2023"
+        )
+        assert result == "category = 'docs' AND year > 2023"
+
+    def test_build_filters_json_none(self) -> None:
+        """Should return None when no filters provided."""
+        from deep_research.services.vector_search_query import VectorSearchQueryService
+
+        result = VectorSearchQueryService.build_filters_json()
+        assert result is None
+
+
+class TestExtractQueryableColumns:
+    """Tests for extract_queryable_columns utility function."""
+
+    def test_delta_sync_index(self) -> None:
+        """Should extract columns from DELTA_SYNC index with embedding_source_columns."""
+        # Mock embedding source column
+        source_col = MagicMock()
+        source_col.name = "text_content"
+
+        # Mock embedding vector column (should be excluded)
+        vector_col = MagicMock()
+        vector_col.name = "text_content_vector"
+
+        # Mock DELTA_SYNC spec
+        spec = MagicMock()
+        spec.embedding_source_columns = [source_col]
+        spec.embedding_vector_columns = [vector_col]
+        spec.schema_json = None
+
+        # Mock VectorIndex
+        index = MagicMock()
+        index.primary_key = "doc_id"
+        index.delta_sync_index_spec = spec
+        index.direct_access_index_spec = None
+
+        roles = extract_queryable_columns(index)
+
+        assert roles is not None
+        assert roles.id_column == "doc_id"
+        assert roles.content_column == "text_content"
+        assert "doc_id" in roles.all_columns
+        assert "text_content" in roles.all_columns
+        assert "text_content_vector" not in roles.all_columns
+
+    def test_direct_access_with_schema_json(self) -> None:
+        """Should extract columns from DIRECT_ACCESS index with schema_json."""
+        # Mock embedding source column
+        source_col = MagicMock()
+        source_col.name = "passage"
+
+        # Mock embedding vector column
+        vector_col = MagicMock()
+        vector_col.name = "embedding"
+
+        spec = MagicMock()
+        spec.embedding_source_columns = [source_col]
+        spec.embedding_vector_columns = [vector_col]
+        spec.schema_json = '{"row_id": "int", "passage": "string", "embedding": "array<float>", "source_url": "string"}'
+
+        index = MagicMock()
+        index.primary_key = "row_id"
+        index.delta_sync_index_spec = None
+        index.direct_access_index_spec = spec
+
+        roles = extract_queryable_columns(index)
+
+        assert roles is not None
+        assert roles.id_column == "row_id"
+        assert roles.content_column == "passage"
+        # schema_json columns minus vector column
+        assert "row_id" in roles.all_columns
+        assert "passage" in roles.all_columns
+        assert "source_url" in roles.all_columns
+        assert "embedding" not in roles.all_columns
+
+    def test_no_spec(self) -> None:
+        """Should return just primary_key when no spec available."""
+        index = MagicMock()
+        index.primary_key = "pk_col"
+        index.delta_sync_index_spec = None
+        index.direct_access_index_spec = None
+
+        roles = extract_queryable_columns(index)
+
+        assert roles is not None
+        assert roles.id_column == "pk_col"
+        assert roles.content_column is None
+        assert roles.all_columns == ["pk_col"]
+
+    def test_no_primary_key(self) -> None:
+        """Should return None when no primary_key."""
+        index = MagicMock()
+        index.primary_key = None
+
+        roles = extract_queryable_columns(index)
+
+        assert roles is None
+
+    def test_no_embedding_source_columns(self) -> None:
+        """Should handle index with no embedding_source_columns gracefully."""
+        spec = MagicMock()
+        spec.embedding_source_columns = None
+        spec.embedding_vector_columns = None
+        spec.schema_json = None
+
+        index = MagicMock()
+        index.primary_key = "id"
+        index.delta_sync_index_spec = spec
+        index.direct_access_index_spec = None
+
+        roles = extract_queryable_columns(index)
+
+        assert roles is not None
+        assert roles.id_column == "id"
+        assert roles.content_column is None
+        assert roles.all_columns == ["id"]
+
+
+class TestParseResponseWithColumnRoles:
+    """Tests for _parse_response with ColumnRoles (deterministic mapping)."""
+
+    def test_with_column_roles(self) -> None:
+        """Should map columns deterministically using ColumnRoles."""
+        roles = ColumnRoles(
+            id_column="doc_id",
+            content_column="text_body",
+            all_columns=["doc_id", "text_body", "source_path"],
+        )
+
+        # Mock response with non-standard column names
+        col1 = MagicMock()
+        col1.name = "doc_id"
+        col2 = MagicMock()
+        col2.name = "text_body"
+        col3 = MagicMock()
+        col3.name = "source_path"
+        col4 = MagicMock()
+        col4.name = "score"
+
+        response = MagicMock()
+        response.manifest.columns = [col1, col2, col3, col4]
+        response.result.data_array = [
+            ["abc123", "This is the document content about Python.", "/docs/python.md", 0.92],
+        ]
+
+        service = VectorSearchQueryService()
+        results = service._parse_response(
+            response,
+            ["doc_id", "text_body", "source_path"],
+            column_roles=roles,
+        )
+
+        assert len(results) == 1
+        assert results[0].id == "abc123"
+        assert results[0].content == "This is the document content about Python."
+        assert results[0].score == 0.92
+        # source_path is metadata, not a mapped field
+        assert results[0].metadata.get("source_path") == "/docs/python.md"
+        # Title derived from content since no "title" column
+        assert "Python" in results[0].title
+
+    def test_without_column_roles_legacy(self) -> None:
+        """Should use legacy hardcoded names when column_roles is None."""
+        col1 = MagicMock()
+        col1.name = "id"
+        col2 = MagicMock()
+        col2.name = "title"
+        col3 = MagicMock()
+        col3.name = "content"
+        col4 = MagicMock()
+        col4.name = "score"
+
+        response = MagicMock()
+        response.manifest.columns = [col1, col2, col3, col4]
+        response.result.data_array = [
+            ["doc_0", "My Title", "My Content", 0.85],
+        ]
+
+        service = VectorSearchQueryService()
+        results = service._parse_response(response, ["id", "title", "content"])
+
+        assert len(results) == 1
+        assert results[0].id == "doc_0"
+        assert results[0].title == "My Title"
+        assert results[0].content == "My Content"
+        assert results[0].score == 0.85
+
+    def test_column_roles_no_content_column(self) -> None:
+        """Should handle ColumnRoles with content_column=None."""
+        roles = ColumnRoles(
+            id_column="pk",
+            content_column=None,
+            all_columns=["pk"],
+        )
+
+        col1 = MagicMock()
+        col1.name = "pk"
+        col2 = MagicMock()
+        col2.name = "score"
+
+        response = MagicMock()
+        response.manifest.columns = [col1, col2]
+        response.result.data_array = [
+            ["row_1", 0.77],
+        ]
+
+        service = VectorSearchQueryService()
+        results = service._parse_response(response, ["pk"], column_roles=roles)
+
+        assert len(results) == 1
+        assert results[0].id == "row_1"
+        assert results[0].content == ""
+        assert results[0].title == "Untitled"
+
+    def test_title_derived_from_content(self) -> None:
+        """Should derive title from content when no title column exists."""
+        roles = ColumnRoles(
+            id_column="id",
+            content_column="body",
+            all_columns=["id", "body"],
+        )
+
+        col1 = MagicMock()
+        col1.name = "id"
+        col2 = MagicMock()
+        col2.name = "body"
+        col3 = MagicMock()
+        col3.name = "score"
+
+        response = MagicMock()
+        response.manifest.columns = [col1, col2, col3]
+        long_content = "A" * 100
+        response.result.data_array = [
+            ["d1", long_content, 0.9],
+        ]
+
+        service = VectorSearchQueryService()
+        results = service._parse_response(response, ["id", "body"], column_roles=roles)
+
+        assert len(results) == 1
+        # Title should be first 80 chars + "..."
+        assert results[0].title.endswith("...")
+        assert len(results[0].title) <= 84  # 80 + "..."
+
+
+class TestUserVectorSearchToolColumnDiscovery:
+    """Tests for UserVectorSearchTool lazy column discovery."""
+
+    @pytest.mark.asyncio
+    async def test_discovers_columns_on_first_execute(self) -> None:
+        """Should call get_index() and populate columns on first execute."""
+        from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
+
+        # Mock OBO client
+        mock_obo_client = MagicMock()
+
+        # Mock the index returned by get_index()
+        source_col = MagicMock()
+        source_col.name = "chunk_text"
+        vector_col = MagicMock()
+        vector_col.name = "chunk_embedding"
+
+        mock_spec = MagicMock()
+        mock_spec.embedding_source_columns = [source_col]
+        mock_spec.embedding_vector_columns = [vector_col]
+        mock_spec.schema_json = None
+
+        mock_index = MagicMock()
+        mock_index.primary_key = "chunk_id"
+        mock_index.delta_sync_index_spec = mock_spec
+        mock_index.direct_access_index_spec = None
+
+        # Mock WorkspaceClient
+        mock_client = MagicMock()
+        mock_client.vector_search_indexes.get_index.return_value = mock_index
+
+        # Mock query service to return results
+        mock_results = [
+            VectorSearchResult(
+                id="chunk_1",
+                title="Test",
+                content="Test content",
+                url=None,
+                score=0.9,
+                metadata={},
+            )
+        ]
+
+        mock_obo_client.get_client = AsyncMock(return_value=mock_client)
+
+        tool = UserVectorSearchTool(
+            obo_client=mock_obo_client,
+            source_name="test_source",
+            endpoint_name="test_ep",
+            index_name="catalog.schema.test_index",
+            # columns=None -> empty list -> triggers discovery
+        )
+
+        # Verify columns start empty
+        assert tool._columns == []
+        assert tool._column_roles is None
+
+        context = create_test_context()
+
+        with patch.object(tool._query_service, "query", return_value=mock_results):
+            result = await tool.execute({"query": "test query"}, context)
+
+        assert result.success
+        # Columns should be populated after discovery
+        assert "chunk_id" in tool._columns
+        assert "chunk_text" in tool._columns
+        assert "chunk_embedding" not in tool._columns
+        assert tool._column_roles is not None
+        assert tool._column_roles.id_column == "chunk_id"
+        assert tool._column_roles.content_column == "chunk_text"
+
+        # get_index was called once
+        mock_client.vector_search_indexes.get_index.assert_called_once_with(
+            "catalog.schema.test_index"
+        )
+
+    @pytest.mark.asyncio
+    async def test_skips_discovery_when_columns_provided(self) -> None:
+        """Should NOT call get_index() when columns are pre-provided."""
+        from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
+
+        mock_obo_client = MagicMock()
+        mock_client = MagicMock()
+        mock_obo_client.get_client = AsyncMock(return_value=mock_client)
+
+        mock_results = [
+            VectorSearchResult(
+                id="doc_0",
+                title="Test",
+                content="Test content",
+                url=None,
+                score=0.9,
+                metadata={},
+            )
+        ]
+
+        tool = UserVectorSearchTool(
+            obo_client=mock_obo_client,
+            source_name="test_source",
+            endpoint_name="test_ep",
+            index_name="catalog.schema.test_index",
+            columns=["doc_id", "text_content", "source_url"],
+        )
+
+        context = create_test_context()
+
+        with patch.object(tool._query_service, "query", return_value=mock_results):
+            result = await tool.execute({"query": "test query"}, context)
+
+        assert result.success
+        # get_index should NOT have been called
+        mock_client.vector_search_indexes.get_index.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_discovery_failure_returns_error(self) -> None:
+        """Should return error ToolResult when column discovery fails."""
+        from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
+
+        mock_obo_client = MagicMock()
+        mock_client = MagicMock()
+        mock_client.vector_search_indexes.get_index.side_effect = Exception("PERMISSION_DENIED")
+        mock_obo_client.get_client = AsyncMock(return_value=mock_client)
+
+        tool = UserVectorSearchTool(
+            obo_client=mock_obo_client,
+            source_name="test_source",
+            endpoint_name="test_ep",
+            index_name="catalog.schema.test_index",
+            # No columns -> discovery needed -> will fail
+        )
+
+        context = create_test_context()
+        result = await tool.execute({"query": "test query"}, context)
+
+        assert not result.success
+        assert "unable to determine" in result.content

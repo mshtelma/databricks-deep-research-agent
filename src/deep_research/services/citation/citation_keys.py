@@ -19,6 +19,32 @@ from deep_research.services.citation.evidence_selector import RankedEvidence
 
 logger = logging.getLogger(__name__)
 
+# URL patterns identifying Databricks enterprise resources.
+# Enterprise sources should use title-based citation keys because their
+# URL domains (workspace hostnames) are not meaningful to readers.
+_ENTERPRISE_URL_PATTERNS = (
+    # Custom scheme fallbacks (backward compat for persisted sources)
+    "genie://",
+    "vs://",
+    "ka://",
+    "enterprise://",
+    # Workspace URL path segments (new proper URLs)
+    "/sql/genie/spaces/",
+    "/ml/endpoints/",
+    "/explore/data/",
+    "/compute/vector-search",
+)
+
+
+def _is_enterprise_url(url: str) -> bool:
+    """Check if URL points to a Databricks enterprise resource.
+
+    Enterprise sources should use title-based citation keys because
+    the URL domain (e.g., 'adb-123.azuredatabricks.net') is not
+    meaningful for human readers.
+    """
+    return any(pattern in url for pattern in _ENTERPRISE_URL_PATTERNS)
+
 
 def extract_domain_key(url: str) -> str:
     """Extract domain-based citation key from URL.
@@ -118,8 +144,9 @@ def build_citation_key_map(evidence_pool: list[RankedEvidence]) -> dict[int, str
     used_keys: set[str] = set()
 
     for idx, evidence in enumerate(evidence_pool):
-        # Priority: domain > title > fallback
-        if evidence.source_url:
+        # For enterprise sources, prefer title-based keys (URL domain is meaningless).
+        # For web sources, prefer domain-based keys (arxiv.org → "Arxiv").
+        if evidence.source_url and not _is_enterprise_url(evidence.source_url):
             base_key = extract_domain_key(evidence.source_url)
         elif evidence.source_title:
             base_key = abbreviate_title(evidence.source_title)

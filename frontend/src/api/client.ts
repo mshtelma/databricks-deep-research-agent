@@ -120,6 +120,9 @@ export const chatsApi = {
       method: 'POST',
     }),
 
+  getFull: (chatId: string) =>
+    request<import('../types').ChatFullResponse>(`/chats/${chatId}/full`),
+
   export: async (chatId: string, format: 'markdown' | 'json'): Promise<{ content: string; filename: string }> => {
     const url = `${API_BASE_URL}/chats/${chatId}/export?format=${format}`
     const response = await fetch(url, {
@@ -289,6 +292,12 @@ export const jobsApi = {
     researchDepth?: string
     verifySources?: boolean
     outputType?: string
+    sourceScope?: 'enterprise_only' | 'web_only' | 'all'
+    enabledSources?: string[]
+    disabledSources?: string[]
+    fileIds?: string[]
+    agentId?: string
+    enablePlanReview?: boolean
   }) =>
     request<Job>('/research/jobs', {
       method: 'POST',
@@ -299,6 +308,12 @@ export const jobsApi = {
         research_depth: data.researchDepth || 'auto',
         verify_sources: data.verifySources ?? true,
         output_type: data.outputType || null,
+        source_scope: data.sourceScope || null,
+        enabled_sources: data.enabledSources || null,
+        disabled_sources: data.disabledSources || [],
+        file_ids: data.fileIds || null,
+        agent_id: data.agentId || null,
+        enable_plan_review: data.enablePlanReview ?? false,
       }),
     }),
 

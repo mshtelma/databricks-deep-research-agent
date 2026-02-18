@@ -27,6 +27,8 @@ interface AgentMessageWithCitationsProps {
   isStreaming?: boolean;
   onRegenerate?: () => void;
   className?: string;
+  /** Whether to fetch claims/citations from API for this message */
+  enableCitationFetch?: boolean;
   /** Hide the Sources & Citations section (when shown in ResearchPanel) */
   hideSourcesSection?: boolean;
 }
@@ -43,11 +45,12 @@ export function AgentMessageWithCitations({
   isStreaming = false,
   onRegenerate,
   className,
+  enableCitationFetch = true,
   hideSourcesSection = false,
 }: AgentMessageWithCitationsProps) {
   // Fetch citations for this message
   // Only fetch if message has a valid UUID (not a placeholder like 'streaming-*', 'session-*', etc.)
-  const shouldFetchCitations = message.id && isValidUUID(message.id);
+  const shouldFetchCitations = enableCitationFetch && message.id && isValidUUID(message.id);
 
   const {
     claims,

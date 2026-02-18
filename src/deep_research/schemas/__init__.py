@@ -33,11 +33,20 @@ from deep_research.schemas.research import (
     ResearchPlan,
     ResearchSession,
 )
+from deep_research.schemas.research_request import (
+    ResearchRequest,
+    ResearchRequestWithChat,
+)
 from deep_research.schemas.streaming import (
     AgentCompletedEvent,
     AgentStartedEvent,
     ClarificationNeededEvent,
     PlanCreatedEvent,
+    PlanForReview,
+    PlanReviewEvent,
+    PlanReviewResponseEvent,
+    PlanReviewTimeoutEvent,
+    PlanStepForReview,
     ReflectionDecisionEvent,
     ResearchCompletedEvent,
     StepCompletedEvent,
@@ -89,6 +98,15 @@ __all__ = [
     "SynthesisProgressEvent",
     "ResearchCompletedEvent",
     "StreamErrorEvent",
+    # Plan Review (007-enterprise-data-sources)
+    "PlanReviewEvent",
+    "PlanReviewResponseEvent",
+    "PlanReviewTimeoutEvent",
+    "PlanForReview",
+    "PlanStepForReview",
+    # Research Request (007-enterprise-data-sources)
+    "ResearchRequest",
+    "ResearchRequestWithChat",
     # Feedback
     "FeedbackRequest",
     "FeedbackResponse",

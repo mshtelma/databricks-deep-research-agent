@@ -31,6 +31,18 @@ The Deep Research Agent uses SQLAlchemy models for database persistence and Pyda
 │    │           │                                                             │
 │    │           └── ResearchEvent (activity log)                              │
 │    │                                                                         │
+│    ├── CustomAgent (reusable research profile)                               │
+│    │     │                                                                   │
+│    │     └── AgentPresetStep (fixed research step)                           │
+│    │                                                                         │
+│    ├── PromptTemplate (reusable prompt with variables)                       │
+│    │                                                                         │
+│    ├── UserDataSource (enterprise data source config)                        │
+│    │                                                                         │
+│    ├── UploadedFile (user-uploaded document)                                 │
+│    │     │                                                                   │
+│    │     └── FileChunk (text chunk for search)                               │
+│    │                                                                         │
 │    └── UserPreferences (system instructions, defaults)                       │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -419,6 +431,128 @@ class ResearchEvent(Base):
 | `claim_verified` | Claim verification result |
 | `verification_summary` | Overall verification stats |
 
+## Enterprise & Customization Entities
+
+### CustomAgent
+
+**File**: `src/models/custom_agent.py` | **Table**: `custom_agents`
+
+A reusable research profile bundling model, source, prompt, and workflow configuration.
+
+**Key Fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `owner_id` | str | Databricks user ID of creator |
+| `name` | str | Display name (unique per owner) |
+| `description` | str | Human-readable description |
+| `visibility` | str | `private`, `workspace`, or `system` |
+| `source_scope` | str | `all`, `enterprise_only`, `web_only` |
+| `enabled_sources` | JSONB | Explicit source names to enable |
+| `disabled_sources` | JSONB | Source names to disable |
+| `default_depth` | str | `light`, `medium`, `extended` |
+| `default_mode` | str | `planner`, `manual`, `hybrid` |
+| `use_planner` | bool | Whether to use AI planner |
+| `model_overrides` | JSONB | Tier-to-endpoint mapping |
+| `domain_filter_mode` | str | `include`, `exclude`, `both` |
+| `include_domains` | JSONB | Domain whitelist patterns |
+| `exclude_domains` | JSONB | Domain blacklist patterns |
+| `system_prompt_template_id` | UUID | FK to PromptTemplate |
+| `synthesis_template_id` | UUID | FK to PromptTemplate |
+| `output_format` | str | `markdown` or `json` |
+| `source_query_configs` | JSONB | Per-source query overrides |
+
+**Relationships**: `preset_steps` (1:N → AgentPresetStep), `system_prompt_template` (N:1 → PromptTemplate), `synthesis_template` (N:1 → PromptTemplate)
+
+### AgentPresetStep
+
+**File**: `src/models/custom_agent.py` | **Table**: `agent_preset_steps`
+
+A fixed research step within a custom agent's workflow.
+
+**Key Fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `agent_id` | UUID | FK to parent CustomAgent |
+| `title` | str | Short step title |
+| `description` | str | What this step should accomplish |
+| `order` | int | Execution order (1-based) |
+| `is_required` | bool | Whether step must execute |
+| `source_hints` | JSONB | Preferred sources, search queries, filters |
+| `source_scope` | str | Optional source scope override for this step |
+
+### PromptTemplate
+
+**File**: `src/models/prompt_template.py` | **Table**: `prompt_templates`
+
+A reusable prompt template with optional `{{variable}}` placeholders.
+
+**Key Fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `owner_id` | str | Databricks user ID of creator |
+| `name` | str | Display name (unique per owner + type) |
+| `content` | str | Template text with optional `{{var}}` placeholders |
+| `type` | str | `system`, `step`, `synthesis`, `query` |
+| `description` | str | Human-readable description |
+| `visibility` | str | `private` or `workspace` |
+| `is_default` | bool | Whether this is the default for its type |
+| `variables` | JSONB | Extracted variable metadata |
+| `tags` | JSONB | Tags for filtering |
+
+### UserDataSource
+
+**File**: `src/models/data_source.py` | **Table**: `user_data_sources`
+
+A user-configured enterprise data source (Vector Search index, Genie space, or Knowledge Assistant).
+
+**Key Fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `owner_id` | str | Databricks user ID of creator |
+| `type` | str | `vector_search`, `genie`, `knowledge_assistant`, etc. |
+| `name` | str | Display name (unique per owner) |
+| `description` | str | Human-readable description |
+| `endpoint_identifier` | str | Primary identifier (index name, space ID, etc.) |
+| `config` | JSONB | Type-specific configuration |
+| `visibility` | str | `private` or `workspace` |
+| `validation_status` | str | `pending`, `valid`, `invalid`, `expired` |
+| `last_validated_at` | datetime | When OBO access was last validated |
+
+### UploadedFile
+
+**File**: `src/models/uploaded_file.py` | **Table**: `uploaded_files`
+
+A user-uploaded document (PDF, TXT, MD, DOCX) for research.
+
+**Key Fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `owner_id` | str | Databricks user ID of uploader |
+| `session_id` | UUID | Optional session scope (ephemeral files) |
+| `filename` | str | Original filename |
+| `file_type` | str | `pdf`, `txt`, `md`, `docx` |
+| `file_size` | int | Size in bytes |
+| `storage_path` | str | Path in storage |
+| `processing_status` | str | `pending`, `processing`, `ready`, `failed` |
+| `chunk_count` | int | Number of chunks after processing |
+| `expires_at` | datetime | Optional expiration for session-scoped files |
+
+**Relationship**: `chunks` (1:N → FileChunk, cascade delete)
+
+### FileChunk
+
+**File**: `src/models/uploaded_file.py` | **Table**: `file_chunks`
+
+A text chunk extracted from an uploaded file for content-based search.
+
+**Key Fields**:
+| Field | Type | Description |
+|-------|------|-------------|
+| `file_id` | UUID | FK to parent UploadedFile |
+| `chunk_index` | int | Position in file (0-indexed) |
+| `content` | str | Text content |
+| `metadata_` | JSONB | Location metadata (page_number, section) |
+
 ## Pydantic Schemas
 
 API request/response schemas are in `src/schemas/`:
@@ -503,9 +637,17 @@ alembic downgrade -1
 | `007_tiered_query_modes` | Query mode fields |
 | `008_research_session_lifecycle` | Session status tracking |
 | `009_background_research_jobs` | Background job support |
+| `014_user_data_sources` | Enterprise data source configuration |
+| `015_create_prompt_templates` | Prompt templates |
+| `016_create_custom_agents` | Custom agents and preset steps |
+| `016_create_uploaded_files` | File upload and chunks |
+| `017_custom_agent_model_overrides` | Model tier overrides for agents |
+| `018_add_template_description` | Template description field |
+| `019_add_source_query_configs` | Per-source query configuration |
 
 ## See Also
 
 - [API Reference](./api.md) - REST endpoints
 - [Architecture](./architecture.md) - System overview
+- [Custom Agents](./custom-agents.md) - Custom agent configuration guide
 - [Citation Pipeline](./citation-pipeline.md) - Verification process

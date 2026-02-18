@@ -21,11 +21,26 @@ const ACTIVE_JOBS_KEY = [...JOBS_KEY, 'in_progress']
  * Polls every 5 seconds to keep status updated.
  */
 export function useActiveJobs() {
+  return useActiveJobsWithOptions()
+}
+
+interface UseActiveJobsOptions {
+  enabled?: boolean
+}
+
+export function useActiveJobsWithOptions(options?: UseActiveJobsOptions) {
+  const enabled = options?.enabled !== false
   return useQuery({
     queryKey: ACTIVE_JOBS_KEY,
     queryFn: () => jobsApi.list({ status: 'in_progress' }),
-    refetchInterval: 5000, // Poll every 5 seconds
-    staleTime: 2000, // Consider data stale after 2 seconds
+    enabled,
+    // Poll only while there are active jobs; otherwise keep it event-driven.
+    refetchInterval: (query) => {
+      const activeCount = query.state.data?.activeCount ?? 0
+      return activeCount > 0 ? 5000 : false
+    },
+    staleTime: 10000,
+    refetchOnWindowFocus: enabled,
   })
 }
 
@@ -104,8 +119,10 @@ export function useChatActiveJob(chatId: string | null) {
     queryKey: [...JOBS_KEY, 'chat', chatId, 'active'],
     queryFn: () => (chatId ? jobsApi.getChatActiveJob(chatId) : null),
     enabled: !!chatId,
-    staleTime: 2000,
-    refetchInterval: 3000, // Poll to detect when job starts/stops
+    staleTime: 10000,
+    // Poll only when a job is active to keep completion detection responsive.
+    refetchInterval: (query) => (query.state.data ? 3000 : false),
+    refetchOnWindowFocus: false,
   })
 }
 

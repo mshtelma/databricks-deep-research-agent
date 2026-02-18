@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { messagesApi } from '../api/client'
+import { CHAT_FULL_KEY } from './useChatFull'
 import type { ResearchDepth } from '../types'
 
 const MESSAGES_KEY = ['messages']
@@ -12,6 +13,7 @@ export function useMessages(
     queryKey: [...MESSAGES_KEY, chatId, params],
     queryFn: () => (chatId ? messagesApi.list(chatId, params) : null),
     enabled: !!chatId,
+    staleTime: 2 * 60 * 1000, // Prefer cache when switching chats; mutations invalidate explicitly
     // Keep gcTime: Infinity to prevent garbage collection (memory benefit)
     // Remove staleTime: Infinity so TanStack Query will background-refetch
     // This gives: instant display from cache + eventual consistency from refetch
@@ -38,6 +40,7 @@ export function useSendMessage() {
       }),
     onSuccess: (_, { chatId }) => {
       queryClient.invalidateQueries({ queryKey: [...MESSAGES_KEY, chatId] })
+      queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, chatId] })
       queryClient.invalidateQueries({ queryKey: ['chats', chatId] })
     },
   })
@@ -58,6 +61,7 @@ export function useEditMessage() {
     }) => messagesApi.edit(chatId, messageId, { content }),
     onSuccess: (_, { chatId }) => {
       queryClient.invalidateQueries({ queryKey: [...MESSAGES_KEY, chatId] })
+      queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, chatId] })
     },
   })
 }
@@ -70,6 +74,7 @@ export function useRegenerateMessage() {
       messagesApi.regenerate(chatId, messageId),
     onSuccess: (_, { chatId }) => {
       queryClient.invalidateQueries({ queryKey: [...MESSAGES_KEY, chatId] })
+      queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, chatId] })
     },
   })
 }

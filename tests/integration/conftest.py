@@ -13,13 +13,24 @@ from collections.abc import AsyncGenerator
 
 import mlflow
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import (
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from deep_research.agent.tools.web_crawler import WebCrawler
 from deep_research.core.app_config import clear_config_cache
-from deep_research.db.session import close_db, get_session_maker
+from deep_research.core.config import get_settings
+import deep_research.db.session as _db_mod
+from deep_research.db.session import get_database_url
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.search.brave import BraveSearchClient
+
+# Keep stale engines alive so Python's GC doesn't finalize their pooled
+# asyncpg connections (Connection.__del__ → terminate() → transport.abort()
+# → loop.call_soon() on the dead loop → RuntimeError).
+_stale_engines: list[object] = []
 
 
 # ---------------------------------------------------------------------------
@@ -127,17 +138,63 @@ async def web_crawler() -> WebCrawler:
 async def db_session() -> AsyncGenerator[AsyncSession, None]:
     """Provide async database session for tests.
 
-    Ensures engine is fresh for each test to avoid event loop mismatch.
-    Rolls back all changes after test completes for isolation.
+    Creates a **test-local** engine on the current event loop so that
+    creation and disposal happen on the same loop — no cross-loop errors.
+
+    Why not reuse the module-level engine via ``get_session_maker()``?
+    -----------------------------------------------------------------
+    pytest-asyncio creates a *new* event loop for every test function.
+    The module-level engine from the previous test holds asyncpg
+    connections bound to that test's (now-dead) loop.  Calling
+    ``engine.dispose()`` on those connections triggers::
+
+        RuntimeError: Event loop is closed
+
+    SQLAlchemy's pool catches the error internally and **logs** it at
+    ERROR level (with full traceback) — a try/except around ``dispose()``
+    in *our* code cannot suppress it because the exception never
+    propagates to us.
+
+    The fix: never call ``dispose()`` cross-loop.  Instead we:
+
+    1. Detach the stale engine from module state (no dispose).
+    2. Stash it in ``_stale_engines`` so GC won't run asyncpg
+       ``Connection.__del__`` (which hits the same dead-loop path).
+    3. Build a fresh, test-local engine on the *current* loop.
+    4. Dispose it ourselves at teardown (safe — same loop).
 
     Note: Requires database configuration (LAKEBASE_* or DATABASE_URL).
     """
-    # Clear any cached engine from previous tests (different event loop)
-    await close_db()
+    # 1. Detach stale engine — do NOT dispose (connections are on a dead loop).
+    if _db_mod._engine is not None:
+        _stale_engines.append(_db_mod._engine)
+        _db_mod._engine = None
+        _db_mod._async_session_maker = None
 
-    session_maker = get_session_maker()
+    # 2. Build a fresh engine scoped to THIS test's event loop.
+    settings = get_settings()
+    url = get_database_url(settings)
+    connect_args = {"ssl": True} if settings.use_lakebase else {}
 
-    async with session_maker() as session:
+    engine = create_async_engine(
+        url,
+        echo=settings.debug,
+        pool_size=5,
+        max_overflow=10,
+        pool_pre_ping=True,
+        connect_args=connect_args,
+    )
+    maker = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autocommit=False,
+        autoflush=False,
+    )
+
+    async with maker() as session:
         yield session
-        # Rollback to clean up any test data
         await session.rollback()
+
+    # 3. Dispose OUR engine (safe — created and destroyed on the same loop).
+    await engine.dispose()

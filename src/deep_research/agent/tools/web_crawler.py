@@ -135,18 +135,22 @@ class CrawlOutput:
 class WebCrawler:
     """Async web crawler for fetching and parsing pages."""
 
-    def __init__(self, max_concurrent: int = 5):
+    def __init__(self, max_concurrent: int = 5, verify_ssl: bool = True):
         """Initialize web crawler.
 
         Args:
             max_concurrent: Maximum concurrent requests.
+            verify_ssl: Whether to verify SSL certificates. Disable behind corporate proxies.
         """
         self._max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
         # Don't set User-Agent here - we'll set it per-request for rotation
+        if not verify_ssl:
+            logger.warning("SSL verification disabled for web crawler HTTP client")
         self._client = httpx.AsyncClient(
             timeout=FETCH_TIMEOUT,
             follow_redirects=True,
+            verify=verify_ssl,
         )
 
         # Rate limiting state
@@ -512,6 +516,7 @@ class WebCrawlTool:
                 },
                 "required": [],  # Either index or url must be provided
             },
+            source_type="web_crawl",
         )
 
     @property

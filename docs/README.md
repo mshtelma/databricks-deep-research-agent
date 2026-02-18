@@ -17,6 +17,7 @@ The Deep Research Agent combines a **5-agent orchestration architecture** with a
 
 | Document | Description |
 |----------|-------------|
+| [Getting Started](./getting-started.md) | Quick setup guide for local development |
 | [Architecture](./architecture.md) | System architecture, technology stack, key design decisions |
 | [Agent Orchestration](./agents.md) | 5-agent design, orchestration flow, state management |
 | [Citation Pipeline](./citation-pipeline.md) | 7-stage verification pipeline with scientific foundations |
@@ -26,6 +27,15 @@ The Deep Research Agent combines a **5-agent orchestration architecture** with a
 | [Data Models](./data-models.md) | Entity definitions and relationships |
 | [API Reference](./api.md) | REST endpoints and SSE event types |
 | [Deployment](./deployment.md) | Databricks Apps deployment guide |
+
+### Enterprise & Customization
+
+| Document | Description |
+|----------|-------------|
+| [Custom Agents](./custom-agents.md) | Create reusable research profiles with model, source, and prompt overrides |
+| [Data Source Configuration](./data-source-config.md) | User guide for configuring Vector Search, Genie, and Knowledge Assistants |
+| [Plugin Development](./plugin-development.md) | Developer guide for creating custom data source plugins |
+| [Metrics & Dashboards](./metrics-dashboards.md) | Monitoring data source performance and creating dashboards |
 
 ## Quick Start
 
@@ -72,10 +82,15 @@ make deploy TARGET=dev BRAVE_SCOPE=msh
 │  └─────────────┘    │  │ (Gemini)│ │  (Claude)  │ │(Claude ER)│          │ │
 │                     │  └─────────┘ └────────────┘ └───────────┘          │ │
 │  ┌─────────────┐    └─────────────────────────────────────────────────────┘ │
-│  │ Brave Search│                                                            │
-│  │     API     │    ┌─────────────────────────────────────────────────────┐ │
-│  └─────────────┘    │              MLflow Tracing (3.8+)                  │ │
-│                     └─────────────────────────────────────────────────────┘ │
+│  │ Brave Search│    ┌─────────────────────────────────────────────────────┐ │
+│  │     API     │    │   Custom Agent Config Layer                         │ │
+│  └─────────────┘    │   Model overrides │ Source scope │ Domain filters   │ │
+│  ┌─────────────┐    └─────────────────────────────────────────────────────┘ │
+│  │ Enterprise  │                                                            │
+│  │  Sources    │    ┌─────────────────────────────────────────────────────┐ │
+│  │ (VS/Genie/  │    │              MLflow Tracing (3.8+)                  │ │
+│  │  Assistant) │    └─────────────────────────────────────────────────────┘ │
+│  └─────────────┘                                                            │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -114,3 +129,6 @@ make deploy TARGET=dev BRAVE_SCOPE=msh
 - [001-deep-research-agent](../specs/001-deep-research-agent/) - Core agent architecture
 - [003-claim-level-citations](../specs/003-claim-level-citations/) - Citation verification
 - [004-tiered-query-modes](../specs/004-tiered-query-modes/) - Query mode selection
+- [007-enterprise-data-sources](../specs/007-enterprise-data-sources/) - Enterprise data source integration
+- [008-data-source-selection](../specs/008-data-source-selection/) - Source scope selection
+- [009-custom-agent-config](../specs/009-custom-agent-config/) - Custom agent configuration

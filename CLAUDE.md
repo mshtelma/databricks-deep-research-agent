@@ -308,6 +308,10 @@ from deep_research.core.app_config import get_app_config
 - PostgreSQL (Databricks Lakebase) (006-user-chat-isolation)
 - Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, SQLAlchemy (async), React 18, TanStack Query (006-user-chat-isolation)
 - PostgreSQL (Databricks Lakebase) - existing + server-side session store for incognito (006-user-chat-isolation)
+- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI 0.109+, React 18, TanStack Query 5.x, Pydantic 2.x (008-data-source-selection)
+- Databricks Lakebase (PostgreSQL) - existing, localStorage for preferences (008-data-source-selection)
+- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI 0.109+, SQLAlchemy (async), React 18, TanStack Query 5.x, Pydantic 2.x (009-custom-agent-config)
+- Databricks Lakebase (PostgreSQL) — not yet live, schema freely modifiable (009-custom-agent-config)
 
 ## Recent Changes
 - 006-user-chat-isolation: Added Python 3.11+ + FastAPI, Databricks SDK (WorkspaceClient), SQLAlchemy, Pydantic

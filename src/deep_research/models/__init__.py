@@ -10,7 +10,21 @@ The enum types (ClaimType, VerificationVerdict, etc.) are kept for use in schema
 
 from deep_research.models.audit_log import AuditAction, AuditLog
 from deep_research.models.chat import Chat, ChatStatus, ChatType
-from deep_research.models.incognito_session import IncognitoSession
+from deep_research.models.custom_agent import (
+    AgentOutputFormat,
+    AgentPresetStep,
+    AgentResearchDepth,
+    AgentSourceScope,
+    AgentVisibility,
+    AgentWorkflowMode,
+    CustomAgent,
+)
+from deep_research.models.data_source import (
+    DataSourceType,
+    DataSourceValidationStatus,
+    DataSourceVisibility,
+    UserDataSource,
+)
 from deep_research.models.enums import (
     ClaimType,
     ConfidenceLevel,
@@ -18,8 +32,14 @@ from deep_research.models.enums import (
     DerivationType,
     VerificationVerdict,
 )
+from deep_research.models.incognito_session import IncognitoSession
 from deep_research.models.message import Message, MessageRole
 from deep_research.models.message_feedback import FeedbackRating, MessageFeedback
+from deep_research.models.prompt_template import (
+    PromptTemplate,
+    TemplateType,
+    TemplateVisibility,
+)
 from deep_research.models.research_event import ResearchEvent
 from deep_research.models.research_session import (
     ResearchDepth,
@@ -28,6 +48,12 @@ from deep_research.models.research_session import (
     ResearchStatus,
 )
 from deep_research.models.source import Source
+from deep_research.models.uploaded_file import (
+    FileChunk,
+    FileProcessingStatus,
+    FileType,
+    UploadedFile,
+)
 from deep_research.models.user_preferences import UserPreferences
 
 __all__ = [
@@ -35,6 +61,11 @@ __all__ = [
     "Chat",
     "ChatStatus",
     "ChatType",
+    # Data Source (007-enterprise-data-sources)
+    "UserDataSource",
+    "DataSourceType",
+    "DataSourceVisibility",
+    "DataSourceValidationStatus",
     # Incognito Session
     "IncognitoSession",
     # Message
@@ -48,6 +79,11 @@ __all__ = [
     "ResearchEvent",
     # Source
     "Source",
+    # Uploaded File (US7)
+    "UploadedFile",
+    "FileChunk",
+    "FileType",
+    "FileProcessingStatus",
     # User Preferences
     "UserPreferences",
     # Feedback
@@ -62,4 +98,16 @@ __all__ = [
     "ConfidenceLevel",
     "CorrectionType",
     "DerivationType",
+    # Prompt Template (US5)
+    "PromptTemplate",
+    "TemplateType",
+    "TemplateVisibility",
+    # Custom Agent (US6)
+    "CustomAgent",
+    "AgentPresetStep",
+    "AgentVisibility",
+    "AgentSourceScope",
+    "AgentWorkflowMode",
+    "AgentOutputFormat",
+    "AgentResearchDepth",
 ]

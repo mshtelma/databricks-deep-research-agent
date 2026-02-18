@@ -1,12 +1,13 @@
 import { useCallback, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { messagesApi } from '@/api/client';
+import { chatsApi } from '@/api/client';
+import { CHAT_FULL_KEY } from './useChatFull';
 
 const PREFETCH_DEBOUNCE_MS = 150; // Avoid rapid-fire prefetches
 
 /**
- * Hook for prefetching messages on hover, providing instant chat switching.
- * Uses debouncing to avoid excessive API calls during rapid cursor movement.
+ * Hook for prefetching full chat data on hover, providing instant chat switching.
+ * Prefetches via GET /chats/{id}/full (messages + claims + sources in one call).
  */
 export function usePrefetchMessages() {
   const queryClient = useQueryClient();
@@ -18,7 +19,7 @@ export function usePrefetchMessages() {
     if (lastPrefetchedRef.current === chatId) return;
 
     // Skip if already cached
-    const cached = queryClient.getQueryData(['messages', chatId, undefined]);
+    const cached = queryClient.getQueryData([...CHAT_FULL_KEY, chatId]);
     if (cached) return;
 
     // Clear pending prefetch
@@ -29,8 +30,8 @@ export function usePrefetchMessages() {
     // Debounced prefetch
     timeoutRef.current = setTimeout(() => {
       queryClient.prefetchQuery({
-        queryKey: ['messages', chatId, undefined],
-        queryFn: () => messagesApi.list(chatId),
+        queryKey: [...CHAT_FULL_KEY, chatId],
+        queryFn: () => chatsApi.getFull(chatId),
         staleTime: Infinity,
       });
       lastPrefetchedRef.current = chatId;

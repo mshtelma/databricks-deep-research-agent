@@ -139,3 +139,43 @@ def extract_obo_token(headers: dict[str, str]) -> str | None:
         logger.debug("OBO token not found in headers - x-forwarded-access-token header absent")
 
     return token
+
+
+_cached_workspace_host: str | None = None
+_workspace_host_resolved: bool = False
+
+
+def get_workspace_host() -> str | None:
+    """Get Databricks workspace base URL for constructing resource links.
+
+    Returns host like 'https://my-workspace.cloud.databricks.com' or None
+    when not available (unit tests, offline development).
+
+    Result is cached after first successful resolution.
+    """
+    global _cached_workspace_host, _workspace_host_resolved
+    if _workspace_host_resolved:
+        return _cached_workspace_host
+
+    host: str | None = None
+
+    # Priority 1: Explicit host from settings
+    settings = get_settings()
+    if settings.databricks_host:
+        host = settings.databricks_host.rstrip("/")
+        if not host.startswith("http"):
+            host = f"https://{host}"
+
+    # Priority 2: Derive from workspace client config
+    if not host:
+        try:
+            client = get_workspace_client()
+            h = client.config.host
+            if h:
+                host = h.rstrip("/")
+        except Exception:
+            pass
+
+    _cached_workspace_host = host
+    _workspace_host_resolved = True
+    return host

@@ -5,7 +5,7 @@ from typing import Any
 
 from mlflow.entities import SpanType
 
-from deep_research.agent.config import get_report_limits, get_synthesizer_config
+from deep_research.agent.config import get_endpoint_override, get_report_limits, get_synthesizer_config
 from deep_research.agent.prompts.synthesizer import (
     STREAMING_SYNTHESIZER_SYSTEM_PROMPT,
     STRUCTURED_SYNTHESIZER_SYSTEM_PROMPT,
@@ -123,6 +123,7 @@ async def run_synthesizer(state: ResearchState, llm: LLMClient) -> ResearchState
             response = await llm.complete(
                 messages=messages,
                 tier=ModelTier.COMPLEX,
+                endpoint_override=get_endpoint_override(state, ModelTier.COMPLEX),
                 max_tokens=max_tokens,
             )
 
@@ -231,6 +232,7 @@ async def run_structured_synthesizer(state: ResearchState, llm: LLMClient) -> Re
             response = await llm.complete(
                 messages=messages,
                 tier=ModelTier.COMPLEX,
+                endpoint_override=get_endpoint_override(state, ModelTier.COMPLEX),
                 max_tokens=8000,
                 structured_output=state.output_schema,
             )
@@ -410,6 +412,7 @@ Be concise. Cite inline as [Title](url).""",
         async for chunk in llm.stream(
             messages=messages,
             tier=ModelTier.COMPLEX,
+            endpoint_override=get_endpoint_override(state, ModelTier.COMPLEX),
             max_tokens=max_tokens,
         ):
             full_content += chunk

@@ -159,8 +159,15 @@ class JobManager:
         conversation_history: list[dict[str, str]],
         system_instructions: str | None,
         output_type: str | None,
+        source_scope: str | None,
+        enabled_sources: list[str] | None,
+        disabled_sources: list[str] | None,
         plugin_manager: Any | None,
         db: AsyncSession,
+        user_token: str | None = None,
+        file_ids: list[str] | None = None,
+        agent_id: str | None = None,
+        enable_plan_review: bool = False,
     ) -> ResearchSession:
         """Submit a new research job.
 
@@ -183,8 +190,15 @@ class JobManager:
             conversation_history: Previous conversation messages.
             system_instructions: User's custom system instructions.
             output_type: Output type name from registry (e.g., 'meeting_prep').
+            source_scope: Source scope (enterprise_only, web_only, all).
+            enabled_sources: Whitelist of source IDs to use.
+            disabled_sources: Blacklist of source IDs to exclude.
             plugin_manager: Plugin manager for custom phase mode (optional).
             db: Database session.
+            user_token: User OAuth token for OBO authentication (007-enterprise Phase 2).
+            file_ids: Uploaded file IDs to include in research context.
+            agent_id: Custom agent ID to use for this research job.
+            enable_plan_review: If True, pause after plan creation for user review.
 
         Returns:
             The created ResearchSession.
@@ -248,6 +262,7 @@ class JobManager:
             query_mode=query_mode,
             research_depth=research_depth,
             output_type=output_type,
+            file_count=len(file_ids) if file_ids else 0,
         )
 
         # Emit lifecycle hook: job_submitted
@@ -289,7 +304,14 @@ class JobManager:
                 conversation_history=conversation_history,
                 system_instructions=system_instructions,
                 output_type=output_type,
+                source_scope=source_scope,
+                enabled_sources=enabled_sources,
+                disabled_sources=disabled_sources,
                 plugin_manager=plugin_manager,
+                user_token=user_token,
+                file_ids=file_ids,
+                agent_id=agent_id,
+                enable_plan_review=enable_plan_review,
             )
         )
         self._active_tasks[session_id] = task
@@ -417,7 +439,14 @@ class JobManager:
         conversation_history: list[dict[str, str]],
         system_instructions: str | None,
         output_type: str | None = None,
+        source_scope: str | None = None,
+        enabled_sources: list[str] | None = None,
+        disabled_sources: list[str] | None = None,
         plugin_manager: Any | None = None,
+        user_token: str | None = None,
+        file_ids: list[str] | None = None,
+        agent_id: str | None = None,
+        enable_plan_review: bool = False,
     ) -> None:
         """Execute research job in background.
 
@@ -440,7 +469,14 @@ class JobManager:
             conversation_history: Conversation history.
             system_instructions: Custom system instructions.
             output_type: Output type name from registry (e.g., 'meeting_prep').
+            source_scope: Source scope (enterprise_only, web_only, all).
+            enabled_sources: Whitelist of source IDs to use.
+            disabled_sources: Blacklist of source IDs to exclude.
             plugin_manager: Plugin manager for custom phase mode (optional).
+            user_token: User OAuth token for OBO authentication (007-enterprise Phase 2).
+            file_ids: Uploaded file IDs to include in research context.
+            agent_id: Custom agent ID to use for this research job.
+            enable_plan_review: If True, pause after plan creation for user review.
         """
         from deep_research.agent.orchestrator import OrchestrationConfig, stream_research
         from deep_research.db.session import get_session_maker
@@ -451,6 +487,7 @@ class JobManager:
             session_id=str(session_id),
             query=query[:100],
             output_type=output_type,
+            file_count=len(file_ids) if file_ids else 0,
         )
 
         try:
@@ -504,7 +541,55 @@ class JobManager:
                 output_schema=output_schema,
                 structured_system_prompt=structured_system_prompt,
                 structured_user_prompt=structured_user_prompt,
+                source_scope=source_scope,
+                enabled_sources=enabled_sources,
+                disabled_sources=disabled_sources,
+                user_token=user_token,  # OBO auth for enterprise tools
+                file_ids=file_ids,
+                agent_id=agent_id,
+                enable_plan_review=enable_plan_review,
             )
+
+            # Agent resolution — separate DB session (009-custom-agent-config)
+            if agent_id:
+                try:
+                    from deep_research.agent.orchestrator import apply_custom_agent_to_config
+                    from deep_research.services.custom_agent_service import CustomAgentService
+
+                    agent_session_maker = get_session_maker()
+                    async with agent_session_maker() as agent_db:
+                        agent_service = CustomAgentService(agent_db)
+                        agent = await agent_service.get_accessible(
+                            UUID(agent_id), user_id
+                        )
+                        if agent:
+                            config = apply_custom_agent_to_config(config, agent)
+                            logger.info(
+                                "JOB_AGENT_CONFIG_APPLIED",
+                                extra={
+                                    "session_id": str(session_id),
+                                    "agent_id": agent_id,
+                                    "agent_name": agent.name,
+                                },
+                            )
+                        else:
+                            logger.warning(
+                                "JOB_AGENT_NOT_FOUND",
+                                extra={
+                                    "session_id": str(session_id),
+                                    "agent_id": agent_id,
+                                    "user_id": user_id,
+                                },
+                            )
+                except Exception as e:
+                    logger.warning(
+                        "JOB_AGENT_RESOLUTION_FAILED",
+                        extra={
+                            "session_id": str(session_id),
+                            "agent_id": agent_id,
+                            "error": str(e)[:200],
+                        },
+                    )
 
             # Use fresh session maker to trigger token refresh check
             session_maker = get_session_maker()

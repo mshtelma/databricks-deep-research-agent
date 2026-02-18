@@ -3,6 +3,9 @@
 Provides semantic search over Vector Search indexes configured via app.yaml.
 Each configured endpoint creates a separate tool instance with a unique name.
 
+Uses WorkspaceClient.vector_search_indexes.query_index() for consistent
+authentication across all environments (profiles, SP, OBO).
+
 Example configuration (config/app.yaml):
     vector_search:
       enabled: true
@@ -15,29 +18,19 @@ Example configuration (config/app.yaml):
           num_results: 5
 """
 
-from dataclasses import dataclass
+import json
 from typing import Any
 
 from deep_research.agent.tools.base import (
     ResearchContext,
-    ResearchTool,
     ToolDefinition,
     ToolResult,
 )
+from deep_research.core.auth import get_workspace_client
 from deep_research.core.logging_utils import get_logger
+from deep_research.services.vector_search_query import VectorSearchQueryService
 
 logger = get_logger(__name__)
-
-
-@dataclass
-class VectorSearchResult:
-    """A single result from Vector Search."""
-
-    title: str
-    content: str
-    url: str | None
-    score: float
-    metadata: dict[str, Any]
 
 
 class VectorSearchTool:
@@ -47,7 +40,7 @@ class VectorSearchTool:
     Queries a Databricks Vector Search index for semantically similar documents.
     Tool name is generated as 'search_{endpoint_name}' to allow multiple indexes.
 
-    Requires Databricks SDK with proper authentication (WorkspaceClient).
+    Uses WorkspaceClient SDK for authentication (profile-aware, OAuth-native).
     """
 
     def __init__(
@@ -88,10 +81,6 @@ class VectorSearchTool:
             "Returns relevant passages ranked by similarity score."
         )
 
-        # Lazy-loaded client
-        self._client: Any = None
-        self._index: Any = None
-
         self._definition = ToolDefinition(
             name=self._tool_name,
             description=self._description,
@@ -112,30 +101,10 @@ class VectorSearchTool:
                 },
                 "required": ["query"],
             },
+            source_type="vector_search",
         )
 
-    def _get_index(self) -> Any:
-        """Get or create Vector Search index reference."""
-        if self._index is None:
-            try:
-                from databricks.vector_search.client import VectorSearchClient
-
-                self._client = VectorSearchClient()
-                self._index = self._client.get_index(
-                    endpoint_name=self._endpoint_name,
-                    index_name=self._index_name,
-                )
-                logger.info(
-                    "Vector Search index initialized",
-                    endpoint=self._endpoint_name,
-                    index=self._index_name,
-                )
-            except ImportError:
-                raise ImportError(
-                    "databricks-vector-search package not installed. "
-                    "Install with: pip install databricks-vector-search"
-                )
-        return self._index
+        self._query_service = VectorSearchQueryService()
 
     @property
     def definition(self) -> ToolDefinition:
@@ -145,7 +114,7 @@ class VectorSearchTool:
     async def execute(
         self,
         arguments: dict[str, Any],
-        context: ResearchContext,
+        context: ResearchContext,  # noqa: ARG002  # Protocol requires context
     ) -> ToolResult:
         """Execute vector search and return results.
 
@@ -160,18 +129,21 @@ class VectorSearchTool:
         num_results = arguments.get("num_results", self._num_results)
 
         try:
-            index = self._get_index()
+            client = get_workspace_client()
 
-            # Execute similarity search
-            response = index.similarity_search(
+            # Build filters_json from configured filters
+            filters_json: str | None = None
+            if self._filters:
+                filters_json = json.dumps(self._filters)
+
+            results = await self._query_service.query(
+                client=client,
+                index_name=self._index_name,
                 query_text=query,
                 columns=self._columns,
                 num_results=num_results,
-                filters=self._filters if self._filters else None,
+                filters_json=filters_json,
             )
-
-            # Parse response
-            results = self._parse_response(response)
 
             if not results:
                 return ToolResult(
@@ -218,13 +190,6 @@ class VectorSearchTool:
                 },
             )
 
-        except ImportError as e:
-            logger.error("Vector Search SDK not available", error=str(e))
-            return ToolResult(
-                content="Vector Search is not available. SDK not installed.",
-                success=False,
-                error=str(e),
-            )
         except Exception as e:
             logger.error(
                 "Vector Search error",
@@ -237,64 +202,6 @@ class VectorSearchTool:
                 success=False,
                 error=str(e),
             )
-
-    def _parse_response(self, response: dict[str, Any]) -> list[VectorSearchResult]:
-        """Parse Vector Search response into structured results.
-
-        Args:
-            response: Raw response from similarity_search()
-
-        Returns:
-            List of VectorSearchResult objects
-        """
-        results: list[VectorSearchResult] = []
-
-        # Get column mapping from manifest
-        manifest = response.get("manifest", {})
-        columns = [col["name"] for col in manifest.get("columns", [])]
-
-        # Get column indices
-        col_indices: dict[str, int] = {name: idx for idx, name in enumerate(columns)}
-
-        # Parse data rows
-        data = response.get("result", {}).get("data_array", [])
-
-        for row in data:
-            # Extract known columns with defaults
-            title = self._get_column_value(row, col_indices, "title", "Untitled")
-            content = self._get_column_value(row, col_indices, "content", "")
-            url = self._get_column_value(row, col_indices, "url", None)
-            score = self._get_column_value(row, col_indices, "score", 0.0)
-
-            # Collect remaining columns as metadata
-            metadata: dict[str, Any] = {}
-            for col_name, col_idx in col_indices.items():
-                if col_name not in ("title", "content", "url", "score"):
-                    if col_idx < len(row):
-                        metadata[col_name] = row[col_idx]
-
-            results.append(VectorSearchResult(
-                title=title,
-                content=content,
-                url=url,
-                score=score,
-                metadata=metadata,
-            ))
-
-        return results
-
-    def _get_column_value(
-        self,
-        row: list[Any],
-        col_indices: dict[str, int],
-        column: str,
-        default: Any,
-    ) -> Any:
-        """Safely get column value from row."""
-        idx = col_indices.get(column)
-        if idx is not None and idx < len(row):
-            return row[idx] if row[idx] is not None else default
-        return default
 
     def validate_arguments(self, arguments: dict[str, Any]) -> list[str]:
         """Validate search arguments.

@@ -63,6 +63,7 @@ export interface Source {
   relevanceScore: number | null
   sourceType: SourceType
   sourceMetadata: Record<string, unknown> | null
+  isCited?: boolean
 }
 
 export interface QueryClassification {
@@ -170,6 +171,8 @@ export type StreamEventType =
   | 'content_revised'
   // Persistence events
   | 'persistence_completed'
+  // Plan review event
+  | 'plan_review'
 
 export interface BaseStreamEvent {
   eventType: StreamEventType
@@ -225,13 +228,15 @@ export interface StepCompletedEvent extends BaseStreamEvent {
   stepId: string
   observationSummary: string
   sourcesFound: number
+  fileSourcesFound?: number
 }
 
 export interface ToolCallEvent extends BaseStreamEvent {
   eventType: 'tool_call'
-  toolName: string // 'web_search' | 'web_crawl'
+  toolName: string // 'web_search' | 'web_crawl' | enterprise tool names
   toolArgs: Record<string, unknown>
   callNumber: number
+  sourceType?: string // genie, vector_search, knowledge_assistant, web_search, web_crawl
 }
 
 export interface ToolResultEvent extends BaseStreamEvent {
@@ -239,6 +244,8 @@ export interface ToolResultEvent extends BaseStreamEvent {
   toolName: string
   resultPreview: string
   sourcesCrawled: number
+  sourcesAdded?: number
+  sourceType?: string // genie, vector_search, knowledge_assistant, web_search, web_crawl
 }
 
 export interface ReflectionDecisionEvent extends BaseStreamEvent {
@@ -294,11 +301,47 @@ export interface PersistenceCompletedEvent extends BaseStreamEvent {
   counts: Record<string, number>
 }
 
+// Plan review event - sent when enable_plan_review is true
+export interface PlanReviewEvent extends BaseStreamEvent {
+  eventType: 'plan_review'
+  plan: unknown
+  timeoutSeconds?: number
+  reviewId?: string
+}
+
 // Stage 7 content revision event - sent after verification retrieval applies softening
 export interface ContentRevisedEvent extends BaseStreamEvent {
   eventType: 'content_revised'
   content: string
   revisionCount: number
+}
+
+// Import citation types for ChatFullResponse
+import type { Claim, VerificationSummary } from './citation';
+
+/** Message with inline claims (from /chats/{id}/full endpoint) */
+export interface FullMessage {
+  id: string;
+  chatId: string;
+  role: 'user' | 'agent';
+  content: string;
+  createdAt: string;
+  isEdited: boolean;
+  researchSession: ResearchSession | null;
+  claims: Claim[];
+  verificationSummary: VerificationSummary | null;
+}
+
+/** Complete chat payload from GET /chats/{id}/full */
+export interface ChatFullResponse {
+  id: string;
+  title: string | null;
+  status: ChatStatus;
+  chatType: string;
+  createdAt: string;
+  updatedAt: string;
+  messages: FullMessage[];
+  messageCount: number;
 }
 
 // Re-export citation stream events from citation types
@@ -343,5 +386,7 @@ export type StreamEvent =
   | VerificationSummaryEvent
   // Stage 7 content revision event
   | ContentRevisedEvent
+  // Plan review event
+  | PlanReviewEvent
   // Persistence events
   | PersistenceCompletedEvent

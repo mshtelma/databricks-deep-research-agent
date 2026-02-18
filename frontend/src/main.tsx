@@ -12,7 +12,8 @@ const queryClient = new QueryClient({
     queries: {
       staleTime: 1000 * 30, // 30 seconds (reduced from 5 minutes to prevent stale cache)
       retry: 1,
-      refetchOnWindowFocus: true, // Refetch on tab switch to ensure fresh data
+      // Avoid network storms on tab switches; individual hooks can opt in.
+      refetchOnWindowFocus: false,
     },
   },
 })
