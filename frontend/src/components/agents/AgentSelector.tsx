@@ -264,7 +264,7 @@ function AgentCard({ agent, isSelected, onSelect }: AgentCardProps) {
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <h4 className="font-medium text-sm truncate">{agent.name}</h4>
-            {!agent.isActive && (
+            {!(agent.isActive ?? true) && (
               <span className="px-1.5 py-0.5 rounded text-xs bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400">
                 Inactive
               </span>
@@ -277,14 +277,14 @@ function AgentCard({ agent, isSelected, onSelect }: AgentCardProps) {
           )}
 
           {/* Capabilities */}
-          {agent.capabilities.length > 0 && (
+          {(agent.capabilities ?? []).length > 0 && (
             <div className="flex flex-wrap gap-1 mt-2">
-              {agent.capabilities.slice(0, 4).map((cap) => (
+              {(agent.capabilities ?? []).slice(0, 4).map((cap) => (
                 <CapabilityBadge key={cap} capability={cap} />
               ))}
-              {agent.capabilities.length > 4 && (
+              {(agent.capabilities ?? []).length > 4 && (
                 <span className="text-xs text-muted-foreground">
-                  +{agent.capabilities.length - 4} more
+                  +{(agent.capabilities ?? []).length - 4} more
                 </span>
               )}
             </div>

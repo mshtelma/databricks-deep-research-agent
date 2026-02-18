@@ -121,6 +121,19 @@ def _agent_to_summary(agent: CustomAgent) -> CustomAgentSummary:
         or bool(agent.enabled_sources)
     )
 
+    # Compute capability tags for display
+    capabilities: list[str] = []
+    if agent.source_scope in ("all", "web_only"):
+        capabilities.append("web_search")
+    if agent.source_scope in ("all", "enterprise_only"):
+        capabilities.append("enterprise_sources")
+    if agent.default_mode != "planner":
+        capabilities.append("manual_workflow")
+    if agent.output_format == "json":
+        capabilities.append("structured_output")
+    if agent.system_prompt_template_id or agent.synthesis_template_id:
+        capabilities.append("custom_prompts")
+
     return CustomAgentSummary(
         id=agent.id,
         owner_id=agent.owner_id,
@@ -135,6 +148,7 @@ def _agent_to_summary(agent: CustomAgent) -> CustomAgentSummary:
         has_model_overrides=bool(agent.model_overrides),
         has_domain_filter=agent.domain_filter_mode is not None,
         has_source_config=bool(has_source_config),
+        capabilities=capabilities,
         created_at=agent.created_at,
     )
 

@@ -237,25 +237,25 @@ function PresetStepCard({
       priority: 2,
       queryHint: null,
     };
-    onUpdate({ sourceHints: [...step.sourceHints, newHint] });
+    onUpdate({ sourceHints: [...(step.sourceHints ?? []), newHint] });
     setShowSourcePicker(false);
   };
 
   const handleRemoveSourceHint = (sourceId: string) => {
     onUpdate({
-      sourceHints: step.sourceHints.filter((h) => h.sourceId !== sourceId),
+      sourceHints: (step.sourceHints ?? []).filter((h) => h.sourceId !== sourceId),
     });
   };
 
   const handleUpdateSourceHint = (sourceId: string, updates: Partial<PresetStepSourceHint>) => {
     onUpdate({
-      sourceHints: step.sourceHints.map((h) =>
+      sourceHints: (step.sourceHints ?? []).map((h) =>
         h.sourceId === sourceId ? { ...h, ...updates } : h
       ),
     });
   };
 
-  const selectedSourceIds = step.sourceHints.map((h) => h.sourceId);
+  const selectedSourceIds = (step.sourceHints ?? []).map((h) => h.sourceId);
   const unselectedSources = availableSources.filter((s) => !selectedSourceIds.includes(s.id));
 
   return (
@@ -358,13 +358,13 @@ function PresetStepCard({
                   </Button>
                 </div>
 
-                {step.sourceHints.length === 0 ? (
+                {(step.sourceHints ?? []).length === 0 ? (
                   <p className="text-xs text-muted-foreground">
                     No source hints. The agent will use default source selection.
                   </p>
                 ) : (
                   <div className="space-y-2">
-                    {step.sourceHints.map((hint) => (
+                    {(step.sourceHints ?? []).map((hint) => (
                       <SourceHintCard
                         key={hint.sourceId}
                         hint={hint}
@@ -398,11 +398,11 @@ function PresetStepCard({
                   {step.description}
                 </p>
               )}
-              {step.sourceHints.length > 0 && (
+              {(step.sourceHints ?? []).length > 0 && (
                 <div className="flex items-center gap-1 mt-1.5">
                   <SourceIcon className="h-3 w-3 text-muted-foreground" />
                   <span className="text-xs text-muted-foreground">
-                    {step.sourceHints.length} source hint{step.sourceHints.length > 1 ? 's' : ''}
+                    {(step.sourceHints ?? []).length} source hint{(step.sourceHints ?? []).length > 1 ? 's' : ''}
                   </span>
                 </div>
               )}

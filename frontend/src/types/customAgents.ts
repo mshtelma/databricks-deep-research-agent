@@ -91,10 +91,10 @@ export interface CustomAgentSummary {
   description: string | null;
   avatarUrl: string | null;
   visibility: AgentVisibility;
-  isActive: boolean;
+  isActive?: boolean;
   ownerId: string;
   ownerName?: string;
-  capabilities: AgentCapability[];
+  capabilities?: AgentCapability[];
   /** Whether the agent has model tier overrides configured */
   hasModelOverrides?: boolean;
   /** Whether the agent has domain filtering configured */
@@ -134,7 +134,7 @@ export interface PresetStep {
   isRequired: boolean;
   /** Per-step source scope override: 'enterprise_only' | 'web_only' | 'all' | null (inherit) */
   sourceScope: string | null;
-  sourceHints: PresetStepSourceHint[];
+  sourceHints?: PresetStepSourceHint[];
   createdAt: string;
   updatedAt: string;
 }

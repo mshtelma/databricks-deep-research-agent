@@ -506,6 +506,9 @@ class CustomAgentSummary(BaseSchema):
     has_source_config: bool = False
     """Whether the agent defines source scope or enabled sources."""
 
+    capabilities: list[str] = Field(default_factory=list)
+    """Computed capability tags for display."""
+
     created_at: datetime
     """When the agent was created."""
 
