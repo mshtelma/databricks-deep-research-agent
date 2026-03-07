@@ -593,7 +593,9 @@ class JobManager:
 
             # Use fresh session maker to trigger token refresh check
             session_maker = get_session_maker()
-            async with session_maker() as db:
+
+            async def _consume_research_stream(research_db: AsyncSession) -> None:
+                """Consume the research stream to completion."""
                 async for _event in stream_research(
                     query=query,
                     llm=llm,
@@ -603,12 +605,36 @@ class JobManager:
                     user_id=user_id,
                     chat_id=str(chat_id),
                     config=config,
-                    db=db,
+                    db=research_db,
                     plugin_manager=plugin_manager,
                 ):
                     # Events are persisted by the orchestrator
                     # We just iterate to completion
                     pass
+
+            async with session_maker() as db:
+                # H1: Wrap research execution with timeout
+                timeout = config.research_timeout_seconds
+                try:
+                    await asyncio.wait_for(
+                        _consume_research_stream(db),
+                        timeout=timeout,
+                    )
+                except TimeoutError:
+                    logger.error(
+                        "RESEARCH_TIMEOUT",
+                        session_id=str(session_id),
+                        timeout_seconds=timeout,
+                    )
+                    session = await db.get(ResearchSession, session_id)
+                    if session and session.status == ResearchStatus.IN_PROGRESS:
+                        session.status = ResearchStatus.FAILED
+                        session.error_message = (
+                            f"Research timed out after {timeout} seconds"
+                        )
+                        session.completed_at = datetime.now(UTC)
+                        await db.commit()
+                    return
 
                 # Mark completed
                 session = await db.get(ResearchSession, session_id)
@@ -767,48 +793,65 @@ class JobManager:
         - last_heartbeat older than zombie_threshold_seconds (or NULL)
 
         These jobs were running when the app restarted and need cleanup.
+
+        Gracefully skips cleanup if database schema is not yet initialized
+        (e.g., migrations haven't run). This is expected during two-phase
+        deployment where the app starts before migrations complete.
         """
+        from sqlalchemy.exc import ProgrammingError
+
         from deep_research.db.session import get_session_maker
 
         cutoff = datetime.now(UTC) - timedelta(seconds=_get_zombie_threshold())
 
-        # Use fresh session maker to trigger token refresh check
-        session_maker = get_session_maker()
-        async with session_maker() as db:
-            stmt = (
-                select(ResearchSession)
-                .where(ResearchSession.status == ResearchStatus.IN_PROGRESS)
-                .where(
-                    (ResearchSession.last_heartbeat < cutoff)
-                    | (ResearchSession.last_heartbeat.is_(None))
+        try:
+            # Use fresh session maker to trigger token refresh check
+            session_maker = get_session_maker()
+            async with session_maker() as db:
+                stmt = (
+                    select(ResearchSession)
+                    .where(ResearchSession.status == ResearchStatus.IN_PROGRESS)
+                    .where(
+                        (ResearchSession.last_heartbeat < cutoff)
+                        | (ResearchSession.last_heartbeat.is_(None))
+                    )
                 )
-            )
-            result = await db.execute(stmt)
-            interrupted = list(result.scalars().all())
+                result = await db.execute(stmt)
+                interrupted = list(result.scalars().all())
 
-            if not interrupted:
-                logger.info("CLEANUP_NO_INTERRUPTED_JOBS")
-                return
-
-            logger.info(
-                "CLEANUP_FOUND_INTERRUPTED_JOBS",
-                count=len(interrupted),
-            )
-
-            for session in interrupted:
-                # For now, mark as failed
-                # Future: could resume from execution_state if available
-                session.status = ResearchStatus.FAILED
-                session.error_message = "Job interrupted by app restart"
-                session.completed_at = datetime.now(UTC)
+                if not interrupted:
+                    logger.info("CLEANUP_NO_INTERRUPTED_JOBS")
+                    return
 
                 logger.info(
-                    "CLEANUP_JOB_MARKED_FAILED",
-                    session_id=str(session.id),
-                    user_id=session.user_id,
+                    "CLEANUP_FOUND_INTERRUPTED_JOBS",
+                    count=len(interrupted),
                 )
 
-            await db.commit()
+                for session in interrupted:
+                    # For now, mark as failed
+                    # Future: could resume from execution_state if available
+                    session.status = ResearchStatus.FAILED
+                    session.error_message = "Job interrupted by app restart"
+                    session.completed_at = datetime.now(UTC)
+
+                    logger.info(
+                        "CLEANUP_JOB_MARKED_FAILED",
+                        session_id=str(session.id),
+                        user_id=session.user_id,
+                    )
+
+                await db.commit()
+        except ProgrammingError as e:
+            if "UndefinedTableError" in str(e):
+                logger.warning(
+                    "CLEANUP_SKIPPED_SCHEMA_NOT_READY",
+                    error=str(e)[:200],
+                    detail="Database schema not initialized. "
+                    "Run migrations: make db-migrate-remote TARGET=<target>",
+                )
+                return
+            raise
 
     async def _count_user_active_jobs(
         self,

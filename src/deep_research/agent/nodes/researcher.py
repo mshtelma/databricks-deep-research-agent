@@ -240,11 +240,24 @@ async def _execute_enterprise_tools(
                     tool=tool_name,
                 )
                 yield (tool_name, arguments, "", 0)
+        except TimeoutError:
+            logger.error(
+                "RESEARCHER_ENTERPRISE_TOOL_TIMEOUT",
+                tool=tool_name,
+            )
+            yield (tool_name, arguments, "Tool execution timed out", 0)
+        except ConnectionError as e:
+            logger.error(
+                "RESEARCHER_ENTERPRISE_TOOL_CONNECTION_ERROR",
+                tool=tool_name,
+                error=str(e)[:200],
+            )
+            yield (tool_name, arguments, f"Connection failed: {e}", 0)
         except Exception as e:
             logger.error(
-                "RESEARCHER_ENTERPRISE_TOOL_ERROR",
+                "RESEARCHER_ENTERPRISE_TOOL_UNEXPECTED_ERROR",
                 tool=tool_name,
-                error=str(e),
+                error=str(e)[:200],
                 error_type=type(e).__name__,
                 exc_info=True,
             )

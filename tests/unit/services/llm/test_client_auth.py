@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from deep_research.core.databricks_auth import TOKEN_LIFETIME, clear_databricks_auth
+from deep_research.core.databricks_auth import clear_databricks_auth
 
 
 class TestLLMClientTokenRefresh:
@@ -33,6 +33,13 @@ class TestLLMClientTokenRefresh:
         from deep_research.services.llm.client import LLMClient
 
         client = LLMClient()
+
+        # Client is None before first API call (lazy init)
+        assert client._client is None
+        assert client._current_token is None
+
+        # Trigger lazy initialization
+        client._ensure_fresh_client()
 
         assert not client._auth.is_oauth
         assert client._current_token == "direct-token"
@@ -68,6 +75,9 @@ class TestLLMClientTokenRefresh:
 
         client = LLMClient()
 
+        # Trigger lazy initialization
+        client._ensure_fresh_client()
+
         assert client._auth.is_oauth
         assert client._current_token == "oauth-token"
         mock_openai.assert_called_once_with(
@@ -84,7 +94,7 @@ class TestLLMClientTokenRefresh:
         mock_openai: MagicMock,
         mock_settings: MagicMock,
     ) -> None:
-        """_ensure_fresh_client should be no-op for direct token auth."""
+        """_ensure_fresh_client should be no-op for direct token auth after init."""
         mock_settings.return_value.databricks_token = "direct-token"
         mock_settings.return_value.databricks_host = "https://test.databricks.com"
         mock_settings.return_value.databricks_config_profile = None
@@ -93,13 +103,16 @@ class TestLLMClientTokenRefresh:
         from deep_research.services.llm.client import LLMClient
 
         client = LLMClient()
+
+        # First call triggers lazy init
+        client._ensure_fresh_client()
         original_client = client._client
 
-        # Should not recreate client
+        # Subsequent calls should not recreate client
         client._ensure_fresh_client()
 
         assert client._client is original_client
-        # OpenAI client should only be created once (in __init__)
+        # OpenAI client should only be created once (in lazy init)
         assert mock_openai.call_count == 1
 
     @patch("deep_research.core.databricks_auth.get_settings")
@@ -128,6 +141,9 @@ class TestLLMClientTokenRefresh:
         from deep_research.services.llm.client import LLMClient
 
         client = LLMClient()
+
+        # Trigger lazy initialization
+        client._ensure_fresh_client()
         assert client._current_token == "token-1"
         assert mock_openai.call_count == 1
 
@@ -147,7 +163,7 @@ class TestLLMClientTokenRefresh:
         client._ensure_fresh_client()
 
         assert client._current_token == "token-2"
-        # OpenAI client should be created twice (init + refresh)
+        # OpenAI client should be created twice (lazy init + refresh)
         assert mock_openai.call_count == 2
         # Verify second call was with token-2
         mock_openai.assert_called_with(
@@ -181,6 +197,9 @@ class TestLLMClientTokenRefresh:
         from deep_research.services.llm.client import LLMClient
 
         client = LLMClient()
+
+        # First call triggers lazy init
+        client._ensure_fresh_client()
         original_client = client._client
 
         # Multiple calls should not recreate client
@@ -239,8 +258,78 @@ class TestLLMClientTokenRefresh:
 
         client = LLMClient()
 
+        # Trigger lazy initialization
+        client._ensure_fresh_client()
+
         assert client._auth.is_oauth
         assert client._auth.auth_mode == "automatic"
         assert client._current_token == "app-token"
         # WorkspaceClient should be created with no args
         mock_wc_class.assert_called_once_with()
+
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.core.databricks_auth.WorkspaceClient")
+    @patch("deep_research.services.llm.client.AsyncOpenAI")
+    @patch("deep_research.services.llm.client.ModelConfig")
+    def test_construction_succeeds_with_broken_oauth(
+        self,
+        mock_model_config: MagicMock,
+        mock_openai: MagicMock,
+        mock_wc_class: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """LLMClient() should succeed even when OAuth auth will fail.
+
+        The auth error should surface only when _ensure_fresh_client() is called,
+        not during construction. This is the core lazy init behavior.
+        """
+        mock_settings.return_value.databricks_token = None
+        mock_settings.return_value.databricks_host = "https://test.databricks.com"
+        mock_settings.return_value.databricks_config_profile = "broken-profile"
+        mock_settings.return_value.is_databricks_app = False
+
+        # WorkspaceClient creation succeeds (DatabricksAuth.__init__ only stores it)
+        mock_wc = MagicMock()
+        mock_wc.config.host = "https://workspace.databricks.com"
+        # But authenticate() fails (corrupted cache, expired token, etc.)
+        mock_wc.config.authenticate.side_effect = ValueError("corrupted token cache")
+        mock_wc_class.return_value = mock_wc
+
+        from deep_research.services.llm.client import LLMClient
+
+        # Construction should succeed — no auth calls happen here
+        client = LLMClient()
+        assert client._client is None
+        assert client._current_token is None
+        assert client._base_url is None
+
+        # Auth error surfaces at first API call
+        with pytest.raises(ValueError, match="corrupted token cache"):
+            client._ensure_fresh_client()
+
+        # Client should still be None after failed init
+        assert client._client is None
+
+    @patch("deep_research.core.databricks_auth.get_settings")
+    @patch("deep_research.services.llm.client.AsyncOpenAI")
+    @patch("deep_research.services.llm.client.ModelConfig")
+    @pytest.mark.asyncio
+    async def test_close_without_initialization(
+        self,
+        mock_model_config: MagicMock,
+        mock_openai: MagicMock,
+        mock_settings: MagicMock,
+    ) -> None:
+        """close() should be safe to call without any prior API calls."""
+        mock_settings.return_value.databricks_token = "direct-token"
+        mock_settings.return_value.databricks_host = "https://test.databricks.com"
+        mock_settings.return_value.databricks_config_profile = None
+        mock_settings.return_value.is_databricks_app = False
+
+        from deep_research.services.llm.client import LLMClient
+
+        client = LLMClient()
+        assert client._client is None
+
+        # close() should not raise even though client was never initialized
+        await client.close()

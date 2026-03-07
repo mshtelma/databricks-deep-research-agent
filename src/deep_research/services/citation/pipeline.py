@@ -1444,6 +1444,8 @@ class CitationVerificationPipeline:
         if parsed_blocks:
             # Track search position to handle duplicate text correctly
             search_start = 0
+            # Pattern for extracting [Key] markers from text
+            citation_pattern = r'\[([A-Za-z][A-Za-z0-9-]*(?:-\d+)?)\]'
 
             for block in parsed_blocks:
                 if block.tag_type == "cite" and block.citation_key:
@@ -1461,6 +1463,10 @@ class CitationVerificationPipeline:
                     position_end = position_start + len(claim_text)
                     search_start = position_end if position >= 0 else search_start
 
+                    # Extract ALL markers from claim text (handles inline markers in block.text)
+                    all_markers = re.findall(citation_pattern, claim_text)
+                    claim_citation_keys = all_markers if len(all_markers) > 1 else None
+
                     claim_info = ClaimInfo(
                         claim_text=claim_text,
                         claim_type="numeric" if evidence and evidence.has_numeric_content else "general",
@@ -1476,6 +1482,7 @@ class CitationVerificationPipeline:
                             has_numeric_content=evidence.has_numeric_content,
                         ) if evidence else None,
                         citation_key=block.citation_key,
+                        citation_keys=claim_citation_keys,
                     )
                     claims.append(claim_info)
                 elif block.tag_type == "unverified":
@@ -1534,6 +1541,45 @@ class CitationVerificationPipeline:
                         from_free_block=True,  # Mark as extracted from <free> block
                     )
                     claims.append(claim_info)
+
+            # Reconcile: ensure all content markers are tracked by claims
+            all_content_markers = set(re.findall(citation_pattern, content))
+            tracked_keys: set[str] = set()
+            for claim in claims:
+                if claim.citation_key:
+                    tracked_keys.add(claim.citation_key)
+                if claim.citation_keys:
+                    tracked_keys.update(claim.citation_keys)
+
+            untracked = all_content_markers - tracked_keys
+            if untracked:
+                for marker in sorted(untracked):
+                    marker_pos = content.find(f"[{marker}]")
+                    if marker_pos == -1:
+                        continue
+                    # Find nearest preceding cite claim
+                    best_claim: ClaimInfo | None = None
+                    best_distance = float('inf')
+                    for claim in claims:
+                        if claim.citation_key and claim.position_end <= marker_pos + len(f"[{marker}]"):
+                            distance = marker_pos - claim.position_start
+                            if 0 <= distance < best_distance:
+                                best_distance = distance
+                                best_claim = claim
+                    # Fallback: attach to first cite claim
+                    if best_claim is None:
+                        best_claim = next((c for c in claims if c.citation_key), None)
+                    if best_claim and best_claim.citation_key:
+                        if best_claim.citation_keys is None:
+                            best_claim.citation_keys = [best_claim.citation_key, marker]
+                        elif marker not in best_claim.citation_keys:
+                            best_claim.citation_keys.append(marker)
+
+                logger.info(
+                    "REACT_CLAIM_RECONCILIATION",
+                    untracked_markers=list(untracked),
+                    reconciled_count=len(untracked),
+                )
 
             # Log extraction results including free block claims
             free_block_claims = [c for c in claims if getattr(c, 'from_free_block', False)]

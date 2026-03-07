@@ -20,11 +20,15 @@ from deep_research.models.prompt_template import (
     TemplateVisibility,
 )
 from deep_research.services.base import BaseRepository
+from deep_research.services.template_renderer import SafeTemplateRenderer
 
 logger = logging.getLogger(__name__)
 
 # Regex pattern for template variables: {{variable_name}}
 VARIABLE_PATTERN = re.compile(r"\{\{(\w+)\}\}")
+
+# Safe template renderer instance (used for rendering user-provided templates)
+_safe_renderer = SafeTemplateRenderer()
 
 
 class TemplateService(BaseRepository[PromptTemplate]):
@@ -159,6 +163,9 @@ class TemplateService(BaseRepository[PromptTemplate]):
     ) -> tuple[str, list[str], list[str]]:
         """Render a template with variable substitution.
 
+        Uses SafeTemplateRenderer to prevent SSTI attacks while supporting
+        {{variable}}, {{#if}}/{{/if}}, {{#for}}/{{/for}}, and {{var|length}}.
+
         Args:
             template: Template to render.
             variables: Variable name to value mapping.
@@ -177,31 +184,28 @@ class TemplateService(BaseRepository[PromptTemplate]):
             if var.get("name")
         }
 
-        # Find all variables in content
-        content_variables = set(VARIABLE_PATTERN.findall(content))
+        # Build the full context with defaults applied
+        context: dict[str, Any] = {}
+        content_variables = _safe_renderer.extract_variables(content)
 
-        # Process each variable
         for var_name in content_variables:
             if var_name in variables:
-                # User provided value
-                value = str(variables[var_name])
-                content = content.replace(f"{{{{{var_name}}}}}", value)
+                context[var_name] = variables[var_name]
             else:
-                # Check metadata for default
                 metadata = var_metadata.get(var_name, {})
                 default_value = metadata.get("default")
                 is_required = metadata.get("required", True)
 
                 if default_value is not None:
-                    content = content.replace(f"{{{{{var_name}}}}}", str(default_value))
+                    context[var_name] = default_value
                     used_defaults.append(var_name)
                 elif is_required:
                     missing_variables.append(var_name)
-                else:
-                    # Not required and no default - leave placeholder empty
-                    content = content.replace(f"{{{{{var_name}}}}}", "")
 
-        return content, missing_variables, used_defaults
+        # Render using the safe template renderer
+        rendered = _safe_renderer.render(content, context)
+
+        return rendered, missing_variables, used_defaults
 
     def validate_variables(
         self,

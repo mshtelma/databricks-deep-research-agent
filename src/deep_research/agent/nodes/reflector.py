@@ -242,10 +242,12 @@ async def run_reflector(state: ResearchState, llm: LLMClient) -> ResearchState:
                     "error": str(e)[:200],
                     "error_type": type(e).__name__,
                 })
-            # Default to continue on error
+            # Fail-safe: default to COMPLETE on error to prevent infinite loops.
+            # If the LLM fails to produce a valid reflection, we must stop
+            # rather than continue indefinitely.
             state.last_reflection = ReflectionResult(
-                decision=ReflectionDecision.CONTINUE,
-                reasoning=f"Default continue due to error: {e}",
+                decision=ReflectionDecision.COMPLETE,
+                reasoning=f"Fail-safe COMPLETE due to error: {e}",
             )
 
         return state

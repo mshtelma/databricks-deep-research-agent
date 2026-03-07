@@ -1,0 +1,286 @@
+"""
+Lakebase Provisioning CLI
+=========================
+
+Consolidates the entire 7-step provisioning flow into a single Python CLI,
+replacing the shell scripts that had quoting/SDK boundary issues.
+
+Usage:
+    uv run python -m deep_research.cli.provision --target <TARGET>
+
+Steps:
+    1. Bundle deploy (bootstrap with postgres)
+    2. Discover Autoscaling endpoint
+    3. Wait for endpoint to be ready
+    4. Create deep_research database
+    5. Re-deploy with deep_research + endpoint info
+    6. Write .env.{target} with Lakebase connection vars
+    7. Run alembic migrations on deep_research database
+
+Each target gets its own .env.{target} file (e.g., .env.local-dev, .env.e2e).
+These files contain only Lakebase connection metadata (no secrets).
+Shared secrets (BRAVE_API_KEY, etc.) stay in .env, managed by the user.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]  # src/deep_research/cli -> repo root
+
+
+def _run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess with inherited stdio."""
+    logger.info("Running: %s", " ".join(cmd))
+    return subprocess.run(cmd, check=check, cwd=PROJECT_ROOT)
+
+
+def _read_target_config(target: str) -> tuple[str, str, str]:
+    """Read profile, resource_suffix, and project_id from databricks.yml.
+
+    Returns:
+        (profile, resource_suffix, project_id)
+
+    Raises:
+        SystemExit: If target is unknown.
+    """
+    yml_path = PROJECT_ROOT / "databricks.yml"
+    with open(yml_path) as f:
+        cfg: dict[str, Any] = yaml.safe_load(f)
+
+    targets = cfg.get("targets", {})
+    t = targets.get(target)
+    if not t:
+        valid = ", ".join(targets.keys())
+        print(f"ERROR: Unknown target '{target}'. Valid targets: {valid}")
+        sys.exit(1)
+
+    profile: str = t["workspace"]["profile"]
+    resource_suffix: str = t["variables"]["resource_suffix"]
+    project_id = f"deep-research-{resource_suffix}"
+    return profile, resource_suffix, project_id
+
+
+def _clear_stale_terraform_state(target: str) -> None:
+    """Delete stale Terraform state files."""
+    state_dir = PROJECT_ROOT / ".databricks" / "bundle" / target / "terraform"
+    for pattern in ("terraform.tfstate", "terraform.tfstate.backup"):
+        path = state_dir / pattern
+        if path.exists():
+            path.unlink()
+            logger.info("Removed stale state: %s", path)
+
+
+def _discover_endpoint(project_id: str) -> str:
+    """Discover the Autoscaling endpoint for a project (Step 2)."""
+    from deep_research.deployment import discover_autoscaling_endpoint
+
+    endpoint_name = discover_autoscaling_endpoint(project_id)
+    if not endpoint_name:
+        print(f"ERROR: Could not discover Autoscaling endpoint for project {project_id}")
+        sys.exit(1)
+    return endpoint_name
+
+
+def _wait_for_endpoint(endpoint_name: str) -> None:
+    """Wait for the Autoscaling endpoint to be ready (Step 3)."""
+    from deep_research.deployment.lakebase import wait_for_lakebase_sync
+
+    # Use postgres database for health check during provisioning
+    os.environ["LAKEBASE_DATABASE"] = "postgres"
+
+    ready = wait_for_lakebase_sync(
+        endpoint_name=endpoint_name,
+        timeout_seconds=300,
+        poll_interval_seconds=10,
+    )
+    if not ready:
+        print("ERROR: Autoscaling endpoint not ready after timeout")
+        sys.exit(1)
+
+
+def _create_database(endpoint_name: str) -> None:
+    """Create the deep_research database (Step 4)."""
+    from deep_research.db.bootstrap import ensure_database_exists
+
+    os.environ["ENDPOINT_NAME"] = endpoint_name
+    os.environ["LAKEBASE_DATABASE"] = "deep_research"
+    # Clear LAKEBASE_INSTANCE_NAME to avoid backend conflict
+    os.environ.pop("LAKEBASE_INSTANCE_NAME", None)
+
+    asyncio.run(ensure_database_exists())
+
+
+def _resolve_pghost(endpoint_name: str) -> str:
+    """Resolve the PGHOST for an endpoint via SDK (Step 5).
+
+    Uses ep.status.hosts.host (not ep.hostname which doesn't exist).
+    """
+    from databricks.sdk import WorkspaceClient
+
+    w = WorkspaceClient()
+    ep = w.postgres.get_endpoint(name=endpoint_name)
+
+    # Navigate the SDK object safely
+    if ep.status and ep.status.hosts:
+        return ep.status.hosts.host  # type: ignore[return-value]
+    return ""
+
+
+def _write_target_env_file(target: str, endpoint_name: str, pghost: str, profile: str) -> None:
+    """Write .env.{target} with Lakebase connection vars (Step 6).
+
+    Writes only connection metadata — no secrets. The file is safe to commit to git.
+    """
+    env_path = PROJECT_ROOT / f".env.{target}"
+
+    content = (
+        f"# Lakebase connection for target: {target}\n"
+        f"# Generated by: make db-provision TARGET={target}\n"
+        f"DATABRICKS_CONFIG_PROFILE={profile}\n"
+        f"ENDPOINT_NAME={endpoint_name}\n"
+        f"PGHOST={pghost}\n"
+        f"LAKEBASE_DATABASE=deep_research\n"
+    )
+
+    env_path.write_text(content)
+    print(f"  Wrote {env_path.name}:")
+    for line in content.strip().splitlines():
+        if not line.startswith("#"):
+            print(f"    {line}")
+
+
+def _run_migrations(endpoint_name: str, profile: str) -> None:
+    """Run alembic migrations on the deep_research database (Step 7)."""
+    db_name = "deep_research"
+    print(f"  Running migrations on {db_name}...")
+    env = {
+        **os.environ,
+        "LAKEBASE_INSTANCE_NAME": "",
+        "ENDPOINT_NAME": endpoint_name,
+        "DATABRICKS_CONFIG_PROFILE": profile,
+        "LAKEBASE_DATABASE": db_name,
+    }
+    result = subprocess.run(
+        ["uv", "run", "alembic", "upgrade", "head"],
+        cwd=PROJECT_ROOT,
+        env=env,
+    )
+    if result.returncode != 0:
+        print(f"ERROR: {db_name} migration failed")
+        sys.exit(1)
+
+
+def provision(target: str) -> None:
+    """Run the full 7-step Lakebase provisioning flow."""
+    print("==============================================")
+    print("Lakebase Provisioning (Autoscaling)")
+    print(f"Target: {target}")
+    print("==============================================")
+
+    # Read config
+    profile, resource_suffix, project_id = _read_target_config(target)
+    os.environ["DATABRICKS_CONFIG_PROFILE"] = profile
+
+    # Pre-flight: clear stale Terraform state
+    print("\nPre-flight: Clearing stale Terraform state...")
+    _clear_stale_terraform_state(target)
+
+    # Step 1: Bundle deploy (bootstrap with postgres)
+    print("")
+    print("Step 1/7: Deploying bundle with postgres (bootstrap)...")
+    print(f"  Profile: {profile}")
+    print(f"  Project: {project_id}")
+    print("  Note: Using postgres database for initial deploy (deep_research may not exist yet)")
+    result = _run([
+        "databricks", "bundle", "deploy", "-t", target,
+        "--var", "lakebase_database=postgres",
+    ], check=False)
+    if result.returncode != 0:
+        print("")
+        print("ERROR: Bundle deploy failed.")
+        print("If you see 'workspace limit' or 'already exists' errors, stale resources from a")
+        print("previous interrupted deploy may be blocking. Run:")
+        print(f"  make db-cleanup TARGET={target}")
+        print(f"Then retry: make db-provision TARGET={target}")
+        sys.exit(1)
+
+    # Step 2: Discover Autoscaling endpoint
+    print("")
+    print("Step 2/7: Discovering Autoscaling endpoint from project...")
+    endpoint_name = _discover_endpoint(project_id)
+    print(f"  ENDPOINT_NAME: {endpoint_name}")
+
+    # Step 3: Wait for endpoint to be ready
+    print("")
+    print("Step 3/7: Waiting for Autoscaling endpoint to be ready...")
+    os.environ["ENDPOINT_NAME"] = endpoint_name
+    _wait_for_endpoint(endpoint_name)
+
+    # Resolve PGHOST now — Step 4 needs it in os.environ for autoscaling auth
+    pghost = _resolve_pghost(endpoint_name)
+    os.environ["PGHOST"] = pghost
+
+    # Step 4: Create deep_research database
+    print("")
+    print("Step 4/7: Creating deep_research database...")
+    _create_database(endpoint_name)
+
+    # Step 5: Re-deploy with deep_research + endpoint info
+    print("")
+    print("Step 5/7: Re-deploying bundle with deep_research + endpoint_name...")
+    result = _run([
+        "databricks", "bundle", "deploy", "-t", target,
+        "--var", "lakebase_database=deep_research",
+        "--var", f"endpoint_name={endpoint_name}",
+        "--var", f"pghost={pghost}",
+    ], check=False)
+    if result.returncode != 0:
+        print("ERROR: Bundle re-deploy failed")
+        sys.exit(1)
+
+    # Step 6: Write .env.{target}
+    print("")
+    print(f"Step 6/7: Writing .env.{target} with endpoint info...")
+    _write_target_env_file(target, endpoint_name, pghost, profile)
+
+    # Step 7: Run migrations on deep_research database
+    print("")
+    print("Step 7/7: Running database migrations...")
+    _run_migrations(endpoint_name, profile)
+
+    # Done
+    print("")
+    print("==============================================")
+    print("Provisioning Complete!")
+    print("==============================================")
+    print("")
+    print(f"Connection info written to .env.{target}")
+    print(f"Run 'make dev' to start developing (uses .env + .env.{target}).")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    logging.basicConfig(level=logging.INFO)
+
+    parser = argparse.ArgumentParser(
+        description="Provision Lakebase infrastructure + bootstrap dev/e2e databases"
+    )
+    parser.add_argument(
+        "--target",
+        required=True,
+        help="Deployment target (e.g., dev, ais, local-dev)",
+    )
+    args = parser.parse_args()
+    provision(args.target)

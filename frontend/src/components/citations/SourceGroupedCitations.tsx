@@ -10,6 +10,7 @@
 import * as React from 'react';
 import { cn } from '@/lib/utils';
 import type { Claim, VerificationSummary } from '@/types/citation';
+import { safeOpenUrl } from '@/utils/urlSafety';
 import { VerificationBadge } from './VerificationBadge';
 import { FloatingEvidenceCard } from './FloatingEvidenceCard';
 import {
@@ -68,7 +69,7 @@ export const SourceGroupedCitations: React.FC<SourceGroupedCitationsProps> = ({
   const handleSourceHeaderClick = (url: string | null, e: React.MouseEvent) => {
     e.stopPropagation();
     if (url) {
-      window.open(url, '_blank', 'noopener,noreferrer');
+      safeOpenUrl(url);
     }
   };
 

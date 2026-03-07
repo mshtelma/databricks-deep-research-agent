@@ -9,7 +9,6 @@ for multiple migration paths (parent + child projects).
 import logging
 import os
 from pathlib import Path
-from typing import Any
 
 logger = logging.getLogger(__name__)
 

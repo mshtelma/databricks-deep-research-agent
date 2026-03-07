@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+import mlflow
+
 from deep_research.agent.config import (
     get_coordinator_config,
     get_planner_config,
@@ -280,6 +282,12 @@ class OrchestrationConfig:
 
     domain_filter: Any | None = None  # DomainFilterConfig
     """Per-agent domain filter overrides from custom agent."""
+
+    # =========================================================================
+    # Research Session Timeout (H1)
+    # =========================================================================
+    research_timeout_seconds: int = 1800  # 30 minutes default
+    """Maximum time in seconds before a research job is terminated."""
 
 
 def _convert_manual_steps_to_plan(
@@ -576,6 +584,200 @@ class OrchestrationResult:
     steps_skipped: int = 0
 
 
+# =============================================================================
+# Shared Helper Functions (C1: Entry Point Divergence Fix)
+# =============================================================================
+# These helpers are the single source of truth for initialization logic
+# shared between run_research() and stream_research(). Extracting them
+# fixes 3 confirmed bugs where stream_research diverged from run_research.
+# =============================================================================
+
+
+def _create_research_state(
+    query: str,
+    config: "OrchestrationConfig",
+    conversation_history: list[dict[str, str]] | None = None,
+    session_id: UUID | None = None,
+) -> ResearchState:
+    """Single source of truth for ResearchState creation from config."""
+    state = ResearchState(
+        query=query,
+        conversation_history=conversation_history or [],
+        max_plan_iterations=config.max_plan_iterations,
+        enable_clarification=config.enable_clarification,
+        query_mode=config.query_mode,
+        research_depth=config.research_depth,
+        system_instructions=config.system_instructions,
+        enable_citation_verification=config.verify_sources,
+        output_format=config.output_format,
+        output_schema=config.output_schema,
+        synthesis_mode=config.synthesis_mode,
+        enable_post_verification=config.enable_post_verification,
+        structured_system_prompt=config.structured_system_prompt,
+        structured_user_prompt=config.structured_user_prompt,
+        # BUG FIX: These two fields were missing from stream_research()
+        workflow_mode=config.workflow_mode,
+        manual_steps=config.manual_steps or [],
+    )
+    if session_id:
+        state.session_id = session_id
+    return state
+
+
+def _wire_source_scope(state: ResearchState, config: "OrchestrationConfig") -> None:
+    """Parse source_scope string and create SourceScopeConfig on state."""
+    if not config.source_scope:
+        return
+    from deep_research.schemas.source_scope import SourceScope, SourceScopeConfig
+
+    try:
+        scope_enum = SourceScope(config.source_scope)
+        state.source_scope_config = SourceScopeConfig(
+            scope=scope_enum,
+            enabled_sources=config.enabled_sources,
+            disabled_sources=config.disabled_sources or [],
+        )
+        logger.info(
+            "ORCHESTRATION_SOURCE_SCOPE_SET",
+            scope=config.source_scope,
+            enabled_count=len(config.enabled_sources or []),
+            disabled_count=len(config.disabled_sources or []),
+        )
+    except ValueError as e:
+        logger.warning(
+            "ORCHESTRATION_INVALID_SOURCE_SCOPE",
+            scope=config.source_scope,
+            error=str(e),
+        )
+        state.source_scope_config = SourceScopeConfig(scope=SourceScope.ALL)
+
+
+def _wire_config_fields(state: ResearchState, config: "OrchestrationConfig") -> None:
+    """Transfer simple config values to state (no I/O required)."""
+    if config.user_token:
+        state.user_token = config.user_token
+    if config.file_ids:
+        state.file_ids = config.file_ids
+    if config.agent_id:
+        state.agent_id = config.agent_id
+    if config.model_overrides:
+        state.model_overrides = config.model_overrides
+    if config.domain_filter:
+        state.domain_filter = config.domain_filter
+
+
+def _wire_manual_mode(state: ResearchState, query: str) -> None:
+    """Convert manual step definitions to plan when workflow_mode is manual/hybrid.
+
+    BUG FIX: This was missing from stream_research(), causing preset steps
+    from custom agents to be ignored in the streaming path.
+    """
+    if not (state.is_manual_mode() and state.manual_steps):
+        return
+    state.current_plan = _convert_manual_steps_to_plan(state.manual_steps, query)
+    for manual_step in state.manual_steps:
+        step_id = getattr(manual_step, "id", "")
+        constraint = getattr(manual_step, "constraints", None)
+        if step_id and constraint:
+            state.set_source_constraint(step_id, constraint)
+
+
+async def _load_enterprise_tools_from_cache(
+    state: ResearchState, user_id: str | None,
+) -> None:
+    """Load enterprise tools from discovery cache (tier 2 fallback).
+
+    Used by both entry points when DB-based tool loading isn't available
+    or returned no enterprise tools.
+    """
+    if (
+        _has_non_file_tools(state.enterprise_tools)
+        or not state.source_scope_config
+        or not state.source_scope_config.enabled_sources
+        or not state.is_enterprise_search_allowed()
+    ):
+        return
+
+    try:
+        from deep_research.agent.tools.factory import create_tools_from_discovered_sources
+        from deep_research.services.discovery_cache import get_discovery_cache
+
+        cache = get_discovery_cache()
+        cached_sources = await cache.get(user_id=user_id)
+
+        if cached_sources:
+            enabled_ids = set(state.source_scope_config.enabled_sources)
+            matching = [s for s in cached_sources if s.source_id in enabled_ids]
+
+            if matching:
+                type_filtered = [
+                    s for s in matching
+                    if state.source_scope_config.is_type_enabled(s.source_type)
+                ]
+
+                if type_filtered:
+                    discovery_tools = await create_tools_from_discovered_sources(
+                        type_filtered
+                    )
+                    _append_unique_tools(state.enterprise_tools, discovery_tools)
+                    logger.info(
+                        "ORCHESTRATION_ENTERPRISE_TOOLS_FROM_DISCOVERY",
+                        tool_count=len(discovery_tools),
+                        tool_names=[t.definition.name for t in discovery_tools],
+                        source_ids=[s.source_id for s in type_filtered],
+                    )
+            else:
+                logger.warning(
+                    "ORCHESTRATION_NO_MATCHING_DISCOVERY_SOURCES",
+                    enabled_ids=list(enabled_ids)[:5],
+                    cached_count=len(cached_sources),
+                )
+        else:
+            logger.warning(
+                "ORCHESTRATION_DISCOVERY_CACHE_EMPTY",
+                user_id=user_id,
+            )
+    except Exception as e:
+        logger.error(
+            "ORCHESTRATION_DISCOVERY_TOOLS_FAILED",
+            error=str(e),
+            error_type=type(e).__name__,
+            exc_info=True,
+        )
+
+
+def _handle_reflection_complete(state: ResearchState) -> tuple[bool, int]:
+    """Handle COMPLETE reflection with minimum steps enforcement.
+
+    BUG FIX: stream_research() was missing min steps enforcement, allowing
+    shallow 1-step results when depth config requires 3+.
+
+    Returns:
+        Tuple of (should_break_loop, steps_skipped).
+    """
+    min_steps = state.get_min_steps()
+    completed = len(state.get_completed_steps())
+    if completed < min_steps:
+        logger.warning(
+            "OVERRIDE_EARLY_COMPLETE",
+            completed=completed,
+            minimum=min_steps,
+            reason="Minimum steps not reached",
+        )
+        state.last_reflection = ReflectionResult(
+            decision=ReflectionDecision.CONTINUE,
+            reasoning=f"Override: {completed}/{min_steps} minimum steps completed",
+        )
+        return False, 0
+
+    steps_skipped = 0
+    while state.has_more_steps():
+        state.advance_step()
+        steps_skipped += 1
+    logger.info("EARLY_COMPLETION", steps_skipped=steps_skipped)
+    return True, steps_skipped
+
+
 async def run_research(
     query: str,
     llm: LLMClient,
@@ -606,139 +808,24 @@ async def run_research(
     config = config or _get_default_orchestration_config()
     start_time = time.perf_counter()
 
-    # Initialize state
-    state = ResearchState(
-        query=query,
-        conversation_history=conversation_history or [],
-        max_plan_iterations=config.max_plan_iterations,
-        enable_clarification=config.enable_clarification,
-        query_mode=config.query_mode,
-        research_depth=config.research_depth,
-        system_instructions=config.system_instructions,
-        enable_citation_verification=config.verify_sources,
-        output_format=config.output_format,
-        output_schema=config.output_schema,
-        synthesis_mode=config.synthesis_mode,
-        enable_post_verification=config.enable_post_verification,
-        structured_system_prompt=config.structured_system_prompt,
-        structured_user_prompt=config.structured_user_prompt,
-        # Workflow mode configuration (007-enterprise-data-sources)
-        workflow_mode=config.workflow_mode,
-        manual_steps=config.manual_steps or [],
-    )
-    if session_id:
-        state.session_id = session_id
+    # Initialize state using shared helpers (C1: single source of truth)
+    state = _create_research_state(query, config, conversation_history, session_id)
+    _wire_source_scope(state, config)
+    _wire_config_fields(state, config)
 
-    # Wire source scope from OrchestrationConfig to ResearchState (008-data-source-selection)
-    if config.source_scope:
-        from deep_research.schemas.source_scope import SourceScope, SourceScopeConfig
-
-        try:
-            scope_enum = SourceScope(config.source_scope)
-            state.source_scope_config = SourceScopeConfig(
-                scope=scope_enum,
-                enabled_sources=config.enabled_sources,
-                disabled_sources=config.disabled_sources or [],
-            )
-            logger.info(
-                "ORCHESTRATION_SOURCE_SCOPE_SET",
-                scope=config.source_scope,
-                enabled_count=len(config.enabled_sources or []),
-                disabled_count=len(config.disabled_sources or []),
-            )
-        except ValueError as e:
-            logger.warning(
-                "ORCHESTRATION_INVALID_SOURCE_SCOPE",
-                scope=config.source_scope,
-                error=str(e),
-            )
-            # Default to ALL scope on invalid input
-            state.source_scope_config = SourceScopeConfig(scope=SourceScope.ALL)
-
-    # Wire user_token for OBO authentication (007-enterprise-data-sources Phase 2)
-    if config.user_token:
-        state.user_token = config.user_token
-
-    # Wire file_ids and agent_id from config to state
+    # run_research-specific: warn about unavailable file_search (no db session)
     if config.file_ids:
-        state.file_ids = config.file_ids
         logger.warning(
             "ORCHESTRATION_FILE_SEARCH_UNAVAILABLE",
             reason="run_research has no database session for file_search",
             file_count=len(config.file_ids),
         )
-    if config.agent_id:
-        state.agent_id = config.agent_id
-    if config.model_overrides:
-        state.model_overrides = config.model_overrides
-    if config.domain_filter:
-        state.domain_filter = config.domain_filter
 
-    # Create enterprise tools from discovery cache (run_research has no db param)
-    if (
-        not state.enterprise_tools
-        and state.source_scope_config
-        and state.source_scope_config.enabled_sources
-        and state.is_enterprise_search_allowed()
-    ):
-        try:
-            from deep_research.agent.tools.factory import create_tools_from_discovered_sources
-            from deep_research.services.discovery_cache import get_discovery_cache
+    # Enterprise tools from discovery cache (shared helper)
+    await _load_enterprise_tools_from_cache(state, user_id)
 
-            cache = get_discovery_cache()
-            cached_sources = await cache.get(user_id=user_id)
-
-            if cached_sources:
-                enabled_ids = set(state.source_scope_config.enabled_sources)
-                matching = [s for s in cached_sources if s.source_id in enabled_ids]
-
-                if matching:
-                    type_filtered = [
-                        s for s in matching
-                        if state.source_scope_config.is_type_enabled(s.source_type)
-                    ]
-
-                    if type_filtered:
-                        discovery_tools = await create_tools_from_discovered_sources(
-                            type_filtered
-                        )
-                        state.enterprise_tools = discovery_tools
-                        logger.info(
-                            "ORCHESTRATION_ENTERPRISE_TOOLS_FROM_DISCOVERY",
-                            tool_count=len(discovery_tools),
-                            tool_names=[t.definition.name for t in discovery_tools],
-                            source_ids=[s.source_id for s in type_filtered],
-                        )
-                else:
-                    logger.warning(
-                        "ORCHESTRATION_NO_MATCHING_DISCOVERY_SOURCES",
-                        enabled_ids=list(enabled_ids)[:5],
-                        cached_count=len(cached_sources),
-                    )
-            else:
-                logger.warning(
-                    "ORCHESTRATION_DISCOVERY_CACHE_EMPTY",
-                    user_id=user_id,
-                )
-        except Exception as e:
-            logger.error(
-                "ORCHESTRATION_DISCOVERY_TOOLS_FAILED",
-                error=str(e),
-                error_type=type(e).__name__,
-                exc_info=True,
-            )
-
-    # Handle manual workflow mode: convert manual steps to plan
-    if state.is_manual_mode() and state.manual_steps:
-        state.current_plan = _convert_manual_steps_to_plan(
-            state.manual_steps, query
-        )
-        # Also set source constraints from manual steps
-        for manual_step in state.manual_steps:
-            step_id = getattr(manual_step, "id", "")
-            constraint = getattr(manual_step, "constraints", None)
-            if step_id and constraint:
-                state.set_source_constraint(step_id, constraint)
+    # Handle manual workflow mode (shared helper)
+    _wire_manual_mode(state, query)
 
     events: list[StreamEvent] = []
     steps_executed = 0
@@ -767,7 +854,7 @@ async def run_research(
             }) as root_span:
 
                 # Group traces by user and chat session for MLflow trace correlation
-                if user_id or chat_id:
+                if (user_id or chat_id) and mlflow.active_run():
                     trace_metadata: dict[str, str] = {}
                     if user_id:
                         trace_metadata["mlflow.trace.user"] = user_id
@@ -978,28 +1065,9 @@ async def run_research(
                                 events.append(_reflection_decision(state))
 
                                 if state.last_reflection.decision == ReflectionDecision.COMPLETE:
-                                    # Check minimum steps enforcement
-                                    min_steps = state.get_min_steps()
-                                    completed = len(state.get_completed_steps())
-
-                                    if completed < min_steps:
-                                        # Override early completion - minimum steps not reached
-                                        logger.warning(
-                                            "OVERRIDE_EARLY_COMPLETE",
-                                            completed=completed,
-                                            minimum=min_steps,
-                                            reason="Minimum steps not reached",
-                                        )
-                                        state.last_reflection = ReflectionResult(
-                                            decision=ReflectionDecision.CONTINUE,
-                                            reasoning=f"Override: {completed}/{min_steps} minimum steps completed",
-                                        )
-                                    else:
-                                        # Allow completion - mark remaining steps as skipped
-                                        while state.has_more_steps():
-                                            state.advance_step()
-                                            steps_skipped += 1
-                                        logger.info("EARLY_COMPLETION", steps_skipped=steps_skipped)
+                                    should_break, skipped = _handle_reflection_complete(state)
+                                    steps_skipped += skipped
+                                    if should_break:
                                         break
 
                                 if state.last_reflection.decision == ReflectionDecision.ADJUST:
@@ -1352,59 +1420,13 @@ async def stream_research(
     config = config or _get_default_orchestration_config()
     start_time = time.perf_counter()
 
-    # Initialize state
-    state = ResearchState(
-        query=query,
-        conversation_history=conversation_history or [],
-        max_plan_iterations=config.max_plan_iterations,
-        enable_clarification=config.enable_clarification,
-        query_mode=config.query_mode,
-        research_depth=config.research_depth,
-        system_instructions=config.system_instructions,
-        enable_citation_verification=config.verify_sources,
-        output_format=config.output_format,
-        output_schema=config.output_schema,
-        synthesis_mode=config.synthesis_mode,
-        enable_post_verification=config.enable_post_verification,
-        structured_system_prompt=config.structured_system_prompt,
-        structured_user_prompt=config.structured_user_prompt,
-    )
-    if session_id:
-        state.session_id = session_id
+    # Initialize state using shared helpers (C1: single source of truth)
+    state = _create_research_state(query, config, conversation_history, session_id)
+    _wire_source_scope(state, config)
+    _wire_config_fields(state, config)
 
-    # Wire source scope from OrchestrationConfig to ResearchState (008-data-source-selection)
-    if config.source_scope:
-        from deep_research.schemas.source_scope import SourceScope, SourceScopeConfig
-
-        try:
-            scope_enum = SourceScope(config.source_scope)
-            state.source_scope_config = SourceScopeConfig(
-                scope=scope_enum,
-                enabled_sources=config.enabled_sources,
-                disabled_sources=config.disabled_sources or [],
-            )
-            logger.info(
-                "ORCHESTRATION_SOURCE_SCOPE_SET",
-                scope=config.source_scope,
-                enabled_count=len(config.enabled_sources or []),
-                disabled_count=len(config.disabled_sources or []),
-            )
-        except ValueError as e:
-            logger.warning(
-                "ORCHESTRATION_INVALID_SOURCE_SCOPE",
-                scope=config.source_scope,
-                error=str(e),
-            )
-            # Default to ALL scope on invalid input
-            state.source_scope_config = SourceScopeConfig(scope=SourceScope.ALL)
-
-    # Wire user_token for OBO authentication (007-enterprise-data-sources Phase 2)
-    if config.user_token:
-        state.user_token = config.user_token
-
-    # Wire file_ids and agent_id from config to state
+    # stream_research-specific: file_search tool creation (requires db param)
     if config.file_ids:
-        state.file_ids = config.file_ids
         if db is not None and user_id:
             try:
                 from deep_research.agent.tools.file_search import create_file_search_tool
@@ -1485,13 +1507,6 @@ async def stream_research(
                 chat_id=chat_id,
             )
 
-    if config.agent_id:
-        state.agent_id = config.agent_id
-    if config.model_overrides:
-        state.model_overrides = config.model_overrides
-    if config.domain_filter:
-        state.domain_filter = config.domain_filter
-
     # Load file contents for inline injection and citation tracking
     if state.file_ids and db is not None and user_id:
         try:
@@ -1547,63 +1562,8 @@ async def stream_research(
             )
             # Continue without enterprise tools - not critical
 
-    # Fallback: create tools from discovered sources if DB-based loading returned empty.
-    # This handles the case where user selected sources from discovery UI
-    # but hasn't saved them as UserDataSource records in the DB.
-    if (
-        not _has_non_file_tools(state.enterprise_tools)
-        and state.source_scope_config
-        and state.source_scope_config.enabled_sources
-        and state.is_enterprise_search_allowed()
-    ):
-        try:
-            from deep_research.agent.tools.factory import create_tools_from_discovered_sources
-            from deep_research.services.discovery_cache import get_discovery_cache
-
-            cache = get_discovery_cache()
-            cached_sources = await cache.get(user_id=user_id)
-
-            if cached_sources:
-                enabled_ids = set(state.source_scope_config.enabled_sources)
-                matching = [s for s in cached_sources if s.source_id in enabled_ids]
-
-                if matching:
-                    # Filter by source-type toggles (e.g., enable_vector_search=False)
-                    type_filtered = [
-                        s for s in matching
-                        if state.source_scope_config.is_type_enabled(s.source_type)
-                    ]
-
-                    if type_filtered:
-                        discovery_tools = await create_tools_from_discovered_sources(
-                            type_filtered
-                        )
-                        _append_unique_tools(state.enterprise_tools, discovery_tools)
-                        logger.info(
-                            "ORCHESTRATION_ENTERPRISE_TOOLS_FROM_DISCOVERY",
-                            loaded_count=len(discovery_tools),
-                            total_count=len(state.enterprise_tools),
-                            tool_names=[t.definition.name for t in state.enterprise_tools],
-                            source_ids=[s.source_id for s in type_filtered],
-                        )
-                else:
-                    logger.warning(
-                        "ORCHESTRATION_NO_MATCHING_DISCOVERY_SOURCES",
-                        enabled_ids=list(enabled_ids)[:5],
-                        cached_count=len(cached_sources),
-                    )
-            else:
-                logger.warning(
-                    "ORCHESTRATION_DISCOVERY_CACHE_EMPTY",
-                    user_id=user_id,
-                )
-        except Exception as e:
-            logger.error(
-                "ORCHESTRATION_DISCOVERY_TOOLS_FAILED",
-                error=str(e),
-                error_type=type(e).__name__,
-                exc_info=True,
-            )
+    # Fallback: discovery cache (shared helper, tier 2)
+    await _load_enterprise_tools_from_cache(state, user_id)
 
     # Last resort: create tools directly from source IDs (no cache/DB needed).
     # The source_id format (e.g. "assistant:endpoint_name") encodes enough
@@ -1635,6 +1595,9 @@ async def stream_research(
                 error=str(e)[:200],
                 error_type=type(e).__name__,
             )
+
+    # Handle manual workflow mode (shared helper — BUG FIX: was missing from stream_research)
+    _wire_manual_mode(state, query)
 
     # DIAGNOSTIC: Log state creation for structured output debugging
     logger.info(
@@ -1741,7 +1704,7 @@ async def stream_research(
         }) as root_span:
 
             # Group traces by user and chat session for MLflow trace correlation
-            if user_id or chat_id:
+            if (user_id or chat_id) and mlflow.active_run():
                 trace_metadata: dict[str, str] = {}
                 if user_id:
                     trace_metadata["mlflow.trace.user"] = user_id
@@ -2827,10 +2790,10 @@ async def stream_research(
                                     await _buffer_event(evt, event_buffer)
 
                                     if state.last_reflection.decision == ReflectionDecision.COMPLETE:
-                                        while state.has_more_steps():
-                                            state.advance_step()
-                                            steps_skipped += 1
-                                        break
+                                        should_break, skipped = _handle_reflection_complete(state)
+                                        steps_skipped += skipped
+                                        if should_break:
+                                            break
 
                                     if state.last_reflection.decision == ReflectionDecision.ADJUST:
                                         preserved_count = len(state.get_completed_steps())

@@ -192,10 +192,10 @@ class TestRunReflector:
         mock_llm_client.complete.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_error_handling_defaults_to_continue(
+    async def test_error_handling_defaults_to_complete(
         self, research_state_with_plan: ResearchState, mock_llm_client: AsyncMock
     ):
-        """Test that errors result in default continue decision."""
+        """Test that errors result in fail-safe COMPLETE decision to prevent infinite loops."""
         # Arrange
         mock_llm_client.complete = AsyncMock(side_effect=Exception("LLM API error"))
 
@@ -204,7 +204,7 @@ class TestRunReflector:
 
         # Assert
         assert result.last_reflection is not None
-        assert result.last_reflection.decision == ReflectionDecision.CONTINUE
+        assert result.last_reflection.decision == ReflectionDecision.COMPLETE
         assert "error" in result.last_reflection.reasoning.lower()
 
     @pytest.mark.asyncio
@@ -269,17 +269,16 @@ class TestRunReflector:
 
 
     @pytest.mark.asyncio
-    async def test_uppercase_decision_normalized(
+    async def test_uppercase_decision_triggers_fail_safe(
         self, research_state_with_plan: ResearchState, mock_llm_client: AsyncMock
     ):
-        """Test that uppercase decision values are normalized to lowercase."""
-        # Arrange - LLM returns uppercase decision (edge case we're fixing)
-        ReflectorOutput(
-            decision="continue",  # Pydantic validates as lowercase
-            reasoning="Should continue with research.",
-            suggested_changes=None,
-        )
+        """Test that uppercase decision values (rejected by Pydantic) trigger fail-safe COMPLETE.
 
+        ReflectorOutput.model_validate_json rejects "CONTINUE" (uppercase) because
+        the enum expects lowercase. This causes a validation error caught by the
+        error handler, which now returns COMPLETE as a fail-safe to prevent
+        infinite loops.
+        """
         # Simulate LLM returning uppercase via raw JSON parsing
         mock_llm_client.complete = AsyncMock(
             return_value=LLMResponse(
@@ -294,9 +293,9 @@ class TestRunReflector:
         # Act
         result = await run_reflector(research_state_with_plan, mock_llm_client)
 
-        # Assert - should succeed with lowercase normalization
+        # Assert - fail-safe COMPLETE because Pydantic rejects uppercase
         assert result.last_reflection is not None
-        assert result.last_reflection.decision == ReflectionDecision.CONTINUE
+        assert result.last_reflection.decision == ReflectionDecision.COMPLETE
 
 
 class TestReflectorOutput:

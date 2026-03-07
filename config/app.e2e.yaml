@@ -55,9 +55,35 @@ models:
   complex:
     endpoints:
       - haiku
+      - gpt5nano
+      - gemini3flash
     temperature: 0.3
     max_tokens: 6000
     reasoning_effort: medium
+    tokens_per_minute: 50000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  # Bulk analysis tier - used by coordinator, reflector, citation pipeline
+  bulk_analysis:
+    endpoints:
+      - gemini3flash
+      - haiku
+    temperature: 0.3
+    max_tokens: 4000
+    reasoning_effort: medium
+    tokens_per_minute: 50000
+    rotation_strategy: priority
+    fallback_on_429: true
+
+  # Fast tier - used by researcher for search query generation
+  fast:
+    endpoints:
+      - gpt5nano
+      - haiku
+    temperature: 0.7
+    max_tokens: 2000
+    reasoning_effort: low
     tokens_per_minute: 50000
     rotation_strategy: priority
     fallback_on_429: true
@@ -222,6 +248,36 @@ citation_verification:
     search_timeout_seconds: 2
 
   unsupported_claim_warning_threshold: 0.20
+
+# Query mode timeouts - relaxed for E2E test environment
+# Pydantic requires full field specification (class defaults differ from mode defaults)
+query_modes:
+  simple:
+    model_role: simple
+    emit_events: false
+    create_session: false
+    timeout_seconds: 120
+  web_search:
+    model_role: analytical
+    emit_events: true
+    create_session: true
+    timeout_seconds: 30
+    max_retries: 2
+    researcher:
+      mode: classic
+      max_search_queries: 2
+      max_urls_to_crawl: 3
+    citation_verification:
+      enabled: true
+      generation_mode: natural
+      enable_numeric_qa_verification: false
+      enable_verification_retrieval: false
+  deep_research:
+    model_role: complex
+    emit_events: true
+    create_session: true
+    use_research_types: true
+    timeout_seconds: 300
 
 # Job configuration - high limits for E2E tests to prevent bottlenecks
 jobs:

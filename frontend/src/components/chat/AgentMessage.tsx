@@ -13,6 +13,7 @@ import {
 import { Message, Source, ResearchPlan } from '@/types';
 import { cn } from '@/lib/utils';
 import { Card, CardContent } from '@/components/ui/card';
+import { safeOpenUrl } from '@/utils/urlSafety';
 import { MarkdownRenderer, CitationContext } from '@/components/common';
 import { EvidenceCard, SourceGroupedCitations } from '@/components/citations';
 import { MessageExportMenu } from './MessageExportMenu';
@@ -182,8 +183,7 @@ export function AgentMessage({
     const sourceUrl = claim.citations[0]?.evidenceSpan?.source?.url ||
                       (claim.citations[0]?.evidenceSpan as { sourceUrl?: string })?.sourceUrl;
     if (sourceUrl) {
-      // Open source URL in new tab
-      window.open(sourceUrl, '_blank', 'noopener,noreferrer');
+      safeOpenUrl(sourceUrl);
     }
   }, [citationData]);
 
@@ -244,7 +244,7 @@ export function AgentMessage({
           )}
 
           {/* Message content with markdown rendering and citation support */}
-          <div className="relative">
+          <div className="relative" data-testid="agent-response-content">
             {/* Use custom renderer if available for structured output */}
             {CustomRenderer && structuredOutput ? (
               <CustomRenderer

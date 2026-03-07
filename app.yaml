@@ -1,12 +1,16 @@
-# Databricks Apps Configuration
+# Databricks Apps Configuration — LOCAL DEVELOPMENT REFERENCE
 # See: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/best-practices
 #
-# IMPORTANT: This file uses `valueFrom` to reference app resources.
+# NOTE: For deployed apps, the config section in databricks.yml generates
+# app.yaml during deployment with variable interpolation. This file is
+# used as a local development reference only.
+#
+# IMPORTANT: This file uses `value_from` to reference app resources.
 # Resources are configured via:
 #   Option A: Databricks UI (Compute > Apps > Configure > App resources)
 #   Option B: databricks.yml (infrastructure-as-code, provisions Lakebase)
 #
-# The `valueFrom` value is a RESOURCE KEY (alias), not the actual resource name.
+# The `value_from` value is a RESOURCE KEY (alias), not the actual resource name.
 
 # Simple command pattern (matching working template)
 # Databricks Apps auto-injects port via --port flag when spawning the process
@@ -48,4 +52,4 @@ env:
   # Brave Search API (external service)
   # The "brave-api-key" resource provides the API key from secret scope
   - name: BRAVE_API_KEY
-    valueFrom: "brave-api-key"
+    value_from: "brave-api-key"

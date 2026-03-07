@@ -16,6 +16,18 @@ from deep_research.plugins.base import PromptProvider, ResearchPlugin, ToolProvi
 from deep_research.plugins.manager import PluginManager
 
 
+def _mock_app_config(**kwargs: Any) -> MagicMock:
+    """Create a MagicMock app_config safe for PluginManager.
+
+    Sets ``plugins.lifecycle_hooks = None`` so the manager does not try to
+    read integer attributes from a MagicMock (which would fail inside
+    ``ThreadPoolExecutor.__init__``).
+    """
+    mock = MagicMock(**kwargs)
+    mock.plugins.lifecycle_hooks = None
+    return mock
+
+
 # Full lifecycle test plugin
 class LifecycleTestPlugin:
     """A plugin that tracks its lifecycle for testing."""
@@ -230,7 +242,7 @@ class TestPluginLifecycle:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [FailingPlugin, WorkingPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         # Only working plugin should be loaded
         assert len(manager) == 1
@@ -244,7 +256,7 @@ class TestPluginLifecycle:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [LifecycleTestPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         # Get registry
         registry = manager.get_tool_registry()
@@ -311,7 +323,7 @@ class TestPluginLifecycle:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [Plugin1, Plugin2]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         context = create_test_context()
         overrides = manager.get_prompt_overrides(context)

@@ -53,6 +53,10 @@ DISCOVERY_TIMEOUT_GENIE = timedelta(seconds=10)
 DISCOVERY_TIMEOUT_SERVING = timedelta(seconds=10)
 CACHE_TTL = timedelta(minutes=5)  # Cache TTL
 
+# Genie pagination - SDK does NOT auto-paginate list_spaces()
+GENIE_PAGE_SIZE = 100   # Spaces per page request
+GENIE_MAX_PAGES = 50    # Safety limit: 50 × 100 = 5,000 spaces max
+
 # Heuristics for identifying Knowledge Assistants
 ASSISTANT_NAME_PATTERNS = ["assistant", "expert", "advisor", "knowledge", "agent"]
 ASSISTANT_TAG_KEYS = ["type", "assistant_type", "knowledge_assistant"]
@@ -474,12 +478,48 @@ class DiscoveryService:
             client = await self._get_client(user_token)
             loop = asyncio.get_event_loop()
 
-            # Single API call - list_spaces() returns all needed summary fields
+            # Paginate through all Genie spaces — SDK does NOT auto-paginate
+            def _list_all_spaces() -> list[Any]:
+                """Fetch all Genie spaces with manual pagination (blocking, runs in executor)."""
+                all_spaces: list[Any] = []
+                seen_ids: set[str] = set()
+                page_token: str | None = None
+
+                for page_num in range(1, GENIE_MAX_PAGES + 1):
+                    response = client.genie.list_spaces(
+                        page_size=GENIE_PAGE_SIZE,
+                        page_token=page_token,
+                    )
+
+                    if not response or not hasattr(response, "spaces"):
+                        break
+
+                    page_spaces = response.spaces or []
+
+                    # Dedup by space_id to guard against API edge cases
+                    for space in page_spaces:
+                        sid = getattr(space, "space_id", None) or getattr(space, "id", None)
+                        if sid and sid not in seen_ids:
+                            seen_ids.add(sid)
+                            all_spaces.append(space)
+
+                    logger.debug(
+                        "GENIE_DISCOVERY_PAGE",
+                        page=page_num,
+                        page_count=len(page_spaces),
+                        total_so_far=len(all_spaces),
+                    )
+
+                    # Follow next_page_token or stop
+                    next_token = getattr(response, "next_page_token", None)
+                    if not next_token:
+                        break
+                    page_token = next_token
+
+                return all_spaces
+
             try:
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: client.genie.list_spaces(),
-                )
+                spaces = await loop.run_in_executor(None, _list_all_spaces)
             except AttributeError:
                 # Genie API may not be available in all SDK versions
                 logger.warning("GENIE_API_NOT_AVAILABLE")
@@ -490,11 +530,6 @@ class DiscoveryService:
                     retryable=False,
                 )
 
-            if not response or not hasattr(response, "spaces"):
-                logger.debug("GENIE_DISCOVERY_EMPTY_RESPONSE")
-                return sources, None
-
-            spaces = response.spaces or []
             logger.debug("GENIE_DISCOVERY_SPACES", count=len(spaces))
 
             for space_summary in spaces:

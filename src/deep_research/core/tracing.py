@@ -105,10 +105,13 @@ def setup_tracing() -> None:
     except Exception as e:
         logger.warning("MLflow tracking URI setup failed: %s", e)
 
-    # Step 3: experiment
+    # Step 3: experiment (prefer ID from Databricks Apps resource, fall back to name)
     experiment_ok = False
     try:
-        mlflow.set_experiment(settings.mlflow_experiment_name)
+        if settings.mlflow_experiment_id:
+            mlflow.set_experiment(experiment_id=settings.mlflow_experiment_id)
+        else:
+            mlflow.set_experiment(settings.mlflow_experiment_name)
         experiment_ok = True
     except Exception as e:
         logger.warning("MLflow set_experiment failed: %s", e)
@@ -127,8 +130,9 @@ def setup_tracing() -> None:
 
     _tracing_enabled = True
     logger.info(
-        "MLflow tracing setup complete: tracking_uri=%s, experiment=%s, experiment_ok=%s",
+        "MLflow tracing setup complete: tracking_uri=%s, experiment_id=%s, experiment_name=%s, experiment_ok=%s",
         settings.mlflow_tracking_uri,
+        settings.mlflow_experiment_id,
         settings.mlflow_experiment_name,
         experiment_ok,
     )

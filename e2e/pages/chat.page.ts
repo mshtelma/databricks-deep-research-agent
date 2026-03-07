@@ -13,6 +13,7 @@ export class ChatPage {
   readonly streamingIndicator: Locator;
   readonly messageList: Locator;
   readonly regenerateButton: Locator;
+  readonly errorAlert: Locator;
 
   constructor(page: Page) {
     this.page = page;
@@ -23,6 +24,80 @@ export class ChatPage {
     this.streamingIndicator = page.getByTestId('streaming-indicator');
     this.messageList = page.getByTestId('message-list');
     this.regenerateButton = page.getByTestId('regenerate-response');
+    this.errorAlert = page.getByTestId('research-error');
+  }
+
+  /**
+   * Check if an agent-response element has meaningful text content.
+   * The backend creates agent messages with NULL content at research start,
+   * which renders as an empty agent-response div. We must exclude these
+   * placeholders to avoid returning prematurely from waitForAgentResponse.
+   */
+  private async hasAgentResponseWithContent(minLength: number = 20): Promise<boolean> {
+    const responses = this.page.getByTestId('agent-response');
+    const count = await responses.count();
+    for (let i = 0; i < count; i++) {
+      const text = (await responses.nth(i).textContent().catch(() => '')) ?? '';
+      if (text.trim().length >= minLength) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Check if a persisted (non-streaming) agent response is visible WITH content.
+   *
+   * During streaming, AgentMessage renders inside streaming-indicator with
+   * the same data-testid="agent-response". This method excludes it by checking
+   * that streaming-indicator is NOT visible before accepting agent-response.
+   *
+   * Also excludes empty placeholder messages (backend creates agent message
+   * with NULL content at research start, before synthesis).
+   *
+   * The "completed-stream bridge" (MessageList.tsx:181) also renders agent-response
+   * outside streaming-indicator — this is intentionally detected as persisted
+   * since it has full content and streaming is complete.
+   */
+  private async isPersistedResponseVisible(): Promise<boolean> {
+    const responseVisible = await this.page
+      .getByTestId('agent-response')
+      .first()
+      .isVisible()
+      .catch(() => false);
+    if (!responseVisible) return false;
+    const streamingActive = await this.streamingIndicator.isVisible().catch(() => false);
+    if (streamingActive) return false;
+    // Verify at least one response has actual content (not an empty placeholder)
+    return this.hasAgentResponseWithContent();
+  }
+
+  /**
+   * Get the count of persisted (non-streaming) agent responses WITH content.
+   *
+   * During streaming, one agent-response element exists inside streaming-indicator.
+   * This method subtracts 1 from the raw count when streaming is active to exclude it.
+   * Also excludes empty placeholder messages (NULL content from backend).
+   */
+  private async getPersistedResponseCount(): Promise<number> {
+    const responses = this.page.getByTestId('agent-response');
+    const rawCount = await responses.count();
+    const streamingActive = await this.streamingIndicator.isVisible().catch(() => false);
+
+    // Count only responses with actual content
+    let contentCount = 0;
+    for (let i = 0; i < rawCount; i++) {
+      const text = (await responses.nth(i).textContent().catch(() => '')) ?? '';
+      if (text.trim().length >= 20) contentCount++;
+    }
+
+    return streamingActive ? Math.max(0, contentCount - 1) : contentCount;
+  }
+
+  /**
+   * Check if a research error alert is visible.
+   * The error banner appears when the backend sends an error event.
+   */
+  private async isErrorVisible(): Promise<boolean> {
+    return this.errorAlert.isVisible().catch(() => false);
   }
 
   /**
@@ -75,88 +150,190 @@ export class ChatPage {
    * We need to wait for EITHER the loading/streaming indicators to hide OR for an
    * agent-response to appear (which indicates completion).
    */
+  /**
+   * Check if the research status shows "Complete" (green badge in the UI).
+   * This indicates the backend finished processing even if the response isn't rendered.
+   */
+  private async isResearchStatusComplete(): Promise<boolean> {
+    // The status indicator shows "Complete" text when research finishes
+    const completeIndicator = this.page.locator('text=Complete').first();
+    return completeIndicator.isVisible().catch(() => false);
+  }
+
   async waitForAgentResponse(timeout: number = 120000): Promise<void> {
-    // Strategy: Two-phase polling
-    // Phase 1: Wait for research to START (loading or streaming indicator appears)
-    // Phase 2: Wait for research to COMPLETE (agent response appears)
-
-    const agentResponse = this.page.getByTestId('agent-response').first();
     const startTime = Date.now();
-    const pollInterval = 1000; // Check every second
+    const pollInterval = 1000;
+    let hasReloaded = false;
 
-    // PHASE 1: Wait for research to start
-    // At the beginning, both loading and streaming indicators may be hidden.
-    // We need to wait for one of them to appear, OR for an early response.
+    // PHASE 1: Wait for research to START (indicator appears) or instant response.
     let researchStarted = false;
     while (Date.now() - startTime < timeout && !researchStarted) {
-      // Check if agent response already exists (maybe cached or very fast)
-      const responseVisible = await agentResponse.isVisible().catch(() => false);
-      if (responseVisible) {
-        return; // Success! Response already appeared
+      if (await this.isPersistedResponseVisible()) {
+        return; // Cached or instant response (no streaming involved)
       }
-
-      // Check if research has started (either indicator visible)
       const loadingVisible = await this.loadingIndicator.isVisible().catch(() => false);
       const streamingVisible = await this.streamingIndicator.isVisible().catch(() => false);
-
       if (loadingVisible || streamingVisible) {
         researchStarted = true;
         break;
       }
-
-      // Wait a bit before checking again
+      if (await this.isErrorVisible()) {
+        researchStarted = true;
+        break;
+      }
+      // Check if research already completed (fast simple queries can finish
+      // before the test catches loading/streaming indicators)
+      if (await this.isResearchStatusComplete()) {
+        researchStarted = true;
+        break;
+      }
       await this.page.waitForTimeout(pollInterval);
     }
 
-    // PHASE 2: Wait for research to complete
-    // Now poll until agent response appears, or indicators disappear after having been visible
+    // PHASE 2: Wait for research to COMPLETE (persisted response appears).
+    let errorFirstSeenAt: number | null = null;
+    let stallStartedAt: number | null = null;
+
     while (Date.now() - startTime < timeout) {
-      // Check if agent response exists
-      const responseVisible = await agentResponse.isVisible().catch(() => false);
-      if (responseVisible) {
-        return; // Success! Agent response appeared
+      if (await this.isPersistedResponseVisible()) {
+        return; // Streaming finished, persisted or bridge response visible
       }
 
-      // Check current indicator state
       const loadingVisible = await this.loadingIndicator.isVisible().catch(() => false);
       const streamingVisible = await this.streamingIndicator.isVisible().catch(() => false);
+      const errorVisible = await this.isErrorVisible();
 
-      // If research started but now both indicators are hidden, check for response
-      if (researchStarted && !loadingVisible && !streamingVisible) {
-        // Both indicators hidden after research started - check for response
-        const finalCheck = await agentResponse.isVisible().catch(() => false);
-        if (finalCheck) {
-          return;
-        }
-        // Wait a bit more for potential late response (DOM update lag)
+      // Terminal: error visible, no active indicators, no response
+      if (errorVisible && !loadingVisible && !streamingVisible) {
+        // Brief wait for DOM transition (bridge may appear)
         await this.page.waitForTimeout(2000);
-        const lastCheck = await agentResponse.isVisible().catch(() => false);
-        if (lastCheck) {
-          return;
+        if (await this.isPersistedResponseVisible()) {
+          return; // Partial response available via bridge
         }
-        // Still no response after indicators gone - might be a failure, but don't break
-        // Keep polling in case of a slow DOM update
+        throw new Error(
+          'Research failed — error alert visible but no agent response rendered. ' +
+            'Backend may have errored before synthesis started.'
+        );
       }
 
-      // Still waiting - sleep before next poll
+      // Defensive: error visible WITH streaming still active (Layer 1 should prevent this,
+      // but handles recoverable errors or if Layer 1 fix doesn't apply)
+      if (errorVisible && streamingVisible) {
+        if (!errorFirstSeenAt) errorFirstSeenAt = Date.now();
+        if (Date.now() - errorFirstSeenAt > 30000) {
+          throw new Error(
+            'Research error with streaming stuck for 30s+ — streaming-indicator ' +
+              'still visible alongside error alert.'
+          );
+        }
+      } else {
+        errorFirstSeenAt = null; // Reset if error disappears or streaming stops
+      }
+
+      // Stall detection: indicators gone, no response, no error.
+      // This happens when the backend completed but the frontend didn't render the response
+      // (e.g., SSE closed before persistence_completed, TanStack Query cache stale).
+      // Fix: reload the page to force fresh data fetch from the API.
+      if (researchStarted && !loadingVisible && !streamingVisible && !errorVisible) {
+        if (!stallStartedAt) {
+          stallStartedAt = Date.now();
+        }
+
+        // Wait 2s for DOM transition first
+        await this.page.waitForTimeout(2000);
+        if (await this.isPersistedResponseVisible()) {
+          return;
+        }
+
+        // After 10s of stall (or if "Complete" status visible), reload page to force refetch
+        const stallDuration = Date.now() - stallStartedAt;
+        const statusComplete = await this.isResearchStatusComplete();
+        if (!hasReloaded && (stallDuration > 10000 || statusComplete)) {
+          hasReloaded = true;
+          await this.page.reload({ waitUntil: 'networkidle' });
+          await this.page.waitForTimeout(3000); // Wait for React hydration + data fetch
+          if (await this.isPersistedResponseVisible()) {
+            return;
+          }
+        }
+      } else {
+        stallStartedAt = null; // Reset if indicators come back
+      }
+
       await this.page.waitForTimeout(pollInterval);
     }
 
-    // Final assertion - if we get here, either timeout or unexpected state
-    await expect(agentResponse).toBeVisible({ timeout: 5000 });
+    // Timeout — produce actionable error
+    const streamingActive = await this.streamingIndicator.isVisible().catch(() => false);
+    const errorVisible = await this.isErrorVisible();
+    if (streamingActive) {
+      throw new Error(
+        `Agent response still streaming after ${timeout}ms timeout. ` +
+          `streaming-indicator is visible, error=${errorVisible} — research may need more time.`
+      );
+    }
+    await expect(this.page.getByTestId('agent-response').first()).toBeVisible({ timeout: 5000 });
   }
 
   /**
    * Get the text content of the last agent response.
+   * Prefers the content-specific locator (excludes timestamps, buttons, sections).
+   *
+   * Includes retry logic to handle the bridge→DB message DOM transition race:
+   * when streaming completes, the bridge message may briefly disappear as the
+   * DB-persisted message renders, causing textContent to return empty during
+   * the React re-render cycle.
+   *
+   * @param maxRetries Maximum number of retry attempts (default: 10)
+   * @param retryInterval Milliseconds between retries (default: 1000)
    * @returns The text content of the most recent agent response
    */
-  async getLastAgentResponse(): Promise<string> {
+  async getLastAgentResponse(maxRetries: number = 10, retryInterval: number = 1000): Promise<string> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const responses = this.page.getByTestId('agent-response');
+      const count = await responses.count();
+
+      if (count === 0) {
+        if (attempt < maxRetries) {
+          await this.page.waitForTimeout(retryInterval);
+          continue;
+        }
+        throw new Error('No agent responses found after retries');
+      }
+
+      const lastResponse = responses.nth(count - 1);
+
+      // Prefer the content-specific locator (excludes timestamps, buttons, sections)
+      const contentLocator = lastResponse.getByTestId('agent-response-content');
+      let text = '';
+      if (await contentLocator.count() > 0) {
+        text = (await contentLocator.textContent()) ?? '';
+      } else {
+        text = (await lastResponse.textContent()) ?? '';
+      }
+
+      // If we got non-empty content, return it immediately
+      if (text.trim().length > 0) {
+        return text;
+      }
+
+      // Content was empty — likely a DOM transition (bridge→DB message). Retry.
+      if (attempt < maxRetries) {
+        await this.page.waitForTimeout(retryInterval);
+      }
+    }
+
+    // All retries exhausted — return whatever we have (may be empty)
     const responses = this.page.getByTestId('agent-response');
     const count = await responses.count();
     if (count === 0) {
-      throw new Error('No agent responses found');
+      throw new Error('No agent responses found after retries');
     }
     const lastResponse = responses.nth(count - 1);
+    const contentLocator = lastResponse.getByTestId('agent-response-content');
+    if (await contentLocator.count() > 0) {
+      return (await contentLocator.textContent()) ?? '';
+    }
     return (await lastResponse.textContent()) ?? '';
   }
 
@@ -177,17 +354,39 @@ export class ChatPage {
 
   /**
    * Get all agent responses in the chat.
+   * Prefers the content-specific locator (excludes timestamps, buttons, sections).
+   * Includes a brief wait if any response has empty content (DOM transition).
    * @returns Array of agent response text content
    */
   async getAgentResponses(): Promise<string[]> {
-    const responses = this.page.getByTestId('agent-response');
-    const count = await responses.count();
-    const texts: string[] = [];
-    for (let i = 0; i < count; i++) {
-      const text = await responses.nth(i).textContent();
-      texts.push(text ?? '');
+    // Allow a brief retry window for DOM transitions
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const responses = this.page.getByTestId('agent-response');
+      const count = await responses.count();
+      const texts: string[] = [];
+      let hasEmpty = false;
+
+      for (let i = 0; i < count; i++) {
+        const response = responses.nth(i);
+        const contentLocator = response.getByTestId('agent-response-content');
+        let text = '';
+        if (await contentLocator.count() > 0) {
+          text = (await contentLocator.textContent()) ?? '';
+        } else {
+          text = (await response.textContent()) ?? '';
+        }
+        texts.push(text);
+        if (text.trim().length === 0) hasEmpty = true;
+      }
+
+      if (!hasEmpty || attempt === 4) {
+        return texts;
+      }
+      await this.page.waitForTimeout(1000);
     }
-    return texts;
+
+    // Fallback (shouldn't reach here)
+    return [];
   }
 
   /**
@@ -319,20 +518,53 @@ export class ChatPage {
    * @param timeout Maximum wait time in milliseconds
    */
   async waitForAgentResponseCount(count: number, timeout: number = 120000): Promise<void> {
-    const responses = this.page.getByTestId('agent-response');
     const startTime = Date.now();
     const pollInterval = 1000;
+    let stallStartedAt: number | null = null;
+    let hasReloaded = false;
 
     while (Date.now() - startTime < timeout) {
-      const currentCount = await responses.count();
+      const currentCount = await this.getPersistedResponseCount();
       if (currentCount >= count) {
         return;
       }
+      // Error terminal check
+      const errorVisible = await this.isErrorVisible();
+      const streamingVisible = await this.streamingIndicator.isVisible().catch(() => false);
+      const loadingVisible = await this.loadingIndicator.isVisible().catch(() => false);
+      if (errorVisible && !loadingVisible && !streamingVisible) {
+        await this.page.waitForTimeout(2000);
+        const finalCount = await this.getPersistedResponseCount();
+        if (finalCount >= count) return;
+        throw new Error(
+          `Research failed — error visible, expected ${count} responses, have ${finalCount}.`
+        );
+      }
+
+      // Stall detection: no indicators, no response, research likely complete.
+      // Use only time-based threshold — do NOT check isResearchStatusComplete() as
+      // it may detect the previous research's "Complete" badge and trigger premature reload.
+      if (!loadingVisible && !streamingVisible && !errorVisible) {
+        if (!stallStartedAt) stallStartedAt = Date.now();
+        const stallDuration = Date.now() - stallStartedAt;
+        if (!hasReloaded && stallDuration > 15000) {
+          hasReloaded = true;
+          await this.page.reload({ waitUntil: 'networkidle' });
+          await this.page.waitForTimeout(3000);
+          const reloadCount = await this.getPersistedResponseCount();
+          if (reloadCount >= count) return;
+        }
+      } else {
+        stallStartedAt = null;
+      }
+
       await this.page.waitForTimeout(pollInterval);
     }
 
-    // Final assertion - will fail with helpful message if count not reached
-    await expect(responses).toHaveCount(count, { timeout: 5000 });
+    const finalCount = await this.getPersistedResponseCount();
+    throw new Error(
+      `Expected ${count} persisted agent responses within ${timeout}ms, got ${finalCount}`
+    );
   }
 
   /**
@@ -341,41 +573,90 @@ export class ChatPage {
    * @param timeout Maximum wait time in milliseconds
    */
   async waitForNthAgentResponse(n: number, timeout: number = 120000): Promise<void> {
-    const responses = this.page.getByTestId('agent-response');
     const startTime = Date.now();
     const pollInterval = 1000;
-
-    // Check if already loading/processing
     let researchStarted = false;
+    let errorFirstSeenAt: number | null = null;
+    let stallStartedAt: number | null = null;
+    let hasReloaded = false;
 
     while (Date.now() - startTime < timeout) {
-      const currentCount = await responses.count();
+      const currentCount = await this.getPersistedResponseCount();
       if (currentCount >= n) {
-        return; // We have the Nth response
+        return;
       }
-
-      // Check if research has started (indicators visible)
       const loadingVisible = await this.loadingIndicator.isVisible().catch(() => false);
       const streamingVisible = await this.streamingIndicator.isVisible().catch(() => false);
+      const errorVisible = await this.isErrorVisible();
 
       if (loadingVisible || streamingVisible) {
         researchStarted = true;
       }
 
-      // If research started but now both indicators hidden, check for new response
-      if (researchStarted && !loadingVisible && !streamingVisible) {
-        await this.page.waitForTimeout(2000); // DOM update lag
-        const finalCount = await responses.count();
-        if (finalCount >= n) {
-          return;
+      // NOTE: Do NOT use isResearchStatusComplete() here — it detects the PREVIOUS
+      // research's "Complete" badge, which would trigger premature stall detection
+      // for follow-up queries. Only detect research started via actual indicators.
+
+      // Error terminal: no indicators, error visible, count not reached
+      if (errorVisible && !loadingVisible && !streamingVisible) {
+        await this.page.waitForTimeout(2000);
+        const finalCount = await this.getPersistedResponseCount();
+        if (finalCount >= n) return;
+        throw new Error(
+          `Research failed — error alert visible, expected ${n} responses but have ${finalCount}.`
+        );
+      }
+
+      // Streaming + error timeout
+      if (errorVisible && streamingVisible) {
+        if (!errorFirstSeenAt) errorFirstSeenAt = Date.now();
+        if (Date.now() - errorFirstSeenAt > 30000) {
+          const finalCount = await this.getPersistedResponseCount();
+          throw new Error(
+            `Error with streaming stuck 30s+, expected ${n} responses, have ${finalCount}.`
+          );
         }
+      } else {
+        errorFirstSeenAt = null;
+      }
+
+      // Stall detection with page reload fallback.
+      // Only activate when we've seen indicators for the CURRENT request go away.
+      // For follow-ups (n > 1), also use elapsed time as a fallback signal since
+      // fast queries may complete before the first poll catches indicators.
+      const elapsed = Date.now() - startTime;
+      const timeFallback = !researchStarted && elapsed > 30000;
+      if ((researchStarted || timeFallback) && !loadingVisible && !streamingVisible && !errorVisible) {
+        if (!stallStartedAt) stallStartedAt = Date.now();
+
+        await this.page.waitForTimeout(2000);
+        const finalCount = await this.getPersistedResponseCount();
+        if (finalCount >= n) return;
+
+        const stallDuration = Date.now() - stallStartedAt;
+        // Use 15s stall threshold (not isResearchStatusComplete which sees old status)
+        if (!hasReloaded && stallDuration > 15000) {
+          hasReloaded = true;
+          await this.page.reload({ waitUntil: 'networkidle' });
+          await this.page.waitForTimeout(3000);
+          const reloadCount = await this.getPersistedResponseCount();
+          if (reloadCount >= n) return;
+        }
+      } else {
+        stallStartedAt = null;
       }
 
       await this.page.waitForTimeout(pollInterval);
     }
 
-    // Final check with assertion
-    const finalCount = await responses.count();
-    expect(finalCount).toBeGreaterThanOrEqual(n);
+    // Timeout — produce actionable error
+    const finalCount = await this.getPersistedResponseCount();
+    const rawCount = await this.page.getByTestId('agent-response').count();
+    const streamingActive = await this.streamingIndicator.isVisible().catch(() => false);
+    const errorVisible = await this.isErrorVisible();
+    throw new Error(
+      `Expected ${n} persisted agent responses within ${timeout}ms, ` +
+        `got ${finalCount} (raw: ${rawCount}, streaming: ${streamingActive}, error: ${errorVisible})`
+    );
   }
 }

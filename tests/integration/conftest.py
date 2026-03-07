@@ -110,7 +110,10 @@ def cleanup_mlflow_run() -> None:
 @pytest.fixture
 async def llm_client() -> LLMClient:
     """Create a real LLMClient with Databricks endpoints."""
-    client = LLMClient()
+    try:
+        client = LLMClient()
+    except (ValueError, OSError, RuntimeError) as e:
+        pytest.skip(f"Databricks auth unavailable: {e}")
     yield client
     await client.close()
 

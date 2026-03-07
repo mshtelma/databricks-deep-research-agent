@@ -1,8 +1,9 @@
 # Deep Research Agent - Build and Development Commands
 #
 # Development:
-#   make dev            - Run backend with hot reload
+#   make dev            - Run backend + frontend (sources .env + .env.local-dev)
 #   make dev-frontend   - Run frontend with hot reload (Vite)
+#   make dev DEV_TARGET=dev  - Run locally against deployed dev project
 #
 # Production:
 #   make build          - Build frontend to static/
@@ -22,8 +23,22 @@
 #   make test-all       - Run all tests (Python + Frontend)
 #
 # E2E Testing:
-#   make e2e            - Build + run E2E tests (auto-starts server)
+#   make e2e            - Build + run E2E tests (sources .env + .env.e2e)
 #   make e2e-ui         - Run E2E tests with Playwright UI
+#
+# Database:
+#   make db-provision TARGET=local-dev  → full Autoscaling setup, writes .env.local-dev
+#   make db-provision TARGET=e2e        → full Autoscaling setup, writes .env.e2e
+#   make db-cleanup TARGET=dev          → remove orphaned resources from interrupted deploys
+#   make db-migrate     → uses .env default (deep_research)
+#   make db-migrate DB_SUFFIX=dev  → uses deep_research_dev
+#
+# Env file layout:
+#   .env              ← shared secrets (BRAVE_API_KEY, etc.) — NOT touched by provisioning
+#   .env.local-dev    ← written by: make db-provision TARGET=local-dev
+#   .env.e2e          ← written by: make db-provision TARGET=e2e
+#   .env.dev          ← written by: make deploy TARGET=dev
+#   .env.ais          ← written by: make deploy TARGET=ais
 #
 # Utilities:
 #   make clean          - Remove build artifacts
@@ -33,7 +48,28 @@
 #   make lint           - Run linting (backend + frontend)
 #   make logs TARGET=dev - Download app logs (add FOLLOW=-f to follow)
 
-.PHONY: dev dev-backend dev-frontend build prod clean clean_db db-migrate db-status db-reset db-migrate-remote db-local db-local-stop typecheck lint install e2e e2e-ui e2e-debug test test-integration test-complex test-all-python test-frontend test-all quickstart deploy requirements bundle-validate bundle-summary logs
+.PHONY: dev dev-backend dev-frontend build prod clean clean_db db-provision db-cleanup db-migrate db-status db-reset db-migrate-remote db-local db-local-stop clean-e2e typecheck lint install e2e e2e-ui e2e-debug e2e-custom-agents test test-integration test-complex test-all-python test-frontend test-all quickstart deploy requirements bundle-validate bundle-summary logs
+
+# =============================================================================
+# Target-bound env loading
+# =============================================================================
+# Each workflow binds to a target whose .env.{target} provides Lakebase vars.
+# Override to run locally against a different project's database.
+DEV_TARGET ?= local-dev
+E2E_TARGET ?= e2e
+
+# Helper: source .env then .env.{target} (target vars override shared ones)
+# Usage in recipes: $(call load-env,$(DEV_TARGET)) && <command>
+define load-env
+set -a && [ -f .env ] && . .env || true && [ -f .env.$(1) ] && . .env.$(1) || true && set +a
+endef
+
+# =============================================================================
+# Database Isolation Variables
+# =============================================================================
+DB_SUFFIX ?=
+DB_BASE ?= deep_research
+DB_NAME = $(if $(DB_SUFFIX),$(DB_BASE)_$(DB_SUFFIX),$(DB_BASE))
 
 # =============================================================================
 # Development
@@ -44,6 +80,7 @@ dev:
 	@./scripts/kill-server.sh 8000 || true
 	@./scripts/kill-server.sh 5173 || true
 	@echo "Starting backend (:8000) and frontend (:5173)..."
+	@echo "Target: $(DEV_TARGET) (env: .env + .env.$(DEV_TARGET))"
 	@echo "Backend logs: /tmp/deep-research-dev.log"
 	@echo "Access UI at: http://localhost:5173"
 	@echo "Press Ctrl+C to stop both servers"
@@ -56,7 +93,7 @@ dev:
 			echo "Servers stopped."; \
 		}; \
 		trap cleanup EXIT INT TERM; \
-		(uv run uvicorn deep_research.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-dev.log) & \
+		($(call load-env,$(DEV_TARGET)) && uv run uvicorn deep_research.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-dev.log) & \
 		(cd frontend && npm run dev) & \
 		wait'
 
@@ -64,8 +101,9 @@ dev-backend:
 	@echo "Stopping any existing server on port 8000..."
 	@./scripts/kill-server.sh 8000 || true
 	@echo "Starting backend only with hot reload on :8000..."
+	@echo "Target: $(DEV_TARGET) (env: .env + .env.$(DEV_TARGET))"
 	@echo "Logs: /tmp/deep-research-dev.log"
-	uv run uvicorn deep_research.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-dev.log
+	@bash -c '$(call load-env,$(DEV_TARGET)) && uv run uvicorn deep_research.main:app --reload --host 0.0.0.0 --port 8000 2>&1 | tee /tmp/deep-research-dev.log'
 
 dev-frontend:
 	@echo "Stopping any existing server on port 5173..."
@@ -170,27 +208,73 @@ test-all-python:
 
 # Frontend tests
 test-frontend:
-	cd frontend && npm run test
+	cd frontend && npx vitest run --passWithNoTests
 
 # All tests (Python + Frontend)
 test-all: test-all-python test-frontend
 
 # =============================================================================
-# Database (Remote Lakebase - Standard for Local Development)
+# Database Infrastructure (one-time)
+# =============================================================================
+
+# Clean up orphaned Lakebase resources for a target
+# Use when db-provision fails due to stale cloud resources from interrupted deploys
+# (e.g., "workspace limit" or "branch already exists" errors)
+# Usage: make db-cleanup TARGET=local-dev
+#        make db-cleanup TARGET=dev
+db-cleanup:
+	@echo "=============================================="
+	@echo "Cleaning orphaned Lakebase resources"
+	@echo "Target: $(TARGET)"
+	@echo "=============================================="
+	@PROFILE=$$(uv run python3 -c "import yaml,sys;cfg=yaml.safe_load(open('databricks.yml'));t=cfg.get('targets',{}).get('$(TARGET)');sys.exit(1) if not t else print(t['workspace']['profile'])" 2>/dev/null) || \
+		{ echo "ERROR: Unknown target '$(TARGET)'. Valid targets:"; uv run python3 -c "import yaml;[print(f'  {k}') for k in yaml.safe_load(open('databricks.yml'))['targets']]"; exit 1; }; \
+	SUFFIX=$$(uv run python3 -c "import yaml;cfg=yaml.safe_load(open('databricks.yml'));print(cfg['targets']['$(TARGET)']['variables']['resource_suffix'])" 2>/dev/null) || \
+		{ echo "ERROR: Could not extract resource_suffix for target '$(TARGET)'"; exit 1; }; \
+	PROJECT_ID="deep-research-$$SUFFIX"; \
+	echo "  Profile: $$PROFILE"; \
+	echo "  Autoscaling project: $$PROJECT_ID"; \
+	echo ""; \
+	uv run python3 scripts/db-cleanup.py "$$PROFILE" "$$PROJECT_ID"; \
+	echo ""; \
+	echo "Removing stale Terraform state..."; \
+	rm -f .databricks/bundle/$(TARGET)/terraform/terraform.tfstate \
+	      .databricks/bundle/$(TARGET)/terraform/terraform.tfstate.backup 2>/dev/null; \
+	echo "  State files removed."; \
+	echo ""; \
+	echo "Cleaning stale bundle state..."; \
+	databricks bundle destroy -t $(TARGET) --auto-approve 2>&1 || true; \
+	echo ""; \
+	echo "Cleanup complete. You can now re-run: make db-provision TARGET=$(TARGET)"
+
+# Provision Lakebase infrastructure + bootstrap dev/e2e databases
+# Two-phase bootstrap: deploy with postgres → create deep_research DB → re-deploy
+# Then: wait for Autoscaling → discover PGHOST → bootstrap dev/e2e databases
+# Usage: make db-provision TARGET=dev
+#        make db-provision TARGET=local-dev
+db-provision:
+	@uv run python -m deep_research.cli.provision --target $(TARGET)
+
+# =============================================================================
+# Database Management (ongoing)
 # =============================================================================
 
 # Run migrations using .env configuration (remote Lakebase)
-# This is the standard command for local development
+# Use DB_SUFFIX to target a specific database:
+#   make db-migrate              → targets deep_research (from .env)
+#   make db-migrate DB_SUFFIX=dev  → targets deep_research_dev
+#   make db-migrate DB_SUFFIX=e2e  → targets deep_research_e2e
 db-migrate:
 	@echo "Running migrations on configured Lakebase instance..."
-	@echo "Using LAKEBASE_* configuration from .env"
-	uv run alembic upgrade head
+	@echo "Database: $(DB_NAME)"
+	LAKEBASE_DATABASE=$(DB_NAME) uv run alembic upgrade head
 	@echo "Migrations complete!"
 
 # Check current migration status
 db-status:
 	@echo "Checking migration status..."
 	uv run alembic current
+
 
 # =============================================================================
 # Database (Local PostgreSQL - Fallback Only)
@@ -214,73 +298,105 @@ db-local-stop:
 
 clean_db:
 	@echo "Cleaning all chats, messages, and research data from database..."
-	uv run ./scripts/clean-db.sh
+	@echo "Database: $(DB_NAME)"
+	LAKEBASE_DATABASE=$(DB_NAME) uv run ./scripts/clean-db.sh
+	@echo "Done!"
+
+# Clean E2E database specifically
+clean-e2e:
+	@echo "Cleaning E2E database..."
+	bash -c '$(call load-env,$(E2E_TARGET)) && uv run ./scripts/clean-db.sh'
 	@echo "Done!"
 
 # Reset database schema (local or remote based on TARGET)
 # Usage: make db-reset                    # Uses local .env config
-#        make db-reset TARGET=dev         # Resets dev Lakebase (e2-demo-west)
+#        make db-reset TARGET=dev         # Resets deployed Lakebase (auto-detects backend)
 #        make db-reset TARGET=ais         # Resets ais Lakebase
 db-reset:
 	@echo "Resetting database schema (drops all tables and recreates)..."
 	@echo "This will delete ALL data. Use clean_db to preserve schema."
 	@if [ -z "$(TARGET)" ]; then \
 		echo "Using local environment configuration..."; \
-		uv run alembic downgrade base && \
+		uv run python -c "import asyncio; from deep_research.db.bootstrap import drop_all_tables; asyncio.run(drop_all_tables())" && \
 		uv run alembic upgrade head; \
 	else \
-		INSTANCE_NAME="deep-research-lakebase"; \
-		case "$(TARGET)" in \
-			dev) PROFILE="e2-demo-west" ;; \
-			ais) PROFILE="ais" ;; \
-			*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
-		esac; \
+		PROFILE=$$(uv run python3 -c "import yaml,sys;cfg=yaml.safe_load(open('databricks.yml'));t=cfg.get('targets',{}).get('$(TARGET)');sys.exit(1) if not t else print(t['workspace']['profile'])" 2>/dev/null) || \
+			{ echo "ERROR: Unknown target '$(TARGET)'. Valid targets:"; uv run python3 -c "import yaml;[print(f'  {k}') for k in yaml.safe_load(open('databricks.yml'))['targets']]"; exit 1; }; \
 		echo "Target: $(TARGET)"; \
-		echo "Lakebase instance: $$INSTANCE_NAME"; \
 		echo "Databricks profile: $$PROFILE"; \
-		echo "Database: deep_research"; \
 		echo ""; \
-		DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
-		LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
-		LAKEBASE_DATABASE="deep_research" \
-		uv run alembic downgrade base && \
-		DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
-		LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
-		LAKEBASE_DATABASE="deep_research" \
-		uv run alembic upgrade head; \
+		echo "Detecting backend..."; \
+		RESOURCE_SUFFIX=$$(uv run python3 -c "import yaml;cfg=yaml.safe_load(open('databricks.yml'));print(cfg['targets']['$(TARGET)']['variables']['resource_suffix'])" 2>/dev/null); \
+		PROJECT_ID="deep-research-$$RESOURCE_SUFFIX"; \
+		ENDPOINT_NAME=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
+			"from deep_research.deployment import discover_autoscaling_endpoint; print(discover_autoscaling_endpoint('$$PROJECT_ID'))" 2>/dev/null); \
+		if [ -n "$$ENDPOINT_NAME" ]; then \
+			echo "Backend: Autoscaling (ENDPOINT_NAME=$$ENDPOINT_NAME)"; \
+			DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
+			ENDPOINT_NAME="$$ENDPOINT_NAME" \
+			LAKEBASE_INSTANCE_NAME="" \
+			LAKEBASE_DATABASE="deep_research" \
+			uv run python -c "import asyncio; from deep_research.db.bootstrap import drop_all_tables; asyncio.run(drop_all_tables())" && \
+			DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
+			ENDPOINT_NAME="$$ENDPOINT_NAME" \
+			LAKEBASE_INSTANCE_NAME="" \
+			LAKEBASE_DATABASE="deep_research" \
+			uv run alembic upgrade head; \
+		else \
+			INSTANCE_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.database_instances.deep_research_lakebase.name // empty'); \
+			echo "Backend: Provisioned (LAKEBASE_INSTANCE_NAME=$$INSTANCE_NAME)"; \
+			DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
+			LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
+			LAKEBASE_DATABASE="deep_research" \
+			uv run python -c "import asyncio; from deep_research.db.bootstrap import drop_all_tables; asyncio.run(drop_all_tables())" && \
+			DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
+			LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
+			LAKEBASE_DATABASE="deep_research" \
+			uv run alembic upgrade head; \
+		fi; \
 	fi
 	@echo "Database schema reset complete!"
 
-# Run migrations on deployed Lakebase instance
+# Run migrations on deployed Lakebase instance (auto-detects Provisioned vs Autoscaling)
 # Usage: make db-migrate-remote TARGET=dev
 #        make db-migrate-remote TARGET=ais
 # Note: Requires databricks CLI configured and app deployed
-# The Lakebase instance name follows the pattern: deep-research-lakebase-dre-<suffix>
-# Profile mapping: dev -> e2-demo-west, ais -> ais (from databricks.yml targets)
+# Profile is auto-detected from databricks.yml targets
 db-migrate-remote:
 	@echo "Running migrations on deployed Lakebase instance..."
 	@echo "Target: $(TARGET)"
 	@echo ""
-	@INSTANCE_NAME="deep-research-lakebase"; \
-	case "$(TARGET)" in \
-		dev) PROFILE="e2-demo-west" ;; \
-		ais) PROFILE="ais" ;; \
-		*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
-	esac; \
-	echo "Lakebase instance: $$INSTANCE_NAME"; \
+	@PROFILE=$$(uv run python3 -c "import yaml,sys;cfg=yaml.safe_load(open('databricks.yml'));t=cfg.get('targets',{}).get('$(TARGET)');sys.exit(1) if not t else print(t['workspace']['profile'])" 2>/dev/null) || \
+		{ echo "ERROR: Unknown target '$(TARGET)'. Valid targets:"; uv run python3 -c "import yaml;[print(f'  {k}') for k in yaml.safe_load(open('databricks.yml'))['targets']]"; exit 1; }; \
 	echo "Databricks profile: $$PROFILE"; \
 	echo ""; \
-	echo "Bootstrapping database and running migrations..."; \
-	DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
-	LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
-	uv run alembic upgrade head
+	echo "Detecting backend..."; \
+	RESOURCE_SUFFIX=$$(uv run python3 -c "import yaml;cfg=yaml.safe_load(open('databricks.yml'));print(cfg['targets']['$(TARGET)']['variables']['resource_suffix'])" 2>/dev/null); \
+	PROJECT_ID="deep-research-$$RESOURCE_SUFFIX"; \
+	ENDPOINT_NAME=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
+		"from deep_research.deployment import discover_autoscaling_endpoint; print(discover_autoscaling_endpoint('$$PROJECT_ID'))" 2>/dev/null); \
+	if [ -n "$$ENDPOINT_NAME" ]; then \
+		echo "Backend: Autoscaling (ENDPOINT_NAME=$$ENDPOINT_NAME)"; \
+		echo "Running migrations..."; \
+		DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
+		ENDPOINT_NAME="$$ENDPOINT_NAME" \
+		LAKEBASE_INSTANCE_NAME="" \
+		uv run alembic upgrade head; \
+	else \
+		INSTANCE_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.database_instances.deep_research_lakebase.name // empty'); \
+		echo "Backend: Provisioned (LAKEBASE_INSTANCE_NAME=$$INSTANCE_NAME)"; \
+		echo "Running migrations..."; \
+		DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
+		LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
+		uv run alembic upgrade head; \
+	fi
 	@echo ""
 	@echo "Migrations complete!"
 
 # =============================================================================
 # E2E Testing with Playwright
 # Auto-starts server if not running (webServer in playwright.config.ts)
-# Requires: Lakebase configured via .env (run 'make db-migrate' to ensure schema)
+# Sources .env + .env.{E2E_TARGET} for database isolation from dev data
 # =============================================================================
 
 # E2E Test Categories:
@@ -288,21 +404,25 @@ db-migrate-remote:
 #   medium     - Light research operations (2-5 min): edit-message, follow-up, regenerate, stop-cancel, error-handling, provenance-export
 #   slow       - Full research with verification (10 min): citations, grey-references, numeric-claims, research-flow, verification-summary
 #   super-slow - Multiple parallel research sessions (15 min): parallel-research
+#   custom-agents - Custom agent CRUD, UI, and research (CRUD ~30s, UI ~3 min, research ~30 min)
 
 # File patterns for each category
 E2E_FAST := smoke.spec.ts chat-management.spec.ts
 E2E_MEDIUM := edit-message.spec.ts follow-up.spec.ts regenerate.spec.ts stop-cancel.spec.ts error-handling.spec.ts provenance-export.spec.ts
 E2E_SLOW := citations.spec.ts grey-references.spec.ts numeric-claims.spec.ts research-flow.spec.ts verification-summary.spec.ts
 E2E_SUPER_SLOW := parallel-research.spec.ts
+E2E_CUSTOM_AGENTS := custom-agent-crud.spec.ts custom-agent-ui.spec.ts custom-agent-research.spec.ts
 
 e2e:
 	@echo "Stopping any existing server on port 8000..."
 	@./scripts/kill-server.sh 8000 || true
 	@echo "Building frontend (ensures fresh static files)..."
 	@make build
+	@echo "Target: $(E2E_TARGET) (env: .env + .env.$(E2E_TARGET))"
+	@echo "Running database migrations..."
+	@bash -c '$(call load-env,$(E2E_TARGET)) && uv run alembic upgrade head'
 	@echo "Running E2E tests with Playwright..."
-	@echo "Note: Requires Lakebase configured in .env"
-	cd e2e && npm test
+	bash -c '$(call load-env,$(E2E_TARGET)) && cd e2e && npm test'
 
 e2e-fast:
 	@echo "Stopping any existing server on port 8000..."
@@ -310,7 +430,7 @@ e2e-fast:
 	@echo "Building frontend..."
 	@make build
 	@echo "Running FAST E2E tests (~1 min)..."
-	cd e2e && npx playwright test $(E2E_FAST)
+	bash -c '$(call load-env,$(E2E_TARGET)) && cd e2e && npx playwright test $(E2E_FAST)'
 
 e2e-medium:
 	@echo "Stopping any existing server on port 8000..."
@@ -318,7 +438,7 @@ e2e-medium:
 	@echo "Building frontend..."
 	@make build
 	@echo "Running MEDIUM E2E tests (2-5 min each)..."
-	cd e2e && RUN_SLOW_TESTS=1 RUN_INTEGRATION_TESTS=true npx playwright test $(E2E_MEDIUM)
+	bash -c '$(call load-env,$(E2E_TARGET)) && cd e2e && RUN_SLOW_TESTS=1 RUN_INTEGRATION_TESTS=true npx playwright test $(E2E_MEDIUM)'
 
 e2e-slow:
 	@echo "Stopping any existing server on port 8000..."
@@ -326,7 +446,7 @@ e2e-slow:
 	@echo "Building frontend..."
 	@make build
 	@echo "Running SLOW E2E tests (~10 min each)..."
-	cd e2e && RUN_SLOW_TESTS=1 npx playwright test $(E2E_SLOW)
+	bash -c '$(call load-env,$(E2E_TARGET)) && cd e2e && RUN_SLOW_TESTS=1 npx playwright test $(E2E_SLOW)'
 
 e2e-super-slow:
 	@echo "Stopping any existing server on port 8000..."
@@ -334,15 +454,18 @@ e2e-super-slow:
 	@echo "Building frontend..."
 	@make build
 	@echo "Running SUPER-SLOW E2E tests (parallel research, ~15 min)..."
-	cd e2e && RUN_SLOW_TESTS=1 npx playwright test $(E2E_SUPER_SLOW)
+	bash -c '$(call load-env,$(E2E_TARGET)) && cd e2e && RUN_SLOW_TESTS=1 npx playwright test $(E2E_SUPER_SLOW)'
 
 e2e-all:
 	@echo "Stopping any existing server on port 8000..."
 	@./scripts/kill-server.sh 8000 || true
 	@echo "Building frontend..."
 	@make build
+	@echo "Target: $(E2E_TARGET) (env: .env + .env.$(E2E_TARGET))"
+	@echo "Running database migrations..."
+	@bash -c '$(call load-env,$(E2E_TARGET)) && uv run alembic upgrade head'
 	@echo "Running ALL E2E tests (fast + medium + slow + super-slow)..."
-	cd e2e && RUN_SLOW_TESTS=1 RUN_INTEGRATION_TESTS=true npx playwright test
+	bash -c '$(call load-env,$(E2E_TARGET)) && cd e2e && RUN_SLOW_TESTS=1 RUN_INTEGRATION_TESTS=true npx playwright test'
 
 e2e-ui:
 	@echo "Stopping any existing server on port 8000..."
@@ -350,7 +473,7 @@ e2e-ui:
 	@echo "Building frontend (ensures fresh static files)..."
 	@make build
 	@echo "Opening Playwright UI..."
-	cd e2e && RUN_SLOW_TESTS=1 RUN_INTEGRATION_TESTS=true npm run test:ui
+	bash -c '$(call load-env,$(E2E_TARGET)) && cd e2e && RUN_SLOW_TESTS=1 RUN_INTEGRATION_TESTS=true npm run test:ui'
 
 e2e-debug:
 	@echo "Stopping any existing server on port 8000..."
@@ -358,7 +481,15 @@ e2e-debug:
 	@echo "Building frontend (ensures fresh static files)..."
 	@make build
 	@echo "Running E2E tests in debug mode..."
-	cd e2e && npm run test:debug
+	bash -c '$(call load-env,$(E2E_TARGET)) && cd e2e && npm run test:debug'
+
+e2e-custom-agents:
+	@echo "Stopping any existing server on port 8000..."
+	@./scripts/kill-server.sh 8000 || true
+	@echo "Building frontend..."
+	@make build
+	@echo "Running CUSTOM AGENT E2E tests (CRUD + UI + research, ~30 min)..."
+	bash -c '$(call load-env,$(E2E_TARGET)) && cd e2e && RUN_SLOW_TESTS=1 RUN_INTEGRATION_TESTS=1 npx playwright test $(E2E_CUSTOM_AGENTS) --reporter=list'
 
 # =============================================================================
 # Cleanup
@@ -414,10 +545,12 @@ bundle-validate:
 #   1. Build frontend (npm run build)
 #   2. Generate requirements.txt
 #   3. Deploy bundle (creates Lakebase + app)
-#   4. Wait for Lakebase to be ready (retry with backoff)
-#   5. Run migrations with developer credentials
-#   6. Start/restart app
-#   7. Show deployment summary
+#   4. Wait for Lakebase to be ready + resolve PGHOST
+#   5. Create database + re-deploy with endpoint info
+#   6. Run migrations with developer credentials
+#   7. Write .env.{target} with connection info
+#   8. Grant permissions + start app
+#   9. Show deployment summary
 #
 # NOTE: Migrations are run with developer credentials (not app service principal)
 # because the app's service principal has CAN_CONNECT_AND_CREATE permission
@@ -426,64 +559,78 @@ TARGET ?= ais
 BRAVE_SCOPE ?=
 deploy: build requirements
 	@echo "=============================================="
-	@echo "Full Deployment Pipeline (Two-Phase)"
+	@echo "Full Deployment Pipeline (Autoscaling)"
 	@echo "Target: $(TARGET)"
 	@echo "=============================================="
-	@# Determine profile and instance name based on target
-	@INSTANCE_NAME="deep-research-lakebase"; \
-	case "$(TARGET)" in \
-		dev) PROFILE="e2-demo-west" ;; \
-		ais) PROFILE="ais" ;; \
-		*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
-	esac; \
+	@PROFILE=$$(uv run python3 -c "import yaml,sys;cfg=yaml.safe_load(open('databricks.yml'));t=cfg.get('targets',{}).get('$(TARGET)');sys.exit(1) if not t else print(t['workspace']['profile'])" 2>/dev/null) || \
+		{ echo "ERROR: Unknown target '$(TARGET)'. Valid targets:"; uv run python3 -c "import yaml;[print(f'  {k}') for k in yaml.safe_load(open('databricks.yml'))['targets']]"; exit 1; }; \
+	RESOURCE_SUFFIX=$$(uv run python3 -c "import yaml;cfg=yaml.safe_load(open('databricks.yml'));print(cfg['targets']['$(TARGET)']['variables']['resource_suffix'])" 2>/dev/null); \
+	PROJECT_ID="deep-research-$$RESOURCE_SUFFIX"; \
+	APP_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.apps.deep_research_agent.name // empty'); \
 	DEPLOY_ARGS="-t $(TARGET)"; \
 	if [ -n "$(BRAVE_SCOPE)" ]; then \
 		DEPLOY_ARGS="$$DEPLOY_ARGS --var brave_secret_scope=$(BRAVE_SCOPE)"; \
 	fi; \
 	\
 	echo ""; \
-	echo "Phase 1: Bootstrap Infrastructure"; \
-	echo "=================================="; \
-	echo ""; \
-	echo "Step 1/8: Deploying bundle with postgres (bootstrap)..."; \
-	echo "  Instance: $$INSTANCE_NAME"; \
+	echo "Step 1/9: Deploying bundle with postgres (bootstrap)..."; \
 	echo "  Profile: $$PROFILE"; \
+	echo "  Project: $$PROJECT_ID"; \
 	echo "  Note: Using postgres database for initial deploy"; \
 	databricks bundle deploy $$DEPLOY_ARGS --var lakebase_database=postgres || { echo "ERROR: Bundle deploy failed"; exit 1; }; \
 	\
 	echo ""; \
-	echo "Step 2/8: Waiting for Lakebase to be ready..."; \
-	echo "  (New instances may take 30-60 seconds to be connectable)"; \
-	./scripts/wait-for-lakebase.sh "$$INSTANCE_NAME" "$$PROFILE" 10 || { echo "ERROR: Lakebase not ready"; exit 1; }; \
+	echo "Step 2/9: Discovering Autoscaling endpoint..."; \
+	ENDPOINT_NAME=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
+		"from deep_research.deployment import discover_autoscaling_endpoint; print(discover_autoscaling_endpoint('$$PROJECT_ID'))"); \
+	if [ -z "$$ENDPOINT_NAME" ]; then \
+		echo "ERROR: Could not discover Autoscaling endpoint for project $$PROJECT_ID"; exit 1; \
+	fi; \
+	echo "  ENDPOINT_NAME: $$ENDPOINT_NAME"; \
 	\
 	echo ""; \
-	echo "Step 3/8: Creating deep_research database..."; \
-	./scripts/create-database.sh "$$INSTANCE_NAME" "$$PROFILE" deep_research || { echo "ERROR: Database creation failed"; exit 1; }; \
+	echo "Step 3/9: Waiting for Autoscaling endpoint to be ready..."; \
+	DATABRICKS_CONFIG_PROFILE="$$PROFILE" ENDPOINT_NAME="$$ENDPOINT_NAME" LAKEBASE_DATABASE=postgres \
+		uv run python -c "from deep_research.deployment.lakebase import wait_for_lakebase_sync; exit(0 if wait_for_lakebase_sync(endpoint_name='$$ENDPOINT_NAME', timeout_seconds=300, poll_interval_seconds=10) else 1)" \
+		|| { echo "ERROR: Autoscaling endpoint not ready"; exit 1; }; \
+	\
+	echo "  Resolving PGHOST..."; \
+	PGHOST=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
+		"from databricks.sdk import WorkspaceClient; w=WorkspaceClient(); ep=w.postgres.get_endpoint(name='$$ENDPOINT_NAME'); print(ep.status.hosts.host if ep.status and ep.status.hosts else '')" 2>/dev/null || echo ""); \
+	echo "  PGHOST: $$PGHOST"; \
+	export PGHOST; \
 	\
 	echo ""; \
-	echo "Phase 2: Complete Deployment"; \
-	echo "============================"; \
-	echo ""; \
-	echo "Step 4/8: Re-deploying bundle with deep_research..."; \
-	databricks bundle deploy $$DEPLOY_ARGS --var lakebase_database=deep_research || { echo "ERROR: Bundle re-deploy failed"; exit 1; }; \
+	echo "Step 4/9: Creating deep_research database..."; \
+	DATABRICKS_CONFIG_PROFILE="$$PROFILE" ENDPOINT_NAME="$$ENDPOINT_NAME" PGHOST="$$PGHOST" LAKEBASE_INSTANCE_NAME="" LAKEBASE_DATABASE=deep_research \
+		uv run python -c "import asyncio; from deep_research.db.bootstrap import ensure_database_exists; asyncio.run(ensure_database_exists())" \
+		|| { echo "ERROR: Database creation failed"; exit 1; }; \
 	\
 	echo ""; \
-	echo "Step 5/8: Running database migrations..."; \
+	echo "Step 5/9: Re-deploying bundle with deep_research + endpoint..."; \
+	databricks bundle deploy $$DEPLOY_ARGS --var lakebase_database=deep_research --var endpoint_name=$$ENDPOINT_NAME --var pghost=$$PGHOST || { echo "ERROR: Bundle re-deploy failed"; exit 1; }; \
+	\
+	echo ""; \
+	echo "Step 6/9: Running database migrations..."; \
 	DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
-	LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
+	ENDPOINT_NAME="$$ENDPOINT_NAME" \
+	PGHOST="$$PGHOST" \
+	LAKEBASE_INSTANCE_NAME="" \
 	LAKEBASE_DATABASE="deep_research" \
 	uv run alembic upgrade head || { echo "ERROR: Migrations failed"; exit 1; }; \
 	\
 	echo ""; \
-	echo "Step 6/8: Granting permissions to app service principal..."; \
-	./scripts/grant-app-permissions.sh "$$INSTANCE_NAME" "$$PROFILE" "deep_research" "deep-research-agent-dre-$(TARGET)" || { echo "ERROR: Permission grant failed"; exit 1; }; \
+	echo "Step 7/9: Writing .env.$(TARGET) with connection info..."; \
+	printf "# Lakebase connection for target: $(TARGET)\n# Generated by: make deploy TARGET=$(TARGET)\nDATABRICKS_CONFIG_PROFILE=%s\nENDPOINT_NAME=%s\nPGHOST=%s\nLAKEBASE_DATABASE=deep_research\n" "$$PROFILE" "$$ENDPOINT_NAME" "$$PGHOST" > .env.$(TARGET); \
+	cat .env.$(TARGET); \
 	\
 	echo ""; \
-	echo "Step 7/8: Starting app..."; \
-	databricks bundle run -t $(TARGET) deep_research_agent || { echo "ERROR: App start failed"; exit 1; }; \
+	echo "Step 8/9: Granting permissions + starting app..."; \
+	ENDPOINT_NAME="$$ENDPOINT_NAME" ./scripts/grant-app-permissions.sh "" "$$PROFILE" "deep_research" "$$APP_NAME" || { echo "ERROR: Permission grant failed"; exit 1; }; \
+	databricks bundle run -t $(TARGET) --var endpoint_name=$$ENDPOINT_NAME --var pghost=$$PGHOST deep_research_agent || { echo "ERROR: App start failed"; exit 1; }; \
 	\
 	echo ""; \
-	echo "Step 8/8: Deployment summary..."; \
+	echo "Step 9/9: Deployment summary..."; \
 	databricks bundle summary -t $(TARGET)
 	@echo ""
 	@echo "=============================================="
@@ -512,9 +659,7 @@ bundle-summary:
 FOLLOW ?=
 SEARCH ?=
 logs:
-	@case "$(TARGET)" in \
-		dev) PROFILE="e2-demo-west" ;; \
-		ais) PROFILE="ais" ;; \
-		*) echo "ERROR: Unknown target $(TARGET). Use 'dev' or 'ais'."; exit 1 ;; \
-	esac; \
-	./scripts/download-app-logs.sh "deep-research-agent-dre-$(TARGET)" "$$PROFILE" $(FOLLOW) $(SEARCH)
+	@PROFILE=$$(uv run python3 -c "import yaml,sys;cfg=yaml.safe_load(open('databricks.yml'));t=cfg.get('targets',{}).get('$(TARGET)');sys.exit(1) if not t else print(t['workspace']['profile'])" 2>/dev/null) || \
+		{ echo "ERROR: Unknown target '$(TARGET)'. Valid targets:"; uv run python3 -c "import yaml;[print(f'  {k}') for k in yaml.safe_load(open('databricks.yml'))['targets']]"; exit 1; }; \
+	APP_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.apps.deep_research_agent.name // empty'); \
+	./scripts/download-app-logs.sh "$$APP_NAME" "$$PROFILE" $(FOLLOW) $(SEARCH)

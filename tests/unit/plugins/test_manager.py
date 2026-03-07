@@ -12,6 +12,21 @@ from deep_research.plugins.base import PromptProvider, ResearchPlugin, ToolProvi
 from deep_research.plugins.manager import PluginManager, PluginManagerError
 
 
+def _mock_app_config(**kwargs: Any) -> MagicMock:
+    """Create a MagicMock app_config that won't break PluginManager internals.
+
+    The PluginManager reads ``app_config.plugins.lifecycle_hooks`` to extract
+    integer values (``max_sync_workers``, ``timeout_seconds``).  A bare
+    ``MagicMock()`` returns another ``MagicMock`` for those attributes, which
+    causes ``TypeError`` when compared to ``int`` inside ``ThreadPoolExecutor``.
+    Setting ``lifecycle_hooks = None`` makes the guard ``if hooks_config:``
+    evaluate to ``False``, avoiding the problematic code path.
+    """
+    mock = MagicMock(**kwargs)
+    mock.plugins.lifecycle_hooks = None
+    return mock
+
+
 # Test fixtures - concrete implementations of protocols
 
 
@@ -163,7 +178,7 @@ class TestPluginManagerDiscovery:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = []
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         assert manager.initialized
         assert len(manager) == 0
@@ -174,7 +189,7 @@ class TestPluginManagerDiscovery:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [MockPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         assert manager.initialized
         assert len(manager) == 1
@@ -185,7 +200,7 @@ class TestPluginManagerDiscovery:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [MockPlugin, MockToolProviderPlugin, MockPromptProviderPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         assert len(manager) == 3
 
@@ -195,12 +210,12 @@ class TestPluginManagerDiscovery:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [MockPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
             first_count = len(manager)
 
             # Try to initialize again
             mock_discover.return_value = [MockPlugin, MockToolProviderPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         assert len(manager) == first_count  # Should not change
 
@@ -214,7 +229,7 @@ class TestPluginManagerDiscovery:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [BadPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         assert len(manager) == 0
 
@@ -240,7 +255,7 @@ class TestPluginManagerDiscovery:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [FailingPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         assert len(manager) == 0
 
@@ -254,7 +269,7 @@ class TestPluginManagerTools:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [MockToolProviderPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         context = create_test_context()
         tools = manager.get_tools(context)
@@ -267,7 +282,7 @@ class TestPluginManagerTools:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [MockToolProviderPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         registry = manager.get_tool_registry()
         assert registry is not None
@@ -284,7 +299,7 @@ class TestPluginManagerTools:
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             # Return class types that will be instantiated
             mock_discover.return_value = []
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         # Manually add the plugins to test conflict handling
         manager._plugins.append(plugin1)
@@ -334,7 +349,7 @@ class TestPluginManagerPrompts:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [MockPromptProviderPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         context = create_test_context()
         overrides = manager.get_prompt_overrides(context)
@@ -485,7 +500,7 @@ class TestPluginManagerFullPlugin:
 
         with patch("deep_research.plugins.manager.discover_plugins") as mock_discover:
             mock_discover.return_value = [MockFullPlugin]
-            manager.discover_and_load(app_config=MagicMock())
+            manager.discover_and_load(app_config=_mock_app_config())
 
         context = create_test_context()
 

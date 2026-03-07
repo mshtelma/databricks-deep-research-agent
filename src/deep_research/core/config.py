@@ -43,9 +43,12 @@ class Settings(BaseSettings):
     serve_static: bool = False  # Set to True in production to serve frontend from static/
 
     # Lakebase (OAuth-authenticated PostgreSQL on Databricks)
-    lakebase_instance_name: str | None = None  # e.g., "instance-xxx-yyy"
+    lakebase_instance_name: str | None = None  # Provisioned: e.g., "instance-xxx-yyy"
     lakebase_database: str = "deep_research"  # Custom DB we own (can create schemas/tables)
     lakebase_port: int = 5432
+
+    # Lakebase Autoscaling
+    endpoint_name: str | None = None  # e.g., "projects/<id>/branches/<id>/endpoints/<id>"
 
     # Database (fallback for local development when Lakebase is not configured)
     database_url: PostgresDsn | None = Field(default=None)
@@ -67,6 +70,7 @@ class Settings(BaseSettings):
     mlflow_enabled: bool = True
     mlflow_tracking_uri: str = "databricks"
     mlflow_experiment_name: str = "deep-research-agent"
+    mlflow_experiment_id: str | None = None  # Injected by Databricks Apps resource
 
     # CORS (stored as comma-separated string, accessed via cors_origins_list property)
     cors_origins: str = "http://localhost:5173"
@@ -104,14 +108,19 @@ class Settings(BaseSettings):
         """Check if Lakebase authentication should be used.
 
         Lakebase is used when:
-        - PGHOST is set (Databricks Apps auto-injects this for database resources)
+        - ENDPOINT_NAME is set (Autoscaling backend)
+        - OR PGHOST is set (Databricks Apps auto-injects this for Provisioned)
         - OR instance name is configured AND profile/app auth is available
         """
-        # Priority 1: PGHOST is auto-injected by Databricks Apps
+        # Autoscaling: ENDPOINT_NAME is set
+        if self.endpoint_name or os.environ.get("ENDPOINT_NAME"):
+            return True
+
+        # Provisioned Priority 1: PGHOST is auto-injected by Databricks Apps
         if os.environ.get("PGHOST"):
             return True
 
-        # Priority 2: Manual configuration with appropriate auth
+        # Provisioned Priority 2: Manual configuration with appropriate auth
         if not self.lakebase_instance_name:
             return False
         return self.is_databricks_app or bool(self.databricks_config_profile)

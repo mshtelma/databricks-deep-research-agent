@@ -3,32 +3,34 @@ Database Creation Utilities
 ===========================
 
 Provides utilities for creating and managing databases on Lakebase.
+Supports both Provisioned and Autoscaling backends.
 """
 
 import asyncio
 import logging
-import uuid
 from typing import Any
 
 from deep_research.deployment.lakebase_connection import (
-    extract_username_from_token,
-    get_lakebase_host,
+    get_lakebase_connection_info,
 )
 
 logger = logging.getLogger(__name__)
 
 
 async def database_exists(
-    instance_name: str,
-    database_name: str,
+    instance_name: str | None = None,
+    database_name: str = "deep_research",
     workspace_client: Any | None = None,
+    *,
+    endpoint_name: str | None = None,
 ) -> bool:
     """Check if a database exists on a Lakebase instance.
 
     Args:
-        instance_name: Name of the Lakebase instance
+        instance_name: Provisioned instance name (required if no endpoint_name)
         database_name: Name of the database to check
         workspace_client: Optional WorkspaceClient
+        endpoint_name: Autoscaling endpoint name
 
     Returns:
         True if database exists, False otherwise
@@ -36,30 +38,21 @@ async def database_exists(
     try:
         import asyncpg
 
-        if workspace_client is None:
-            from databricks.sdk import WorkspaceClient
-
-            workspace_client = WorkspaceClient()
-
-        # Get credentials (request_id required by Databricks API)
-        cred = workspace_client.database.generate_database_credential(
-            instance_names=[instance_name],
-            request_id=str(uuid.uuid4()),
+        info = get_lakebase_connection_info(
+            instance_name=instance_name,
+            workspace_client=workspace_client,
+            endpoint_name=endpoint_name,
         )
 
-        # Get correct hostname (from PGHOST or API lookup, not derived from instance name)
-        host = get_lakebase_host(instance_name, workspace_client)
+        # Determine bootstrap database (Autoscaling uses databricks_postgres)
+        bootstrap_db = "databricks_postgres" if endpoint_name else "postgres"
 
-        # Get username from PGUSER or JWT token (not hardcoded "token")
-        username = extract_username_from_token(cred.token)
-
-        # Connect to postgres database to check
         conn = await asyncpg.connect(
-            host=host,
-            port=5432,
-            user=username,
-            password=cred.token,
-            database="postgres",
+            host=info.host,
+            port=info.port,
+            user=info.username,
+            password=info.token,
+            database=bootstrap_db,
             ssl="require",
         )
         try:
@@ -77,18 +70,21 @@ async def database_exists(
 
 
 async def create_database(
-    instance_name: str,
-    database_name: str,
+    instance_name: str | None = None,
+    database_name: str = "deep_research",
     if_not_exists: bool = True,
     workspace_client: Any | None = None,
+    *,
+    endpoint_name: str | None = None,
 ) -> bool:
     """Create a database on a Lakebase instance.
 
     Args:
-        instance_name: Name of the Lakebase instance
+        instance_name: Provisioned instance name (required if no endpoint_name)
         database_name: Name of the database to create
         if_not_exists: If True, don't error if database exists (default True)
         workspace_client: Optional WorkspaceClient
+        endpoint_name: Autoscaling endpoint name
 
     Returns:
         True if database was created or already exists, False on error
@@ -96,30 +92,21 @@ async def create_database(
     try:
         import asyncpg
 
-        if workspace_client is None:
-            from databricks.sdk import WorkspaceClient
-
-            workspace_client = WorkspaceClient()
-
-        # Get credentials (request_id required by Databricks API)
-        cred = workspace_client.database.generate_database_credential(
-            instance_names=[instance_name],
-            request_id=str(uuid.uuid4()),
+        info = get_lakebase_connection_info(
+            instance_name=instance_name,
+            workspace_client=workspace_client,
+            endpoint_name=endpoint_name,
         )
 
-        # Get correct hostname (from PGHOST or API lookup, not derived from instance name)
-        host = get_lakebase_host(instance_name, workspace_client)
+        # Determine bootstrap database (Autoscaling uses databricks_postgres)
+        bootstrap_db = "databricks_postgres" if endpoint_name else "postgres"
 
-        # Get username from PGUSER or JWT token (not hardcoded "token")
-        username = extract_username_from_token(cred.token)
-
-        # Connect to postgres database (default database for admin operations)
         conn = await asyncpg.connect(
-            host=host,
-            port=5432,
-            user=username,
-            password=cred.token,
-            database="postgres",
+            host=info.host,
+            port=info.port,
+            user=info.username,
+            password=info.token,
+            database=bootstrap_db,
             ssl="require",
         )
         try:
@@ -134,14 +121,14 @@ async def create_database(
                     logger.info(
                         "Database '%s' already exists on '%s'",
                         database_name,
-                        instance_name,
+                        instance_name or endpoint_name,
                     )
                     return True
                 else:
                     logger.error(
                         "Database '%s' already exists on '%s'",
                         database_name,
-                        instance_name,
+                        instance_name or endpoint_name,
                     )
                     return False
 
@@ -153,7 +140,7 @@ async def create_database(
             logger.info(
                 "Created database '%s' on '%s'",
                 database_name,
-                instance_name,
+                instance_name or endpoint_name,
             )
             return True
 
@@ -166,18 +153,19 @@ async def create_database(
 
 
 async def ensure_database_exists(
-    instance_name: str,
-    database_name: str,
+    instance_name: str | None = None,
+    database_name: str = "deep_research",
     workspace_client: Any | None = None,
+    *,
+    endpoint_name: str | None = None,
 ) -> bool:
     """Ensure a database exists, creating it if necessary.
 
-    Convenience function that combines existence check and creation.
-
     Args:
-        instance_name: Name of the Lakebase instance
+        instance_name: Provisioned instance name (required if no endpoint_name)
         database_name: Name of the database
         workspace_client: Optional WorkspaceClient
+        endpoint_name: Autoscaling endpoint name
 
     Returns:
         True if database exists or was created, False on error
@@ -187,22 +175,26 @@ async def ensure_database_exists(
         database_name=database_name,
         if_not_exists=True,
         workspace_client=workspace_client,
+        endpoint_name=endpoint_name,
     )
 
 
 def create_database_sync(
-    instance_name: str,
-    database_name: str,
+    instance_name: str | None = None,
+    database_name: str = "deep_research",
     if_not_exists: bool = True,
     workspace_client: Any | None = None,
+    *,
+    endpoint_name: str | None = None,
 ) -> bool:
     """Synchronous version of create_database.
 
     Args:
-        instance_name: Name of the Lakebase instance
+        instance_name: Provisioned instance name (required if no endpoint_name)
         database_name: Name of the database to create
         if_not_exists: If True, don't error if database exists
         workspace_client: Optional WorkspaceClient
+        endpoint_name: Autoscaling endpoint name
 
     Returns:
         True if database was created or already exists
@@ -213,6 +205,7 @@ def create_database_sync(
             database_name=database_name,
             if_not_exists=if_not_exists,
             workspace_client=workspace_client,
+            endpoint_name=endpoint_name,
         )
     )
 
@@ -223,6 +216,7 @@ def main() -> None:
 
     Usage:
         python -m deep_research.deployment.database create <instance> <database>
+        python -m deep_research.deployment.database create --endpoint-name <endpoint> <database>
     """
     import argparse
 
@@ -232,8 +226,12 @@ def main() -> None:
         choices=["create", "exists"],
         help="Command to execute",
     )
-    parser.add_argument("instance_name", help="Lakebase instance name")
+    parser.add_argument("instance_name", nargs="?", help="Lakebase instance name (Provisioned)")
     parser.add_argument("database_name", help="Database name")
+    parser.add_argument(
+        "--endpoint-name",
+        help="Autoscaling endpoint name (alternative to instance_name)",
+    )
 
     args = parser.parse_args()
 
@@ -243,6 +241,7 @@ def main() -> None:
         success = create_database_sync(
             instance_name=args.instance_name,
             database_name=args.database_name,
+            endpoint_name=args.endpoint_name,
         )
         if not success:
             exit(1)
@@ -251,6 +250,7 @@ def main() -> None:
             database_exists(
                 instance_name=args.instance_name,
                 database_name=args.database_name,
+                endpoint_name=args.endpoint_name,
             )
         )
         print(f"Database exists: {exists}")

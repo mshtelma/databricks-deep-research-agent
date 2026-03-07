@@ -54,7 +54,7 @@ cryptography==46.0.3
     # via mlflow
 cycler==0.12.1
     # via matplotlib
-databricks-sdk==0.77.0
+databricks-sdk==0.96.0
     # via
     #   databricks-deep-research (pyproject.toml)
     #   mlflow-skinny
@@ -356,5 +356,5 @@ zipp==3.23.0
     # via importlib-metadata
 
 # Install the local package itself (required for src layout)
-# Build timestamp: 20260211145735 - forces reinstall on changes
+# Build timestamp: 20260306143825 - forces reinstall on changes
 .

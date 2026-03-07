@@ -211,26 +211,17 @@ def get_citation_config_for_depth(depth: str) -> CitationVerificationConfig:
 
     per_type = type_config.citation_verification
 
-    # Deep merge: global as base, per-type overrides on top
-    # model_dump() with exclude_unset=True would be ideal but Pydantic
-    # doesn't track which fields were explicitly set in YAML vs defaulted
-    #
-    # Solution: Start with global, then update with per-type values that
-    # differ from Pydantic defaults (meaning they were explicitly set)
+    # Deep merge: global as base, per-type overrides on top.
+    # Use model_fields_set to reliably detect explicitly set fields,
+    # instead of comparing against defaults (which fails when a user
+    # explicitly sets a value that happens to match the default).
     global_dict = global_config.model_dump()
-    per_type_dict = per_type.model_dump()
+    explicitly_set = per_type.model_fields_set
 
-    # Get default config to compare against
-    defaults = CitationVerificationConfig()
-    defaults_dict = defaults.model_dump()
-
-    # Merge: start with global, override with non-default per-type values
     merged = global_dict.copy()
-    for key, per_type_value in per_type_dict.items():
-        default_value = defaults_dict.get(key)
-        # If per-type value differs from default, it was explicitly set
-        if per_type_value != default_value:
-            merged[key] = per_type_value
+    for field_name in CitationVerificationConfig.model_fields:
+        if field_name in explicitly_set:
+            merged[field_name] = getattr(per_type, field_name)
 
     return CitationVerificationConfig(**merged)
 

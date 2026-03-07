@@ -178,6 +178,32 @@ export function MessageInput({
   // Agent selection state (with localStorage persistence — T013)
   const [selectedAgent, setSelectedAgent] = React.useState<CustomAgentSummary | null>(null);
   const [showAgentPicker, setShowAgentPicker] = React.useState(false);
+  const agentPickerRef = React.useRef<HTMLDivElement>(null);
+
+  // Dismiss agent picker on Escape key or click outside
+  React.useEffect(() => {
+    if (!showAgentPicker) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setShowAgentPicker(false);
+      }
+    };
+
+    const handleClickOutside = (e: MouseEvent) => {
+      if (agentPickerRef.current && !agentPickerRef.current.contains(e.target as Node)) {
+        setShowAgentPicker(false);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    document.addEventListener('mousedown', handleClickOutside);
+
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showAgentPicker]);
   const { data: agentsData } = useCustomAgents(
     { include_system: true },
     { enabled: queryMode === 'deep_research' }
@@ -455,9 +481,10 @@ export function MessageInput({
         )}
         {/* Agent selector (deep_research mode) */}
         {queryMode === 'deep_research' && (
-          <div className="relative">
+          <div className="relative" ref={agentPickerRef}>
             <button
               type="button"
+              data-testid="agent-selector-trigger"
               onClick={() => setShowAgentPicker(!showAgentPicker)}
               disabled={disabled || isLoading}
               className={cn(
@@ -469,23 +496,32 @@ export function MessageInput({
               )}
             >
               <AgentIcon className="h-3.5 w-3.5" />
-              <span className="max-w-[100px] truncate">
+              <span data-testid="agent-selected-name" className="max-w-[100px] truncate">
                 {selectedAgent?.name ?? 'Default Agent'}
               </span>
               {selectedAgent && (
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleAgentSelect(null);
-                  }}
-                  className="ml-0.5 hover:text-foreground"
-                  title="Clear agent selection"
-                >
-                  ×
-                </button>
+                <>
+                  <span data-testid="agent-selected-badge" className="sr-only">selected</span>
+                  <button
+                    type="button"
+                    data-testid="agent-clear-button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleAgentSelect(null);
+                    }}
+                    className="ml-0.5 hover:text-foreground"
+                    title="Clear agent selection"
+                  >
+                    ×
+                  </button>
+                </>
               )}
             </button>
+            {selectedAgent && selectedAgent.sourceScope && selectedAgent.sourceScope !== 'all' && (
+              <span data-testid="agent-source-scope-indicator" className="text-xs text-muted-foreground">
+                {selectedAgent.sourceScope}
+              </span>
+            )}
             {showAgentPicker && (
               <AgentPickerDropdown
                 agents={agents}
@@ -790,6 +826,7 @@ function AgentPickerDropdown({
     <button
       key={agent.id}
       type="button"
+      data-testid={`agent-option-${agent.id}`}
       onClick={() => onSelect(agent)}
       className={cn(
         'w-full text-left px-3 py-2 rounded-sm text-sm transition-colors',
@@ -819,7 +856,7 @@ function AgentPickerDropdown({
   );
 
   return (
-    <div className="absolute left-0 top-full z-50 mt-1 w-64 max-h-64 overflow-auto rounded-md border bg-popover p-1 shadow-md">
+    <div data-testid="agent-selector-dropdown" className="absolute left-0 top-full z-50 mt-1 w-64 max-h-64 overflow-auto rounded-md border bg-popover p-1 shadow-md">
       {myAgents.length > 0 && (
         <>
           <div className="px-3 py-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider">

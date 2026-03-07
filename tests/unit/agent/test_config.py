@@ -1,5 +1,7 @@
 """Unit tests for agent configuration accessors."""
 
+import os
+
 import pytest
 
 from deep_research.agent.config import (
@@ -8,9 +10,9 @@ from deep_research.agent.config import (
     get_coordinator_config,
     get_planner_config,
     get_report_limits,
+    get_research_type_config,
     get_researcher_config,
     get_researcher_config_for_depth,
-    get_research_type_config,
     get_step_limits,
     get_synthesizer_config,
     get_truncation_limit,
@@ -36,6 +38,7 @@ class TestGetResearcherConfig:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_returns_researcher_config(self) -> None:
@@ -61,6 +64,7 @@ class TestGetPlannerConfig:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_returns_planner_config(self) -> None:
@@ -79,6 +83,7 @@ class TestGetCoordinatorConfig:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_returns_coordinator_config(self) -> None:
@@ -98,6 +103,7 @@ class TestGetSynthesizerConfig:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_returns_synthesizer_config(self) -> None:
@@ -116,6 +122,7 @@ class TestGetBackgroundConfig:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_returns_background_config(self) -> None:
@@ -136,6 +143,7 @@ class TestGetTruncationLimit:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_returns_log_preview_limit(self) -> None:
@@ -173,6 +181,7 @@ class TestConfigAccessorConsistency:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_all_accessors_return_frozen_configs(self) -> None:
@@ -204,6 +213,7 @@ class TestGetResearchTypeConfig:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_returns_research_type_config_for_light(self) -> None:
@@ -244,6 +254,7 @@ class TestGetStepLimits:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_returns_step_limits(self) -> None:
@@ -274,6 +285,7 @@ class TestGetReportLimits:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_returns_report_limit_config(self) -> None:
@@ -295,6 +307,7 @@ class TestGetResearcherConfigForDepth:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_returns_researcher_type_config(self) -> None:
@@ -328,6 +341,7 @@ class TestGetCitationConfigForDepth:
 
     def setup_method(self) -> None:
         """Clear config cache before each test."""
+        os.environ.pop("APP_CONFIG_PATH", None)
         clear_config_cache()
 
     def test_returns_citation_verification_config(self) -> None:

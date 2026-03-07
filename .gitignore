@@ -31,6 +31,11 @@ env/
 .env
 .env.*
 !.env.example
+# Target env files contain only connection metadata (no secrets) — safe to commit
+!.env.local-dev
+!.env.e2e
+!.env.dev
+!.env.ais
 
 # IDE
 .idea/

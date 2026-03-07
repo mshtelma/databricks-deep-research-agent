@@ -1,16 +1,21 @@
 """Alembic environment configuration for async migrations."""
 
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import pool
+from alembic.script import ScriptDirectory
+from alembic.util.exc import CommandError
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from deep_research.core.config import get_settings
 from deep_research.db.base import Base
 from deep_research.db.session import get_database_url
+
+logger = logging.getLogger(__name__)
 
 # Import all models to ensure they're registered with Base.metadata
 from deep_research.models import (  # noqa: F401  # noqa: F401
@@ -41,6 +46,57 @@ database_url = get_database_url(settings)
 
 # add your model's MetaData object here for 'autogenerate' support
 target_metadata = Base.metadata
+
+
+async def _fix_unknown_revision(connection: AsyncConnection) -> None:
+    """Detect and fix unknown alembic revisions from consolidated feature branches.
+
+    When feature branch migrations (e.g. 016, 017, 019) get deployed to shared
+    databases and then squashed into a single migration on main (e.g. 014),
+    alembic's revision graph breaks. This function detects that situation and
+    stamps the database to head so migrations can proceed.
+    """
+    # Check if alembic_version table exists (fresh DB → nothing to fix)
+    result = await connection.execute(
+        text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = 'alembic_version'"
+        )
+    )
+    if not result.scalar():
+        return
+
+    # Get all stamped revisions
+    result = await connection.execute(text("SELECT version_num FROM alembic_version"))
+    rows = result.fetchall()
+    if not rows:
+        return
+
+    # Check each revision against the script directory
+    script = ScriptDirectory.from_config(config)
+    unknown_revisions: list[str] = []
+    for (version_num,) in rows:
+        try:
+            script.get_revision(version_num)
+        except CommandError:
+            unknown_revisions.append(version_num)
+
+    if not unknown_revisions:
+        return
+
+    # Stamp to head — replaces all rows with the current head revision
+    head = script.get_current_head()
+    logger.warning(
+        "ALEMBIC_UNKNOWN_REVISION detected=%s stamping_to='%s'",
+        unknown_revisions,
+        head,
+    )
+    await connection.execute(text("DELETE FROM alembic_version"))
+    await connection.execute(
+        text("INSERT INTO alembic_version (version_num) VALUES (:head)"),
+        {"head": head},
+    )
+    await connection.commit()
 
 
 def run_migrations_offline() -> None:
@@ -93,7 +149,12 @@ async def run_async_migrations() -> None:
     )
 
     async with connectable.connect() as connection:
+        await _fix_unknown_revision(connection)
         await connection.run_sync(do_run_migrations)
+        # Explicit commit required for async engines — without this, SQLAlchemy
+        # issues ROLLBACK when the connection context exits, silently discarding
+        # all DDL that Alembic executed via run_sync.
+        await connection.commit()
 
     await connectable.dispose()
 

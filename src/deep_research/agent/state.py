@@ -14,6 +14,7 @@ from deep_research.core.logging_utils import get_logger
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
+    from deep_research.agent.tools.base import ResearchTool
     from deep_research.schemas.source_scope import SourceScopeConfig
 
 
@@ -385,7 +386,7 @@ class ResearchState:
 
     # Enterprise tools loaded from user data sources (007-enterprise-data-sources Phase 2)
     # Populated by orchestrator from get_enabled_tools_for_user()
-    enterprise_tools: list[Any] = field(default_factory=list)
+    enterprise_tools: list[ResearchTool] = field(default_factory=list)
     """Enterprise tools (GenieTool, UserVectorSearchTool) loaded from user data sources."""
 
     source_quality_history: dict[str, list[str]] = field(default_factory=dict)
@@ -569,11 +570,11 @@ class ResearchState:
             content = fc.get("content", "")
 
             if strategy == "inline":
-                entry = f"### File: {filename}\n{content}"
+                entry = f'<uploaded_file name="{filename}">\n{content}\n</uploaded_file>'
             elif strategy == "hybrid":
-                entry = f"### File: {filename} (preview; use file_search for full content)\n{content}"
+                entry = f'<uploaded_file name="{filename}" mode="preview">\n{content}\n</uploaded_file>'
             else:
-                entry = f"### File: {filename} (use file_search tool to search this file)"
+                entry = f'<uploaded_file name="{filename}" mode="retrieval">\nUse file_search tool to search this file.\n</uploaded_file>'
 
             entry_len = len(entry)
             if max_chars > 0 and total + entry_len > max_chars:

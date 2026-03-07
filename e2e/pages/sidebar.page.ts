@@ -120,6 +120,9 @@ export class SidebarPage {
     // Navigate to the new chat
     await this.page.goto(`/chat/${chatId}`);
 
+    // Wait for chat list to finish loading after navigation
+    await this.waitForChatListLoaded(timeout);
+
     // Wait for the chat item to appear in the sidebar
     const chatItem = this.page.getByTestId(`chat-item-${chatId}`);
     await expect(chatItem).toBeVisible({ timeout });
@@ -183,6 +186,14 @@ export class SidebarPage {
    */
   async waitForChatList(): Promise<void> {
     await expect(this.chatList).toBeVisible();
+  }
+
+  /**
+   * Wait for the chat list to finish its initial load.
+   * Resolves when the loading indicator disappears (either items rendered or empty state).
+   */
+  async waitForChatListLoaded(timeout: number = 30000): Promise<void> {
+    await expect(this.chatListLoading).toBeHidden({ timeout });
   }
 
   // ==================== Search Methods ====================

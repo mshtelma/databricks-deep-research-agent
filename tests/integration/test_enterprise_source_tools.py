@@ -238,7 +238,10 @@ class TestGenieExecution:
         source = result.sources[0]
         assert source.get("type") == "genie"
         assert source.get("space_id") == GENIE_SPACE_ID
-        assert str(source.get("url", "")).startswith("genie://")
+        url = str(source.get("url", ""))
+        assert url.startswith("genie://") or (
+            "/sql/genie/spaces/" in url and GENIE_SPACE_ID in url
+        ), f"Unexpected genie URL format: {url}"
 
     @pytest.mark.asyncio
     async def test_genie_result_data_has_expected_fields(self) -> None:

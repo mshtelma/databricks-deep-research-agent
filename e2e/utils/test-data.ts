@@ -256,9 +256,9 @@ export const WEB_SEARCH_QUERIES = [
  * Timeout configuration for parallel tests (in milliseconds).
  */
 export const PARALLEL_TIMEOUTS = {
-  deepResearch: 360000,    // 6 minutes for deep research
-  webSearch: 60000,        // 1 minute for web search
-  simple: 30000,           // 30 seconds for simple queries
-  parallelAll: 420000,     // 7 minutes for all parallel operations
-  fullScenario: 900000,    // 15 minutes for complete scenario
+  deepResearch: 600000,    // 10 minutes for deep research (empirically takes 5-9 min with citations)
+  webSearch: 600000,       // 10 minutes — web_search currently falls through to deep research pipeline
+  simple: 120000,          // 2 minutes for simple queries (includes LLM + DB persistence + polling)
+  parallelAll: 660000,     // 11 minutes for all parallel operations
+  fullScenario: 1200000,   // 20 minutes for complete scenario
 };

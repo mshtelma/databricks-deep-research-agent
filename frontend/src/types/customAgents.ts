@@ -91,6 +91,8 @@ export interface CustomAgentSummary {
   description: string | null;
   avatarUrl: string | null;
   visibility: AgentVisibility;
+  /** Source scope: 'all' | 'enterprise_only' | 'web_only' */
+  sourceScope?: SourceScope;
   isActive?: boolean;
   ownerId: string;
   ownerName?: string;

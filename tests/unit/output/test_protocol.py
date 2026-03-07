@@ -37,6 +37,9 @@ class TestOutputTypeProviderProtocol:
             def get_synthesizer_prompt(self) -> str | None:
                 return "Custom prompt"
 
+            def get_output_model(self) -> type | None:
+                return None
+
         provider = CustomProvider()
         assert isinstance(provider, OutputTypeProvider)
 
@@ -166,6 +169,9 @@ Include:
 Query: {query}
 Findings: {findings}
 """
+
+            def get_output_model(self) -> type | None:
+                return None
 
         provider = MeetingPrepProvider()
         assert isinstance(provider, OutputTypeProvider)

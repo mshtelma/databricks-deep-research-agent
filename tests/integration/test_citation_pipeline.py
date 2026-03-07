@@ -19,7 +19,9 @@ Run with:
 import pytest
 from tests.integration.conftest import requires_all_credentials
 
+from deep_research.agent.tools.web_crawler import WebCrawler
 from deep_research.services.llm.client import LLMClient
+from deep_research.core.exceptions import ExternalServiceError
 from deep_research.services.search.brave import BraveSearchClient
 
 
@@ -117,15 +119,18 @@ class TestCitationPipelineIntegration:
         This test verifies Stage 1 (Evidence Pre-Selection) with real search.
         """
         # Do a simple search to get real sources
-        search_results = await brave_client.search(
-            query="Python programming language creator",
-            count=3,
-        )
+        try:
+            search_results = await brave_client.search(
+                query="Python programming language creator",
+                count=3,
+            )
+        except ExternalServiceError:
+            pytest.skip("Brave Search unreachable after retries (network issue)")
 
-        assert len(search_results) > 0
+        assert len(search_results.results) > 0
 
         # Verify we got actual content
-        for result in search_results:
+        for result in search_results.results:
             assert result.url is not None
             assert result.title is not None
 
@@ -169,6 +174,7 @@ class TestCitationPipelineIntegration:
         self,
         llm_client: LLMClient,
         brave_client: BraveSearchClient,
+        web_crawler: WebCrawler,
     ) -> None:
         """Smoke test for the full citation pipeline.
 
@@ -177,25 +183,26 @@ class TestCitationPipelineIntegration:
         from deep_research.agent.orchestrator import OrchestrationConfig, run_research
 
         config = OrchestrationConfig(
-            max_iterations=1,
-            max_steps=2,
+            max_plan_iterations=1,
+            max_steps_per_plan=2,
         )
 
         # Run a simple research query
         result = await run_research(
             query="What year was Python programming language created?",
-            llm_client=llm_client,
+            llm=llm_client,
             brave_client=brave_client,
+            crawler=web_crawler,
             config=config,
         )
 
         # Verify we got a result
         assert result is not None
-        assert result.report is not None
-        assert len(result.report) > 0
+        assert result.state.final_report is not None
+        assert len(result.state.final_report) > 0
 
         # Verify sources were collected
-        assert result.sources is not None
+        assert result.state.sources is not None
 
     @requires_all_credentials
     @pytest.mark.asyncio

@@ -11,7 +11,7 @@ after migrations have created tables. This is necessary because:
 
 import asyncio
 import logging
-import ssl
+import re
 
 import asyncpg  # type: ignore[import-untyped]
 from databricks.sdk import WorkspaceClient
@@ -20,6 +20,22 @@ from deep_research.core.config import Settings, get_settings
 from deep_research.db.session import get_credential_provider
 
 logger = logging.getLogger(__name__)
+
+_SQL_IDENTIFIER_RE = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
+
+
+def _validate_sql_identifier(name: str, label: str = "identifier") -> str:
+    """Validate a string is safe for use as a SQL identifier.
+
+    Only allows alphanumeric, underscore, hyphen, and dot characters.
+    Raises ValueError if the name contains dangerous characters.
+    """
+    if not name or not _SQL_IDENTIFIER_RE.match(name):
+        raise ValueError(
+            f"Unsafe SQL {label}: {name!r}. "
+            f"Only alphanumeric, underscore, hyphen, and dot are allowed."
+        )
+    return name
 
 
 async def grant_permissions_to_app(
@@ -55,15 +71,13 @@ async def grant_permissions_to_app(
     matched_app_name = None
 
     for app in apps:
-        if app.name and app_name in app.name:
-            # Get the service principal associated with this app
-            if app.service_principal_id:
-                app_sp_id = app.service_principal_id
-                matched_app_name = app.name
-                logger.info(
-                    f"Found app '{app.name}' with service principal ID: {app_sp_id}"
-                )
-                break
+        if app.name and app_name in app.name and app.service_principal_id:
+            app_sp_id = app.service_principal_id
+            matched_app_name = app.name
+            logger.info(
+                f"Found app '{app.name}' with service principal ID: {app_sp_id}"
+            )
+            break
 
     if not app_sp_id:
         available_apps = [a.name for a in apps if a.name]
@@ -89,11 +103,10 @@ async def grant_permissions_to_app(
         )
         # Fallback: list all service principals and find by ID
         for sp in ws.service_principals.list():
-            if sp.id and str(sp.id) == str(app_sp_id):
-                if sp.application_id:
-                    sp_username = sp.application_id
-                    logger.info(f"Found service principal via list: {sp_username}")
-                    break
+            if sp.id and str(sp.id) == str(app_sp_id) and sp.application_id:
+                sp_username = sp.application_id
+                logger.info(f"Found service principal via list: {sp_username}")
+                break
 
     if not sp_username:
         # Last resort: use the numeric ID directly as username
@@ -104,6 +117,7 @@ async def grant_permissions_to_app(
         )
         sp_username = str(app_sp_id)
 
+    _validate_sql_identifier(sp_username, "service principal username")
     logger.info(f"Service principal username for grants: {sp_username}")
 
     # Connect to database with developer credentials
@@ -112,24 +126,39 @@ async def grant_permissions_to_app(
         raise RuntimeError("Lakebase credential provider not available")
 
     cred = provider.get_credential()
-    host = provider._get_instance_host()
-
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
+    host = provider.get_host()
+    port = provider.get_port()
 
     logger.info(f"Connecting to {settings.lakebase_database} at {host}...")
 
     conn = await asyncpg.connect(
         host=host,
-        port=settings.lakebase_port,
+        port=port,
         user=cred.username,
         password=cred.token,
         database=settings.lakebase_database,
-        ssl=ssl_context,
+        ssl="require",
     )
 
     try:
+        # Autoscaling requires explicit role creation via databricks_auth extension
+        if provider.get_backend_type() == "autoscaling":
+            try:
+                await conn.execute("CREATE EXTENSION IF NOT EXISTS databricks_auth")
+                await conn.execute(
+                    "SELECT databricks_create_role($1, 'SERVICE_PRINCIPAL')",
+                    sp_username,
+                )
+                logger.info(f"Created Autoscaling role for {sp_username}")
+            except Exception as e:
+                logger.warning(
+                    "Autoscaling role creation failed for %s: %s. "
+                    "This may require project-owner privileges. "
+                    "Try creating the role manually in the Lakebase SQL Editor.",
+                    sp_username,
+                    e,
+                )
+
         # Grant permissions on existing tables
         logger.info(f"Granting ALL on all tables to {sp_username}...")
         await conn.execute(
@@ -145,7 +174,7 @@ async def grant_permissions_to_app(
         logger.info("Granted ALL on all sequences")
 
         # Set default privileges for future tables created by current user
-        logger.info(f"Setting default privileges for future tables...")
+        logger.info("Setting default privileges for future tables...")
         await conn.execute(
             f'''
             ALTER DEFAULT PRIVILEGES IN SCHEMA public
@@ -155,7 +184,7 @@ async def grant_permissions_to_app(
         logger.info("Set default privileges for tables")
 
         # Set default privileges for future sequences
-        logger.info(f"Setting default privileges for future sequences...")
+        logger.info("Setting default privileges for future sequences...")
         await conn.execute(
             f'''
             ALTER DEFAULT PRIVILEGES IN SCHEMA public

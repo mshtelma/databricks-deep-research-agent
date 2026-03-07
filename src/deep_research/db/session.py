@@ -14,14 +14,14 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from deep_research.core.config import Settings, get_settings
-from deep_research.db.lakebase_auth import LakebaseCredentialProvider
+from deep_research.db.credential_provider import BaseLakebaseCredentialProvider
 
 logger = logging.getLogger(__name__)
 
 # Module-level state
 _engine: AsyncEngine | None = None
 _async_session_maker: async_sessionmaker[AsyncSession] | None = None
-_credential_provider: LakebaseCredentialProvider | None = None
+_credential_provider: BaseLakebaseCredentialProvider | None = None
 
 
 async def _dispose_engine_async(engine: AsyncEngine) -> None:
@@ -36,8 +36,11 @@ async def _dispose_engine_async(engine: AsyncEngine) -> None:
         logger.warning(f"Error disposing engine: {e}")
 
 
-def get_credential_provider(settings: Settings) -> LakebaseCredentialProvider | None:
+def get_credential_provider(settings: Settings) -> BaseLakebaseCredentialProvider | None:
     """Get or create Lakebase credential provider.
+
+    Uses the credential factory for auto-detection of backend type
+    (Provisioned vs Autoscaling).
 
     Args:
         settings: Application settings.
@@ -51,7 +54,9 @@ def get_credential_provider(settings: Settings) -> LakebaseCredentialProvider | 
         return None
 
     if _credential_provider is None:
-        _credential_provider = LakebaseCredentialProvider(settings)
+        from deep_research.db.credential_factory import create_credential_provider
+
+        _credential_provider = create_credential_provider(settings)
 
     return _credential_provider
 
@@ -100,7 +105,7 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
 
     # Proactive token refresh check (Lakebase only)
     if settings.use_lakebase and _credential_provider is not None:
-        cred = _credential_provider._credential
+        cred = _credential_provider.current_credential
         if cred is not None:
             logger.info(
                 "LAKEBASE_ENGINE_CHECK credential_exists=True expires_at=%s "

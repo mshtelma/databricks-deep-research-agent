@@ -188,75 +188,56 @@ class ReactResearchState:
             if url not in self.low_quality_sources:
                 self.low_quality_sources.append(url)
 
-    def record_tool_call_outcome(self) -> None:
-        """Record the outcome of a tool call for early stopping analysis.
+    async def record_tool_call_outcome(self) -> None:
+        """Record the outcome of a tool call for early stopping analysis (async-safe)."""
+        async with self._sources_lock:
+            current_hq_count = len(self.high_quality_sources)
+        async with self._content_lock:
+            current_content_len = sum(len(c) for c in self.crawled_content.values())
 
-        Called after each tool call to track information gain.
-        """
-        # Calculate information gain
-        current_hq_count = len(self.high_quality_sources)
-        current_content_len = sum(len(c) for c in self.crawled_content.values())
-
-        # Info gain based on new sources and content
         new_sources = current_hq_count - self._last_high_quality_count
         new_content = current_content_len - self._last_content_length
 
-        # Normalize info gain (0.0 to 1.0 scale)
         info_gain = 0.0
         if new_sources > 0:
-            info_gain += 0.5  # New source is valuable
+            info_gain += 0.5
         if new_content > 1000:
-            info_gain += min(0.5, new_content / 10000)  # Content adds value
+            info_gain += min(0.5, new_content / 10000)
 
         self._info_gain_history.append(info_gain)
 
-        # Track consecutive low-gain calls
         if info_gain < 0.1:
             self._consecutive_low_gain_calls += 1
         else:
             self._consecutive_low_gain_calls = 0
 
-        # Update tracking
         self._last_high_quality_count = current_hq_count
         self._last_content_length = current_content_len
 
-    def should_stop_early(
+    async def should_stop_early(
         self,
         min_calls: int = 5,
         min_sources: int = 3,
         max_low_gain_calls: int = 5,
     ) -> tuple[bool, str]:
-        """Determine if ReAct loop should stop early.
-
-        This is a TOKEN OPTIMIZATION that stops the loop when:
-        1. We have enough high-quality sources AND
-        2. Last N calls added no new information (diminishing returns)
-
-        Args:
-            min_calls: Minimum calls before early stopping is allowed.
-            min_sources: Minimum high-quality sources required.
-            max_low_gain_calls: Stop after this many consecutive low-gain calls.
-
-        Returns:
-            Tuple of (should_stop, reason_string).
-        """
-        # Don't stop before minimum calls
-        if self.tool_call_count < min_calls:
+        """Determine if ReAct loop should stop early (async-safe)."""
+        async with self._tool_count_lock:
+            tc = self.tool_call_count
+        if tc < min_calls:
             return False, ""
 
-        # Check for diminishing returns
         if self._consecutive_low_gain_calls >= max_low_gain_calls:
-            # Only stop if we have minimum sources
-            if len(self.high_quality_sources) >= min_sources:
+            async with self._sources_lock:
+                hq_count = len(self.high_quality_sources)
+            if hq_count >= min_sources:
                 return True, f"diminishing_returns_after_{self._consecutive_low_gain_calls}_low_gain_calls"
 
-        # Check coverage - if we have many high-quality sources, can stop
-        if len(self.high_quality_sources) >= min_sources + 2:
-            # Check recent info gain
-            if len(self._info_gain_history) >= 3:
-                recent_gain = sum(self._info_gain_history[-3:])
-                if recent_gain < 0.3:  # Last 3 calls added little
-                    return True, f"high_coverage_{len(self.high_quality_sources)}_sources_low_recent_gain"
+        async with self._sources_lock:
+            hq_count = len(self.high_quality_sources)
+        if hq_count >= min_sources + 2 and len(self._info_gain_history) >= 3:
+            recent_gain = sum(self._info_gain_history[-3:])
+            if recent_gain < 0.3:
+                return True, f"high_coverage_{hq_count}_sources_low_recent_gain"
 
         return False, ""
 
@@ -533,7 +514,7 @@ async def run_react_researcher(
                     })
 
                 # Track info gain for early stopping (once after batch)
-                react_state.record_tool_call_outcome()
+                await react_state.record_tool_call_outcome()
 
             else:
                 # SEQUENTIAL EXECUTION: Single tool, no parallelism benefit
@@ -580,10 +561,10 @@ async def run_react_researcher(
                     )
 
                     # TOKEN OPTIMIZATION: Track info gain for early stopping
-                    react_state.record_tool_call_outcome()
+                    await react_state.record_tool_call_outcome()
 
             # TOKEN OPTIMIZATION: Check for early stopping (diminishing returns)
-            should_stop, stop_reason = react_state.should_stop_early(
+            should_stop, stop_reason = await react_state.should_stop_early(
                 min_calls=5,  # At least 5 calls before considering early stop
                 min_sources=3,  # Need at least 3 high-quality sources
                 max_low_gain_calls=5,  # Stop after 5 consecutive low-gain calls
@@ -732,7 +713,7 @@ async def _execute_tool(
 
             # Add sources to state
             for r in results.results:
-                state.add_source(
+                await state.add_source_async(
                     SourceInfo(
                         url=r.url,
                         title=r.title,
@@ -884,7 +865,7 @@ async def _execute_tool(
                     ent_source_type = enterprise_tool.definition.source_type
                     if result.sources:
                         for src in result.sources:
-                            state.add_source(
+                            await state.add_source_async(
                                 SourceInfo(
                                     url=src.get("url", fallback_url),
                                     title=src.get("title", tc.name),
@@ -895,7 +876,7 @@ async def _execute_tool(
                             )
                     else:
                         # No structured sources — add generic entry so content can be linked
-                        state.add_source(
+                        await state.add_source_async(
                             SourceInfo(
                                 url=primary_url,
                                 title=tc.name,
@@ -1114,7 +1095,7 @@ async def _execute_tool_with_timeout(
         )
         sources_added = max(0, len(state.sources) - sources_before)
         return (tc.id, result, sources_added)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning(
             "PARALLEL_TOOL_TIMEOUT",
             tool=tc.name,
@@ -1217,7 +1198,7 @@ async def execute_tools_parallel(
                         error=str(e)[:200],
                     )
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "PARALLEL_BATCH_TIMEOUT",
                 batch_index=batch_idx,

@@ -1,4 +1,5 @@
 import { test, expect } from '../fixtures';
+import { RESEARCH_QUERIES } from '../utils/test-data';
 import { waitForCitationMarkers } from '../utils/wait-helpers';
 
 /**
@@ -13,8 +14,9 @@ import { waitForCitationMarkers } from '../utils/wait-helpers';
  * Detection is done by checking CSS classes on citation markers.
  * Grey markers have: opacity-60 and text-gray-400 classes.
  *
- * NOTE: These tests run real research queries using the ultra-light test config
- * (config/app.test.yaml): 1-2 steps, minimal iterations (~60-90 seconds each).
+ * IMPORTANT: Queries must be research-worthy (not simple factual questions).
+ * The coordinator classifies simple queries (e.g. "What is the capital of France?")
+ * as simple and bypasses the research pipeline entirely, producing no citations.
  *
  * Run with: RUN_SLOW_TESTS=1 npx playwright test grey-references.spec.ts
  */
@@ -25,15 +27,17 @@ test.describe('Grey Reference Detection', () => {
     'Grey reference tests require real research - set RUN_SLOW_TESTS=1 to enable'
   );
 
-  // Use extended timeout for research queries (research with real LLM takes 3-5+ min)
-  test.setTimeout(600000);
+  // Use extended timeout for research queries (research with real LLM + citation pipeline takes 5-10+ min)
+  test.setTimeout(900000);
 
   test('no grey citations after research completes', async ({ chatPage, citationsPage, page }) => {
-    // Run a simple factual research query with deep_research mode to trigger citations
-    await chatPage.sendMessageWithMode('What is the capital of France?', 'deep_research');
+    // Use a research-worthy query that triggers the full deep research pipeline with citations.
+    // Simple factual queries get classified as "simple" by the coordinator, bypassing research.
+    const query = RESEARCH_QUERIES[0]; // Complex research topic
+    await chatPage.sendMessageWithMode(query.text, 'deep_research');
 
-    // Wait for agent response (6 min - research with real LLM takes 3-5+ min)
-    await chatPage.waitForAgentResponse(360000);
+    // Wait for agent response (10 min - research with real LLM + citation verification takes 3-7+ min)
+    await chatPage.waitForAgentResponse(600000);
 
     // Wait for citation markers to appear
     try {
@@ -65,9 +69,10 @@ test.describe('Grey Reference Detection', () => {
   });
 
   test('all citations resolve within timeout', async ({ chatPage, citationsPage, page }) => {
-    // Run research query with deep_research mode to trigger citations
-    await chatPage.sendMessageWithMode('What programming language did Guido van Rossum create?', 'deep_research');
-    await chatPage.waitForAgentResponse(360000);
+    // Use a research query that triggers deep research with citations
+    const query = RESEARCH_QUERIES[1]; // Comparison research
+    await chatPage.sendMessageWithMode(query.text, 'deep_research');
+    await chatPage.waitForAgentResponse(600000);
 
     // Check if citations exist
     const markerCount = await citationsPage.getCitationMarkerCount();
@@ -98,9 +103,10 @@ test.describe('Grey Reference Detection', () => {
   });
 
   test('citation resolution stats are accurate', async ({ chatPage, citationsPage, page }) => {
-    // Run research with deep_research mode to trigger citations
-    await chatPage.sendMessageWithMode('What year was Python first released?', 'deep_research');
-    await chatPage.waitForAgentResponse(360000);
+    // Use a research query that triggers deep research with citations
+    const query = RESEARCH_QUERIES[2]; // Current events research
+    await chatPage.sendMessageWithMode(query.text, 'deep_research');
+    await chatPage.waitForAgentResponse(600000);
 
     // Wait for citations
     try {
@@ -134,9 +140,10 @@ test.describe('Grey Reference Detection', () => {
     citationsPage,
     page,
   }) => {
-    // Run research with deep_research mode to trigger citations
-    await chatPage.sendMessageWithMode('Who founded Microsoft?', 'deep_research');
-    await chatPage.waitForAgentResponse(360000);
+    // Use a research query that triggers deep research with citations
+    const query = RESEARCH_QUERIES[0]; // Complex research topic
+    await chatPage.sendMessageWithMode(query.text, 'deep_research');
+    await chatPage.waitForAgentResponse(600000);
 
     // Wait for citations
     try {

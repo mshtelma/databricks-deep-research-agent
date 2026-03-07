@@ -6,13 +6,13 @@ Usage:
 
 Examples:
     # Fetch logs once
-    uv run python scripts/download-app-logs.py deep-research-agent-dre-dev e2-demo-west
+    uv run python scripts/download-app-logs.py deep-research-agent-dev e2-demo-west
 
     # Follow logs continuously (poll every 5s)
-    uv run python scripts/download-app-logs.py deep-research-agent-dre-dev e2-demo-west -f
+    uv run python scripts/download-app-logs.py deep-research-agent-dev e2-demo-west -f
 
     # Search for errors
-    uv run python scripts/download-app-logs.py deep-research-agent-dre-dev e2-demo-west --search ERROR
+    uv run python scripts/download-app-logs.py deep-research-agent-dev e2-demo-west --search ERROR
 """
 import argparse
 import json
@@ -129,16 +129,16 @@ def main() -> None:
         epilog="""
 Examples:
   # Fetch logs once
-  python download-app-logs.py deep-research-agent-dre-dev e2-demo-west
+  python download-app-logs.py deep-research-agent-dev e2-demo-west
 
   # Follow logs continuously
-  python download-app-logs.py deep-research-agent-dre-dev e2-demo-west -f
+  python download-app-logs.py deep-research-agent-dev e2-demo-west -f
 
   # Search for errors
-  python download-app-logs.py deep-research-agent-dre-dev e2-demo-west --search ERROR
+  python download-app-logs.py deep-research-agent-dev e2-demo-west --search ERROR
 
   # Follow + search with custom interval
-  python download-app-logs.py deep-research-agent-dre-dev e2-demo-west -f --search ERROR --interval 2
+  python download-app-logs.py deep-research-agent-dev e2-demo-west -f --search ERROR --interval 2
         """,
     )
     parser.add_argument("app_name", help="Databricks App name")

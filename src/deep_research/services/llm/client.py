@@ -128,30 +128,45 @@ class LLMClient:
 
         # Use centralized auth
         self._auth = get_databricks_auth()
-        self._current_token = self._auth.get_token()
-        self._base_url = self._auth.get_base_url()
 
         # Auth retry tracking (prevents infinite loops on persistent auth failures)
         self._auth_retry_count: int = 0
         self._refresh_lock = asyncio.Lock()
 
+        # Lazy initialization — client created on first API call.
+        # Follows the same pattern as Lakebase credential generation (main.py:91-97).
+        # This allows the server to start even when auth is temporarily unavailable
+        # (corrupted CLI cache, expired token, network issues).
+        self._current_token: str | None = None
+        self._base_url: str | None = None
+        self._client: AsyncOpenAI | None = None
+
         logger.info("LLM_CLIENT_INIT", auth_mode=self._auth.auth_mode)
 
-        # Initialize OpenAI client for Databricks
-        self._client = AsyncOpenAI(
-            api_key=self._current_token,
-            base_url=self._base_url,
-        )
+    def _ensure_fresh_client(self) -> AsyncOpenAI:
+        """Ensure the OpenAI client is initialized with a fresh token.
 
-    def _ensure_fresh_client(self) -> None:
-        """Ensure the OpenAI client has a fresh OAuth token.
+        On first call, performs lazy initialization (creates client + authenticates).
+        On subsequent calls, checks OAuth token freshness and refreshes if needed.
+        For direct token auth, refresh is a no-op after initialization.
 
-        For OAuth-based auth, checks if token is expired and refreshes if needed.
-        For direct token auth, this is a no-op.
+        Returns:
+            Initialized AsyncOpenAI client ready for API calls.
         """
+        # Lazy initialization: create client on first API call
+        if self._client is None:
+            self._current_token = self._auth.get_token()
+            self._base_url = self._auth.get_base_url()
+            self._client = AsyncOpenAI(
+                api_key=self._current_token,
+                base_url=self._base_url,
+            )
+            logger.info("LLM_CLIENT_INITIALIZED", auth_mode=self._auth.auth_mode)
+            return self._client
+
         if not self._auth.is_oauth:
             # Direct token auth - no refresh needed
-            return
+            return self._client
 
         # Get potentially refreshed token
         token = self._auth.get_token()
@@ -164,6 +179,8 @@ class LLMClient:
                 api_key=token,
                 base_url=self._base_url,
             )
+
+        return self._client
 
     async def _force_refresh_token(self) -> bool:
         """Force refresh OAuth token after authentication error.
@@ -539,7 +556,7 @@ class LLMClient:
             LLMResponse with content and metadata.
         """
         # Ensure fresh OAuth token before request
-        self._ensure_fresh_client()
+        client = self._ensure_fresh_client()
 
         # Estimate tokens (rough: ~4 chars per token)
         estimated_input = sum(len(m.get("content", "")) for m in messages) // 4
@@ -617,7 +634,7 @@ class LLMClient:
                             },
                         }
 
-                response = await self._client.chat.completions.create(**request_kwargs)
+                response = await client.chat.completions.create(**request_kwargs)
 
                 duration_ms = (time.perf_counter() - start_time) * 1000
 
@@ -1035,7 +1052,7 @@ class LLMClient:
         from deep_research.services.llm.tracing import traced_stream
 
         # Ensure fresh OAuth token before request
-        self._ensure_fresh_client()
+        client = self._ensure_fresh_client()
 
         estimated_tokens = sum(len(m.get("content", "")) for m in messages) // 4
         if endpoint_override:
@@ -1076,7 +1093,7 @@ class LLMClient:
             try:
                 stream = cast(
                     AsyncStream[ChatCompletionChunk],
-                    await self._client.chat.completions.create(
+                    await client.chat.completions.create(
                         model=endpoint.endpoint_identifier,
                         messages=cast(Any, cached_messages),
                         stream=True,
@@ -1389,7 +1406,7 @@ class LLMClient:
         from deep_research.services.llm.tracing import traced_stream_with_tools
 
         # Ensure fresh OAuth token before request
-        self._ensure_fresh_client()
+        client = self._ensure_fresh_client()
 
         estimated_tokens = sum(
             len(str(m.get("content", ""))) for m in messages
@@ -1423,7 +1440,7 @@ class LLMClient:
             try:
                 stream = cast(
                     AsyncStream[ChatCompletionChunk],
-                    await self._client.chat.completions.create(
+                    await client.chat.completions.create(
                         model=endpoint.endpoint_identifier,
                         messages=cast(Any, cached_messages),
                         tools=cast(Any, tools if tools else None),
@@ -1676,5 +1693,7 @@ class LLMClient:
 
         Must be called before the event loop closes to avoid
         'Event loop is closed' errors during cleanup.
+        Safe to call even if client was never initialized (lazy init).
         """
-        await self._client.close()
+        if self._client is not None:
+            await self._client.close()

@@ -26,8 +26,8 @@ async def clean_db():
     try:
         from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy import text
-        from src.core.config import get_settings
-        from src.db.lakebase_auth import LakebaseCredentialProvider
+        from deep_research.core.config import get_settings
+        from deep_research.db.lakebase_auth import LakebaseCredentialProvider
     except ImportError as e:
         print(f"Error: {e}")
         print("Run from project root with: uv run ./scripts/clean-db.sh")

@@ -1,57 +1,30 @@
-"""Lakebase OAuth credential provider."""
+"""Lakebase OAuth credential provider (Provisioned backend)."""
 
 import base64
 import json
 import logging
+import os
 import uuid
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from urllib.parse import quote_plus
 
 from databricks.sdk import WorkspaceClient
+
+from deep_research.db.credential_provider import (
+    TOKEN_LIFETIME,
+    BaseLakebaseCredentialProvider,
+    LakebaseBackend,
+    LakebaseCredential,
+)
 
 if TYPE_CHECKING:
     from deep_research.core.config import Settings
 
 logger = logging.getLogger(__name__)
 
-# Token refresh buffer (refresh 15 minutes before expiry to handle clock skew)
-TOKEN_REFRESH_BUFFER = timedelta(minutes=15)
-TOKEN_LIFETIME = timedelta(hours=1)
 
-
-@dataclass
-class LakebaseCredential:
-    """OAuth credential for Lakebase connection."""
-
-    token: str
-    username: str
-    expires_at: datetime
-
-    @property
-    def is_expired(self) -> bool:
-        """Check if token is expired or about to expire.
-
-        Returns True if current time >= (expires_at - 5 minute buffer).
-        """
-        now = datetime.now(UTC)
-        threshold = self.expires_at - TOKEN_REFRESH_BUFFER
-        expired = now >= threshold
-        time_until_threshold = (threshold - now).total_seconds() if not expired else 0
-        logger.info(
-            "LAKEBASE_CREDENTIAL_EXPIRY_CHECK now_utc=%s expires_at=%s threshold=%s "
-            "is_expired=%s time_until_threshold=%.1f",
-            now.isoformat(),
-            self.expires_at.isoformat(),
-            threshold.isoformat(),
-            expired,
-            time_until_threshold,
-        )
-        return expired
-
-
-class LakebaseCredentialProvider:
+class LakebaseCredentialProvider(BaseLakebaseCredentialProvider):
     """Provides and refreshes OAuth credentials for Lakebase."""
 
     def __init__(self, settings: "Settings") -> None:
@@ -90,8 +63,6 @@ class LakebaseCredentialProvider:
         """
         if self._instance_host is not None:
             return self._instance_host
-
-        import os
 
         # Priority 1: Use PGHOST if set (Databricks Apps auto-injects this)
         pghost = os.environ.get("PGHOST")
@@ -163,7 +134,6 @@ class LakebaseCredentialProvider:
         Raises:
             ValueError: If instance name cannot be determined.
         """
-        import os
         import re
 
         # Priority 1: Use explicit setting if available
@@ -271,8 +241,6 @@ class LakebaseCredentialProvider:
         Returns:
             Username (service principal client ID or email).
         """
-        import os
-
         # Priority 1: Use PGUSER if set (Databricks Apps auto-injects this)
         pguser = os.environ.get("PGUSER")
         if pguser:
@@ -305,6 +273,22 @@ class LakebaseCredentialProvider:
 
         raise ValueError("Could not determine username for Lakebase authentication")
 
+    def get_host(self) -> str:
+        """Get the hostname for the Lakebase instance."""
+        return self._get_instance_host()
+
+    def get_port(self) -> int:
+        """Get the port for the Lakebase instance."""
+        return int(os.environ.get("PGPORT", self._settings.lakebase_port))
+
+    def get_database(self) -> str:
+        """Get the database name."""
+        return os.environ.get("PGDATABASE", self._settings.lakebase_database)
+
+    def get_backend_type(self) -> LakebaseBackend:
+        """Return the backend type identifier."""
+        return "provisioned"
+
     def build_connection_url(self) -> str:
         """Build PostgreSQL connection URL with OAuth token.
 
@@ -317,14 +301,12 @@ class LakebaseCredentialProvider:
         Raises:
             ValueError: If required configuration is missing.
         """
-        import os
-
         cred = self.get_credential()
 
         # Get connection parameters (prefer auto-injected env vars from Databricks Apps)
-        host = self._get_instance_host()
-        port = int(os.environ.get("PGPORT", self._settings.lakebase_port))
-        database = os.environ.get("PGDATABASE", self._settings.lakebase_database)
+        host = self.get_host()
+        port = self.get_port()
+        database = self.get_database()
 
         logger.info(f"Building connection URL: host={host}, port={port}, database={database}")
 

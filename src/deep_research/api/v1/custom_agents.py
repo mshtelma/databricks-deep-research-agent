@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.core.app_config import get_app_config
-from deep_research.core.exceptions import NotFoundError, ValidationError
+from deep_research.core.exceptions import ConflictError, NotFoundError, ValidationError
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import AuthenticatedUser, CurrentUser
 from deep_research.models.custom_agent import (
@@ -241,7 +241,7 @@ async def create_custom_agent(
     # Check for duplicate name
     existing = await service.get_by_name(user.user_id, request_body.name)
     if existing:
-        raise ValidationError(f"Agent with name '{request_body.name}' already exists")
+        raise ConflictError(f"Agent with name '{request_body.name}' already exists")
 
     # Convert preset steps to dicts
     preset_steps: list[dict[str, Any]] | None = None
@@ -258,6 +258,16 @@ async def create_custom_agent(
             if step.source_hints:
                 step_dict["source_hints"] = step.source_hints.model_dump()
             preset_steps.append(step_dict)
+
+    # Validate model_overrides tier names at creation time (M2)
+    _VALID_TIERS = {"simple", "analytical", "complex", "synthesis"}
+    if request_body.model_overrides:
+        for tier_name in request_body.model_overrides:
+            if tier_name not in _VALID_TIERS:
+                raise ValidationError(
+                    f"Unknown model tier: {tier_name!r}. "
+                    f"Valid tiers: {', '.join(sorted(_VALID_TIERS))}"
+                )
 
     agent = await service.create_agent(
         owner_id=user.user_id,
@@ -317,7 +327,7 @@ async def update_custom_agent(
     if request_body.name is not None and request_body.name != agent.name:
         existing = await service.get_by_name(user.user_id, request_body.name)
         if existing:
-            raise ValidationError(f"Agent with name '{request_body.name}' already exists")
+            raise ConflictError(f"Agent with name '{request_body.name}' already exists")
 
     # Update fields
     if request_body.name is not None:
@@ -354,6 +364,14 @@ async def update_custom_agent(
             raise ValidationError("Cannot set visibility to 'system'")
         agent.visibility = request_body.visibility.value
     if request_body.model_overrides is not None:
+        # Validate model_overrides tier names at update time (M2)
+        _VALID_TIERS = {"simple", "analytical", "complex", "synthesis"}
+        for tier_name in request_body.model_overrides:
+            if tier_name not in _VALID_TIERS:
+                raise ValidationError(
+                    f"Unknown model tier: {tier_name!r}. "
+                    f"Valid tiers: {', '.join(sorted(_VALID_TIERS))}"
+                )
         agent.model_overrides = request_body.model_overrides
     if request_body.domain_filter_mode is not None:
         agent.domain_filter_mode = request_body.domain_filter_mode

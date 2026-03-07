@@ -276,8 +276,9 @@ class TestFileContentHelpers:
         ]
         result = state.get_file_context_for_prompt()
         assert "## Uploaded File Contents" in result
-        assert "### File: notes.txt" in result
+        assert '<uploaded_file name="notes.txt">' in result
         assert "Hello world" in result
+        assert "</uploaded_file>" in result
 
     def test_get_file_context_hybrid_file(self) -> None:
         """Hybrid files show preview hint."""
@@ -291,7 +292,7 @@ class TestFileContentHelpers:
             }
         ]
         result = state.get_file_context_for_prompt()
-        assert "preview; use file_search for full content" in result
+        assert '<uploaded_file name="report.pdf" mode="preview">' in result
         assert "Preview text..." in result
 
     def test_get_file_context_retrieval_file(self) -> None:
@@ -306,7 +307,8 @@ class TestFileContentHelpers:
             }
         ]
         result = state.get_file_context_for_prompt()
-        assert "use file_search tool to search this file" in result
+        assert '<uploaded_file name="big.pdf" mode="retrieval">' in result
+        assert "file_search" in result
 
     def test_get_file_context_max_chars_truncation(self) -> None:
         """Truncation when content exceeds max_chars."""

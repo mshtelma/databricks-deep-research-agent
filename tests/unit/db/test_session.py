@@ -34,71 +34,55 @@ class TestDisposeEngineAsync:
 
 
 class TestEngineDisposalTracking:
-    """Tests for engine disposal task tracking."""
+    """Tests for engine disposal task lifecycle (fire-and-forget)."""
 
     def setup_method(self) -> None:
         """Reset module state before each test."""
         session._engine = None
         session._async_session_maker = None
         session._credential_provider = None
-        session._pending_disposal_tasks.clear()
 
     def teardown_method(self) -> None:
         """Clean up module state after each test."""
         session._engine = None
         session._async_session_maker = None
         session._credential_provider = None
-        session._pending_disposal_tasks.clear()
 
     @pytest.mark.asyncio
     async def test_disposal_task_tracked_and_removed(self) -> None:
-        """Verify disposal tasks are tracked and removed on completion."""
-        # Create a mock engine
+        """Verify fire-and-forget disposal task completes and disposes engine."""
         mock_engine = AsyncMock()
         mock_engine.dispose = AsyncMock()
 
-        # Get the running event loop
         loop = asyncio.get_running_loop()
 
-        # Create and track a disposal task
         task = loop.create_task(session._dispose_engine_async(mock_engine))
-        session._pending_disposal_tasks.add(task)
-        task.add_done_callback(session._pending_disposal_tasks.discard)
 
-        # Task should be tracked
-        assert len(session._pending_disposal_tasks) == 1
-
-        # Wait for task completion
         await task
 
-        # Task should be removed after completion
-        assert len(session._pending_disposal_tasks) == 0
+        mock_engine.dispose.assert_awaited_once()
+        assert task.done()
 
     @pytest.mark.asyncio
     async def test_multiple_disposal_tasks_tracked(self) -> None:
-        """Verify multiple concurrent disposal tasks are properly tracked."""
+        """Verify multiple concurrent disposal tasks all complete."""
         mock_engines = [AsyncMock() for _ in range(3)]
         for engine in mock_engines:
             engine.dispose = AsyncMock()
 
         loop = asyncio.get_running_loop()
 
-        # Create multiple disposal tasks
         tasks = []
         for engine in mock_engines:
             task = loop.create_task(session._dispose_engine_async(engine))
-            session._pending_disposal_tasks.add(task)
-            task.add_done_callback(session._pending_disposal_tasks.discard)
             tasks.append(task)
 
-        # All tasks should be tracked
-        assert len(session._pending_disposal_tasks) == 3
-
-        # Wait for all tasks
         await asyncio.gather(*tasks)
 
-        # All tasks should be removed
-        assert len(session._pending_disposal_tasks) == 0
+        for engine in mock_engines:
+            engine.dispose.assert_awaited_once()
+        for task in tasks:
+            assert task.done()
 
 
 class TestGetEngineTokenRefresh:
@@ -109,14 +93,12 @@ class TestGetEngineTokenRefresh:
         session._engine = None
         session._async_session_maker = None
         session._credential_provider = None
-        session._pending_disposal_tasks.clear()
 
     def teardown_method(self) -> None:
         """Clean up module state after each test."""
         session._engine = None
         session._async_session_maker = None
         session._credential_provider = None
-        session._pending_disposal_tasks.clear()
 
     @pytest.mark.asyncio
     async def test_engine_disposal_on_token_expiry(self) -> None:
@@ -125,7 +107,7 @@ class TestGetEngineTokenRefresh:
         mock_provider = MagicMock()
         mock_cred = MagicMock()
         mock_cred.is_expired = True
-        mock_provider._credential = mock_cred
+        mock_provider.current_credential = mock_cred
         mock_provider.get_credential = MagicMock()
         mock_provider.build_connection_url = MagicMock(
             return_value="postgresql+asyncpg://user:pass@localhost/db"

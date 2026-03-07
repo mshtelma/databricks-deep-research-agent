@@ -44,7 +44,7 @@ export default defineConfig({
   // Uses Lakebase from .env configuration (or local PostgreSQL if DATABASE_URL is set)
   // Uses lightweight E2E config for faster tests
   webServer: {
-    command: 'cd .. && LAKEBASE_DATABASE=deep_research APP_CONFIG_PATH=config/app.e2e.yaml SERVE_STATIC=true uv run uvicorn deep_research.main:app --host 0.0.0.0 --port 8000',
+    command: `cd .. && LAKEBASE_DATABASE=${process.env.LAKEBASE_DATABASE || 'deep_research_e2e'} APP_CONFIG_PATH=config/app.e2e.yaml SERVE_STATIC=true uv run uvicorn deep_research.main:app --host 0.0.0.0 --port 8000`,
     url: 'http://localhost:8000/health',
     reuseExistingServer: !process.env.CI, // Reuse locally, fresh in CI
     timeout: 120000,

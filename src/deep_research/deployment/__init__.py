@@ -38,28 +38,29 @@ Example usage:
     print(f"Host: {info.host}, Username: {info.username}")
 """
 
-from deep_research.deployment.lakebase import (
-    check_lakebase_health,
-    wait_for_lakebase,
-)
 from deep_research.deployment.database import (
     create_database,
     database_exists,
     ensure_database_exists,
 )
-from deep_research.deployment.migrations import (
-    run_migrations,
-    get_migration_paths,
-)
-from deep_research.deployment.permissions import (
-    grant_to_app,
-    get_app_service_principal,
+from deep_research.deployment.lakebase import (
+    check_lakebase_health,
+    wait_for_lakebase,
 )
 from deep_research.deployment.lakebase_connection import (
-    get_lakebase_host,
+    LakebaseConnectionInfo,
+    discover_autoscaling_endpoint,
     extract_username_from_token,
     get_lakebase_connection_info,
-    LakebaseConnectionInfo,
+    get_lakebase_host,
+)
+from deep_research.deployment.migrations import (
+    get_migration_paths,
+    run_migrations,
+)
+from deep_research.deployment.permissions import (
+    get_app_service_principal,
+    grant_to_app,
 )
 
 __all__ = [
@@ -80,5 +81,6 @@ __all__ = [
     "get_lakebase_host",
     "extract_username_from_token",
     "get_lakebase_connection_info",
+    "discover_autoscaling_endpoint",
     "LakebaseConnectionInfo",
 ]

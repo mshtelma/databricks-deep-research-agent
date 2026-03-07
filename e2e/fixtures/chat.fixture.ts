@@ -33,6 +33,8 @@ export const test = base.extend<ChatFixtures>({
     await page.reload();
     const sidebarPage = new SidebarPage(page);
     await sidebarPage.newChatButton.waitFor({ state: 'visible', timeout: 30000 });
+    // Wait for chat list to finish initial load (loading indicator disappears)
+    await sidebarPage.waitForChatListLoaded();
     await use(sidebarPage);
   },
 

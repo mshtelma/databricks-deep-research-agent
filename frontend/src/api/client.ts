@@ -125,9 +125,23 @@ export const chatsApi = {
 
   export: async (chatId: string, format: 'markdown' | 'json'): Promise<{ content: string; filename: string }> => {
     const url = `${API_BASE_URL}/chats/${chatId}/export?format=${format}`
-    const response = await fetch(url, {
-      headers: { 'Content-Type': 'application/json' },
-    })
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+    let response: Response
+    try {
+      response = await fetch(url, {
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+      })
+    } catch (error) {
+      clearTimeout(timeoutId)
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new ApiError(0, 'TIMEOUT', `Export timed out after ${DEFAULT_TIMEOUT_MS}ms`)
+      }
+      throw error
+    } finally {
+      clearTimeout(timeoutId)
+    }
     if (!response.ok) {
       let errorData: { code?: string; message?: string }
       try {
@@ -190,9 +204,23 @@ export const messagesApi = {
 
   exportReport: async (messageId: string): Promise<{ content: string; filename: string }> => {
     const url = `${API_BASE_URL}/messages/${messageId}/report`
-    const response = await fetch(url, {
-      headers: { 'Content-Type': 'application/json' },
-    })
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+    let response: Response
+    try {
+      response = await fetch(url, {
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+      })
+    } catch (error) {
+      clearTimeout(timeoutId)
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new ApiError(0, 'TIMEOUT', `Export timed out after ${DEFAULT_TIMEOUT_MS}ms`)
+      }
+      throw error
+    } finally {
+      clearTimeout(timeoutId)
+    }
     if (!response.ok) {
       let errorData: { code?: string; message?: string }
       try {
@@ -215,9 +243,23 @@ export const messagesApi = {
 
   exportProvenance: async (messageId: string): Promise<{ content: string; filename: string }> => {
     const url = `${API_BASE_URL}/messages/${messageId}/provenance?format=markdown`
-    const response = await fetch(url, {
-      headers: { 'Content-Type': 'application/json' },
-    })
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS)
+    let response: Response
+    try {
+      response = await fetch(url, {
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+      })
+    } catch (error) {
+      clearTimeout(timeoutId)
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new ApiError(0, 'TIMEOUT', `Export timed out after ${DEFAULT_TIMEOUT_MS}ms`)
+      }
+      throw error
+    } finally {
+      clearTimeout(timeoutId)
+    }
     if (!response.ok) {
       let errorData: { code?: string; message?: string }
       try {

@@ -221,6 +221,22 @@ async def submit_job(
     # Get OBO token for enterprise data source authentication (007-enterprise Phase 2)
     user_token = getattr(request.state, "obo_token", None)
 
+    # Validate agent_id if provided (009-custom-agent-config)
+    if body.agent_id:
+        from deep_research.services.custom_agent_service import CustomAgentService
+
+        try:
+            agent_uuid = UUID(body.agent_id)
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Invalid agent ID format")
+
+        agent_service = CustomAgentService(db)
+        agent = await agent_service.get_accessible(agent_uuid, user.user_id)
+        if not agent:
+            raise HTTPException(
+                status_code=404, detail="Agent not found or not accessible"
+            )
+
     # Submit job
     session = await job_manager.submit_job(
         user_id=user.user_id,

@@ -4,7 +4,6 @@
 # Deploy with:
 #   databricks bundle deploy                    # Deploy to dev (default)
 #   databricks bundle deploy -t prod            # Deploy to production
-#   databricks bundle deploy --var lakebase_capacity=CU_2  # Custom capacity
 #
 # IMPORTANT: Lakebase instances incur cost immediately upon deployment!
 # See: https://docs.databricks.com/pricing
@@ -20,18 +19,32 @@ variables:
     description: "Name of the Databricks App"
     default: "deep-research-agent"
 
-  # Lakebase Configuration (provisioned by this bundle)
-  lakebase_instance_name:
-    description: "Name for the Lakebase instance to be provisioned"
-    default: "deep-research-lakebase"
-
   lakebase_database:
     description: "Database name in Lakebase (we create and own this)"
     default: "deep_research"
 
-  lakebase_capacity:
-    description: "Lakebase compute capacity (CU_1, CU_2, CU_4, etc)"
-    default: "CU_1"
+  # Lakebase Autoscaling Configuration
+  pg_version:
+    description: "PostgreSQL version for Autoscaling projects"
+    default: "17"
+
+  autoscaling_min_cu:
+    description: "Minimum compute units (Autoscaling)"
+    default: "0.5"
+
+  autoscaling_max_cu:
+    description: "Maximum compute units (Autoscaling)"
+    default: "2"
+
+  # Autoscaling endpoint name (discovered post-deploy via discover_autoscaling_endpoint)
+  endpoint_name:
+    description: "Autoscaling endpoint name (discovered post-deploy, passed by provisioning scripts)"
+    default: ""
+
+  # Filled by deployment script after endpoint creation (PGHOST isn't known until then)
+  pghost:
+    description: "Lakebase Autoscaling endpoint hostname (resolved post-deploy)"
+    default: ""
 
   # Brave Search API Secret Configuration
   brave_secret_scope:
@@ -43,16 +56,18 @@ variables:
     default: "BRAVE_API_KEY"
 
   # Resource suffix for multi-user workspaces
+  # CONSTRAINT: app_name + "-" + suffix must be ≤ 30 chars (Databricks app name limit).
+  # With app_name="deep-research-agent" (20 chars), suffix can be at most 9 chars.
   resource_suffix:
     description: "Suffix for resource names to avoid collisions"
-    default: "dra"
+    default: "default"
 
 resources:
 
-  database_instances:
-    deep_research_lakebase:
-      name: ${var.lakebase_instance_name}
-      capacity: ${var.lakebase_capacity}
+  # NOTE: Database resources (database_instances, postgres_projects) are defined
+  # at the TARGET level — not here. Each target declares only its backend type.
+  # This prevents DAB from creating both Provisioned and Autoscaling resources
+  # on every deploy (which causes "workspace limit" / "already exists" errors).
 
   apps:
     deep_research_agent:
@@ -70,7 +85,39 @@ resources:
         - vectorsearch.vector-search-endpoints
         - vectorsearch.vector-search-indexes
 
-      # App resources - grant service principal access to platform resources
+      # ---- Config: generates app.yaml during deploy ----
+      # Variable-interpolated at deploy time. Replaces static app.yaml for production.
+      config:
+        command: ["uvicorn", "deep_research.main:app"]
+        env:
+          # MLflow
+          - name: MLFLOW_TRACKING_URI
+            value: "databricks"
+          - name: MLFLOW_REGISTRY_URI
+            value: "databricks-uc"
+          - name: MLFLOW_EXPERIMENT_NAME
+            value: "/Shared/deep-research-agent-experiments"
+          # App config
+          - name: SERVE_STATIC
+            value: "true"
+          - name: APP_ENV
+            value: "production"
+          - name: LOG_LEVEL
+            value: "INFO"
+          - name: APP_CONFIG_PATH
+            value: "config/app.yaml"
+          - name: LAKEBASE_DATABASE
+            value: ${var.lakebase_database}
+          # Lakebase (Autoscaling — harmless when pghost is empty)
+          - name: ENDPOINT_NAME
+            value: ${var.endpoint_name}
+          - name: PGHOST
+            value: ${var.pghost}
+          # Brave Search (uses value_from to read from secret scope)
+          - name: BRAVE_API_KEY
+            value_from: "brave-api-key"
+
+      # ---- Resource bindings ----
       resources:
         # =================================================================
         # Secrets
@@ -81,16 +128,6 @@ resources:
             scope: ${var.brave_secret_scope}
             key: ${var.brave_secret_key}
             permission: READ
-
-        # =================================================================
-        # Database
-        # =================================================================
-        - name: database
-          description: "Lakebase database for chat persistence"
-          database:
-            database_name: ${var.lakebase_database}
-            instance_name: ${resources.database_instances.deep_research_lakebase.name}
-            permission: CAN_CONNECT_AND_CREATE
 
         # =================================================================
         # Model Serving Endpoints
@@ -150,11 +187,14 @@ resources:
 
         # =================================================================
         # Optional: MLflow Experiment
+        # Databricks Apps does NOT support mlflow_experiment as a resource type.
+        # Experiment permissions must be granted manually or via a setup script.
         # =================================================================
         # - name: experiment
         #   description: "MLflow experiment for tracing"
         #   mlflow_experiment:
-        #     path: /Workspace/Shared/deep-research-agent
+        #     path: /Shared/deep-research-agent-experiments
+        #     permission: CAN_EDIT
 
 targets:
   dev:
@@ -162,7 +202,13 @@ targets:
     workspace:
       profile: e2-demo-west
     variables:
-      resource_suffix: "dre-dev"
+      resource_suffix: "dev"
+    resources:
+      postgres_projects:
+        deep_research_project:
+          project_id: deep-research-${var.resource_suffix}
+          display_name: deep-research-${var.resource_suffix}
+          pg_version: ${var.pg_version}
 
   ais:
     mode: development
@@ -170,4 +216,38 @@ targets:
     workspace:
       profile: ais
     variables:
-      resource_suffix: "dre-ais"
+      resource_suffix: "ais"
+    resources:
+      postgres_projects:
+        deep_research_project:
+          project_id: deep-research-${var.resource_suffix}
+          display_name: deep-research-${var.resource_suffix}
+          pg_version: ${var.pg_version}
+
+  e2e:
+    mode: development
+    default: false
+    workspace:
+      profile: ais
+    variables:
+      resource_suffix: "e2e"
+    resources:
+      postgres_projects:
+        deep_research_project:
+          project_id: deep-research-${var.resource_suffix}
+          display_name: deep-research-${var.resource_suffix}
+          pg_version: ${var.pg_version}
+
+  local-dev:
+    mode: development
+    default: false
+    workspace:
+      profile: ais
+    variables:
+      resource_suffix: "local"
+    resources:
+      postgres_projects:
+        deep_research_project:
+          project_id: deep-research-${var.resource_suffix}
+          display_name: deep-research-${var.resource_suffix}
+          pg_version: ${var.pg_version}

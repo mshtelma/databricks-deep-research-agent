@@ -10,6 +10,7 @@
 
 import React from 'react';
 import { VerificationVerdict } from '@/types/citation';
+import { safeOpenUrl } from '@/utils/urlSafety';
 
 interface CitationMarkerProps {
   /** Human-readable citation key (e.g., "Arxiv", "Zhipu", "Github-2") */
@@ -128,7 +129,7 @@ export const CitationMarker: React.FC<CitationMarkerProps> = ({
 
     // Always open URL in new tab if available (primary action)
     if (url) {
-      window.open(url, '_blank', 'noopener,noreferrer');
+      safeOpenUrl(url);
     }
 
     // Also call onClick handler for any additional handling

@@ -28,6 +28,8 @@ from deep_research.services.discovery_service import (
     DISCOVERY_TIMEOUT_GENIE,
     DISCOVERY_TIMEOUT_SERVING,
     DISCOVERY_TIMEOUT_VS,
+    GENIE_MAX_PAGES,
+    GENIE_PAGE_SIZE,
     DiscoveryService,
     get_discovery_service,
     reset_discovery_service,
@@ -237,6 +239,7 @@ class TestGenieDiscovery:
         # Mock list response
         list_response = MagicMock()
         list_response.spaces = [mock_genie_space]
+        list_response.next_page_token = None
         mock_client.genie.list_spaces.return_value = list_response
 
         # Mock get_space
@@ -363,6 +366,7 @@ class TestParallelDiscovery:
         # Setup Genie - only list_spaces needed now
         list_response = MagicMock()
         list_response.spaces = [mock_genie_space]
+        list_response.next_page_token = None
         mock_client.genie.list_spaces.return_value = list_response
 
         # Setup Serving
@@ -726,13 +730,16 @@ class TestSimplifiedGenieDiscovery:
 
         list_response = MagicMock()
         list_response.spaces = [space_summary]
+        list_response.next_page_token = None
         mock_client.genie.list_spaces.return_value = list_response
 
         with patch.object(discovery_service, "_get_client", return_value=mock_client):
             sources, error = await discovery_service.discover_genie_spaces("test-token")
 
-        # list_spaces() called once
-        mock_client.genie.list_spaces.assert_called_once()
+        # list_spaces() called once with pagination params
+        mock_client.genie.list_spaces.assert_called_once_with(
+            page_size=GENIE_PAGE_SIZE, page_token=None
+        )
 
         # get_space() should NOT be called
         mock_client.genie.get_space.assert_not_called()
@@ -758,6 +765,7 @@ class TestSimplifiedGenieDiscovery:
 
         list_response = MagicMock()
         list_response.spaces = [space_summary]
+        list_response.next_page_token = None
         mock_client.genie.list_spaces.return_value = list_response
 
         with patch.object(discovery_service, "_get_client", return_value=mock_client):
@@ -773,6 +781,110 @@ class TestSimplifiedGenieDiscovery:
         assert metadata["warehouse_id"] == "wh789"
         assert metadata["owner"] is None
         assert metadata["created_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_genie_pagination_multi_page(
+        self,
+        discovery_service: DiscoveryService,
+    ) -> None:
+        """Genie discovery should follow next_page_token across multiple pages."""
+        mock_client = MagicMock()
+
+        # Page 1: 2 spaces + next_page_token
+        space1 = MagicMock()
+        space1.space_id = "space_a"
+        space1.title = "Space A"
+        space1.description = "First space"
+        space1.warehouse_id = "wh1"
+
+        space2 = MagicMock()
+        space2.space_id = "space_b"
+        space2.title = "Space B"
+        space2.description = "Second space"
+        space2.warehouse_id = "wh2"
+
+        page1 = MagicMock()
+        page1.spaces = [space1, space2]
+        page1.next_page_token = "token_page2"
+
+        # Page 2: 1 space + no next_page_token
+        space3 = MagicMock()
+        space3.space_id = "space_c"
+        space3.title = "Space C"
+        space3.description = "Third space"
+        space3.warehouse_id = "wh3"
+
+        page2 = MagicMock()
+        page2.spaces = [space3]
+        page2.next_page_token = None
+
+        mock_client.genie.list_spaces.side_effect = [page1, page2]
+
+        with patch.object(discovery_service, "_get_client", return_value=mock_client):
+            sources, error = await discovery_service.discover_genie_spaces("test-token")
+
+        assert error is None
+        assert len(sources) == 3
+
+        source_ids = {s.source_id for s in sources}
+        assert source_ids == {"genie:space_a", "genie:space_b", "genie:space_c"}
+
+        # Verify pagination calls
+        assert mock_client.genie.list_spaces.call_count == 2
+        mock_client.genie.list_spaces.assert_any_call(
+            page_size=GENIE_PAGE_SIZE, page_token=None
+        )
+        mock_client.genie.list_spaces.assert_any_call(
+            page_size=GENIE_PAGE_SIZE, page_token="token_page2"
+        )
+
+    @pytest.mark.asyncio
+    async def test_genie_pagination_max_pages_safety(
+        self,
+        discovery_service: DiscoveryService,
+    ) -> None:
+        """Genie pagination should stop at GENIE_MAX_PAGES even if next_page_token persists."""
+        mock_client = MagicMock()
+
+        def make_page(*_args: object, **_kwargs: object) -> MagicMock:
+            space = MagicMock()
+            space.space_id = f"space_{mock_client.genie.list_spaces.call_count}"
+            space.title = f"Space {mock_client.genie.list_spaces.call_count}"
+            space.description = None
+            space.warehouse_id = "wh1"
+
+            page = MagicMock()
+            page.spaces = [space]
+            page.next_page_token = "more"  # Always returns more
+            return page
+
+        mock_client.genie.list_spaces.side_effect = make_page
+
+        with patch.object(discovery_service, "_get_client", return_value=mock_client):
+            sources, error = await discovery_service.discover_genie_spaces("test-token")
+
+        assert error is None
+        assert mock_client.genie.list_spaces.call_count == GENIE_MAX_PAGES
+        assert len(sources) == GENIE_MAX_PAGES
+
+    @pytest.mark.asyncio
+    async def test_genie_pagination_empty_first_page(
+        self,
+        discovery_service: DiscoveryService,
+    ) -> None:
+        """Genie discovery should handle empty first page gracefully."""
+        mock_client = MagicMock()
+
+        page = MagicMock()
+        page.spaces = []
+        page.next_page_token = None
+        mock_client.genie.list_spaces.return_value = page
+
+        with patch.object(discovery_service, "_get_client", return_value=mock_client):
+            sources, error = await discovery_service.discover_genie_spaces("test-token")
+
+        assert error is None
+        assert len(sources) == 0
 
 
 class TestSimplifiedVectorSearchDiscovery:

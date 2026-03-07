@@ -3,17 +3,15 @@ Permission Utilities
 ====================
 
 Provides utilities for granting database permissions to
-app service principals.
+app service principals. Supports both Provisioned and Autoscaling backends.
 """
 
 import asyncio
 import logging
-import uuid
 from typing import Any
 
 from deep_research.deployment.lakebase_connection import (
-    extract_username_from_token,
-    get_lakebase_host,
+    get_lakebase_connection_info,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,10 +54,12 @@ async def get_app_service_principal(
 
 
 async def grant_to_app(
-    instance_name: str,
-    database_name: str,
-    app_name: str,
+    instance_name: str | None = None,
+    database_name: str = "deep_research",
+    app_name: str = "deep-research-agent",
     workspace_client: Any | None = None,
+    *,
+    endpoint_name: str | None = None,
 ) -> bool:
     """Grant database permissions to an app's service principal.
 
@@ -67,10 +67,11 @@ async def grant_to_app(
     plus sets default privileges for future objects.
 
     Args:
-        instance_name: Name of the Lakebase instance
+        instance_name: Provisioned instance name (required if no endpoint_name)
         database_name: Name of the database
         app_name: Name of the Databricks App
         workspace_client: Optional WorkspaceClient
+        endpoint_name: Autoscaling endpoint name
 
     Returns:
         True if permissions were granted, False on error
@@ -92,28 +93,23 @@ async def grant_to_app(
         logger.info(
             "Granting permissions to service principal '%s' on '%s.%s'",
             sp_name,
-            instance_name,
+            instance_name or endpoint_name,
             database_name,
         )
 
-        # Get credentials (request_id required by Databricks API)
-        cred = workspace_client.database.generate_database_credential(
-            instance_names=[instance_name],
-            request_id=str(uuid.uuid4()),
+        # Get connection info via shared helper (handles both backends)
+        info = get_lakebase_connection_info(
+            instance_name=instance_name,
+            workspace_client=workspace_client,
+            endpoint_name=endpoint_name,
         )
-
-        # Get correct hostname (from PGHOST or API lookup, not derived from instance name)
-        host = get_lakebase_host(instance_name, workspace_client)
-
-        # Get username from PGUSER or JWT token (not hardcoded "token")
-        username = extract_username_from_token(cred.token)
 
         # Connect to the target database
         conn = await asyncpg.connect(
-            host=host,
-            port=5432,
-            user=username,
-            password=cred.token,
+            host=info.host,
+            port=info.port,
+            user=info.username,
+            password=info.token,
             database=database_name,
             ssl="require",
         )
@@ -122,15 +118,31 @@ async def grant_to_app(
             # Service principal names are typically like "user@domain.com"
             quoted_sp = f'"{sp_name}"'
 
-            # Create role if it doesn't exist (app may not have connected yet)
-            # PostgreSQL requires roles to exist before GRANT can target them
-            # Lakebase creates app roles on first connection, but deployment
-            # runs before the app starts, so we need to create the role ourselves
-            try:
-                await conn.execute(f"CREATE ROLE {quoted_sp} WITH LOGIN")
-                logger.debug("Created role %s", sp_name)
-            except asyncpg.exceptions.DuplicateObjectError:
-                logger.debug("Role %s already exists", sp_name)
+            # For Autoscaling, create role via databricks_auth extension
+            if endpoint_name:
+                try:
+                    await conn.execute("CREATE EXTENSION IF NOT EXISTS databricks_auth")
+                    await conn.execute(
+                        f"SELECT databricks_create_role('{sp_name}', 'SERVICE_PRINCIPAL')"
+                    )
+                    logger.debug("Created Autoscaling role for %s", sp_name)
+                except Exception as e:
+                    logger.warning(
+                        "Autoscaling role creation failed for %s: %s. "
+                        "This may require project-owner privileges.",
+                        sp_name,
+                        e,
+                    )
+            else:
+                # Provisioned: Create role if it doesn't exist
+                # PostgreSQL requires roles to exist before GRANT can target them
+                # Lakebase creates app roles on first connection, but deployment
+                # runs before the app starts, so we need to create the role ourselves
+                try:
+                    await conn.execute(f"CREATE ROLE {quoted_sp} WITH LOGIN")
+                    logger.debug("Created role %s", sp_name)
+                except asyncpg.exceptions.DuplicateObjectError:
+                    logger.debug("Role %s already exists", sp_name)
 
             # Grant on existing tables
             await conn.execute(
@@ -173,18 +185,21 @@ async def grant_to_app(
 
 
 def grant_to_app_sync(
-    instance_name: str,
-    database_name: str,
-    app_name: str,
+    instance_name: str | None = None,
+    database_name: str = "deep_research",
+    app_name: str = "deep-research-agent",
     workspace_client: Any | None = None,
+    *,
+    endpoint_name: str | None = None,
 ) -> bool:
     """Synchronous version of grant_to_app.
 
     Args:
-        instance_name: Name of the Lakebase instance
+        instance_name: Provisioned instance name (required if no endpoint_name)
         database_name: Name of the database
         app_name: Name of the Databricks App
         workspace_client: Optional WorkspaceClient
+        endpoint_name: Autoscaling endpoint name
 
     Returns:
         True if permissions were granted
@@ -195,6 +210,7 @@ def grant_to_app_sync(
             database_name=database_name,
             app_name=app_name,
             workspace_client=workspace_client,
+            endpoint_name=endpoint_name,
         )
     )
 
@@ -205,6 +221,7 @@ def main() -> None:
 
     Usage:
         python -m deep_research.deployment.permissions grant <instance> <database> <app>
+        python -m deep_research.deployment.permissions grant --endpoint-name <ep> <database> <app>
     """
     import argparse
 
@@ -214,9 +231,13 @@ def main() -> None:
         choices=["grant", "sp-name"],
         help="Command to execute",
     )
-    parser.add_argument("instance_name", help="Lakebase instance name")
+    parser.add_argument("instance_name", nargs="?", help="Lakebase instance name (Provisioned)")
     parser.add_argument("database_name", help="Database name")
     parser.add_argument("app_name", help="Databricks App name")
+    parser.add_argument(
+        "--endpoint-name",
+        help="Autoscaling endpoint name (alternative to instance_name)",
+    )
 
     args = parser.parse_args()
 
@@ -227,6 +248,7 @@ def main() -> None:
             instance_name=args.instance_name,
             database_name=args.database_name,
             app_name=args.app_name,
+            endpoint_name=args.endpoint_name,
         )
         if not success:
             exit(1)

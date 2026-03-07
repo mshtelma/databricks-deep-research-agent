@@ -76,15 +76,16 @@ export function MessageList({
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
   const scrollTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Check if we have an agent message with substantial content (>50 chars)
-  // This is used to determine when to stop showing the streaming fallback
-  // and switch to the persisted DB message
+  // Check if the LAST message is a valid agent response with substantial content.
+  // This determines when to stop showing the streaming bridge and switch to the
+  // persisted DB message. We check the last message (not any message) so that
+  // the bridge correctly renders for follow-up queries where a previous agent
+  // response already exists.
   const hasValidAgentMessage = React.useMemo(() => {
-    return messages.some(m =>
-      m.role === 'agent' &&
-      m.content &&
-      m.content.length > 50
-    );
+    if (messages.length === 0) return false;
+    // Safe: length > 0 guarantees element exists
+    const last = messages[messages.length - 1]!;
+    return last.role === 'agent' && !!last.content && last.content.length > 50;
   }, [messages]);
 
   // Fetch citations only for the latest persisted agent message.
@@ -201,7 +202,7 @@ export function MessageList({
 
       {/* Error display - shows inline where agent message would appear */}
       {errorDetails && (
-        <div className="flex justify-start">
+        <div data-testid="research-error" className="flex justify-start">
           <div className="max-w-[85%] w-full">
             <StreamErrorAlert
               error={errorDetails.error}

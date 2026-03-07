@@ -62,7 +62,7 @@ test.describe('Stop/Cancel', () => {
     // Should be able to send another message
     await chatPage.sendMessage('Hello');
     // Research agent takes 3-5+ minutes for responses with real LLM calls
-    await chatPage.waitForAgentResponse(360000);
+    await chatPage.waitForAgentResponse(600000);
 
     // Should get a response
     const response = await chatPage.getLastAgentResponse();

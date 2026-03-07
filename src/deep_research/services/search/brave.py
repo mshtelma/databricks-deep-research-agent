@@ -23,6 +23,10 @@ logger = get_logger(__name__)
 
 BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search"
 
+# Retry settings for transient connection failures
+MAX_SEARCH_RETRIES = 2
+SEARCH_RETRY_BACKOFF = 1.0  # seconds, doubled each retry
+
 
 @dataclass
 class SearchResult:
@@ -146,83 +150,107 @@ class BraveSearchClient:
 
         start_time = time.perf_counter()
 
-        try:
-            response = await self._client.get(
-                BRAVE_API_URL,
-                params=params,
-                headers={"X-Subscription-Token": self._api_key},
-            )
-
-            duration_ms = (time.perf_counter() - start_time) * 1000
-
-            if response.status_code == 429:
-                retry_after = int(response.headers.get("Retry-After", 60))
-                logger.warning(
-                    "SEARCH_RATE_LIMITED",
-                    query=truncate(query, 50),
-                    retry_after=retry_after,
-                )
-                raise RateLimitError(retry_after=retry_after)
-
-            response.raise_for_status()
-
+        last_error: Exception | None = None
+        for attempt in range(MAX_SEARCH_RETRIES + 1):
             try:
-                data = response.json()
-            except ValueError as e:
-                log_search_error(logger, query=query, error=e, status_code=response.status_code)
-                raise ExternalServiceError("Brave Search", f"Invalid JSON response: {e}") from e
-
-            # Parse results
-            results = []
-            web_results = data.get("web", {}).get("results", [])
-
-            for i, item in enumerate(web_results):
-                results.append(
-                    SearchResult(
-                        url=item.get("url", ""),
-                        title=item.get("title", ""),
-                        snippet=item.get("description", ""),
-                        relevance_score=1.0 - (i * 0.1) if i < 10 else 0.1,
-                    )
+                response = await self._client.get(
+                    BRAVE_API_URL,
+                    params=params,
+                    headers={"X-Subscription-Token": self._api_key},
                 )
 
-            # Apply domain filtering (use override if provided)
-            active_filter = domain_filter if domain_filter is not None else self._domain_filter
-            filtered_count = len(results)
-            if active_filter.is_active:
-                results = [
-                    r for r in results if active_filter.is_allowed(r.url).allowed
-                ]
-                filtered_count = filtered_count - len(results)
-                if filtered_count > 0:
-                    logger.debug(
-                        "SEARCH_RESULTS_FILTERED",
-                        filtered_count=filtered_count,
-                        remaining_count=len(results),
+                duration_ms = (time.perf_counter() - start_time) * 1000
+
+                if response.status_code == 429:
+                    retry_after = int(response.headers.get("Retry-After", 60))
+                    logger.warning(
+                        "SEARCH_RATE_LIMITED",
+                        query=truncate(query, 50),
+                        retry_after=retry_after,
+                    )
+                    raise RateLimitError(retry_after=retry_after)
+
+                response.raise_for_status()
+
+                try:
+                    data = response.json()
+                except ValueError as e:
+                    log_search_error(logger, query=query, error=e, status_code=response.status_code)
+                    raise ExternalServiceError("Brave Search", f"Invalid JSON response: {e}") from e
+
+                # Parse results
+                results = []
+                web_results = data.get("web", {}).get("results", [])
+
+                for i, item in enumerate(web_results):
+                    results.append(
+                        SearchResult(
+                            url=item.get("url", ""),
+                            title=item.get("title", ""),
+                            snippet=item.get("description", ""),
+                            relevance_score=1.0 - (i * 0.1) if i < 10 else 0.1,
+                        )
                     )
 
-            # Log the response
-            urls = [r.url for r in results]
-            log_search_response(
-                logger,
-                query=query,
-                result_count=len(results),
-                urls=urls,
-                duration_ms=duration_ms,
-            )
+                # Apply domain filtering (use override if provided)
+                active_filter = domain_filter if domain_filter is not None else self._domain_filter
+                filtered_count = len(results)
+                if active_filter.is_active:
+                    results = [
+                        r for r in results if active_filter.is_allowed(r.url).allowed
+                    ]
+                    filtered_count = filtered_count - len(results)
+                    if filtered_count > 0:
+                        logger.debug(
+                            "SEARCH_RESULTS_FILTERED",
+                            filtered_count=filtered_count,
+                            remaining_count=len(results),
+                        )
 
-            return SearchResponse(
-                results=results,
-                query=query,
-                total_results=len(results),
-            )
+                # Log the response
+                urls = [r.url for r in results]
+                log_search_response(
+                    logger,
+                    query=query,
+                    result_count=len(results),
+                    urls=urls,
+                    duration_ms=duration_ms,
+                )
 
-        except httpx.HTTPStatusError as e:
-            log_search_error(logger, query=query, error=e, status_code=e.response.status_code)
-            raise ExternalServiceError("Brave Search", f"HTTP {e.response.status_code}") from e
-        except httpx.RequestError as e:
-            log_search_error(logger, query=query, error=e)
-            raise ExternalServiceError("Brave Search", str(e)) from e
+                return SearchResponse(
+                    results=results,
+                    query=query,
+                    total_results=len(results),
+                )
+
+            except (httpx.ConnectTimeout, httpx.ConnectError) as e:
+                last_error = e
+                if attempt < MAX_SEARCH_RETRIES:
+                    wait = SEARCH_RETRY_BACKOFF * (2 ** attempt)
+                    logger.warning(
+                        "SEARCH_RETRY",
+                        query=truncate(query, 50),
+                        attempt=attempt + 1,
+                        max_attempts=MAX_SEARCH_RETRIES,
+                        wait_seconds=wait,
+                        error_type=type(e).__name__,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                # Exhausted retries
+                log_search_error(logger, query=query, error=e)
+                raise ExternalServiceError("Brave Search", str(e)) from e
+
+            except httpx.HTTPStatusError as e:
+                log_search_error(logger, query=query, error=e, status_code=e.response.status_code)
+                raise ExternalServiceError("Brave Search", f"HTTP {e.response.status_code}") from e
+
+            except httpx.RequestError as e:
+                log_search_error(logger, query=query, error=e)
+                raise ExternalServiceError("Brave Search", str(e)) from e
+
+        # Should not be reached — loop always returns or raises
+        raise ExternalServiceError("Brave Search", str(last_error))
 
     async def close(self) -> None:
         """Close the HTTP client."""

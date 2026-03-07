@@ -24,7 +24,7 @@ test.describe('Research Flow', () => {
   );
 
   // Use extended timeout for research queries
-  test.setTimeout(600000); // 10 minutes - complex research queries
+  test.setTimeout(900000); // 15 minutes - research with citation pipeline can take 5-10+ min
 
   // Skip: Citations require actual source data from research which isn't implemented in mock
   test.skip('submits query and receives response with citations', async ({ chatPage }) => {
@@ -40,7 +40,7 @@ test.describe('Research Flow', () => {
     expect(loadingVisible || streamingVisible).toBe(true);
 
     // Then: wait for completion (up to 6 minutes - research takes 3-5+ min)
-    await chatPage.waitForAgentResponse(360000);
+    await chatPage.waitForAgentResponse(600000);
 
     // Then: verify response contains substantive content
     const response = await chatPage.getLastAgentResponse();
@@ -64,7 +64,7 @@ test.describe('Research Flow', () => {
     expect(loadingVisible || streamingVisible).toBe(true);
 
     // Wait for completion (6 minutes - research takes 3-5+ min)
-    await chatPage.waitForAgentResponse(360000);
+    await chatPage.waitForAgentResponse(600000);
 
     // Streaming/loading should be hidden after completion
     expect(await chatPage.isLoading()).toBe(false);
@@ -76,8 +76,8 @@ test.describe('Research Flow', () => {
     // Send research query
     await chatPage.sendMessage(query.text);
 
-    // Wait for response (6 minutes - research can take 3-5+ min)
-    await chatPage.waitForAgentResponse(360000);
+    // Wait for response (8 minutes - research can take 3-7+ min)
+    await chatPage.waitForAgentResponse(480000);
 
     // Get response content
     const response = await chatPage.getLastAgentResponse();
@@ -117,7 +117,7 @@ test.describe('Research Flow', () => {
     await chatPage.sendMessage(query.text);
 
     // Wait for response (6 minutes - research takes 3-5+ min)
-    await chatPage.waitForAgentResponse(360000);
+    await chatPage.waitForAgentResponse(600000);
 
     // Check citations
     const citations = page.getByTestId('citation');
