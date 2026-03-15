@@ -1,0 +1,123 @@
+id: mixed_sources
+name: Mixed Sources Research Pipeline
+description: Research using both web and enterprise tools
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+tools:
+  - name: web_search
+    kind: web_search
+    config:
+      max_results: 10
+
+  - name: web_crawl
+    kind: web_crawl
+
+  - name: genie
+    kind: genie
+    config:
+      space_id: 01ef8d7a-0000-0000-0000-000000000000
+    description: "Enterprise data warehouse analytics"
+
+  - name: vector_search
+    kind: vector_search
+    config:
+      index_name: prod_catalog.docs.internal_docs_idx
+      num_results: 10
+    description: "Internal document search"
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 100
+  - name: observations
+    dedup_content_hash: true
+    max_items: 50
+
+root:
+  id: main
+  type: sequence
+  label: Mixed Sources Pipeline
+  children:
+    # Step 1: Classify the query
+    - id: coordinator
+      type: agent
+      label: Query Classifier
+      config:
+        subtype: coordinator
+        model_tier: simple
+        output_key: coordination
+
+    # Step 2: Quick background web search
+    - id: background
+      type: agent
+      label: Background Investigator
+      config:
+        subtype: background
+        model_tier: simple
+        output_key: background
+        tools: [web_search]
+        max_tool_calls: 2
+
+    # Step 3: Research cycle with all tools
+    - id: research_cycle
+      type: plan_and_execute
+      label: Mixed Research Cycle
+      config:
+        planner_guidance: |
+          The researcher can use both enterprise tools and public web search.
+          For comparison tasks that require internal/proprietary evidence and public or industry evidence,
+          plan at least one enterprise retrieval step and at least one web retrieval step before synthesis.
+          Use enterprise tools for internal architecture, documentation, analytics, and runbooks.
+          Use web search for public best practices, industry trends, and external comparisons.
+        planner:
+          subtype: planner
+          model_tier: analytical
+          output_key: plan
+        items_path: steps
+        item_state_key: current_step
+        body:
+          id: researcher
+          type: agent
+          label: Mixed Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: findings
+            tools: [web_search, web_crawl, genie, vector_search]
+            pool_writes:
+              - pool: observations
+                extract: findings
+              - pool: sources
+                extract: sources
+            max_tool_calls: 10
+        evaluator:
+          subtype: reflector
+          model_tier: analytical
+          output_key: evaluation
+          pool_inject:
+            - pool: observations
+              threshold: 0
+        max_iterations: 4
+        min_iterations: 1
+        max_replan_cycles: 1
+
+    # Step 4: Synthesize final report
+    - id: synthesizer
+      type: agent
+      label: Report Synthesizer
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: report
+        pool_inject:
+          - pool: observations
+            threshold: 0
+            max_items: 12
+            max_item_chars: 500
+          - pool: sources
+            threshold: 0
+            max_items: 15
+            max_item_chars: 600
+        max_tool_calls: 0

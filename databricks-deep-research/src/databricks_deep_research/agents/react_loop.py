@@ -1,0 +1,771 @@
+"""Generic ReAct execution loop.
+
+Manages LLM conversation state with tool calling iteration.
+Reused by any agent that needs tool calling (researcher, synthesizer, etc.).
+
+The loop is stateless — messages are passed in, not stored internally.
+This makes it easy to test and compose.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
+
+from databricks_deep_research.agents.source_aware import (
+    admit_tool_result,
+    plan_tool_arguments,
+    select_step_tools,
+    tool_source_kind,
+)
+from databricks_deep_research.events.types import (
+    AgentStreamChunkEvent,
+    StreamEvent,
+    ToolCacheHitEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
+from databricks_deep_research.llm.client import FrameworkLLMClient, LLMResponse, ToolCall
+from databricks_deep_research.tools.protocol import ResearchTool, ToolContext
+from databricks_deep_research.tracing import trace_span
+
+logger = logging.getLogger(__name__)
+
+
+def _build_request_id(tool_name: str, arguments: dict[str, Any], scope: str) -> str:
+    raw = json.dumps({"tool": tool_name, "args": arguments, "scope": scope}, sort_keys=True)
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Tool call cache
+# ---------------------------------------------------------------------------
+
+
+class ToolCallCache:
+    """Dedup cache for tool calls — stores results AND source metadata."""
+
+    def __init__(self) -> None:
+        self._cache: dict[str, tuple[str, list[Any]]] = {}
+
+    def _make_key(self, tool_name: str, arguments: dict[str, Any], scope: str = "") -> str:
+        raw = json.dumps({"tool": tool_name, "args": arguments, "scope": scope}, sort_keys=True)
+        return hashlib.md5(raw.encode()).hexdigest()
+
+    def get(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        scope: str = "",
+    ) -> tuple[str, list[Any]] | None:
+        return self._cache.get(self._make_key(tool_name, arguments, scope))
+
+    def put(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        result: str,
+        sources: list[Any] | None = None,
+        *,
+        scope: str = "",
+    ) -> None:
+        self._cache[self._make_key(tool_name, arguments, scope)] = (result, sources or [])
+
+
+# ---------------------------------------------------------------------------
+# ReAct loop result
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ReactResult:
+    """Result of a ReAct loop execution."""
+
+    content: str
+    tool_calls_made: int = 0
+    events: list[StreamEvent] = field(default_factory=list)
+    token_usage: dict[str, int] = field(default_factory=dict)
+    sources: list[Any] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# ReAct loop
+# ---------------------------------------------------------------------------
+
+
+class ReactLoop:
+    """Generic ReAct execution loop.
+
+    Iterates: LLM call → parse tool calls → execute tools → add results → continue
+    until no tool calls returned or max_tool_calls reached.
+    """
+
+    def __init__(
+        self,
+        llm_client: FrameworkLLMClient,
+        tools: list[ResearchTool],
+        *,
+        tool_context: ToolContext | None = None,
+        cache: ToolCallCache | None = None,
+        node_id: str = "",
+        max_tool_calls: int = 20,
+        model_tier: str = "analytical",
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        stream: bool = False,
+        subtype: str = "",
+        max_result_chars: int = 4000,
+    ) -> None:
+        self._llm = llm_client
+        self._ctx = tool_context or ToolContext()
+        self._all_tools = {t.definition.name: t for t in tools}
+        self._tools = dict(self._all_tools)
+        self._tool_defs = [self._to_openai_tool(t) for t in tools]
+        self._cache = cache or ToolCallCache()
+        self._node_id = node_id
+        self._max_tool_calls = max_tool_calls
+        self._model_tier = model_tier
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._stream = stream
+        self._subtype = subtype
+        self._max_result_chars = max_result_chars
+        self._fallback_tools: dict[str, ResearchTool] = {}
+        self._fallback_enabled = False
+        self._fallback_retry_used = False
+        self._cache_scope = self._build_cache_scope()
+        self._runtime_store = getattr(self._ctx, "runtime_store", None)
+        self._step_query_signatures: set[str] = set()
+        self._tool_outcome_history: dict[str, list[dict[str, Any]]] = {}
+
+
+    def _normalize_query_signature(self, tool_name: str, rewritten_query: str) -> str:
+        normalized = " ".join(str(rewritten_query).lower().split())
+        return f"{tool_name}:{normalized}"
+
+    def _record_tool_outcome(self, tool_name: str, meta: dict[str, Any], rewritten_query: str) -> None:
+        history = self._tool_outcome_history.setdefault(tool_name, [])
+        history.append({**meta, "rewritten_query": rewritten_query})
+        if len(history) > 6:
+            del history[0]
+
+    def _is_low_yield_duplicate(self, tool_name: str, rewritten_query: str) -> bool:
+        signature = self._normalize_query_signature(tool_name, rewritten_query)
+        if signature not in self._step_query_signatures:
+            return False
+        history = self._tool_outcome_history.get(tool_name, [])
+        if not history:
+            return False
+        latest = history[-1]
+        return int(latest.get("accepted_substantive_count", 0) or 0) == 0
+
+    # -- Public interface ---------------------------------------------------
+
+    async def execute(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> ReactResult:
+        """Run the ReAct loop on the given messages.
+
+        Returns the final ReactResult with accumulated content and events.
+        """
+        self._apply_step_tool_selection()
+
+        logger.info(
+            "REACT_START node=%s tools=%s max_calls=%d",
+            self._node_id, list(self._tools.keys()), self._max_tool_calls,
+        )
+
+        async with trace_span(
+            f"react_loop.{self._subtype or 'generic'}",
+            span_type="CHAIN",
+            attributes={
+                "react.tools": str(list(self._tools.keys())),
+                "react.max_calls": self._max_tool_calls,
+            },
+        ) as loop_span:
+            events: list[StreamEvent] = []
+            sources: list[Any] = []
+            total_usage: dict[str, int] = {}
+            call_count = 0
+            first_turn_retried = False
+
+            while True:
+                # Compact old tool results to limit prompt growth
+                if call_count > 0:
+                    self._compact_old_tool_results(messages)
+
+                # LLM call
+                if self._stream and call_count == 0 and not first_turn_retried:
+                    response, stream_events = await self._stream_call(messages)
+                    events.extend(stream_events)
+                else:
+                    response = await self._llm.complete(
+                        messages,
+                        self._model_tier,
+                        temperature=self._temperature,
+                        max_tokens=self._max_tokens,
+                        tools=self._tool_defs if self._tools else None,
+                    )
+
+                # Track usage
+                _merge_usage(total_usage, response.usage)
+                logger.info(
+                    "REACT_LLM_USAGE node=%s call=%d prompt_tokens=%d "
+                    "completion_tokens=%d total_tokens=%d",
+                    self._node_id, call_count,
+                    response.usage.get("prompt_tokens", 0),
+                    response.usage.get("completion_tokens", 0),
+                    response.usage.get("total_tokens", 0),
+                )
+
+                # First-turn retry for evidence-gathering subtypes
+                if (
+                    not response.tool_calls
+                    and call_count == 0
+                    and not first_turn_retried
+                    and self._subtype in ("background", "researcher")
+                ):
+                    first_turn_retried = True
+                    messages.append(self._assistant_msg(response))
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "You have search tools available. "
+                            "Call at least one to gather evidence before responding."
+                        ),
+                    })
+                    continue
+
+                # No tool calls — done
+                if not response.tool_calls or call_count >= self._max_tool_calls:
+                    if (
+                        not response.tool_calls
+                        and self._fallback_tools
+                        and not self._fallback_enabled
+                        and not sources
+                        and call_count > 0
+                    ):
+                        self._enable_fallback_tools(messages, reason="no_tool_calls_with_zero_accepted_sources")
+                        continue
+                    if (
+                        not response.tool_calls
+                        and self._fallback_enabled
+                        and not sources
+                        and not self._fallback_retry_used
+                        and call_count > 0
+                    ):
+                        self._fallback_retry_used = True
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "You still have no accepted evidence. "
+                                "Call one of the available fallback tools before answering."
+                            ),
+                        })
+                        continue
+                    exit_reason = (
+                        "no_tool_calls" if not response.tool_calls
+                        else "max_calls_reached"
+                    )
+                    logger.info(
+                        "REACT_DONE node=%s calls=%d content_len=%d sources=%d "
+                        "exit_reason=%s",
+                        self._node_id, call_count, len(response.content),
+                        len(sources), exit_reason,
+                    )
+                    if loop_span:
+                        span_attrs: dict[str, Any] = {
+                            "react.total_calls": call_count,
+                            "react.total_sources": len(sources),
+                        }
+                        for k, v in total_usage.items():
+                            span_attrs[f"react.{k}"] = v
+                        loop_span.set_attributes(span_attrs)
+                    return ReactResult(
+                        content=response.content,
+                        tool_calls_made=call_count,
+                        events=events,
+                        token_usage=total_usage,
+                        sources=sources,
+                    )
+
+                # Add assistant message with tool calls
+                messages.append(self._assistant_msg(response))
+
+                # -- Phase 1: Parse, classify (cached vs uncached) --
+                responded_tc_ids: set[str] = set()
+                cached_results: dict[str, tuple[str, list[Any]]] = {}
+                to_execute: list[tuple[ToolCall, dict[str, Any]]] = []
+                sources_before_round = len(sources)
+
+                for tc in response.tool_calls:
+                    if call_count >= self._max_tool_calls:
+                        break
+                    call_count += 1
+                    try:
+                        args = json.loads(tc.arguments) if tc.arguments else {}
+                    except json.JSONDecodeError:
+                        args = {}
+
+                    cached = self._cache.get(tc.function_name, args, scope=self._cache_scope)
+                    if cached is not None:
+                        content, cached_sources = cached
+                        cached_results[tc.id] = (content, cached_sources)
+                        events.append(ToolCacheHitEvent(
+                            node_id=self._node_id, timestamp=_now(),
+                            tool_name=tc.function_name,
+                            cache_key=f"{tc.function_name}:{hash(tc.arguments)}",
+                        ))
+                    else:
+                        to_execute.append((tc, args))
+                        events.append(ToolCallEvent(
+                            node_id=self._node_id, timestamp=_now(),
+                            tool_name=tc.function_name, arguments=args,
+                        ))
+
+                # -- Phase 2: Execute uncached in parallel --
+                exec_results: dict[str, tuple[str, list[Any], dict[str, Any]]] = {}
+                if to_execute:
+                    tasks = [
+                        asyncio.create_task(self._execute_single_tool(tc, args))
+                        for tc, args in to_execute
+                    ]
+                    raw_results = await asyncio.gather(*tasks, return_exceptions=True)
+                    for r in raw_results:
+                        if isinstance(r, BaseException):
+                            logger.error(
+                                "REACT_TOOL_GATHER_ERROR node=%s error=%s",
+                                self._node_id, r,
+                            )
+                            continue
+                        tc_id, result_content, tool_sources, tool_result_meta = r
+                        exec_results[tc_id] = (
+                            result_content,
+                            tool_sources,
+                            tool_result_meta,
+                        )
+
+                # -- Phase 3: Reassemble in original order --
+                for tc in response.tool_calls:
+                    if tc.id in cached_results:
+                        content, cached_srcs = cached_results[tc.id]
+                        sources.extend(cached_srcs)
+                        messages.append(self._tool_msg(tc.id, content))
+                        responded_tc_ids.add(tc.id)
+                    elif tc.id in exec_results:
+                        result_content, tool_srcs, tool_result_meta = exec_results[tc.id]
+                        sources.extend(tool_srcs)
+                        try:
+                            exec_args = json.loads(tc.arguments) if tc.arguments else {}
+                        except json.JSONDecodeError:
+                            exec_args = {}
+                        self._cache.put(
+                            tc.function_name,
+                            exec_args,
+                            result_content,
+                            tool_srcs,
+                            scope=self._cache_scope,
+                        )
+                        messages.append(self._tool_msg(tc.id, result_content))
+                        responded_tc_ids.add(tc.id)
+                        events.append(ToolResultEvent(
+                            node_id=self._node_id, timestamp=_now(),
+                            tool_name=tc.function_name,
+                            result_summary=result_content[:200],
+                            source_count=int(tool_result_meta.get("accepted_source_count", 0)),
+                            raw_source_count=int(tool_result_meta.get("raw_source_count", 0)),
+                            accepted_source_count=int(tool_result_meta.get("accepted_source_count", 0)),
+                            rejected_source_count=int(tool_result_meta.get("rejected_source_count", 0)),
+                            tool_success=bool(tool_result_meta.get("tool_success", True)),
+                            tool_error=str(tool_result_meta.get("tool_error", "") or ""),
+                        ))
+
+                    if call_count >= self._max_tool_calls:
+                        break
+
+                # Ensure ALL tool_calls have tool_result messages (prevents
+                # "tool_use without tool_result" errors from Anthropic API)
+                for tc in response.tool_calls:
+                    if tc.id not in responded_tc_ids:
+                        messages.append(self._tool_msg(
+                            tc.id, "Skipped: tool call budget exhausted"
+                        ))
+
+                if (
+                    self._fallback_tools
+                    and not self._fallback_enabled
+                    and len(sources) == sources_before_round
+                    and responded_tc_ids
+                ):
+                    self._enable_fallback_tools(messages, reason="zero_accepted_sources")
+
+    # -- Parallel tool execution --------------------------------------------
+
+    async def _execute_single_tool(
+        self, tc: ToolCall, args: dict[str, Any],
+    ) -> tuple[str, str, list[Any], dict[str, Any]]:
+        """Execute one tool call. Returns (tc_id, content, sources, diagnostics)."""
+        tool_name = tc.function_name
+        tool = self._tools.get(tool_name)
+        if tool is None:
+            return tc.id, f"Error: Unknown tool '{tool_name}'", [], {
+                "tool_success": False,
+                "tool_error": f"Unknown tool '{tool_name}'",
+                "raw_source_count": 0,
+                "accepted_source_count": 0,
+                "rejected_source_count": 0,
+            }
+
+        # Build rich log of tool arguments
+        log_args = dict(args)
+        if tool_name == "web_crawl" and "url_index" in args and self._ctx.url_registry:
+            resolved_url = self._ctx.url_registry.resolve(args["url_index"])
+            log_args["_resolved_url"] = resolved_url or "UNKNOWN"
+
+        logger.info(
+            "REACT_TOOL_CALL node=%s tool=%s args=%s",
+            self._node_id, tool_name,
+            {k: str(v)[:200] for k, v in log_args.items()},
+        )
+
+        try:
+            planned = plan_tool_arguments(
+                tool.definition,
+                args,
+                current_step=self._ctx.current_step,
+                root_query=self._ctx.query,
+                background_summary=self._ctx.background_summary,
+                recent_observations=self._ctx.recent_observations,
+            )
+            logger.info(
+                "QUERY_PLAN_APPLIED node=%s tool=%s source_type=%s strategy=%s "
+                "original_query=%r rewritten_query=%r step_title=%r",
+                self._node_id,
+                tool_name,
+                tool_source_kind(tool.definition),
+                planned.strategy,
+                planned.original_query[:300],
+                planned.rewritten_query[:300],
+                self._current_step_title()[:200],
+            )
+            if planned.alternate_queries:
+                logger.info(
+                    "VECTOR_QUERY_ALTERNATES node=%s tool=%s count=%d alternates=%s",
+                    self._node_id,
+                    tool_name,
+                    len(planned.alternate_queries),
+                    [query[:200] for query in planned.alternate_queries],
+                )
+
+            if self._is_low_yield_duplicate(tool_name, planned.rewritten_query):
+                logger.info(
+                    "REACT_DUPLICATE_LOW_YIELD_SKIP node=%s tool=%s strategy=%s query=%r",
+                    self._node_id, tool_name, planned.strategy, planned.rewritten_query[:200],
+                )
+                return tc.id, f"Skipped duplicate low-yield {tool_name} query", [], {
+                    "tool_success": True,
+                    "tool_error": "",
+                    "raw_source_count": 0,
+                    "accepted_source_count": 0,
+                    "accepted_substantive_count": 0,
+                    "accepted_low_value_count": 0,
+                    "rejected_source_count": 0,
+                    "evidence_quality": "empty",
+                    "failure_mode": "duplicate_low_yield",
+                    "needs_adaptation": True,
+                }
+            self._step_query_signatures.add(self._normalize_query_signature(tool_name, planned.rewritten_query))
+            validated_args = tool.validate_arguments(planned.arguments)
+            async with trace_span(
+                f"tool.{tool_name}", span_type="TOOL",
+                attributes={
+                    "tool.name": tool_name,
+                    "tool.args": str({k: str(v)[:100] for k, v in planned.arguments.items()}),
+                },
+            ) as tool_span:
+                result = await tool.execute(validated_args, self._ctx)
+                admitted = admit_tool_result(
+                    tool.definition,
+                    result,
+                    current_step=self._ctx.current_step,
+                    root_query=self._ctx.query,
+                )
+                logger.info(
+                    "ENTERPRISE_RESULTS_RETRIEVED node=%s tool=%s source_type=%s raw=%d "
+                    "accepted=%d rejected=%d top_titles=%s",
+                    self._node_id,
+                    tool_name,
+                    tool_source_kind(tool.definition),
+                    len(admitted.raw_sources),
+                    admitted.accepted_count,
+                    admitted.rejected_count,
+                    [src.get("title", "")[:120] for src in admitted.raw_sources[:5]],
+                )
+                if admitted.accepted_sources:
+                    logger.info(
+                        "ENTERPRISE_RESULTS_ACCEPTED node=%s tool=%s reasons=%s",
+                        self._node_id,
+                        tool_name,
+                        [src.get("admission_reason", "")[:160] for src in admitted.accepted_sources[:5]],
+                    )
+                if admitted.rejected_sources:
+                    logger.info(
+                        "ENTERPRISE_RESULTS_REJECTED node=%s tool=%s reasons=%s",
+                        self._node_id,
+                        tool_name,
+                        [src.get("admission_reason", "")[:160] for src in admitted.rejected_sources[:5]],
+                    )
+                    logger.info(
+                        "ADMISSION_REJECTION_CONTEXT node=%s tool=%s source_kind=%s "
+                        "step_title=%r root_query=%r "
+                        "rejected_titles=%s rejected_relevance_scores=%s",
+                        self._node_id,
+                        tool_name,
+                        tool_source_kind(tool.definition),
+                        self._current_step_title()[:200],
+                        self._ctx.query[:200],
+                        [s.get("title", "")[:120] for s in admitted.rejected_sources[:5]],
+                        [s.get("relevance_score") for s in admitted.rejected_sources[:5]],
+                    )
+                if tool_span:
+                    tool_span.set_attributes({
+                        "tool.result_len": len(admitted.content),
+                        "tool.success": result.success,
+                        "tool.error": result.error or "",
+                        "tool.source_count": admitted.accepted_count,
+                        "tool.raw_source_count": len(admitted.raw_sources),
+                        "tool.accepted_source_count": admitted.accepted_count,
+                        "tool.rejected_source_count": admitted.rejected_count,
+                        "tool.original_query": planned.original_query[:500],
+                        "tool.rewritten_query": planned.rewritten_query[:500],
+                        "tool.query_strategy": planned.strategy,
+                        "tool.accepted_substantive_count": admitted.accepted_substantive_count,
+                        "tool.accepted_low_value_count": admitted.accepted_low_value_count,
+                        "tool.evidence_quality": admitted.evidence_quality,
+                        "tool.failure_mode": admitted.failure_mode,
+                        "tool.needs_adaptation": admitted.needs_adaptation,
+                        "tool.failure_class": str(result.data.get("failure_class", "")),
+                        "tool.suppressed_by_failure_cache": bool(
+                            result.data.get("suppressed_by_failure_cache", False)
+                        ),
+                        "tool.suppression_scope": str(result.data.get("suppression_scope", "")),
+                    })
+                meta = {
+                    "tool_success": result.success,
+                    "tool_error": result.error or "",
+                    "raw_source_count": len(admitted.raw_sources),
+                    "accepted_source_count": admitted.accepted_count,
+                    "accepted_substantive_count": admitted.accepted_substantive_count,
+                    "accepted_low_value_count": admitted.accepted_low_value_count,
+                    "rejected_source_count": admitted.rejected_count,
+                    "evidence_quality": admitted.evidence_quality,
+                    "failure_mode": admitted.failure_mode,
+                    "needs_adaptation": admitted.needs_adaptation,
+                    "failure_class": str(result.data.get("failure_class", "")),
+                    "suppressed_by_failure_cache": bool(
+                        result.data.get("suppressed_by_failure_cache", False)
+                    ),
+                    "suppression_scope": str(result.data.get("suppression_scope", "")),
+                }
+                self._record_tool_outcome(tool_name, meta, planned.rewritten_query)
+                return tc.id, admitted.content, admitted.accepted_sources, meta
+        except Exception as exc:
+            logger.warning(
+                "REACT_TOOL_ERROR node=%s tool=%s error=%s",
+                self._node_id, tool_name, exc,
+            )
+            return tc.id, f"Error executing {tool_name}: {exc}", [], {
+                "tool_success": False,
+                "tool_error": str(exc),
+                "raw_source_count": 0,
+                "accepted_source_count": 0,
+                "rejected_source_count": 0,
+            }
+
+    def _apply_step_tool_selection(self) -> None:
+        """Expose preferred tools first and keep the rest as fallback."""
+        selection = select_step_tools(
+            list(self._all_tools.values()),
+            self._ctx.current_step,
+        )
+        self._tools = {tool.definition.name: tool for tool in selection.active_tools}
+        self._tool_defs = [self._to_openai_tool(tool) for tool in selection.active_tools]
+        self._fallback_tools = {
+            tool.definition.name: tool
+            for tool in selection.fallback_tools
+        }
+        logger.info(
+            "STEP_TOOL_FILTERED node=%s step_title=%r active=%s fallback=%s reasons=%s",
+            self._node_id,
+            self._current_step_title()[:200],
+            list(self._tools.keys()),
+            list(self._fallback_tools.keys()),
+            selection.reasons,
+        )
+
+    def _enable_fallback_tools(self, messages: list[dict[str, Any]], *, reason: str) -> None:
+        """Expose deferred fallback tools after preferred sources miss."""
+        if self._fallback_enabled or not self._fallback_tools:
+            return
+        self._fallback_enabled = True
+        self._tools.update(self._fallback_tools)
+        self._tool_defs = [self._to_openai_tool(tool) for tool in self._tools.values()]
+        logger.info(
+            "FALLBACK_SOURCE_WIDENED node=%s reason=%s newly_enabled=%s",
+            self._node_id,
+            reason,
+            list(self._fallback_tools.keys()),
+        )
+        messages.append({
+            "role": "system",
+            "content": (
+                "Preferred sources returned no accepted evidence for the current step. "
+                "Fallback sources are now available. Use them only to fill the gap."
+            ),
+        })
+
+    def _build_cache_scope(self) -> str:
+        current_step = self._ctx.current_step
+        if current_step is None:
+            return self._ctx.query[:120]
+        step_id = ""
+        if isinstance(current_step, dict):
+            step_id = str(current_step.get("id", "") or current_step.get("title", ""))
+        else:
+            step_id = str(getattr(current_step, "id", "") or getattr(current_step, "title", ""))
+        return step_id[:120] or self._ctx.query[:120]
+
+    def _current_step_title(self) -> str:
+        current_step = self._ctx.current_step
+        if current_step is None:
+            return ""
+        if isinstance(current_step, dict):
+            return str(current_step.get("title", "") or current_step.get("description", ""))
+        return str(getattr(current_step, "title", "") or getattr(current_step, "description", ""))
+
+    # -- Message compaction -------------------------------------------------
+
+    def _compact_old_tool_results(self, messages: list[dict[str, Any]]) -> None:
+        """Truncate tool results from prior iterations to limit prompt growth.
+
+        Only truncates tool results BEFORE the most recent tool-calling iteration.
+        Current iteration's results are always preserved intact.
+        """
+        if self._max_result_chars <= 0:
+            return
+
+        # Find the latest assistant message that triggered tool calls
+        last_tc_idx = -1
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "assistant" and messages[i].get("tool_calls"):
+                last_tc_idx = i
+                break
+
+        if last_tc_idx <= 0:
+            return  # first iteration or no tool calls — nothing to truncate
+
+        for i in range(last_tc_idx):
+            msg = messages[i]
+            content = msg.get("content", "")
+            if msg.get("role") == "tool" and isinstance(content, str) and len(content) > self._max_result_chars:
+                msg["content"] = content[:self._max_result_chars] + (
+                    f"\n...[truncated from {len(content)} chars]"
+                )
+
+    # -- Streaming -----------------------------------------------------------
+
+    async def _stream_call(
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[LLMResponse, list[StreamEvent]]:
+        """Stream an LLM call, emitting AgentStreamChunkEvents."""
+        events: list[StreamEvent] = []
+        chunks: list[str] = []
+        tool_calls: list[ToolCall] = []
+
+        async for item in self._llm.stream(
+            messages,
+            self._model_tier,
+            temperature=self._temperature,
+            max_tokens=self._max_tokens,
+            tools=self._tool_defs if self._tools else None,
+        ):
+            if isinstance(item, str):
+                chunks.append(item)
+                events.append(AgentStreamChunkEvent(
+                    node_id=self._node_id, timestamp=_now(),
+                    chunk=item, subtype=self._subtype,
+                ))
+            elif isinstance(item, ToolCall):
+                tool_calls.append(item)
+
+        content = "".join(chunks)
+        return LLMResponse(
+            content=content,
+            tool_calls=tool_calls,
+            model=self._model_tier,
+        ), events
+
+    # -- Helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _to_openai_tool(tool: ResearchTool) -> dict[str, Any]:
+        """Convert a ResearchTool to OpenAI function-calling format."""
+        defn = tool.definition
+        return {
+            "type": "function",
+            "function": {
+                "name": defn.name,
+                "description": defn.description,
+                "parameters": defn.parameters,
+            },
+        }
+
+    @staticmethod
+    def _assistant_msg(response: LLMResponse) -> dict[str, Any]:
+        """Build an assistant message from LLM response (with tool calls)."""
+        msg: dict[str, Any] = {"role": "assistant"}
+        if response.content:
+            msg["content"] = response.content
+        if response.tool_calls:
+            msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function_name,
+                        "arguments": tc.arguments,
+                    },
+                }
+                for tc in response.tool_calls
+            ]
+        return msg
+
+    @staticmethod
+    def _tool_msg(tool_call_id: str, content: str) -> dict[str, Any]:
+        """Build a tool result message."""
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Module helpers
+# ---------------------------------------------------------------------------
+
+
+def _now() -> str:
+    return datetime.now(tz=UTC).isoformat()
+
+
+def _merge_usage(total: dict[str, int], new: dict[str, int]) -> None:
+    for k, v in new.items():
+        total[k] = total.get(k, 0) + v

@@ -1,0 +1,60 @@
+# Databricks Apps Configuration — LOCAL DEVELOPMENT ONLY
+# See: https://docs.databricks.com/aws/en/dev-tools/databricks-apps/best-practices
+#
+# This file is synced to the workspace and serves as the base app spec.
+# The config: section in databricks.yml overrides env vars at deploy time
+# with production values (endpoints, Lakebase host, etc.).
+#
+# IMPORTANT: This file uses `value_from` to reference app resources.
+# Resources are configured via:
+#   Option A: Databricks UI (Compute > Apps > Configure > App resources)
+#   Option B: databricks.yml (infrastructure-as-code, provisions Lakebase)
+#
+# The `value_from` value is a RESOURCE KEY (alias), not the actual resource name.
+
+# Simple command pattern (matching working template)
+# Databricks Apps auto-injects port via --port flag when spawning the process
+# Migrations run in lifespan startup hook via on_startup event
+command: ["bash", "entrypoint.sh"]
+
+env:
+  # MLflow Integration (automatic within Databricks workspace)
+  # Using the app's service principal experiment path to ensure write access
+  - name: MLFLOW_TRACKING_URI
+    value: "databricks"
+  - name: MLFLOW_REGISTRY_URI
+    value: "databricks-uc"
+  - name: MLFLOW_EXPERIMENT_NAME
+    value: "/Shared/deep-research-agent-experiments"
+
+  # App Configuration
+  - name: SERVE_STATIC
+    value: "true"
+  - name: APP_ENV
+    value: "production"
+  - name: LOG_LEVEL
+    value: "INFO"
+  - name: APP_CONFIG_PATH
+    value: "config/app.yaml"
+
+  # Lakebase Configuration
+  # For local dev: LAKEBASE_INSTANCE_NAME triggers provisioned backend.
+  # For deployed apps: config: section in databricks.yml ADDS ENDPOINT_NAME
+  # and PGHOST (not present here), which triggers autoscaling backend.
+  # Key: ENDPOINT_NAME must NOT be in this file, or app.yaml's value wins
+  # over the config section's value (DAB merge: app.yaml takes precedence).
+  - name: LAKEBASE_INSTANCE_NAME
+    value: "deep-research-lakebase"
+  - name: LAKEBASE_DATABASE
+    value: "deep_research"
+
+  # Security
+  - name: DATABRICKS_APP_URL
+    value: ""
+  - name: ALLOWED_ORIGINS
+    value: ""
+
+  # Brave Search API (external service)
+  # The "brave-api-key" resource provides the API key from secret scope
+  - name: BRAVE_API_KEY
+    value_from: "brave-api-key"

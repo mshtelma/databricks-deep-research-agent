@@ -1,0 +1,26 @@
+# Minimal single-agent workflow for testing.
+#
+# Runs just a coordinator agent to classify a query.
+# Useful for verifying LLM connectivity and agent harness.
+#
+# Usage:
+#   from databricks_deep_research import WorkflowRunner
+#
+#   runner = WorkflowRunner.from_databricks()
+#   result = await runner.run("examples/single_agent.yaml", query="What is quantum computing?")
+#   print(result.output)
+
+id: single_agent
+name: Single Agent Test
+version: 1
+required_inputs: [query]
+output_keys: [coordination]
+
+root:
+  id: coordinator
+  type: agent
+  label: Query Classifier
+  config:
+    subtype: coordinator
+    model_tier: simple
+    output_key: coordination

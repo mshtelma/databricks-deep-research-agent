@@ -1,0 +1,105 @@
+id: verified_enterprise_research
+name: Verified Enterprise Research Pipeline
+description: Enterprise vector search with reclaim-mode synthesis and citation verification
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+tools:
+  - name: vector_search
+    kind: vector_search
+    config:
+      index_name: prod_catalog.finance.earnings_idx
+      num_results: 10
+      query_type: HYBRID
+    description: "Quarterly earnings filings, financial reports, and analyst notes"
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 50
+  - name: observations
+    dedup_content_hash: true
+    max_items: 30
+
+root:
+  id: main
+  type: sequence
+  label: Verified Enterprise Research Pipeline
+  children:
+    # Step 1: Classify the query
+    - id: coordinator
+      type: agent
+      label: Query Classifier
+      config:
+        subtype: coordinator
+        model_tier: simple
+        output_key: coordination
+
+    # Step 2: Research cycle with vector_search only
+    - id: research_cycle
+      type: plan_and_execute
+      label: Enterprise Research Cycle
+      config:
+        planner_guidance: |
+          Available tools for the researcher:
+          - vector_search: Semantic search over internal documents and enterprise data (earnings reports, financial filings, analyst notes)
+          There is NO web search or other tools available. Design all research steps to use vector_search.
+          For each step, write a clear search query that the vector_search tool can execute.
+
+          IMPORTANT: Plan at least 2 research steps that target DIFFERENT aspects
+          of the query. Each step should use different search angles/keywords to
+          maximize document coverage. A single broad query is NOT sufficient.
+        planner:
+          subtype: planner
+          model_tier: analytical
+          output_key: plan
+        items_path: steps
+        item_state_key: current_step
+        body:
+          id: researcher
+          type: agent
+          label: Enterprise Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: findings
+            tools: [vector_search]
+            pool_writes:
+              - pool: observations
+                extract: findings
+              - pool: sources
+                extract: sources
+            max_tool_calls: 6
+        evaluator:
+          subtype: reflector
+          model_tier: analytical
+          output_key: evaluation
+          pool_inject:
+            - pool: observations
+              threshold: 0
+        max_iterations: 2
+        min_iterations: 1
+        max_replan_cycles: 1
+
+    # Step 3: Reclaim-mode synthesizer with citation verification
+    - id: synthesizer
+      type: agent
+      label: Verified Report Synthesizer
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        grounding_mode: reclaim
+        output_key: report
+        pool_inject:
+          - pool: observations
+            threshold: 0
+          - pool: sources
+            threshold: 0
+        max_tool_calls: 0
+        output_schema:
+          synthesis_mode: reclaim
+          enable_citation_verification: true
+          target_word_count: 600
+          max_tokens: 2000
+          generation_mode: strict

@@ -1,0 +1,92 @@
+id: classical_enterprise_vector_search
+name: Classical Enterprise Vector Search Pipeline
+description: Enterprise vector search with classical non-reclaim synthesis
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+tools:
+  - name: vector_search
+    kind: vector_search
+    config:
+      index_name: main.dbdemos_ai_agent.transcript_vs_index
+      num_results: 10
+      query_type: HYBRID
+    description: "Enterprise transcripts, business documents, and internal reports"
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 50
+  - name: observations
+    dedup_content_hash: true
+    max_items: 30
+
+root:
+  id: main
+  type: sequence
+  label: Classical Enterprise Vector Search Pipeline
+  children:
+    - id: coordinator
+      type: agent
+      label: Query Classifier
+      config:
+        subtype: coordinator
+        model_tier: simple
+        output_key: coordination
+
+    - id: research_cycle
+      type: plan_and_execute
+      label: Enterprise Research Cycle
+      config:
+        planner_guidance: |
+          Available tools for the researcher:
+          - vector_search: Semantic search over enterprise transcripts, internal business documents, and reports
+          There is NO web search or other tools available. Design all research steps to use vector_search.
+          Plan at least 2 research steps that use distinct search angles or keyword variations.
+        planner:
+          subtype: planner
+          model_tier: analytical
+          output_key: plan
+        items_path: steps
+        item_state_key: current_step
+        body:
+          id: researcher
+          type: agent
+          label: Enterprise Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: findings
+            tools: [vector_search]
+            pool_writes:
+              - pool: observations
+                extract: findings
+              - pool: sources
+                extract: sources
+            max_tool_calls: 6
+        evaluator:
+          subtype: reflector
+          model_tier: analytical
+          output_key: evaluation
+          pool_inject:
+            - pool: observations
+              threshold: 0
+        max_iterations: 2
+        min_iterations: 1
+        max_replan_cycles: 1
+
+    - id: synthesizer
+      type: agent
+      label: Classical Report Synthesizer
+      config:
+        subtype: synthesizer
+        grounding_mode: classical_lite
+        model_tier: analytical
+        output_key: report
+        pool_inject:
+          - pool: observations
+            threshold: 0
+          - pool: sources
+            threshold: 0
+        max_tool_calls: 0

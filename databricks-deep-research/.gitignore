@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Environment
+.env
+.env.local
+.env.test
+
+# IDE
+.vscode/
+.idea/
+
+# Caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.swp
+*.swo
+.DS_Store
+
+# Test trace output
+test-traces/
+
+# MLflow local database
+mlflow.db
