@@ -10,6 +10,7 @@ The plugin system allows you to extend the Deep Research Agent with:
 - **Templates**: Reusable prompt templates with variables
 - **Custom Agents**: Specialized research assistants
 - **File Processors**: Handlers for custom file formats
+- **Workflows**: Custom YAML research pipelines resolved by ref
 
 ## Plugin Architecture
 
@@ -23,6 +24,10 @@ Plugins implement one or more **provider protocols** and are discovered at start
 │  │ DataSource    │  │ Template      │  │ CustomAgent   │       │
 │  │ Provider      │  │ Provider      │  │ Provider      │       │
 │  └───────────────┘  └───────────────┘  └───────────────┘       │
+│  ┌───────────────┐  ┌───────────────┐                          │
+│  │ Workflow      │  │ FileProcessor │                          │
+│  │ Provider      │  │ Provider      │                          │
+│  └───────────────┘  └───────────────┘                          │
 │         ↓                  ↓                  ↓                │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │                    Lifecycle Events                      │  │
@@ -222,6 +227,97 @@ class MyAgentProvider(CustomAgentProvider):
             )
         ]
 ```
+
+### WorkflowProviderPlugin
+
+Supply custom YAML research workflows that are resolved by a `workflow_ref` string set on a custom agent.
+
+When a custom agent has a `workflow_ref`, the app iterates registered plugins implementing `WorkflowProviderPlugin`. The first plugin whose `get_workflow_yaml()` returns a non-`None` string wins. If no plugin claims the ref, a `ValueError` is raised (strict — no silent fallback to the default pipeline).
+
+```python
+import importlib.resources
+
+from deep_research.plugins.base import WorkflowProviderPlugin
+
+
+class ComplianceWorkflowProvider(WorkflowProviderPlugin):
+    """Provides compliance-focused research workflows."""
+
+    name = "compliance"
+    version = "1.0.0"
+
+    def get_workflow_yaml(self, ref: str) -> str | None:
+        """Return YAML for compliance workflows, or None to defer."""
+        if ref == "compliance_audit":
+            return importlib.resources.read_text(
+                "compliance.workflows", "compliance_audit.yaml"
+            )
+        return None
+```
+
+The YAML follows the framework workflow schema. Here is an example `compliance_audit.yaml`:
+
+```yaml
+id: compliance_audit
+name: Compliance Audit Research
+version: "1.0"
+
+pools:
+  shared_pool:
+    capacity: 50
+    dedup: true
+
+root:
+  type: sequence
+  steps:
+    - type: agent
+      agent_type: background
+      config:
+        pool: shared_pool
+        tools: [web_search]
+        max_tool_calls: 5
+
+    - type: plan_and_execute
+      config:
+        pool: shared_pool
+        planner:
+          agent_type: planner
+        researcher:
+          agent_type: researcher
+          config:
+            mode: react
+            tools: [web_search, web_crawl]
+            max_tool_calls: 15
+        reflector:
+          agent_type: reflector
+        max_steps: 8
+        min_steps: 3
+
+    - type: agent
+      agent_type: synthesizer
+      config:
+        pool: shared_pool
+```
+
+To associate a custom agent with this workflow, set `workflow_ref` when creating the agent:
+
+```json
+POST /api/v1/custom-agents
+{
+  "name": "Compliance Auditor",
+  "description": "Research agent for compliance audits",
+  "system_prompt": "You are a compliance research specialist...",
+  "workflow_ref": "compliance_audit"
+}
+```
+
+**Key behaviors:**
+
+- `get_workflow_yaml()` returns a raw YAML string (not a file path, not a parsed object)
+- Tools referenced in the YAML are automatically filtered against runtime-available tools (removed tools are logged at INFO level)
+- The app handles execution, tool resolution, source policy, OBO tokens, streaming, and persistence — the plugin only supplies the YAML
+- Plugin exceptions are logged and the next plugin is tried
+- Returning `None` means "I don't own that ref" (not an error) — the next plugin gets a chance
 
 ### FileProcessorProvider
 

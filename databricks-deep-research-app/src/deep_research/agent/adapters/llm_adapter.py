@@ -79,7 +79,7 @@ def _build_model_mapping(
                 endpoint = config.get_endpoint(primary)
                 if endpoint:
                     mapping[tier_name] = endpoint.endpoint_identifier
-        except (KeyError, IndexError, AttributeError):
+        except (KeyError, IndexError, AttributeError, ValueError):
             logger.debug("TIER_MAPPING_SKIP tier=%s", tier_name)
 
     # Apply overrides

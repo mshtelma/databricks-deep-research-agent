@@ -33,7 +33,7 @@ from databricks_deep_research.llm.client import (
 from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.workflow.definition import WorkflowDefinition
 from databricks_deep_research.workflow.executor import WorkflowExecutor
-from databricks_deep_research.workflow.loader import load_workflow
+from databricks_deep_research.workflow.loader import load_workflow, load_workflow_from_dict
 from databricks_deep_research.workflow.state import WorkflowState
 
 logger = logging.getLogger(__name__)
@@ -131,7 +131,7 @@ class WorkflowRunner:
 
     async def run(
         self,
-        workflow: str | Path | WorkflowDefinition,
+        workflow: str | Path | WorkflowDefinition | dict[str, Any],
         *,
         query: str = "",
         state: WorkflowState | None = None,
@@ -141,7 +141,8 @@ class WorkflowRunner:
         Parameters
         ----------
         workflow:
-            Path to YAML, Path object, or pre-loaded WorkflowDefinition.
+            Path to YAML, Path object, pre-loaded WorkflowDefinition, or
+            a plain dict matching the YAML schema.
         query:
             Query string.  Ignored when *state* is provided.
         state:
@@ -164,7 +165,7 @@ class WorkflowRunner:
 
     async def stream(
         self,
-        workflow: str | Path | WorkflowDefinition,
+        workflow: str | Path | WorkflowDefinition | dict[str, Any],
         *,
         query: str = "",
         state: WorkflowState | None = None,
@@ -216,9 +217,11 @@ class WorkflowRunner:
 
     def _resolve(
         self,
-        workflow: str | Path | WorkflowDefinition,
+        workflow: str | Path | WorkflowDefinition | dict[str, Any],
     ) -> WorkflowDefinition:
-        """Accept str path, Path, or pre-loaded definition."""
+        """Accept str path, Path, pre-loaded definition, or raw dict."""
         if isinstance(workflow, WorkflowDefinition):
             return workflow
+        if isinstance(workflow, dict):
+            return load_workflow_from_dict(workflow)
         return load_workflow(str(workflow))

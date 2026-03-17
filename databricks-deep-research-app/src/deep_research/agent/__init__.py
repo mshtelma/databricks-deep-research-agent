@@ -1,8 +1,10 @@
 """Agent package - Multi-agent research system."""
 
-from deep_research.agent.orchestrator import (
+from deep_research.agent.orchestration_config import (
     OrchestrationConfig,
     OrchestrationResult,
+)
+from deep_research.agent.orchestrator import (
     run_research,
     stream_research,
 )

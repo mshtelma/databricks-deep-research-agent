@@ -233,6 +233,7 @@ export function MessageInput({
   // Hide when a custom agent defines its own source configuration (009-custom-agent-config T030)
   const agentDefinesSources = selectedAgent?.hasSourceConfig === true;
   const shouldShowSourceScope =
+    effectiveShowModeSelector &&
     (queryMode === 'deep_research' || queryMode === 'web_search') && !agentDefinesSources;
 
   // Plan review toggle state
@@ -480,7 +481,7 @@ export function MessageInput({
           </label>
         )}
         {/* Agent selector (deep_research mode) */}
-        {queryMode === 'deep_research' && (
+        {queryMode === 'deep_research' && effectiveShowModeSelector && (
           <div className="relative" ref={agentPickerRef}>
             <button
               type="button"
@@ -535,7 +536,7 @@ export function MessageInput({
           </div>
         )}
         {/* Plan review toggle (deep_research mode) */}
-        {queryMode === 'deep_research' && (
+        {queryMode === 'deep_research' && effectiveShowModeSelector && (
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
             <input
               type="checkbox"

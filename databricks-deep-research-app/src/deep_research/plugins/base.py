@@ -360,6 +360,40 @@ class CustomAgentProvider(Protocol):
 
 
 @runtime_checkable
+class WorkflowProviderPlugin(Protocol):
+    """Protocol for plugins that provide custom research workflows.
+
+    Plugin supplies YAML content; the app handles execution, tool resolution,
+    source policy, and streaming. The YAML should reference tools by stable
+    logical names (web_search, web_crawl, plugin-provided tool names).
+
+    Example::
+
+        class CompliancePlugin:
+            name = "compliance"
+            version = "1.0.0"
+
+            def get_workflow_yaml(self, ref: str) -> str | None:
+                if ref == "compliance_audit":
+                    return importlib.resources.read_text(
+                        "compliance.workflows", "compliance_audit.yaml"
+                    )
+                return None
+    """
+
+    def get_workflow_yaml(self, ref: str) -> str | None:
+        """Return YAML workflow content for the given ref, or None to defer.
+
+        Args:
+            ref: Workflow reference string (e.g., "compliance_audit").
+
+        Returns:
+            Raw YAML string, or None if this plugin doesn't own that ref.
+        """
+        ...
+
+
+@runtime_checkable
 class FileProcessorProvider(Protocol):
     """Protocol for plugins that provide file processing (T007).
 

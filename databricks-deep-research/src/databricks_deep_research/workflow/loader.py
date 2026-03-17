@@ -231,6 +231,39 @@ def load_workflow_from_string(yaml_content: str) -> WorkflowDefinition:
     return _definition_from_raw(raw)
 
 
+def load_workflow_from_dict(data: dict[str, Any]) -> WorkflowDefinition:
+    """Build a workflow definition from a plain dictionary.
+
+    The dictionary structure mirrors the YAML schema: top-level keys ``id``,
+    ``name``, and ``root`` are required; all others have sensible defaults.
+    Unknown top-level keys are silently ignored (forward-compatibility).
+
+    Equivalent to ``yaml.safe_load()`` followed by ``load_workflow_from_string()``,
+    but skips the YAML serialisation round-trip.  The input dict is read but not
+    mutated.
+
+    Parameters
+    ----------
+    data:
+        Workflow specification as a plain dict (same schema as parsed YAML).
+
+    Returns
+    -------
+    WorkflowDefinition
+        A fully parsed and validated workflow definition.
+
+    Raises
+    ------
+    WorkflowValidationError
+        If *data* is not a dict or fails structural validation.
+    """
+    if not isinstance(data, dict):
+        raise WorkflowValidationError(
+            errors=[f"Expected a dict, got {type(data).__name__}"],
+        )
+    return _definition_from_raw(data)
+
+
 def save_workflow(definition: WorkflowDefinition, path: str | Path) -> None:
     """Serialise a :class:`WorkflowDefinition` to a YAML file.
 
@@ -265,6 +298,12 @@ def _to_yaml(self: WorkflowDefinition, path: str | Path) -> None:
     save_workflow(self, path)
 
 
+def _from_dict(_cls: type[WorkflowDefinition], data: dict[str, Any]) -> WorkflowDefinition:
+    """Replacement for the stub ``WorkflowDefinition.from_dict``."""
+    return load_workflow_from_dict(data)
+
+
 # Monkey-patch the definition class so the convenience API works.
 WorkflowDefinition.from_yaml = classmethod(_from_yaml)  # type: ignore[assignment]
+WorkflowDefinition.from_dict = classmethod(_from_dict)  # type: ignore[assignment]
 WorkflowDefinition.to_yaml = _to_yaml  # type: ignore[method-assign]

@@ -8,6 +8,7 @@ is injected via the constructor; the LLM only provides a query string.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from databricks_deep_research.tools.protocol import (
@@ -19,6 +20,52 @@ from databricks_deep_research.tools.protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+_PAGE_CHUNK_SUFFIX = re.compile(r'_page\d+(?:_chunk\d+)?$')
+_PDF_SUFFIX = re.compile(r'_?_?pdf$', re.IGNORECASE)
+_PATH_KEYWORDS = frozenset({
+    'dbfs', 'volumes', 'mnt', 'workspace', 'users', 'documents',
+    'uploads', 'upload', 'data', 'files', 'shared',
+})
+
+
+def _title_from_chunk_id(chunk_id: str) -> str:
+    """Best-effort: extract a human-readable document title from a VS chunk_id.
+
+    Handles Databricks auto-chunking paths like:
+      dbfs__Volumes_users_joe_documents_upload__Sales_Battlecard__AWS_pdf_page13_chunk0
+    → "Sales Battlecard: AWS (p.13)"
+
+    Returns empty string if no meaningful title can be extracted.
+    """
+    if not chunk_id or '_pdf' not in chunk_id.lower():
+        return ""
+
+    page_m = re.search(r'_page(\d+)', chunk_id)
+    page = page_m.group(1) if page_m else None
+
+    base = _PAGE_CHUNK_SUFFIX.sub('', chunk_id)
+    base = _PDF_SUFFIX.sub('', base)
+
+    segments = [s for s in base.split('__') if s]
+
+    doc_segments: list[str] = []
+    for seg in segments:
+        seg_lower = seg.lower()
+        is_path = any(kw in seg_lower for kw in _PATH_KEYWORDS)
+        if is_path:
+            doc_segments = []
+        else:
+            doc_segments.append(seg)
+
+    if not doc_segments:
+        return ""
+
+    title = ': '.join(seg.replace('_', ' ') for seg in doc_segments)
+    if len(title) < 3:
+        return ""
+
+    return f"{title} (p.{page})" if page else title
 
 
 class DatabricksVectorSearchTool:
@@ -37,6 +84,7 @@ class DatabricksVectorSearchTool:
         query_type: str | None = None,
         filters_json: str | None = None,
         description: str = "",
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         self._ws = workspace_client
         self._name = name
@@ -46,6 +94,8 @@ class DatabricksVectorSearchTool:
         self._query_type = query_type
         self._filters_json = filters_json
         self._description = description or f"Vector search over {index_name}"
+        self._pk_col: str | None = None
+        self._content_col: str | None = None
 
         self._definition = ToolDefinition(
             name=name,
@@ -71,6 +121,7 @@ class DatabricksVectorSearchTool:
             },
             source_type="enterprise",
             source_kind=SourceKind.vector_index,
+            metadata=metadata or {},
         )
 
     @property
@@ -152,18 +203,26 @@ class DatabricksVectorSearchTool:
                 source_url = f"enterprise://vector_search/{self._name}/{idx}"
                 canonical_source_url: str | None = None
                 content_text = ""
-                for content_col in ("content", "text", "chunk_text", "page_content"):
+                _content_candidates = ("content", "text", "chunk_text", "chunk_content", "page_content")
+                content_cols = (self._content_col,) + _content_candidates if self._content_col else _content_candidates
+                for content_col in content_cols:
                     raw_content = _col(content_col, "")
                     if isinstance(raw_content, str) and raw_content:
                         content_text = raw_content
                         break
 
                 source_title = ""
-                for title_col in ("title", "source_title", "doc_title", "name"):
+                for title_col in ("title", "source_title", "doc_title", "name", "document_title"):
                     raw_title = _col(title_col, "")
                     if isinstance(raw_title, str) and raw_title:
                         source_title = raw_title
                         break
+
+                # Extract document title from primary key value (typically chunk_id)
+                if not source_title and self._pk_col:
+                    pk_val = _col(self._pk_col, "")
+                    if isinstance(pk_val, str) and pk_val:
+                        source_title = _title_from_chunk_id(pk_val)
 
                 for col_idx, val in enumerate(row):
                     col_name = col_names[col_idx] if col_idx < len(col_names) else f"col_{col_idx}"
@@ -175,6 +234,10 @@ class DatabricksVectorSearchTool:
 
                 if not source_title:
                     source_title = f"Vector search result {idx + 1}"
+                    logger.info(
+                        "VS_GENERIC_TITLE tool=%s index=%s row=%d cols=%s",
+                        self._name, self._index_name, idx, col_names,
+                    )
 
                 lines.append(f"[{idx + 1}] {'; '.join(entry_parts)}")
 
@@ -235,6 +298,7 @@ class DatabricksVectorSearchTool:
         primary_key = getattr(index_info, "primary_key", None)
         if primary_key:
             columns.append(str(primary_key))
+            self._pk_col = str(primary_key)
 
         delta_sync = getattr(index_info, "delta_sync_index_spec", None)
         if delta_sync:
@@ -243,6 +307,11 @@ class DatabricksVectorSearchTool:
                 for col in (pk if isinstance(pk, list) else [pk]):
                     if col and col not in columns:
                         columns.append(str(col))
+                # Use first PK column if top-level primary_key was missing
+                if not self._pk_col and pk:
+                    first_pk = pk[0] if isinstance(pk, list) else pk
+                    if first_pk:
+                        self._pk_col = str(first_pk)
 
             src_cols = getattr(delta_sync, "embedding_source_columns", None) or []
             for sc in src_cols:
@@ -252,5 +321,8 @@ class DatabricksVectorSearchTool:
                 )
                 if col_name and col_name not in columns:
                     columns.append(col_name)
+                # Store first embedding source column for content extraction
+                if col_name and not self._content_col:
+                    self._content_col = str(col_name)
 
         return columns or []

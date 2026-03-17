@@ -194,7 +194,10 @@ class WebSearchTool:
             name="web_search",
             description=(
                 "Search the web for information. Returns numbered results with titles and snippets. "
-                "Use the result INDEX numbers (0, 1, 2, etc.) to select sources for crawling."
+                "Write search queries as you would type into a search engine: "
+                "specific, keyword-focused, 5-15 words. "
+                "Include company names, dates, and specific terms. "
+                "Example: 'Apple Q4 2024 revenue earnings report' not 'Tell me about Apple's latest earnings.'"
             ),
             parameters={
                 "type": "object",

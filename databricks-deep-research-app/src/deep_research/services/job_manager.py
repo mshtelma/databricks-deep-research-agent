@@ -497,6 +497,32 @@ class JobManager:
             structured_system_prompt = None
             structured_user_prompt = None
 
+            # Auto-resolve output_type from plugin when not specified by the
+            # frontend.  When exactly one plugin implements OutputTypeProvider,
+            # every query should use its output type (plugin-driven app).
+            if not output_type and plugin_manager:
+                try:
+                    from deep_research.output.protocol import OutputTypeProvider
+
+                    providers = [
+                        p
+                        for p in plugin_manager.get_plugins()
+                        if isinstance(p, OutputTypeProvider)
+                    ]
+                    if len(providers) == 1:
+                        output_type = providers[0].output_type_name
+                        logger.info(
+                            "OUTPUT_TYPE_AUTO_RESOLVED",
+                            extra={
+                                "output_type": output_type,
+                                "plugin": getattr(
+                                    providers[0], "name", type(providers[0]).__name__
+                                ),
+                            },
+                        )
+                except Exception:
+                    logger.exception("OUTPUT_TYPE_AUTO_RESOLVE_FAILED")
+
             if output_type:
                 registry = get_output_registry()
                 provider = registry.get(output_type)
@@ -549,6 +575,30 @@ class JobManager:
                 agent_id=agent_id,
                 enable_plan_review=enable_plan_review,
             )
+
+            # Auto-resolve workflow_ref from output_type when a plugin provides
+            # a matching workflow.  Bridges OutputTypeProvider (synthesizer) and
+            # WorkflowProviderPlugin (research pipeline).  Without this, workflow_ref
+            # is only set via custom agents in the DB, so plugin YAML workflows are
+            # never triggered.
+            if output_type and not config.workflow_ref and plugin_manager:
+                from deep_research.plugins.base import WorkflowProviderPlugin
+
+                for plugin in plugin_manager.get_plugins():
+                    if isinstance(plugin, WorkflowProviderPlugin):
+                        try:
+                            if plugin.get_workflow_yaml(output_type) is not None:
+                                config.workflow_ref = output_type
+                                logger.info(
+                                    "WORKFLOW_REF_AUTO_SET",
+                                    extra={
+                                        "output_type": output_type,
+                                        "plugin": getattr(plugin, "name", type(plugin).__name__),
+                                    },
+                                )
+                                break
+                        except Exception:
+                            pass
 
             # Agent resolution — separate DB session (009-custom-agent-config)
             if agent_id:

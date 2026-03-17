@@ -215,6 +215,11 @@ class CustomAgent(BaseModel):
         nullable=True,
     )
 
+    # Plugin workflow reference (012-workflow-provider)
+    workflow_ref: Mapped[str | None] = mapped_column(
+        String(255), nullable=True, default=None,
+    )
+
     # Relationships
     system_prompt_template: Mapped["PromptTemplate | None"] = relationship(
         "PromptTemplate",

@@ -8,6 +8,11 @@ from databricks_deep_research.workflow.definition import ToolDeclaration
 
 _SUPPORTED_KINDS = frozenset({"vector_search", "genie", "knowledge_assistant"})
 
+_VS_OPTIMIZATION_KEYS = frozenset({
+    "query_policy", "multi_query", "hyde", "rerank",
+    "num_alternatives", "rerank_threshold", "rrf_k",
+})
+
 
 class DatabricksToolFactory:
     """Creates vector_search, genie, and knowledge_assistant tools from declarations."""
@@ -33,6 +38,8 @@ class DatabricksToolFactory:
                 DatabricksVectorSearchTool,
             )
 
+            vs_metadata = {k: v for k, v in decl.config.items() if k in _VS_OPTIMIZATION_KEYS}
+
             return DatabricksVectorSearchTool(
                 workspace_client=ctx.workspace_client,
                 name=decl.name,
@@ -42,6 +49,7 @@ class DatabricksToolFactory:
                 query_type=decl.config.get("query_type"),
                 filters_json=decl.config.get("filters_json"),
                 description=decl.description,
+                metadata=vs_metadata,
             )
 
         if decl.kind == "genie":

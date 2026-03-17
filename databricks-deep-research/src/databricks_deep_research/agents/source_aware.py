@@ -402,21 +402,35 @@ def admit_tool_result(
         len(raw_sources),
     )
     if not profile["terms"] and not profile["phrases"]:
+        is_valid = result.success and not _tool_result_is_empty_or_error(result)
+        early_accepted = raw_sources if is_valid else []
+        # Classify early-accepted sources by content quality
+        early_substantive = []
+        early_low = []
+        for src in early_accepted:
+            ct = str(src.get("content") or src.get("snippet") or "")
+            if len(ct.strip()) > 80:
+                early_substantive.append(src)
+            else:
+                early_low.append(src)
+        if early_substantive:
+            early_eq = "full_text"
+        elif early_low:
+            early_eq = "snippet_only"
+        elif early_accepted:
+            early_eq = "metadata_only"
+        else:
+            early_eq = "empty"
         return AdmittedToolResult(
             content=result.content,
-            accepted_sources=(
-                raw_sources if result.success and not _tool_result_is_empty_or_error(result) else []
-            ),
-            rejected_sources=(
-                [] if result.success and not _tool_result_is_empty_or_error(result) else raw_sources
-            ),
+            accepted_sources=early_accepted,
+            rejected_sources=[] if is_valid else raw_sources,
             raw_sources=raw_sources,
-            accepted_count=(
-                len(raw_sources) if result.success and not _tool_result_is_empty_or_error(result) else 0
-            ),
-            rejected_count=(
-                0 if result.success and not _tool_result_is_empty_or_error(result) else len(raw_sources)
-            ),
+            accepted_count=len(early_accepted),
+            rejected_count=0 if is_valid else len(raw_sources),
+            accepted_substantive_count=len(early_substantive),
+            accepted_low_value_count=len(early_low),
+            evidence_quality=early_eq,
         )
 
     for source in raw_sources:
@@ -442,6 +456,25 @@ def admit_tool_result(
     else:
         content = result.content
 
+    # Classify accepted sources by content quality
+    substantive = []
+    low_value_list = []
+    for src in accepted:
+        content_text = str(src.get("content") or src.get("snippet") or "")
+        if len(content_text.strip()) > 80:
+            substantive.append(src)
+        else:
+            low_value_list.append(src)
+
+    if substantive:
+        eq = "full_text"
+    elif low_value_list:
+        eq = "snippet_only"
+    elif accepted:
+        eq = "metadata_only"
+    else:
+        eq = "empty"
+
     return AdmittedToolResult(
         content=content,
         accepted_sources=accepted,
@@ -449,6 +482,9 @@ def admit_tool_result(
         raw_sources=raw_sources,
         accepted_count=len(accepted),
         rejected_count=len(rejected),
+        accepted_substantive_count=len(substantive),
+        accepted_low_value_count=len(low_value_list),
+        evidence_quality=eq,
     )
 
 

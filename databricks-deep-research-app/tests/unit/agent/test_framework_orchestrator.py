@@ -62,6 +62,7 @@ def _mock_config(**overrides: Any) -> MagicMock:
         "model_overrides": None,
         "domain_filter": None,
         "agent_id": None,
+        "workflow_ref": None,
         "research_timeout_seconds": 1800,
     }
     defaults.update(overrides)

@@ -79,8 +79,9 @@ from databricks_deep_research.workflow.executor import (
     run_workflow,
     run_workflow_from_yaml,
 )
-from databricks_deep_research.workflow.loader import (  # noqa: F401 — side-effect: wires from_yaml/to_yaml
+from databricks_deep_research.workflow.loader import (  # noqa: F401 — side-effect: wires from_yaml/to_yaml/from_dict
     load_workflow,
+    load_workflow_from_dict,
     load_workflow_from_string,
     save_workflow,
 )
@@ -110,6 +111,7 @@ __all__ = [
     "ToolFactoryContext",
     # Loader
     "load_workflow",
+    "load_workflow_from_dict",
     "load_workflow_from_string",
     "save_workflow",
     # Executor

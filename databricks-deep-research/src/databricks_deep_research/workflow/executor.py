@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import BaseModel
+
 from databricks_deep_research.agents.config import (
     AgentNodeConfig,
     ConditionalNodeConfig,
@@ -428,13 +430,21 @@ class WorkflowExecutor:
                     missing_declared_tools=self._workflow_missing_declared_tools,
                 )
 
+            report_value = state.get("report") or state.get("output")
+            structured = None
+            if isinstance(report_value, BaseModel):
+                structured = report_value.model_dump()
+            elif isinstance(report_value, dict) and report_value.get("output_type"):
+                structured = report_value
+
             yield self._emit(WorkflowCompletedEvent(
                 node_id=self._defn.root.id,
                 timestamp=_now(),
                 workflow_id=self._defn.id,
                 duration_ms=elapsed_ms,
                 total_tokens=self._total_tokens,
-                final_report=str(state.get("report") or state.get("output") or ""),
+                final_report=report_value.model_dump_json() if isinstance(report_value, BaseModel) else str(report_value or ""),
+                structured_output=structured,
                 total_sources=total_sources,
                 total_steps_executed=self._workflow_total_steps_executed,
             ))

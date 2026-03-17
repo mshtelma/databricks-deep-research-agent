@@ -18,11 +18,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from databricks_deep_research.agents.source_aware import (
+    PlannedToolArguments,
     admit_tool_result,
     plan_tool_arguments,
     select_step_tools,
     tool_source_kind,
 )
+from databricks_deep_research.agents.vector_query_optimizer import VectorQueryOptimizer
 from databricks_deep_research.events.types import (
     AgentStreamChunkEvent,
     StreamEvent,
@@ -143,6 +145,7 @@ class ReactLoop:
         self._runtime_store = getattr(self._ctx, "runtime_store", None)
         self._step_query_signatures: set[str] = set()
         self._tool_outcome_history: dict[str, list[dict[str, Any]]] = {}
+        self._vs_optimizer = VectorQueryOptimizer(llm_client)
 
 
     def _normalize_query_signature(self, tool_name: str, rewritten_query: str) -> str:
@@ -436,6 +439,13 @@ class ReactLoop:
         )
 
         try:
+            # Check for VS query optimization (LLM or passthrough mode)
+            source_kind = tool_source_kind(tool.definition)
+            query_policy = (tool.definition.metadata or {}).get("query_policy", "")
+
+            if source_kind == "vector_index" and query_policy in ("llm", "passthrough"):
+                return await self._execute_vs_optimized(tc, tool, args, query_policy)
+
             planned = plan_tool_arguments(
                 tool.definition,
                 args,
@@ -588,6 +598,128 @@ class ReactLoop:
                 "accepted_source_count": 0,
                 "rejected_source_count": 0,
             }
+
+    async def _execute_vs_optimized(
+        self,
+        tc: ToolCall,
+        tool: ResearchTool,
+        args: dict[str, Any],
+        query_policy: str,
+    ) -> tuple[str, str, list[Any], dict[str, Any]]:
+        """Handle VS tools with LLM optimization or passthrough.
+
+        Returns the same (tc_id, content, sources, meta) tuple as
+        _execute_single_tool for seamless integration.
+        """
+        tool_name = tool.definition.name
+        original_query = str(args.get("query", "")).strip()
+
+        async with trace_span(
+            f"tool.{tool_name}", span_type="TOOL",
+            attributes={
+                "tool.name": tool_name,
+                "tool.query_policy": query_policy,
+                "tool.original_query": original_query[:500],
+            },
+        ) as tool_span:
+            if query_policy == "passthrough":
+                # Passthrough: use agent's query as-is
+                validated = tool.validate_arguments(args)
+                result = await tool.execute(validated, self._ctx)
+                planned = PlannedToolArguments(
+                    arguments=args,
+                    original_query=original_query,
+                    rewritten_query=original_query,
+                    alternate_queries=[],
+                    strategy="passthrough",
+                    source_hint=None,
+                )
+                trace_meta: dict[str, Any] = {
+                    "strategy": "passthrough",
+                    "generated_queries": [original_query],
+                }
+            else:
+                # LLM optimization pipeline
+                result, trace_meta = await self._vs_optimizer.optimize_and_execute(
+                    tool, original_query, self._ctx
+                )
+                generated = trace_meta.get("generated_queries", [original_query])
+                planned = PlannedToolArguments(
+                    arguments={"query": generated[0] if generated else original_query},
+                    original_query=original_query,
+                    rewritten_query=generated[0] if generated else original_query,
+                    alternate_queries=generated[1:] if len(generated) > 1 else [],
+                    strategy=trace_meta.get("strategy", "llm"),
+                    source_hint=None,
+                )
+                logger.info(
+                    "VS_OPTIMIZATION_COMPLETE node=%s tool=%s strategy=%s "
+                    "queries=%d vs_calls=%d/%d rerank=%d->%d total_ms=%d",
+                    self._node_id, tool_name,
+                    trace_meta.get("strategy"),
+                    trace_meta.get("unique_query_count", 1),
+                    trace_meta.get("vs_calls_success", 0),
+                    trace_meta.get("vs_calls_total", 0),
+                    trace_meta.get("rerank_input", 0),
+                    trace_meta.get("rerank_output", 0),
+                    trace_meta.get("total_ms", 0),
+                )
+
+            # Call admit_tool_result() for framework source tracking
+            admitted = admit_tool_result(
+                tool.definition,
+                result,
+                current_step=self._ctx.current_step,
+                root_query=self._ctx.query,
+            )
+
+            logger.info(
+                "VS_OPTIMIZED_RESULTS node=%s tool=%s strategy=%s raw=%d "
+                "accepted=%d rejected=%d",
+                self._node_id, tool_name,
+                planned.strategy,
+                len(admitted.raw_sources),
+                admitted.accepted_count,
+                admitted.rejected_count,
+            )
+
+            if tool_span:
+                tool_span.set_attributes({
+                    "tool.result_len": len(admitted.content),
+                    "tool.success": result.success,
+                    "tool.error": result.error or "",
+                    "tool.source_count": admitted.accepted_count,
+                    "tool.raw_source_count": len(admitted.raw_sources),
+                    "tool.accepted_source_count": admitted.accepted_count,
+                    "tool.rejected_source_count": admitted.rejected_count,
+                    "tool.original_query": planned.original_query[:500],
+                    "tool.rewritten_query": planned.rewritten_query[:500],
+                    "tool.query_strategy": planned.strategy,
+                    "tool.accepted_substantive_count": admitted.accepted_substantive_count,
+                    "tool.accepted_low_value_count": admitted.accepted_low_value_count,
+                    "tool.evidence_quality": admitted.evidence_quality,
+                    "tool.failure_mode": admitted.failure_mode,
+                    "tool.needs_adaptation": admitted.needs_adaptation,
+                    "tool.vs_stage1_ms": trace_meta.get("stage1_ms", 0),
+                    "tool.vs_stage2_ms": trace_meta.get("stage2_ms", 0),
+                    "tool.vs_stage3_ms": trace_meta.get("stage3_ms", 0),
+                    "tool.vs_total_ms": trace_meta.get("total_ms", 0),
+                })
+
+            meta = {
+                "tool_success": result.success,
+                "tool_error": result.error or "",
+                "raw_source_count": len(admitted.raw_sources),
+                "accepted_source_count": admitted.accepted_count,
+                "accepted_substantive_count": admitted.accepted_substantive_count,
+                "accepted_low_value_count": admitted.accepted_low_value_count,
+                "rejected_source_count": admitted.rejected_count,
+                "evidence_quality": admitted.evidence_quality,
+                "failure_mode": admitted.failure_mode,
+                "needs_adaptation": admitted.needs_adaptation,
+            }
+            self._record_tool_outcome(tool_name, meta, planned.rewritten_query)
+            return tc.id, admitted.content, admitted.accepted_sources, meta
 
     def _apply_step_tool_selection(self) -> None:
         """Expose preferred tools first and keep the rest as fallback."""

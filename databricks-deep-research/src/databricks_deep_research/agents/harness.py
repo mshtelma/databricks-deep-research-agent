@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
@@ -237,6 +238,7 @@ async def execute_agent(
         # -- 1. Build AgentInput ------------------------------------------------
         synthesis_context_usage: dict[str, int] = {}
         synthesis_context_stats: dict[str, Any] = {}
+        synthesis_source_records: list[dict[str, Any]] = []
         if config.subtype == "synthesizer":
             typed_context = compile_typed_synthesis_context(state.runtime_state())
             if typed_context is not None:
@@ -267,6 +269,59 @@ async def execute_agent(
                     state.runtime_store.set_synthesis_mode("partial")
                 else:
                     state.runtime_store.set_synthesis_mode("full")
+
+            # -- Inject compiled synthesis context into template vars ---------
+            if synthesis_context is not None:
+                if runtime_context is None:
+                    runtime_context = {}
+                else:
+                    runtime_context = dict(runtime_context)
+                runtime_context["all_observations"] = synthesis_context.all_observations
+
+                runtime_context["fallback_discovery_sources"] = synthesis_context.fallback_discovery_sources
+
+                # Build numbered sources list AND structured records from the
+                # SAME data source (pool) to guarantee index alignment.
+                # The prompt source #N and synthesis_source_records[N-1] will
+                # always refer to the same URL.
+                numbered_lines: list[str] = []
+                sources_pool = pools.get("sources")
+                if sources_pool is not None:
+                    seen_urls: set[str] = set()
+                    for item in sources_pool.snapshot():
+                        if not isinstance(item, dict):
+                            continue
+                        url = str(item.get("url", "") or "")
+                        title = str(item.get("title", "") or "")
+                        # Replace generic VS fallback titles with tool-level metadata
+                        if re.match(r'^Vector search result \d+$', title):
+                            source_desc = str(item.get("source_description", "") or "")
+                            source_name = str(item.get("source_name", "") or "")
+                            if source_desc:
+                                title = source_desc[:120]
+                            elif source_name:
+                                title = source_name
+                        if url and url in seen_urls:
+                            continue
+                        if url:
+                            seen_urls.add(url)
+                        idx = len(synthesis_source_records) + 1
+                        label = title or url or f"Source {idx}"
+                        if url:
+                            # Truncate URL to prevent prompt bloat from tracking params
+                            display_url = url[:150]
+                            numbered_lines.append(f"{idx}. {label} — {display_url}")
+                        else:
+                            numbered_lines.append(f"{idx}. {label}")
+                        synthesis_source_records.append({
+                            "index": str(idx),
+                            "url": url,
+                            "title": title,
+                            "snippet": str(
+                                item.get("snippet", "") or item.get("content", "")
+                            )[:200],
+                        })
+                runtime_context["sources_list"] = "\n".join(numbered_lines)
 
         agent_input, input_token_usage = await _build_input(
             node_id,
@@ -354,7 +409,7 @@ async def execute_agent(
         # -- 4. Parse output -----------------------------------------------------
         parsed = _parse_output(content, config)
         parsed = _enrich_parsed_output(parsed, config, sources)
-        normalized_research_output = _normalize_research_output(parsed, config)
+        normalized_research_output = _normalize_research_output(parsed, config, sources)
         skip_pool_writes = isinstance(parsed, dict) and bool(parsed.get("_skip_pool_writes"))
         if isinstance(parsed, dict) and "_skip_pool_writes" in parsed:
             parsed = {k: v for k, v in parsed.items() if k != "_skip_pool_writes"}
@@ -557,6 +612,14 @@ async def execute_agent(
                 runtime.nodes[node_id].output_key = config.output_key
                 runtime.nodes[node_id].output_preview = preview[:400]
 
+        # -- Fallback: inject pool sources if LLM didn't populate them ----
+        if config.subtype == "synthesizer" and synthesis_source_records:
+            _inject_sources_into_output(state_output, synthesis_source_records)
+
+        # -- Post-process: compute citation_stats from actual source_refs ---
+        if config.subtype == "synthesizer" and state_output is not None:
+            _compute_citation_stats(state_output, len(synthesis_source_records))
+
         # -- 8. Builtin post-processing ------------------------------------------
         if state.runtime_store is not None and config.subtype == "synthesizer":
             mode = "full"
@@ -724,6 +787,137 @@ def _write_synthesis_context_state(
         node_id,
         "fallback_discovery_sources",
         context.fallback_discovery_sources,
+    )
+
+
+def _inject_sources_into_output(
+    output: Any, source_records: list[dict[str, Any]]
+) -> None:
+    """Inject or enrich source records in synthesizer output.
+
+    Three behaviors:
+    1. If output.sources is empty → replace with source_records (existing)
+    2. If output.sources has items but some lack URLs → enrich via index match (NEW)
+    3. If output.sources is fully populated → no-op
+    """
+    # -- Phase 1: Replace empty sources (existing behavior) ---
+    if isinstance(output, dict):
+        if not output.get("sources"):
+            output["sources"] = source_records
+    elif hasattr(output, "sources"):
+        if not output.sources:
+            try:
+                output.sources = source_records
+            except Exception:
+                logger.warning(
+                    "SYNTH_SOURCE_INJECT_FAILED output_type=%s",
+                    type(output).__name__,
+                )
+
+    # -- Phase 2: Enrich existing sources that lack URLs ---
+    existing: list[Any] | None = None
+    if isinstance(output, dict):
+        existing = output.get("sources")
+    elif hasattr(output, "sources"):
+        existing = output.sources
+
+    if not existing or not source_records:
+        return
+
+    record_by_idx = {r["index"]: r for r in source_records}
+    enriched_count = 0
+
+    for src in existing:
+        try:
+            if isinstance(src, dict):
+                idx = str(src.get("index", "") or src.get("id", ""))
+                record = record_by_idx.get(idx)
+                if record and not src.get("url"):
+                    src["url"] = record["url"]
+                    enriched_count += 1
+                if record and not src.get("snippet"):
+                    src["snippet"] = record.get("snippet", "")
+            elif hasattr(src, "index"):
+                idx = str(src.index)
+                record = record_by_idx.get(idx)
+                if record and not getattr(src, "url", ""):
+                    src.url = record["url"]
+                    enriched_count += 1
+                if record and not getattr(src, "snippet", ""):
+                    src.snippet = record.get("snippet", "")
+        except Exception:
+            continue
+
+    if enriched_count:
+        logger.info(
+            "SYNTH_SOURCE_ENRICH enriched=%d/%d sources",
+            enriched_count, len(existing),
+        )
+
+
+def _compute_citation_stats(output: Any, total_sources: int) -> None:
+    """Count actual source_refs across output and update citation_stats in-place."""
+    all_refs: list[str] = []
+    fields_with_refs = 0
+    fields_total = 0
+
+    def _collect(obj: Any) -> None:
+        nonlocal fields_with_refs, fields_total
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                if key.endswith("source_refs"):
+                    fields_total += 1
+                    if isinstance(val, list) and val:
+                        fields_with_refs += 1
+                        all_refs.extend(str(v) for v in val)
+                elif isinstance(val, (dict, list)):
+                    _collect(val)
+        elif isinstance(obj, list):
+            for item in obj:
+                if isinstance(item, (dict, list)):
+                    _collect(item)
+
+    try:
+        data = output.model_dump() if hasattr(output, "model_dump") else output
+        if isinstance(data, dict):
+            _collect(data)
+    except Exception:
+        return
+
+    valid = sum(
+        1 for r in all_refs
+        if r.isdigit() and 1 <= int(r) <= max(total_sources, 1)
+    )
+
+    # Mutate existing CitationStats in-place (avoids type replacement issues)
+    cs = getattr(output, "citation_stats", None)
+    if cs is not None and hasattr(cs, "total_citations"):
+        try:
+            cs.total_citations = len(all_refs)
+            cs.valid_citations = valid
+            cs.invalid_citations = len(all_refs) - valid
+            cs.coverage_percentage = (
+                round(fields_with_refs / fields_total * 100, 1)
+                if fields_total > 0 else 0.0
+            )
+        except Exception:
+            pass
+    elif isinstance(output, dict):
+        output["citation_stats"] = {
+            "total_citations": len(all_refs),
+            "valid_citations": valid,
+            "invalid_citations": len(all_refs) - valid,
+            "coverage_percentage": (
+                round(fields_with_refs / fields_total * 100, 1)
+                if fields_total > 0 else 0.0
+            ),
+        }
+
+    logger.info(
+        "CITATION_STATS total=%d valid=%d invalid=%d coverage=%.1f%% fields=%d/%d",
+        len(all_refs), valid, len(all_refs) - valid,
+        round(fields_with_refs / fields_total * 100, 1) if fields_total else 0,
+        fields_with_refs, fields_total,
     )
 
 

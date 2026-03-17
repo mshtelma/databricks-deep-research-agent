@@ -134,42 +134,79 @@ class DefaultQueryPolicy:
 
 
 class WebSearchQueryPolicy(DefaultQueryPolicy):
+    """Pass-through policy that trusts the react-loop LLM's search queries.
+
+    The react-loop LLM has full research context and generates targeted queries.
+    This policy passes them through with only length normalization.
+    Regex-based entity extraction is intentionally removed — the LLM IS
+    the query optimizer.
+    """
+
     def build_query_plan(self, definition: ToolDefinition, need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
         key = "query" if "query" in raw_arguments else "question"
-        entities = " ".join(need.entities[:3])
-        terms = " ".join(need.focus_terms[:6])
-        query = " ".join(part for part in [entities, terms] if part).strip() or str(raw_arguments.get(key, ""))
-        query = " ".join(query.split()[:14])
+        raw_query = str(raw_arguments.get(key, "")).strip()
+
+        # Use the LLM's query directly — it has full research context
+        query = raw_query or need.step_text or need.root_query
+
+        # Length-cap only: search engines handle up to ~32 words well
+        words = query.split()
+        if len(words) > 32:
+            query = " ".join(words[:32])
+
         updated = dict(raw_arguments)
         updated[key] = query
-        alternates: list[dict[str, Any]] = []
-        if need.comparison_target:
-            alternates.append({**updated, key: " ".join(x for x in [entities, need.comparison_target, terms] if x).strip()})
-        return QueryPlan(arguments=updated, alternate_argument_sets=alternates, query_strategy="web_compact", rendered_query_text=query)
+
+        return QueryPlan(
+            arguments=updated,
+            query_strategy="web_passthrough",
+            rendered_query_text=query,
+        )
 
     def assess_result(self, definition: ToolDefinition, result: ToolResult, need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
-        accepted, rejected = [], []
+        """Classify web search results by content quality, not just URL validity."""
+        substantive, low_value, rejected = [], [], []
+
         for src in raw_sources:
-            if str(src.get("url", "")).startswith(("http://", "https://")):
-                accepted.append(src)
-            else:
+            url = str(src.get("url", ""))
+            snippet = str(src.get("snippet") or src.get("content") or "")
+
+            if not url.startswith(("http://", "https://")):
                 rejected.append(src)
-        quality = EvidenceQuality.snippet_only if accepted else EvidenceQuality.empty
+            elif len(snippet.strip()) > 50:
+                substantive.append(src)
+            else:
+                low_value.append(src)
+
+        if substantive:
+            quality = EvidenceQuality.snippet_only
+        elif low_value:
+            quality = EvidenceQuality.metadata_only
+        else:
+            quality = EvidenceQuality.empty
+
         return RetrievalOutcome(
             content=result.content,
             raw_sources=raw_sources,
-            accepted_sources=accepted,
-            accepted_substantive_sources=accepted,
-            accepted_low_value_sources=[],
+            accepted_sources=substantive + low_value,
+            accepted_substantive_sources=substantive,
+            accepted_low_value_sources=low_value,
             rejected_sources=rejected,
             evidence_quality=quality,
-            failure_mode=FailureMode.none if accepted else FailureMode.low_relevance,
-            sufficient_for_step=bool(accepted),
-            needs_adaptation=not bool(accepted),
-            adaptation_hint="shorten public query and vary entity/benchmark framing" if not accepted else "",
+            failure_mode=(
+                FailureMode.none if substantive
+                else FailureMode.low_relevance if low_value
+                else FailureMode.empty_result
+            ),
+            sufficient_for_step=bool(substantive),
+            needs_adaptation=not bool(substantive),
+            adaptation_hint=(
+                "try different query phrasing or broaden search terms"
+                if not substantive else ""
+            ),
             admission_summary={
-                "accepted_substantive_count": len(accepted),
-                "accepted_low_value_count": 0,
+                "accepted_substantive_count": len(substantive),
+                "accepted_low_value_count": len(low_value),
             },
         )
 

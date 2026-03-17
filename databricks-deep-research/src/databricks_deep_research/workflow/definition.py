@@ -209,6 +209,24 @@ class WorkflowDefinition(BaseModel):
             "from_yaml is not yet implemented -- see workflow.loader"
         )
 
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> WorkflowDefinition:
+        """Build a workflow definition from a plain dictionary.
+
+        .. note::
+           This is a stub.  The full implementation -- including schema
+           validation, node-type-specific config parsing, and pool resolution
+           -- lives in :pymod:`databricks_deep_research.workflow.loader`.
+
+        Raises
+        ------
+        NotImplementedError
+            Always, until ``loader.py`` is wired up.
+        """
+        raise NotImplementedError(
+            "from_dict is not yet implemented -- see workflow.loader"
+        )
+
     def to_yaml(self, path: str | Path) -> None:
         """Serialise this workflow definition to a YAML file.
 

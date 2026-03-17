@@ -15,6 +15,7 @@ handling) are handled here.  The framework handles workflow execution.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import traceback
@@ -30,6 +31,7 @@ from databricks_deep_research.events.types import (
     WorkflowCompletedEvent as FwkWorkflowCompletedEvent,
 )
 from databricks_deep_research.workflow.context import ExecutionContext
+from databricks_deep_research.workflow.definition import WorkflowDefinition
 from databricks_deep_research.workflow.executor import WorkflowExecutor
 from databricks_deep_research.workflow.state import WorkflowState
 
@@ -62,7 +64,7 @@ except ImportError:
     _SpanType = None  # type: ignore[misc, assignment]
 
 if TYPE_CHECKING:
-    from deep_research.agent.orchestrator import OrchestrationConfig
+    from deep_research.agent.orchestration_config import OrchestrationConfig
     from deep_research.agent.tools.web_crawler import WebCrawler
 
 try:
@@ -80,6 +82,100 @@ logger = logging.getLogger(__name__)
 # Regex matching [N] numeric citation markers produced by the framework synthesizer.
 # Captures the integer N.  Matches [1], [12], [1][2], etc.
 _NUMERIC_CITATION_RE = __import__("re").compile(r"\[(\d+)\]")
+
+
+def _resolve_workflow(
+    config: OrchestrationConfig,
+    tool_names: list[str],
+    plugin_manager: PluginManager | None,
+) -> WorkflowDefinition:
+    """Resolve workflow: plugin YAML when workflow_ref is set, else config_translator.
+
+    When workflow_ref is None or empty, calls translate() (zero behavioral change).
+    When set, iterates WorkflowProviderPlugin plugins for YAML content.
+    If no plugin resolves the ref, raises ValueError (strict — no silent fallback).
+    """
+    ref = config.workflow_ref
+    if not ref:
+        return translate(config, available_tools=tool_names)
+
+    from databricks_deep_research import load_workflow_from_string
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    from deep_research.plugins.base import WorkflowProviderPlugin
+
+    if plugin_manager is not None:
+        for plugin in plugin_manager.get_plugins():
+            if not isinstance(plugin, WorkflowProviderPlugin):
+                continue
+            try:
+                result = plugin.get_workflow_yaml(ref)
+                if result is not None:
+                    logger.info(
+                        "WORKFLOW_PLUGIN_RESOLVED ref=%s plugin=%s type=%s",
+                        ref,
+                        getattr(plugin, "name", type(plugin).__name__),
+                        type(result).__name__,
+                    )
+                    # Accept str (YAML), dict, or WorkflowDefinition
+                    if isinstance(result, WorkflowDefinition):
+                        defn = result
+                    elif isinstance(result, dict):
+                        defn = load_workflow_from_dict(result)
+                    else:
+                        defn = load_workflow_from_string(result)
+                    _filter_workflow_tools(defn, tool_names)
+                    return defn
+            except Exception:
+                logger.exception(
+                    "WORKFLOW_PLUGIN_ERROR ref=%s plugin=%s",
+                    ref,
+                    getattr(plugin, "name", type(plugin).__name__),
+                )
+
+    raise ValueError(
+        f"workflow_ref={ref!r} set but no plugin resolved it. "
+        f"Registered plugins: {[p.name for p in (plugin_manager.get_plugins() if plugin_manager else [])]}"
+    )
+
+
+def _filter_workflow_tools(
+    defn: WorkflowDefinition, available_tools: list[str]
+) -> None:
+    """Intersect agent node tool lists with runtime-available tools.
+
+    Walks the workflow tree. For each agent node with a tools config,
+    removes tool names that aren't in available_tools.
+    """
+    available = set(available_tools)
+    _filter_node_tools(defn.root, available)
+
+
+def _filter_node_tools(node: Any, available: set[str]) -> None:
+    """Recursively filter tools on agent nodes."""
+    if node.type.value == "agent":
+        tools = node.config.get("tools")
+        if isinstance(tools, list):
+            filtered = [t for t in tools if t in available]
+            if len(filtered) != len(tools):
+                removed = set(tools) - set(filtered)
+                logger.info(
+                    "WORKFLOW_TOOLS_FILTERED node=%s removed=%s",
+                    node.id,
+                    sorted(removed),
+                )
+            node.config["tools"] = filtered
+
+    for child in node.children:
+        _filter_node_tools(child, available)
+
+    # Handle plan_and_execute body node
+    if node.type.value == "plan_and_execute":
+        body = node.config.get("body")
+        if hasattr(body, "config"):
+            tools = body.config.get("tools")
+            if isinstance(tools, list):
+                body.config["tools"] = [t for t in tools if t in available]
 
 
 async def stream_research_via_framework(
@@ -118,17 +214,18 @@ async def stream_research_via_framework(
     Yields:
         StreamEvent objects and synthesis content chunks (strings).
     """
-    from deep_research.agent.orchestrator import (
-        _get_default_orchestration_config,
+    from deep_research.agent.orchestration_config import (
+        get_default_orchestration_config,
     )
 
-    config = config or _get_default_orchestration_config()
+    config = config or get_default_orchestration_config()
     start_time = time.perf_counter()
     event_buffer: EventBuffer | None = None
     steps_executed = 0
     steps_skipped = 0
     plan_iterations = 0
     final_report: str | None = None
+    structured_output: dict | None = None
     simple_response: str | None = None
     _synthesis_chunks: list[str] = []
     wf_state: WorkflowState | None = None
@@ -237,6 +334,41 @@ async def stream_research_via_framework(
                     user_id=user_id,
                 )
 
+                # Merge plugin-provided tools so YAML workflows can reference
+                # them.  Plugin tools (e.g., sfdc_context) aren't created by
+                # create_framework_tools but are needed by custom workflow steps.
+                if plugin_manager:
+                    from deep_research.agent.tools.base import (
+                        ResearchContext as _ToolCtx,
+                    )
+
+                    _tool_ctx = _ToolCtx(
+                        chat_id=session_id or uuid4(),
+                        user_id=user_id or "system",
+                        research_type=config.research_depth or "medium",
+                    )
+                    _existing = {t.definition.name for t in framework_tools}
+                    for _plugin in plugin_manager.get_plugins():
+                        if not hasattr(_plugin, "get_tools"):
+                            continue
+                        try:
+                            for _tool in _plugin.get_tools(_tool_ctx):
+                                if _tool.definition.name not in _existing:
+                                    framework_tools.append(_tool)
+                                    _existing.add(_tool.definition.name)
+                                    logger.info(
+                                        "PLUGIN_TOOL_MERGED tool=%s plugin=%s",
+                                        _tool.definition.name,
+                                        getattr(
+                                            _plugin, "name", type(_plugin).__name__
+                                        ),
+                                    )
+                        except Exception:
+                            logger.exception(
+                                "PLUGIN_TOOL_MERGE_ERROR plugin=%s",
+                                getattr(_plugin, "name", type(_plugin).__name__),
+                            )
+
                 # Build ToolResolver with all tools registered as overrides.
                 # This replaces the old ToolRegistry approach — the resolver
                 # handles both name-string refs (new) and dict refs (legacy).
@@ -267,7 +399,7 @@ async def stream_research_via_framework(
                             tool_names,
                         )
 
-                workflow_def = translate(config, available_tools=tool_names)
+                workflow_def = _resolve_workflow(config, tool_names, plugin_manager)
 
                 logger.info(
                     "FWK_WORKFLOW_TRANSLATED workflow_id=%s tool_names=%s",
@@ -353,6 +485,13 @@ async def stream_research_via_framework(
                                         "FWK_FINAL_REPORT_CAPTURED len=%d",
                                         len(final_report),
                                     )
+                                if fw_event.structured_output is not None:
+                                    structured_output = fw_event.structured_output
+                                    logger.info("FWK_STRUCTURED_OUTPUT_CAPTURED type=%s", type(structured_output).__name__)
+                                    # Ensure final_report is valid JSON (not __repr__) when
+                                    # structured output exists, so DB-persisted message.content
+                                    # is parseable by parseStructuredOutput() on reload.
+                                    final_report = json.dumps(structured_output, default=str)
 
                             # Periodic persistence
                             if tracker.should_persist():
@@ -439,7 +578,7 @@ async def stream_research_via_framework(
 
                     extracted_claims = framework_claims
                     effective_summary = framework_summary
-                    if not extracted_claims and effective_summary is None:
+                    if not extracted_claims and effective_summary is None and structured_output is None:
                         extracted_claims, effective_summary = (
                             _extract_verification_from_report(
                                 final_report,
@@ -537,6 +676,7 @@ async def stream_research_via_framework(
         plan_iterations=plan_iterations,
         total_duration_ms=total_duration_ms,
         final_report=final_report,
+        structured_output=structured_output,
     )
 
 

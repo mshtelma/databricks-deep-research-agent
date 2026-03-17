@@ -17,7 +17,7 @@ from databricks_deep_research.workflow.definition import (
 )
 
 if TYPE_CHECKING:
-    from deep_research.agent.orchestrator import OrchestrationConfig
+    from deep_research.agent.orchestration_config import OrchestrationConfig
 
 logger = logging.getLogger(__name__)
 

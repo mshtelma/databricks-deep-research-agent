@@ -282,6 +282,10 @@ class CreateCustomAgentRequest(BaseSchema):
     source_query_configs: dict[str, dict[str, Any]] | None = None
     """Per-source query configs. Keys are source names, values are query config overrides."""
 
+    # Plugin workflow reference (012-workflow-provider)
+    workflow_ref: str | None = None
+    """Named workflow to resolve from plugins instead of config_translator."""
+
     # Optionally create preset steps inline
     preset_steps: list[CreatePresetStepRequest] = Field(default_factory=list)
     """Preset steps to create with the agent."""
@@ -359,6 +363,10 @@ class UpdateCustomAgentRequest(BaseSchema):
     # Per-source query configuration (009-custom-agent-config M5)
     source_query_configs: dict[str, dict[str, Any]] | None = None
     """Updated per-source query configs."""
+
+    # Plugin workflow reference (012-workflow-provider)
+    workflow_ref: str | None = None
+    """Updated workflow ref."""
 
     @model_validator(mode="after")
     def _validate_domain_filter(self) -> "UpdateCustomAgentRequest":
@@ -444,6 +452,10 @@ class CustomAgentResponse(BaseSchema):
     # Per-source query configuration (009-custom-agent-config M5)
     source_query_configs: dict[str, dict[str, Any]] | None = None
     """Per-source query configs."""
+
+    # Plugin workflow reference (012-workflow-provider)
+    workflow_ref: str | None = None
+    """Named workflow to resolve from plugins."""
 
     model_override_warnings: list[dict[str, str]] = Field(default_factory=list)
     """Warnings for model overrides referencing unknown endpoints."""

@@ -126,6 +126,13 @@ class TestResolve:
         runner._resolve(Path("path.yaml"))
         mock_load.assert_called_once_with("path.yaml")
 
+    @patch("databricks_deep_research.runner.load_workflow_from_dict")
+    def test_dict_calls_load_workflow_from_dict(self, mock_load: MagicMock) -> None:
+        mock_load.return_value = _make_definition()
+        runner = WorkflowRunner(llm_client=_make_mock_client())
+        runner._resolve({"id": "test", "name": "Test", "root": {}})
+        mock_load.assert_called_once_with({"id": "test", "name": "Test", "root": {}})
+
 
 # ===================================================================
 # WorkflowRunner.run
