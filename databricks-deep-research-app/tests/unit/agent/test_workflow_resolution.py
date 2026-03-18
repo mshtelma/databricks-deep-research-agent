@@ -143,6 +143,26 @@ class TestResolveWorkflow:
         good_plugin.get_workflow_yaml.assert_called_once_with("my_workflow")
         assert result.id == "test-plugin-wf"
 
+    def test_plugin_returns_malformed_yaml_raises_with_context(self) -> None:
+        """Plugin that claims ref but returns bad YAML should raise ValueError with plugin name."""
+        config = _make_config(workflow_ref="bad_wf")
+        plugin = _make_plugin(name="broken_plugin", yaml_content="{{invalid yaml: [")
+        pm = _make_plugin_manager([plugin])
+
+        with pytest.raises(ValueError, match="broken_plugin.*claimed.*bad_wf.*unparseable"):
+            _resolve_workflow(config, ["web_search"], pm)
+
+    def test_plugin_returns_malformed_dict_raises_with_context(self) -> None:
+        """Plugin that claims ref but returns invalid dict should raise ValueError with plugin name."""
+        config = _make_config(workflow_ref="bad_dict_wf")
+        plugin = _make_plugin(name="dict_plugin")
+        # Return a dict missing required fields instead of YAML string
+        plugin.get_workflow_yaml.return_value = {"not": "a valid workflow"}
+        pm = _make_plugin_manager([plugin])
+
+        with pytest.raises(ValueError, match="dict_plugin.*claimed.*bad_dict_wf.*unparseable"):
+            _resolve_workflow(config, ["web_search"], pm)
+
     def test_first_plugin_wins(self) -> None:
         """First plugin returning YAML wins; subsequent plugins not called."""
         config = _make_config(workflow_ref="my_workflow")

@@ -251,7 +251,7 @@ async def run_plan_execute(
                     node_id=node.id,
                     timestamp=deps.now(),
                     item_index=idx,
-                    item_summary=str(item)[:200],
+                    item_summary=(item.get("title") or str(item))[:200] if isinstance(item, dict) else str(item)[:200],
                     total_items=len(items),
                 )
             )
@@ -261,7 +261,7 @@ async def run_plan_execute(
             async with trace_span(
                 f"item_{idx}",
                 span_type="CHAIN",
-                attributes={"item.index": idx, "item.summary": str(item)[:200]},
+                attributes={"item.index": idx, "item.summary": (item.get("title") or str(item))[:200] if isinstance(item, dict) else str(item)[:200]},
             ):
                 if config.body:
                     body_node = WorkflowNode(**config.body)

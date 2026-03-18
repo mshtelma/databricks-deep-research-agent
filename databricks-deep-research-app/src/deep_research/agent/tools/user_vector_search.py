@@ -114,6 +114,7 @@ class UserVectorSearchTool:
         description: str | None = None,
         query_config: VectorSearchQueryConfig | None = None,
         source_name: str | None = None,
+        column_roles: ColumnRoles | None = None,
     ) -> None:
         """Initialize the Vector Search tool.
 
@@ -173,8 +174,8 @@ class UserVectorSearchTool:
         # Shared query service
         self._query_service = VectorSearchQueryService()
 
-        # Column role mapping — populated by _discover_columns() on first execute
-        self._column_roles: ColumnRoles | None = None
+        # Column role mapping — from enrichment or populated by _discover_columns()
+        self._column_roles: ColumnRoles | None = column_roles
 
     @property
     def definition(self) -> ToolDefinition:
@@ -335,11 +336,19 @@ class UserVectorSearchTool:
                             success=False,
                             error="Column discovery failed",
                         )
+                elif not self._column_roles:
+                    # Columns known (from enrichment/config) but roles missing.
+                    # Discover roles so the parser maps content correctly.
+                    await self._discover_columns(client)
 
                 logger.info(
                     "VECTOR_SEARCH_USING_WORKSPACE_CLIENT",
                     index=self._index_name,
+                    query=query[:80],
                     query_type=self._resolve_query_type(),
+                    columns=self._columns[:5] if self._columns else [],
+                    content_column=self._column_roles.content_column if self._column_roles else None,
+                    has_column_roles=self._column_roles is not None,
                     obo_authenticated=context.user_token is not None,
                 )
 
@@ -404,11 +413,23 @@ class UserVectorSearchTool:
                 unique_results = self._deduplicate_results(results)
                 result_count = len(unique_results)
 
+                logger.info(
+                    "VECTOR_SEARCH_RAW_RESULTS",
+                    index=self._index_name,
+                    query=query[:80],
+                    raw_count=len(unique_results),
+                )
+
                 # Build sources for citation tracking
                 sources: list[dict[str, Any]] = []
                 formatted_results: list[str] = []
 
                 for idx, result in enumerate(unique_results):
+                    # Skip results with empty content (edge case: content_column
+                    # exists but individual rows have NULL content).
+                    if not result.content or not result.content.strip():
+                        continue
+
                     # Build navigable workspace URL
                     if result.url:
                         source_url = result.url
@@ -452,7 +473,28 @@ class UserVectorSearchTool:
                         f"    {result.content}"
                     )
 
-                content = f"Found {len(unique_results)} results from {self._source_name}:\n\n"
+                # Accurate count after filtering empty results
+                result_count = len(sources)
+                if result_count < len(unique_results):
+                    logger.warning(
+                        "VECTOR_SEARCH_EMPTY_RESULTS_FILTERED",
+                        index=self._index_name,
+                        query=query[:80],
+                        total=len(unique_results),
+                        skipped=len(unique_results) - result_count,
+                        content_column=self._column_roles.content_column if self._column_roles else None,
+                        has_column_roles=self._column_roles is not None,
+                    )
+
+                logger.info(
+                    "VECTOR_SEARCH_RESULTS_ACCEPTED",
+                    index=self._index_name,
+                    query=query[:80],
+                    accepted=result_count,
+                    total=len(unique_results),
+                )
+
+                content = f"Found {result_count} results from {self._source_name}:\n\n"
                 content += "\n\n".join(formatted_results)
 
                 # Update span with final metrics
@@ -534,7 +576,9 @@ class UserVectorSearchTool:
         """Discover queryable columns via get_index() on first execute.
 
         Called when self._columns is empty (no column info from discovery or config).
-        Populates both self._columns and self._column_roles.
+        Populates both self._columns and self._column_roles only when a content
+        column is found — otherwise the tool stays disabled (empty self._columns
+        triggers the guard at execute()).
 
         One-time cost: ~1s per index. Results are cached on the tool instance.
         """
@@ -546,14 +590,24 @@ class UserVectorSearchTool:
             )
             roles = extract_queryable_columns(index)
             if roles and roles.all_columns:
-                self._columns = roles.all_columns
+                if roles.content_column is None:
+                    logger.warning(
+                        "VECTOR_SEARCH_SOURCE_DISABLED",
+                        index=self._index_name,
+                        reason="no_content_column",
+                        columns=roles.all_columns[:10],
+                        id_column=roles.id_column,
+                    )
+                    return  # self._columns stays empty → guard at execute() fires
+                if not self._columns:
+                    self._columns = roles.all_columns
                 self._column_roles = roles
                 logger.info(
-                    "VECTOR_SEARCH_COLUMNS_DISCOVERED",
+                    "VECTOR_SEARCH_COLUMNS_ACTIVE",
                     index=self._index_name,
-                    columns=roles.all_columns[:10],
-                    id_column=roles.id_column,
                     content_column=roles.content_column,
+                    id_column=roles.id_column,
+                    columns=roles.all_columns[:10],
                 )
             else:
                 logger.warning(

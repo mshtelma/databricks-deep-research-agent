@@ -520,6 +520,18 @@ class JobManager:
                                 ),
                             },
                         )
+                    elif len(providers) > 1:
+                        logger.warning(
+                            "OUTPUT_TYPE_AUTO_RESOLVE_AMBIGUOUS",
+                            extra={
+                                "provider_count": len(providers),
+                                "plugins": [
+                                    getattr(p, "name", type(p).__name__)
+                                    for p in providers
+                                ],
+                                "note": "Set output_type explicitly to resolve ambiguity.",
+                            },
+                        )
                 except Exception:
                     logger.exception("OUTPUT_TYPE_AUTO_RESOLVE_FAILED")
 

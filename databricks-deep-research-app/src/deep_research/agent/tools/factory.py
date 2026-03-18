@@ -255,6 +255,7 @@ def _create_vs_from_discovery(
 ) -> ResearchTool | None:
     """Create UserVectorSearchTool from a DiscoveredSource."""
     from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
+    from deep_research.services.vector_search_query import ColumnRoles
 
     metadata = source.metadata
     index_name = metadata.get("index_name", source.endpoint_name)
@@ -263,6 +264,22 @@ def _create_vs_from_discovery(
     # Use pre-discovered columns if available (from discovery enrichment).
     # If empty/missing, tool will discover at query time via get_index().
     columns = metadata.get("queryable_columns") or None
+    content_column = metadata.get("content_column")
+    primary_key = metadata.get("primary_key", "id")
+
+    # Construct ColumnRoles from enrichment metadata so the query parser
+    # maps the actual content column (e.g. "text_content"), not the
+    # hardcoded legacy name "content".
+    column_roles: ColumnRoles | None = None
+    if columns and content_column:
+        column_roles = ColumnRoles(
+            id_column=primary_key,
+            content_column=content_column,
+            all_columns=columns,
+        )
+
+    # Reranking target: the content column is what should be reranked
+    columns_to_rerank = [content_column] if content_column else []
 
     return UserVectorSearchTool(
         obo_client=obo_client,
@@ -270,6 +287,8 @@ def _create_vs_from_discovery(
         endpoint_name=endpoint_name,
         index_name=index_name,
         columns=columns,
+        columns_to_rerank=columns_to_rerank,
+        column_roles=column_roles,
         enable_hybrid="hybrid" in source.capabilities,
         enable_reranking="reranking" in source.capabilities,
         description=source.description,

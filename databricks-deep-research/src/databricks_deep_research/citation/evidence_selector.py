@@ -136,6 +136,9 @@ _NAV = [
     "advertisement", "sponsored content", "related articles",
     "you might also like", "share this article",
 ]
+_PLACEHOLDER_VALUES = frozenset({
+    "untitled", "unknown", "n/a", "na", "none", "null", "",
+})
 _NUM_RE = [
     r"\$[\d,]+(?:\.\d+)?", r"\d+(?:\.\d+)?%", r"\b\d{4}\b",
     r"\b\d+(?:,\d{3})+(?:\.\d+)?\b", r"\b\d+\.\d+\b",
@@ -304,7 +307,10 @@ class EvidenceSelector:
             source_pool_index = src.get("source_pool_index")
 
             if not content and snippet:
-                score = _keyword_relevance(query, snippet) if query else 0.5
+                snippet_stripped = snippet.strip()
+                if len(snippet_stripped) < 20 or snippet_stripped.lower() in _PLACEHOLDER_VALUES:
+                    continue
+                score = _keyword_relevance(query, snippet_stripped) if query else 0.5
                 has_num = _has_numeric(snippet)
                 if has_num:
                     score = min(1.0, score + self._cfg.numeric_content_boost)

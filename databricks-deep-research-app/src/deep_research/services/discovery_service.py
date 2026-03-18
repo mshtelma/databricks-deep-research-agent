@@ -221,18 +221,8 @@ class DiscoveryService:
                     )
                     sources.append(source)
 
-            # Enrich up to MAX_ENRICHMENT_INDEXES sources with column info.
-            # This is an optimization — tools fall back to query-time discovery if skipped.
-            MAX_ENRICHMENT_INDEXES = 10
-            ENRICHMENT_TIMEOUT = 8.0  # seconds
-
             if sources:
-                sources = await self._enrich_with_columns(
-                    sources,
-                    user_token,
-                    max_to_enrich=MAX_ENRICHMENT_INDEXES,
-                    timeout=ENRICHMENT_TIMEOUT,
-                )
+                sources = await self._enrich_with_columns(sources, user_token)
 
             logger.info("VS_DISCOVERY_COMPLETE", source_count=len(sources))
             return sources, None
@@ -258,27 +248,26 @@ class DiscoveryService:
         self,
         sources: list[DiscoveredSource],
         user_token: str | None,
-        max_to_enrich: int = 10,
-        timeout: float = 8.0,
     ) -> list[DiscoveredSource]:
-        """Best-effort column enrichment for a bounded subset of sources.
+        """Validate and enrich all VS sources with column info.
 
-        Only enriches first max_to_enrich sources. Remaining keep empty columns
-        and will be discovered at query time by the tool.
+        Every source is checked via get_index(). Sources without a discoverable
+        content column are filtered — they produce empty results and "Untitled"
+        entries in the citation pipeline.
         """
         from deep_research.services.vector_search_query import extract_queryable_columns
 
         client = await self._get_client(user_token)
         loop = asyncio.get_event_loop()
-        semaphore = asyncio.Semaphore(5)  # Max 5 concurrent get_index() calls
+        semaphore = asyncio.Semaphore(10)
 
-        async def enrich_one(source: DiscoveredSource) -> DiscoveredSource:
+        async def enrich_one(source: DiscoveredSource) -> DiscoveredSource | None:
             index_name = source.metadata.get("index_name", "")
             if not index_name:
                 return source
             async with semaphore:
                 try:
-                    idx_name = index_name  # capture for lambda
+                    idx_name = index_name
 
                     index = await loop.run_in_executor(
                         None,
@@ -286,43 +275,45 @@ class DiscoveryService:
                     )
                     roles = extract_queryable_columns(index)
                     if roles and roles.all_columns:
+                        if roles.content_column is None:
+                            logger.warning(
+                                "VS_SOURCE_NO_CONTENT_COLUMN",
+                                index=index_name,
+                                columns=roles.all_columns[:10],
+                                id_column=roles.id_column,
+                            )
+                            return None
                         metadata = dict(source.metadata)
                         metadata["queryable_columns"] = roles.all_columns
+                        metadata["content_column"] = roles.content_column
                         return source.model_copy(update={"metadata": metadata})
+                    return None
                 except Exception as e:
                     logger.debug(
                         "VS_ENRICHMENT_SKIP",
                         index=index_name,
                         error=str(e)[:100],
                     )
-            return source
+            return None
 
-        # Enrich only the first max_to_enrich
-        to_enrich = sources[:max_to_enrich]
-        passthrough = sources[max_to_enrich:]
-
-        try:
-            enriched = await asyncio.wait_for(
-                asyncio.gather(
-                    *[enrich_one(s) for s in to_enrich],
-                    return_exceptions=True,
-                ),
-                timeout=timeout,
-            )
-            result: list[DiscoveredSource] = []
-            for i, r in enumerate(enriched):
-                result.append(r if not isinstance(r, Exception) else to_enrich[i])
-            result.extend(passthrough)
-            enriched_count = len([r for r in enriched if not isinstance(r, Exception)])
-            logger.info(
-                "VS_ENRICHMENT_COMPLETE",
-                enriched=enriched_count,
-                total=len(sources),
-            )
-            return result
-        except asyncio.TimeoutError:
-            logger.warning("VS_ENRICHMENT_TIMEOUT", timeout=timeout)
-            return sources  # Return originals on timeout
+        enriched = await asyncio.gather(
+            *[enrich_one(s) for s in sources],
+            return_exceptions=True,
+        )
+        result: list[DiscoveredSource] = []
+        filtered_count = 0
+        for r in enriched:
+            if r is None or isinstance(r, Exception):
+                filtered_count += 1
+                continue
+            result.append(r)
+        logger.info(
+            "VS_ENRICHMENT_COMPLETE",
+            enriched=len(result),
+            filtered=filtered_count,
+            total=len(sources),
+        )
+        return result
 
     def _extract_vector_search_metadata(
         self,

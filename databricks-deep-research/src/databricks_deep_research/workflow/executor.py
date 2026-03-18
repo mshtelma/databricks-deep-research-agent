@@ -433,7 +433,7 @@ class WorkflowExecutor:
             report_value = state.get("report") or state.get("output")
             structured = None
             if isinstance(report_value, BaseModel):
-                structured = report_value.model_dump()
+                structured = report_value.model_dump(mode="json")
             elif isinstance(report_value, dict) and report_value.get("output_type"):
                 structured = report_value
 

@@ -108,30 +108,43 @@ def _resolve_workflow(
         for plugin in plugin_manager.get_plugins():
             if not isinstance(plugin, WorkflowProviderPlugin):
                 continue
+
+            # Scope 1: plugin lookup — failures are non-fatal (try next plugin)
             try:
                 result = plugin.get_workflow_yaml(ref)
-                if result is not None:
-                    logger.info(
-                        "WORKFLOW_PLUGIN_RESOLVED ref=%s plugin=%s type=%s",
-                        ref,
-                        getattr(plugin, "name", type(plugin).__name__),
-                        type(result).__name__,
-                    )
-                    # Accept str (YAML), dict, or WorkflowDefinition
-                    if isinstance(result, WorkflowDefinition):
-                        defn = result
-                    elif isinstance(result, dict):
-                        defn = load_workflow_from_dict(result)
-                    else:
-                        defn = load_workflow_from_string(result)
-                    _filter_workflow_tools(defn, tool_names)
-                    return defn
             except Exception:
                 logger.exception(
-                    "WORKFLOW_PLUGIN_ERROR ref=%s plugin=%s",
+                    "WORKFLOW_PLUGIN_LOOKUP_ERROR ref=%s plugin=%s",
                     ref,
                     getattr(plugin, "name", type(plugin).__name__),
                 )
+                continue  # try next plugin
+
+            if result is None:
+                continue  # this plugin doesn't own the ref
+
+            logger.info(
+                "WORKFLOW_PLUGIN_RESOLVED ref=%s plugin=%s type=%s",
+                ref,
+                getattr(plugin, "name", type(plugin).__name__),
+                type(result).__name__,
+            )
+
+            # Scope 2: YAML/dict loading — failures ARE fatal (plugin claimed the ref)
+            try:
+                if isinstance(result, WorkflowDefinition):
+                    defn = result
+                elif isinstance(result, dict):
+                    defn = load_workflow_from_dict(result)
+                else:
+                    defn = load_workflow_from_string(result)
+            except Exception as exc:
+                raise ValueError(
+                    f"Plugin {getattr(plugin, 'name', type(plugin).__name__)!r} claimed "
+                    f"ref={ref!r} but returned unparseable workflow: {exc}"
+                ) from exc
+            _filter_workflow_tools(defn, tool_names)
+            return defn
 
     raise ValueError(
         f"workflow_ref={ref!r} set but no plugin resolved it. "
@@ -145,15 +158,30 @@ def _filter_workflow_tools(
     """Intersect agent node tool lists with runtime-available tools.
 
     Walks the workflow tree. For each agent node with a tools config,
-    removes tool names that aren't in available_tools.
+    removes tool names that aren't in available_tools or declared in
+    the workflow's tools section (resolvable via factory chain).
     """
     available = set(available_tools)
+    # YAML-declared tools are resolvable via the factory chain at execution
+    # time — don't strip them from agent nodes.
+    declared_names = {t.name for t in defn.tools} if defn.tools else set()
+    if declared_names:
+        available |= declared_names
+    logger.debug(
+        "WORKFLOW_TOOLS_FILTER_START runtime_tools=%d declared_tools=%s "
+        "total_available=%d",
+        len(available_tools),
+        sorted(declared_names),
+        len(available),
+    )
     _filter_node_tools(defn.root, available)
 
 
 def _filter_node_tools(node: Any, available: set[str]) -> None:
     """Recursively filter tools on agent nodes."""
-    if node.type.value == "agent":
+    from databricks_deep_research.workflow.definition import NodeType, WorkflowNode
+
+    if node.type == NodeType.agent:
         tools = node.config.get("tools")
         if isinstance(tools, list):
             filtered = [t for t in tools if t in available]
@@ -170,9 +198,9 @@ def _filter_node_tools(node: Any, available: set[str]) -> None:
         _filter_node_tools(child, available)
 
     # Handle plan_and_execute body node
-    if node.type.value == "plan_and_execute":
+    if node.type == NodeType.plan_and_execute:
         body = node.config.get("body")
-        if hasattr(body, "config"):
+        if isinstance(body, WorkflowNode):
             tools = body.config.get("tools")
             if isinstance(tools, list):
                 body.config["tools"] = [t for t in tools if t in available]
@@ -347,9 +375,11 @@ async def stream_research_via_framework(
                         user_id=user_id or "system",
                         research_type=config.research_depth or "medium",
                     )
+                    from deep_research.plugins.base import ToolProvider as _ToolProvider
+
                     _existing = {t.definition.name for t in framework_tools}
                     for _plugin in plugin_manager.get_plugins():
-                        if not hasattr(_plugin, "get_tools"):
+                        if not isinstance(_plugin, _ToolProvider):
                             continue
                         try:
                             for _tool in _plugin.get_tools(_tool_ctx):
@@ -368,15 +398,6 @@ async def stream_research_via_framework(
                                 "PLUGIN_TOOL_MERGE_ERROR plugin=%s",
                                 getattr(_plugin, "name", type(_plugin).__name__),
                             )
-
-                # Build ToolResolver with all tools registered as overrides.
-                # This replaces the old ToolRegistry approach — the resolver
-                # handles both name-string refs (new) and dict refs (legacy).
-                from databricks_deep_research.tools.resolver import ToolResolver
-
-                tool_resolver = ToolResolver()
-                for tool in framework_tools:
-                    tool_resolver.override(tool.definition.name, tool)
 
                 context = ExecutionContext(
                     llm_client=framework_llm,
@@ -406,6 +427,55 @@ async def stream_research_via_framework(
                     workflow_def.id,
                     tool_names,
                 )
+
+                # Build ToolResolver with YAML declarations + factories so
+                # declared tools (vector_search, genie, etc.) can be created
+                # on-demand by the factory chain.
+                from databricks_deep_research.tools.resolver import ToolResolver
+                from databricks_deep_research.tools.factory import ToolFactoryContext
+                from databricks_deep_research.tools.factories.builtin import (
+                    BuiltinToolFactory,
+                )
+                from databricks_deep_research.tools.factories.databricks import (
+                    DatabricksToolFactory,
+                )
+
+                _ws_client = None
+                if workflow_def.tools:
+                    try:
+                        from deep_research.core.auth import get_workspace_client
+
+                        _ws_client = get_workspace_client()
+                        logger.info(
+                            "FWK_WORKSPACE_CLIENT_OK host=%s",
+                            getattr(_ws_client.config, "host", "unknown"),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "FWK_WORKSPACE_CLIENT_UNAVAILABLE reason=%s — "
+                            "YAML-declared Databricks tools will not be available",
+                            str(exc)[:200],
+                        )
+
+                tool_resolver = ToolResolver(
+                    declarations=list(workflow_def.tools) if workflow_def.tools else None,
+                    # No kind overlap: builtin handles web_search/web_crawl/file_search;
+                    # Databricks handles vector_search/genie/knowledge_assistant.
+                    factories=[BuiltinToolFactory(), DatabricksToolFactory()],
+                    factory_context=ToolFactoryContext(
+                        workspace_client=_ws_client,
+                        user_token=config.user_token,
+                    ),
+                )
+                logger.info(
+                    "FWK_TOOL_RESOLVER_READY declarations=%d "
+                    "workspace_client=%s overrides=%d",
+                    len(workflow_def.tools),
+                    "present" if _ws_client else "MISSING",
+                    len(framework_tools),
+                )
+                for tool in framework_tools:
+                    tool_resolver.override(tool.definition.name, tool)
 
                 # -- 4. Execute workflow and stream events --
                 executor = WorkflowExecutor(
@@ -796,8 +866,8 @@ def _to_sse_event(app_evt: AppSSEEvent) -> StreamEvent | None:
 
             return AppToolCallEvent(
                 tool_name=data.get("tool_name", ""),
-                tool_args={},
-                call_number=0,
+                tool_args=data.get("tool_args", {}),
+                call_number=data.get("call_number", 0),
             )
         elif progress_type == "tool_result":
             from deep_research.schemas.streaming import ToolResultEvent as AppToolResultEvent
@@ -806,6 +876,7 @@ def _to_sse_event(app_evt: AppSSEEvent) -> StreamEvent | None:
                 tool_name=data.get("tool_name", ""),
                 result_preview=data.get("result_summary", ""),
                 sources_crawled=data.get("source_count", 0),
+                sources_added=data.get("sources_added", 0),
             )
         elif progress_type == "claim_verified":
             from deep_research.schemas.streaming import ClaimVerifiedEvent as AppClaimVerified

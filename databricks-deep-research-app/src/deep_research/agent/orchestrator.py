@@ -36,7 +36,7 @@ __all__ = [
     "OrchestrationResult",
     "apply_custom_agent_to_config",
     "get_default_orchestration_config",
-    "_get_default_orchestration_config",
+    "_get_default_orchestration_config",  # backward-compat alias; callers use the private name
     "run_research",
     "stream_research",
 ]

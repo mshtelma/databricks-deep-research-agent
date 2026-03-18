@@ -133,6 +133,30 @@ def mock_serving_endpoint() -> MagicMock:
     return endpoint
 
 
+def _make_enrichable_index(
+    name: str = "catalog.schema.test_index",
+    primary_key: str = "id",
+    content_column: str = "content",
+) -> MagicMock:
+    """Create a mock VectorIndex that passes enrichment (has content_column)."""
+    index = MagicMock()
+    index.name = name
+    index.primary_key = primary_key
+    index.direct_access_index_spec = None
+
+    embedding_col = MagicMock()
+    embedding_col.name = content_column
+
+    spec = MagicMock()
+    spec.embedding_source_columns = [embedding_col]
+    spec.embedding_vector_columns = []
+    spec.schema_json = None
+    spec.columns_to_sync = None
+    index.delta_sync_index_spec = spec
+
+    return index
+
+
 class TestVectorSearchDiscovery:
     """Tests for Vector Search source discovery."""
 
@@ -194,6 +218,11 @@ class TestVectorSearchDiscovery:
         mock_mini_index.primary_key = "id"
         mock_mini_index.index_type = MagicMock(value="DELTA_SYNC")
         mock_client.vector_search_indexes.list_indexes.return_value = [mock_mini_index]
+
+        # Enrichment calls get_index — provide a valid index with content column
+        mock_client.vector_search_indexes.get_index.return_value = _make_enrichable_index(
+            name="catalog.schema.test_idx",
+        )
 
         with patch.object(discovery_service, "_get_client", return_value=mock_client):
             sources, error = await discovery_service.discover_vector_search_sources("test-token")
@@ -355,13 +384,16 @@ class TestParallelDiscovery:
         """Test that discover_all runs all discovery types in parallel."""
         mock_client = MagicMock()
 
-        # Setup VS - use mini index format (no get_index needed)
+        # Setup VS - use mini index format
         mock_client.vector_search_endpoints.list_endpoints.return_value = [mock_vs_endpoint]
         mock_mini_index = MagicMock()
         mock_mini_index.name = "catalog.schema.test_index"
         mock_mini_index.primary_key = "id"
         mock_mini_index.index_type = MagicMock(value="DELTA_SYNC")
         mock_client.vector_search_indexes.list_indexes.return_value = [mock_mini_index]
+
+        # Enrichment needs a valid index with content column
+        mock_client.vector_search_indexes.get_index.return_value = _make_enrichable_index()
 
         # Setup Genie - only list_spaces needed now
         list_response = MagicMock()
@@ -403,6 +435,9 @@ class TestParallelDiscovery:
         mock_mini_index.primary_key = "id"
         mock_mini_index.index_type = MagicMock(value="DELTA_SYNC")
         mock_client.vector_search_indexes.list_indexes.return_value = [mock_mini_index]
+
+        # Enrichment needs a valid index with content column
+        mock_client.vector_search_indexes.get_index.return_value = _make_enrichable_index()
 
         with patch.object(discovery_service, "_get_client", return_value=mock_client):
             response = await discovery_service.discover_all(
@@ -891,23 +926,29 @@ class TestSimplifiedVectorSearchDiscovery:
     """Tests for simplified Vector Search discovery with parallel listing."""
 
     @pytest.mark.asyncio
-    async def test_vs_discovery_bounded_enrichment(
+    async def test_vs_discovery_enriches_all(
         self,
         discovery_service: DiscoveryService,
         mock_vs_endpoint: MagicMock,
     ) -> None:
-        """VS discovery should call get_index() for bounded enrichment."""
+        """VS discovery should call get_index() for every discovered source."""
         mock_client = MagicMock()
 
         # Setup endpoints
         mock_client.vector_search_endpoints.list_endpoints.return_value = [mock_vs_endpoint]
 
-        # Setup mini index
-        mini_index = MagicMock()
-        mini_index.name = "catalog.schema.test_index"
-        mini_index.primary_key = "id"
-        mini_index.index_type = MagicMock(value="DELTA_SYNC")
-        mock_client.vector_search_indexes.list_indexes.return_value = [mini_index]
+        # Setup multiple mini indexes to verify all are enriched
+        mini_indexes = []
+        for i in range(15):
+            idx = MagicMock()
+            idx.name = f"catalog.schema.test_index_{i}"
+            idx.primary_key = "id"
+            idx.index_type = MagicMock(value="DELTA_SYNC")
+            mini_indexes.append(idx)
+        mock_client.vector_search_indexes.list_indexes.return_value = mini_indexes
+
+        # Enrichment needs a valid index with content column
+        mock_client.vector_search_indexes.get_index.side_effect = lambda name: _make_enrichable_index(name=name)
 
         with patch.object(discovery_service, "_get_client", return_value=mock_client):
             sources, error = await discovery_service.discover_vector_search_sources("test-token")
@@ -918,11 +959,11 @@ class TestSimplifiedVectorSearchDiscovery:
         # list_indexes() called once per endpoint
         mock_client.vector_search_indexes.list_indexes.assert_called_once()
 
-        # get_index() IS called during enrichment (bounded to MAX_ENRICHMENT_INDEXES)
-        mock_client.vector_search_indexes.get_index.assert_called_once()
+        # get_index() called for EVERY source, not just first N
+        assert mock_client.vector_search_indexes.get_index.call_count == 15
 
-        # Should still return source
-        assert len(sources) == 1
+        # All sources should be returned
+        assert len(sources) == 15
         assert error is None
 
     @pytest.mark.asyncio
@@ -956,6 +997,9 @@ class TestSimplifiedVectorSearchDiscovery:
 
         mock_client.vector_search_indexes.list_indexes.side_effect = make_list_fn
 
+        # Enrichment needs a valid index with content column for each discovered index
+        mock_client.vector_search_indexes.get_index.side_effect = lambda name: _make_enrichable_index(name=name)
+
         with patch.object(discovery_service, "_get_client", return_value=mock_client):
             sources, error = await discovery_service.discover_vector_search_sources("test-token")
 
@@ -981,6 +1025,11 @@ class TestSimplifiedVectorSearchDiscovery:
         mini_index.primary_key = "doc_id"
         mini_index.index_type = MagicMock(value="DIRECT_ACCESS")
         mock_client.vector_search_indexes.list_indexes.return_value = [mini_index]
+
+        # Enrichment needs a valid index with content column
+        mock_client.vector_search_indexes.get_index.return_value = _make_enrichable_index(
+            name="catalog.schema.my_index", primary_key="doc_id",
+        )
 
         with patch.object(discovery_service, "_get_client", return_value=mock_client):
             sources, error = await discovery_service.discover_vector_search_sources("test-token")

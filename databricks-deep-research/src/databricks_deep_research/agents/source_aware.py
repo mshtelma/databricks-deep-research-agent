@@ -371,6 +371,34 @@ def plan_tool_arguments(
     )
 
 
+def _classify_sources_by_quality(
+    sources: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    """Split sources into (substantive, low_value) and return evidence_quality string.
+
+    Threshold: >80 stripped characters in content/snippet = substantive.
+    """
+    substantive: list[dict[str, Any]] = []
+    low_value: list[dict[str, Any]] = []
+    for src in sources:
+        text = str(src.get("content") or src.get("snippet") or "")
+        if len(text.strip()) > 80:
+            substantive.append(src)
+        else:
+            low_value.append(src)
+
+    if substantive:
+        quality = "full_text"
+    elif low_value:
+        quality = "snippet_only"
+    elif sources:
+        quality = "metadata_only"
+    else:
+        quality = "empty"
+
+    return substantive, low_value, quality
+
+
 def admit_tool_result(
     definition: ToolDefinition,
     result: ToolResult,
@@ -404,23 +432,7 @@ def admit_tool_result(
     if not profile["terms"] and not profile["phrases"]:
         is_valid = result.success and not _tool_result_is_empty_or_error(result)
         early_accepted = raw_sources if is_valid else []
-        # Classify early-accepted sources by content quality
-        early_substantive = []
-        early_low = []
-        for src in early_accepted:
-            ct = str(src.get("content") or src.get("snippet") or "")
-            if len(ct.strip()) > 80:
-                early_substantive.append(src)
-            else:
-                early_low.append(src)
-        if early_substantive:
-            early_eq = "full_text"
-        elif early_low:
-            early_eq = "snippet_only"
-        elif early_accepted:
-            early_eq = "metadata_only"
-        else:
-            early_eq = "empty"
+        early_substantive, early_low, early_eq = _classify_sources_by_quality(early_accepted)
         return AdmittedToolResult(
             content=result.content,
             accepted_sources=early_accepted,
@@ -457,23 +469,7 @@ def admit_tool_result(
         content = result.content
 
     # Classify accepted sources by content quality
-    substantive = []
-    low_value_list = []
-    for src in accepted:
-        content_text = str(src.get("content") or src.get("snippet") or "")
-        if len(content_text.strip()) > 80:
-            substantive.append(src)
-        else:
-            low_value_list.append(src)
-
-    if substantive:
-        eq = "full_text"
-    elif low_value_list:
-        eq = "snippet_only"
-    elif accepted:
-        eq = "metadata_only"
-    else:
-        eq = "empty"
+    substantive, low_value_list, eq = _classify_sources_by_quality(accepted)
 
     return AdmittedToolResult(
         content=content,

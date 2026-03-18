@@ -899,9 +899,75 @@ class TestUserVectorSearchToolColumnDiscovery:
         )
 
     @pytest.mark.asyncio
-    async def test_skips_discovery_when_columns_provided(self) -> None:
-        """Should NOT call get_index() when columns are pre-provided."""
+    async def test_discovers_roles_when_columns_provided_without_roles(self) -> None:
+        """Should call get_index() to discover column_roles even when columns are pre-provided."""
         from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
+
+        mock_obo_client = MagicMock()
+
+        # Mock the index returned by get_index()
+        source_col = MagicMock()
+        source_col.name = "text_content"
+        vector_col = MagicMock()
+        vector_col.name = "text_content_vector"
+
+        mock_spec = MagicMock()
+        mock_spec.embedding_source_columns = [source_col]
+        mock_spec.embedding_vector_columns = [vector_col]
+        mock_spec.schema_json = None
+
+        mock_index = MagicMock()
+        mock_index.primary_key = "doc_id"
+        mock_index.delta_sync_index_spec = mock_spec
+        mock_index.direct_access_index_spec = None
+
+        mock_client = MagicMock()
+        mock_client.vector_search_indexes.get_index.return_value = mock_index
+        mock_obo_client.get_client = AsyncMock(return_value=mock_client)
+
+        mock_results = [
+            VectorSearchResult(
+                id="doc_0",
+                title="Test",
+                content="Test content",
+                url=None,
+                score=0.9,
+                metadata={},
+            )
+        ]
+
+        tool = UserVectorSearchTool(
+            obo_client=mock_obo_client,
+            source_name="test_source",
+            endpoint_name="test_ep",
+            index_name="catalog.schema.test_index",
+            columns=["doc_id", "text_content", "source_url"],
+            # column_roles=None (implicit) → triggers discovery
+        )
+
+        context = create_test_context()
+
+        with patch.object(tool._query_service, "query", return_value=mock_results):
+            result = await tool.execute({"query": "test query"}, context)
+
+        assert result.success
+        # get_index WAS called to discover column_roles
+        mock_client.vector_search_indexes.get_index.assert_called_once()
+        # Original columns preserved (not overwritten by discovery)
+        assert tool._columns == ["doc_id", "text_content", "source_url"]
+        # column_roles now populated
+        assert tool._column_roles is not None
+
+    @pytest.mark.asyncio
+    async def test_column_roles_passed_from_constructor(self) -> None:
+        """Column roles from constructor should be used without calling get_index()."""
+        from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
+
+        roles = ColumnRoles(
+            id_column="doc_id",
+            content_column="text_body",
+            all_columns=["doc_id", "text_body", "source_path"],
+        )
 
         mock_obo_client = MagicMock()
         mock_client = MagicMock()
@@ -923,16 +989,20 @@ class TestUserVectorSearchToolColumnDiscovery:
             source_name="test_source",
             endpoint_name="test_ep",
             index_name="catalog.schema.test_index",
-            columns=["doc_id", "text_content", "source_url"],
+            columns=["doc_id", "text_body", "source_path"],
+            column_roles=roles,
         )
 
-        context = create_test_context()
+        # column_roles is set from constructor
+        assert tool._column_roles is not None
+        assert tool._column_roles.content_column == "text_body"
 
+        context = create_test_context()
         with patch.object(tool._query_service, "query", return_value=mock_results):
-            result = await tool.execute({"query": "test query"}, context)
+            result = await tool.execute({"query": "test"}, context)
 
         assert result.success
-        # get_index should NOT have been called
+        # get_index should NOT have been called (roles already known)
         mock_client.vector_search_indexes.get_index.assert_not_called()
 
     @pytest.mark.asyncio
@@ -958,3 +1028,239 @@ class TestUserVectorSearchToolColumnDiscovery:
 
         assert not result.success
         assert "unable to determine" in result.content
+
+    @pytest.mark.asyncio
+    async def test_discover_columns_no_content_disables_tool(self) -> None:
+        """Should NOT populate columns when content_column is None (self-managed embeddings)."""
+        from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
+
+        mock_obo_client = MagicMock()
+        mock_client = MagicMock()
+
+        # Index with no embedding_source_columns and no heuristic match
+        mock_spec = MagicMock()
+        mock_spec.embedding_source_columns = None
+        mock_spec.embedding_vector_columns = None
+        mock_spec.schema_json = None
+        mock_spec.columns_to_sync = None
+
+        mock_index = MagicMock()
+        mock_index.primary_key = "pk"
+        mock_index.delta_sync_index_spec = mock_spec
+        mock_index.direct_access_index_spec = None
+
+        mock_client.vector_search_indexes.get_index.return_value = mock_index
+        mock_obo_client.get_client = AsyncMock(return_value=mock_client)
+
+        tool = UserVectorSearchTool(
+            obo_client=mock_obo_client,
+            source_name="test_source",
+            endpoint_name="test_ep",
+            index_name="catalog.schema.test_index",
+        )
+
+        context = create_test_context()
+        result = await tool.execute({"query": "test query"}, context)
+
+        # Tool should be disabled — columns stay empty, execute returns error
+        assert tool._columns == []
+        assert not result.success
+        assert "unable to determine" in result.content
+
+    @pytest.mark.asyncio
+    async def test_execute_filters_empty_content_results(self) -> None:
+        """Should skip results with empty content in execute() output."""
+        from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
+
+        mock_obo_client = MagicMock()
+        mock_client = MagicMock()
+        mock_obo_client.get_client = AsyncMock(return_value=mock_client)
+
+        # Mix of results: some with content, some empty
+        mock_results = [
+            VectorSearchResult(
+                id="doc_0",
+                title="Good Result",
+                content="This has real content about the topic.",
+                url="https://example.com/1",
+                score=0.95,
+                metadata={},
+            ),
+            VectorSearchResult(
+                id="doc_1",
+                title="Untitled",
+                content="",  # Empty content
+                url=None,
+                score=0.9,
+                metadata={},
+            ),
+            VectorSearchResult(
+                id="doc_2",
+                title="Whitespace Only",
+                content="   ",  # Whitespace-only content
+                url=None,
+                score=0.85,
+                metadata={},
+            ),
+        ]
+
+        tool = UserVectorSearchTool(
+            obo_client=mock_obo_client,
+            source_name="test_source",
+            endpoint_name="test_ep",
+            index_name="catalog.schema.test_index",
+            columns=["id", "content"],  # Pre-provided to skip discovery
+        )
+
+        context = create_test_context()
+
+        with patch.object(tool._query_service, "query", return_value=mock_results):
+            result = await tool.execute({"query": "test query"}, context)
+
+        assert result.success
+        # Only the result with real content should be in sources
+        assert len(result.sources) == 1
+        assert result.sources[0]["title"] == "Good Result"
+
+
+class TestExtractQueryableColumnsToSync:
+    """Tests for columns_to_sync and heuristic content column detection."""
+
+    def test_extract_columns_reads_columns_to_sync(self) -> None:
+        """DELTA_SYNC with self-managed embeddings: columns_to_sync should populate all_columns."""
+        # columns_to_sync entries
+        col1 = MagicMock()
+        col1.name = "chunk_id"
+        col2 = MagicMock()
+        col2.name = "text"
+        col3 = MagicMock()
+        col3.name = "metadata_json"
+
+        vector_col = MagicMock()
+        vector_col.name = "embedding"
+
+        spec = MagicMock()
+        spec.embedding_source_columns = None  # Self-managed: no source columns
+        spec.embedding_vector_columns = [vector_col]
+        spec.schema_json = None
+        spec.columns_to_sync = [col1, col2, col3]
+
+        index = MagicMock()
+        index.primary_key = "chunk_id"
+        index.delta_sync_index_spec = spec
+        index.direct_access_index_spec = None
+
+        roles = extract_queryable_columns(index)
+
+        assert roles is not None
+        assert "chunk_id" in roles.all_columns
+        assert "text" in roles.all_columns
+        assert "metadata_json" in roles.all_columns
+        assert "embedding" not in roles.all_columns  # Vector col excluded
+        # Heuristic should find "text" as content column
+        assert roles.content_column == "text"
+
+    def test_extract_columns_heuristic_content_col(self) -> None:
+        """Heuristic should find content column named 'text' when embedding_source_columns is empty."""
+        col1 = MagicMock()
+        col1.name = "doc_id"
+        col2 = MagicMock()
+        col2.name = "content"
+        col3 = MagicMock()
+        col3.name = "source_url"
+
+        spec = MagicMock()
+        spec.embedding_source_columns = None
+        spec.embedding_vector_columns = None
+        spec.schema_json = '{"doc_id": "string", "content": "string", "source_url": "string"}'
+        spec.columns_to_sync = None
+
+        index = MagicMock()
+        index.primary_key = "doc_id"
+        index.delta_sync_index_spec = None
+        index.direct_access_index_spec = spec
+
+        roles = extract_queryable_columns(index)
+
+        assert roles is not None
+        assert roles.content_column == "content"
+
+    def test_extract_columns_no_heuristic_match(self) -> None:
+        """Heuristic should return content_column=None when no candidates match."""
+        spec = MagicMock()
+        spec.embedding_source_columns = None
+        spec.embedding_vector_columns = None
+        spec.schema_json = None
+        spec.columns_to_sync = None
+
+        index = MagicMock()
+        index.primary_key = "pk"
+        index.delta_sync_index_spec = spec
+        index.direct_access_index_spec = None
+
+        roles = extract_queryable_columns(index)
+
+        assert roles is not None
+        assert roles.content_column is None
+        assert roles.all_columns == ["pk"]
+
+
+class TestFactoryColumnRolesFromDiscovery:
+    """Tests for factory passing ColumnRoles from discovery enrichment metadata."""
+
+    def test_factory_passes_column_roles_from_enrichment(self) -> None:
+        """_create_vs_from_discovery should construct ColumnRoles from enrichment metadata."""
+        from deep_research.agent.tools.factory import _create_vs_from_discovery
+        from deep_research.schemas.discovery import DiscoveredSource
+
+        source = DiscoveredSource(
+            source_id="vs:cat.schema.idx",
+            source_type="vector_search",
+            name="test_index",
+            endpoint_name="ep1",
+            description="Test VS index",
+            capabilities=["hybrid", "reranking"],
+            metadata={
+                "index_name": "cat.schema.idx",
+                "endpoint_name": "ep1",
+                "primary_key": "chunk_id",
+                "queryable_columns": ["chunk_id", "text_content", "url"],
+                "content_column": "text_content",
+            },
+        )
+
+        mock_obo_client = MagicMock()
+        tool = _create_vs_from_discovery(source, mock_obo_client)
+
+        assert tool is not None
+        assert tool._column_roles is not None
+        assert tool._column_roles.content_column == "text_content"
+        assert tool._column_roles.id_column == "chunk_id"
+        assert tool._columns_to_rerank == ["text_content"]
+
+    def test_factory_no_column_roles_when_no_content_column(self) -> None:
+        """_create_vs_from_discovery should not create ColumnRoles when content_column is missing."""
+        from deep_research.agent.tools.factory import _create_vs_from_discovery
+        from deep_research.schemas.discovery import DiscoveredSource
+
+        source = DiscoveredSource(
+            source_id="vs:cat.schema.idx2",
+            source_type="vector_search",
+            name="test_index_2",
+            endpoint_name="ep2",
+            description="Test VS index without content column",
+            capabilities=["hybrid"],
+            metadata={
+                "index_name": "cat.schema.idx2",
+                "endpoint_name": "ep2",
+                "queryable_columns": ["id", "data"],
+                # No content_column
+            },
+        )
+
+        mock_obo_client = MagicMock()
+        tool = _create_vs_from_discovery(source, mock_obo_client)
+
+        assert tool is not None
+        assert tool._column_roles is None
+        assert tool._columns_to_rerank == []

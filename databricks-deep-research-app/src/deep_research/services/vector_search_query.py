@@ -97,6 +97,14 @@ def extract_queryable_columns(index: Any) -> ColumnRoles | None:
     if primary_key not in columns:
         columns.insert(0, primary_key)
 
+    # 3b. For DELTA_SYNC: include columns_to_sync (covers self-managed embeddings
+    # where embedding_source_columns is empty).
+    if hasattr(spec, "columns_to_sync") and spec.columns_to_sync:
+        for col in spec.columns_to_sync:
+            col_name = col.name if hasattr(col, "name") else str(col)
+            if col_name and col_name not in columns:
+                columns.append(col_name)
+
     # 4. Exclude embedding vector columns (array<float>) — useless for text results
     vector_col_names: set[str] = set()
     if hasattr(spec, "embedding_vector_columns") and spec.embedding_vector_columns:
@@ -112,6 +120,18 @@ def extract_queryable_columns(index: Any) -> ColumnRoles | None:
         if name in columns and name != primary_key:
             content_column = name
             break
+
+    # 5b. Heuristic fallback for self-managed embeddings where the API
+    # doesn't identify the text column via embedding_source_columns.
+    if content_column is None:
+        _CONTENT_COL_CANDIDATES = (
+            "content", "text", "chunk_text", "chunk_content", "page_content",
+            "body", "passage", "document", "chunk", "paragraph",
+        )
+        for candidate in _CONTENT_COL_CANDIDATES:
+            if candidate in columns and candidate != primary_key:
+                content_column = candidate
+                break
 
     return ColumnRoles(
         id_column=primary_key,

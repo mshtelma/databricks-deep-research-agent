@@ -437,6 +437,7 @@ def _handle_tool_call(event: StreamEvent, delta: PersistenceDelta) -> list[AppSS
         data={
             "progress_type": "tool_call",
             "tool_name": e.tool_name,
+            "tool_args": e.arguments,
             "node_id": e.node_id,
         },
     )]
@@ -454,6 +455,7 @@ def _handle_tool_result(event: StreamEvent, delta: PersistenceDelta) -> list[App
             "tool_name": e.tool_name,
             "result_summary": e.result_summary,
             "source_count": e.source_count,
+            "sources_added": e.accepted_source_count,
         },
     )]
 

@@ -74,6 +74,27 @@ from databricks_deep_research.workflow.runtime_core.selectors import (
     select_verification_summary,
 )
 
+import re as _re
+
+_PLACEHOLDER_TITLES = frozenset({
+    "untitled", "unknown", "source", "n/a", "na", "none", "null", "",
+})
+_PLACEHOLDER_TITLE_PATTERNS = _re.compile(
+    r"^(vector search result \d+|doc_\d+|row_\d+)$", _re.I,
+)
+
+
+def _is_placeholder_title(title: str) -> bool:
+    """True if title carries no information value."""
+    stripped = title.strip()
+    return (
+        not stripped
+        or stripped.lower() in _PLACEHOLDER_TITLES
+        or bool(_PLACEHOLDER_TITLE_PATTERNS.match(stripped))
+        or len(stripped) < 3
+    )
+
+
 logger = logging.getLogger(__name__)
 
 # Default max tool calls for synthesizer (pool search for evidence)
@@ -220,7 +241,7 @@ def _normalize_source(source: Any) -> dict[str, Any] | None:
         snippet = source.get("snippet") or (
             content[:500] if isinstance(content, str) else ""
         )
-        if not snippet and title:
+        if not snippet and title and not _is_placeholder_title(str(title)):
             snippet = str(title)
         normalized = dict(source)
         normalized["url"] = str(url)
@@ -242,7 +263,7 @@ def _normalize_source(source: Any) -> dict[str, Any] | None:
     snippet = getattr(source, "snippet", None) or (
         content[:500] if isinstance(content, str) else ""
     )
-    if not snippet and title:
+    if not snippet and title and not _is_placeholder_title(title):
         snippet = title
     return {
         "url": str(url),
@@ -1182,6 +1203,18 @@ async def _execute(
     sources = _collect_sources(pools)
     observations = _collect_observations(state, pools)
     sources = _hydrate_sparse_sources(sources, observations)
+    # Filter sources that still have no usable text after hydration
+    pre_filter = len(sources)
+    sources = [
+        s for s in sources
+        if (s.get("content") or "").strip() or (s.get("snippet") or "").strip()
+    ]
+    if pre_filter > len(sources):
+        logger.warning(
+            "SYNTHESIZER_EMPTY_SOURCES_FILTERED before=%d after=%d",
+            pre_filter,
+            len(sources),
+        )
     pipeline = _build_reclaim_pipeline(llm_client, citation_config)
     mode_label = grounding_mode.upper()
     logger.info(

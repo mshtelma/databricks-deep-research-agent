@@ -18,6 +18,7 @@ import type {
   ToolResultEvent,
 } from '../types'
 import { inferSourceType } from './eventStats'
+import type { MergedResultData } from './eventFilters'
 
 /** Human-readable labels for each agent (no emojis - EnhancedEventLabel adds icons) */
 const AGENT_STARTED_LABELS: Record<string, string> = {
@@ -137,23 +138,34 @@ function formatStepCompleted(event: StepCompletedEvent): string {
 function formatToolCall(event: ToolCallEvent): string {
   const sourceType = inferSourceType(event)
   const query = findQueryArg(event.toolArgs)
+  const merged = (event as unknown as { _mergedResult?: MergedResultData })._mergedResult
+  const suffix = buildResultSuffix(sourceType, merged)
 
   switch (sourceType) {
     case 'web_search':
-      return query ? `Searching: ${truncate(query, 80)}` : 'Searching...'
+      return query ? `Searching: ${truncate(query, 70)}${suffix}` : `Searching...${suffix}`
     case 'web_crawl':
-      return 'Crawling page...'
+      return `Crawling page...${suffix}`
     case 'genie':
-      return query ? `Querying Genie: ${truncate(query, 60)}` : 'Querying enterprise database...'
+      return query ? `Querying Genie: ${truncate(query, 50)}${suffix}` : `Querying enterprise database...${suffix}`
     case 'vector_search':
-      return query ? `Searching docs: ${truncate(query, 60)}` : 'Searching enterprise documents...'
+      return query ? `Searching docs: ${truncate(query, 50)}${suffix}` : `Searching enterprise documents...${suffix}`
     case 'knowledge_assistant':
-      return query ? `Asking assistant: ${truncate(query, 60)}` : 'Asking knowledge assistant...'
+      return query ? `Asking assistant: ${truncate(query, 50)}${suffix}` : `Asking knowledge assistant...${suffix}`
     case 'file_search':
-      return query ? `Searching files: ${truncate(query, 60)}` : 'Searching files...'
+      return query ? `Searching files: ${truncate(query, 50)}${suffix}` : `Searching files...${suffix}`
     default:
-      return query ? `${event.toolName}: ${truncate(query, 60)}` : `${event.toolName}...`
+      return query ? `${event.toolName}: ${truncate(query, 50)}${suffix}` : `${event.toolName}...${suffix}`
   }
+}
+
+/** Build result count suffix, e.g. " → 5 sources" or " → 3 pages". */
+function buildResultSuffix(sourceType: string, merged: MergedResultData | undefined): string {
+  if (!merged) return ''
+  const count = merged.sourcesAdded || merged.sourcesCrawled || 0
+  if (count === 0) return ''
+  const unit = sourceType === 'web_crawl' ? 'page' : 'source'
+  return ` \u2192 ${count} ${unit}${count !== 1 ? 's' : ''}`
 }
 
 /** Extract the most likely query argument from tool args. */

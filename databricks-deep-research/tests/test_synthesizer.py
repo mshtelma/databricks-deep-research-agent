@@ -182,6 +182,60 @@ async def test_execute_agent_reclaim_runs_pipeline_and_writes_state() -> None:
     llm.complete.assert_not_awaited()
 
 
+class TestPlaceholderTitle:
+    """Tests for _is_placeholder_title and its effect on _normalize_source."""
+
+    def test_is_placeholder_title_rejects_untitled(self) -> None:
+        from databricks_deep_research.agents.builtins.synthesizer import _is_placeholder_title
+
+        assert _is_placeholder_title("Untitled") is True
+        assert _is_placeholder_title("unknown") is True
+        assert _is_placeholder_title("N/A") is True
+        assert _is_placeholder_title("") is True
+        assert _is_placeholder_title("  ") is True
+        assert _is_placeholder_title("AB") is True  # len < 3
+        assert _is_placeholder_title("doc_42") is True
+        assert _is_placeholder_title("row_0") is True
+        assert _is_placeholder_title("Vector Search Result 7") is True
+
+    def test_is_placeholder_title_allows_real_titles(self) -> None:
+        from databricks_deep_research.agents.builtins.synthesizer import _is_placeholder_title
+
+        assert _is_placeholder_title("Kroger Q3 2025 Earnings Report") is False
+        assert _is_placeholder_title("API Reference Guide") is False
+        assert _is_placeholder_title("Product Documentation") is False
+
+    def test_normalize_source_placeholder_title_not_used_as_snippet(self) -> None:
+        from databricks_deep_research.agents.builtins.synthesizer import _normalize_source
+
+        source = {
+            "url": "https://example.com",
+            "title": "Untitled",
+            "content": None,
+            "snippet": "",
+        }
+        result = _normalize_source(source)
+
+        assert result is not None
+        # "Untitled" should NOT become the snippet
+        assert result["snippet"] == ""
+
+    def test_normalize_source_real_title_used_as_snippet(self) -> None:
+        from databricks_deep_research.agents.builtins.synthesizer import _normalize_source
+
+        source = {
+            "url": "https://example.com",
+            "title": "Kroger Q3 Earnings Report",
+            "content": None,
+            "snippet": "",
+        }
+        result = _normalize_source(source)
+
+        assert result is not None
+        # Real title should be used as snippet fallback
+        assert result["snippet"] == "Kroger Q3 Earnings Report"
+
+
 @pytest.mark.asyncio
 async def test_execute_agent_none_mode_skips_citation_pipeline() -> None:
     config = AgentNodeConfig(

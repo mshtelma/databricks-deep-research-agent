@@ -278,7 +278,8 @@ db-provision:
 db-migrate:
 	@echo "Running migrations on configured Lakebase instance..."
 	@echo "Database: $(DB_NAME)"
-	LAKEBASE_DATABASE=$(DB_NAME) uv run alembic upgrade head
+	@if [ -n "$(TARGET)" ]; then echo "Target: $(TARGET) (env: ../.env + ../.env.$(TARGET))"; fi
+	@bash -c '$(call load-env,$(or $(TARGET),$(DEV_TARGET))) && LAKEBASE_DATABASE=$(DB_NAME) uv run alembic upgrade head'
 	@echo "Migrations complete!"
 
 # Check current migration status

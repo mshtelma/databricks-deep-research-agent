@@ -187,7 +187,7 @@ db-cleanup:
 	$(MAKE) -C $(APP_DIR) db-cleanup TARGET=$(TARGET)
 
 db-migrate:
-	$(MAKE) -C $(APP_DIR) db-migrate DB_SUFFIX=$(DB_SUFFIX)
+	$(MAKE) -C $(APP_DIR) db-migrate DB_SUFFIX=$(DB_SUFFIX) TARGET=$(TARGET)
 
 db-status:
 	$(MAKE) -C $(APP_DIR) db-status

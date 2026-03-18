@@ -97,7 +97,7 @@ async def grant_permissions_to_app(
             sp_username = sp.application_id
             logger.info(f"Found service principal application_id: {sp_username}")
     except Exception as e:
-        logger.warning(
+        logger.debug(
             f"Could not get service principal by ID {app_sp_id}: {e}. "
             "Trying to find by listing..."
         )
@@ -145,11 +145,27 @@ async def grant_permissions_to_app(
         if provider.get_backend_type() == "autoscaling":
             try:
                 await conn.execute("CREATE EXTENSION IF NOT EXISTS databricks_auth")
-                await conn.execute(
-                    "SELECT databricks_create_role($1, 'SERVICE_PRINCIPAL')",
-                    sp_username,
-                )
-                logger.info(f"Created Autoscaling role for {sp_username}")
+                # Check existence first — pg_roles is readable by all Postgres users
+                try:
+                    role_exists = await conn.fetchval(
+                        "SELECT 1 FROM pg_roles WHERE rolname = $1", sp_username
+                    )
+                except Exception as check_err:
+                    logger.debug(
+                        "pg_roles existence check failed for %s: %s — will attempt creation",
+                        sp_username,
+                        check_err,
+                    )
+                    role_exists = False
+
+                if not role_exists:
+                    await conn.execute(
+                        "SELECT databricks_create_role($1, 'SERVICE_PRINCIPAL')",
+                        sp_username,
+                    )
+                    logger.info(f"Created Autoscaling role for {sp_username}")
+                else:
+                    logger.info(f"Autoscaling role already exists for {sp_username}, skipping")
             except Exception as e:
                 logger.warning(
                     "Autoscaling role creation failed for %s: %s. "
