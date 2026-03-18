@@ -1,0 +1,70 @@
+"""Agent prompt templates.
+
+Re-exports all prompt constants from individual modules for convenient access.
+"""
+
+from databricks_deep_research.agents.prompts.background import (
+    BACKGROUND_SEARCH_PROMPT,
+    BACKGROUND_SYSTEM_PROMPT,
+    BACKGROUND_USER_PROMPT,
+)
+from databricks_deep_research.agents.prompts.coordinator import (
+    COORDINATOR_SYSTEM_PROMPT,
+    COORDINATOR_USER_PROMPT,
+    SIMPLE_QUERY_SYSTEM_PROMPT,
+    SIMPLE_QUERY_TOOLS,
+)
+from databricks_deep_research.agents.prompts.planner import (
+    PLANNER_SYSTEM_PROMPT,
+    PLANNER_USER_PROMPT,
+    SOURCE_AWARE_PLANNER_NO_LANDSCAPE_PROMPT,
+    SOURCE_AWARE_PLANNER_SYSTEM_PROMPT,
+    SOURCE_AWARE_PLANNER_USER_PROMPT,
+)
+from databricks_deep_research.agents.prompts.reflector import (
+    REFLECTOR_SYSTEM_PROMPT,
+    REFLECTOR_USER_PROMPT,
+)
+from databricks_deep_research.agents.prompts.researcher import (
+    RESEARCHER_SYSTEM_PROMPT,
+    RESEARCHER_USER_PROMPT,
+    SEARCH_QUERY_PROMPT,
+)
+from databricks_deep_research.agents.prompts.synthesizer import (
+    STREAMING_SYNTHESIZER_SYSTEM_PROMPT,
+    STRUCTURED_SYNTHESIZER_SYSTEM_PROMPT,
+    STRUCTURED_SYNTHESIZER_USER_PROMPT,
+    SYNTHESIZER_SYSTEM_PROMPT,
+    SYNTHESIZER_USER_PROMPT,
+)
+
+__all__ = [
+    # Background
+    "BACKGROUND_SEARCH_PROMPT",
+    "BACKGROUND_SYSTEM_PROMPT",
+    "BACKGROUND_USER_PROMPT",
+    # Coordinator
+    "COORDINATOR_SYSTEM_PROMPT",
+    "COORDINATOR_USER_PROMPT",
+    "SIMPLE_QUERY_SYSTEM_PROMPT",
+    "SIMPLE_QUERY_TOOLS",
+    # Planner
+    "PLANNER_SYSTEM_PROMPT",
+    "PLANNER_USER_PROMPT",
+    "SOURCE_AWARE_PLANNER_NO_LANDSCAPE_PROMPT",
+    "SOURCE_AWARE_PLANNER_SYSTEM_PROMPT",
+    "SOURCE_AWARE_PLANNER_USER_PROMPT",
+    # Reflector
+    "REFLECTOR_SYSTEM_PROMPT",
+    "REFLECTOR_USER_PROMPT",
+    # Researcher
+    "RESEARCHER_SYSTEM_PROMPT",
+    "RESEARCHER_USER_PROMPT",
+    "SEARCH_QUERY_PROMPT",
+    # Synthesizer
+    "STREAMING_SYNTHESIZER_SYSTEM_PROMPT",
+    "STRUCTURED_SYNTHESIZER_SYSTEM_PROMPT",
+    "STRUCTURED_SYNTHESIZER_USER_PROMPT",
+    "SYNTHESIZER_SYSTEM_PROMPT",
+    "SYNTHESIZER_USER_PROMPT",
+]

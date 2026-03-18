@@ -1,0 +1,149 @@
+# Full research pipeline with production model configuration.
+#
+# Demonstrates:
+# - Multi-endpoint tiers with automatic failover on rate limits
+# - Priority-based endpoint rotation
+# - Per-tier token budget enforcement
+#
+# Self-contained — the models: section defines all endpoints:
+#   runner = WorkflowRunner.from_databricks()
+#   result = await runner.run("research_pipeline.yaml", query="...")
+#
+# Four-step pipeline:
+# 1. Coordinator classifies query complexity
+# 2. Background gathers initial web context
+# 3. Plan-and-execute cycle: planner -> researcher -> reflector loop
+# 4. Synthesizer produces final report
+
+id: research_pipeline
+name: Research Pipeline
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+# -- Model tier configuration ------------------------------------------------
+# Each tier maps to one or more Databricks serving endpoints.
+# When multiple endpoints are listed, the framework handles:
+#   - Rate limit (429) failover to the next healthy endpoint
+#   - Health tracking (unhealthy after 3 consecutive errors, 60s cooldown)
+#   - Per-endpoint token budget enforcement (tokens_per_minute)
+#   - Rotation: "priority" (try in order) or "round_robin" (distribute evenly)
+#
+# Tiers are referenced by agent nodes via model_tier field.
+# You can define any tier name — not limited to simple/analytical/complex.
+models:
+  simple:
+    endpoints:
+      - databricks-claude-haiku-4-5
+      - databricks-gemini-3-flash
+    tokens_per_minute: 200000
+    fallback_on_429: true
+    rotation_strategy: priority
+
+  analytical:
+    endpoints:
+      - databricks-claude-haiku-4-5
+      - databricks-gpt-5-mini
+      - databricks-gemini-3-flash
+    tokens_per_minute: 200000
+    fallback_on_429: true
+    rotation_strategy: priority
+
+  complex:
+    endpoints:
+      - databricks-claude-opus-4-5
+      - databricks-claude-sonnet-4-5
+      - databricks-gpt-5-2
+    tokens_per_minute: 200000
+    fallback_on_429: true
+    rotation_strategy: priority
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 100
+  - name: observations
+    dedup_key: content_hash
+    max_items: 50
+
+root:
+  id: main
+  type: sequence
+  label: Main Pipeline
+  children:
+    # Step 1: Classify the query
+    - id: coordinator
+      type: agent
+      label: Query Classifier
+      config:
+        subtype: coordinator
+        model_tier: simple
+        output_key: coordination
+
+    # Step 2: Quick background investigation
+    - id: background
+      type: agent
+      label: Background Investigator
+      config:
+        subtype: background
+        model_tier: simple
+        output_key: background
+        tools: [web_search]
+        max_tool_calls: 3
+
+    # Step 3: Research cycle (plan -> execute -> evaluate)
+    - id: research_cycle
+      type: plan_and_execute
+      label: Research Cycle
+      config:
+        planner:
+          subtype: planner
+          model_tier: analytical
+          output_key: plan
+        items_path: steps
+        item_state_key: current_step
+        body:
+          id: researcher
+          type: agent
+          label: Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: findings
+            pool_inject:
+              - pool: observations
+                threshold: 0
+                max_items: 10
+                max_item_chars: 500
+            tools: [web_search, web_crawl]
+            pool_writes:
+              - pool: observations
+                extract: findings
+              - pool: sources
+                extract: sources
+            max_tool_calls: 8
+        evaluator:
+          subtype: reflector
+          model_tier: analytical
+          output_key: evaluation
+        max_iterations: 5
+        min_iterations: 1
+        max_replan_cycles: 1
+
+    # Step 4: Generate final report
+    - id: synthesizer
+      type: agent
+      label: Report Synthesizer
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: report
+        pool_inject:
+          - pool: observations
+            threshold: 0
+          - pool: sources
+            threshold: 0
+        pool_tools:
+          - observations
+          - sources
+        max_tool_calls: 5

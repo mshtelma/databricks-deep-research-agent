@@ -1,0 +1,71 @@
+# Web Search Mode — Single-Step Quick Research
+#
+# Lightweight workflow for simple queries that only need a quick web search.
+# Skips planning/reflection cycle. Single researcher step with limited budget.
+#
+# Pipeline: coordinator → researcher (single pass) → synthesizer
+
+id: web_search
+name: Web Search
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 50
+  - name: observations
+    dedup_key: content_hash
+    max_items: 30
+
+root:
+  id: main
+  type: sequence
+  label: Web Search Pipeline
+  children:
+    # 1. Classify query (still useful for simple query detection)
+    - id: coordinator
+      type: agent
+      label: Query Classifier
+      config:
+        subtype: coordinator
+        model_tier: simple
+        output_key: coordination
+
+    # 2. Single researcher pass — no planner/reflector
+    - id: researcher
+      type: agent
+      label: Web Researcher
+      config:
+        subtype: researcher
+        model_tier: analytical
+        input_keys: [query]
+        output_key: findings
+        tools:
+          - type: builtin
+            name: web_search
+          - type: builtin
+            name: web_crawl
+        pool_writes:
+          - pool: observations
+            extract: findings
+          - pool: sources
+            extract: sources
+        max_tool_calls: 8
+
+    # 3. Quick synthesis
+    - id: synthesizer
+      type: agent
+      label: Report Synthesizer
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        input_keys: [query]
+        output_key: report
+        pool_inject:
+          - pool: observations
+            threshold: 0
+          - pool: sources
+            threshold: 0
+        max_tool_calls: 3

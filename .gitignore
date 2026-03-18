@@ -71,17 +71,17 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # Frontend build
-frontend/dist/
-frontend/build/
+**/frontend/dist/
+**/frontend/build/
 # static/ - NOT ignored: needed for DAB deployment
 # But the symlink inside src is for local dev only
-src/deep_research/static
+**/src/deep_research/static
 .next/
 out/
 
 # E2E test artifacts
-e2e/test-results/
-e2e/playwright-report/
+**/e2e/test-results/
+**/e2e/playwright-report/
 
 # Misc
 .DS_Store
@@ -110,7 +110,10 @@ alembic.ini.local
 
 # Test artifacts
 test.py
-/frontend/test-results/
-/frontend/playwright-report/
+**/frontend/test-results/
+**/frontend/playwright-report/
 .idea
 /.idea/
+
+# UV workspace
+uv.lock

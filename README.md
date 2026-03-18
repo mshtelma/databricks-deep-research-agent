@@ -6,10 +6,11 @@
 [![React](https://img.shields.io/badge/React-18.x-blue.svg)](https://react.dev/)
 [![License](https://img.shields.io/badge/license-Proprietary-red.svg)]()
 
-A production-grade multi-agent research system with claim-level citation verification, built on Databricks infrastructure. Combines a 5-agent orchestration architecture with a 7-stage verification pipeline grounded in peer-reviewed research.
+A **uv workspace monorepo** containing two packages: a standalone multi-agent orchestration framework (`databricks-deep-research`) and a production application (`databricks-deep-research-app`) built on it. Features a 5-agent research architecture with a 7-stage citation verification pipeline grounded in peer-reviewed research, deployed on Databricks infrastructure.
 
 ## Key Features
 
+- **YAML Workflow Engine** - Declarative research pipelines with 8 node types and plan-and-execute orchestration ([framework docs](databricks-deep-research/docs/index.md))
 - **5-Agent Architecture** - Coordinator, Planner, Researcher, Reflector, and Synthesizer with step-by-step reflection
 - **7-Stage Citation Pipeline** - Evidence pre-selection, interleaved generation, confidence classification, isolated verification, citation correction, numeric QA, and ARE-style revision
 - **Tiered Query Modes** - Simple (<3s), Web Search (<15s), and Deep Research (<2min) for progressive disclosure
@@ -99,7 +100,7 @@ make deploy TARGET=dev BRAVE_SCOPE=your-secret-scope
 make deploy TARGET=ais
 ```
 
-This single command executes the complete 8-step deployment pipeline:
+This single command executes the complete 9-step deployment pipeline:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -248,13 +249,13 @@ Environment variables are configured in `app.yaml` for deployed apps:
 
 ```bash
 # Check database connectivity
-uv run python -c "from src.db.session import get_engine; print(get_engine())"
+uv run python -c "from deep_research.db.session import get_engine; print(get_engine())"
 
 # Verify migrations
 uv run alembic current
 
 # Test LLM endpoint
-uv run python -c "from src.services.llm.client import LLMClient; ..."
+uv run python -c "from deep_research.services.llm.client import LLMClient; ..."
 
 # Check app logs (deployed)
 make logs TARGET=dev FOLLOW=-f SEARCH="--search ERROR"
@@ -264,15 +265,30 @@ make logs TARGET=dev FOLLOW=-f SEARCH="--search ERROR"
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/create-database.sh` | Create deep_research database in Lakebase |
-| `scripts/wait-for-lakebase.sh` | Wait for Lakebase instance to be ready |
+| `scripts/quickstart.sh` | Set up local development environment |
 | `scripts/grant-app-permissions.sh` | Grant table access to app service principal |
 | `scripts/download-app-logs.py` | Fetch app logs via REST API |
-| `scripts/quickstart.sh` | Set up local development environment |
+| `scripts/clean-db.sh` | Clean database data |
+| `scripts/db-cleanup.py` | Remove orphaned provisioning resources |
+| `scripts/kill-server.sh` | Kill running dev server |
+| `scripts/purge_deleted_chats.py` | Purge soft-deleted chats |
+| `scripts/analyze_traces.py` | Analyze MLflow traces |
 
 ## Documentation
 
-Comprehensive documentation is available in the [`docs/`](./docs/) folder:
+### Framework Documentation
+
+The **databricks-deep-research** framework has 42 documentation files covering the workflow engine, agent harness, tool protocol, pool system, streaming events, and citation pipeline.
+
+Full index: [`databricks-deep-research/docs/index.md`](databricks-deep-research/docs/index.md)
+
+| Track | Time | What You'll Learn |
+|-------|------|-------------------|
+| **Quick Start** | ~15 min | Installation, first workflow, architecture overview |
+| **Workflow Builder** | ~1-2 hours | YAML authoring, builtin agents/tools, pools, events |
+| **Deep Dive** | ~half day | Custom tools/agents, citation pipeline, full reference |
+
+### Application Documentation
 
 | Document | Description |
 |----------|-------------|
@@ -292,6 +308,7 @@ Comprehensive documentation is available in the [`docs/`](./docs/) folder:
 |-----------|------------|---------|
 | Backend | Python | 3.11+ |
 | Frontend | TypeScript/React | 18.x |
+| Orchestration | databricks-deep-research | 0.2.0 |
 | Framework | FastAPI | 0.109+ |
 | Database | Databricks Lakebase | PostgreSQL |
 | LLM Client | AsyncOpenAI | 1.10+ |
@@ -301,7 +318,7 @@ Comprehensive documentation is available in the [`docs/`](./docs/) folder:
 
 ## Configuration
 
-All settings are centralized in `config/app.yaml`:
+All settings are centralized in `databricks-deep-research-app/config/app.yaml`:
 
 ```yaml
 # Model tier routing
@@ -357,32 +374,25 @@ The citation verification pipeline implements patterns from peer-reviewed resear
 
 See [Scientific Foundations](./docs/scientific-foundations.md) for detailed explanations.
 
-## Project Structure
+## Repository Structure
 
 ```
-src/                            # Python backend
-├── agent/                      # 5-agent orchestration
-│   ├── orchestrator.py         # Main async pipeline
-│   ├── nodes/                  # Agent implementations
-│   └── prompts/                # Agent prompts
-├── api/                        # FastAPI routes
-├── services/
-│   ├── llm/                    # LLM client with tier routing
-│   ├── citation/               # 7-stage verification pipeline
-│   └── search/                 # Brave Search API
-└── db/                         # Lakebase persistence
-
-frontend/                       # React frontend
-├── src/
-│   ├── components/             # UI components
-│   ├── hooks/                  # React hooks (streaming, etc.)
-│   └── pages/                  # Page components
-└── tests/                      # Vitest tests
-
-e2e/                            # Playwright E2E tests
-tests/                          # Python backend tests
-config/                         # YAML configuration
-docs/                           # Documentation
+pyproject.toml                          # uv workspace root
+databricks-deep-research/               # Framework package (v0.2.0)
+├── src/databricks_deep_research/       # Workflow engine, agents, tools, pools, citation
+├── docs/                               # Framework documentation (43 files)
+├── examples/                           # 13 YAML workflow examples
+└── tests/
+databricks-deep-research-app/           # Application package
+├── src/deep_research/                  # FastAPI backend
+├── frontend/                           # React frontend
+├── e2e/                                # Playwright E2E tests
+├── config/                             # YAML configuration
+├── scripts/                            # Utility scripts
+└── tests/
+docs/                                   # Application documentation
+examples/sales-research-agent/          # Example extension project
+specs/                                  # Feature specifications
 ```
 
 ## Contributing

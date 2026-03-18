@@ -1,0 +1,115 @@
+id: enterprise_research
+name: Enterprise Research Pipeline
+description: Research using only enterprise data sources (no web search)
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+tools:
+  - name: genie
+    kind: genie
+    config:
+      space_id: 01ef8d7a-0000-0000-0000-000000000000
+    description: "Enterprise data warehouse — financial data, operational metrics, KPIs"
+
+  - name: vector_search
+    kind: vector_search
+    config:
+      index_name: prod_catalog.docs.internal_docs_idx
+      num_results: 10
+    description: "Internal documents — architecture reviews, technical specs, policies"
+
+  - name: knowledge_assistant
+    kind: knowledge_assistant
+    config:
+      endpoint_name: internal-docs-assistant
+    description: "AI-powered Q&A on internal documentation and runbooks"
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 50
+  - name: observations
+    dedup_content_hash: true
+    max_items: 30
+
+root:
+  id: main
+  type: sequence
+  label: Enterprise Research Pipeline
+  children:
+    # Step 1: Classify the query
+    - id: coordinator
+      type: agent
+      label: Query Classifier
+      config:
+        subtype: coordinator
+        model_tier: simple
+        output_key: coordination
+
+    # Step 2: Research cycle with enterprise tools only
+    - id: research_cycle
+      type: plan_and_execute
+      label: Enterprise Research Cycle
+      config:
+        planner_guidance: |
+          Available tools for the researcher:
+          - genie: Query enterprise data warehouse using natural language (financial data, operational metrics, KPIs)
+          - vector_search: Semantic search over internal documents (architecture reviews, technical specs, policies)
+          - knowledge_assistant: AI-powered Q&A on internal documentation and runbooks
+          There is NO web search available. Design all research steps for these enterprise data sources.
+          Every research step in this workflow MUST be executable via at least one of the listed enterprise tools.
+          Do not create generic analysis-only steps before evidence retrieval; each step should explicitly instruct the researcher what enterprise system to query and what fields or documents to retrieve.
+          For financial queries, prefer genie first and ask for concrete metrics, dimensions, and time ranges.
+          For technical/documentation queries, prefer vector_search or knowledge_assistant with explicit document targets.
+          If the user query is underspecified, the first step must still use an enterprise tool to discover available metrics, entities, schemas, or documentation rather than abstaining.
+        planner:
+          subtype: planner
+          model_tier: analytical
+          output_key: plan
+        items_path: steps
+        item_state_key: current_step
+        body:
+          id: researcher
+          type: agent
+          label: Enterprise Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: findings
+            tools: [genie, vector_search, knowledge_assistant]
+            pool_writes:
+              - pool: observations
+                extract: findings
+              - pool: sources
+                extract: sources
+            max_tool_calls: 8
+        evaluator:
+          subtype: reflector
+          model_tier: analytical
+          output_key: evaluation
+          pool_inject:
+            - pool: observations
+              threshold: 0
+        max_iterations: 3
+        min_iterations: 1
+        max_replan_cycles: 1
+
+    # Step 3: Synthesize final report
+    - id: synthesizer
+      type: agent
+      label: Report Synthesizer
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: report
+        pool_inject:
+          - pool: observations
+            threshold: 0
+            max_items: 12
+            max_item_chars: 500
+          - pool: sources
+            threshold: 0
+            max_items: 15
+            max_item_chars: 600
+        max_tool_calls: 0

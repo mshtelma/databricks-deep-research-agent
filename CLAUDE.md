@@ -9,7 +9,7 @@ Deep research agent with multi-agent architecture (Coordinator, Planner, Researc
 - **Step-by-step reflection** after EACH research step (CONTINUE/ADJUST/COMPLETE)
 - **Tiered model routing**: simple (fast), analytical (balanced), complex (reasoning)
 
-## Quick Reference - Make Commands
+## Quick Reference — Make Commands
 
 ### Development
 | Command | Description |
@@ -23,7 +23,11 @@ Deep research agent with multi-agent architecture (Coordinator, Planner, Researc
 ### Database
 | Command | Description |
 |---------|-------------|
-| `make db-migrate` | Run migrations on configured Lakebase (standard for local dev) |
+| `make db-provision TARGET=local-dev` | Full Autoscaling setup, writes `.env.local-dev` |
+| `make db-provision TARGET=e2e` | Full Autoscaling setup for E2E, writes `.env.e2e` |
+| `make db-cleanup TARGET=dev` | Remove orphaned resources from interrupted deploys |
+| `make db-migrate` | Run migrations on configured Lakebase |
+| `make db-migrate DB_SUFFIX=dev` | Run migrations on `deep_research_dev` database |
 | `make db-status` | Check current migration status |
 | `make db-migrate-remote TARGET=dev` | Run migrations on deployed Lakebase instance |
 | `make db-reset` | Reset schema (drops ALL data, recreates tables) |
@@ -31,25 +35,37 @@ Deep research agent with multi-agent architecture (Coordinator, Planner, Researc
 | `make db-local` | Start local PostgreSQL via Docker (fallback only) |
 | `make db-local-stop` | Stop local PostgreSQL |
 
-**Note:** Local development uses **remote Lakebase** by default. Configure via `LAKEBASE_*` env vars in `.env`. The `make db-local` command is only for offline/fallback scenarios.
+**Note:** Local development uses **remote Lakebase** by default. Use `DB_SUFFIX` to isolate databases (e.g., `DB_SUFFIX=dev` targets `deep_research_dev`).
 
 ### Testing
 | Command | Description |
 |---------|-------------|
-| `make test` | Unit tests only (fast, mocked, no credentials) |
+| `make test` | Unit tests — both framework + app (fast, mocked) |
+| `make test-framework` | Framework unit tests only |
+| `make test-app` | App unit tests only |
 | `make test-integration` | Integration tests (real LLM/Brave, requires creds) |
 | `make test-complex` | Long-running tests (production config) |
 | `make test-all` | All Python + Frontend tests |
 | `make test-frontend` | Frontend tests only |
-| `make e2e` | Build + run Playwright E2E tests |
-| `make e2e-ui` | E2E tests with Playwright UI |
+
+### E2E Testing (Playwright)
+| Command | Description |
+|---------|-------------|
+| `make e2e` | Build + run all E2E tests |
+| `make e2e-fast` | Basic UI tests, no research (~1 min) |
+| `make e2e-medium` | Light research operations (2-5 min) |
+| `make e2e-slow` | Full research with verification (~10 min) |
+| `make e2e-super-slow` | Parallel research sessions (~15 min) |
+| `make e2e-custom-agents` | Custom agent CRUD + research (~30 min) |
+| `make e2e-all` | All E2E categories |
+| `make e2e-ui` | E2E with Playwright UI |
 
 ### Quality & Build
 | Command | Description |
 |---------|-------------|
-| `make typecheck` | Type check backend (mypy) + frontend (tsc) |
-| `make lint` | Lint backend (ruff) + frontend (eslint) |
-| `make format` | Format code (ruff + prettier) |
+| `make typecheck` | Type check both projects (mypy + tsc) |
+| `make lint` | Lint both projects (ruff + eslint) |
+| `make format` | Format both projects (ruff + prettier) |
 | `make build` | Build frontend to `static/` |
 | `make prod` | Build + run unified production server (:8000) |
 | `make clean` | Remove build artifacts |
@@ -66,111 +82,107 @@ Deep research agent with multi-agent architecture (Coordinator, Planner, Researc
 | `make bundle-validate` | Validate Databricks bundle config |
 | `make bundle-summary` | Show deployment summary |
 
+### Framework
+| Command | Description |
+|---------|-------------|
+| `make run-example WORKFLOW=simple_research QUERY="What is AI?"` | Run a framework example workflow |
+
 ### Direct Commands
 ```bash
-# Pytest with markers
 uv run pytest -m "unit"          # Unit tests
 uv run pytest -m "integration"   # Integration tests
-uv run pytest -m "complex"       # Complex tests
-
-# Individual tools
 uv run mypy src/deep_research --strict
 uv run ruff check src/deep_research
 cd frontend && npm run typecheck
-
-# View logs
 tail -f /tmp/deep-research-dev.log   # Dev server logs
-tail -f /tmp/deep-research-prod.log  # Prod server logs
 ```
 
-## Tech Stack
+## Project Structure (uv Workspace Monorepo)
 
-| Component | Technology | Version |
-|-----------|------------|---------|
-| Backend | Python | 3.11+ |
-| Frontend | TypeScript + React | 5.x / 18.x |
-| Agent Orchestration | Plain Async Python | - |
-| LLM Client | openai (AsyncOpenAI) | 1.10+ |
-| Backend Framework | FastAPI | 0.109+ |
-| Database | Databricks Lakebase (PostgreSQL) | Preview |
-| Database Client | psycopg3 / asyncpg | 3.1+ / 0.29+ |
-| Observability | MLflow | 3.8+ |
-| UI | Tailwind CSS, TanStack Query | 3.4+ / 5.x |
-
-## Project Structure
+This is a **uv workspace monorepo** with two packages:
+- `databricks-deep-research` — standalone framework (PyPI-publishable)
+- `databricks-deep-research-app` — the app that uses the framework
 
 ```text
-src/deep_research/               # Python package (pip-installable)
-├── agent/
-│   ├── orchestrator.py          # Main async pipeline
-│   ├── state.py                 # ResearchState model
-│   ├── config.py                # Agent configuration accessors
-│   ├── persistence.py           # DB persistence layer
-│   ├── nodes/                   # Agent nodes
-│   │   ├── coordinator.py       # Query classification
-│   │   ├── background.py        # Quick background search
-│   │   ├── planner.py           # Research plan generation
-│   │   ├── researcher.py        # Classic step execution
-│   │   ├── react_researcher.py  # ReAct-style researcher
-│   │   ├── reflector.py         # Step-by-step decisions
-│   │   ├── synthesizer.py       # Final report generation
-│   │   ├── citation_synthesizer.py   # Citation-aware synthesis
-│   │   └── react_synthesizer.py      # ReAct synthesis mode
-│   ├── prompts/                 # Agent prompt templates
-│   ├── tools/                   # web_search, web_crawler, registries
-│   └── pipeline/                # Pipeline components
-├── api/v1/                      # FastAPI routes
-│   ├── utils/                   # Shared auth & transformers
-│   └── *.py                     # Endpoint files
-├── models/                      # SQLAlchemy models
-├── schemas/                     # Pydantic request/response schemas
-├── services/                    # Business logic
-│   ├── base.py                  # BaseRepository pattern
-│   ├── llm/                     # LLM client, rate limiter
-│   ├── search/                  # Brave Search API
-│   ├── citation/                # Citation pipeline
-│   └── *_service.py             # Domain services
-├── core/                        # Config, auth, tracing
-├── db/                          # Database, migrations
-└── main.py                      # FastAPI app entry point
+pyproject.toml                        # Root workspace config
 
-frontend/src/                    # React frontend
-├── components/                  # UI components
-│   ├── chat/                    # Chat UI components
-│   ├── research/                # Research panel components
-│   ├── citations/               # Citation display components
-│   └── common/                  # Shared components
-├── hooks/                       # Custom React hooks
-├── pages/                       # Page components
-├── api/                         # API client
-└── types/                       # TypeScript types
+databricks-deep-research/             # Framework package
+├── src/databricks_deep_research/
+│   ├── workflow/                      # DAG engine: definition, executor, state, conditions, validation
+│   │   ├── runtime/                   # Plan-and-execute orchestration (planning, step exec, recovery)
+│   │   └── runtime_core/             # RuntimeState, WorkflowRunRequest/Result, store, selectors
+│   ├── agents/                        # Agent harness, ReAct loop, grounding, isolation, query policy
+│   │   ├── builtins/                  # 6 subtypes: coordinator, planner, researcher, reflector, synthesizer, background
+│   │   ├── execution/                 # Pool/state projection, output normalization
+│   │   └── prompts/                   # Per-subtype prompt templates
+│   ├── tools/                         # ResearchTool protocol, ToolResolver, UrlRegistry
+│   │   ├── builtins/                  # web_search, web_crawl, brave_search, file_search, vector_search, genie, knowledge_assistant
+│   │   └── factories/                 # Builtin + Databricks tool factories
+│   ├── pools/                         # Shared research pools (dedup, capacity, BM25 search)
+│   ├── llm/                           # FrameworkLLMClient, ModelTier routing, token budget
+│   ├── citation/                      # 7-stage verification pipeline (12 modules)
+│   ├── events/                        # StreamEvent discriminated union
+│   ├── templates/                     # Safe Jinja2 template rendering
+│   ├── runner.py                      # WorkflowRunner high-level API
+│   ├── tracing.py                     # MLflow tracing integration
+│   └── errors.py                      # WorkflowError hierarchy
+├── docs/                              # Framework documentation (43 files)
+├── examples/                          # YAML workflow examples
+└── tests/
 
-e2e/                             # Playwright E2E tests
-├── tests/                       # Test spec files
-├── pages/                       # Page Object Models
-└── fixtures/                    # Test fixtures
-
-tests/                           # Python tests (3-tier)
-├── unit/                        # Fast, mocked tests
-├── integration/                 # Real LLM/Brave tests
-└── complex/                     # Long-running tests
-
-config/                          # Configuration files
-├── app.yaml                     # Production config
-├── app.test.yaml                # Test config (minimal iterations)
-├── app.e2e.yaml                 # E2E test config
-└── app.example.yaml             # Documented example
+databricks-deep-research-app/         # Application package
+├── src/deep_research/
+│   ├── agent/
+│   │   ├── orchestrator.py            # Main async pipeline (legacy path)
+│   │   ├── framework_orchestrator.py  # Framework path (use_framework=True)
+│   │   ├── adapters/                  # Framework ↔ App adapters (llm, config, domain, tool, checkpoint)
+│   │   ├── pipeline/                  # Phase-based execution pipeline
+│   │   ├── workflows/                 # YAML workflow definitions + builder
+│   │   ├── nodes/                     # Agent nodes (coordinator, planner, researcher, etc.)
+│   │   ├── prompts/                   # App-specific prompt templates
+│   │   ├── tools/                     # App-specific tools (enterprise, vector search, genie)
+│   │   └── utils/                     # Agent utilities (conversation history)
+│   ├── agent_server/                  # Databricks agent serving endpoint
+│   ├── api/v1/                        # FastAPI routes (15 modules + utils/)
+│   ├── middleware/                     # Auth, CSRF, security headers, audit, logging
+│   ├── plugins/                       # Plugin system (base, manager, discovery, lifecycle/)
+│   ├── conversation/                  # Intent classification + conversation routing
+│   ├── output/                        # Output protocol + format registry
+│   ├── models/                        # SQLAlchemy models
+│   ├── schemas/                       # Pydantic schemas
+│   ├── services/                      # Business logic (llm/, search/, citation/, storage/)
+│   ├── core/                          # Config, auth, tracing, dependencies
+│   ├── deployment/                    # Lakebase provisioning, migration runner, permission grants
+│   ├── db/                            # Database session, migrations/ (20 versions)
+│   ├── cli/                           # CLI provisioning tools
+│   ├── jobs/                          # Background job definitions
+│   └── main.py                        # FastAPI entry point
+├── frontend/src/                      # React frontend
+├── e2e/                               # Playwright E2E tests
+├── tests/                             # App tests (unit/integration/complex)
+├── scripts/                           # Utility scripts
+└── config/                            # YAML config files
 ```
 
-## Key Configuration Files
-
+### Key Configuration Files
 | File | Purpose |
 |------|---------|
 | `config/app.yaml` | Central config (endpoints, models, agents, search) |
 | `config/app.test.yaml` | Test config (fast models, minimal iterations) |
-| `.env` | Environment variables (credentials, secrets) |
+| `.env` | Shared secrets (BRAVE_API_KEY, etc.) — not touched by provisioning |
 | `pyproject.toml` | Python package definition |
 | `databricks.yml` | Databricks Asset Bundle config |
+
+### Env File Layout
+All env files live in the **repository root**, not inside `databricks-deep-research-app/`.
+
+| File | Written by | Purpose |
+|------|-----------|---------|
+| `.env` | Manual | Shared secrets (BRAVE_API_KEY, workspace creds) |
+| `.env.local-dev` | `make db-provision TARGET=local-dev` | Local dev Lakebase connection |
+| `.env.e2e` | `make db-provision TARGET=e2e` | E2E test Lakebase connection |
+| `.env.ais` | `make deploy TARGET=ais` | AIS deployment config |
+| `.env.example` | Checked in | Template for new developers |
 
 ## Constitution Principles (MUST FOLLOW)
 
@@ -179,6 +191,31 @@ config/                          # Configuration files
 3. **Pydantic Models**: Use for data structures and validation
 4. **No Runtime Introspection**: No hasattr/isinstance for type safety
 5. **Linting**: mypy strict + ruff MUST pass before merge
+6. **Env Files**: All `.env*` files live in repo root, not inside app directory
+7. **Target Env Loading**: Use `load-env` pattern for target-specific env loading
+
+## Architecture
+
+### Framework (`databricks-deep-research`)
+Standalone multi-agent orchestration library (see `databricks-deep-research/docs/` for full reference):
+- **Workflow Engine**: YAML-defined DAG with 8 node types (sequence, parallel, loop, conditional, agent, tool, subworkflow, plan_and_execute)
+- **Plan-and-Execute Runtime**: `runtime/` handles planning, step execution, evaluation, recovery; `runtime_core/` provides `RuntimeState` (append-only), `WorkflowRunRequest`/`WorkflowRunResult`
+- **Agent Harness**: prompt→LLM→parse→state cycle with ReAct tool-calling loop; `execution/` pipeline handles pool/state projection and output normalization
+- **Builtin Subtypes**: coordinator, planner, researcher, reflector, synthesizer, background (registered via `register_builtin()`)
+- **Tool System**: `ResearchTool` protocol with `SourceKind` enum (web, vector_index, sql_analytics, qa_assistant, file, builtin); `ToolResolver` chains overrides → cache → factories → registry; `UrlRegistry` prevents hallucinated URLs
+- **7 Builtin Tools**: web_search, web_crawl, brave_search, file_search, vector_search, genie, knowledge_assistant
+- **Pool System**: Shared research pools with dedup, capacity limits, BM25+vector hybrid search
+- **Citation Pipeline**: 7-stage verification (evidence selection → interleaved generation → confidence → NLI verification → correction → numeric QA → ARE retrieval)
+- **Public API**: `WorkflowRunner`, `WorkflowResult`, `RuntimeState`, `ExecutionContext`, `FrameworkLLMClient`, `ModelTier`, `ResearchTool`, `ToolFactoryContext`, `StreamEvent`
+
+### App Integration
+- **Feature Flag**: `OrchestrationConfig.use_framework=True` routes through `framework_orchestrator.py` instead of legacy `orchestrator.py`
+- **Adapter Pattern**: `llm_adapter.py`, `config_translator.py`, `domain_context.py`, `tool_adapter.py`, `checkpoint_adapter.py` bridge framework ↔ app
+- **Middleware Stack**: Auth → CSRF → SecurityHeaders → AuditLog → RequestLogging (in `middleware/`)
+- **Plugin System**: `PluginManager` discovers tool/prompt providers + lifecycle hooks via entry points
+- **Conversation Handler**: Intent classification and routing in `conversation/`
+- **Output Protocol**: Extensible output format registry in `output/`
+- **Deployment Helpers**: Lakebase provisioning, migration runner, permission grants in `deployment/`
 
 ## Code Patterns
 
@@ -200,43 +237,46 @@ config/                          # Configuration files
 - SSE for streaming (not WebSockets)
 - Use `formatActivityLabel()` from `@/utils/activityLabels`
 
+### Framework Integration
+- Import public API from `databricks_deep_research` (see `__init__.py` for full list)
+- Tools implement `ResearchTool` protocol; use `ToolFactoryContext` for DI (workspace_client, user_token)
+- `SourceKind` enum drives query generation and result admission per tool type
+- `UrlRegistry` maps integer indices → URLs; LLM never sees raw URLs
+- `RuntimeState` is append-only — never mutate, always extend
+
 ## Authentication
 
-### Local Development (Remote Lakebase - Standard)
+### Local Development (Lakebase — Standard)
 ```bash
-# .env - Profile-based with Lakebase (RECOMMENDED)
+# Profile-based (RECOMMENDED)
 DATABRICKS_CONFIG_PROFILE=your-profile-name
 LAKEBASE_INSTANCE_NAME=your-instance-name
 LAKEBASE_DATABASE=deep_research
 
-# OR direct token with Lakebase
-DATABRICKS_HOST=https://your-workspace.databricks.com
-DATABRICKS_TOKEN=your-token
-LAKEBASE_INSTANCE_NAME=your-instance-name
-LAKEBASE_DATABASE=deep_research
+# Autoscaling backend (written by db-provision)
+ENDPOINT_NAME=your-endpoint-name
+PGHOST=your-pghost.database.cloud.databricks.com
 ```
 
 ### Local PostgreSQL (Fallback Only)
 ```bash
-# Only for offline development or when Lakebase is unavailable
-# Requires: make db (starts Docker PostgreSQL)
+# Only for offline development — requires: make db-local
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/postgres
 ```
-
-**Important:** This project uses **remote Lakebase** for local development. Local PostgreSQL is a fallback option only.
 
 ### Lakebase OAuth
 - Tokens have 1-hour lifetime with 5-minute refresh buffer
 - Username is always `"token"` for OAuth connections
-- Host: `{LAKEBASE_INSTANCE_NAME}.database.cloud.databricks.com`
+- Auth path auto-detected: `ENDPOINT_NAME` → Autoscaling, `PGHOST` → Provisioned, `LAKEBASE_INSTANCE_NAME` → Legacy
 
 ## Deployment Architecture
 
-### Two-Phase Deployment
-1. **Bootstrap**: Deploy with `postgres` database (always exists)
-2. **Wait**: Lakebase instance becomes ready (~30-60s)
-3. **Create**: `deep_research` database via script
-4. **Complete**: Re-deploy with `deep_research` as configured database
+### Autoscaling Pipeline
+1. Provision Lakebase endpoint via `make db-provision TARGET=<target>`
+2. Wait for endpoint ready state
+3. Create database, run migrations
+4. Grant permissions to app service principal
+5. Deploy app via `make deploy TARGET=<target>`
 
 ### Permission Model
 ```
@@ -278,6 +318,15 @@ research_types:
     researcher: {mode: react, max_tool_calls: 20}
 ```
 
+### Query Modes
+- `simple` — Direct LLM response, no research
+- `web_search` — Lightweight pipeline: 2-5 sources, 15-20s timeout, falls back to simple on timeout
+- `deep_research` — Full multi-step pipeline with reflection
+
+### Researcher Modes
+- `classic`: Single-pass with fixed searches/crawls per step (faster)
+- `react`: ReAct loop where LLM controls tool calls with budget (more intelligent)
+
 ### Config Access in Code
 ```python
 from deep_research.agent.config import (
@@ -287,31 +336,3 @@ from deep_research.agent.config import (
 )
 from deep_research.core.app_config import get_app_config
 ```
-
-## Known Issues
-
-### Web Search Mode Incomplete
-- **Status**: Design complete, implementation pending
-- **Current**: Falls through to full Deep Research pipeline
-- **Expected**: Single-step researcher with limited budget (~15s)
-
-## Researcher Modes
-- `classic`: Single-pass with fixed searches/crawls per step (faster)
-- `react`: ReAct loop where LLM controls tool calls with budget (more intelligent)
-
-<!-- MANUAL ADDITIONS START -->
-<!-- Add project-specific notes here that should persist across updates -->
-<!-- MANUAL ADDITIONS END -->
-
-## Active Technologies
-- Python 3.11+ + FastAPI, Databricks SDK (WorkspaceClient), SQLAlchemy, Pydantic (006-user-chat-isolation)
-- PostgreSQL (Databricks Lakebase) (006-user-chat-isolation)
-- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI, SQLAlchemy (async), React 18, TanStack Query (006-user-chat-isolation)
-- PostgreSQL (Databricks Lakebase) - existing + server-side session store for incognito (006-user-chat-isolation)
-- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI 0.109+, React 18, TanStack Query 5.x, Pydantic 2.x (008-data-source-selection)
-- Databricks Lakebase (PostgreSQL) - existing, localStorage for preferences (008-data-source-selection)
-- Python 3.11+ (backend), TypeScript 5.x (frontend) + FastAPI 0.109+, SQLAlchemy (async), React 18, TanStack Query 5.x, Pydantic 2.x (009-custom-agent-config)
-- Databricks Lakebase (PostgreSQL) — not yet live, schema freely modifiable (009-custom-agent-config)
-
-## Recent Changes
-- 006-user-chat-isolation: Added Python 3.11+ + FastAPI, Databricks SDK (WorkspaceClient), SQLAlchemy, Pydantic

@@ -1,0 +1,97 @@
+id: citation_pipeline
+name: Research with Citation Pipeline
+description: Research pipeline with reduced iterations, designed for citation verification testing
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 100
+  - name: observations
+    dedup_content_hash: true
+    max_items: 50
+
+root:
+  id: main
+  type: sequence
+  label: Citation Research Pipeline
+  children:
+    # Step 1: Classify the query
+    - id: coordinator
+      type: agent
+      label: Query Classifier
+      config:
+        subtype: coordinator
+        model_tier: simple
+        output_key: coordination
+
+    # Step 2: Quick background search
+    - id: background
+      type: agent
+      label: Background Investigator
+      config:
+        subtype: background
+        model_tier: simple
+        output_key: background
+        tools: [web_search]
+        max_tool_calls: 3
+
+    # Step 3: Research cycle (reduced iterations for faster citation testing)
+    - id: research_cycle
+      type: plan_and_execute
+      label: Research Cycle
+      config:
+        planner:
+          subtype: planner
+          model_tier: analytical
+          output_key: plan
+        items_path: steps
+        item_state_key: current_step
+        body:
+          id: researcher
+          type: agent
+          label: Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: findings
+            pool_inject:
+              - pool: observations
+                threshold: 0
+                max_items: 10
+                max_item_chars: 500
+            tools: [web_search, web_crawl]
+            pool_writes:
+              - pool: observations
+                extract: findings
+              - pool: sources
+                extract: sources
+            max_tool_calls: 6
+        evaluator:
+          subtype: reflector
+          model_tier: analytical
+          output_key: evaluation
+        max_iterations: 3
+        min_iterations: 1
+        max_replan_cycles: 1
+
+    # Step 4: Synthesize report (source for citation verification)
+    - id: synthesizer
+      type: agent
+      label: Report Synthesizer
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        grounding_mode: classical_lite
+        output_key: report
+        pool_inject:
+          - pool: observations
+            threshold: 0
+          - pool: sources
+            threshold: 0
+        pool_tools:
+          - observations
+          - sources
+        max_tool_calls: 5

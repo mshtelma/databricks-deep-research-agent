@@ -161,6 +161,9 @@ class MyResearchPlugin:
         }
 ```
 
+> **Tip**: Plugins can also implement `WorkflowProviderPlugin` to supply custom YAML workflows
+> resolved by a `workflow_ref` string. See the [Plugin Development Guide](../../docs/plugin-development.md#workflowproviderplugin) for details.
+
 ### Step 3: Implement a Custom Tool
 
 ```python

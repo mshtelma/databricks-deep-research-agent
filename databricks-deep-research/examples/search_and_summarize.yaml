@@ -1,0 +1,54 @@
+# Search-and-summarize workflow for integration testing.
+#
+# Two-step pipeline:
+# 1. Background agent searches the web for initial context
+# 2. Synthesizer generates a brief summary from findings
+#
+# Tests: tool calling (web_search), pool writes, pool injection, synthesis.
+
+id: search_and_summarize
+name: Search and Summarize
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 50
+  - name: observations
+    dedup_key: content_hash
+    max_items: 50
+
+root:
+  id: main
+  type: sequence
+  label: Main Pipeline
+  children:
+    - id: background
+      type: agent
+      label: Background Search
+      config:
+        subtype: background
+        model_tier: simple
+        output_key: background
+        tools: [web_search]
+        pool_writes:
+          - pool: sources
+            extract: sources
+        max_tool_calls: 3
+
+    - id: synthesizer
+      type: agent
+      label: Report Writer
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        input_keys: [query, background]
+        output_key: report
+        pool_inject:
+          - pool: observations
+            threshold: 0
+          - pool: sources
+            threshold: 0
+        max_tool_calls: 0

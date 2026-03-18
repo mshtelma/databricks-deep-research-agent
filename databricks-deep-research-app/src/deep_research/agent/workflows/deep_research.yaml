@@ -1,0 +1,109 @@
+# Deep Research Pipeline — Full Multi-Agent Workflow
+#
+# This is the primary workflow used by the Deep Research app.
+# The config_translator may override specific settings (tools, depth, etc.)
+# based on OrchestrationConfig, but this YAML defines the structural skeleton.
+#
+# Pipeline: coordinator → background → plan_and_execute → synthesizer
+
+id: deep_research
+name: Deep Research
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 200
+  - name: observations
+    dedup_key: content_hash
+    max_items: 100
+
+root:
+  id: main
+  type: sequence
+  label: Deep Research Pipeline
+  children:
+    # 1. Classify query complexity and determine research depth
+    - id: coordinator
+      type: agent
+      label: Query Classifier
+      config:
+        subtype: coordinator
+        model_tier: simple
+        output_key: coordination
+
+    # 2. Quick background investigation for initial context
+    - id: background
+      type: agent
+      label: Background Investigator
+      config:
+        subtype: background
+        model_tier: simple
+        output_key: background
+        tools:
+          - type: builtin
+            name: web_search
+          - type: builtin
+            name: web_crawl
+        max_tool_calls: 5
+
+    # 3. Iterative research cycle with planning, execution, reflection
+    - id: research_cycle
+      type: plan_and_execute
+      label: Research Cycle
+      config:
+        planner:
+          subtype: planner
+          model_tier: analytical
+          output_key: plan
+        items_path: steps
+        item_state_key: current_step
+        body:
+          id: researcher
+          type: agent
+          label: Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: findings
+            tools:
+              - type: builtin
+                name: web_search
+              - type: builtin
+                name: web_crawl
+            pool_writes:
+              - pool: observations
+                extract: findings
+              - pool: sources
+                extract: sources
+            max_tool_calls: 15
+        evaluator:
+          subtype: reflector
+          model_tier: analytical
+          output_key: evaluation
+          pool_inject:
+            - pool: observations
+              threshold: 0
+        max_iterations: 7
+        min_iterations: 2
+        max_replan_cycles: 3
+
+    # 4. Generate final synthesized report
+    - id: synthesizer
+      type: agent
+      label: Report Synthesizer
+      config:
+        subtype: synthesizer
+        model_tier: complex
+        output_key: report
+        pool_inject:
+          - pool: observations
+            threshold: 0
+          - pool: sources
+            threshold: 0
+        pool_tools:
+          - observations
+          - sources
+        max_tool_calls: 10

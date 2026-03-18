@@ -1,0 +1,170 @@
+[project]
+name = "databricks-deep-research-app"
+version = "0.1.0"
+description = "Deep Research application - FastAPI backend + React frontend for Databricks"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "databricks-deep-research",
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "httpx>=0.26.0",
+    "openai>=1.10.0",
+    "sqlalchemy[asyncio]>=2.0.0",
+    "greenlet>=3.0.0",
+    "psycopg[binary,pool]>=3.1.0",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    "mlflow>=3.8.0",
+    "databricks-sdk>=0.89.0",
+    "json-repair>=0.25.0",
+    "pyyaml>=6.0.0",
+    "trafilatura>=2.0.0",
+    "bm25s>=0.2.0",
+    "numpy>=1.24.0",
+    "python-multipart>=0.0.22",
+    "databricks-vectorsearch>=0.55",
+]
+
+[project.optional-dependencies]
+docling = [
+    "docling>=2.0.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-timeout>=2.2.0",
+    "mypy>=1.8.0",
+    "ruff>=0.2.0",
+    "httpx>=0.26.0",
+    "types-PyYAML>=6.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deep_research"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# Include frontend static assets in the package for deployment
+"static" = "deep_research/static"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/deep_research", "static"]
+
+# CLI entry points for deployment utilities
+[project.scripts]
+deep-research-run = "deep_research.deployment.app_runner:main"
+deep-research-migrate = "deep_research.deployment.migrations:main"
+
+# Entry points for plugin discovery
+[project.entry-points."deep_research.plugins"]
+# External plugins register themselves in their own pyproject.toml
+
+[project.entry-points."deep_research.tools"]
+web_search = "deep_research.agent.tools.web_search:WebSearchTool"
+web_crawl = "deep_research.agent.tools.web_crawl:WebCrawlTool"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src/deep_research"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long - handled by formatter
+    "B008",   # do not perform function calls in argument defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Stub endpoints have unused parameters that will be used when implemented
+"src/deep_research/api/v1/chats.py" = ["ARG001"]
+"src/deep_research/api/v1/messages.py" = ["ARG001"]
+"src/deep_research/api/v1/preferences.py" = ["ARG001"]
+"src/deep_research/api/v1/research.py" = ["ARG001"]
+# Exception handlers require request parameter by FastAPI signature
+"src/deep_research/core/exceptions.py" = ["ARG001"]
+# Tracing stubs have reserved parameters for future use
+"src/deep_research/core/tracing.py" = ["ARG001"]
+# SPA serving uses path but not request
+"src/deep_research/static_files.py" = ["ARG001"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["deep_research"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = [
+    "mlflow.*",
+    "databricks.*",
+    "bm25s.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
+markers = [
+    "unit: Fast tests with mocked dependencies (default)",
+    "integration: Tests requiring real LLM and Brave API (uses test config)",
+    "complex: Long-running research tests with production config (opt-in)",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pyspark.*",
+    "ignore::DeprecationWarning:distutils.*",
+]
+
+[tool.coverage.run]
+source = ["src/deep_research"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+    "*/migrations/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@abstractmethod",
+]
+fail_under = 0
+show_missing = true
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[dependency-groups]
+dev = [
+    "build>=1.4.0",
+    "mypy>=1.19.1",
+]

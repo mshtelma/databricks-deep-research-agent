@@ -2,6 +2,13 @@
 
 Production-grade multi-agent system for intelligent web research with claim-level citation verification, built on Databricks infrastructure.
 
+> **Looking for framework documentation?** The workflow engine, agent harness,
+> tool protocol, YAML authoring, and citation pipeline are documented in the
+> framework package: [`databricks-deep-research/docs/`](../databricks-deep-research/docs/index.md)
+>
+> The docs below cover the **application** (FastAPI backend, React frontend,
+> deployment, configuration). All file paths are relative to `databricks-deep-research-app/`.
+
 ## Overview
 
 The Deep Research Agent combines a **5-agent orchestration architecture** with a **7-stage verification pipeline** grounded in peer-reviewed research (ARE, FActScore, SAFE, CoVe, ReClaim, QAFactEval).
@@ -26,7 +33,8 @@ The Deep Research Agent combines a **5-agent orchestration architecture** with a
 | [Configuration](./configuration.md) | YAML configuration system and accessors |
 | [Data Models](./data-models.md) | Entity definitions and relationships |
 | [API Reference](./api.md) | REST endpoints and SSE event types |
-| [Deployment](./deployment.md) | Databricks Apps deployment guide |
+| [Deployment](./deployment.md) | Deployment, Lakebase operations, and troubleshooting guide |
+| [Framework Documentation](../databricks-deep-research/docs/index.md) | Workflow engine, agent system, tool protocol, YAML authoring, pool system, citation pipeline |
 
 ### Enterprise & Customization
 
@@ -118,9 +126,9 @@ make deploy TARGET=dev BRAVE_SCOPE=msh
 
 | Path | Purpose |
 |------|---------|
-| `src/agent/orchestrator.py` | Main orchestration pipeline |
-| `src/agent/nodes/` | 5 agent implementations |
-| `src/services/citation/pipeline.py` | 7-stage citation verification |
+| `src/deep_research/agent/orchestrator.py` | Main orchestration pipeline |
+| `src/deep_research/agent/nodes/` | 5 agent implementations |
+| `src/deep_research/services/citation/pipeline.py` | 7-stage citation verification |
 | `config/app.yaml` | Central configuration |
 | `specs/` | Feature specifications |
 
@@ -132,3 +140,4 @@ make deploy TARGET=dev BRAVE_SCOPE=msh
 - [007-enterprise-data-sources](../specs/007-enterprise-data-sources/) - Enterprise data source integration
 - [008-data-source-selection](../specs/008-data-source-selection/) - Source scope selection
 - [009-custom-agent-config](../specs/009-custom-agent-config/) - Custom agent configuration
+- [011-multi-agent-framework](../specs/011-multi-agent-framework/) - Standalone orchestration framework

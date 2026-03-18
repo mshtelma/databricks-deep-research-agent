@@ -1,0 +1,129 @@
+# Simple Deep Research Workflow
+#
+# Demonstrates the full research pipeline:
+# 1. Coordinator classifies the query
+# 2. Background investigator gathers initial context
+# 3. Plan-and-execute cycle: planner creates steps, researcher executes
+#    each step, reflector evaluates progress (continue/replan/complete)
+# 4. Synthesizer generates the final report
+#
+# Usage:
+#   from databricks_deep_research import WorkflowRunner
+#
+#   runner = WorkflowRunner.from_databricks()
+#   result = await runner.run("examples/simple_research.yaml", query="What are the latest advances in quantum computing?")
+#   print(result.output)
+
+id: simple_research
+name: Simple Research Pipeline
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 200
+  - name: observations
+    dedup_key: content_hash
+    max_items: 100
+
+root:
+  id: main
+  type: sequence
+  label: Main Pipeline
+  children:
+    # Step 1: Classify the query
+    - id: coordinator
+      type: agent
+      label: Query Classifier
+      config:
+        subtype: coordinator
+        model_tier: simple
+        output_key: coordination
+
+    # Step 2: Quick background investigation
+    - id: background
+      type: agent
+      label: Background Investigator
+      config:
+        subtype: background
+        model_tier: simple
+        output_key: background
+        tools: [web_search]
+        max_tool_calls: 5
+
+    # Step 3: Research cycle (plan → execute → evaluate)
+    - id: research_cycle
+      type: plan_and_execute
+      label: Research Cycle
+      config:
+        planner:
+          subtype: planner
+          model_tier: analytical
+          output_key: plan
+        items_path: steps
+        item_state_key: current_step
+        body:
+          id: researcher
+          type: agent
+          label: Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: findings
+            tools: [web_search, web_crawl]
+            pool_writes:
+              - pool: observations
+                extract: findings
+              - pool: sources
+                extract: sources
+            max_tool_calls: 6
+        evaluator:
+          subtype: reflector
+          model_tier: analytical
+          output_key: evaluation
+          pool_inject:
+            - pool: observations
+              threshold: 0
+        max_iterations: 4
+        min_iterations: 1
+        max_replan_cycles: 1
+
+    # Step 4: Generate final report
+    - id: synthesizer
+      type: agent
+      label: Report Synthesizer
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        grounding_mode: none
+        output_key: report
+        pool_inject:
+          - pool: observations
+            threshold: 0
+          - pool: sources
+            threshold: 0
+        max_tool_calls: 0
+        synthesis_context:
+          observations:
+            max_items: 30
+            max_item_chars: 300
+            compaction:
+              mode: auto
+              max_total_chars: 6000
+              target_chars: 3500
+          sources:
+            max_items: 50
+            max_item_chars: 200
+            compaction:
+              mode: auto
+              max_total_chars: 4000
+              target_chars: 2200
+          fallback_discovery_sources:
+            max_items: 20
+            max_item_chars: 200
+            compaction:
+              mode: auto
+              max_total_chars: 1200
+              target_chars: 700

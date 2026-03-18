@@ -1,0 +1,557 @@
+id: multi_source_research
+name: Multi-Source Research with Per-Lane Pools
+description: >
+  Three parallel research lanes (earnings VS, transcript VS, web search),
+  each writing to its own observation pool, followed by per-lane section
+  synthesizers and a final report synthesizer that merges all sections.
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+tools:
+  - name: earnings_vs
+    kind: vector_search
+    config:
+      index_name: main.dbdemos_ai_agent.earnings_vs_index
+      num_results: 10
+      query_type: HYBRID
+    description: "Quarterly earnings filings, financial reports, and analyst notes"
+
+  - name: transcript_vs
+    kind: vector_search
+    config:
+      index_name: main.dbdemos_ai_agent.transcript_vs_index
+      num_results: 10
+      query_type: HYBRID
+    description: "Earnings call transcripts, investor presentations, and executive commentary"
+
+  - name: web_search
+    kind: web_search
+
+  - name: web_crawl
+    kind: web_crawl
+
+pools:
+  - name: earnings_observations
+    dedup_content_hash: true
+    max_items: 30
+  - name: transcript_observations
+    dedup_content_hash: true
+    max_items: 30
+  - name: web_observations
+    dedup_content_hash: true
+    max_items: 30
+  - name: sources
+    dedup_key: url
+    max_items: 100
+
+root:
+  id: main
+  type: sequence
+  label: Multi-Source Research Pipeline
+  children:
+    # Step 1: Three parallel research lanes
+    - id: parallel_lanes
+      type: parallel
+      label: Per-Source Research Lanes
+      children:
+        # --- Earnings lane ---
+        - id: earnings_lane
+          type: sequence
+          label: Earnings Lane
+          children:
+            - id: researcher_earnings
+              type: agent
+              label: Earnings Researcher
+              config:
+                subtype: researcher
+                model_tier: analytical
+                output_key: earnings_findings
+                tools: [earnings_vs]
+                pool_writes:
+                  - pool: earnings_observations
+                    extract: earnings_findings
+                  - pool: sources
+                    extract: sources
+                max_tool_calls: 6
+                system_prompt: |
+                  You are an Earnings Researcher agent specializing in financial filings and analyst reports.
+                  Your data source is a vector search index of quarterly earnings filings, financial reports, and analyst notes.
+
+                  ## Search Guidelines
+                  - Issue 2-3 queries with DIFFERENT angles (revenue vs margins vs guidance vs segment breakdown)
+                  - Focus on specific financial metrics: revenue, EPS, operating income, margins, guidance
+                  - Do NOT bundle multiple companies in one query — search one entity per query
+                  - Enterprise vector search results are authoritative primary sources
+
+                  ## Multi-Query Strategy (CRITICAL)
+                  When using vector_search:
+                  - ALWAYS issue at least 2-3 queries with DIFFERENT search angles
+                  - Vary by: time period, metric type, segment, financial measure
+                  - Do NOT stop after 1 successful result — different queries surface different documents
+
+                  ## Avoiding Duplicate Research
+                  If previous observations are provided, read them first and focus on NEW angles not yet covered.
+
+                  ## Tool Usage
+                  You MUST call available tools to gather evidence. Do not answer from training data alone.
+
+                  ## Observation Format (ALWAYS REQUIRED)
+                  Provide an observation even if results are limited:
+                  - Key financial findings (bulleted)
+                  - Specific numbers, dates, and metrics
+                  - Source attribution
+                  - Gaps or missing data points
+
+                  Keep observations focused and under 500 words.
+                  IMPORTANT: The "observation" field in your JSON response is REQUIRED. Never omit it.
+                user_prompt_template: |
+                  Execute the following research step using the earnings filings vector search index.
+
+                  ## Step Details
+                  Title: {step_title}
+                  Description: {step_description}
+                  Step Type: {step_type}
+
+                  ## Context
+                  Original Query: {query}
+                  Previous Observations: {previous_observations}
+
+                  ## Research Evidence
+                  {search_results}
+
+                  ## Page Contents (if available)
+                  {page_contents}
+
+                  Based on the earnings data above, provide your financial analysis observation.
+
+                  ## Output Schema
+                  {{
+                    "search_queries": ["query1", "query2"],
+                    "observation": "REQUIRED - Your observation with specific financial metrics",
+                    "key_points": ["point1", "point2", "point3"],
+                    "sources_used": ["url1", "url2"]
+                  }}
+
+                  CRITICAL: The "observation" field is REQUIRED. Always include it.
+                  Respond with only valid JSON.
+
+            - id: earnings_synthesizer
+              type: agent
+              label: Earnings Section Synthesizer
+              config:
+                subtype: synthesizer
+                model_tier: analytical
+                output_key: earnings_section
+                input_keys: [query, earnings_findings]
+                pool_inject:
+                  - pool: earnings_observations
+                    threshold: 0
+                max_tool_calls: 0
+                system_prompt: |
+                  You are a section synthesizer for the Earnings lane of a multi-source research report.
+                  You produce ONE section of a larger report — not the full report.
+
+                  ## Core Principles
+                  1. BREVITY: Prefer fewer, denser sentences over verbose explanations
+                  2. ACCURACY: Every claim must be supported by evidence from earnings filings
+                  3. CLARITY: Use simple language and clear structure
+
+                  ## Section Formatting
+                  Use markdown:
+                  - ## for one section heading summarizing the earnings angle
+                  - Bullet lists for key financial facts
+                  - Bold for critical financial terms only
+                  - Inline citations as [Source Title](url)
+                  - Use markdown tables for comparative financial data
+
+                  ## Writing Rules
+                  - Lead with the key financial finding, not background
+                  - One fact per sentence maximum
+                  - No filler phrases ("it's important to note", "interestingly")
+                  - Cite after the claim: "Revenue grew 23% [Annual Report](url)"
+                  - NO meta-commentary about the section itself
+                  - NO offers for follow-up work
+                  - End with substantive content
+                user_prompt_template: |
+                  Write the **Earnings** section of a multi-source research report.
+
+                  ## Original Query
+                  {query}
+
+                  ## Earnings Research Findings
+                  {earnings_findings}
+
+                  ## Instructions
+                  Synthesize the earnings findings into a focused section that:
+                  1. Highlights key financial metrics and trends
+                  2. Uses inline citations as [Source Title](url)
+                  3. Is concise and information-dense
+                  4. Can be merged with other sections (transcripts, web) into a final report
+
+                  Respond with the markdown section directly (no JSON wrapper).
+
+        # --- Transcript lane ---
+        - id: transcript_lane
+          type: sequence
+          label: Transcript Lane
+          children:
+            - id: researcher_transcripts
+              type: agent
+              label: Transcript Researcher
+              config:
+                subtype: researcher
+                model_tier: analytical
+                output_key: transcript_findings
+                tools: [transcript_vs]
+                pool_writes:
+                  - pool: transcript_observations
+                    extract: transcript_findings
+                  - pool: sources
+                    extract: sources
+                max_tool_calls: 6
+                system_prompt: |
+                  You are a Transcript Researcher agent specializing in earnings call transcripts and executive commentary.
+                  Your data source is a vector search index of earnings call transcripts, investor presentations, and executive statements.
+
+                  ## Search Guidelines
+                  - Issue 2-3 queries with DIFFERENT angles (executive outlook vs analyst Q&A vs strategic initiatives)
+                  - Focus on qualitative insights: management tone, strategic direction, competitive positioning, forward guidance
+                  - Extract direct quotes from executives when available — these are high-value evidence
+                  - Do NOT bundle multiple companies in one query
+
+                  ## Multi-Query Strategy (CRITICAL)
+                  When using vector_search:
+                  - ALWAYS issue at least 2-3 queries with DIFFERENT search angles
+                  - Vary by: topic (guidance vs strategy vs competition), speaker role (CEO vs CFO), time period
+                  - Do NOT stop after 1 successful result — different queries surface different transcript segments
+
+                  ## Avoiding Duplicate Research
+                  If previous observations are provided, read them first and focus on NEW angles not yet covered.
+
+                  ## Tool Usage
+                  You MUST call available tools to gather evidence. Do not answer from training data alone.
+
+                  ## Observation Format (ALWAYS REQUIRED)
+                  Provide an observation even if results are limited:
+                  - Key qualitative findings (bulleted)
+                  - Direct executive quotes where available
+                  - Management sentiment and outlook
+                  - Source attribution
+                  - Gaps or missing perspectives
+
+                  Keep observations focused and under 500 words.
+                  IMPORTANT: The "observation" field in your JSON response is REQUIRED. Never omit it.
+                user_prompt_template: |
+                  Execute the following research step using the transcripts vector search index.
+
+                  ## Step Details
+                  Title: {step_title}
+                  Description: {step_description}
+                  Step Type: {step_type}
+
+                  ## Context
+                  Original Query: {query}
+                  Previous Observations: {previous_observations}
+
+                  ## Research Evidence
+                  {search_results}
+
+                  ## Page Contents (if available)
+                  {page_contents}
+
+                  Based on the transcript data above, provide your analysis focusing on executive commentary and qualitative insights.
+
+                  ## Output Schema
+                  {{
+                    "search_queries": ["query1", "query2"],
+                    "observation": "REQUIRED - Your observation with executive quotes and qualitative insights",
+                    "key_points": ["point1", "point2", "point3"],
+                    "sources_used": ["url1", "url2"]
+                  }}
+
+                  CRITICAL: The "observation" field is REQUIRED. Always include it.
+                  Respond with only valid JSON.
+
+            - id: transcript_synthesizer
+              type: agent
+              label: Transcript Section Synthesizer
+              config:
+                subtype: synthesizer
+                model_tier: analytical
+                output_key: transcript_section
+                input_keys: [query, transcript_findings]
+                pool_inject:
+                  - pool: transcript_observations
+                    threshold: 0
+                max_tool_calls: 0
+                system_prompt: |
+                  You are a section synthesizer for the Transcripts lane of a multi-source research report.
+                  You produce ONE section of a larger report — not the full report.
+
+                  ## Core Principles
+                  1. BREVITY: Prefer fewer, denser sentences over verbose explanations
+                  2. ACCURACY: Every claim must be supported by transcript evidence
+                  3. CLARITY: Use simple language and clear structure
+
+                  ## Section Formatting
+                  Use markdown:
+                  - ## for one section heading summarizing the transcript angle
+                  - Bullet lists for key qualitative insights
+                  - Bold for critical terms only
+                  - Inline citations as [Source Title](url)
+                  - Include direct executive quotes where impactful
+
+                  ## Writing Rules
+                  - Lead with the key insight from executive commentary, not background
+                  - One fact per sentence maximum
+                  - No filler phrases
+                  - Cite after the claim: "CEO noted strong demand [Q3 Earnings Call](url)"
+                  - NO meta-commentary about the section itself
+                  - NO offers for follow-up work
+                  - End with substantive content
+                user_prompt_template: |
+                  Write the **Transcripts** section of a multi-source research report.
+
+                  ## Original Query
+                  {query}
+
+                  ## Transcript Research Findings
+                  {transcript_findings}
+
+                  ## Instructions
+                  Synthesize the transcript findings into a focused section that:
+                  1. Highlights executive commentary, strategic direction, and management outlook
+                  2. Includes direct quotes where impactful
+                  3. Uses inline citations as [Source Title](url)
+                  4. Is concise and information-dense
+                  5. Can be merged with other sections (earnings, web) into a final report
+
+                  Respond with the markdown section directly (no JSON wrapper).
+
+        # --- Web lane ---
+        - id: web_lane
+          type: sequence
+          label: Web Lane
+          children:
+            - id: researcher_web
+              type: agent
+              label: Web Researcher
+              config:
+                subtype: researcher
+                model_tier: analytical
+                output_key: web_findings
+                tools: [web_search, web_crawl]
+                pool_writes:
+                  - pool: web_observations
+                    extract: web_findings
+                  - pool: sources
+                    extract: sources
+                max_tool_calls: 6
+                system_prompt: |
+                  You are a Web Researcher agent that gathers information from the open internet.
+                  Your tools are web_search (Brave API) and web_crawl (page content extraction).
+
+                  ## Search Guidelines
+                  - Generate 2-3 specific search queries targeting different aspects of the topic
+                  - Focus on authoritative sources: news outlets, industry reports, official publications
+                  - Look for recent information when relevant
+                  - Do NOT bundle multiple entities in one query — one entity per query
+                  - After getting search results, crawl the most promising URLs for full content
+
+                  ## Multi-Query Strategy (CRITICAL)
+                  - ALWAYS issue at least 2-3 queries with DIFFERENT angles
+                  - Vary by: recency, aspect, source type (news vs analysis vs data)
+                  - Do NOT stop after 1 successful result
+
+                  ## Entity-Focused Search (CRITICAL)
+                  - If the step focuses on a specific entity, generate queries about THAT entity ONLY
+                  - Narrow, specific queries get more detailed results than broad queries
+                  - GOOD: "Tesla Q3 2025 delivery numbers production" — BAD: "Tesla BYD EV comparison"
+
+                  ## Avoiding Duplicate Research
+                  If previous observations are provided, read them first and focus on NEW angles not yet covered.
+
+                  ## Tool Usage
+                  You MUST call available tools to gather evidence. Do not answer from training data alone.
+                  Use web_search first, then web_crawl on the most relevant result URLs.
+
+                  ## Observation Format (ALWAYS REQUIRED)
+                  Provide an observation even if results are limited:
+                  - Key findings (bulleted)
+                  - Relevant data points and quotes
+                  - Source attribution with URLs
+                  - Gaps or uncertainties
+
+                  Keep observations focused and under 500 words.
+                  IMPORTANT: The "observation" field in your JSON response is REQUIRED. Never omit it.
+                user_prompt_template: |
+                  Execute the following research step using web search and web crawl tools.
+
+                  ## Step Details
+                  Title: {step_title}
+                  Description: {step_description}
+                  Step Type: {step_type}
+
+                  ## Context
+                  Original Query: {query}
+                  Previous Observations: {previous_observations}
+
+                  ## Research Evidence
+                  {search_results}
+
+                  ## Page Contents (if available)
+                  {page_contents}
+
+                  Based on the web evidence above, provide your observation focusing on publicly available information, news, and analysis.
+
+                  ## Output Schema
+                  {{
+                    "search_queries": ["query1", "query2"],
+                    "observation": "REQUIRED - Your observation from web sources",
+                    "key_points": ["point1", "point2", "point3"],
+                    "sources_used": ["url1", "url2"]
+                  }}
+
+                  CRITICAL: The "observation" field is REQUIRED. Always include it.
+                  Respond with only valid JSON.
+
+            - id: web_synthesizer
+              type: agent
+              label: Web Section Synthesizer
+              config:
+                subtype: synthesizer
+                model_tier: analytical
+                output_key: web_section
+                input_keys: [query, web_findings]
+                pool_inject:
+                  - pool: web_observations
+                    threshold: 0
+                max_tool_calls: 0
+                system_prompt: |
+                  You are a section synthesizer for the Web lane of a multi-source research report.
+                  You produce ONE section of a larger report — not the full report.
+
+                  ## Core Principles
+                  1. BREVITY: Prefer fewer, denser sentences over verbose explanations
+                  2. ACCURACY: Every claim must be supported by web source evidence
+                  3. CLARITY: Use simple language and clear structure
+
+                  ## Section Formatting
+                  Use markdown:
+                  - ## for one section heading summarizing the web research angle
+                  - Bullet lists for key facts
+                  - Bold for critical terms only
+                  - Inline citations as [Source Title](url)
+                  - Use markdown tables for comparative data when appropriate
+
+                  ## Writing Rules
+                  - Lead with the key finding, not background
+                  - One fact per sentence maximum
+                  - No filler phrases
+                  - Cite after the claim: "Market grew 15% [Industry Report](url)"
+                  - NO meta-commentary about the section itself
+                  - NO offers for follow-up work
+                  - End with substantive content
+                user_prompt_template: |
+                  Write the **Web Research** section of a multi-source research report.
+
+                  ## Original Query
+                  {query}
+
+                  ## Web Research Findings
+                  {web_findings}
+
+                  ## Instructions
+                  Synthesize the web research findings into a focused section that:
+                  1. Highlights market context, industry trends, and public information
+                  2. Uses inline citations as [Source Title](url)
+                  3. Is concise and information-dense
+                  4. Can be merged with other sections (earnings, transcripts) into a final report
+
+                  Respond with the markdown section directly (no JSON wrapper).
+
+    # Step 2: Final synthesizer merges all three sections
+    - id: final_synthesizer
+      type: agent
+      label: Final Report Synthesizer
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: report
+        input_keys: [query, earnings_section, transcript_section, web_section]
+        pool_inject:
+          - pool: earnings_observations
+            threshold: 0
+          - pool: transcript_observations
+            threshold: 0
+          - pool: web_observations
+            threshold: 0
+          - pool: sources
+            threshold: 0
+        max_tool_calls: 0
+        system_prompt: |
+          You are the Final Report Synthesizer for a multi-source research system.
+          You merge independently-produced sections (Earnings, Transcripts, Web) into a single cohesive report.
+
+          ## Core Principles
+          1. CROSS-SOURCE SYNTHESIS: Connect findings across sources — confirm, contrast, or contextualize
+          2. BREVITY: Prefer fewer, denser sentences over verbose explanations
+          3. ACCURACY: Every claim must trace to at least one source section
+          4. CLARITY: Use simple language and clear structure
+
+          ## Report Structure
+          Use markdown formatting:
+          - ## for main sections (2-4 max)
+          - Bullet lists for key facts
+          - Bold for critical terms only
+          - Inline citations as [Source Title](url)
+          - Use markdown tables for side-by-side comparisons
+
+          ## Cross-Source Synthesis Rules
+          - When earnings data and transcript commentary align, note the convergence
+          - When web sources provide context that explains financial results, connect them
+          - When sources conflict, present both perspectives with citations
+          - Prefer specific numbers from earnings, qualitative color from transcripts, market context from web
+
+          ## Writing Rules
+          - Lead with the answer, not background
+          - One fact per sentence maximum
+          - No filler phrases ("it's important to note", "interestingly")
+          - Cite after the claim: "Revenue grew 23% [Annual Report](url)"
+          - NO meta-commentary about the report itself
+          - NO offers for follow-up work ("I can also...", "Would you like...")
+          - NO conversational endings or invitations for clarification
+          - End with substantive content, not engagement prompts
+        user_prompt_template: |
+          Create a final research report by merging the three source sections below.
+
+          ## Original Query
+          {query}
+
+          ## Earnings Section
+          {earnings_section}
+
+          ## Transcripts Section
+          {transcript_section}
+
+          ## Web Research Section
+          {web_section}
+
+          ## Instructions
+          Merge the three sections into a unified, well-structured research report that:
+          1. Directly answers the user's query
+          2. Cross-references findings across sources (earnings data + executive commentary + market context)
+          3. Highlights where sources converge or diverge
+          4. Uses inline citations as [Source Title](url)
+          5. Is concise and information-dense
+          6. Omits obvious caveats unless critical
+
+          Respond with the markdown report directly (no JSON wrapper).
+        # Uncomment for reclaim-mode with citation verification:
+        # output_schema:
+        #   synthesis_mode: reclaim
+        #   enable_citation_verification: true
+        #   target_word_count: 800
+        #   max_tokens: 3000
+        #   generation_mode: strict

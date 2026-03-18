@@ -1,0 +1,98 @@
+id: parallel_research
+name: Parallel Research Pipeline
+description: Two parallel researchers with shared pool, followed by synthesizer
+version: 1
+required_inputs: [query]
+output_keys: [report]
+
+tools:
+  - name: web_search
+    kind: web_search
+
+  - name: web_crawl
+    kind: web_crawl
+
+  - name: vector_search
+    kind: vector_search
+    config:
+      index_name: prod_catalog.docs.internal_docs_idx
+      num_results: 10
+    description: "Internal document search"
+
+  - name: knowledge_assistant
+    kind: knowledge_assistant
+    config:
+      endpoint_name: internal-docs-assistant
+    description: "AI-powered Q&A on internal documentation"
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 100
+  - name: observations
+    dedup_content_hash: true
+    max_items: 50
+
+root:
+  id: main
+  type: sequence
+  label: Parallel Research Pipeline
+  children:
+    # Step 1: Classify the query
+    - id: coordinator
+      type: agent
+      label: Query Classifier
+      config:
+        subtype: coordinator
+        model_tier: simple
+        output_key: coordination
+
+    # Step 2: Two researchers in parallel
+    - id: parallel_research
+      type: parallel
+      label: Parallel Researchers
+      children:
+        - id: researcher_web
+          type: agent
+          label: Web Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: web_findings
+            tools: [web_search, web_crawl]
+            pool_writes:
+              - pool: observations
+                extract: web_findings
+              - pool: sources
+                extract: sources
+            max_tool_calls: 5
+
+        - id: researcher_enterprise
+          type: agent
+          label: Enterprise Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: enterprise_findings
+            tools: [vector_search, knowledge_assistant]
+            pool_writes:
+              - pool: observations
+                extract: enterprise_findings
+              - pool: sources
+                extract: sources
+            max_tool_calls: 5
+
+    # Step 3: Synthesize from both research tracks
+    - id: synthesizer
+      type: agent
+      label: Report Synthesizer
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: report
+        pool_inject:
+          - pool: observations
+            threshold: 0
+          - pool: sources
+            threshold: 0
+        max_tool_calls: 0

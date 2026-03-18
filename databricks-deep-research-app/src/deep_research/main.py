@@ -1,0 +1,281 @@
+"""FastAPI application entry point."""
+
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+
+from deep_research.api.v1 import router as api_v1_router
+from deep_research.core.app_config import get_app_config
+from deep_research.core.config import get_settings
+from deep_research.core.exceptions import (
+    AppException,
+    app_exception_handler,
+    http_exception_handler,
+)
+from deep_research.db.session import close_db
+from deep_research.middleware.csrf import CSRFMiddleware
+from deep_research.middleware.logging import RequestLoggingMiddleware, setup_logging
+from deep_research.middleware.security import SecurityHeadersMiddleware
+from deep_research.static_files import setup_static_files
+
+logger = logging.getLogger(__name__)
+
+# Session cleanup interval in seconds (5 minutes)
+SESSION_CLEANUP_INTERVAL_SECONDS = 300
+
+
+async def cleanup_expired_sessions_task(session_maker) -> None:
+    """Background task to clean up expired incognito sessions periodically.
+
+    Runs every 5 minutes to delete expired sessions and their associated chats.
+    This prevents storage leaks and ensures privacy by removing incognito data
+    after session expiry.
+    """
+    from deep_research.services.session_service import SessionService
+
+    while True:
+        try:
+            await asyncio.sleep(SESSION_CLEANUP_INTERVAL_SECONDS)
+            async with session_maker() as db:
+                service = SessionService(db)
+                count = await service.cleanup_expired()
+                if count > 0:
+                    await db.commit()
+                    logger.info(f"Cleaned up {count} expired incognito sessions")
+        except asyncio.CancelledError:
+            logger.info("Session cleanup task cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Session cleanup failed: {e}", exc_info=True)
+            # Continue running despite errors
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan manager."""
+    settings = get_settings()
+
+    # Setup logging
+    setup_logging(settings.log_level)
+
+    # NOTE: Database migrations are NOT run here.
+    # The app's service principal has limited permissions (CAN_CONNECT_AND_CREATE)
+    # but cannot create tables in the public schema.
+    # Migrations must be run remotely with developer credentials via:
+    #   make deploy TARGET=dev  (runs migrations as part of deployment)
+    #   make db-migrate-remote TARGET=dev  (manual migration only)
+
+    # Validate central configuration (fail fast on startup)
+    try:
+        app_config = get_app_config()
+        logger.info(
+            "Central configuration loaded: %d endpoints, %d roles, default_role=%s",
+            len(app_config.endpoints),
+            len(app_config.models),
+            app_config.default_role,
+        )
+    except Exception as e:
+        logger.critical("Failed to load central configuration: %s", e)
+        raise SystemExit(1) from e
+
+    # Setup tracing (if available)
+    try:
+        from deep_research.core.tracing import setup_tracing
+
+        setup_tracing()
+    except ImportError:
+        pass
+
+    # Initialize Lakebase credential provider if configured
+    # NOTE: Credential pre-generation disabled - will generate on first DB request
+    # if settings.use_lakebase:
+    #     provider = get_credential_provider(settings)
+    #     if provider:
+    #         # Pre-generate credential to fail fast on startup
+    #         provider.get_credential()
+    #         logger.info("Lakebase OAuth credential initialized")
+    logger.info("Lakebase credential will be generated on first database request")
+
+    # Initialize shared services
+    from deep_research.agent.tools.web_crawler import WebCrawler
+    from deep_research.services.llm.client import LLMClient
+    from deep_research.services.llm.config import ModelConfig
+    from deep_research.services.search.brave import BraveSearchClient
+
+    app.state.model_config = ModelConfig()
+    app.state.llm_client = LLMClient(app.state.model_config)
+    app.state.brave_client = BraveSearchClient(verify_ssl=settings.brave_verify_ssl)
+    app.state.web_crawler = WebCrawler(verify_ssl=settings.brave_verify_ssl)
+
+    # Initialize plugin manager (discovers and loads plugins via entry points)
+    from deep_research.plugins.manager import PluginManager
+
+    plugin_manager = PluginManager()
+    try:
+        plugin_manager.discover_and_load(app_config)
+        app.state.plugin_manager = plugin_manager
+        logger.info(
+            "PluginManager initialized: %d plugins, %d phases",
+            len(plugin_manager),
+            len(plugin_manager.get_all_phases()),
+        )
+        # DIAGNOSTIC: Log plugin_manager storage for instance comparison
+        logger.info(
+            f"MAIN_PLUGIN_MANAGER_STORED instance_id={id(plugin_manager)} num_plugins={len(plugin_manager)} num_phases={len(plugin_manager.get_all_phases())} has_customization={plugin_manager.get_pipeline_customization() is not None}"
+        )
+    except Exception as e:
+        logger.warning("PluginManager initialization failed: %s", e)
+        app.state.plugin_manager = None
+
+    # Initialize background job manager
+    from deep_research.db.session import get_session_maker
+    from deep_research.services.job_manager import initialize_job_manager
+
+    job_manager = initialize_job_manager()
+    session_maker = get_session_maker(settings)
+    await job_manager.start(session_maker)
+    app.state.job_manager = job_manager
+    logger.info(
+        "Job manager started: worker_id=%s",
+        job_manager.worker_id,
+    )
+
+    # Start session cleanup background task
+    cleanup_task = asyncio.create_task(cleanup_expired_sessions_task(session_maker))
+    app.state.cleanup_task = cleanup_task
+    logger.info("Session cleanup task started (runs every %d seconds)", SESSION_CLEANUP_INTERVAL_SECONDS)
+
+    logger.info(
+        "Application started: env=%s, is_databricks_app=%s, port=%s",
+        settings.app_env,
+        settings.is_databricks_app,
+        settings.server_port,
+    )
+
+    yield
+
+    # Graceful shutdown - Databricks Apps requires completion within 15 seconds
+    logger.info("Shutdown signal received, cleaning up...")
+
+    # Cancel session cleanup task
+    if hasattr(app.state, "cleanup_task") and app.state.cleanup_task:
+        app.state.cleanup_task.cancel()
+        try:
+            await app.state.cleanup_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Session cleanup task stopped")
+
+    # Stop job manager first (cancels running jobs)
+    if hasattr(app.state, "job_manager") and app.state.job_manager:
+        await app.state.job_manager.stop()
+        logger.info("Job manager stopped")
+
+    # Flush MLflow traces before closing connections
+    try:
+        from deep_research.core.tracing import shutdown_tracing
+
+        shutdown_tracing()
+    except ImportError:
+        pass
+
+    # Cleanup shared services
+    await app.state.llm_client.close()
+    await app.state.web_crawler.close()
+    await app.state.brave_client.close()
+    logger.info("Shared services closed")
+
+    # Cleanup database
+    await close_db()
+    logger.info("Database connections closed - shutdown complete")
+
+
+def create_app() -> FastAPI:
+    """Create and configure FastAPI application."""
+    settings = get_settings()
+
+    app = FastAPI(
+        title=settings.app_name,
+        description="Deep Research Agent API - Multi-agent research with step-by-step reflection",
+        version="1.0.0",
+        docs_url="/docs" if not settings.is_production else None,
+        redoc_url="/redoc" if not settings.is_production else None,
+        lifespan=lifespan,
+    )
+
+    # ── Content Security Policy ──
+    csp_policy = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https:; "
+        "font-src 'self'; "
+        "connect-src 'self'; "
+        "frame-ancestors 'none'"
+    )
+
+    # Middleware is added in reverse execution order
+    # Execution: SecurityHeaders → CORS → CSRF → Logging → Route
+
+    # 1. Request logging (innermost — added first)
+    app.add_middleware(RequestLoggingMiddleware)
+
+    # 2. CSRF protection via Origin header validation
+    csrf_origins = settings.csrf_allowed_origins
+    if not csrf_origins:
+        logger.warning(
+            "CSRF_NO_ORIGINS No allowed origins configured; "
+            "only same-origin requests will be permitted for state-changing methods"
+        )
+    app.add_middleware(
+        CSRFMiddleware,
+        allowed_origins=csrf_origins,
+        enforce_https=settings.is_production,
+    )
+
+    # 3. CORS (tightened from wildcard)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins_list,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Content-Type",
+            "Authorization",
+            "x-forwarded-access-token",
+            "X-Request-ID",
+            "Accept",
+        ],
+    )
+
+    # 4. Security response headers (outermost — added last)
+    app.add_middleware(
+        SecurityHeadersMiddleware,
+        csp_policy=csp_policy,
+        report_only=settings.csp_report_only,
+    )
+
+    # Register exception handlers
+    app.add_exception_handler(AppException, app_exception_handler)
+    app.add_exception_handler(HTTPException, http_exception_handler)
+
+    # Include API routers
+    app.include_router(api_v1_router, prefix="/api/v1")
+
+    # Health check endpoint
+    @app.get("/health")
+    async def health_check():
+        """Health check endpoint for load balancers."""
+        return {"status": "healthy", "service": "deep-research-agent"}
+
+    # Setup static file serving for SPA (must be last - catch-all route)
+    setup_static_files(app)
+
+    return app
+
+
+# Create application instance
+app = create_app()

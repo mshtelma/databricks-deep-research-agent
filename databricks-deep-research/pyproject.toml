@@ -1,0 +1,82 @@
+[project]
+name = "databricks-deep-research"
+version = "0.2.0"
+description = "Composable multi-agent orchestration framework with YAML workflow definitions"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.10.0",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+web = ["httpx>=0.24"]
+crawl = ["trafilatura>=1.6"]
+search = ["bm25s>=0.1", "numpy>=1.24"]
+tracing = ["mlflow>=2.10"]
+all = ["databricks-deep-research[web,crawl,search,tracing]"]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "pytest-timeout>=2.2.0",
+    "python-dotenv>=1.0.0",
+    "mypy>=1.8.0",
+    "ruff>=0.2.0",
+    "types-PyYAML>=6.0.0",
+]
+integration = [
+    "databricks-deep-research[all,dev]",
+    "databricks-sdk>=0.20.0",
+    "httpx>=0.24",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/databricks_deep_research"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src/databricks_deep_research"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "ARG", "SIM"]
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ARG001", "ARG002"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["databricks_deep_research"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["bm25s.*", "numpy", "numpy.*", "mlflow", "mlflow.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --tb=short"
+markers = [
+    "integration: integration tests with real LLM and search APIs",
+    "complex: long-running research pipeline tests",
+]
+
+[tool.coverage.run]
+source = ["src/databricks_deep_research"]
+branch = true
