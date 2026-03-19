@@ -119,9 +119,9 @@ def test_plan_tool_arguments_builds_vector_search_alternates() -> None:
         recent_observations=[],
     )
 
-    assert planned.rewritten_query.startswith("Kroger")
-    assert "quarterly earnings release" in planned.rewritten_query
-    assert len(planned.alternate_queries) >= 2
+    # Passthrough mode preserves the LLM's raw query
+    assert planned.rewritten_query == "Kroger Q3 2025 earnings report revenue net income EPS"
+    assert planned.strategy == "vector_passthrough"
     assert planned.arguments["_alternate_queries"] == planned.alternate_queries
 
 
@@ -144,9 +144,9 @@ def test_plan_tool_arguments_strips_question_leadins_from_subject() -> None:
         recent_observations=[],
     )
 
-    assert not planned.rewritten_query.startswith("What ")
-    assert not planned.rewritten_query.startswith("How ")
-    assert planned.rewritten_query.startswith("Kroger")
+    # Passthrough mode preserves the LLM's raw query (including question form)
+    assert planned.rewritten_query == "What did Kroger management say about guidance?"
+    assert planned.strategy == "vector_passthrough"
 
 
 def test_admit_tool_result_rejects_irrelevant_vector_hits() -> None:

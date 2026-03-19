@@ -458,8 +458,8 @@ def _depth_to_step_limits(depth: str) -> tuple[int, int]:
     """Map research depth to (min_steps, max_steps)."""
     limits = {
         "light": (1, 3),
-        "medium": (3, 5),
-        "extended": (5, 10),
+        "medium": (2, 5),
+        "extended": (3, 7),
         "auto": (2, 7),
     }
     return limits.get(depth, (2, 7))

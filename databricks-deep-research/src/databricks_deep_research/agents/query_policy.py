@@ -212,30 +212,44 @@ class WebSearchQueryPolicy(DefaultQueryPolicy):
 
 
 class VectorIndexQueryPolicy(DefaultQueryPolicy):
+    """Pass-through policy for VS tools: trust the react-loop LLM's queries.
+
+    The react-loop LLM has full research context (step title, description,
+    root query, previous observations). Its queries are informed and varied.
+    This policy passes them through with word-count capping for embedding
+    model compatibility.
+    """
+
+    _MAX_QUERY_WORDS = 40  # Embedding models handle ~512 tokens; cap conservatively
+
     def build_query_plan(self, definition: ToolDefinition, need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
         key = "query" if "query" in raw_arguments else "question"
-        artifact = str((definition.metadata or {}).get("artifact_type") or "")
-        metadata = definition.metadata or {}
-        signature = f"{definition.name} {definition.description} {metadata.get('index_name', '')}".lower()
-        if not artifact:
-            if "earnings" in signature:
-                artifact = "quarterly earnings release"
-            elif "transcript" in signature:
-                artifact = "earnings call transcript"
-            elif "policy" in signature:
-                artifact = "policy document"
-            elif "runbook" in signature or "knowledge" in signature or "manual" in signature:
-                artifact = "runbook manual"
-        base = " ".join(part for part in [" ".join(need.entities[:3]), artifact, " ".join(need.focus_terms[:6])] if part).strip()
-        query = base or str(raw_arguments.get(key, ""))
+        raw_query = str(raw_arguments.get(key, "")).strip()
+
+        # Trust the LLM's query — fall back to step context only if empty
+        query = raw_query or need.step_text or need.root_query
+
+        # Word-count cap for embedding model compatibility
+        words = query.split()
+        if len(words) > self._MAX_QUERY_WORDS:
+            query = " ".join(words[: self._MAX_QUERY_WORDS])
+
         updated = dict(raw_arguments)
         updated[key] = query
-        alternates = []
-        if need.phrases:
-            alternates.append({**updated, key: " ".join(need.entities[:2] + need.phrases[:1]).strip()})
-        if artifact:
-            alternates.append({**updated, key: " ".join(need.entities[:2] + [artifact]).strip()})
-        return QueryPlan(arguments=updated, alternate_argument_sets=alternates[:2], query_strategy="vector_entity_artifact", rendered_query_text=query)
+
+        # Build alternates from step context for optional diversity
+        alternates: list[dict[str, Any]] = []
+        if need.entities and need.phrases:
+            alt = " ".join(need.entities[:2] + need.phrases[:2]).strip()
+            if alt and alt.lower() != query.lower():
+                alternates.append({**updated, key: alt})
+
+        return QueryPlan(
+            arguments=updated,
+            alternate_argument_sets=alternates[:2],
+            query_strategy="vector_passthrough",
+            rendered_query_text=query,
+        )
 
     def assess_result(self, definition: ToolDefinition, result: ToolResult, need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
         accepted_substantive, accepted_low, rejected = [], [], []

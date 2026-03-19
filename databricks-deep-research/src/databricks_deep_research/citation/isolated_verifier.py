@@ -505,6 +505,55 @@ class IsolatedVerifier:
         evidence: RankedEvidence,
     ) -> VerificationResult:
         """Full verification with detailed reasoning."""
+        try:
+            return await self._do_full_verification(claim_text, evidence)
+        except Exception as exc:
+            exc_str = str(exc).lower()
+            if any(kw in exc_str for kw in ("context_length", "too long", "max_tokens", "400")):
+                logger.warning(
+                    "VERIFIER_TRUNCATION_RETRY claim=%s evidence_len=%d",
+                    _truncate(claim_text, 40), len(evidence.quote_text),
+                )
+                truncated = RankedEvidence(
+                    source_url=evidence.source_url,
+                    quote_text=evidence.quote_text[:1500],
+                    relevance_score=evidence.relevance_score,
+                    canonical_source_url=evidence.canonical_source_url,
+                    source_title=evidence.source_title,
+                    source_id=evidence.source_id,
+                    start_offset=evidence.start_offset,
+                    end_offset=evidence.end_offset,
+                    section_heading=evidence.section_heading,
+                    has_numeric_content=evidence.has_numeric_content,
+                    source_pool_index=evidence.source_pool_index,
+                    evidence_pool_index=evidence.evidence_pool_index,
+                    is_snippet_based=evidence.is_snippet_based,
+                )
+                try:
+                    return await self._do_full_verification(claim_text, truncated)
+                except Exception as retry_exc:
+                    logger.error(
+                        "VERIFIER_RETRY_FAILED claim=%s error=%s",
+                        _truncate(claim_text, 40), retry_exc,
+                    )
+            else:
+                logger.error(
+                    "VERIFIER_FAILED claim=%s type=%s error=%s",
+                    _truncate(claim_text, 40), type(exc).__name__, str(exc)[:200],
+                )
+            return VerificationResult(
+                verdict=VerificationVerdict.UNSUPPORTED,
+                reasoning=f"Verification failed: {exc}",
+                confidence=0.0,
+                abstained=True,
+            )
+
+    async def _do_full_verification(
+        self,
+        claim_text: str,
+        evidence: RankedEvidence,
+    ) -> VerificationResult:
+        """Execute the full verification LLM call."""
         prompt = ISOLATED_VERIFICATION_PROMPT.format(
             claim_text=claim_text,
             source_title=evidence.source_title or "Unknown",
@@ -514,39 +563,29 @@ class IsolatedVerifier:
 
         tier = self._resolve_tier(self._config.verification_model_tier)
 
-        try:
-            response = await self._llm.complete(
-                messages=[{"role": "user", "content": prompt}],
-                tier=tier,
-                structured_output=VerificationOutput,
-            )
+        response = await self._llm.complete(
+            messages=[{"role": "user", "content": prompt}],
+            tier=tier,
+            structured_output=VerificationOutput,
+        )
 
-            if response.structured:
-                output: VerificationOutput = response.structured
-                verdict = self.parse_verdict(output.verdict)
-                return VerificationResult(
-                    verdict=verdict,
-                    reasoning=output.reasoning,
-                    key_match=output.key_match,
-                    issues=output.issues,
-                    confidence=(
-                        output.verification_confidence
-                        if output.verification_confidence is not None
-                        else self._default_confidence(verdict)
-                    ),
-                )
-
-            # Fallback: parse from raw content.
-            return self._parse_verification_response(response.content)
-
-        except Exception as exc:
-            logger.error("Full verification failed: %s", exc)
+        if response.structured:
+            output: VerificationOutput = response.structured
+            verdict = self.parse_verdict(output.verdict)
             return VerificationResult(
-                verdict=VerificationVerdict.UNSUPPORTED,
-                reasoning=f"Verification failed: {exc}",
-                confidence=0.0,
-                abstained=True,
+                verdict=verdict,
+                reasoning=output.reasoning,
+                key_match=output.key_match,
+                issues=output.issues,
+                confidence=(
+                    output.verification_confidence
+                    if output.verification_confidence is not None
+                    else self._default_confidence(verdict)
+                ),
             )
+
+        # Fallback: parse from raw content.
+        return self._parse_verification_response(response.content)
 
     async def _quick_verify(
         self,
@@ -798,3 +837,7 @@ class IsolatedVerifier:
             return ModelTier(tier_str)
         except ValueError:
             return tier_str
+
+
+def _truncate(text: str, max_len: int) -> str:
+    return text[:max_len] + "..." if len(text) > max_len else text

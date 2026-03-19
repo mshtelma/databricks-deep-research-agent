@@ -147,28 +147,36 @@ class EnterpriseToolAdapter:
             or getattr(self._tool, "source_type", None)
             or "enterprise"
         )
+        source_kind_val = _APP_SOURCE_TYPE_TO_KIND.get(
+            source_type_str, SourceKind.vector_index
+        )
+        metadata: dict[str, Any] = {
+            "source_name": (
+                getattr(self._tool, "_source_name", None)
+                or getattr(self._tool, "source_name", None)
+                or name
+            ),
+            "source_description": description,
+            "backend": type(self._tool).__name__,
+            "index_name": getattr(self._tool, "_index_name", None),
+            "endpoint_name": getattr(self._tool, "_endpoint_name", None),
+            "source_type": (
+                getattr(app_definition, "source_type", None)
+                or getattr(self._tool, "source_type", None)
+                or "enterprise"
+            ),
+        }
+        # VS tools: passthrough sends LLM query directly to embedding API
+        if source_kind_val == SourceKind.vector_index:
+            metadata["query_policy"] = "passthrough"
+
         return ToolDefinition(
             name=name,
             description=description,
             parameters=params,
             source_type=source_type_str,
-            source_kind=_APP_SOURCE_TYPE_TO_KIND.get(source_type_str, SourceKind.vector_index),
-            metadata={
-                "source_name": (
-                    getattr(self._tool, "_source_name", None)
-                    or getattr(self._tool, "source_name", None)
-                    or name
-                ),
-                "source_description": description,
-                "backend": type(self._tool).__name__,
-                "index_name": getattr(self._tool, "_index_name", None),
-                "endpoint_name": getattr(self._tool, "_endpoint_name", None),
-                "source_type": (
-                    getattr(app_definition, "source_type", None)
-                    or getattr(self._tool, "source_type", None)
-                    or "enterprise"
-                ),
-            },
+            source_kind=source_kind_val,
+            metadata=metadata,
         )
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:

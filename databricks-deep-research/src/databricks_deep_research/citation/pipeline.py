@@ -21,6 +21,7 @@ draft into claims and then reuses the same downstream verification stages.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -1374,6 +1375,8 @@ class CitationVerificationPipeline:
 
         self._active_claims_context = claims
         try:
+            # Phase 1: Pre-filter — handle FREE and no-evidence claims immediately
+            verify_tasks: list[tuple[int, ClaimInfo]] = []
             for claim_index, claim in enumerate(claims):
                 if target_roles is not None and claim.claim_role not in target_roles:
                     continue
@@ -1422,18 +1425,46 @@ class CitationVerificationPipeline:
                         },
                     )
                     continue
+                verify_tasks.append((claim_index, claim))
 
-                try:
-                    for event in await self._verify_claim_once(claim_index, claim):
-                        yield event
+            # Phase 2: Parallel verification with bounded concurrency
+            concurrency = getattr(
+                self.config.isolated_verification,
+                "max_concurrent_verifications", 5,
+            )
+            sem = asyncio.Semaphore(concurrency)
 
-                except Exception:
-                    logger.warning(
-                        "CLAIM_VERIFICATION_ERROR claim=%s",
-                        _truncate(claim.claim_text, 50),
-                        exc_info=True,
-                    )
-                    claim.abstained = True
+            async def _bounded_verify(
+                claim_index: int, claim: ClaimInfo,
+            ) -> list[VerificationEvent]:
+                async with sem:
+                    try:
+                        return await self._verify_claim_once(claim_index, claim)
+                    except Exception:
+                        logger.warning(
+                            "CLAIM_VERIFICATION_ERROR claim=%s",
+                            _truncate(claim.claim_text, 50),
+                            exc_info=True,
+                        )
+                        claim.abstained = True
+                        return []
+
+            all_event_lists = await asyncio.gather(
+                *[_bounded_verify(i, c) for i, c in verify_tasks],
+            )
+
+            # Phase 3: Yield events in original claim order (gather preserves order)
+            for events in all_event_lists:
+                for event in events:
+                    yield event
+
+            # Observability: warn on high abstain rate
+            abstained = sum(1 for c in claims if c.abstained)
+            if claims and abstained / len(claims) > 0.10:
+                logger.warning(
+                    "HIGH_ABSTAIN_RATE rate=%.1f%% abstained=%d total=%d",
+                    abstained / len(claims) * 100, abstained, len(claims),
+                )
         finally:
             self._active_claims_context = []
 

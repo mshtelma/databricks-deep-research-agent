@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from databricks_deep_research import FrameworkLLMClient
+from databricks_deep_research import FrameworkLLMClient, ModelTierConfig
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.types import ModelTier
 
@@ -53,32 +53,52 @@ def create_framework_llm_client(
 def _build_model_mapping(
     app_llm: LLMClient,
     overrides: dict[str, str] | None = None,
-) -> dict[str, str]:
+) -> dict[str, str | ModelTierConfig]:
     """Build framework model tier → model name mapping.
 
     Maps framework tier names (simple, analytical, complex) to actual
     Databricks endpoint identifiers from the app's configuration.
+    Multi-endpoint tiers produce ``ModelTierConfig`` objects so the
+    framework can handle fallback and rotation.
 
     Args:
         app_llm: Application LLM client with model config.
         overrides: Optional per-tier model name overrides.
 
     Returns:
-        Dict mapping tier name to model/endpoint identifier.
+        Dict mapping tier name to model/endpoint identifier or
+        ``ModelTierConfig`` for multi-endpoint tiers.
     """
-    mapping: dict[str, str] = {}
+    mapping: dict[str, str | ModelTierConfig] = {}
     config = app_llm._config
 
-    # Map each app ModelTier to the primary endpoint
+    # Map each app ModelTier to resolved endpoints
     for tier in ModelTier:
         tier_name = tier.value  # "simple", "analytical", "complex", etc.
         try:
             role = config.get_role(tier)
-            if role and role.endpoints:
-                primary = role.endpoints[0]
-                endpoint = config.get_endpoint(primary)
-                if endpoint:
-                    mapping[tier_name] = endpoint.endpoint_identifier
+            if not role or not role.endpoints:
+                continue
+            # Resolve ALL endpoint identifiers, skipping failures
+            resolved: list[str] = []
+            for ep_id in role.endpoints:
+                try:
+                    endpoint = config.get_endpoint(ep_id)
+                    if endpoint:
+                        resolved.append(endpoint.endpoint_identifier)
+                except (KeyError, AttributeError, ValueError):
+                    logger.debug("ENDPOINT_RESOLVE_SKIP tier=%s ep=%s", tier_name, ep_id)
+            if not resolved:
+                continue
+            if len(resolved) == 1:
+                mapping[tier_name] = resolved[0]
+            else:
+                mapping[tier_name] = ModelTierConfig(
+                    endpoints=resolved,
+                    fallback_on_429=role.fallback_on_429,
+                    rotation_strategy=role.rotation_strategy.name,
+                    tokens_per_minute=0,
+                )
         except (KeyError, IndexError, AttributeError, ValueError):
             logger.debug("TIER_MAPPING_SKIP tier=%s", tier_name)
 
@@ -91,6 +111,10 @@ def _build_model_mapping(
     if "simple" not in mapping and "analytical" in mapping:
         mapping["simple"] = mapping["analytical"]
     if "complex" not in mapping and "analytical" in mapping:
+        logger.warning(
+            "COMPLEX_TIER_FALLBACK_TO_ANALYTICAL — check that opus endpoint "
+            "is configured in app.yaml and reachable"
+        )
         mapping["complex"] = mapping["analytical"]
     if "analytical" not in mapping:
         # Fallback: use any available endpoint
@@ -109,7 +133,8 @@ def _build_model_mapping(
 
     logger.info(
         "LLM_ADAPTER_MAPPING tiers=%s",
-        {k: v[:30] for k, v in mapping.items()},
+        {k: (str(v)[:50] if isinstance(v, ModelTierConfig) else v[:30])
+         for k, v in mapping.items()},
     )
     return mapping
 

@@ -361,6 +361,7 @@ class WorkflowExecutor:
                 "workflow.name": self._defn.name,
                 "workflow.id": self._defn.id,
                 "query": (state.query or "")[:200],
+                "workflow.query": (state.query or "")[:500],
             },
         ) as wf_span:
             yield self._emit(WorkflowStartedEvent(

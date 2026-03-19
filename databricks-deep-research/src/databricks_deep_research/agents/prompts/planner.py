@@ -276,6 +276,38 @@ When planning steps that use enterprise sources, your step descriptions MUST acc
 3. FILL GAPS — use web search for what enterprise sources lack
 4. CROSS-VALIDATE — compare enterprise data with external sources
 
+## Source-Aware Step Design (CRITICAL)
+
+Each research step should focus on a RESEARCH TOPIC, not on a specific data source.
+Include source_hints for the 1-3 most relevant sources per step.
+
+### Pattern: Topic-Focused Plans
+GOOD plan — steps organized by research question, each leveraging relevant sources:
+- Step 1: "Core technical documentation" → source_hints for the most relevant index (priority 1)
+  plus a supplementary index (priority 2)
+- Step 2: "Deployment patterns and hosting" → different primary index (priority 1)
+  plus web search (priority 2)
+- Step 3: "Community examples and best practices" → web search (priority 1)
+  plus a reference index (priority 2)
+
+BAD plan — one step per source (causes redundant queries within each step):
+- Step 1: "Search first index" → only one index, researcher hammers it
+- Step 2: "Search second index" → same problem
+- Step 3: "Search third index" → same problem
+
+### Rules
+1. Every step with `needs_search: true` MUST include at least one source_hint with priority 1
+2. A step MAY include 1-2 additional hints at priority 2 for supplementary sources
+3. Use source names from the Available Source Catalog
+4. Steps should differ by TOPIC or ANGLE — not by which source they use
+5. Use `exclude_sources` to prevent re-querying sources already covered thoroughly
+
+### Why Topic-Focused
+Different sources often contain complementary information about the same topic.
+A step with 2-3 related sources produces richer, cross-validated evidence.
+Source-per-step plans force the researcher to call one tool repeatedly with
+diminishing returns.
+
 ## Multi-Entity Query Handling
 
 When comparing multiple entities:

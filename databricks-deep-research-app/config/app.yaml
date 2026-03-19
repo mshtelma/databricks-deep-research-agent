@@ -36,29 +36,29 @@ endpoints:
     supports_structured_output: true
 
   sonnet:
-    endpoint_identifier: databricks-claude-sonnet-4-5
+    endpoint_identifier: databricks-claude-sonnet-4-6
     max_context_window: 128000
-    tokens_per_minute: 50000
+    tokens_per_minute: 200000
     supports_structured_output: true
     supports_prompt_caching: true  # Claude supports cache_control
 
   opus:
-    endpoint_identifier: databricks-claude-opus-4-5
+    endpoint_identifier: databricks-claude-opus-4-6
     max_context_window: 128000
     tokens_per_minute: 200000  # Databricks allows 200k ITPM for Opus 4.5
     supports_structured_output: true
     supports_prompt_caching: true  # Claude supports cache_control
 
   gpt5:
-    endpoint_identifier: databricks-gpt-5-2
+    endpoint_identifier: databricks-gpt-5-4
     max_context_window: 128000
-    tokens_per_minute: 50000
+    tokens_per_minute: 200000
     supports_structured_output: true
 
   gemini3pro:
-    endpoint_identifier: databricks-gemini-3-pro
+    endpoint_identifier: databricks-gemini-3-1-pro
     max_context_window: 1000000  # 1M tokens - excellent for large documents
-    tokens_per_minute: 500000    # High throughput
+    tokens_per_minute: 2000000    # High throughput
     supports_structured_output: true
     supports_temperature: true
 
@@ -81,9 +81,8 @@ models:
   # TIER 2: ANALYTICAL - Medium operations (research, planning)
   analytical:
     endpoints:
-      - haiku
+      - sonnet
       - gpt5mini
-      - gemini3flash
     temperature: 0.7
     max_tokens: 8000
     reasoning_effort: medium
@@ -103,18 +102,16 @@ models:
     reasoning_budget: 8000
     tokens_per_minute: 100000
     rotation_strategy: priority
-    fallback_on_429: true
+    fallback_on_429: false
 
   # TIER 4: BULK_ANALYSIS - Large-context analysis tasks (Gemini 3 Pro)
   # Use for: NLI/entailment, evidence extraction, classification, decomposition
   # NOT for: Text synthesis (use Claude for synthesis quality)
   bulk_analysis:
     endpoints:
+      - sonnet
       - gpt5
-      - gpt5mini
-      - gemini3flash
-      - haiku
-    temperature: 0.3  # Lower temperature for analytical consistency
+    temperature: 0.6
     max_tokens: 16000
     reasoning_effort: medium
     tokens_per_minute: 500000  # Higher throughput

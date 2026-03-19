@@ -162,14 +162,14 @@ def _build_citation_config(config: AgentNodeConfig) -> CitationConfig:
         generation_mode=generation_mode,
         enable_verification_retrieval=bool(reclaim_cfg["enable_are_retrieval"]),
         isolated_verification=IsolatedVerificationConfig(
-            verification_model_tier="analytical",
-            quick_verification_tier="simple",
+            verification_model_tier="bulk_analysis",
+            quick_verification_tier="fast",
         ),
         verification_retrieval=VerificationRetrievalConfig(
-            decomposition_tier="analytical",
-            entailment_tier="analytical",
+            decomposition_tier="simple",
+            entailment_tier="bulk_analysis",
             reconstruction_tier="analytical",
-            softening_tier="simple",
+            softening_tier="fast",
         ),
     )
 

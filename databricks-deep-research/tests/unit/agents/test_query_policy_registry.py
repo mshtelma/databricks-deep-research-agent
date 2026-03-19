@@ -26,8 +26,36 @@ def test_registry_resolves_vector_policy() -> None:
     registry = QueryPolicyRegistry()
     definition = ToolDefinition(name="vector_search", description="", parameters={}, source_kind="vector_index")
     plan = registry.plan("vector_index", definition, _need(RetrievalIntent.document_retrieval, EvidenceContract.quoted_document_content), {"query": "Kroger earnings"})
-    assert plan.query_strategy == "vector_entity_artifact"
-    assert "research index first then" not in plan.rendered_query_text
+    assert plan.query_strategy == "vector_passthrough"
+    assert plan.rendered_query_text == "Kroger earnings"
+
+
+def test_vector_passthrough_preserves_raw_query() -> None:
+    """Passthrough policy preserves the LLM's raw query verbatim."""
+    registry = QueryPolicyRegistry()
+    definition = ToolDefinition(name="vs_tool", description="", parameters={}, source_kind="vector_index")
+    raw_query = "authoring deploying agents Databricks Apps"
+    plan = registry.plan("vector_index", definition, _need(), {"query": raw_query})
+    assert plan.rendered_query_text == raw_query
+    assert plan.arguments["query"] == raw_query
+
+
+def test_vector_passthrough_truncates_long_query() -> None:
+    """Queries longer than 40 words get truncated."""
+    registry = QueryPolicyRegistry()
+    definition = ToolDefinition(name="vs_tool", description="", parameters={}, source_kind="vector_index")
+    long_query = " ".join(f"word{i}" for i in range(60))
+    plan = registry.plan("vector_index", definition, _need(), {"query": long_query})
+    assert len(plan.rendered_query_text.split()) == 40
+
+
+def test_vector_passthrough_falls_back_on_empty_query() -> None:
+    """Empty raw query falls back to step_text."""
+    registry = QueryPolicyRegistry()
+    definition = ToolDefinition(name="vs_tool", description="", parameters={}, source_kind="vector_index")
+    need = _need()
+    plan = registry.plan("vector_index", definition, need, {"query": ""})
+    assert plan.rendered_query_text == need.step_text
 
 
 def test_registry_resolves_sql_policy() -> None:

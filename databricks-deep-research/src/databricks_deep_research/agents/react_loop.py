@@ -146,6 +146,8 @@ class ReactLoop:
         self._step_query_signatures: set[str] = set()
         self._tool_outcome_history: dict[str, list[dict[str, Any]]] = {}
         self._vs_optimizer = VectorQueryOptimizer(llm_client)
+        self._seen_source_urls: set[str] = set()
+        self._consecutive_zero_novel_rounds: int = 0
 
 
     def _normalize_query_signature(self, tool_name: str, rewritten_query: str) -> str:
@@ -158,15 +160,42 @@ class ReactLoop:
         if len(history) > 6:
             del history[0]
 
+    _JACCARD_DEDUP_THRESHOLD = 0.8  # >80% word overlap = near-duplicate
+
     def _is_low_yield_duplicate(self, tool_name: str, rewritten_query: str) -> bool:
+        """Return True if this query is a (near-)duplicate of a previous one for this tool."""
         signature = self._normalize_query_signature(tool_name, rewritten_query)
-        if signature not in self._step_query_signatures:
+
+        # Exact match on normalized query — unconditionally skip
+        if signature in self._step_query_signatures:
+            logger.info(
+                "REACT_EXACT_DEDUP_SKIP node=%s tool=%s query=%r",
+                self._node_id, tool_name, rewritten_query[:200],
+            )
+            return True
+
+        # Near-duplicate: Jaccard overlap on word sets for the same tool
+        query_words = set(rewritten_query.lower().split())
+        if len(query_words) < 2:
             return False
-        history = self._tool_outcome_history.get(tool_name, [])
-        if not history:
-            return False
-        latest = history[-1]
-        return int(latest.get("accepted_substantive_count", 0) or 0) == 0
+
+        for prev_sig in self._step_query_signatures:
+            if not prev_sig.startswith(f"{tool_name}:"):
+                continue
+            prev_words = set(prev_sig.split(":", 1)[1].split())
+            if not prev_words:
+                continue
+            intersection = len(query_words & prev_words)
+            union = len(query_words | prev_words)
+            if union > 0 and intersection / union > self._JACCARD_DEDUP_THRESHOLD:
+                logger.info(
+                    "REACT_JACCARD_DEDUP_SKIP node=%s tool=%s jaccard=%.2f query=%r prev=%r",
+                    self._node_id, tool_name, intersection / union,
+                    rewritten_query[:200], prev_sig.split(":", 1)[1][:200],
+                )
+                return True
+
+        return False
 
     # -- Public interface ---------------------------------------------------
 
@@ -317,7 +346,11 @@ class ReactLoop:
                     except json.JSONDecodeError:
                         args = {}
 
+                    # Step-scoped cache (same step, same query)
                     cached = self._cache.get(tc.function_name, args, scope=self._cache_scope)
+                    if cached is None:
+                        # Global cross-step cache (any step, same tool + args)
+                        cached = self._cache.get(tc.function_name, args, scope="")
                     if cached is not None:
                         content, cached_sources = cached
                         cached_results[tc.id] = (content, cached_sources)
@@ -376,6 +409,14 @@ class ReactLoop:
                             tool_srcs,
                             scope=self._cache_scope,
                         )
+                        # Global cross-step cache
+                        self._cache.put(
+                            tc.function_name,
+                            exec_args,
+                            result_content,
+                            tool_srcs,
+                            scope="",
+                        )
                         messages.append(self._tool_msg(tc.id, result_content))
                         responded_tc_ids.add(tc.id)
                         events.append(ToolResultEvent(
@@ -400,6 +441,38 @@ class ReactLoop:
                         messages.append(self._tool_msg(
                             tc.id, "Skipped: tool call budget exhausted"
                         ))
+
+                # Track novel sources for diminishing-returns detection
+                novel_urls_this_round: set[str] = set()
+                for tc in response.tool_calls:
+                    if tc.id in exec_results:
+                        _, tool_srcs, _ = exec_results[tc.id]
+                        for src in tool_srcs:
+                            url = str(src.get("url", "") if isinstance(src, dict) else getattr(src, "url", ""))
+                            url = url.rstrip("/").lower()
+                            if url and url not in self._seen_source_urls:
+                                novel_urls_this_round.add(url)
+                self._seen_source_urls.update(novel_urls_this_round)
+
+                if len(novel_urls_this_round) == 0 and responded_tc_ids:
+                    self._consecutive_zero_novel_rounds += 1
+                else:
+                    self._consecutive_zero_novel_rounds = 0
+
+                if self._consecutive_zero_novel_rounds >= 2:
+                    logger.info(
+                        "REACT_EARLY_STOP_NUDGE node=%s rounds=%d seen_urls=%d",
+                        self._node_id, self._consecutive_zero_novel_rounds,
+                        len(self._seen_source_urls),
+                    )
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "The last 2 rounds of tool calls returned no new unique sources. "
+                            "You likely have sufficient evidence. Synthesize your findings "
+                            "and provide your observation now."
+                        ),
+                    })
 
                 if (
                     self._fallback_tools
@@ -444,7 +517,31 @@ class ReactLoop:
             query_policy = (tool.definition.metadata or {}).get("query_policy", "")
 
             if source_kind == "vector_index" and query_policy in ("llm", "passthrough"):
-                return await self._execute_vs_optimized(tc, tool, args, query_policy)
+                # Global cache check with original (pre-optimizer) args
+                vs_cached = self._cache.get(tc.function_name, args, scope="")
+                if vs_cached is not None:
+                    cached_content, cached_sources = vs_cached
+                    logger.info(
+                        "VS_GLOBAL_CACHE_HIT node=%s tool=%s query=%r",
+                        self._node_id, tool_name, str(args.get("query", ""))[:200],
+                    )
+                    return tc.id, cached_content, cached_sources, {
+                        "tool_success": True,
+                        "tool_error": "",
+                        "raw_source_count": len(cached_sources),
+                        "accepted_source_count": len(cached_sources),
+                        "accepted_substantive_count": len(cached_sources),
+                        "accepted_low_value_count": 0,
+                        "rejected_source_count": 0,
+                        "evidence_quality": "cached",
+                        "failure_mode": "",
+                        "needs_adaptation": False,
+                    }
+                result = await self._execute_vs_optimized(tc, tool, args, query_policy)
+                _tc_id, vs_content, vs_sources, vs_meta = result
+                if vs_meta.get("tool_success", False) and vs_sources:
+                    self._cache.put(tc.function_name, args, vs_content, vs_sources, scope="")
+                return result
 
             planned = plan_tool_arguments(
                 tool.definition,
@@ -492,12 +589,36 @@ class ReactLoop:
                     "needs_adaptation": True,
                 }
             self._step_query_signatures.add(self._normalize_query_signature(tool_name, planned.rewritten_query))
+
+            # Post-rewrite cache: catches different raw queries → same rewrite
+            rewritten_cache_args = {k: v for k, v in planned.arguments.items() if k != "_alternate_queries"}
+            post_cached = self._cache.get(tc.function_name, rewritten_cache_args, scope=self._cache_scope)
+            if post_cached is None:
+                post_cached = self._cache.get(tc.function_name, rewritten_cache_args, scope="")
+            if post_cached is not None:
+                logger.info(
+                    "POST_REWRITE_CACHE_HIT node=%s tool=%s query=%r",
+                    self._node_id, tool_name, planned.rewritten_query[:200],
+                )
+                content, cached_sources = post_cached
+                return tc.id, content, cached_sources, {
+                    "tool_success": True, "tool_error": "",
+                    "raw_source_count": len(cached_sources),
+                    "accepted_source_count": len(cached_sources),
+                    "accepted_substantive_count": len(cached_sources),
+                    "accepted_low_value_count": 0,
+                    "rejected_source_count": 0,
+                    "evidence_quality": "cached", "failure_mode": "",
+                    "needs_adaptation": False,
+                }
+
             validated_args = tool.validate_arguments(planned.arguments)
             async with trace_span(
                 f"tool.{tool_name}", span_type="TOOL",
                 attributes={
                     "tool.name": tool_name,
                     "tool.args": str({k: str(v)[:100] for k, v in planned.arguments.items()}),
+                    "tool.query": str(planned.rewritten_query)[:500],
                 },
             ) as tool_span:
                 result = await tool.execute(validated_args, self._ctx)
@@ -584,6 +705,10 @@ class ReactLoop:
                     ),
                     "suppression_scope": str(result.data.get("suppression_scope", "")),
                 }
+                # Cache with rewritten args too (so post-rewrite lookup hits next time)
+                rewritten_put_args = {k: v for k, v in planned.arguments.items() if k != "_alternate_queries"}
+                self._cache.put(tc.function_name, rewritten_put_args, admitted.content, admitted.accepted_sources, scope="")
+
                 self._record_tool_outcome(tool_name, meta, planned.rewritten_query)
                 return tc.id, admitted.content, admitted.accepted_sources, meta
         except Exception as exc:
@@ -620,6 +745,7 @@ class ReactLoop:
                 "tool.name": tool_name,
                 "tool.query_policy": query_policy,
                 "tool.original_query": original_query[:500],
+                "tool.query": original_query[:500],
             },
         ) as tool_span:
             if query_policy == "passthrough":
@@ -747,6 +873,7 @@ class ReactLoop:
         if self._fallback_enabled or not self._fallback_tools:
             return
         self._fallback_enabled = True
+        self._consecutive_zero_novel_rounds = 0
         self._tools.update(self._fallback_tools)
         self._tool_defs = [self._to_openai_tool(tool) for tool in self._tools.values()]
         logger.info(

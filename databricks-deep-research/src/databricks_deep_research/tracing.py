@@ -18,6 +18,16 @@ except ImportError:
     _HAS_MLFLOW = False
 
 
+def get_current_span() -> Any:
+    """Return the current active MLflow span, or ``None`` if unavailable."""
+    if not _HAS_MLFLOW:
+        return None
+    try:
+        return mlflow.get_current_active_span()
+    except Exception:
+        return None
+
+
 @contextlib.asynccontextmanager
 async def trace_span(
     name: str,

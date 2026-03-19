@@ -7,6 +7,7 @@ sources are rejected before LLM extraction runs.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from dataclasses import dataclass, field
@@ -108,7 +109,8 @@ class EvidenceSelectionConfig:
     chunk_overlap: int = 1_000
     max_chunks_per_source: int = 5
     quality_min_score: float = 0.5
-    model_tier: str | ModelTier = ModelTier.analytical
+    model_tier: str | ModelTier = "bulk_analysis"
+    max_sources: int = 40
 
 @dataclass
 class EvidenceResult:
@@ -296,7 +298,17 @@ class EvidenceSelector:
         else:
             good, rej = sources, 0
 
+        # Cap the number of sources to process via LLM
+        if len(good) > self._cfg.max_sources:
+            logger.info(
+                "EVIDENCE_SOURCE_CAP total=%d cap=%d", len(good), self._cfg.max_sources,
+            )
+            good = good[: self._cfg.max_sources]
+
         pool: list[RankedEvidence] = []
+
+        # Phase 1: Handle snippet-only sources inline (no LLM needed)
+        content_sources: list[dict[str, Any]] = []
         for src in good:
             url = src.get("url", "")
             canonical_url = src.get("canonical_url") or url
@@ -329,33 +341,51 @@ class EvidenceSelector:
                 continue
             if not content:
                 continue
+            content_sources.append(src)
 
-            try:
-                spans = await self._extract_from_source(query, url, title or "Unknown", content)
-                for sp in spans[:cap]:
-                    pool.append(RankedEvidence(
-                        source_url=url, canonical_source_url=canonical_url,
-                        source_title=title, source_id=sid,
-                        quote_text=sp.get("quote_text", ""),
-                        relevance_score=sp.get("relevance_score", 0.5),
-                        section_heading=sp.get("section"),
-                        has_numeric_content=sp.get("has_numeric", False),
-                        source_pool_index=source_pool_index,
-                    ))
-            except Exception:
-                logger.warning("LLM extraction failed for %s, heuristic fallback",
-                               url[:60], exc_info=True)
-                pool.extend(
-                    self._heuristic_extract(
-                        query,
-                        content,
-                        url,
-                        canonical_url,
-                        title,
-                        sid,
-                        source_pool_index,
+        # Phase 2: Extract from content sources in parallel
+        sem = asyncio.Semaphore(8)
+
+        async def _extract_one(src: dict[str, Any]) -> list[RankedEvidence]:
+            url = src.get("url", "")
+            canonical_url = src.get("canonical_url") or url
+            title = src.get("title")
+            content = src.get("content", "")
+            sid = src.get("id")
+            source_pool_index = src.get("source_pool_index")
+            async with sem:
+                try:
+                    spans = await self._extract_from_source(query, url, title or "Unknown", content)
+                    return [
+                        RankedEvidence(
+                            source_url=url, canonical_source_url=canonical_url,
+                            source_title=title, source_id=sid,
+                            quote_text=sp.get("quote_text", ""),
+                            relevance_score=sp.get("relevance_score", 0.5),
+                            section_heading=sp.get("section"),
+                            has_numeric_content=sp.get("has_numeric", False),
+                            source_pool_index=source_pool_index,
+                        )
+                        for sp in spans[:cap]
+                    ]
+                except Exception:
+                    logger.warning("LLM extraction failed for %s, heuristic fallback",
+                                   url[:60], exc_info=True)
+                    return self._heuristic_extract(
+                        query, content, url, canonical_url, title, sid, source_pool_index,
                     )[:cap]
-                )
+
+        results = await asyncio.gather(
+            *[_extract_one(src) for src in content_sources],
+            return_exceptions=True,
+        )
+
+        # Phase 3: Collect results (gather completed — no race)
+        for r in results:
+            if isinstance(r, BaseException):
+                logger.error("SOURCE_EXTRACT_GATHER_ERROR error=%s", r)
+            else:
+                pool.extend(r)
 
         thr = self._cfg.relevance_threshold
         result = sorted([e for e in pool if e.relevance_score >= thr],
@@ -373,11 +403,23 @@ class EvidenceSelector:
             return await self._llm_extract(query, url, title, content)
         chunks = _chunk_content(content, cfg.chunk_size, cfg.chunk_overlap)
         mc = cfg.max_chunks_per_source
-        logger.info("Processing %d/%d chunks for %s", min(len(chunks), mc), len(chunks), url[:60])
+        chunks_to_process = chunks[:mc]
+        logger.info("Processing %d/%d chunks for %s", len(chunks_to_process), len(chunks), url[:60])
+        titles = [
+            f"{title} (chunk {ch.index + 1}/{len(chunks_to_process)})"
+            for ch in chunks_to_process
+        ]
+        results = await asyncio.gather(
+            *[self._llm_extract(query, url, t, ch.text)
+              for ch, t in zip(chunks_to_process, titles)],
+            return_exceptions=True,
+        )
         all_sp: list[dict[str, Any]] = []
-        for ch in chunks[:mc]:
-            t = f"{title} (chunk {ch.index + 1}/{min(len(chunks), mc)})"
-            all_sp.extend(await self._llm_extract(query, url, t, ch.text))
+        for r in results:
+            if isinstance(r, BaseException):
+                logger.warning("CHUNK_EXTRACT_FAILED url=%s error=%s", url[:60], r)
+            else:
+                all_sp.extend(r)
         return _merge_spans(all_sp)
 
     async def _llm_extract(self, query: str, url: str,

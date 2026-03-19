@@ -138,8 +138,9 @@ class IsolatedVerificationConfig(BaseModel):
     """Stage 4: Isolated Verification configuration."""
 
     enable_nei_verdict: bool = True
-    verification_model_tier: str = Field(default="bulk_analysis")
-    quick_verification_tier: str = Field(default="bulk_analysis")
+    verification_model_tier: str = Field(default="complex")
+    quick_verification_tier: str = Field(default="analytical")
+    max_concurrent_verifications: int = Field(default=5, ge=1, le=20)
 
     model_config = {"frozen": True}
 
