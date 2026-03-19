@@ -16,6 +16,8 @@ from databricks_deep_research.workflow.definition import (
     WorkflowNode,
 )
 
+from deep_research.agent.config import get_report_limits
+
 if TYPE_CHECKING:
     from deep_research.agent.orchestration_config import OrchestrationConfig
 
@@ -366,6 +368,18 @@ def _build_synthesizer(config: "OrchestrationConfig") -> WorkflowNode:
     else:
         synth_schema["synthesis_mode"] = "simple"
         synth_schema["enable_citation_verification"] = False
+
+    # ------------------------------------------------------------------
+    # Report limits → framework synthesizer
+    # ------------------------------------------------------------------
+    # The framework's _get_reclaim_config() reads max_tokens and
+    # target_word_count from output_schema.  Without these the pipeline
+    # falls back to _RECLAIM_MAX_TOKENS — far too low for full reports.
+    _valid_depths = {"light", "medium", "extended"}
+    depth = config.research_depth if config.research_depth in _valid_depths else "medium"
+    report_limits = get_report_limits(depth)
+    synth_schema["max_tokens"] = report_limits.max_tokens
+    synth_schema["target_word_count"] = report_limits.max_words
 
     synth_config["output_schema"] = synth_schema
 

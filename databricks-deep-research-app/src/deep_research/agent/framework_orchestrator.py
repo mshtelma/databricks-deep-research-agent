@@ -41,6 +41,7 @@ from deep_research.agent.adapters.domain_context import (
     DomainContextTracker,
 )
 from deep_research.agent.adapters.llm_adapter import create_framework_llm_client
+from deep_research.services.llm.embedder import DEFAULT_EMBEDDING_ENDPOINT
 from deep_research.agent.adapters.tool_adapter import create_framework_tools
 from deep_research.core.tracing import safe_mlflow_run, safe_tool_span, safe_update_trace
 from deep_research.schemas.streaming import (
@@ -335,6 +336,7 @@ async def stream_research_via_framework(
                 # -- 2. Build framework execution context --
                 framework_llm = create_framework_llm_client(
                     llm,
+                    embedding_model=DEFAULT_EMBEDDING_ENDPOINT,
                     model_overrides=config.model_overrides,
                 )
 

@@ -1,7 +1,7 @@
-"""GTE embedding client for hybrid search in ReAct synthesis.
+"""Embedding client for hybrid search in ReAct synthesis.
 
-Computes text embeddings using Databricks GTE endpoint for semantic
-similarity search in the evidence registry.
+Computes text embeddings using Databricks Foundation Model API endpoint
+for semantic similarity search in the evidence registry.
 """
 
 from __future__ import annotations
@@ -19,27 +19,27 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Default GTE endpoint name (configurable)
-DEFAULT_GTE_ENDPOINT = "databricks-gte-large"
+# Default embedding endpoint name (configurable)
+DEFAULT_EMBEDDING_ENDPOINT = "databricks-qwen3-embedding-0-6b"
 
 
-class GteEmbedder:
-    """Compute text embeddings via Databricks GTE endpoint.
+class Embedder:
+    """Compute text embeddings via Databricks Foundation Model API endpoint.
 
     Uses the same authentication pattern as LLMClient (profile-based OAuth
     or direct token). Embeddings are used for semantic search in the
     evidence registry alongside BM25 keyword search.
 
     Example:
-        embedder = GteEmbedder()
+        embedder = Embedder()
         # Single text
         vec = await embedder.embed("machine learning achieves 95% accuracy")
         # Batch (more efficient)
         vecs = await embedder.embed_batch(["text1", "text2", "text3"])
     """
 
-    def __init__(self, endpoint_name: str = DEFAULT_GTE_ENDPOINT):
-        """Initialize the GTE embedder.
+    def __init__(self, endpoint_name: str = DEFAULT_EMBEDDING_ENDPOINT):
+        """Initialize the embedder.
 
         Uses centralized DatabricksAuth for authentication which supports:
         1. Direct token: DATABRICKS_TOKEN environment variable
@@ -47,7 +47,7 @@ class GteEmbedder:
         3. Automatic OAuth: Databricks Apps environment (service principal)
 
         Args:
-            endpoint_name: Databricks model serving endpoint name for GTE.
+            endpoint_name: Databricks model serving endpoint name.
         """
         self._endpoint = endpoint_name
 
@@ -63,7 +63,7 @@ class GteEmbedder:
         )
 
         logger.info(
-            "GTE_EMBEDDER_INITIALIZED",
+            "EMBEDDER_INITIALIZED",
             endpoint=endpoint_name,
             auth_mode=self._auth.auth_mode,
         )
@@ -80,7 +80,7 @@ class GteEmbedder:
         token = self._auth.get_token()
 
         if token != self._current_token:
-            logger.info("GTE_TOKEN_REFRESHED", auth_mode=self._auth.auth_mode)
+            logger.info("EMBEDDER_TOKEN_REFRESHED", auth_mode=self._auth.auth_mode)
             self._current_token = token
             self._client = AsyncOpenAI(
                 api_key=token,
@@ -124,7 +124,7 @@ class GteEmbedder:
                 all_embeddings.extend(batch_embeddings)
 
                 logger.debug(
-                    "GTE_BATCH_EMBEDDED",
+                    "EMBEDDER_BATCH_EMBEDDED",
                     batch_start=i,
                     batch_size=len(batch),
                     embed_dim=len(batch_embeddings[0]) if batch_embeddings else 0,
@@ -132,7 +132,7 @@ class GteEmbedder:
 
             except Exception as e:
                 logger.error(
-                    "GTE_EMBED_ERROR",
+                    "EMBEDDER_ERROR",
                     batch_start=i,
                     batch_size=len(batch),
                     error=str(e)[:200],
@@ -159,19 +159,23 @@ class GteEmbedder:
 
 
 # Singleton instance for reuse
-_embedder_instance: GteEmbedder | None = None
+_embedder_instance: Embedder | None = None
 
 
-def get_embedder(endpoint_name: str = DEFAULT_GTE_ENDPOINT) -> GteEmbedder:
-    """Get or create a singleton GTE embedder instance.
+def get_embedder(endpoint_name: str = DEFAULT_EMBEDDING_ENDPOINT) -> Embedder:
+    """Get or create a singleton embedder instance.
 
     Args:
-        endpoint_name: Databricks endpoint name for GTE model.
+        endpoint_name: Databricks model serving endpoint name.
 
     Returns:
-        GteEmbedder instance.
+        Embedder instance.
     """
     global _embedder_instance
     if _embedder_instance is None:
-        _embedder_instance = GteEmbedder(endpoint_name)
+        _embedder_instance = Embedder(endpoint_name)
     return _embedder_instance
+
+
+# Backward compatibility alias
+GteEmbedder = Embedder

@@ -45,6 +45,13 @@ Example for "How are Kroger earnings?":
   Query 2: "Kroger operating income EPS adjusted results"
   Query 3: "Kroger digital ecommerce growth comparable sales"
 
+### Tool Diversity (when multiple tools are available)
+
+When you have access to multiple research tools:
+- Use DIFFERENT tools to cross-validate findings — do not rely on a single source
+- If you have multiple vector search indexes, query each one that might contain relevant data
+- After 2-3 queries to one tool, switch to another available tool for the next query
+
 ### Entity-Focused Search Strategy (CRITICAL)
 
 - **NEVER bundle multiple entities** in a single search query - this returns generic comparison articles instead of detailed information

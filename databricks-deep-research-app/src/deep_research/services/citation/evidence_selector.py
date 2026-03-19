@@ -27,7 +27,7 @@ from deep_research.services.llm.types import ModelTier
 if TYPE_CHECKING:
     from numpy.typing import NDArray
 
-    from deep_research.services.llm.embedder import GteEmbedder
+    from deep_research.services.llm.embedder import Embedder
 
 logger = logging.getLogger(__name__)
 
@@ -561,7 +561,7 @@ class EvidencePreSelector:
 
 async def compute_evidence_embeddings(
     evidence_pool: list[RankedEvidence],
-    embedder: GteEmbedder,
+    embedder: Embedder,
 ) -> NDArray[np.float32]:
     """Compute embeddings for all evidence spans.
 
@@ -570,7 +570,7 @@ async def compute_evidence_embeddings(
 
     Args:
         evidence_pool: List of RankedEvidence from pre-selection.
-        embedder: GTE embedder client.
+        embedder: Embedder client.
 
     Returns:
         2D numpy array of shape (n_evidence, embed_dim).
@@ -609,7 +609,7 @@ async def preselect_evidence_with_embeddings(
     query: str,
     sources: list[dict[str, Any]],
     llm_client: LLMClient,
-    embedder: GteEmbedder | None = None,
+    embedder: Embedder | None = None,
     max_spans_per_source: int | None = None,
 ) -> EvidenceWithEmbeddings:
     """Pre-select evidence and optionally compute embeddings.
@@ -621,7 +621,7 @@ async def preselect_evidence_with_embeddings(
         query: Research query.
         sources: List of source dicts with url, title, content.
         llm_client: LLM client for evidence extraction.
-        embedder: Optional GTE embedder for hybrid search.
+        embedder: Optional embedder for hybrid search.
         max_spans_per_source: Max spans per source.
 
     Returns:

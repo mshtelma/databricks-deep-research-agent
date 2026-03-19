@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from deep_research.services.llm.client import LLMClient
-    from deep_research.services.llm.embedder import GteEmbedder
+    from deep_research.services.llm.embedder import Embedder
 
 logger = get_logger(__name__)
 
@@ -596,7 +596,7 @@ async def run_react_synthesis(
     max_tool_calls: int = 40,
     retrieval_window_size: int = 3,
     embeddings: NDArray[np.float32] | None = None,
-    embedder: GteEmbedder | None = None,
+    embedder: Embedder | None = None,
     hybrid_alpha: float = 0.6,
     enable_post_processing: bool = False,
 ) -> AsyncGenerator[ReactSynthesisEvent, None]:
@@ -618,7 +618,7 @@ async def run_react_synthesis(
         max_tool_calls: Maximum tool calls before stopping.
         retrieval_window_size: Size of sliding window for grounding inference.
         embeddings: Pre-computed evidence embeddings for hybrid search.
-        embedder: GTE embedder for computing query embeddings (optional).
+        embedder: Embedder for computing query embeddings (optional).
         hybrid_alpha: Weight for vector vs BM25 (0.6 = 60% vector).
         enable_post_processing: Run LLM polish pass for coherence (default False).
 
@@ -973,7 +973,7 @@ Remember: search_evidence → read_snippet → write claim with citation.
 async def _execute_synthesis_tool(
     tc: ToolCall,
     registry: EvidenceRegistry,
-    embedder: GteEmbedder | None = None,
+    embedder: Embedder | None = None,
 ) -> str:
     """Execute a synthesis tool call.
 
@@ -1038,7 +1038,7 @@ async def run_react_synthesis_sectioned(
     tool_budget_per_section: int = 10,
     retrieval_window_size: int = 3,
     embeddings: NDArray[np.float32] | None = None,
-    embedder: GteEmbedder | None = None,
+    embedder: Embedder | None = None,
     hybrid_alpha: float = 0.6,
     enable_post_processing: bool = False,
 ) -> AsyncGenerator[ReactSynthesisEvent, None]:
@@ -1056,7 +1056,7 @@ async def run_react_synthesis_sectioned(
         tool_budget_per_section: Tool calls allowed per section.
         retrieval_window_size: Window size for grounding.
         embeddings: Pre-computed evidence embeddings for hybrid search.
-        embedder: GTE embedder for computing query embeddings.
+        embedder: Embedder for computing query embeddings.
         hybrid_alpha: Weight for vector vs BM25 (0.6 = 60% vector).
         enable_post_processing: Run LLM polish pass for coherence (default False).
 
@@ -1152,7 +1152,7 @@ Do not repeat content from previous sections.
                     messages=messages,
                     tools=SYNTHESIS_TOOLS,
                     tier=ModelTier.COMPLEX,
-                    max_tokens=min(limits.max_tokens, 4000),  # Fixed budget per section
+                    max_tokens=limits.max_tokens,
                 ):
                     if chunk.content:
                         accumulated_content += chunk.content

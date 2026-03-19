@@ -269,7 +269,7 @@ research_types:
     report_limits:
       min_words: 800
       max_words: 2000
-      max_tokens: 4000
+      max_tokens: 8000
 
     # Researcher configuration
     researcher:
@@ -297,8 +297,8 @@ research_types:
     # Report length limits
     report_limits:
       min_words: 1200
-      max_words: 2000
-      max_tokens: 4000
+      max_words: 3000
+      max_tokens: 12000
 
     # Researcher configuration
     researcher:
@@ -324,8 +324,8 @@ research_types:
     # Report length limits
     report_limits:
       min_words: 1500
-      max_words: 3200
-      max_tokens: 8000
+      max_words: 4000
+      max_tokens: 16000
 
     # Researcher configuration
     researcher:

@@ -123,7 +123,7 @@ research_types:
     report_limits:
       min_words: 300
       max_words: 600
-      max_tokens: 1200
+      max_tokens: 2000
     researcher:
       mode: react
       max_search_queries: 2
@@ -140,8 +140,8 @@ research_types:
       prompt_guidance: "Balanced research, 2-3 steps."
     report_limits:
       min_words: 500
-      max_words: 1000
-      max_tokens: 2000
+      max_words: 1200
+      max_tokens: 4000
     researcher:
       mode: react
       max_search_queries: 3
@@ -157,8 +157,8 @@ research_types:
       prompt_guidance: "Thorough research for testing."
     report_limits:
       min_words: 800
-      max_words: 1500
-      max_tokens: 3000
+      max_words: 2000
+      max_tokens: 6000
     researcher:
       mode: react
       max_search_queries: 4

@@ -148,6 +148,8 @@ class ReactLoop:
         self._vs_optimizer = VectorQueryOptimizer(llm_client)
         self._seen_source_urls: set[str] = set()
         self._consecutive_zero_novel_rounds: int = 0
+        self._same_tool_consecutive_rounds: int = 0
+        self._last_round_tool: str = ""
 
 
     def _normalize_query_signature(self, tool_name: str, rewritten_query: str) -> str:
@@ -196,6 +198,34 @@ class ReactLoop:
                 return True
 
         return False
+
+    def _dedup_check_and_register(
+        self, tool_name: str, query: str,
+    ) -> dict[str, Any] | None:
+        """Check if query is a near-duplicate; if not, register it for future checks.
+
+        Returns a skip-meta dict if duplicate (caller should return early),
+        or None if the query is novel (caller should proceed with execution).
+        """
+        if self._is_low_yield_duplicate(tool_name, query):
+            logger.info(
+                "REACT_DEDUP_SKIP node=%s tool=%s query=%r",
+                self._node_id, tool_name, query[:200],
+            )
+            return {
+                "tool_success": True, "tool_error": "",
+                "raw_source_count": 0, "accepted_source_count": 0,
+                "accepted_substantive_count": 0,
+                "accepted_low_value_count": 0,
+                "rejected_source_count": 0,
+                "evidence_quality": "empty",
+                "failure_mode": "duplicate_low_yield",
+                "needs_adaptation": True,
+            }
+        self._step_query_signatures.add(
+            self._normalize_query_signature(tool_name, query)
+        )
+        return None
 
     # -- Public interface ---------------------------------------------------
 
@@ -474,6 +504,43 @@ class ReactLoop:
                         ),
                     })
 
+                # Track tool diversity — nudge LLM when it hammers a single tool
+                round_tool_names: set[str] = set()
+                for tc in response.tool_calls:
+                    if tc.id in responded_tc_ids:
+                        round_tool_names.add(tc.function_name)
+
+                if len(round_tool_names) == 1 and len(self._tools) > 1:
+                    only_tool = next(iter(round_tool_names))
+                    if only_tool == self._last_round_tool:
+                        self._same_tool_consecutive_rounds += 1
+                    else:
+                        self._same_tool_consecutive_rounds = 1
+                    self._last_round_tool = only_tool
+                else:
+                    self._same_tool_consecutive_rounds = 0
+                    self._last_round_tool = ""
+
+                if self._same_tool_consecutive_rounds >= 3 and len(self._tools) > 1:
+                    other_tools = [n for n in self._tools if n != self._last_round_tool]
+                    logger.info(
+                        "REACT_TOOL_DIVERSITY_NUDGE node=%s repeated_tool=%s "
+                        "rounds=%d other_tools=%s",
+                        self._node_id, self._last_round_tool,
+                        self._same_tool_consecutive_rounds, other_tools,
+                    )
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"You have used only '{self._last_round_tool}' for the last "
+                            f"{self._same_tool_consecutive_rounds} rounds. "
+                            f"Other tools are available: {', '.join(other_tools)}. "
+                            "For cross-validation and broader coverage, try querying "
+                            "a different tool before concluding this step."
+                        ),
+                    })
+                    self._same_tool_consecutive_rounds = 0
+
                 if (
                     self._fallback_tools
                     and not self._fallback_enabled
@@ -517,6 +584,12 @@ class ReactLoop:
             query_policy = (tool.definition.metadata or {}).get("query_policy", "")
 
             if source_kind == "vector_index" and query_policy in ("llm", "passthrough"):
+                # Dedup: exact + Jaccard check against step query signatures
+                original_query = str(args.get("query", "")).strip()
+                skip_meta = self._dedup_check_and_register(tool_name, original_query)
+                if skip_meta is not None:
+                    return tc.id, f"Skipped duplicate {tool_name} query", [], skip_meta
+
                 # Global cache check with original (pre-optimizer) args
                 vs_cached = self._cache.get(tc.function_name, args, scope="")
                 if vs_cached is not None:
@@ -571,24 +644,9 @@ class ReactLoop:
                     [query[:200] for query in planned.alternate_queries],
                 )
 
-            if self._is_low_yield_duplicate(tool_name, planned.rewritten_query):
-                logger.info(
-                    "REACT_DUPLICATE_LOW_YIELD_SKIP node=%s tool=%s strategy=%s query=%r",
-                    self._node_id, tool_name, planned.strategy, planned.rewritten_query[:200],
-                )
-                return tc.id, f"Skipped duplicate low-yield {tool_name} query", [], {
-                    "tool_success": True,
-                    "tool_error": "",
-                    "raw_source_count": 0,
-                    "accepted_source_count": 0,
-                    "accepted_substantive_count": 0,
-                    "accepted_low_value_count": 0,
-                    "rejected_source_count": 0,
-                    "evidence_quality": "empty",
-                    "failure_mode": "duplicate_low_yield",
-                    "needs_adaptation": True,
-                }
-            self._step_query_signatures.add(self._normalize_query_signature(tool_name, planned.rewritten_query))
+            skip_meta = self._dedup_check_and_register(tool_name, planned.rewritten_query)
+            if skip_meta is not None:
+                return tc.id, f"Skipped duplicate {tool_name} query", [], skip_meta
 
             # Post-rewrite cache: catches different raw queries → same rewrite
             rewritten_cache_args = {k: v for k, v in planned.arguments.items() if k != "_alternate_queries"}
@@ -874,6 +932,8 @@ class ReactLoop:
             return
         self._fallback_enabled = True
         self._consecutive_zero_novel_rounds = 0
+        self._same_tool_consecutive_rounds = 0
+        self._last_round_tool = ""
         self._tools.update(self._fallback_tools)
         self._tool_defs = [self._to_openai_tool(tool) for tool in self._tools.values()]
         logger.info(

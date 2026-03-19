@@ -4,7 +4,7 @@ This service manages the accumulation and retrieval of sources across
 all messages in a chat conversation. It enables:
 
 1. **Source Accumulation**: Sources are persisted with chat_id for direct lookup
-2. **Hybrid Search**: BM25 keyword + GTE embeddings for intelligent retrieval
+2. **Hybrid Search**: BM25 keyword + embedding similarity for intelligent retrieval
 3. **URL Deduplication**: Same URL within a chat is upserted, not duplicated
 4. **Follow-up Support**: Existing sources are available for citation in follow-ups
 
@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from deep_research.agent.tools.evidence_registry import HybridSearchIndex, HybridSearchResult
-    from deep_research.services.llm.embedder import GteEmbedder
+    from deep_research.services.llm.embedder import Embedder
 
 logger = get_logger(__name__)
 
@@ -55,7 +55,7 @@ class ChatSourcePoolService:
     a chat conversation. It supports:
 
     - Loading all sources for a chat with O(1) lookup via chat_id
-    - Building an in-memory hybrid search index (BM25 + GTE embeddings)
+    - Building an in-memory hybrid search index (BM25 + embeddings)
     - Searching sources with hybrid fusion (α=0.6)
     - Adding/updating sources with atomic upsert by URL
     """
@@ -63,13 +63,13 @@ class ChatSourcePoolService:
     def __init__(
         self,
         session: AsyncSession,
-        embedder: "GteEmbedder | None" = None,
+        embedder: "Embedder | None" = None,
     ):
         """Initialize the chat source pool service.
 
         Args:
             session: Async database session.
-            embedder: Optional GTE embedder for semantic search.
+            embedder: Optional embedder for semantic search.
                      If None, only BM25 keyword search is used.
         """
         self._session = session
@@ -182,12 +182,12 @@ class ChatSourcePoolService:
     ) -> "HybridSearchIndex":
         """Build an in-memory hybrid search index for the chat sources.
 
-        Combines BM25 keyword search with GTE embeddings for hybrid retrieval.
+        Combines BM25 keyword search with embeddings for hybrid retrieval.
         If embedder is not available, falls back to BM25-only search.
 
         Args:
             chat_id: UUID of the chat.
-            compute_embeddings: Whether to compute GTE embeddings.
+            compute_embeddings: Whether to compute embeddings.
 
         Returns:
             The built HybridSearchIndex.

@@ -431,25 +431,54 @@ def admit_tool_result(
     )
     if not profile["terms"] and not profile["phrases"]:
         is_valid = result.success and not _tool_result_is_empty_or_error(result)
-        early_accepted = raw_sources if is_valid else []
-        early_substantive, early_low, early_eq = _classify_sources_by_quality(early_accepted)
-        return AdmittedToolResult(
-            content=result.content,
-            accepted_sources=early_accepted,
-            rejected_sources=[] if is_valid else raw_sources,
-            raw_sources=raw_sources,
-            accepted_count=len(early_accepted),
-            rejected_count=0 if is_valid else len(raw_sources),
-            accepted_substantive_count=len(early_substantive),
-            accepted_low_value_count=len(early_low),
-            evidence_quality=early_eq,
-        )
+        if not is_valid:
+            return AdmittedToolResult(
+                content=result.content,
+                accepted_sources=[],
+                rejected_sources=raw_sources,
+                raw_sources=raw_sources,
+                accepted_count=0,
+                rejected_count=len(raw_sources),
+                accepted_substantive_count=0,
+                accepted_low_value_count=0,
+                evidence_quality="empty",
+            )
+        # Enterprise sources: still filter by relevance_score even without profile
+        source_kind = tool_source_kind(definition)
+        if source_kind in _ENTERPRISE_SOURCE_KINDS:
+            # Fall through to normal scoring — relevance_score provides signal
+            pass
+        else:
+            # Non-enterprise (web): accept all when profile is empty
+            early_substantive, early_low, early_eq = _classify_sources_by_quality(raw_sources)
+            return AdmittedToolResult(
+                content=result.content,
+                accepted_sources=raw_sources,
+                rejected_sources=[],
+                raw_sources=raw_sources,
+                accepted_count=len(raw_sources),
+                rejected_count=0,
+                accepted_substantive_count=len(early_substantive),
+                accepted_low_value_count=len(early_low),
+                evidence_quality=early_eq,
+            )
 
     for source in raw_sources:
         score, reason = _score_source_relevance(source, profile)
         source["admission_score"] = score
         source["admission_reason"] = reason
-        if _should_accept_source(definition, result, source, score):
+        accepted_flag = _should_accept_source(definition, result, source, score)
+        logger.info(
+            "ADMISSION_SOURCE_SCORE tool=%s title=%r relevance_score=%s "
+            "admission_score=%d accepted=%s reason=%s",
+            definition.name,
+            str(source.get("title", ""))[:120],
+            source.get("relevance_score"),
+            score,
+            accepted_flag,
+            reason[:200],
+        )
+        if accepted_flag:
             accepted.append(source)
         else:
             rejected.append(source)
@@ -834,6 +863,19 @@ _ENTERPRISE_SOURCE_KINDS = frozenset({
     "knowledge_assistant",
 })
 
+# Minimum cosine similarity for VS sources to get an enterprise boost.
+# 0.5+ = strong match (full boost), 0.3-0.5 = moderate (partial boost).
+_VS_STRONG_RELEVANCE_THRESHOLD = 0.5
+_VS_MODERATE_RELEVANCE_THRESHOLD = 0.3
+
+# Minimum cosine similarity for VS sources to pass the fallback acceptance
+# gate in _should_accept_source, independent of the keyword-based admission
+# score.  This is a separate signal: even if the combined admission_score is
+# below the nominal threshold of 2, a VS source whose upstream embedding
+# similarity meets this bar is accepted because the embedding search already
+# performed semantic matching.
+_VS_RELEVANCE_FALLBACK_THRESHOLD = 0.3
+
 
 def _score_source_relevance(source: dict[str, Any], profile: dict[str, Any]) -> tuple[int, str]:
     text = " ".join(
@@ -858,8 +900,12 @@ def _score_source_relevance(source: dict[str, Any], profile: dict[str, Any]) -> 
     enterprise_boost = 0
     if source_kind in _ENTERPRISE_SOURCE_KINDS and relevance_score is not None:
         try:
-            if float(relevance_score) > 0:
-                enterprise_boost = 2
+            rs = float(relevance_score)
+            if rs >= _VS_STRONG_RELEVANCE_THRESHOLD:
+                enterprise_boost = 2   # Strong semantic match
+            elif rs >= _VS_MODERATE_RELEVANCE_THRESHOLD:
+                enterprise_boost = 1   # Moderate match — needs keyword support too
+            # Below threshold: no boost — must pass on keywords alone
         except (TypeError, ValueError):
             pass
     score += enterprise_boost
@@ -908,8 +954,12 @@ def _should_accept_source(
     if source_kind in {SourceKind.vector_index, "vector_search"}:
         if score >= 2:
             return True
+        # Fallback: accept if the upstream embedding similarity alone is
+        # strong enough, even when keyword overlap is low.  This is a
+        # separate gate from the combined admission_score — see the
+        # _VS_RELEVANCE_FALLBACK_THRESHOLD docstring for rationale.
         try:
-            return float(relevance_score or 0.0) > 0.0
+            return float(relevance_score or 0.0) >= _VS_RELEVANCE_FALLBACK_THRESHOLD
         except (TypeError, ValueError):
             return False
 
