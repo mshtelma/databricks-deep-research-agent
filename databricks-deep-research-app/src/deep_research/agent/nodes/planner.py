@@ -172,10 +172,7 @@ async def run_planner(state: ResearchState, llm: LLMClient) -> ResearchState:
                 structured_output=PlanOutput,
             )
 
-            if response.structured:
-                output = response.structured
-            else:
-                output = PlanOutput.model_validate_json(response.content)
+            output = response.structured or PlanOutput.model_validate_json(response.content)
 
             # Convert LLM output to new steps, skipping any that match completed step IDs
             completed_ids = {s.id for s in completed_steps}
@@ -331,7 +328,7 @@ async def run_source_aware_planner(state: ResearchState, llm: LLMClient) -> Rese
     from deep_research.core.app_config import get_app_config
 
     config = get_app_config()
-    source_routing = config.get("source_routing", {})
+    source_routing: dict[str, Any] = getattr(config, "source_routing", {})
 
     # Fall back to basic planner if source routing disabled or no landscape
     if not source_routing.get("enabled", True):

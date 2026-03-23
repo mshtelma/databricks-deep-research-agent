@@ -7,7 +7,7 @@ Part of 007-enterprise-data-sources feature (T010).
 """
 
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import DateTime, Index, String, Text
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     pass
 
 
-class DataSourceType(str, Enum):
+class DataSourceType(StrEnum):
     """Types of queryable data sources.
 
     Each type has different capabilities and query patterns:
@@ -40,14 +40,14 @@ class DataSourceType(str, Enum):
     CUSTOM = "custom"
 
 
-class DataSourceVisibility(str, Enum):
+class DataSourceVisibility(StrEnum):
     """Visibility levels for user-configured data sources."""
 
     PRIVATE = "private"  # Only creator can see/use
     WORKSPACE = "workspace"  # All workspace users (with OBO access)
 
 
-class DataSourceValidationStatus(str, Enum):
+class DataSourceValidationStatus(StrEnum):
     """Validation status for user data sources."""
 
     PENDING = "pending"

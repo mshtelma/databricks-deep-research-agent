@@ -8,16 +8,16 @@ from fastapi import APIRouter, Cookie, Depends, Query, Response
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deep_research.api.v1.utils.transformers import (
+    jsonb_claim_to_response,
+    jsonb_summary_to_response,
+)
 from deep_research.core.config import get_settings
 from deep_research.core.exceptions import NotFoundError, ValidationError
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.chat import Chat, ChatStatus, ChatType
 from deep_research.models.incognito_session import MAX_INCOGNITO_CHATS, SESSION_TTL_HOURS
-from deep_research.api.v1.utils.transformers import (
-    jsonb_claim_to_response,
-    jsonb_summary_to_response,
-)
 from deep_research.schemas.agent import SourceResponse
 from deep_research.schemas.chat import (
     ChatCreate,

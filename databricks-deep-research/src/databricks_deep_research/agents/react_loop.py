@@ -97,6 +97,47 @@ class ReactResult:
 
 
 # ---------------------------------------------------------------------------
+# Compaction helpers
+# ---------------------------------------------------------------------------
+
+
+def _summarize_tool_result(content: str, max_chars: int = 800) -> str:
+    """Preserve key data points when compacting a tool result.
+
+    Keeps lines that contain pipe characters (markdown table rows),
+    numeric digits (data values), or metadata markers (``[...]`` headers).
+    Discards narrative text and whitespace to fit within *max_chars*.
+    """
+    lines = content.split("\n")
+    kept: list[str] = []
+    char_count = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or len(stripped) < 3:
+            continue
+
+        has_pipe = "|" in stripped
+        has_number = any(c.isdigit() for c in stripped)
+        is_metadata = stripped.startswith("[") and "]" in stripped
+
+        if has_pipe or has_number or is_metadata:
+            kept.append(stripped)
+            char_count += len(stripped) + 1
+            if char_count >= max_chars:
+                kept.append("...[additional data truncated]")
+                break
+
+    if not kept:
+        return f"[Prior results — {len(content)} chars, no tabular data]"
+
+    return (
+        f"[Compacted from {len(content)} chars — key data preserved:]\n"
+        + "\n".join(kept)
+    )
+
+
+# ---------------------------------------------------------------------------
 # ReAct loop
 # ---------------------------------------------------------------------------
 
@@ -123,6 +164,7 @@ class ReactLoop:
         stream: bool = False,
         subtype: str = "",
         max_result_chars: int = 4000,
+        compaction_strategy: str = "truncate",
     ) -> None:
         self._llm = llm_client
         self._ctx = tool_context or ToolContext()
@@ -138,6 +180,7 @@ class ReactLoop:
         self._stream = stream
         self._subtype = subtype
         self._max_result_chars = max_result_chars
+        self._compaction_strategy = compaction_strategy
         self._fallback_tools: dict[str, ResearchTool] = {}
         self._fallback_enabled = False
         self._fallback_retry_used = False
@@ -150,7 +193,61 @@ class ReactLoop:
         self._consecutive_zero_novel_rounds: int = 0
         self._same_tool_consecutive_rounds: int = 0
         self._last_round_tool: str = ""
+        self._budget_warned: bool = False
+        self._compact_after_rounds: int = max(2, max_tool_calls * 2 // 5)
 
+    # -- Budget-aware guidance -----------------------------------------------
+
+    def _inject_budget_guidance(
+        self,
+        messages: list[dict[str, Any]],
+        remaining: int,
+    ) -> list[dict[str, Any]] | None:
+        """Inject budget awareness; return restricted tool_defs or None.
+
+        At ≤25% budget remaining (once): warn to start writing findings.
+        At ≤2 calls remaining: critical message + restrict to compute-only.
+        """
+        if remaining <= 0:
+            return None
+
+        if remaining <= 2:
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"CRITICAL: Only {remaining} tool call(s) remaining. "
+                    "Include your COMPLETE FINAL OUTPUT text in this response. "
+                    "Write your full findings/answer alongside any last tool call. "
+                    "If you stored values via compute, reference them in your output."
+                ),
+            })
+            logger.info(
+                "REACT_BUDGET_CRITICAL node=%s remaining=%d",
+                self._node_id, remaining,
+            )
+            compute_defs = [
+                td for td in self._tool_defs
+                if td["function"]["name"] == "compute"
+            ]
+            return compute_defs if compute_defs else None
+
+        remaining_pct = remaining / self._max_tool_calls if self._max_tool_calls > 0 else 1.0
+        if remaining_pct <= 0.25 and not self._budget_warned:
+            self._budget_warned = True
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"BUDGET: {remaining} tool calls remaining out of "
+                    f"{self._max_tool_calls}. Start writing your findings. "
+                    "Store any remaining values in compute."
+                ),
+            })
+            logger.info(
+                "REACT_BUDGET_WARNING node=%s remaining=%d",
+                self._node_id, remaining,
+            )
+
+        return None
 
     def _normalize_query_signature(self, tool_name: str, rewritten_query: str) -> str:
         normalized = " ".join(str(rewritten_query).lower().split())
@@ -263,6 +360,15 @@ class ReactLoop:
                 if call_count > 0:
                     self._compact_old_tool_results(messages)
 
+                # Budget-aware guidance + optional tool restriction
+                remaining = self._max_tool_calls - call_count
+                restricted_tools = self._inject_budget_guidance(messages, remaining)
+                active_tool_defs = (
+                    restricted_tools
+                    if restricted_tools is not None
+                    else (self._tool_defs if self._tools else None)
+                )
+
                 # LLM call
                 if self._stream and call_count == 0 and not first_turn_retried:
                     response, stream_events = await self._stream_call(messages)
@@ -273,7 +379,7 @@ class ReactLoop:
                         self._model_tier,
                         temperature=self._temperature,
                         max_tokens=self._max_tokens,
-                        tools=self._tool_defs if self._tools else None,
+                        tools=active_tool_defs,
                     )
 
                 # Track usage
@@ -336,6 +442,36 @@ class ReactLoop:
                         "no_tool_calls" if not response.tool_calls
                         else "max_calls_reached"
                     )
+
+                    # ── Compute namespace fallback ─────────────────────
+                    # When max_calls is hit with empty content, dump any
+                    # values the agent stored in the compute tool's
+                    # namespace.  Zero-cost (no extra LLM call).
+                    if (
+                        exit_reason == "max_calls_reached"
+                        and not response.content.strip()
+                    ):
+                        compute_tool = self._all_tools.get("compute")
+                        if compute_tool and hasattr(compute_tool, "_namespace"):
+                            user_vars = {
+                                k: repr(v)
+                                for k, v in compute_tool._namespace.items()
+                                if isinstance(v, (int, float, str, list, dict, tuple, bool))
+                            }
+                            if user_vars:
+                                parts = [f"{k} = {v}" for k, v in user_vars.items()]
+                                response = LLMResponse(
+                                    content="Extracted data:\n" + "\n".join(parts),
+                                    tool_calls=[],
+                                    model=response.model,
+                                    usage=response.usage,
+                                )
+                                exit_reason = "namespace_fallback"
+                                logger.info(
+                                    "REACT_NAMESPACE_FALLBACK node=%s vars=%d",
+                                    self._node_id, len(user_vars),
+                                )
+
                     logger.info(
                         "REACT_DONE node=%s calls=%d content_len=%d sources=%d "
                         "exit_reason=%s",
@@ -616,6 +752,36 @@ class ReactLoop:
                     self._cache.put(tc.function_name, args, vs_content, vs_sources, scope="")
                 return result
 
+            # ── Builtin deterministic tools (compute) ────────────────────
+            # Compute results are mathematical outputs, not retrieval sources.
+            # Routing through admission creates a synthetic source, scores it
+            # on keyword overlap (always ≈0 for numbers), and rejects it —
+            # replacing the actual computation with "No relevant results
+            # accepted."  Bypass the entire admission pipeline.
+            if tool_source_kind(tool.definition) == "builtin":
+                tool_result = await tool.execute(
+                    tool.validate_arguments(args), self._ctx
+                )
+                logger.info(
+                    "BUILTIN_TOOL_RESULT node=%s tool=%s success=%s content_len=%d",
+                    self._node_id,
+                    tool_name,
+                    tool_result.success,
+                    len(tool_result.content),
+                )
+                return tc.id, tool_result.content, [], {
+                    "tool_success": tool_result.success,
+                    "tool_error": tool_result.error or "",
+                    "raw_source_count": 0,
+                    "accepted_source_count": 0,
+                    "accepted_substantive_count": 0,
+                    "accepted_low_value_count": 0,
+                    "rejected_source_count": 0,
+                    "evidence_quality": "builtin",
+                    "failure_mode": "" if tool_result.success else "tool_error",
+                    "needs_adaptation": not tool_result.success,
+                }
+
             planned = plan_tool_arguments(
                 tool.definition,
                 args,
@@ -679,10 +845,10 @@ class ReactLoop:
                     "tool.query": str(planned.rewritten_query)[:500],
                 },
             ) as tool_span:
-                result = await tool.execute(validated_args, self._ctx)
+                tool_result = await tool.execute(validated_args, self._ctx)
                 admitted = admit_tool_result(
                     tool.definition,
-                    result,
+                    tool_result,
                     current_step=self._ctx.current_step,
                     root_query=self._ctx.query,
                 )
@@ -726,8 +892,8 @@ class ReactLoop:
                 if tool_span:
                     tool_span.set_attributes({
                         "tool.result_len": len(admitted.content),
-                        "tool.success": result.success,
-                        "tool.error": result.error or "",
+                        "tool.success": tool_result.success,
+                        "tool.error": tool_result.error or "",
                         "tool.source_count": admitted.accepted_count,
                         "tool.raw_source_count": len(admitted.raw_sources),
                         "tool.accepted_source_count": admitted.accepted_count,
@@ -740,15 +906,15 @@ class ReactLoop:
                         "tool.evidence_quality": admitted.evidence_quality,
                         "tool.failure_mode": admitted.failure_mode,
                         "tool.needs_adaptation": admitted.needs_adaptation,
-                        "tool.failure_class": str(result.data.get("failure_class", "")),
+                        "tool.failure_class": str(tool_result.data.get("failure_class", "")),
                         "tool.suppressed_by_failure_cache": bool(
-                            result.data.get("suppressed_by_failure_cache", False)
+                            tool_result.data.get("suppressed_by_failure_cache", False)
                         ),
-                        "tool.suppression_scope": str(result.data.get("suppression_scope", "")),
+                        "tool.suppression_scope": str(tool_result.data.get("suppression_scope", "")),
                     })
                 meta = {
-                    "tool_success": result.success,
-                    "tool_error": result.error or "",
+                    "tool_success": tool_result.success,
+                    "tool_error": tool_result.error or "",
                     "raw_source_count": len(admitted.raw_sources),
                     "accepted_source_count": admitted.accepted_count,
                     "accepted_substantive_count": admitted.accepted_substantive_count,
@@ -757,11 +923,11 @@ class ReactLoop:
                     "evidence_quality": admitted.evidence_quality,
                     "failure_mode": admitted.failure_mode,
                     "needs_adaptation": admitted.needs_adaptation,
-                    "failure_class": str(result.data.get("failure_class", "")),
+                    "failure_class": str(tool_result.data.get("failure_class", "")),
                     "suppressed_by_failure_cache": bool(
-                        result.data.get("suppressed_by_failure_cache", False)
+                        tool_result.data.get("suppressed_by_failure_cache", False)
                     ),
-                    "suppression_scope": str(result.data.get("suppression_scope", "")),
+                    "suppression_scope": str(tool_result.data.get("suppression_scope", "")),
                 }
                 # Cache with rewritten args too (so post-rewrite lookup hits next time)
                 rewritten_put_args = {k: v for k, v in planned.arguments.items() if k != "_alternate_queries"}
@@ -972,31 +1138,52 @@ class ReactLoop:
     # -- Message compaction -------------------------------------------------
 
     def _compact_old_tool_results(self, messages: list[dict[str, Any]]) -> None:
-        """Truncate tool results from prior iterations to limit prompt growth.
+        """Compact tool results from prior iterations to limit prompt growth.
 
-        Only truncates tool results BEFORE the most recent tool-calling iteration.
-        Current iteration's results are always preserved intact.
+        Supports two strategies:
+        - ``truncate`` (default): hard-truncate old tool results to ``max_result_chars``.
+        - ``mask``: replace old tool results with one-line placeholders, keeping
+          the last 2 tool-calling iterations fully intact.
         """
         if self._max_result_chars <= 0:
             return
 
-        # Find the latest assistant message that triggered tool calls
-        last_tc_idx = -1
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "assistant" and messages[i].get("tool_calls"):
-                last_tc_idx = i
-                break
+        # Indices of assistant messages that triggered tool calls
+        tc_indices = [
+            i for i, m in enumerate(messages)
+            if m.get("role") == "assistant" and m.get("tool_calls")
+        ]
 
-        if last_tc_idx <= 0:
-            return  # first iteration or no tool calls — nothing to truncate
+        if not tc_indices:
+            return
 
-        for i in range(last_tc_idx):
-            msg = messages[i]
-            content = msg.get("content", "")
-            if msg.get("role") == "tool" and isinstance(content, str) and len(content) > self._max_result_chars:
-                msg["content"] = content[:self._max_result_chars] + (
-                    f"\n...[truncated from {len(content)} chars]"
-                )
+        if self._compaction_strategy == "mask":
+            # Delay compaction until ~40% of budget is used
+            if len(tc_indices) < self._compact_after_rounds:
+                return
+            # Keep last 3 iterations intact (was 2) for better data retention
+            keep_from = tc_indices[-3] if len(tc_indices) >= 3 else 0
+            for i in range(keep_from):
+                msg = messages[i]
+                if msg.get("role") == "tool":
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and len(content) > self._max_result_chars:
+                        msg["content"] = _summarize_tool_result(
+                            content, max_chars=self._max_result_chars,
+                        )
+        else:
+            # Original truncation behavior (backward compat)
+            last_tc_idx = tc_indices[-1]
+            if last_tc_idx <= 0:
+                return
+            for i in range(last_tc_idx):
+                msg = messages[i]
+                content = msg.get("content", "")
+                if (msg.get("role") == "tool" and isinstance(content, str)
+                        and len(content) > self._max_result_chars):
+                    msg["content"] = content[:self._max_result_chars] + (
+                        f"\n...[truncated from {len(content)} chars]"
+                    )
 
     # -- Streaming -----------------------------------------------------------
 

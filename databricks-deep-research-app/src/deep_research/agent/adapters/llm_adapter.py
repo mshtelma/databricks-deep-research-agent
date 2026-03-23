@@ -8,9 +8,13 @@ calls without knowing about Databricks auth, tracing, or health tracking.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Literal, cast
 
-from databricks_deep_research import FrameworkLLMClient, ModelTierConfig
+from databricks_deep_research import (
+    FrameworkLLMClient,
+    ModelTierConfig,
+)
+
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.types import ModelTier
 
@@ -96,7 +100,7 @@ def _build_model_mapping(
                 mapping[tier_name] = ModelTierConfig(
                     endpoints=resolved,
                     fallback_on_429=role.fallback_on_429,
-                    rotation_strategy=role.rotation_strategy.name,
+                    rotation_strategy=cast(Literal["PRIORITY", "ROUND_ROBIN"], role.rotation_strategy.name),
                     tokens_per_minute=0,
                 )
         except (KeyError, IndexError, AttributeError, ValueError):
@@ -116,12 +120,11 @@ def _build_model_mapping(
             "is configured in app.yaml and reachable"
         )
         mapping["complex"] = mapping["analytical"]
-    if "analytical" not in mapping:
+    if "analytical" not in mapping and mapping:
         # Fallback: use any available endpoint
-        if mapping:
-            fallback = next(iter(mapping.values()))
-            for tier_key in ("simple", "analytical", "complex"):
-                mapping.setdefault(tier_key, fallback)
+        fallback = next(iter(mapping.values()))
+        for tier_key in ("simple", "analytical", "complex"):
+            mapping.setdefault(tier_key, fallback)
 
     if not mapping:
         raise ValueError(

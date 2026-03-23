@@ -49,7 +49,7 @@ GENERIC_EXTRACTION_PROMPT = """Extract key information from this query.
 Be precise. Extract only what is explicitly mentioned. Do not infer or guess."""
 
 
-def get_default_extraction_config() -> "ExtractionConfig":
+def get_default_extraction_config() -> ExtractionConfig:
     """Get default extraction config with no domain bias.
 
     Returns:

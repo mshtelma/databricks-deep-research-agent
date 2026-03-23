@@ -1,0 +1,258 @@
+id: officeqa_benchmark
+name: OfficeQA Treasury Bulletin Benchmark
+version: 4
+required_inputs: [query]
+output_keys: [report]
+
+models:
+  simple: databricks-claude-opus-4-6
+  analytical: databricks-claude-opus-4-6
+
+tools:
+  - name: treasury_search
+    kind: vector_search
+    config:
+      index_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks_vs_index"
+      num_results: 20
+      query_type: HYBRID
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+    description: >
+      Semantic search across US Treasury Monthly Statement Bulletins (1939-2025).
+      Use for initial discovery to identify which file contains the data.
+      Returns ranked chunks by semantic relevance.
+
+  - name: treasury_file_read
+    kind: delta_read
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks"
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+    description: >
+      Read ALL chunks from a specific Treasury Bulletin file by exact filename.
+      Returns chunks in document order. Use AFTER treasury_search identifies
+      the target file. Essential for reading complete tables that were split
+      across multiple chunks.
+
+  - name: treasury_grep
+    kind: delta_grep
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks"
+      content_column: content
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+    description: >
+      Search for exact text patterns within a specific file. Supports substring
+      (case-insensitive, default) and regex modes. Use to find specific values,
+      category names, or row labels within a known file.
+
+  - name: compute
+    kind: compute
+    config:
+      max_execution_seconds: 10
+    description: >
+      Execute Python code for calculations. Only math and statistics modules
+      are available. Do NOT use import statements. Variables persist across
+      calls within the same session and across loop iterations.
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 80
+  - name: observations
+    dedup_content_hash: true
+    max_items: 50
+
+root:
+  id: main
+  type: sequence
+  label: OfficeQA Benchmark
+  children:
+    # ---------------------------------------------------------------
+    # Research Loop: Researcher + Reflector (max 2 iterations)
+    # ---------------------------------------------------------------
+    - id: research_loop
+      type: loop
+      label: Research with Reflection
+      config:
+        until:
+          type: state
+          key: reflection.decision
+          operator: eq
+          value: complete
+        min_iterations: 1
+        max_iterations: 2
+      children:
+        - id: researcher
+          type: agent
+          label: Grounded Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: findings
+            tools: [treasury_search, treasury_file_read, treasury_grep, compute]
+            input_keys: [query, findings, reflection]
+            pool_writes:
+              - pool: observations
+                extract: findings
+            max_tool_calls: 15
+            compaction_strategy: mask
+            max_result_chars: 2000
+            system_prompt: |
+              You are a data retrieval agent for US Treasury Bulletin data.
+              Your job is to find specific numerical values in Treasury Bulletin documents.
+
+              ## STRICT RETRIEVAL POLICY (follow this order)
+
+              PHASE 1 — IDENTIFY the target bulletin file (1-2 treasury_search calls MAX):
+              Use these rules to determine the correct file BEFORE searching:
+              - Calendar year (CY) data → January bulletin of NEXT year
+                Example: CY 1940 → treasury_bulletin_1941_01.txt
+              - Fiscal year (FY) data → October bulletin of that FY year
+                Example: FY 1955 → treasury_bulletin_1955_10.txt
+              - Monthly data for a specific year → January bulletin of NEXT year has annual summary tables
+              - Recent data → latest available bulletin
+              - If unsure, use treasury_search with the most specific terms from the question.
+
+              PHASE 2 — EXTRACT data from the identified file (this is the main phase):
+              Once you know the target file:
+              1. treasury_file_read(file_name="...", chunk_type="table") — get ALL table chunks
+              2. treasury_grep(file_name="...", pattern="exact category name") — find specific rows
+              3. Read the chunks carefully and extract the exact values you need.
+              DO NOT go back to treasury_search unless the file is clearly wrong.
+
+              PHASE 3 — COMPUTE intermediate values if needed:
+              - Use compute tool to sum monthly values, verify totals, etc.
+              - ONLY math and statistics modules are available.
+              - Do NOT use import statements. Do NOT use numpy, pandas, scipy.
+              - Example: compute(code="total = sum([100, 200, 300]); print(total)")
+              - Do NOT compute the final derived answer — the assembler does that.
+
+              ## KEY RULES
+              - Record numbers EXACTLY as they appear in the source. Do NOT scale or convert.
+              - Tables use "In millions of dollars" unless stated otherwise.
+              - FY runs July 1 - June 30. CY runs January 1 - December 31.
+              - If a table is truncated in treasury_search results, use treasury_file_read to get the COMPLETE table.
+              - If monthly values are requested, extract EACH individual month — do not substitute an annual total.
+
+              {% if findings %}
+              ## PREVIOUS FINDINGS
+              {{findings}}
+              {% endif %}
+
+              {% if reflection %}
+              ## GUIDANCE FROM REFLECTOR
+              {{reflection}}
+
+              Follow the reflector's guidance. Focus on what's missing.
+              Carry forward values already found — do not re-search for them.
+              {% else %}
+              This is your first iteration. Identify the target file and extract the needed values.
+              {% endif %}
+
+              ## OUTPUT
+              Summarize what you found:
+              - For each value needed: state the number, source file, table name, row/column
+              - For values not found: state what you tried
+              - Be precise and concise. Include exact numbers with their source.
+
+        - id: reflector
+          type: agent
+          label: Completeness Checker
+          config:
+            subtype: reflector
+            model_tier: analytical
+            output_key: reflection
+            input_keys: [query, findings]
+            pool_inject:
+              - pool: observations
+                threshold: 0
+              - pool: sources
+                threshold: 0
+            max_tool_calls: 0
+            system_prompt: |
+              You evaluate whether the researcher has found enough data to answer the question.
+
+              DECISION RULES:
+              1. If the researcher found ALL needed values with clear source attribution
+                 (file name, table name, row/column labels) → decision: "complete"
+
+              2. If the researcher found the RIGHT FILE but couldn't extract specific values
+                 → decision: "continue"
+                 → suggested_changes: ["use treasury_file_read on <filename> with chunk_type=table",
+                    "use treasury_grep on <filename> with pattern=<specific category>"]
+
+              3. If the researcher is searching the WRONG FILE or wrong time period
+                 → decision: "adjust"
+                 → suggested_changes: ["target file should be treasury_bulletin_YYYY_MM.txt because <reason>"]
+
+              4. If the researcher already used treasury_file_read AND treasury_grep on the
+                 target file and STILL can't find the data → decision: "complete"
+                 (the data genuinely isn't there — let the assembler handle it)
+
+              NEVER say "continue" just to rephrase the same search queries.
+              NEVER say "continue" if all values are already found.
+              Prefer "complete" over "continue" when in doubt.
+
+              The observations and sources sections below show accumulated research context.
+
+            user_prompt_template: |
+              ## Question
+              {query}
+
+              ## Researcher Findings
+              {findings}
+
+              Evaluate the findings. Respond with JSON matching this schema exactly:
+              {{
+                "decision": "complete" or "continue" or "adjust",
+                "reasoning": "one sentence explaining why",
+                "evidence_sufficiency": "sufficient" or "partial" or "insufficient",
+                "suggested_changes": ["specific next step if continuing"]
+              }}
+
+    # ---------------------------------------------------------------
+    # Answer Assembler
+    # ---------------------------------------------------------------
+    - id: assembler
+      type: agent
+      label: Answer Assembler
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: report
+        tools: [compute]
+        input_keys: [query, findings]
+        pool_inject:
+          - pool: sources
+            threshold: 0
+        max_tool_calls: 5
+        system_prompt: |
+          You compute the final answer from the researcher's findings.
+
+          STEP 1 — READ the researcher's findings carefully.
+          Extract the specific numerical values with their source attribution.
+          If the findings say a value was not found, output:
+          <FINAL_ANSWER>DATA NOT AVAILABLE</FINAL_ANSWER>
+
+          STEP 2 — COMPUTE the answer using the compute tool.
+          Use the exact values from the findings. NEVER do mental arithmetic.
+          ONLY math and statistics modules are available. Do NOT use import statements.
+          Do NOT use numpy, pandas, or scipy.
+
+          Examples:
+          - Sum: compute(code="total = 100 + 200 + 300; print(total)")
+          - Percent change: compute(code="pct = (44463 - 2602) / 2602 * 100; print(round(pct, 2))")
+          - Geometric mean: compute(code="vals = [3.2, 4.1]; gm = (vals[0] * vals[1]) ** (1/len(vals)); print(round(gm, 4))")
+          - Standard deviation: compute(code="print(round(statistics.stdev([1, 2, 3]), 4))")
+
+          STEP 3 — OUTPUT the answer.
+          End your response with: <FINAL_ANSWER>value</FINAL_ANSWER>
+          - Just the number, no units
+          - Exactly as computed, no extra rounding
+          - For lists: [value1, value2]
+
+          RULES:
+          - You MUST ALWAYS include the <FINAL_ANSWER> tag
+          - NEVER invent values not in the findings
+          - NEVER substitute general knowledge for missing data
+          - An honest DATA NOT AVAILABLE is better than a fabricated answer

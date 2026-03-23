@@ -1,7 +1,7 @@
 """Unit tests for CitationCorrector service (Stage 5)."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 

@@ -14,18 +14,15 @@ from databricks_deep_research.citation.types import (
     VerificationResult,
     VerificationVerdict,
 )
+from databricks_deep_research.citation.utils import (
+    NUMERIC_PATTERN as _ANALYSIS_NUMERIC_RE,
+)
+from databricks_deep_research.citation.utils import (
+    TEMPORAL_PATTERN as _ANALYSIS_TEMPORAL_RE,
+)
 from databricks_deep_research.llm.client import FrameworkLLMClient, ModelTier
 
 logger = logging.getLogger(__name__)
-
-_ANALYSIS_NUMERIC_RE = re.compile(
-    r"[$€£¥]?\(?\d[\d,]*(?:\.\d+)?(?:\s*(?:%|million|billion|m|b|k|x))?\)?",
-    re.IGNORECASE,
-)
-_ANALYSIS_TEMPORAL_RE = re.compile(
-    r"\b(?:q[1-4]|20\d{2}|first quarter|second quarter|third quarter|fourth quarter|full[- ]year|year[- ]to[- ]date)\b",
-    re.IGNORECASE,
-)
 _HEDGED_ANALYSIS_CUES = (
     "may indicate",
     "suggests",

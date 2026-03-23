@@ -15,9 +15,8 @@ Tests cover:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -26,7 +25,6 @@ from deep_research.agent.tools.query_rewriter import (
     RewrittenQuery,
     rewrite_for_source_type,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -510,7 +508,7 @@ async def test_vs_multi_query_with_query2doc() -> None:
     async def mock_complete(**kwargs: Any) -> MagicMock:
         nonlocal call_count
         call_count += 1
-        structured_output = kwargs.get("structured_output")
+        _ = kwargs.get("structured_output")
 
         if call_count == 1:
             # First call: multi_query generation

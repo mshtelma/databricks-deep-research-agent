@@ -10,7 +10,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from databricks_deep_research.tools.protocol import ResearchTool, SourceKind, ToolDefinition, ToolResult
+from databricks_deep_research.tools.protocol import (
+    ResearchTool,
+    SourceKind,
+    ToolDefinition,
+    ToolResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +188,7 @@ class EnterpriseToolAdapter:
         """Pass-through validation (app tools handle their own validation)."""
         return arguments
 
-    async def execute(self, arguments: dict[str, Any], context: Any = None) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: Any = None) -> ToolResult:
         """Execute the underlying app tool with correct calling convention.
 
         App enterprise tools follow the protocol:
@@ -191,7 +196,8 @@ class EnterpriseToolAdapter:
         NOT **kwargs unpacking.
         """
         try:
-            from uuid import UUID as _UUID, uuid4 as _uuid4
+            from uuid import UUID as _UUID
+            from uuid import uuid4 as _uuid4
 
             from deep_research.agent.tools.base import ResearchContext as AppResearchContext
 
@@ -303,7 +309,7 @@ class BraveSearchAdapter:
                 before, len(results),
             )
 
-        return results
+        return list(results)
 
 
 async def create_framework_tools(
@@ -340,7 +346,9 @@ async def create_framework_tools(
     # Web search tool
     if brave_client is not None:
         try:
-            from databricks_deep_research.tools.builtins.web_search import WebSearchTool
+            from databricks_deep_research.tools.builtins.web_search import (
+                WebSearchTool,
+            )
 
             adapted_client = BraveSearchAdapter(
                 client=brave_client,
@@ -355,7 +363,9 @@ async def create_framework_tools(
     # Web crawl tool
     if crawler is not None:
         try:
-            from databricks_deep_research.tools.builtins.web_crawl import WebCrawlTool
+            from databricks_deep_research.tools.builtins.web_crawl import (
+                WebCrawlTool,
+            )
 
             adapted_crawler = CrawlerAdapter(crawler)
             tools.append(WebCrawlTool(crawler=adapted_crawler))

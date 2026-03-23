@@ -1,6 +1,5 @@
 """Tests for tracing constants and span name builders."""
 
-import pytest
 
 from deep_research.core.tracing_constants import (
     DOMAIN_CITATION,

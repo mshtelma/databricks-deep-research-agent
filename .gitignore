@@ -115,5 +115,9 @@ test.py
 .idea
 /.idea/
 
+# Benchmarks — external data and run results
+benchmarks/data/
+benchmarks/results/
+
 # UV workspace
 uv.lock

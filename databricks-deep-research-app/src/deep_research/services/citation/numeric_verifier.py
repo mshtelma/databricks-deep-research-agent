@@ -47,18 +47,11 @@ def is_exact_numeric_match(claim: str, evidence: str) -> bool:
     if not claim_numbers:
         return False
 
-    # Normalize evidence for matching
-    evidence_lower = evidence.lower()
-    claim_lower = claim.lower()
-
     # Check if ALL numbers appear in evidence
     matches = 0
     for num in claim_numbers:
         # Check direct match
-        if num in evidence:
-            matches += 1
-        # Check without commas
-        elif num.replace(",", "") in evidence.replace(",", ""):
+        if num in evidence or num.replace(",", "") in evidence.replace(",", ""):
             matches += 1
 
     # All numbers must match
@@ -480,12 +473,11 @@ class NumericVerifier:
             return False
 
         # Optionally check units
-        if self._config.require_unit_match:
-            if parsed.unit and evidence_parsed.unit:
-                if parsed.unit.lower() != evidence_parsed.unit.lower():
-                    return False
-
-        return True
+        return not (
+            self._config.require_unit_match
+            and parsed.unit and evidence_parsed.unit
+            and parsed.unit.lower() != evidence_parsed.unit.lower()
+        )
 
     def detect_numeric_claims(self, text: str) -> list[str]:
         """Detect sentences containing numeric claims.

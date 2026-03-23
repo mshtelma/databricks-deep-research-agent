@@ -110,6 +110,5 @@ class TestFromDatabricksNoCredentials:
         with patch(
             "databricks.sdk.WorkspaceClient",
             side_effect=RuntimeError("no auth"),
-        ):
-            with pytest.raises(RuntimeError, match="Could not authenticate"):
-                FrameworkLLMClient.from_databricks()
+        ), pytest.raises(RuntimeError, match="Could not authenticate"):
+            FrameworkLLMClient.from_databricks()

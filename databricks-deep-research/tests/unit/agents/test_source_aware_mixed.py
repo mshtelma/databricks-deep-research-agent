@@ -16,7 +16,6 @@ from databricks_deep_research.agents.source_aware import (
 )
 from databricks_deep_research.tools.protocol import ToolDefinition
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -376,7 +375,7 @@ class TestComparisonKeywordBoost:
         enterprise tools like vector_search or genie."""
         vs_definition = _enterprise_vs_tool().definition
         step_text = "Compare Kroger earnings to industry benchmarks"
-        vs_score = _score_tool_for_step(vs_definition, step_text)
+        _score_tool_for_step(vs_definition, step_text)
 
         ws_definition = _web_search_tool().definition
         ws_score = _score_tool_for_step(ws_definition, step_text)

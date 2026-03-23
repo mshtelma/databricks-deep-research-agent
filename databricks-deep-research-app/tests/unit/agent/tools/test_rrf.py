@@ -10,11 +10,8 @@ Tests cover:
 
 from __future__ import annotations
 
-import pytest
-
 from deep_research.agent.tools.user_vector_search import reciprocal_rank_fusion
 from deep_research.services.vector_search_query import VectorSearchResult
-
 
 # ---------------------------------------------------------------------------
 # Helpers

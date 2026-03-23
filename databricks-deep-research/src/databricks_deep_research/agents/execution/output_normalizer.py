@@ -159,7 +159,10 @@ def normalize_research_output(
     )
 
 
-from databricks_deep_research.workflow.runtime_core.models import ObservationRecord, SourceRecord
+from databricks_deep_research.workflow.runtime_core.models import (  # noqa: E402
+    ObservationRecord,
+    SourceRecord,
+)
 
 
 def build_source_records(sources: list[Any], *, tool_name: str = "") -> list[SourceRecord]:

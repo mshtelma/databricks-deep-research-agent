@@ -24,10 +24,9 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
 
-import mlflow
 from mlflow.entities import SpanType
 from pydantic import BaseModel, Field
 
@@ -69,7 +68,7 @@ DEFAULT_DECOMPOSITION_BATCH_SIZE = 5
 # =============================================================================
 
 
-class EvidenceSource(str, Enum):
+class EvidenceSource(StrEnum):
     """Source of evidence supporting an atomic fact."""
 
     INTERNAL = "internal"  # From existing evidence pool
@@ -294,7 +293,7 @@ class AtomicDecomposer:
         self,
         claim: ClaimInfo,
         claim_index: int,
-        context: str | None = None,
+        _context: str | None = None,
     ) -> ClaimDecomposition:
         """Decompose a claim into atomic facts.
 
@@ -306,7 +305,7 @@ class AtomicDecomposer:
         Args:
             claim: The claim to decompose.
             claim_index: Index of this claim in the claims list.
-            context: Optional surrounding context for decontextualization.
+            _context: Optional surrounding context (unused; kept for interface compat).
 
         Returns:
             ClaimDecomposition with list of atomic facts.
@@ -445,7 +444,7 @@ class AtomicDecomposer:
                     decomposition_reasoning=output.reasoning,
                 )
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     "DECOMPOSITION_TIMEOUT",
                     claim=truncate(claim_text, 50),
@@ -498,7 +497,7 @@ class AtomicDecomposer:
             decomposition_reasoning="Fallback: treating entire claim as single atomic fact",
         )
 
-    def _decontextualize(self, fact: str, claim: str) -> str:
+    def _decontextualize(self, fact: str, _claim: str) -> str:
         """Make a fact self-contained without the original claim context.
 
         Applies simple heuristic rules:
@@ -510,7 +509,7 @@ class AtomicDecomposer:
 
         Args:
             fact: The atomic fact text.
-            claim: The original claim for context.
+            _claim: The original claim for context (unused; kept for interface compat).
 
         Returns:
             Decontextualized fact text.
@@ -825,7 +824,7 @@ class AtomicDecomposer:
 
             return final_results
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("BATCH_DECOMPOSITION_TIMEOUT")
             raise
 
@@ -846,9 +845,7 @@ class AtomicDecomposer:
         results: dict[int, ClaimDecomposition] = {}
 
         # Create lookup from prompt index to batch info
-        prompt_idx_to_batch: dict[int, tuple[int, int, ClaimInfo]] = {
-            i: claim_tuple for i, claim_tuple in enumerate(claims_to_process)
-        }
+        prompt_idx_to_batch: dict[int, tuple[int, int, ClaimInfo]] = dict(enumerate(claims_to_process))
 
         for item in output.decompositions:
             prompt_idx = item.claim_index
@@ -866,7 +863,7 @@ class AtomicDecomposer:
             atomic_facts: list[AtomicFact] = []
             seen_facts: set[str] = set()
 
-            for i, fact_text in enumerate(item.atomic_facts):
+            for _i, fact_text in enumerate(item.atomic_facts):
                 fact_normalized = fact_text.strip().lower()
                 if not fact_text.strip() or fact_normalized in seen_facts:
                     continue
@@ -926,9 +923,7 @@ class AtomicDecomposer:
                 data = json.loads(json_match.group())
                 if "decompositions" in data and isinstance(data["decompositions"], list):
                     # Create lookup from prompt index to batch info
-                    prompt_idx_to_batch: dict[int, tuple[int, int, ClaimInfo]] = {
-                        i: claim_tuple for i, claim_tuple in enumerate(claims_to_process)
-                    }
+                    prompt_idx_to_batch: dict[int, tuple[int, int, ClaimInfo]] = dict(enumerate(claims_to_process))
 
                     for item in data["decompositions"]:
                         prompt_idx = item.get("claim_index", -1)
@@ -939,7 +934,7 @@ class AtomicDecomposer:
                         atomic_facts_raw = item.get("atomic_facts", [])
 
                         atomic_facts: list[AtomicFact] = []
-                        for i, fact_text in enumerate(atomic_facts_raw):
+                        for _i, fact_text in enumerate(atomic_facts_raw):
                             if not fact_text.strip():
                                 continue
                             atomic_facts.append(

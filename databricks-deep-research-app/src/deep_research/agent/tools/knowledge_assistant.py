@@ -25,15 +25,12 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mlflow.entities import SpanType
-
 from deep_research.agent.tools.base import (
     ResearchContext,
     ToolDefinition,
     ToolResult,
 )
 from deep_research.core.logging_utils import get_logger
-from deep_research.core.tracing import safe_tool_span
 from deep_research.services.metrics import record_source_query
 
 if TYPE_CHECKING:
@@ -312,156 +309,58 @@ class KnowledgeAssistantTool:
             else self._endpoint_name
         )
 
-        # Use safe_tool_span for MLflow tracing (T107)
-        async with safe_tool_span(
-            name=f"knowledge_assistant:{self._tool_name}",
-            span_type=SpanType.TOOL,  # type: ignore[arg-type]
-            attributes={
-                "source_type": "knowledge_assistant",
-                "source_name": source_name,
-                "endpoint_name": self._endpoint_name,
-                "question": question[:200],  # Truncate for span attributes
-                "obo_authenticated": self._use_obo,
-                "context_passing_enabled": self._pass_context,
-                "context_included": self._pass_context and include_context,
-            },
-        ) as span:
-            try:
-                # Get appropriate client based on auth mode
-                if self._use_obo:
-                    if not context.user_token:
-                        if span:
-                            span.set_attributes({
-                                "success": False,
-                                "error_type": "MissingToken",
-                            })
-                        return ToolResult(
-                            content="OBO authentication required but no user token available.",
-                            success=False,
-                            error="Missing user_token in context",
-                        )
-                    client = await self._get_obo_client(context.user_token)
-                else:
-                    client = self._get_client()
-
-                # Query the KA serving endpoint (sync API, run in executor).
-                # KA endpoints use the Responses API format: they require the
-                # ``input`` field and return ``output`` with ``output_text``
-                # items.  The SDK's high-level ``serving_endpoints.query()``
-                # does not deserialize the ``output`` field, so we call the
-                # REST API directly through ``api_client.do()`` which returns
-                # the raw dict.
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: client.api_client.do(
-                        "POST",
-                        f"/serving-endpoints/{self._endpoint_name}/invocations",
-                        body={
-                            "input": [
-                                {"role": "user", "content": enhanced_question}
-                            ]
-                        },
-                    ),
-                )
-
-                duration_ms = (time.perf_counter() - start_time) * 1000
-
-                # Parse response with confidence level
-                answer, citations, confidence = self._parse_response_with_confidence(response)
-
-                if not answer:
-                    if span:
-                        span.set_attributes({
-                            "duration_ms": duration_ms,
-                            "result_count": 0,
-                            "success": True,
-                            "has_answer": False,
-                        })
-                    # Record metrics for monitoring (T108)
-                    record_source_query(
-                        source_type="knowledge_assistant",
-                        source_name=source_name,
-                        latency_ms=duration_ms,
-                        success=True,
+        try:
+            # Get appropriate client based on auth mode
+            if self._use_obo:
+                if not context.user_token:
+                    logger.info(
+                        "KA_SPAN_ATTRS",
+                        success=False,
+                        error_type="MissingToken",
                     )
                     return ToolResult(
-                        content="The Knowledge Assistant could not provide an answer.",
-                        success=True,
-                        sources=[],
-                        data={
-                            "question": question,
-                            "has_answer": False,
-                            "context_included": self._pass_context and include_context,
-                        },
+                        content="OBO authentication required but no user token available.",
+                        success=False,
+                        error="Missing user_token in context",
                     )
+                client = await self._get_obo_client(context.user_token)
+            else:
+                client = self._get_client()
 
-                # Build sources list for citation tracking
-                sources: list[dict[str, Any]] = []
-                citation_text: list[str] = []
+            # Query the KA serving endpoint (sync API, run in executor).
+            # KA endpoints use the Responses API format: they require the
+            # ``input`` field and return ``output`` with ``output_text``
+            # items.  The SDK's high-level ``serving_endpoints.query()``
+            # does not deserialize the ``output`` field, so we call the
+            # REST API directly through ``api_client.do()`` which returns
+            # the raw dict.
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: client.api_client.do(
+                    "POST",
+                    f"/serving-endpoints/{self._endpoint_name}/invocations",
+                    body={
+                        "input": [
+                            {"role": "user", "content": enhanced_question}
+                        ]
+                    },
+                ),
+            )
 
-                # Generate unique URL per response to avoid dedup collisions
-                import hashlib
-                response_hash = hashlib.md5(answer[:200].encode()).hexdigest()[:12] if answer else "empty"
+            duration_ms = (time.perf_counter() - start_time) * 1000
 
-                for idx, citation in enumerate(citations):
-                    # Build navigable workspace URL
-                    if citation.url:
-                        source_url = citation.url
-                    else:
-                        from deep_research.core.auth import get_workspace_host
-                        workspace_host = get_workspace_host()
-                        if workspace_host:
-                            source_url = f"{workspace_host}/ml/endpoints/{self._endpoint_name}#{response_hash}-{idx}"
-                        else:
-                            source_url = f"ka://{self._endpoint_name}/{response_hash}/{idx}"
+            # Parse response with confidence level
+            answer, citations, confidence = self._parse_response_with_confidence(response)
 
-                    # Title fallback: citation title → source display name → endpoint name
-                    source_title = citation.title or source_name or self._endpoint_name
-
-                    source_entry: dict[str, Any] = {
-                        "type": "knowledge_assistant",
-                        "source_name": source_name,
-                        "endpoint_name": self._endpoint_name,
-                        "source": citation.source,
-                        "title": source_title,
-                        "url": source_url,
-                        "snippet": citation.snippet,
-                        "citation_index": idx,
-                        "confidence_level": confidence,
-                    }
-
-                    # Add internal reference tracking
-                    if citation.source:
-                        source_entry["internal_reference"] = {
-                            "source_type": "knowledge_assistant",
-                            "reference_id": citation.source,
-                            "document_title": citation.title,
-                        }
-
-                    sources.append(source_entry)
-
-                    if citation.title:
-                        citation_text.append(f"[{idx + 1}] {citation.title}")
-
-                # Format content with citations and confidence
-                content = answer
-                if citation_text:
-                    content += "\n\nSources:\n" + "\n".join(citation_text)
-
-                if confidence and confidence != "unknown":
-                    content += f"\n\n[Confidence: {confidence}]"
-
-                # Update span with final metrics
-                if span:
-                    span.set_attributes({
-                        "duration_ms": duration_ms,
-                        "result_count": len(citations),
-                        "success": True,
-                        "has_answer": True,
-                        "confidence_level": confidence,
-                    })
-
+            if not answer:
+                logger.info(
+                    "KA_SPAN_ATTRS",
+                    duration_ms=duration_ms,
+                    result_count=0,
+                    success=True,
+                    has_answer=False,
+                )
                 # Record metrics for monitoring (T108)
                 record_source_query(
                     source_type="knowledge_assistant",
@@ -469,91 +368,175 @@ class KnowledgeAssistantTool:
                     latency_ms=duration_ms,
                     success=True,
                 )
-
                 return ToolResult(
-                    content=content,
+                    content="The Knowledge Assistant could not provide an answer.",
                     success=True,
-                    sources=sources,
+                    sources=[],
                     data={
                         "question": question,
-                        "has_answer": True,
-                        "citation_count": len(citations),
-                        "endpoint_name": self._endpoint_name,
-                        "source_name": source_name,
-                        "confidence_level": confidence,
+                        "has_answer": False,
                         "context_included": self._pass_context and include_context,
-                        "obo_authenticated": self._use_obo,
                     },
                 )
 
-            except ImportError as e:
-                duration_ms = (time.perf_counter() - start_time) * 1000
-                if span:
-                    span.set_attributes({
-                        "duration_ms": duration_ms,
-                        "success": False,
-                        "error_type": "ImportError",
-                    })
-                # Record error metrics for monitoring (T108)
-                record_source_query(
-                    source_type="knowledge_assistant",
-                    source_name=source_name,
-                    latency_ms=duration_ms,
-                    success=False,
-                    error="ImportError: SDK not installed",
-                )
-                logger.error("Databricks SDK not available", error=str(e))
-                return ToolResult(
-                    content="Knowledge Assistant is not available. SDK not installed.",
-                    success=False,
-                    error=str(e),
-                )
-            except Exception as e:
-                error_msg = str(e)
-                duration_ms = (time.perf_counter() - start_time) * 1000
+            # Build sources list for citation tracking
+            sources: list[dict[str, Any]] = []
+            citation_text: list[str] = []
 
-                # Provide helpful error messages for common OBO failures
-                if self._use_obo:
-                    if "PERMISSION_DENIED" in error_msg or "403" in error_msg:
-                        error_msg = (
-                            f"Permission denied: You don't have access to endpoint "
-                            f"'{self._endpoint_name}'. Please verify your permissions."
-                        )
-                    elif "NOT_FOUND" in error_msg or "404" in error_msg:
-                        error_msg = f"Endpoint not found: '{self._endpoint_name}' does not exist."
+            # Generate unique URL per response to avoid dedup collisions
+            import hashlib
+            response_hash = hashlib.md5(answer[:200].encode()).hexdigest()[:12] if answer else "empty"
 
-                # Update span with error info
-                if span:
-                    span.set_attributes({
-                        "duration_ms": duration_ms,
-                        "result_count": 0,
-                        "success": False,
-                        "error_type": type(e).__name__,
-                    })
+            for idx, citation in enumerate(citations):
+                # Build navigable workspace URL
+                if citation.url:
+                    source_url = citation.url
+                else:
+                    from deep_research.core.auth import get_workspace_host
+                    workspace_host = get_workspace_host()
+                    if workspace_host:
+                        source_url = f"{workspace_host}/ml/endpoints/{self._endpoint_name}#{response_hash}-{idx}"
+                    else:
+                        source_url = f"ka://{self._endpoint_name}/{response_hash}/{idx}"
 
-                # Record error metrics for monitoring (T108)
-                record_source_query(
-                    source_type="knowledge_assistant",
-                    source_name=source_name,
-                    latency_ms=duration_ms,
-                    success=False,
-                    error=error_msg[:200],
-                )
+                # Title fallback: citation title → source display name → endpoint name
+                source_title = citation.title or source_name or self._endpoint_name
 
-                logger.error(
-                    "KNOWLEDGE_ASSISTANT_ERROR",
-                    error=error_msg,
-                    error_type=type(e).__name__,
-                    endpoint=self._endpoint_name,
-                    obo_mode=self._use_obo,
-                    duration_ms=duration_ms,
-                    exc_info=True,
-                )
-                return ToolResult(
-                    content=f"Query failed: {error_msg[:500]}",
-                    success=False,
-                    error=error_msg,
-                )
+                source_entry: dict[str, Any] = {
+                    "type": "knowledge_assistant",
+                    "source_name": source_name,
+                    "endpoint_name": self._endpoint_name,
+                    "source": citation.source,
+                    "title": source_title,
+                    "url": source_url,
+                    "snippet": citation.snippet,
+                    "citation_index": idx,
+                    "confidence_level": confidence,
+                }
+
+                # Add internal reference tracking
+                if citation.source:
+                    source_entry["internal_reference"] = {
+                        "source_type": "knowledge_assistant",
+                        "reference_id": citation.source,
+                        "document_title": citation.title,
+                    }
+
+                sources.append(source_entry)
+
+                if citation.title:
+                    citation_text.append(f"[{idx + 1}] {citation.title}")
+
+            # Format content with citations and confidence
+            content = answer
+            if citation_text:
+                content += "\n\nSources:\n" + "\n".join(citation_text)
+
+            if confidence and confidence != "unknown":
+                content += f"\n\n[Confidence: {confidence}]"
+
+            # Log final metrics
+            logger.info(
+                "KA_SPAN_ATTRS",
+                duration_ms=duration_ms,
+                result_count=len(citations),
+                success=True,
+                has_answer=True,
+                confidence_level=confidence,
+            )
+
+            # Record metrics for monitoring (T108)
+            record_source_query(
+                source_type="knowledge_assistant",
+                source_name=source_name,
+                latency_ms=duration_ms,
+                success=True,
+            )
+
+            return ToolResult(
+                content=content,
+                success=True,
+                sources=sources,
+                data={
+                    "question": question,
+                    "has_answer": True,
+                    "citation_count": len(citations),
+                    "endpoint_name": self._endpoint_name,
+                    "source_name": source_name,
+                    "confidence_level": confidence,
+                    "context_included": self._pass_context and include_context,
+                    "obo_authenticated": self._use_obo,
+                },
+            )
+
+        except ImportError as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info(
+                "KA_SPAN_ATTRS",
+                duration_ms=duration_ms,
+                success=False,
+                error_type="ImportError",
+            )
+            # Record error metrics for monitoring (T108)
+            record_source_query(
+                source_type="knowledge_assistant",
+                source_name=source_name,
+                latency_ms=duration_ms,
+                success=False,
+                error="ImportError: SDK not installed",
+            )
+            logger.error("Databricks SDK not available", error=str(e))
+            return ToolResult(
+                content="Knowledge Assistant is not available. SDK not installed.",
+                success=False,
+                error=str(e),
+            )
+        except Exception as e:
+            error_msg = str(e)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+
+            # Provide helpful error messages for common OBO failures
+            if self._use_obo:
+                if "PERMISSION_DENIED" in error_msg or "403" in error_msg:
+                    error_msg = (
+                        f"Permission denied: You don't have access to endpoint "
+                        f"'{self._endpoint_name}'. Please verify your permissions."
+                    )
+                elif "NOT_FOUND" in error_msg or "404" in error_msg:
+                    error_msg = f"Endpoint not found: '{self._endpoint_name}' does not exist."
+
+            # Log error info
+            logger.info(
+                "KA_SPAN_ATTRS",
+                duration_ms=duration_ms,
+                result_count=0,
+                success=False,
+                error_type=type(e).__name__,
+            )
+
+            # Record error metrics for monitoring (T108)
+            record_source_query(
+                source_type="knowledge_assistant",
+                source_name=source_name,
+                latency_ms=duration_ms,
+                success=False,
+                error=error_msg[:200],
+            )
+
+            logger.error(
+                "KNOWLEDGE_ASSISTANT_ERROR",
+                error=error_msg,
+                error_type=type(e).__name__,
+                endpoint=self._endpoint_name,
+                obo_mode=self._use_obo,
+                duration_ms=duration_ms,
+                exc_info=True,
+            )
+            return ToolResult(
+                content=f"Query failed: {error_msg[:500]}",
+                success=False,
+                error=error_msg,
+            )
 
     def _parse_response(self, response: Any) -> tuple[str, list[KACitation]]:
         """Parse Knowledge Assistant response (legacy method).

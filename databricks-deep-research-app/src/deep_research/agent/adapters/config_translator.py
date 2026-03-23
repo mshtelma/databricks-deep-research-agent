@@ -16,7 +16,7 @@ from databricks_deep_research.workflow.definition import (
     WorkflowNode,
 )
 
-from deep_research.agent.config import get_report_limits
+from deep_research.agent.config import get_report_limits, get_research_type_config
 
 if TYPE_CHECKING:
     from deep_research.agent.orchestration_config import OrchestrationConfig
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def translate(
-    config: "OrchestrationConfig",
+    config: OrchestrationConfig,
     available_tools: list[str] | None = None,
 ) -> WorkflowDefinition:
     """Translate an ``OrchestrationConfig`` into a ``WorkflowDefinition``.
@@ -56,7 +56,7 @@ def translate(
     return _build_deep_research_workflow(config, available_tools)
 
 
-def _build_simple_workflow(config: "OrchestrationConfig") -> WorkflowDefinition:
+def _build_simple_workflow(config: OrchestrationConfig) -> WorkflowDefinition:
     """Build a minimal workflow for simple queries (coordinator only)."""
     root = WorkflowNode(
         id="main",
@@ -76,7 +76,7 @@ def _build_simple_workflow(config: "OrchestrationConfig") -> WorkflowDefinition:
 
 
 def _build_web_search_workflow(
-    config: "OrchestrationConfig",
+    config: OrchestrationConfig,
     available_tools: list[str] | None = None,
 ) -> WorkflowDefinition:
     """Build a lightweight workflow for web search queries.
@@ -134,7 +134,7 @@ def _build_web_search_workflow(
 
 
 def _build_deep_research_workflow(
-    config: "OrchestrationConfig",
+    config: OrchestrationConfig,
     available_tools: list[str] | None = None,
 ) -> WorkflowDefinition:
     """Build the full deep research pipeline.
@@ -180,7 +180,7 @@ def _build_deep_research_workflow(
 # ---------------------------------------------------------------------------
 
 
-def _build_coordinator(config: "OrchestrationConfig") -> WorkflowNode:
+def _build_coordinator(_config: OrchestrationConfig) -> WorkflowNode:
     """Build coordinator node."""
     return WorkflowNode(
         id="coordinator",
@@ -196,7 +196,7 @@ def _build_coordinator(config: "OrchestrationConfig") -> WorkflowNode:
 
 
 def _build_background(
-    config: "OrchestrationConfig",
+    config: OrchestrationConfig,
     available_tools: list[str] | None = None,
 ) -> WorkflowNode:
     """Build background investigation node."""
@@ -220,7 +220,7 @@ def _build_background(
 
 
 def _build_research_cycle(
-    config: "OrchestrationConfig",
+    config: OrchestrationConfig,
     available_tools: list[str] | None = None,
 ) -> WorkflowNode:
     """Build plan_and_execute node for the research cycle."""
@@ -306,7 +306,7 @@ def _build_research_cycle(
     )
 
 
-def _build_synthesizer(config: "OrchestrationConfig") -> WorkflowNode:
+def _build_synthesizer(config: OrchestrationConfig) -> WorkflowNode:
     """Build synthesizer node.
 
     Handles three synthesis modes:
@@ -381,6 +381,20 @@ def _build_synthesizer(config: "OrchestrationConfig") -> WorkflowNode:
     synth_schema["max_tokens"] = report_limits.max_tokens
     synth_schema["target_word_count"] = report_limits.max_words
 
+    # NLI verification concurrency and claim disposition from per-depth citation config
+    citation_cfg = None
+    try:
+        depth_config = get_research_type_config(depth)
+        citation_cfg = depth_config.citation_verification
+        if citation_cfg and hasattr(citation_cfg, "max_concurrent_verifications"):
+            synth_schema["max_concurrent_verifications"] = citation_cfg.max_concurrent_verifications
+    except Exception:
+        pass  # Fall back to framework default
+
+    # Stage 8 claim disposition
+    if citation_cfg:
+        synth_schema["claim_disposition"] = citation_cfg.claim_disposition
+
     synth_config["output_schema"] = synth_schema
 
     # ------------------------------------------------------------------
@@ -398,9 +412,8 @@ def _build_synthesizer(config: "OrchestrationConfig") -> WorkflowNode:
         synth_config["system_prompt"] = config.structured_system_prompt
     if config.structured_user_prompt:
         synth_config["user_prompt_template"] = config.structured_user_prompt
-    if config.system_instructions:
-        if "system_prompt" not in synth_config:
-            synth_config["system_prompt"] = config.system_instructions
+    if config.system_instructions and "system_prompt" not in synth_config:
+        synth_config["system_prompt"] = config.system_instructions
 
     return WorkflowNode(
         id="synthesizer",
@@ -416,7 +429,7 @@ def _build_synthesizer(config: "OrchestrationConfig") -> WorkflowNode:
 
 
 def _resolve_search_tools(
-    config: "OrchestrationConfig",
+    config: OrchestrationConfig,
     available_tools: list[str] | None = None,
 ) -> list[str | dict[str, Any]]:
     """Build tool list based on source scope config.
@@ -479,7 +492,7 @@ def _depth_to_step_limits(depth: str) -> tuple[int, int]:
     return limits.get(depth, (2, 7))
 
 
-def _build_pools(config: "OrchestrationConfig") -> list[dict[str, Any]]:
+def _build_pools(_config: OrchestrationConfig) -> list[dict[str, Any]]:
     """Build pool configuration."""
     return [
         {"name": "sources", "dedup_key": "url", "max_items": 200},

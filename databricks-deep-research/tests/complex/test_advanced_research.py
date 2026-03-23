@@ -30,31 +30,23 @@ from typing import Any
 import pytest
 
 from databricks_deep_research.events.types import (
-    AgentOutputEvent,
     EvaluationDecisionEvent,
     ItemCompletedEvent,
-    ItemStartedEvent,
-    NodeCompletedEvent,
-    NodeStartedEvent,
     PlanAndExecuteExitEvent,
-    PlanCreatedEvent,
-    StreamEvent,
     ToolCacheHitEvent,
     ToolCallEvent,
     WorkflowCompletedEvent,
-    WorkflowStartedEvent,
 )
 from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.tools.registry import ToolRegistry
-from databricks_deep_research.workflow.definition import WorkflowDefinition
 from databricks_deep_research.workflow.executor import run_workflow
 from databricks_deep_research.workflow.loader import load_workflow
 from tests.complex.conftest import requires_all_credentials
 from tests.helpers import (
     assert_report_has_substance,
     event_summary,
-    print_event_timeline,
     print_evaluator_decisions,
+    print_event_timeline,
     print_full_diagnostics,
     print_pool_summary,
 )

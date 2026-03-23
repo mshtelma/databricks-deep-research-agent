@@ -32,7 +32,6 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-import mlflow
 from mlflow.entities import SpanType
 from pydantic import BaseModel, Field
 
@@ -73,7 +72,6 @@ from deep_research.core.tracing_constants import (
     ATTR_REVISION_TYPE,
     ATTR_SEARCH_ATTEMPT,
     ATTR_SEARCH_QUERY,
-    ATTR_SEARCH_RESULTS_COUNT,
     ATTR_SOFTENED_COUNT,
     ATTR_SOFTENING_INPUT,
     ATTR_SOFTENING_OUTPUT,
@@ -97,7 +95,6 @@ from deep_research.services.citation.atomic_decomposer import (
     AtomicFact,
     ClaimDecomposition,
     ClaimRevision,
-    DecompositionMetrics,
     EvidenceSource,
 )
 from deep_research.services.citation.evidence_selector import RankedEvidence
@@ -105,11 +102,10 @@ from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.types import ModelTier
 
 if TYPE_CHECKING:
-    from uuid import UUID
 
     from deep_research.agent.state import ClaimInfo, SourceInfo
     from deep_research.agent.tools.web_crawler import CrawlResult, WebCrawler
-    from deep_research.services.search.brave import BraveSearchClient, SearchResult
+    from deep_research.services.search.brave import BraveSearchClient
 
 logger = get_logger(__name__)
 
@@ -390,7 +386,7 @@ class VerificationRetriever:
         self,
         claims: list[ClaimInfo],
         evidence_pool: list[RankedEvidence],
-        report_content: str,
+        report_content: str,  # noqa: ARG002
         research_query: str,
         sources: list[SourceInfo] | None = None,
     ) -> AsyncGenerator[VerificationEvent | ClaimRevision, None]:
@@ -399,7 +395,7 @@ class VerificationRetriever:
         Args:
             claims: List of claims from previous stages.
             evidence_pool: Pre-selected evidence from Stage 1.
-            report_content: Current report content.
+            report_content: Current report content (unused; kept for interface compat).
             research_query: Original research query for context.
             sources: List of sources (for adding new sources).
 
@@ -698,7 +694,7 @@ class VerificationRetriever:
                         "search.threshold": self.config.internal_search_threshold,
                     })
 
-                for evidence, score in internal_results:
+                for evidence, _score in internal_results:
                     # Check entailment
                     entails, ent_score = await self._check_entailment(
                         fact, evidence, claim_index
@@ -764,7 +760,7 @@ class VerificationRetriever:
         fact: AtomicFact,
         claim_index: int,
         research_query: str,
-        sources: list[SourceInfo] | None = None,
+        sources: list[SourceInfo] | None = None,  # noqa: ARG002
     ) -> None:
         """Search external sources for evidence supporting a fact.
 
@@ -772,7 +768,7 @@ class VerificationRetriever:
             fact: The atomic fact to find evidence for.
             claim_index: Index of parent claim for span naming.
             research_query: Original research query for context.
-            sources: List of sources (for adding new sources).
+            _sources: List of sources (unused; kept for interface compat).
         """
         if not self.brave_client or not self.web_crawler:
             return
@@ -882,7 +878,7 @@ class VerificationRetriever:
                                 })
                             return
 
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning(
                         "EXTERNAL_SEARCH_TIMEOUT",
                         query=truncate(query, 50),

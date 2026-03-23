@@ -10,11 +10,11 @@ Usage:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from deep_research.core.app_config import get_app_config
-from deep_research.core.logging_utils import get_logger, truncate
+from deep_research.core.logging_utils import get_logger
 from deep_research.services.citation.citation_corrector import (
     CitationCorrector,
     CorrectionType,
@@ -310,15 +310,15 @@ class PostVerifier:
         # Stage 6: Numeric verification
         numeric_verified = None
         if self._config.include_stage6_numeric and evidence:
-            verifier = self._get_numeric_verifier()
-            if verifier.detect_numeric_claims(claim.text):
-                result = await verifier.verify_numeric_claim(
+            numeric_verifier = self._get_numeric_verifier()
+            if numeric_verifier.detect_numeric_claims(claim.text):
+                numeric_result = await numeric_verifier.verify_numeric_claim(
                     claim_text=claim.text,
                     evidence=evidence,
                 )
-                numeric_verified = result.overall_match
+                numeric_verified = numeric_result.overall_match
                 # Downgrade verdict if numeric mismatch
-                if not result.overall_match and verdict == Verdict.SUPPORTED:
+                if not numeric_result.overall_match and verdict == Verdict.SUPPORTED:
                     verdict = Verdict.PARTIAL
 
         return VerifiedClaim(

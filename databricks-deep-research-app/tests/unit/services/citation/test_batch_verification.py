@@ -10,7 +10,6 @@ from deep_research.services.citation.isolated_verifier import (
     BatchVerificationOutput,
     IsolatedVerifier,
     Verdict,
-    VerificationResult,
 )
 
 

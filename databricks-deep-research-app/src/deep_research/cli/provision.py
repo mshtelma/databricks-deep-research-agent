@@ -42,7 +42,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]  # src/deep_research/cli -> r
 def _run(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     """Run a subprocess with inherited stdio."""
     logger.info("Running: %s", " ".join(cmd))
-    return subprocess.run(cmd, check=check, cwd=PROJECT_ROOT)
+    return subprocess.run(cmd, check=check, cwd=PROJECT_ROOT, text=True)
 
 
 def _read_target_config(target: str) -> tuple[str, str, str]:

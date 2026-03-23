@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from databricks_deep_research.agents.config import PoolWriteConfig
-from databricks_deep_research.agents.execution.output_normalizer import NormalizedResearchOutput, is_semantically_empty
+from databricks_deep_research.agents.execution.output_normalizer import (
+    NormalizedResearchOutput,
+    is_semantically_empty,
+)
 
 
 @dataclass(frozen=True)

@@ -3,7 +3,6 @@
 Part of 008-data-source-selection feature implementation.
 """
 
-import pytest
 
 from deep_research.agent.state import ResearchState
 from deep_research.schemas.source_scope import SourceScope, SourceScopeConfig

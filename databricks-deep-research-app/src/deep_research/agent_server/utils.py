@@ -210,7 +210,8 @@ def get_obo_token(context: dict[str, Any] | None) -> str | None:
 
     # Try various token locations
     token = context.get("authorization")
-    if token and token.startswith("Bearer "):
+    if isinstance(token, str) and token.startswith("Bearer "):
         return token[7:]
 
-    return context.get("obo_token") or context.get("token")
+    obo = context.get("obo_token") or context.get("token")
+    return str(obo) if obo else None

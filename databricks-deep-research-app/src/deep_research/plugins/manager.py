@@ -115,7 +115,7 @@ class PluginManager:
     _pipeline_customizations: dict[str, PipelineCustomization] = field(default_factory=dict)
 
     # Lifecycle hook state
-    _hook_cache: dict[str, list[tuple[Any, Callable]]] | None = None
+    _hook_cache: dict[str, list[tuple[Any, Callable[..., Any]]]] | None = None
     _cache_lock: RLock = field(default_factory=RLock)
     _cache_version: int = 0
     _hook_timeout: int = 30  # seconds
@@ -125,7 +125,7 @@ class PluginManager:
     # Throttling state
     _throttle_configs: dict[str, HookThrottleConfig] = field(default_factory=dict)
     _last_hook_times: dict[tuple[str, str], float] = field(default_factory=lambda: defaultdict(float))
-    _batched_events: dict[tuple[str, str], list] = field(default_factory=lambda: defaultdict(list))
+    _batched_events: dict[tuple[str, str], list[Any]] = field(default_factory=lambda: defaultdict(list))
 
     # Metrics
     _hook_metrics: dict[str, HookMetrics] = field(default_factory=lambda: defaultdict(lambda: HookMetrics(hook_name="unknown")))
@@ -418,8 +418,8 @@ class PluginManager:
 
         # Merge all customizations
         merged_disabled: set[str] = set()
-        merged_insertions: list = []
-        merged_overrides: dict = {}
+        merged_insertions: list[Any] = []
+        merged_overrides: dict[str, Any] = {}
 
         for customization in self._pipeline_customizations.values():
             merged_disabled.update(customization.disabled_agents)
@@ -512,7 +512,7 @@ class PluginManager:
                 self._cache_version,
             )
 
-    def _get_hook_cache(self) -> dict[str, list[tuple[Any, Callable]]]:
+    def _get_hook_cache(self) -> dict[str, list[tuple[Any, Callable[..., Any]]]]:
         """
         Get hook cache, rebuilding if needed (lazy + thread-safe).
 
@@ -529,7 +529,7 @@ class PluginManager:
                 )
             return self._hook_cache
 
-    def _build_hook_cache(self) -> dict[str, list[tuple[Any, Callable]]]:
+    def _build_hook_cache(self) -> dict[str, list[tuple[Any, Callable[..., Any]]]]:
         """
         Build hook cache from current plugins.
 
@@ -538,7 +538,7 @@ class PluginManager:
         Returns:
             Dict mapping hook names to list of (plugin, callable) tuples
         """
-        cache: dict[str, list[tuple[Any, Callable]]] = {}
+        cache: dict[str, list[tuple[Any, Callable[..., Any]]]] = {}
 
         # All possible hooks from JobLifecycleListener protocol
         all_hooks = [
@@ -627,11 +627,11 @@ class PluginManager:
                     if not getattr(hooks_config, "enabled", True):
                         return {"skipped": True, "reason": "feature_disabled"}
 
-                    allowlist = getattr(hooks_config, "allowlist", set())
+                    allowlist: set[str] = getattr(hooks_config, "allowlist", set())
                     if allowlist and hook_name not in allowlist:
                         return {"skipped": True, "reason": "not_in_allowlist"}
 
-                    denylist = getattr(hooks_config, "denylist", set())
+                    denylist: set[str] = getattr(hooks_config, "denylist", set())
                     if hook_name in denylist:
                         return {"skipped": True, "reason": "in_denylist"}
 
@@ -653,7 +653,7 @@ class PluginManager:
         cache = self._get_hook_cache()  # Thread-safe lazy access
         hooks = cache.get(hook_name, [])
 
-        stats = {
+        stats: dict[str, Any] = {
             "hook_name": hook_name,
             "total_plugins": len(hooks),
             "succeeded": 0,
@@ -773,7 +773,7 @@ class PluginManager:
 
         return {"throttled": True, "batch_size": len(self._batched_events[key])}
 
-    def _create_batch_event(self, hook_name: str, events: list) -> Any:
+    def _create_batch_event(self, hook_name: str, events: list[Any]) -> Any:
         """Combine multiple events into batch."""
         if hook_name == "on_synthesis_chunk":
             # Combine chunks
@@ -792,7 +792,7 @@ class PluginManager:
             )
         return events[-1]  # Fallback: just use last event
 
-    def get_hook_metrics(self) -> dict[str, dict]:
+    def get_hook_metrics(self) -> dict[str, dict[str, Any]]:
         """
         Get current hook performance metrics.
 

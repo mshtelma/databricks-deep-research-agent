@@ -249,6 +249,17 @@ citation_verification:
 
   unsupported_claim_warning_threshold: 0.20
 
+  # Stage 8: Post-verification claim disposition
+  # Maps each verdict to an action: keep, remove, or soften
+  claim_disposition:
+    supported: keep
+    partial: keep
+    unsupported: remove
+    contradicted: remove
+    abstained: keep
+    analysis_partial: keep
+    analysis_unsupported: remove
+
 # Query mode timeouts - relaxed for E2E test environment
 # Pydantic requires full field specification (class defaults differ from mode defaults)
 query_modes:

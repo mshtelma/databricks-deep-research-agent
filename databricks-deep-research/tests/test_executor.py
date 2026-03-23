@@ -36,27 +36,32 @@ from databricks_deep_research.workflow.definition import (
     WorkflowNode,
 )
 from databricks_deep_research.workflow.executor import (
+    NormalizedPlanContract,
     PlanCycleContext,
     WorkflowExecutor,
     _build_available_source_catalog,
     _build_evaluator_runtime_context,
     _build_planner_runtime_context,
     _extract_items,
-    NormalizedPlanContract,
     _extract_raw_plan_contract,
     _finalize_plan_contract,
-    _normalize_executable_plan_contract,
     _format_all_observations,
     _format_source_quality,
+    _normalize_executable_plan_contract,
     _populate_synthesis_state,
     run_workflow,
 )
 from databricks_deep_research.workflow.state import WorkflowState
 from tests.conftest import (
     build_mock_llm_client as _mock_llm_client,
+)
+from tests.conftest import (
     collect_events as _collect_events,
+)
+from tests.conftest import (
     events_of_type as _events_of_type,
 )
+
 
 def _make_definition(root: WorkflowNode) -> WorkflowDefinition:
     """Wrap a root node into a minimal WorkflowDefinition."""

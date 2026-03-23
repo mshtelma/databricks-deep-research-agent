@@ -1,11 +1,12 @@
 """Chat SQLAlchemy model."""
 
 from datetime import UTC, datetime
-from enum import Enum
-from typing import TYPE_CHECKING
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, Index, String
+from sqlalchemy import DateTime, ForeignKey, Index, String
+from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,7 +19,7 @@ if TYPE_CHECKING:
     from deep_research.models.source import Source
 
 
-class ChatStatus(str, Enum):
+class ChatStatus(StrEnum):
     """Chat status enumeration."""
 
     ACTIVE = "active"
@@ -26,7 +27,7 @@ class ChatStatus(str, Enum):
     DELETED = "deleted"
 
 
-class ChatType(str, Enum):
+class ChatType(StrEnum):
     """Chat type enumeration for distinguishing regular vs incognito chats."""
 
     REGULAR = "regular"
@@ -83,7 +84,7 @@ class Chat(BaseModel):
     )
 
     # Additional metadata (JSONB for flexibility)
-    metadata_: Mapped[dict] = mapped_column(
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
         JSONB,
         default=dict,

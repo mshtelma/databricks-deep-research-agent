@@ -10,10 +10,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from deep_research.core.databricks_auth import (
-    DatabricksAuth,
-    OAuthCredential,
     TOKEN_LIFETIME,
     TOKEN_REFRESH_BUFFER,
+    DatabricksAuth,
+    OAuthCredential,
     clear_databricks_auth,
 )
 

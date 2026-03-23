@@ -9,10 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from dotenv import load_dotenv
 
-from databricks_deep_research.llm.client import FrameworkLLMClient, LLMResponse
 from databricks_deep_research.events.types import StreamEvent
+from databricks_deep_research.llm.client import FrameworkLLMClient, LLMResponse
 from databricks_deep_research.tools.protocol import (
-    ResearchTool,
     SourceInfo,
     ToolContext,
     ToolDefinition,

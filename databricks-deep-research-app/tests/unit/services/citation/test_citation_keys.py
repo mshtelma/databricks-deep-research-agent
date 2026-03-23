@@ -4,15 +4,14 @@ Tests the human-readable citation key generation that replaces
 numeric markers [0], [1], [2] with [Arxiv], [Zhipu], [Github-2].
 """
 
-import pytest
 
 from deep_research.services.citation.citation_keys import (
     _is_enterprise_url,
-    extract_domain_key,
     abbreviate_title,
     build_citation_key_map,
-    replace_numeric_markers,
+    extract_domain_key,
     parse_citation_key,
+    replace_numeric_markers,
 )
 from deep_research.services.citation.evidence_selector import RankedEvidence
 

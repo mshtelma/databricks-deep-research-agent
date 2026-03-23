@@ -29,6 +29,7 @@ from databricks_deep_research.citation.types import (
     VerificationResult,
     VerificationVerdict,
 )
+from databricks_deep_research.citation.utils import truncate as _truncate
 from databricks_deep_research.llm.client import FrameworkLLMClient, ModelTier
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,9 @@ The claim is FULLY entailed by the evidence:
 - All facts in the claim are present in the evidence
 - Numbers match exactly (or are correctly rounded)
 - No extrapolation beyond what the evidence states
+- Paraphrasing, rewording, or summarizing the evidence is acceptable
+- A claim that rephrases the evidence in different words is SUPPORTED, not PARTIAL
+- However, if the claim adds specific numbers, dates, or entities NOT in the evidence, it is PARTIAL
 
 ### PARTIAL
 The claim is PARTIALLY supported:
@@ -113,7 +117,7 @@ Quickly verify if this claim matches the evidence.
 "{evidence_quote}"
 
 ## Quick Check
-1. Is the core fact in the claim present in the evidence? (Y/N)
+1. Does the evidence SUPPORT the meaning of this claim? A paraphrase or rewording counts as supported. (Y/Partial/N)
 2. Do any numbers match exactly? (Y/N/NA)
 3. Is there any contradiction? (Y/N)
 
@@ -139,7 +143,7 @@ For EACH claim above:
 3. Include the claim_index in your response
 
 ## Verdict Categories
-- SUPPORTED: Evidence fully entails the claim (all facts present, numbers match)
+- SUPPORTED: Evidence fully entails the claim (all facts present, numbers match). Paraphrasing is acceptable — rephrased meaning counts as supported.
 - PARTIAL: Evidence partially supports (some aspects not mentioned). Use PARTIAL when the core fact is confirmed but the claim also contains editorial interpretation or commentary beyond the evidence
 - UNSUPPORTED: Evidence doesn't address the PRIMARY factual assertion in the claim. Do NOT use if the main fact is confirmed but editorial commentary isn't
 - CONTRADICTED: Evidence directly opposes the claim
@@ -837,7 +841,3 @@ class IsolatedVerifier:
             return ModelTier(tier_str)
         except ValueError:
             return tier_str
-
-
-def _truncate(text: str, max_len: int) -> str:
-    return text[:max_len] + "..." if len(text) > max_len else text

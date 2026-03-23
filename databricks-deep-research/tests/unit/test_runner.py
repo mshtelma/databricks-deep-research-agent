@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from databricks_deep_research.events.types import StreamEvent, WorkflowStartedEvent
+from databricks_deep_research.events.types import WorkflowStartedEvent
 from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.runner import WorkflowResult, WorkflowRunner
 from databricks_deep_research.workflow.definition import (
@@ -16,7 +16,6 @@ from databricks_deep_research.workflow.definition import (
     WorkflowNode,
 )
 from databricks_deep_research.workflow.state import WorkflowState
-
 
 # ---------------------------------------------------------------------------
 # Helpers

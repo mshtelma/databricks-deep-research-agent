@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,7 +11,6 @@ from databricks_deep_research.llm.client import (
     ModelTierConfig,
     parse_model_config,
 )
-
 
 # ===================================================================
 # parse_model_config

@@ -13,6 +13,7 @@ Claims and verification data are now read from the verification_data JSONB colum
 on the research_sessions table instead of normalized tables.
 """
 
+from datetime import UTC
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -108,7 +109,6 @@ async def list_message_claims(
     correction_metrics = None
     if include_corrections:
         # Return zero metrics for backwards compatibility
-        total_claims = len(claims) or 1
         correction_metrics = CorrectionMetrics(
             total_corrections=0,
             keep_count=0,
@@ -213,7 +213,7 @@ async def get_claim_evidence(
             citations: list[CitationResponse] = []
             evidence = claim_dict.get("evidence")
             if evidence:
-                from uuid import uuid5, NAMESPACE_DNS
+                from uuid import NAMESPACE_DNS, uuid5
                 evidence_id = uuid5(NAMESPACE_DNS, f"{claim_id}:evidence")
                 source_id = uuid5(NAMESPACE_DNS, evidence["source_url"])
 
@@ -374,7 +374,7 @@ async def export_provenance(
         )
 
     # JSON format (default)
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     # Verify ownership
     await verify_message_ownership(message_id, user.user_id, db)
@@ -387,7 +387,7 @@ async def export_provenance(
 
     if not session or not session.verification_data:
         return ProvenanceExport(
-            exported_at=datetime.now(timezone.utc),
+            exported_at=datetime.now(UTC),
             message_id=message_id,
             claims=[],
             summary=build_empty_verification_summary(),
@@ -434,7 +434,7 @@ async def export_provenance(
     summary = jsonb_summary_to_response(verification_data.get("summary", {}))
 
     return ProvenanceExport(
-        exported_at=datetime.now(timezone.utc),
+        exported_at=datetime.now(UTC),
         message_id=message_id,
         claims=export_claims,
         summary=summary,

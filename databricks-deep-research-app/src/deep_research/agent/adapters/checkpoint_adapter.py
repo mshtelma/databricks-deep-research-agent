@@ -67,13 +67,13 @@ class AppCheckpointHandler:
     async def load(
         self,
         execution_id: str,
-        workflow_id: str,
+        _workflow_id: str,
     ) -> dict[str, Any] | None:
         """Load workflow state from the app's database.
 
         Args:
             execution_id: Unique execution instance ID.
-            workflow_id: Workflow definition ID.
+            _workflow_id: Workflow definition ID (unused; kept for interface compat).
 
         Returns:
             Serialised state dict, or None if no checkpoint exists.

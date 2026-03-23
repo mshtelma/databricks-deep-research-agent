@@ -30,6 +30,7 @@ Example usage:
     )
 """
 
+from deep_research.agent.pipeline.base_phase import BaseResearchPhase
 from deep_research.agent.pipeline.config import (
     AgentConfig,
     AgentType,
@@ -37,18 +38,10 @@ from deep_research.agent.pipeline.config import (
 )
 from deep_research.agent.pipeline.defaults import (
     DEFAULT_DEEP_RESEARCH_PIPELINE,
-    SIMPLE_RESEARCH_PIPELINE,
     REACT_LOOP_PIPELINE,
+    SIMPLE_RESEARCH_PIPELINE,
     get_default_pipeline,
 )
-from deep_research.agent.pipeline.protocols import (
-    CustomPhase,
-    PipelineCustomization,
-    PipelineCustomizer,
-    PhaseInsertion,
-    PhaseProvider,
-)
-from deep_research.agent.pipeline.base_phase import BaseResearchPhase
 from deep_research.agent.pipeline.executor import (
     ExecutionResult,
     PipelineExecutor,
@@ -58,6 +51,13 @@ from deep_research.agent.pipeline.phase_executor import (
     PhaseEvent,
     PhaseExecutionGroup,
     PhaseExecutor,
+)
+from deep_research.agent.pipeline.protocols import (
+    CustomPhase,
+    PhaseInsertion,
+    PhaseProvider,
+    PipelineCustomization,
+    PipelineCustomizer,
 )
 
 __all__ = [

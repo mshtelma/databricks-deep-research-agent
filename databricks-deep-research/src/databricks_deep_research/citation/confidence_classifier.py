@@ -15,8 +15,53 @@ import re
 from dataclasses import dataclass
 
 from databricks_deep_research.citation.types import ConfidenceLevel, ConfidenceResult
+from databricks_deep_research.citation.utils import NUMERIC_PATTERN, TEMPORAL_PATTERN
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Scoring helpers (extracted from pipeline.py)
+# ---------------------------------------------------------------------------
+
+
+def confidence_score_from_level(level: str | None) -> float:
+    """Map a qualitative confidence label to a coarse numeric score."""
+    mapping = {
+        "high": 0.9,
+        "medium": 0.6,
+        "low": 0.3,
+    }
+    return mapping.get((level or "").lower(), 0.0)
+
+
+def extract_numeric_tokens(text: str) -> set[str]:
+    """Extract normalized numeric/financial tokens from text."""
+    tokens: set[str] = set()
+    for match in NUMERIC_PATTERN.findall(text):
+        normalized = re.sub(r"\s+", "", match).lower().replace(",", "")
+        if normalized:
+            tokens.add(normalized)
+    return tokens
+
+
+def extract_temporal_tokens(text: str) -> set[str]:
+    """Extract coarse quarter/year scope tokens from text."""
+    return {
+        match.strip().lower()
+        for match in TEMPORAL_PATTERN.findall(text)
+    }
+
+
+def quote_overlap_score(claim_text: str, evidence_quote: str | None) -> float:
+    """Compute deterministic word overlap without depending on classifier internals."""
+    if not evidence_quote:
+        return 0.0
+    claim_words = set(re.findall(r"\b\w{4,}\b", claim_text.lower()))
+    evidence_words = set(re.findall(r"\b\w{4,}\b", evidence_quote.lower()))
+    if not claim_words:
+        return 0.0
+    return len(claim_words & evidence_words) / len(claim_words)
 
 
 # ---------------------------------------------------------------------------

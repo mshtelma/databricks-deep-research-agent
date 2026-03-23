@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from deep_research.models.research_session import ResearchSession, ResearchSessionStatus, ResearchStatus
+from deep_research.models.research_session import ResearchSession, ResearchStatus
 
 logger = logging.getLogger(__name__)
 
@@ -218,10 +218,10 @@ class ResearchSessionService:
             return None
 
         if error_message:
-            session.status = ResearchSessionStatus.FAILED
+            session.status = ResearchStatus.FAILED
             session.error_message = error_message
         else:
-            session.status = ResearchSessionStatus.COMPLETED
+            session.status = ResearchStatus.COMPLETED
 
         session.completed_at = datetime.now(UTC)
         await self._session.flush()
@@ -242,10 +242,10 @@ class ResearchSessionService:
         if not session:
             return None
 
-        if session.status != ResearchSessionStatus.IN_PROGRESS:
+        if session.status != ResearchStatus.IN_PROGRESS:
             return session
 
-        session.status = ResearchSessionStatus.CANCELLED
+        session.status = ResearchStatus.CANCELLED
         session.completed_at = datetime.now(UTC)
         await self._session.flush()
         await self._session.refresh(session)

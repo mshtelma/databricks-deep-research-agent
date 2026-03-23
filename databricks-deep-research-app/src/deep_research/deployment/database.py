@@ -36,7 +36,7 @@ async def database_exists(
         True if database exists, False otherwise
     """
     try:
-        import asyncpg
+        import asyncpg  # type: ignore[import-untyped]
 
         info = get_lakebase_connection_info(
             instance_name=instance_name,
@@ -60,7 +60,7 @@ async def database_exists(
                 "SELECT 1 FROM pg_database WHERE datname = $1",
                 database_name,
             )
-            return result == 1
+            return bool(result == 1)
         finally:
             await conn.close()
 

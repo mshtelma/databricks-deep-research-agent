@@ -3,8 +3,6 @@
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-import pytest
-
 from deep_research.agent.tools.url_registry import IndexedUrl, UrlRegistry
 
 

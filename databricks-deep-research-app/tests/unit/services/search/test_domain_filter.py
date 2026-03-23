@@ -1,6 +1,5 @@
 """Unit tests for domain filtering with wildcard patterns."""
 
-import pytest
 
 from deep_research.core.app_config import DomainFilterConfig, DomainFilterMode
 from deep_research.services.search.domain_filter import (

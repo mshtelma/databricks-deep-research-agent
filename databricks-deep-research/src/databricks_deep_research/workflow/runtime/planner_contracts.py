@@ -28,7 +28,7 @@ def is_executable_plan_item(item: Any) -> bool:
     return bool(title.strip() or description.strip())
 
 
-def synthesize_plan_item(plan_data: Any, title: str, thought: str) -> dict[str, Any] | None:
+def synthesize_plan_item(_plan_data: Any, title: str, thought: str) -> dict[str, Any] | None:
     has_substantive_context = bool((title or "").strip() and (thought or "").strip())
     if not has_substantive_context:
         return None

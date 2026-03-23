@@ -12,7 +12,6 @@ Available pipelines:
 
 from deep_research.agent.pipeline.config import AgentConfig, AgentType, PipelineConfig
 
-
 # =============================================================================
 # Default Deep Research Pipeline (5-agent architecture)
 # =============================================================================

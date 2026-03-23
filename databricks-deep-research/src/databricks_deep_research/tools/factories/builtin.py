@@ -6,7 +6,10 @@ from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.tools.protocol import ResearchTool
 from databricks_deep_research.workflow.definition import ToolDeclaration
 
-_SUPPORTED_KINDS = frozenset({"web_search", "web_crawl", "file_search"})
+_SUPPORTED_KINDS = frozenset({
+    "web_search", "web_crawl", "file_search", "compute",
+    "delta_read", "delta_grep", "delta_context",
+})
 
 
 class BuiltinToolFactory:
@@ -50,5 +53,73 @@ class BuiltinToolFactory:
             from databricks_deep_research.tools.builtins.file_search import FileSearchTool
 
             return FileSearchTool(file_index=ctx.file_index)
+
+        if decl.kind == "compute":
+            from databricks_deep_research.tools.builtins.compute import PythonComputeTool
+
+            return PythonComputeTool(
+                name=decl.name,
+                allowed_modules=decl.config.get("allowed_modules"),
+                max_execution_seconds=decl.config.get("max_execution_seconds", 10.0),
+                max_output_chars=decl.config.get("max_output_chars", 10_000),
+                description=decl.description,
+            )
+
+        if decl.kind == "delta_read":
+            if not ctx.workspace_client:
+                raise ValueError(
+                    f"workspace_client required in ToolFactoryContext for "
+                    f"delta_read tool '{decl.name}'"
+                )
+            from databricks_deep_research.tools.builtins.delta_read import DeltaReadTool
+
+            return DeltaReadTool(
+                name=decl.name,
+                description=decl.description,
+                table_name=decl.config["table_name"],
+                columns=decl.config.get("columns", ["*"]),
+                workspace_client=ctx.workspace_client,
+                warehouse_id=decl.config["warehouse_id"],
+                content_column=decl.config.get("content_column", "content"),
+                order_by=decl.config.get("order_by", "chunk_id"),
+            )
+
+        if decl.kind == "delta_grep":
+            if not ctx.workspace_client:
+                raise ValueError(
+                    f"workspace_client required in ToolFactoryContext for "
+                    f"delta_grep tool '{decl.name}'"
+                )
+            from databricks_deep_research.tools.builtins.delta_read import DeltaGrepTool
+
+            return DeltaGrepTool(
+                name=decl.name,
+                description=decl.description,
+                table_name=decl.config["table_name"],
+                columns=decl.config.get("columns", ["*"]),
+                workspace_client=ctx.workspace_client,
+                warehouse_id=decl.config["warehouse_id"],
+                content_column=decl.config.get("content_column", "content"),
+                order_by=decl.config.get("order_by", "chunk_id"),
+            )
+
+        if decl.kind == "delta_context":
+            if not ctx.workspace_client:
+                raise ValueError(
+                    f"workspace_client required in ToolFactoryContext for "
+                    f"delta_context tool '{decl.name}'"
+                )
+            from databricks_deep_research.tools.builtins.delta_read import DeltaContextTool
+
+            return DeltaContextTool(
+                name=decl.name,
+                description=decl.description,
+                table_name=decl.config["table_name"],
+                columns=decl.config.get("columns", ["*"]),
+                workspace_client=ctx.workspace_client,
+                warehouse_id=decl.config["warehouse_id"],
+                content_column=decl.config.get("content_column", "content"),
+                order_by=decl.config.get("order_by", "chunk_id"),
+            )
 
         raise ValueError(f"Unsupported kind: {decl.kind}")

@@ -15,18 +15,14 @@ import pytest
 from databricks_deep_research.agents.isolation import AgentOutput
 from databricks_deep_research.events.types import (
     AgentOutputEvent,
-    BranchSelectedEvent,
-    CoordinatorClassifiedEvent,
-    EvaluationDecisionEvent,
     ItemCompletedEvent,
-    ItemStartedEvent,
     ItemsExtractedEvent,
+    ItemStartedEvent,
     LoopExitEvent,
     LoopIterationEvent,
     NodeCompletedEvent,
     NodeStartedEvent,
     PlanAndExecuteExitEvent,
-    PlanCreatedEvent,
     WorkflowCompletedEvent,
     WorkflowStartedEvent,
 )
@@ -40,9 +36,14 @@ from databricks_deep_research.workflow.executor import WorkflowExecutor
 from databricks_deep_research.workflow.state import WorkflowState
 from tests.conftest import (
     build_mock_llm_client as _mock_llm_client,
+)
+from tests.conftest import (
     collect_events as _collect_events,
+)
+from tests.conftest import (
     events_of_type as _events_of_type,
 )
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -207,10 +208,9 @@ class TestEventOrdering:
         started_indices: dict[str, int] = {}
         completed_indices: dict[str, int] = {}
         for idx, event in enumerate(events):
-            if isinstance(event, NodeStartedEvent):
+            if isinstance(event, NodeStartedEvent) and event.node_id not in started_indices:
                 # Record first occurrence
-                if event.node_id not in started_indices:
-                    started_indices[event.node_id] = idx
+                started_indices[event.node_id] = idx
             if isinstance(event, NodeCompletedEvent):
                 # Record last occurrence
                 completed_indices[event.node_id] = idx

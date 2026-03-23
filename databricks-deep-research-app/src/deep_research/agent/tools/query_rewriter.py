@@ -192,8 +192,8 @@ async def _rewrite_for_vector_search(
         if response.structured:
             query = response.structured.query
         else:
-            parsed = _VSRewriteOutput.model_validate_json(response.content)
-            query = parsed.query
+            rewrite_parsed = _VSRewriteOutput.model_validate_json(response.content)
+            query = rewrite_parsed.query
 
         return RewrittenQuery(primary_query=query, strategy_used="direct")
 
@@ -221,9 +221,9 @@ async def _generate_query2doc(
         structured_output=_Query2DocOutput,
     )
     if response.structured:
-        return response.structured.passage
-    parsed = _Query2DocOutput.model_validate_json(response.content)
-    return parsed.passage
+        return str(response.structured.passage)
+    q2d_parsed = _Query2DocOutput.model_validate_json(response.content)
+    return q2d_parsed.passage
 
 
 async def _rewrite_for_genie(

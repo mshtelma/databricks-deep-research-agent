@@ -6,8 +6,8 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from deep_research.core.exceptions import NotFoundError
 from deep_research.core.auth import UserIdentity
+from deep_research.core.exceptions import NotFoundError
 from deep_research.db.session import get_db
 from deep_research.main import app
 from deep_research.middleware.auth import get_current_user_identity

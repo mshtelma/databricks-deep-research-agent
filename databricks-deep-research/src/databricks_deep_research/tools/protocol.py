@@ -46,6 +46,7 @@ class SourceKind(StrEnum):
     qa_assistant = "qa_assistant"
     file = "file"
     builtin = "builtin"
+    delta_table = "delta_table"
 
 
 class ToolKind(StrEnum):
@@ -62,6 +63,9 @@ class ToolKind(StrEnum):
     vector_search = "vector_search"
     genie = "genie"
     knowledge_assistant = "knowledge_assistant"
+    compute = "compute"
+    delta_read = "delta_read"
+    delta_grep = "delta_grep"
     custom = "custom"
 
 
@@ -72,6 +76,9 @@ _TOOL_KIND_TO_SOURCE_KIND: dict[str, str] = {
     ToolKind.vector_search: SourceKind.vector_index,
     ToolKind.genie: SourceKind.sql_analytics,
     ToolKind.knowledge_assistant: SourceKind.qa_assistant,
+    ToolKind.compute: SourceKind.builtin,
+    ToolKind.delta_read: SourceKind.delta_table,
+    ToolKind.delta_grep: SourceKind.delta_table,
 }
 
 

@@ -2,7 +2,6 @@
 
 import pytest
 
-from deep_research.agent.pipeline.config import AgentType
 from deep_research.agent.pipeline.defaults import (
     DEFAULT_DEEP_RESEARCH_PIPELINE,
     REACT_LOOP_PIPELINE,

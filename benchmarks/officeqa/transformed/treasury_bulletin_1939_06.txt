@@ -1,0 +1,2597 @@
+Treas. HJ 10. A2
+
+c.2
+
+COPY No.2
+
+LIBRARY
+
+ROOM 5030
+
+JUN 21 1972
+
+TREASURY DEPARTMENT
+
+REFERENCE To be used in Treasury Library
+
+BULLETIN OF THE TREASURY DEPARTMENT
+
+JUNE 1939
+
+Analysis of Receipts and Disbursements Composition of the Public Debt Capital Movements and Monetary Data Other Treasury Statistics
+
+TREASURY DEPARTMENT OFFICE OF THE SECRETARY
+
+BULLETIN
+
+OF THE
+
+TREASURY DEPARTMENT
+
+JUNE 1939
+
+Analysis of Receipts and Disbursements
+Composition of the Public Debt
+Capital Movements and Monetary Data
+Other Treasury Statistics
+
+TREASURY DEPARTMENT
+
+OFFICE OF THE SECRETARY
+
+Table of Contents
+
+Receipts and Expenditures
+
+First Eleven Months of Fiscal Years 1934-39 2
+Expenditures by Classes, Receipts by Sources 3-8
+Social Insurance Accounts 12-13
+Cash Income and Outgo 14
+
+General Fund and Public Debt
+
+Composition of the General Fund 17
+Treasury Financings in Fiscal Years 1938-39 18
+Composition of the Public Debt 19
+Net Market Transactions of Treasury Investment Accounts 19
+Holdings of Government Obligations 21
+Member Bank Holdings of Government Obligations 22
+Computed Interest and Yields on Public Debt Issues 23-25
+Computed Interest Charge and Rate by Type of Issue 26-28
+
+Government Corporations and Credit Agencies
+
+Assets, Liabilities and Proprietary Interest 30
+Sources and Uses of Funds 31-32
+Issues Outstanding 33
+Financing Operations 33
+
+International Capital Movements
+
+Summary Table 35
+Short-term Foreign Assets and Liabilities 37-38
+Security Transactions and Brokerage Balances 39-40
+Transactions in U. S. Domestic Securities 41
+Foreign Exchange Transactions 43-44
+
+Other Monetary Data
+
+Gold and Silver Stocks 46-48
+Silver Production, Movements and Seigniorage 48-49
+Foreign Exchange and Price Data 50-51
+
+Miscellaneous
+
+Commodities Imported Under Quota 53
+Law Enforcement Statistics 54
+
+| Variable | Baseline | 2 Years | 4 Years |
+| --- | --- | --- | --- |
+| Age (years) | 54.5 (4.8) | 54.3 (5.2) | 54.8 (5.0) |
+| Female sex | 43 (40.6%) | 46 (43.2%) | 49 (45.7%) |
+| Body mass index (kg/m2) | 25.1 (3.7) | 24.8 (3.5) | 24.8 (3.7) |
+| Diabetes mellitus | 13 (12.1%) | 11 (10.4%) | 13 (12.1%) |
+| Hyperlipidemia | 29 (27.1%) | 32 (29.9%) | 34 (31.6%) |
+| Current smoker | 3 (2.8%) | 2 (1.9%) | 3 (2.8%) |
+| Alcohol consumption | 14 (13.3%) | 14 (13.1%) | 13 (12.1%) |
+| Education level | 10 (9.3%) | 13 (12.1%) | 12 (11.2%) |
+| Current medication | 4 (3.7%) | 5 (4.6%) | 6 (5.6%) |
+| Previous surgery | 14 (13.3%) | 12 (11.2%) | 15 (14.0%) |
+
+FEDERAL RECEIPTS AND EXPENDITURES
+
+-1-
+
+1801-1807
+
+2
+
+Summary Table on Receipts, Expenditures and Public Debt
+
+(in millions of dollars - on basis of daily Treasury statements, unrevized.)
+
+| 1934 | Receipts and Expenditures > First 11 months of fiscal year- > 1935 | 1936 | 1937 | 1938 | 1939 | 1934_2 | Public Debt > Outstanding on May 31 of fiscal year- > 1935 | 1936_2 | 1937_2 | 1938_2 | 1939_2 | Change '38 -'39 | col_14 | col_15 | col_16 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Receipts.... | 2,725 | 3,337 | 3,587 | 4,426 | 5,468 | 5,055 | -413 | Market issues, etc | 25,799 | 28,046 | 30,907 | 34,254 | 34,840 | 36,616 | +1,776 |
+| Expenditures. | 5,368 | 6,316 | 6,238 | 7,149 | 6,696 | 8,259 | +1,563 | Special issues... | 356 | 592 | 729 | 959 | 2,582 | 3,666 | +1,084 |
+| Deficit.... | 2,642 | 2,979 | 2,651 | 2,723 | 1,228 | 3,204 | +1,976 | Gross debt..... | 26,155 | 28,638 | 31,636 | 35,213 | 37,422 | 40,282 | +2,860 |
+
+Receipts and Expenditures
+
+First 11 Months, Fiscal Years 1934 to 1939
+
+(In millions of dollars - on basis of daily Treasury statements, unrevised)
+
+| Category | 1934 | 1935 | 1936 | 1937 | 1938 | 1939 | Change 138 -139 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Receipts |  |  |  |  |  |  |  |
+| Income Tax..... | 630 | 845 | 1,116 | 1,611 | 2,085 | 1,827 | -258 |
+| Miscellaneous Internal Revenue..... | 1,340 | 1,520 | 1,845 | 1,971 | 2,094 | 2,040 | -54 |
+| Taxes under Social Security Act.. | - | - | - | 199 | 599 | 627 | +28 |
+| Taxes upon carriers and their employees..... | - | - | - | - | 150 | 88 | -62 |
+| Customs..... | 292 | 315 | 354 | 444 | 337 | 294 | -43 |
+| Other..... | 463 | 657 | 272 | 201 | 203 | 179 | -24 |
+| Total Receipts | 2,725 | 3,337 | 3,587 | 4,426 | 5,468 | 5,055 | -413 |
+| Expenditures |  |  |  |  |  |  |  |
+| National defense and Veterans Adm.. | 990 | 1,215 | 1,462 | 1,437 | 1,469 | 1,568 | +99 |
+| Social Security and R. R. Retirement Act. | - | - | 24 | 387 | 798 | 881 | +83 |
+| Agricultural Adjustment Program..... | 254 | 660 | 480 | 491 | 314 | 709 | +395 |
+| Interest on the public debt... | 635 | 702 | 618 | 673 | 693 | 668 | -25 |
+| Public Works... | 452 | 593 | 648 | 885 | 739 | 872 | +133 |
+| Unemployment relief..... | 1,693 | 2,094 | 2,089 | 2,246 | 1,719 | 2,399 | +680 |
+| Loans and stock subscriptions..... | 765 | 441 | 134 | 173 | 110 | 192 | +82 |
+| Other..... | 579 | 611 | 783 | 857 | 854 | 970 | +116 |
+| Total Expenditure..... | 5,368 | 6,316 | 6,238 | 7,149 | 6,696 | 8,259 | +1,563 |
+| Excess of Expenditures.. | 2,643 | 2,979 | 2,651 | 2,723 | 1,228 | 3,204 | +1,976 |
+
+Fiscal Years 1937, 1938 and 1939
+
+(In millions of dollars - on basis of the 1940 Budget and daily Treasury statements, unrevised)
+
+| Category | Actual 1937 | Actual 1938 | Estimated 1939 | Actual 11 months 1939 |
+| --- | --- | --- | --- | --- |
+| Receipts: |  |  |  |  |
+| Income tax | 2,158 | 2,635 | 2,086 | 1,827 |
+| Miscellaneous Internal Revenue | 2,181 | 2,280 | 2,173 | 2,040 |
+| Taxes under Social Security Act | 252 | 604 | 611 | 627 |
+| Taxes upon carriers and their employees | - | 150 | 109 | 88 |
+| Customs | 486 | 359 | 335 | 294 |
+| Other | 217 | 214 | 206 | 179 |
+| Total Receipts | 5,294 | 6,242 | 5,520 | 5,055 |
+| Expenditures: |  |  |  |  |
+| National defense and Veterans Adm. | 2,072 | 1,610 | 1,723 | 1,568 |
+| Social Security and R. R. Retirement Acts | 453 | 823 | 954 | 881 |
+| Agricultural Adjustment Program | 527 | 362 | 703 | 709 |
+| Interest on the public debt | 866 | 926 | 976 | 668 |
+| Public Works | 957 | 794 | 1,224 | 872 |
+| Unemployment relief | 2,432 | 1,914 | 2,672 | 2,399 |
+| Loans and stock subscriptions | 198 | 135 | 279 | 192 |
+| Other | 937 | 1,062 | 961 | 970 |
+| Total Expenditures | 8,142 | 7,626 | 9,492 | 8,259 |
+| Net deficit | 3,148 | 1,384 | 3,972 | 3,204 |
+| Financing of deficit: |  |  |  |  |
+| Increase in debt |  |  |  |  |
+| Market issues | 1,714 | 378 1/2 | 3,008 | 2,127 |
+| Special issues | 932 | 1,118 | 959 | 990 |
+| Total debt increase | 2,646 | 740 | 3,967 | 3,117 |
+| Net increase in working balance, general and special accounts (deduct) | 502* | 644* | 5** | 87* |
+|  | 3,148 | 1,384 | 3,972 | 3,204 |
+
+1/ Decrease, deduct.
+Decrease in balance, add.
+** Add, represents decrease in working balance due to retirement of National bank notes.
+
+RECONCILIATION, DEFICIT AND DEBT INCREASE, FIRST 11 MONTHS OF FISCAL YEAR 1939
+
+| Category | col_2 | col_3 |
+| --- | --- | --- |
+| Increase in debt: |  |  |
+| New issues (less redemptions) | 3,117 |  |
+| Accounted for: |  |  |
+| Deficit |  | 3,204 |
+| Increase, cash balance | 705 |  |
+| Less trust fund net receipts | 795 | 87 |
+|  |  | 3,117 |
+
+3
+
+Monthly Receipts, Expenditures and Excess of Expenditures
+
+(In millions of dollars - on basis of daily Treasury statements, unrevised)
+
+| Category | Jan. | Feb. | Mar. | Apr. | May | June | July | Aug. | Sept. | Oct. | Nov. | Dec. | col_14 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Receipts |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| 1934 | 211 | 206 | 420 | 182 | 237 | 391 | 218 | 286 | 449 | 260 | 247 | 385 |  |
+| 1935 | 203 | 214 | 601 | 228 | 246 | 463 | 279 | 299 | 421 | 235 | 234 | 434 |  |
+| 1936 | 228 | 218 | 752 | 231 | 256 | 529 | 294 | 343 | 499 | 272 | 233 | 517 |  |
+| 1937 | 284 | 275 | 1,011 | 363 | 335 | 868 | 409 | 453 | 788 | 333 | 327 | 866 |  |
+| 1938 | 335 | 349 | 960 | 273 | 375 | 774 | 311 | 487 | 711 | 332 | 382 | 704 |  |
+| 1939 | 308 | 417 | 737 | 268 | 397 |  |  |  |  |  |  |  |  |
+| Expendituree |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| 1934 | 720 | 934 | 580 | 644 | 483 | 643 | 611 | 561 | 544 | 790 | 598 | 647 |  |
+| 1935 | 488 | 531 | 574 | 785 | 596 | 858 | 616 | 438 | 588 | 805 | 535 | 637 |  |
+| 1936 | 538 | 489 | 644 | 648 | 693 | 2,438 | 661 | 592 | 683 | 681 | 569 | 728 |  |
+| 1937 | 588 | 613 | 815 | 757 | 564 | 1,295 | 677 | 558 | 702 | 612 | 499 | 680 |  |
+| 1938 | 534 | 528 | 752 | 643 | 569 | 937 | 763 | 683 | 765 | 771 | 678 | 870 |  |
+| 1939 | 693 | 662 | 879 | 786 | 745 |  |  |  |  |  |  |  |  |
+| Excess of expendituree |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| 1934 | 509 | 728 | 160 | 462 | 246 | 252 | 393 | 275 | 95 | 530 | 352 | 262 |  |
+| 1935 | 285 | 317 | -27 | 557 | 350 | 395 | 337 | 139 | 167 | 570 | 301 | 203 |  |
+| 1936 | 310 | 271 | -108 | 417 | 437 | 1,909 | 367 | 249 | 184 | 409 | 336 | 211 |  |
+| 1937 | 304 | 338 | -196 | 394 | 229 | 427 | 268 | 105 | -86 | 279 | 172 | -186 |  |
+| 1938 | 199 | 179 | -208 | 370 | 194 | 163 | 452 | 196 | 54 | 439 | 296 | 166 |  |
+| 1939 | 385 | 245 | 142 | 518 | 348 |  |  |  |  |  |  |  |  |
+
+Note: Negative figures denote excess of receipts.
+
+Summary of Receipts and Expenditures
+
+(In millions of dollars - on basis of daily Treasury statements, unrevised)
+
+| Fiscal year or month | Receipts > Total | Total | Income tax | Social Security 3/ | Other | Expenditures £/ > Customs | Miscellaneous receipts | Total_2 | General | Recovery and relief | Revolving funds (net) | Excess of receipts (+) or expenditure (-) | Transfers to trust accounts etc. | Debt retirement |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1932 | 2,006 | 1,561 | 1,057 | - | 504 | 328 | 117 | 4,948 | 3,627 | 625 | 62 | 221 | 413 | -2,942 |
+| 1933 | 2,080 | 1,604 | 746 | - | 858 | 251 | 225 | 4,325 | 3,283 | 385 | 74 | 121 | 461 | -2,245 |
+| 1934 | 3,116 | 2,641 | 818 | - | 1,823 | 313 | 162 | 6,371 | 2,681 | 2,763 | 496 | 71 | 360 | -3,255 |
+| 1935 | 3,800 | 3,278 | 1,099 | - | 2,179 | 343 | 179 | 7,583 | 3,225 | 3,369 | 345 | 71 | 574 | -3,783 |
+| 1936 | 4,116 | 3,513 | 1,427 | - | 2,086 | 387 | 216 | 9,069 | 3,399 | 3,441 | 11 | 1,814 | 403 | -1,953 |
+| 1937 | 5,294 | 4,598 | 2,158 | 253 | 2,187 | 486 | 210 | 8,546 | 4,297 | 3,073 | 204 | 868 | 104 | -3,253 |
+| 1938 | 6,242 | 5,675 | 2,635 | 755 | 2,285 | 359 | 208 | 7,691 | 4,661 | 2,238 | 121 | 607 | 65 | -1,450 |
+| 1938-May | 375 | 340 | 40 | 131 | 169 | 22 | 12 | 569 | 344 | 206 | 16 | 2 | 1 | -193 |
+| June | 774 | 740 | 550 | 5 | 185 | 22 | 12 | 937 | 603 | 314 | 12 | 1 | 7 | -163 |
+| July | 311 | 265 | 47 | 32 | 186 | 23 | 24 | 763 | 406 | 216 | 5 | 135 | 1/ | -451 |
+| Aug. | 487 | 446 | 32 | 131 | 283 | 29 | 13 | 683 | 386 | 236 | 13 | 48 | - | -195 |
+| Sept. | 711 | 671 | 498 | 3 | 170 | 29 | 11 | 765 | 453 | 243 | 10 | 45 | 14 | -54 |
+| Oct. | 332 | 284 | 41 | 34 | 209 | 31 | 17 | 771 | 454 | 262 | 10 | 44 | 2 | -439 |
+| Nov. | 382 | 340 | 36 | 129 | 175 | 27 | 14 | 678 | 374 | 248 | 7 | 48 | 1 | -296 |
+| Dec. | 704 | 664 | 481 | 3 | 180 | 25 | 15 | 870 | 500 | 307 | 6 | 48 | 9 | -166 |
+| 1939-Jan. | 308 | 264 | 48 | 43 | 173 | 24 | 20 | 693 | 391 | 257 | 6 | 39 | 1 | -385 |
+| Feb. | 417 | 380 | 56 | 182 | 142 | 22 | 16 | 662 | 348 | 254 | 10 | 50 | - | -245 |
+| Mar. | 737 | 693 | 506 | 4 | 183 | 29 | 15 | 879 | 499 | 297 | 6 | 68 | 10 | -142 |
+| Apr. | 268 | 226 | 40 | 30 | 156 | 29 | 13 | 786 | 456 | 266 | 8 | 55 | 1 | -518 |
+| May | 397 | 355 | 43 | 124 | 188 | 25 | 17 | 745 | 425 | 262 | 7 | 50 | 1 | -348 |
+
+1/ Figures in this and three succeeding tables are rounded to nearest million and will not necessarily add to totals.
+2/ Excluding postal revenues but including postal deficit.
+3/ Including Railroad Retirement.
+4/ Less than $500,000.
+
+BUDGET RECEIPTS, EXPENDITURES AND EXCESS OF EXPENDITURES
+
+January 1934 to Date
+
+4
+
+5
+
+Expenditures - General
+
+(In millions of dollars - on basis of daily Treasury statement, unrevised)
+
+| Fiscal year or month | Total | Departmental | National defense | Veterans' Administration | Public Works 1/ | Agricultural Adjustment program | Civilian Conservation Corps | Social Security and Railroad Retirement Acts | Interest on the public debt | Other |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1932 | 3,627 | 958 | 708 | 785 | 117 | - | - | - | 599 | 460 |
+| 1933 | 3,283 | 807 | 668 | 763 | 118 | - | - | - | 689 | 238 |
+| 1934 | 2,681 | 341 | 480 | 507 | 154 | 289 | 2/ | - | 757 | 153 |
+| 1935 | 3,225 | 356 | 534 | 556 | 80 | 712 | 2/ | - | 821 | 166 |
+| 1936 | 3,399 | 429 | 764 | 576 | 150 | 533 | 2/ | 29 | 749 | 169 |
+| 1937 | 4,297 | 505 | 856 | 580 | 311 | 527 | 321 | 188 | 866 | 143 |
+| 1938 | 4,661 | 570 | 974 | 582 | 560 | 362 | 325 | 290 | 926 | 172 |
+| 1938-May | 344 | 45 | 86 | 48 | 31 | 60 | 24 | 22 | 9 | 19 |
+| June | 603 | 47 | 84 | 48 | 35 | 48 | 25 | 65 | 233 | 18 |
+| July | 406 | 70 | 89 | 48 | 43 | 58 | 27 | 40 | 13 | 18 |
+| Aug. | 386 | 61 | 94 | 48 | 47 | 33 | 28 | 33 | 17 | 25 |
+| Sept. | 453 | 48 | 84 | 47 | 49 | 25 | 26 | 10 | 146 | 18 |
+| Oct. | 454 | 56 | 90 | 46 | 52 | 63 | 25 | 49 | 67 | 6 |
+| Nov. | 374 | 60 | 92 | 46 | 45 | 70 | 23 | 28 | 9 | 1 |
+| Dec. | 500 | 50 | 91 | 45 | 44 | 53 | 23 | 14 | 173 | 7 |
+| 1939-Jan. | 391 | 65 | 94 | 46 | 41 | 53 | 23 | 33 | 30 | 6 |
+| Feb. | 348 | 57 | 77 | 44 | 34 | 61 | 22 | 26 | 17 | 10 |
+| Mar. | 499 | 54 | 91 | 46 | 33 | 94 | 24 | 24 | 120 | 13 |
+| Apr. | 456 | 52 | 87 | 46 | 31 | 98 | 22 | 37 | 66 | 17 |
+| May | 425 | 54 | 90 | 45 | 37 | 106 | 23 | 33 | 10 | 27 |
+
+1/ includes public buildings, public highways, rivers and harbors, Tennessee Valley Authority and reclamation projects. 2/ Included under Recovery and Relief in these years.
+
+Expenditures - Recovery and Relief
+
+(In millions of dollars - on basis of daily Treasury statement, unrevised)
+
+| Fiscal year or month | Total | Public works, including work relief > VPA | Other | Relief | Agricultural Aid | Aid to home owners | Miscellaneous |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1932 | 625 | - | - | - | 125 (*) | - | 500 |
+| 1933 | 385 | - | - | 38 | 49 | 44 | 303 |
+| 1934 | 2,763 | - | 494 | 1,844 1/2 | 48 | 195 | 182 |
+| 1935 | 3,369 | - | 816 | 2,348 1/2 | 157 | 104 | 52 |
+| 1936 | 3,441 | 1,264 | 784 | 985 1/2 | 64 | 215 | 36 |
+| 1937 | 3,073 | 1,896 | 741 | 78 | 170 2/2 | 238 | (4) |
+| 1938 | 2,238 | 1,472 | 342 | 6 | - | 240 | 7 |
+| 1938-May | 206 | 158 | 25 | 1 | 3 | 20 | * |
+| June | 314 | 166 | 29 | * | 102 2/2 | 17 | (*) |
+| July | 216 | 172 | 26 | * | 3 | 15 | (*) |
+| Aug. | 236 | 193 | 24 | * | 9 | 10 | (*) |
+| Sept. | 243 | 194 | 36 | * | 4 | 9 | (*) |
+| Oct. | 262 | 207 | 38 | 1 | 2 | 13 | - |
+| Nov. | 248 | 194 | 36 | * | 5 | 10 | 2 |
+| Dec. | 307 | 219 | 73 | * | 4 | 11 | - |
+| 1939-Jan. | 257 | 165 | 59 | * | (1) | 14 | * |
+| Feb. | 254 | 160 | 63 | * | 9 | 20 | 2 |
+| Mar. | 297 | 201 | 61 | * | 3 | 32 | - |
+| Apr. | 266 | 173 | 64 | * | 2 | 25 | 2 |
+| May | 262 | 173 | 61 | * | 5 | 23 | (*) |
+
+1/ Includes funds expended for Civilian Conservation Corps during these years. 2/ Includes $44,000,000 restoration of capital impairment of Commodity Credit Corporation. * Less than $500,000. ( ) Indicates excess of credits, deduct.
+
+6
+
+Expenditures - Revolving Funds (Net), and Transfers to Trust Accounts, etc.
+
+(In millions of dollars - on basis of daily Treasury statement, unrevised)
+
+| Fiscal year or month | Revolving funds (net) > Total | Agricultural Aid | Public Works | Transfers to trust accounts, etc. > Total | Old-Age Reserve Account | Railroad Retirement Account | Adjusted Service Certificate Fund | Government Employees' Retirement Funds (U.S. share) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1932 | 62 | 62 | - | 221 | - | - | 200 | 21 |
+| 1933 | 74 | 74 | - | 121 | - | - | 100 | 21 |
+| 1934 | 496 | 346 | 150 | 71 | - | - | 50 | 21 |
+| 1935 | 345 | 141 | 204 | 71 | - | - | 50 | 21 |
+| 1936 | 11 | (33) | 44 | 1,514 | - | - | 1,773 | 41 |
+| 1937 | 204 | (18) | 222 | 556 | 265 | - | 556 | 47 |
+| 1938 | 121 | (13) | 134 | 607 | 387 | 147 | - | 73 |
+| 1938-May | 16 | (*) | 16 | 2 | 2 | - | - | - |
+| June | 12 | (*) | 13 | 1 | - | 1 | - | - |
+| July | 5 | (1) | 6 | 135 | 38 | 22 | - | 75 |
+| Aug. | 13 | (1) | 14 | 48 | 38 | 10 | - | - |
+| Sept. | 10 | (1) | 11 | 45 | 33 | 12 | - | - |
+| Oct. | 10 | (1) | 11 | 44 | 32 | 12 | - | - |
+| Nov. | 7 | (1) | 8 | 48 | 32 | 16 | - | - |
+| Dec. | 6 | (2) | 8 | 48 | 32 | 16 | - | - |
+| 1939-Jan. | 6 | (*) | 6 | 39 | 37 | 2 | - | - |
+| Feb. | 10 | (*) | 11 | 50 | 50 | - | - | - |
+| Mar. | 6 | (*) | 6 | 68 | 50 | 18 | - | - |
+| Apr. | 8 | (*) | 8 | 55 | 55 | - | - | - |
+| May | 7 | (*) | 8 | 50 | 50 | - | - | - |
+
+Less than $500,000. ( ) Indicates excess of credits, deduct.
+
+7
+
+Collections of Internal Revenue
+
+(In thousands of dollars - on basis of reports of collections)
+
+| Sources of Revenue | May > 1939 | 1938 | First 11 months > Fiscal year 1939 | Fiscal year 1938 | Sources of Revenue_2 | May > 1939_2 | 1938_2 | First 11 months > Fiscal year 1939_2 | Fiscal year 1938_2 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Income taxes: |  |  |  |  | Miscellaneous internal revenue - continued |  |  |  |  |
+| Corporation | $9,903 | $10,873 | $793,919 | $881,801 | Manufacturers' excise taxes: |  |  |  |  |
+| Current | 13,982 | 11,987 | 140,331 | 134,217 | Lubricating oils | $2,551 | $2,365 | $28,003 | $28,457 |
+| Back |  |  |  |  | Gasoline | 16,377 | 14,380 | 189,223 | 188,105 |
+| Individual | 5,751 | 8,433 | 776,456 | 943,769 | Tires and inner tubes | 2,430 | 1,838 | 31,029 | 29,091 |
+| Current | 13,896 | 9,406 | 88,710 | 84,557 | Automobile trucks | 628 | 351 | 5,410 | 6,310 |
+| Back | 900 | 1,793 | 25,146 | 27,726 | Other automobiles and motorcycles | 6,367 | 1,397 | 39,761 | 40,561 |
+| Excess-profit |  |  |  |  | Parts or accessories for automobiles | 712 | 375 | 7,274 | 7,469 |
+| Total income taxes | 44,432 | 42,492 | 1,824,562 | 2,072,070 | Electrical energy | 3,237 | 3,375 | 36,472 | 35,374 |
+| Tax on unjust enrichment | 666 | 462 | 5,852 | 5,471 | Radio sets, phonograph records, etc. | 279 | 197 | 4,576 | 5,400 |
+| Miscellaneous internal revenue: |  |  |  |  | Mechanical refrigerators | 1,163 | 708 | 5,883 | 8,264 |
+| Capital stock tax | 180 | 142 | 127,072 | 139,074 | Firearms, shells, and cartridges | 205 | 204 | 2,681 | 2,653 |
+| Estate tax | 21,981 | 24,151 | 296,468 | 345,540 | Pistols and revolvers | 8 | 7 | 61 | 77 |
+| Gift tax | 552 | 772 | 28,071 | 32,785 | Toilet preparations, etc. (including repealed 5% tax) | 1,262 | 1,456 | 10,262 | 15,150 |
+| Alcoholic beverage taxes: |  |  |  |  | Matches (including repealed tax) | 1 | 153 | 127 | 4,556 |
+| Distilled spirits (imported, excise) | 1,804 | 1,805 | 23,283 | 26,382 | Brewers' wort and malt (repealed as of 7/1/38) | 1/ | 46 | 12 | 460 |
+| Distilled spirits (domestic, excise) | 20,009 | 17,623 | 239,696 | 211,222 | Articles made of fur (repealed as of 7/1/38) | 20 | 136 | 354 | 5,264 |
+| Distilled spirits rectification tax | 768 | 713 | 10,044 | 10,057 | Sporting goods (repealed as of 7/1/38) | 9 | 611 | 842 | 6,013 |
+| Wines, cordials, etc. (imported, excise) | 37 | 28 | 469 | 476 | Cameras and lenses (repealed as of 7/1/38) | 2 | 61 | 189 | 1,231 |
+| Wines, cordials, etc. (domestic, excise) | 436 | 382 | 5,483 | 5,022 | Chewing gum (repealed as of 7/1/38) | 1/ | 67 | 106 | 911 |
+| Brandy used for fortifying sweet wines | 154 | 75 | 948 | 773 | Total manufacturers' excise taxes | 35,251 | 27,727 | 362,265 | 385,346 |
+| Dealers in distilled spirits; rectifiers; manufacturers of stills (special taxes) | 96 | 87 | 4,852 | 4,978 | Miscellaneous taxes: |  |  |  |  |
+| Stamps for distilled spirits intended for export | 1/ | 1/ | 1/ | 1 | Bituminous Coal Act of 1937 | 206 | 212 | 3,171 | 3,006 |
+| Case stamps for distilled spirits bottled in bond | 41 | 34 | 427 | 280 | Sugar Act of 1937 | 5,892 | 3,815 | 61,224 | 26,051 |
+| Container stamps | 640 | 704 | 8,745 | 8,823 | Telephone, telegraph, radio, and cable facilities, leased wires, etc. | 1,748 | 1,796 | 22,157 | 22,103 |
+| Floor taxes | 11 | 2 | 5,424 | 11 | Transportation of oil by pipe line | 905 | 800 | 10,019 | 11,452 |
+| Fermented malt liquors | 25,359 | 22,699 | 230,816 | 243,044 | Leases of safe-deposit boxes | 158 | 165 | 1,816 | 1,856 |
+| Brewers; dealers in malt liquors (special taxes) | 49 | 51 | 2,625 | 2,860 | Admission to theaters, concerts, cabarets, etc. | 1,606 | 1,395 | 17,980 | 19,176 |
+| Total alcoholic beverage taxes | 49,464 | 44,203 | 532,818 | 513,929 | Club dues and initiation fees | 678 | 663 | 5,595 | 5,904 |
+| Tobacco taxes: |  |  |  |  | Adulterated and processed or renovated butter, mixed flour and filled cheese | 2 | 18 | 20 | 39 |
+| Cigars (large) | 1,131 | 1,025 | 11,627 | 11,588 | Oleomargarine, including special taxes | 67 | 87 | 1,854 | 2,095 |
+| Cigars (small) | 12 | 10 | 110 | 121 | Narcotics, including marihuana and special taxes | 36 | 32 | 350 | 360 |
+| Cigarettes (large) | 2 | 2 | 17 | 20 | Coconut and other vegetable oils processed | 1,985 | 2,269 | 25,159 | 25,536 |
+| Cigarettes (small) | 46,336 | 43,272 | 454,253 | 449,283 | National Firearms Act | 1/ | 1 | 6 | 8 |
+| Snuff | 635 | 562 | 6,341 | 6,117 | All other, including repealed taxes not listed | 7 | 143 | 273 | 1,331 |
+| Tobacco (chewing and smoking) | 4,855 | 4,644 | 49,928 | 49,111 | above |  |  |  |  |
+| Cigarette papers and tubes | 135 | 117 | 1,369 | 1,078 | Total miscellaneous taxes | 13,290 | 11,396 | 149,624 | 118,917 |
+| Leaf dealer penalties, etc. | 1/ | 1 | 7 | 2 | Total miscellaneous internal revenue | 176,894 | 160,952 | 2,058,337 | 2,096,196 |
+| Total tobacco taxes | 53,106 | 49,633 | 523,652 | 517,320 | Payroll taxes: |  |  |  |  |
+| Documentary, etc., stamp taxes: |  |  |  |  | Social Security taxes (Social Security Act): |  |  |  |  |
+| Bonds of indebtedness |  |  |  |  | Taxes with respect to employment (title VIII) | 73,682 | 56,957 | 527,232 | 498,591 |
+| Issues of capital stock, deeds of conveyance, etc. | 1,557 | 1,396 | 17,743 | 18,509 | Tax on employers of 8 or more (title IX) | 6,401 | 4,784 | 100,504 | 89,674 |
+| Capital stock and similar interest sales or transfers | 1,273 | 1,154 | 16,330 | 17,418 | Total Social Security taxes | 80,083 | 61,741 | 627,736 | 588,265 |
+| Playing cards | 234 | 203 | 3,866 | 3,792 | Carriers Taxing Act of 1937 | 12,961 | 12,118 | 96,441 | 149,466 |
+| Silver bullion sales or transfers | 6 | 1 | 179 | 135 | Total payroll taxes | 93,044 | 73,859 | 724,177 | 737,733 |
+| Sales of produce for future delivery (repealed as of 7/1/38) | 1/ | 174 | 249 | 3,431 | Total internal revenue | 315,036 | 277,765 | 4,612,928 | 4,911,470 |
+| Total documentary, etc., stamp taxes | 3,070 | 2,928 | 38,367 | 43,285 |  |  |  |  |  |
+
+1/
+
+Less than $500.
+
+8
+
+Collections of Internal Revenue
+
+(In thousands of dollars - on basis of reports of collections)
+
+| Fiscal year or month | Total | Income and Profits > Total | Individual | Corporation 1/ | Payroll Taxes > Total | Social Security Act Title VIII | Title IX | Carriers' Taxing Act of 1937 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1929 | 2,939,054 | 2,331,274 | 1,095,541 | 1,235,733 | - | - | - | - |
+| 1930 | 3,040,146 | 2,410,259 | 1,146,845 | 1,263,414 | - | - | - | - |
+| 1931 | 2,428,289 | 1,860,040 | 833,648 | 1,026,393 | - | - | - | - |
+| 1932 | 1,557,729 | 1,056,757 | 427,191 | 629,566 | - | - | - | - |
+| 1933 | 1,619,839 | 746,791 | 352,574 | 394,218 | - | - | - | - |
+| 1934 | 2,672,239 | 819,656 | 419,509 | 400,147 | - | - | - | - |
+| 1935 | 3,299,436 | 1,105,791 | 527,113 | 578,678 | 48 | - | - | 48 |
+| 1936 | 3,520,208 | 1,427,448 | 674,416 | 753,032 | 48 | - | - | 48 |
+| 1937 | 4,653,195 | 2,173,769 | 1,091,741 | 1,082,028 | 265,745 | 207,339 | 58,119 | 287 |
+| 1938 | 5,658,765 | 2,622,813 | 1,286,312 | 1,336,501 | 742,660 | 502,917 | 90,267 | 149,476 |
+| 1938-May | 277,765 | 42,492 | 17,839 | 24,653 | 73,859 | 56,957 | 4,784 | 12,118 |
+| June | 747,295 | 550,743 | 257,986 | 292,757 | 4,927 | 4,328 | 592 | 7 |
+| July | 350,426 | 42,923 | 11,999 | 30,924 | 77,707 | 61,026 | 5,181 | 11,500 |
+| Aug. | 362,286 | 34,609 | 12,764 | 21,845 | 85,736 | 65,608 | 5,509 | 14,619 |
+| Sept. | 682,544 | 495,548 | 227,573 | 267,975 | 2,804 | 2,074 | 779 | 11 |
+| Oct. | 315,061 | 42,162 | 9,468 | 32,694 | 81,508 | 59,282 | 7,287 | 14,939 |
+| Nov. | 304,572 | 36,491 | 12,513 | 23,978 | 81,979 | 64,601 | 4,732 | 12,647 |
+| Dec. | 662,252 | 481,509 | 213,622 | 267,887 | 2,939 | 2,414 | 483 | 42 |
+| 1939-Jan. | 315,845 | 51,598 | 19,067 | 32,531 | 98,992 | 59,035 | 25,150 | 14,807 |
+| Feb. | 333,517 | 57,524 | 32,333 | 25,191 | 125,870 | 74,571 | 37,694 | 13,605 |
+| Mar. | 691,401 | 498,474 | 291,215 | 207,259 | 3,855 | 2,410 | 1,747 | -302 |
+| Apr. | 279,986 | 39,292 | 14,964 | 24,328 | 69,684 | 62,529 | 5,542 | 1,613 |
+| May | 315,036 | 44,432 | 19,647 | 24,785 | 93,044 | 73,682 | 6,401 | 12,961 |
+
+| Fiscal year or month | Miscellaneous Internal Revenue > Total | Capital stock | Estate and Gift | Alcoholic beverages | Tobacco | Stamp | Manufacturers' excises | Miscellaneous 2/ | Unjust enrichment | Agricultural Adjustment |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1929 | 607,780 | - | 61,897 | 12,777 | 434,445 | 64,173 | 166 | 34,322 | - | - |
+| 1930 | 629,887 | - | 64,770 | 11,695 | 450,339 | 77,729 | 344 | 25,010 | - | - |
+| 1931 | 568,189 | - | 48,078 | 10,432 | 444,277 | 46,954 | 138 | 18,310 | - | - |
+| 1932 | 500,972 | - | 47,422 | 8,704 | 398,579 | 32,241 | - | 14,026 | - | - |
+| 1933 | 873,048 | - | 34,310 | 43,174 | 402,739 | 57,578 | 247,751 | 87,496 | - | - |
+| 1934 | 1,481,160 | 80,168 | 113,138 | 258,911 | 425,169 | 66,580 | 390,038 | 147,156 | - | 371,423 |
+| 1935 | 1,667,423 | 91,508 | 212,112 | 411,022 | 459,179 | 43,133 | 342,275 | 108,194 | - | 526,222 |
+| 1936 | 2,021,075 | 94,943 | 378,840 | 505,464 | 501,166 | 68,990 | 379,540 | 92,132 | - | 71,637 |
+| 1937 | 2,207,608 | 137,499 | 305,548 | 594,245 | 552,254 | 69,919 | 449,654 | 98,289 | 6,073 | - |
+| 1938 | 2,287,075 | 139,349 | 416,874 | 567,979 | 568,182 | 46,233 | 416,754 | 132,704 | 6,217 | - |
+| 1938-May | 160,952 | 142 | 24,923 | 44,203 | 49,633 | 2,928 | 27,727 | 11,396 | 462 | - |
+| June | 190,879 | 275 | 38,550 | 54,049 | 50,862 | 2,948 | 31,408 | 12,787 | 746 | - |
+| July | 228,760 | 50,822 | 25,645 | 52,440 | 47,461 | 3,373 | 34,344 | 14,675 | 1,036 | - |
+| Aug. | 241,655 | 60,362 | 27,236 | 52,522 | 54,432 | 4,078 | 30,445 | 12,520 | 286 | - |
+| Sept. | 183,434 | 11,653 | 22,544 | 47,244 | 50,952 | 3,029 | 34,050 | 13,962 | 698 | - |
+| Oct. | 191,134 | 2,552 | 37,519 | 54,603 | 46,291 | 3,592 | 31,517 | 15,060 | 257 | - |
+| Nov. | 185,659 | 364 | 29,324 | 57,573 | 47,539 | 4,212 | 31,399 | 15,248 | 443 | - |
+| Dec. | 177,041 | 322 | 33,701 | 52,270 | 43,815 | 3,895 | 31,087 | 12,951 | 763 | - |
+| 1939-Jan. | 164,858 | 300 | 27,828 | 38,151 | 47,359 | 3,831 | 34,355 | 13,034 | 397 | - |
+| Feb. | 149,685 | 164 | 22,062 | 35,918 | 40,837 | 3,198 | 33,950 | 13,556 | 438 | - |
+| Mar. | 188,771 | 213 | 42,461 | 47,356 | 49,321 | 3,126 | 34,116 | 12,178 | 301 | - |
+| Apr. | 170,444 | 141 | 33,626 | 46,277 | 42,539 | 2,962 | 31,750 | 13,149 | 566 | - |
+| May | 176,894 | 180 | 22,533 | 49,464 | 53,106 | 3,070 | 35,251 | 13,290 | 666 | - |
+
+1/ Including excess-profits tax collections. 2/ Including tax collections under the Sugar Act of 1937 and under the dividends tax imposed by the Act of June 16, 1933.
+
+COLLECTIONS OF INTERNAL REVENUE
+
+YEARLY, FISCAL YEARS 1929 TO 1938
+
+By Principal Sources
+
+MONTHLY, JANUARY 1938 TO MAY 1939
+
+By Principal Sources
+
+10
+
+Customs Duties and Taxes Estimated, and Value of Dutiable and Taxable Imports, by Tariff Schedules: First 9 Months, Fiscal Year 1939
+
+(In thousands of dollars)
+
+| Month | Chemicals, oils, and paints | Earths, earthenware, and glassware | Metals and manufactures of | Wood and manufactures of | Sugar, molasses, and manufactures of 2/ | Tobacco and manufactures of | Agricultural products and provisions | Spirits, wines, and other beverages | Cotton manufactures | Flax, hemp, jute, and manufactures of |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Duties and taxes: |  |  |  |  |  |  |  |  |  |  |
+| 1938-July.... | 1,660 | 790 | 1,632 | 141 | 4,042 | 3,670 | 3,194 | 2,117 | 725 | 869 |
+| Aug..... | 1,943 | 979 | 1,914 | 185 | 7,486 | 2,239 | 3,437 | 1,854 | 894 | 1,076 |
+| Sept.... | 1,749 | 1,149 | 2,201 | 209 | 5,188 | 1,874 | 4,047 | 2,659 | 856 | 1,030 |
+| Oct..... | 1,795 | 1,132 | 2,211 | 208 | 3,961 | 2,209 | 5,051 | 3,548 | 850 | 1,066 |
+| Nov..... | 1,874 | 1,040 | 2,201 | 186 | 2,098 | 1,990 | 5,293 | 4,146 | 765 | 915 |
+| Dec..... | 1,481 | 766 | 1,836 | 175 | 1,209 | 1,592 | 4,769 | 5,192 | 645 | 820 |
+| 1939-Jan.... | 1,411 | 646 | 1,696 | 181 | 784 | 1,931 | 5,867 | 2,021 | 847 | 1,261 |
+| Feb..... | 1,620 | 688 | 1,619 | 162 | 1,524 | 1,841 | 4,920 | 1,974 | 710 | 698 |
+| Mar..... | 1,908 | 929 | 1,804 | 209 | 3,201 | 2,246 | 5,708 | 2,479 | 936 | 1,320 |
+| Total. | 15,442 | 8,120 | 17,113 | 1,657 | 29,493 | 19,591 | 42,287 | 25,989 | 7,228 | 9,054 |
+| Value: |  |  |  |  |  |  |  |  |  |  |
+| 1938-July.... | 4,236 | 1,829 | 5,203 | 1,001 | 8,276 | 5,299 | 9,937 | 3,650 | 1,792 | 3,639 |
+| Aug..... | 4,882 | 2,122 | 6,096 | 1,293 | 12,991 | 3,276 | 10,614 | 3,229 | 2,233 | 4,430 |
+| Sept.... | 4,500 | 2,476 | 6,840 | 1,356 | 10,706 | 2,738 | 13,199 | 4,619 | 2,178 | 4,061 |
+| Oct..... | 4,813 | 2,460 | 6,729 | 1,478 | 8,589 | 3,140 | 15,236 | 6,081 | 2,257 | 4,168 |
+| Nov..... | 4,665 | 2,231 | 6,662 | 1,231 | 3,791 | 3,223 | 14,781 | 7,144 | 2,071 | 3,731 |
+| Dec..... | 4,070 | 1,829 | 5,782 | 1,079 | 1,556 | 2,216 | 13,298 | 9,063 | 1,791 | 3,539 |
+| 1939-Jan.... | 4,106 | 1,592 | 6,744 | 1,149 | 2,192 | 2,725 | 15,932 | 3,487 | 2,401 | 5,990 |
+| Feb..... | 4,398 | 1,651 | 6,029 | 1,093 | 3,627 | 2,669 | 13,261 | 3,418 | 2,005 | 3,115 |
+| Mar..... | 5,149 | 2,231 | 6,709 | 1,427 | 6,542 | 3,128 | 15,481 | 4,376 | 2,604 | 6,360 |
+| Total. | 40,819 | 18,420 | 56,795 | 11,108 | 58,270 | 28,414 | 121,738 | 45,068 | 19,332 | 39,032 |
+
+| Month | Wool and manufacture of | Silk manufactures | Manufacture of rayon or other synthetic textile | Papers and books | Sundries | Free list 3/ | Miscellaneous | Total | Adjustment to daily Treasury statement (unrevised) | Total, daily Treasury statement (unrevised) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Duties and taxes: |  |  |  |  |  |  |  |  |  |  |
+| 1938-July... | 1,518 | 211 | 183 | 175 | 2,394 | 817 | 14 | 24,153 | -1,052 | 23,101 |
+| Aug..... | 2,244 | 318 | 313 | 217 | 3,304 | 842 | 40 | 29,285 | -612 | 28,673 |
+| Sept... | 1,962 | 305 | 232 | 219 | 3,291 | 676 | 19 | 27,666 | +924 | 28,590 |
+| Oct..... | 2,047 | 354 | 229 | 235 | 3,240 | 822 | 17 | 28,974 | +1,823 | 30,797 |
+| Nov..... | 1,828 | 299 | 186 | 220 | 3,195 | 763 | 18 | 27,016 | +322 | 27,338 |
+| Dec..... | 1,479 | 269 | 168 | 183 | 2,848 | 800 | 9 | 24,241 | +880 | 25,121 |
+| 1939-Jan.... | 2,729 | 216 | 232 | 169 | 3,010 | 680 | 24 | 23,704 | +614 | 24,318 |
+| Feb..... | 2,142 | 196 | 226 | 177 | 2,773 | 724 | 15 | 22,009 | +352 | 22,361 |
+| Mar..... | 2,860 | 245 | 276 | 196 | 3,383 | 815 | 19 | 28,535 | +731 | 29,266 |
+| Total. | 18,808 | 2,412 | 2,045 | 1,790 | 27,439 | 6,939 | 176 | 235,582 | +3,983 | 239,565 |
+| Values: |  |  |  |  |  |  |  |  |  |  |
+| 1938-July... | 2,244 | 389 | 532 | 823 | 8,148 | 2,883 | 11 | 59,891 | - | - |
+| Aug..... | 3,221 | 593 | 1,011 | 1,038 | 10,539 | 3,438 | 61 | 71,067 | - | - |
+| Sept... | 2,822 | 564 | 731 | 998 | 10,725 | 2,438 | 9 | 70,959 | - | - |
+| Oct..... | 3,206 | 663 | 721 | 1,080 | 10,248 | 2,907 | 6 | 73,782 | - | - |
+| Nov..... | 2,711 | 559 | 514 | 1,038 | 10,642 | 2,592 | 9 | 67,595 | - | - |
+| Dec..... | 2,055 | 508 | 443 | 913 | 11,001 | 2,805 | 5 | 61,954 | - | - |
+| 1939-Jan.... | 4,239 | 411 | 692 | 917 | 11,208 | 2,229 | 28 | 66,041 | - | - |
+| Feb..... | 3,388 | 369 | 734 | 917 | 11,310 | 2,385 | 5 | 60,375 | - | - |
+| Mar..... | 4,140 | 468 | 861 | 1,052 | 12,990 | 2,582 | 25 | 76,124 | - | - |
+| Total. | 28,027 | 4,522 | 6,238 | 8,775 | 96,811 | 24,260 | 157 | 607,789 | - | - |
+
+Note: The amount of customs duties and taxes is calculated on the basis of reports of the Bureau of Foreign and Domestic Commerce, showing the quantity and value of merchandise imported.
+Figures are rounded to nearest thousand, and will not necessarily add to totals.
+1/ Include, taxable sugar from the Philippine Islands.
+2/ Duty-free commodities taxed under the Revenue Act of 1932 and subsequent acts.
+3/ Articles dutiable under paragraph 1615 and repairs on vessels dutiable under Section 466 of the Tariff Act of 1930; the taxable copper content of dutiable articles taxed under the Revenue Act of 1932 and taxes on articles composed in chief value of manufactured sugar under the Sugar Act of 1937, which cannot be allocated to appropriate schedules. Taxes collected on other dutiable commodities under the revenue acts and the Sugar Act of 1937 are included in appropriate schedules.
+
+11
+
+Estimated Receipts from Taxes Imposed by Various Revenue Acts on Imports into the United States: First 9 Months, Fiscal Year 1939
+
+| Article | Rate of tax | July | August | September | October | November | December | January | February | March | First 9 months Fiscal year 1939 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Duty-free articles 1/: |  |  |  |  |  |  |  |  |  |  |  |
+| Crude petroleum | $4 gal. | $503,062 | $320,672 | $300,928 | $438,746 | $387,938 | $464,821 | $287,862 | $281,991 | $297,665 | $3,283,685 |
+| Fuel oil and gas oil derived from petroleum, and all liquid derivatives of crude petroleum except lubricating oil and gasoline or other motor fuel. | $4 gal. | 102,522 | 256,682 | 134,798 | 101,372 | 126,058 | 136,560 | 111,504 | 116,562 | 145,922 | 1,231,980 |
+| Gasoline or other motor fuel. | $24 gal. | 11 | 2 | 16 | 667 | 1 | 341 | - | 1 | - | 1,039 |
+| Lubricating oil. | $4 gal. | 42 | 643 | 1,127 | 978 | 27 | 1,477 | 519 | 551 | 1,463 | 6,827 |
+| Paraffin and other petroleum wax products. | 16 lb. | 27,878 | 27,180 | 17,768 | 15,614 | 2,582 | 8,217 | 29,925 | 20,960 | 17,931 | 168,055 |
+| Seed oils | 44 lb. | 100,861 | 106,818 | 113,124 | 129,666 | 167,034 | 132,357 | 175,450 | 161,042 | 231,396 | 1,317,748 |
+| Oil seeds | Various 2/ | 25,377 | 15,061 | 37,953 | 44,085 | 32,559 | 24,023 | 32,411 | 51,363 | 36,531 | 299,363 |
+| Animal, fish and coconut oils. | 34 lb. | - | 148 | - | 13 | 126 | 66 | 142 | 99 | 197 | 791 |
+| Copper. | 44 lb. | 49,286 | 100,829 | 56,004 | 76,155 | 32,966 | 19,554 | 29,953 | 78,318 | 64,781 | 507,846 |
+| Lumber of specified types. | $1.50 M ft.3/ | 7,819 | 14,135 | 11,970 | 14,350 | 12,451 | 11,223 | 12,163 | 12,685 | 16,013 | 112,809 |
+| Coal and related fuels | 104 100 lbs. | 562 | - | 2,455 | 332 | 1,494 | 1,651 | - | 166 | 2,688 | 9,348 |
+| Total |  | 817,420 | 842,170 | 676,143 | 821,978 | 763,236 | 800,290 | 679,929 | 723,738 | 814,587 | 6,939,491 |
+| Dutiable articles 4/: |  |  |  |  |  |  |  |  |  |  |  |
+| Cane sugar | Various 5/ | $535,685 | $779,248 | $195,850 | $66,019 | $41,776 | $20,595 | $22,882 | $59,954 | $228,714 | $1,950,723 |
+| Cane sugar (from Philippine Islands). | Various 5/ | 85,754 | 85,854 | 43,107 | 54,421 | 30,607 | 14,735 | 7,754 | 35,914 | 47,247 | 405,393 |
+| Boat sugar | Various 5/ | - | 3,478 | - | - | - | - | - | 2 | - | 3,480 |
+| Articles composed in chief value of manufactured sugar | 5144 1b.6/ | 1,216 | 1,680 | 1,838 | 2,114 | 2,445 | 1,810 | 1,438 | 3,917 | 2,663 | 19,121 |
+| Fuel oil and gas oil derived from petroleum, and all liquid derivatives of crude petroleum except lubricating oil and gasoline or other motor fuel. | 34 gal. | 1 | - | 1 | - | - | 1 | - | - | - | 3 |
+| Lubricating oil. | 44 gal. | - | 23 | 30 | - | - | 23 | - | 10 | - | 86 |
+| Paraffin and other petroleum wax products. | 16 lb. | - | 9 | 3 | 18 | 5 | 19 | 7 | 2 | 25 | 88 |
+| Seed oils. | 44 lb. | 1,363 | 4 | 2,260 | 58 | 168 | 214 | 220 | 85 | 222 | 4,594 |
+| Animal and fish oils. | 34 lb. | 69,706 | 132,813 | 25,067 | 100,869 | 71,674 | 9,900 | 49,884 | 15,391 | 17,399 | 497,146 |
+| Palm oil | 34 lb. | - | - | - | - | - | - | 831 | 926 | 1,355 | - |
+| Coconut oil (from Philippine Islands). | 34 lb. | 1,126 | 401 | 211 | 515 | 695 | 671 | - | 570 | 761 | 5,274 |
+| Coconut oil. | 54 lb. | 13,459 | 12,241 | 17,710 | 12,924 | 16,066 | 8,947 | 786 | 322 | 547 | 116,367 |
+| Copper. | Various 1/ | - | - | - | - | - | - | 10,779 | 10,675 | 13,566 | - |
+| Lumber of specified types. | $1.50 M ft.3/ | 21,107 | 36,777 | 52,500 | 48,623 | 39,533 | 41,786 | 42,626 | 42,785 | 54,988 | 380,725 |
+| Total |  | 729,417 | 1,052,528 | 338,577 | 285,561 | 202,969 | 98,701 | 137,207 | 170,553 | 367,487 | 3,383,000 |
+| Grand total. |  | 1,546,837 | 1,894,698 | 1,014,720 | 1,107,539 | 966,205 | 898,991 | 817,136 | 894,291 | 1,182,074 | 10,322,491 |
+
+The total of the taxes herein corresponds to the total of the column headed "Free List" in the preceding table. Tax in cents per pound: hempseed, 1.24; perilla seed, 1.38; kapok seed, 2; rapeseed, 2; sesame seed, 1.18. $1.20 W feet from Cuba. The total of the taxes herein corresponds to the total of the taxes on copper and sugar in the Miscellaneous column in the preceding table, plus all taxes included in appropriate tariff schedules. 0.5144 lb. on less than 92 degree sugar; 0.4656 lb. on 92 degree sugar and 0.00875d lb. additional for each additional sugar degree. On the total sugar therein. (e) 44 lb. on ores, concentrates, and articles in tariff paragraphs 316, 380, 381, 387; (b) 34 lb. on dutiable articles, excluding those in (e), in which copper is the component material of chief value; (c) 3 per centum ad valorem or 3/44 lb., whichever is lower, on dutiable articles excluding those in (a) and (b), containing 4 per centum or more of copper by weight.
+
+12
+
+Receipts and Expenditures under Social Security Act
+
+(in millions of dollars - on basis of daily Treasury statements, unrevised)
+
+| Fiscal year or month | Receipts > Employment taxes Title VIII | Tax on employers of 8 or more, (Title IX, Sec. 901) | Total Receipts | Expenditures > Administrative Expenses 1/ | Grants to States Unemployment compensation administration | Old-Age Assistance, etc. | Refunds to States of taxes collected under Title IX, Sec. 901 2/ | Transfers to Old-Age Reserve Accounts (Title II) | Total Expenditures 3/ |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1936 | - | - | - | .6 | .9 | 26.9 | 27.8 | - | 28.4 |
+| 1937 | 194.3 | 57.5 | 252.2 | 15.3 | 9.1 | 157.8 | 166.9 | - | 447.7 |
+| 1938 | 514.4 | 90.1 | 604.4 | 20.0 | 41.9 | 229.5 | 271.5 | 40.6 | 719.1 |
+| 1939-July | 28.8 | 2.6 | 31.3 | 1.9 | 8.0 | 30.0 | 38.0 | - | 77.9 |
+| Aug. | 97.8 | 8.0 | 105.8 | 1.8 | 5.3 | 24.5 | 30.6 | - | 70.4 |
+| Sept. | 2.2 | .5 | 2.7 | 1.8 | 1.2 | 6.5 | 8.0 | - | 42.8 |
+| Oct. | 30.6 | 2.9 | 33.5 | 1.8 | 9.1 | 38.1 | 47.2 | - | 81.0 |
+| Nov. | 95.7 | 7.1 | 102.8 | 1.7 | 6.3 | 20.3 | 26.6 | - | 60.3 |
+| Dec. | 2.5 | .5 | 3.0 | 1.6 | .6 | 11.7 | 12.3 | - | 45.9 |
+| Jan. | 28.9 | 12.9 | 41.7 | 1.7 | 4.6 | 26.2 | 30.8 | - | 69.5 |
+| Feb. | 102.2 | 52.1 | 154.4 | 1.8 | 2.6 | 21.6 | 24.2 | - | 76.0 |
+| Mar. | 2.2 | 1.7 | 3.9 | 1.7 | 2.2 | 19.3 | 21.5 | - | 73.2 |
+| Apr. | 27.1 | 2.8 | 29.9 | 1.8 | 9.0 | 26.0 | 35.0 | - | 55.0 |
+| May. | 109.1 | 9.1 | 118.2 | 1.8 | 4.4 | 26.1 | 30.5 | - | 82.3 |
+| Total fiscal year 1939 to date | 527.1 | 100.1 | 627.2 | 19.5 | 53.6 | 251.1 | 304.7 | - | 771.2 |
+| Grand total | 1,235.8 | 248.0 | 1,483.8 | 55.9 | 105.6 | 665.3 | 770.9 | 40.6 | 1,966.4 |
+
+Note: Figures in this and four succeeding tables are rounded to nearest tenths of millions and will not necessarily add to totals.
+1/ Includes only expenditures from appropriations made specifically for administrative expenses relating to the Social Security Act. Does not include administrative expenses payable from other appropriations. The principal agencies in the latter group are the Bureau of Internal Revenue and the Public Health Service of the Treasury Department, and the Office of Education of the Department of Interior.
+2/ $40,561,886.43 appropriated in the fiscal year 1938 for making refund to certain states of portions of employers' tax for the calendar year 1936 collected under Title IX, Section 901 of the Social Security Act.
+3/ Excludes expenditures from the appropriation of $6,902,491 made to the "Railroad Unemployment Insurance Administration Fund" to date. This appropriation is equivalent to the amount that carriers have paid for the fiscal years 1936 and 1937 under Title IX, Section 901 of the Social Security Act.
+
+Old-Age Reserve Account
+
+(In millions of dollars - on basis of daily Treasury statements, unrevised)
+
+| Cumulative as of end of Fiscal Year or month | Receipts > Transfers from general fund | Balance available for transfer | Total | Interest on investments | Expenditures Benefit Payments | Balance > Total | Investments | To credit of appropriations | To credit of disbursing officers |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1936 | 265.0 | - | 265.0 | 2.3 | 267.3 | - | 267.2 | -1 | -1 |
+| 1937 | 652.0 | 113.0 | 765.0 | 17.7 | 782.7 | 5.4 | 777.2 | 113.0 | 1.9 |
+| 1938 | 690.0 | 435.0 | 1,125.0 | 17.7 | 1,142.7 | 6.2 | 1,136.5 | 435.0 | 1.2 |
+| 1939-July | 728.0 | 397.0 | 1,125.0 | 17.7 | 1,142.7 | 7.0 | 1,135.6 | 397.0 | 5.3 |
+| Aug. | 761.0 | 364.0 | 1,125.0 | 17.7 | 1,142.7 | 7.9 | 1,134.8 | 364.0 | 4.5 |
+| Sept. | 793.0 | 332.0 | 1,125.0 | 17.7 | 1,142.7 | 9.0 | 1,133.7 | 332.0 | 3.4 |
+| Oct. | 825.0 | 300.0 | 1,125.0 | 17.7 | 1,142.7 | 10.0 | 1,132.7 | 300.0 | 2.4 |
+| Nov. | 857.0 | 268.0 | 1,125.0 | 17.7 | 1,142.7 | 11.1 | 1,131.6 | 268.0 | 1.3 |
+| Dec. | 894.0 | 231.0 | 1,125.0 | 17.7 | 1,142.7 | 12.2 | 1,130.5 | 231.0 | 5.2 |
+| Jan. | 944.0 | 181.0 | 1,125.0 | 17.7 | 1,142.7 | 13.3 | 1,129.3 | 181.0 | 4.0 |
+| Feb. | 994.0 | 131.0 | 1,125.0 | 17.7 | 1,142.7 | 14.8 | 1,127.9 | 131.0 | 2.6 |
+| Mar. | 1,049.0 | 76.0 | 1,125.0 | 17.7 | 1,142.7 | 16.2 | 1,126.5 | 76.0 | 6.2 |
+| Apr. | 1,099.0 | 56.0 | 1,155.0 | 17.7 | 1,172.7 | 17.8 | 1,154.8 | 56.0 | 4.5 |
+
+1/ Includes balance of appropriation available for transfers.
+
+Unemployment Trust Fund
+
+(in millions of dollars - on basis of daily Treasury statements, unrevied)
+
+| Cumulative as of end of fiscal year or month | Receipts > Deposits by States 1/ | Interest on Investments | Total Receipts | Expenditures > Withdrawals by States | Balance > Total | Investments | Cash |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1936 | 18.9 | .1 | 18.9 | - | 18.9 | 18.9 | - |
+| 1937 | 310.6 | 2.8 | 313.4 | 1.0 | 312.4 | 312.3 | .1 |
+| 1938 | 1,058.2 | 18.0 | 1,076.2 | 192.0 | 884.2 | 572.0 | 12.2 |
+| 1939-July | 1,093.7 | 18.0 | 1,111.7 | 227.9 | 883.8 | 872.0 | 11.8 |
+| Aug. | 1,225.0 | 18.0 | 1,243.0 | 280.7 | 962.4 | 954.0 | 8.4 |
+| Sept. | 1,260.4 | 18.0 | 1,278.4 | 320.7 | 957.7 | 950.0 | 7.7 |
+| Oct. | 1,298.4 | 18.1 | 1,316.6 | 360.4 | 956.2 | 936.0 | 20.2 |
+| Nov. | 1,423.5 | 18.1 | 1,441.6 | 386.8 | 1,054.8 | 1,032.0 | 22.8 |
+| Dec. | 1,460.4 | 18.1 | 1,478.6 | 406.3 | 1,072.3 | 1,064.0 | 8.3 |
+| Jan. | 1,499.2 | 30.0 | 1,529.2 | 439.6 | 1,089.6 | 1,074.0 | 15.6 |
+| Feb. | 1,647.5 | 30.0 | 1,677.5 | 475.6 | 1,201.9 | 1,185.0 | 16.9 |
+| Mar. | 1,681.5 | 30.1 | 1,711.5 | 519.5 | 1,192.0 | 1,185.0 | 7.0 |
+| Apr. | 1,715.0 | 30.2 | 1,745.1 | 560.5 | 1,184.6 | 1,172.0 | 12.6 |
+| May. | 1,852.1 | 30.2 | 1,882.2 | 592.6 | 1,289.6 | 1,280.0 | 9.6 |
+
+1/ Includes in 1938 the proceeds of refunds to States of taxes collected under Title IX, Section 901 of the Social Security Act, amounting to $40,561,886.43.
+
+15
+
+Receipts and Expenditures Under Railroad Retirement Act
+
+(In millions of dollars - on basis of daily Treasury statements, unrevised)
+
+| Fiscal year or month | Receipts > Taxes upon carriers and their employees | Administrative Expenses | Expenditures > Transfers to Railroad Retirement Acct. | Total Expenditures | col_6 |
+| --- | --- | --- | --- | --- | --- |
+| 1936 | - | .3 | - | .3 |  |
+| 1937 | .4 | 1.5 | - | 1.5 |  |
+| 1938 | 150.1 | 2.6 | 146.4 | 149.0 |  |
+| 1939-July | .4 | .2 | 22.0 | 22.2 |  |
+| Aug. | 25.5 | .2 | 9.5 | 9.7 |  |
+| Sept. | - | .3 | 11.5 | 11.8 |  |
+| Oct. | .8 | .2 | 11.5 | 11.7 |  |
+| Nov. | 26.5 | .2 | 16.5 | 16.7 |  |
+| Dec. | - | .3 | 16.5 | 16.8 |  |
+| Jan. | .9 | .3 | 1.5 | 1.8 |  |
+| Feb. | 27.5 | .3 | - | .3 |  |
+| Mar. | - | .3 | 18.0 | 18.3 |  |
+| Apr. | .4 | .3 | - | .3 |  |
+| May. | 6.1 | .3 | .1 | .4 |  |
+| Total fiscal year 1939 to date | 88.2 | 3.0 | 107.1 | 110.1 |  |
+| Grand total | 238.7 | 7.3 | 253.5 | 260.5 |  |
+
+Note: Includes Railroad Unemployment Insurance Act.
+
+Railroad Retirement Account
+
+(In millions of dollars - on basis of daily Treasury statements, unrevised)
+
+| Cumulative as of and of Fiscal year or month | Receipts > Appropriations by Congress > Transfers from general fund 1/ | Balance available for transfers | Total | Interest on investments | Expenditures > Benefit Payments | Balance > Total Receipts | Total investments > To credit of appropriations 2/ | Unexpended: > To credit of disbursing officer | col_10 | col_11 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1936 | - | - | 46.6 | - | 46.6 | 46.6 | - | 46.6 | - |  |
+| 1937 | - | - | 46.6 | - | 46.6 | 42.6 | - | 36.6 | 6.0 |  |
+| 1938 | 146.4 | .1 | 146.5 | 1.4 | 147.9 | 79.8 | 68.1 | 66.2 | .2 | 1.6 |
+| 1939-July | 168.4 | 96.4 | 264.8 | 1.4 | 266.2 | 87.9 | 178.3 | 68.2 | 96.5 | 13.6 |
+| Aug. | 177.9 | 86.9 | 264.8 | 1.4 | 266.2 | 96.3 | 169.9 | 69.7 | 87.0 | 13.1 |
+| Sept. | 189.4 | 75.4 | 264.8 | 1.4 | 266.2 | 104.9 | 161.3 | 71.2 | 75.5 | 14.5 |
+| Oct. | 200.9 | 63.9 | 264.8 | 1.4 | 266.2 | 113.7 | 152.5 | 72.7 | 64.1 | 15.8 |
+| Nov. | 217.4 | 47.4 | 264.8 | 1.4 | 266.2 | 122.3 | 143.9 | 74.2 | 47.6 | 22.1 |
+| Dec. | 233.9 | 30.9 | 264.8 | 1.4 | 266.2 | 131.3 | 134.9 | 75.7 | 31.1 | 28.1 |
+| Jan. | 235.4 | 29.4 | 264.8 | 1.4 | 266.2 | 140.1 | 126.1 | 77.2 | 29.6 | 19.3 |
+| Feb. | 235.4 | 29.4 | 264.8 | 1.4 | 266.2 | 149.1 | 117.1 | 77.2 | 29.5 | 10.4 |
+| Mar. | 253.4 | 11.4 | 264.8 | 1.4 | 266.2 | 158.3 | 107.8 | 77.2 | 11.6 | 19.1 |
+| Apr. | 253.4 | 11.4 | 264.8 | 1.4 | 266.2 | 167.4 | 98.8 | 77.2 | 11.6 | 10.0 |
+| May. | 253.4 | 11.4 | 264.8 | 1.7 | 266.4 | 176.6 | 89.8 | 67.2 | 11.3 | 11.4 |
+
+1/ Transfers from general fund were not reflected until July 1, 1937.
+2/ Includes balance of appropriation available for transfers subsequent to June 30, 1937.
+
+14
+
+Cash Income and Outgo of the Treasury, Fiscal Year 1939
+
+(These figures are not intended to reflect the budgetary position of the Government. They will not agree with budgetary figures on receipts, expenditures and deficit such as those appearing in Daily Treasury Statements and in other tables in this Bulletin. For an explanation of the revisions made in Daily Treasury Statement figures to arrive at this cash series, see the text in February Bulletin. All figures in the table at the bottom of the page have now been revised in accordance with that explanation.)
+
+(In millions of dollars)
+
+| Category | July | Aug. | Sept. | Oct. | Nov. | Dec. | Jan. | Feb. | Mar. | Apr. | May | Total | col_14 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CASH INCOME |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Budget: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Income tax | 47 | 32 | 498 | 41 | 36 | 481 | 48 | 56 | 506 | 40 | 43 | 1,827 |  |
+| Miscellaneous internal revenue | 185 | 282 | 169 | 209 | 175 | 180 | 172 | 142 | 183 | 155 | 187 | 2,039 |  |
+| Taxes under Social Security Act | 31 | 106 | 3 | 33 | 103 | 3 | 42 | 154 | 4 | 30 | 118 | 627 |  |
+| Taxes upon carriers and their employees | - | 26 | - | 1 | 26 | - | 1 | 28 | - | - | 6 | 88 |  |
+| Customs | 23 | 29 | 29 | 31 | 27 | 25 | 24 | 22 | 29 | 29 | 25 | 294 |  |
+| Other | 16 | 12 | 12 | 17 | 15 | 15 | 18 | 15 | 15 | 15 | 18 | 168 |  |
+| Subtotal | 302 | 487 | 711 | 332 | 382 | 704 | 305 | 417 | 737 | 269 | 397 | 5,043 |  |
+| Trust funds, etc.: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Unemployment trust fund (deposits by States) | 36 | 131 | 35 | 38 | 125 | 37 | 39 | 148 | 34 | 34 | 137 | 794 |  |
+| Trust accounts | 27 | 14 | 21 | 25 | 14 | 16 | 20 | 16 | 25 | 20 | 18 | 216 |  |
+| Subtotal | 63 | 145 | 56 | 63 | 139 | 53 | 59 | 164 | 59 | 54 | 155 | 1,010 |  |
+| Total cash income | 365 | 632 | 767 | 395 | 521 | 757 | 364 | 581 | 796 | 323 | 552 | 6,053 |  |
+| CASH OUTGO |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Budget: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| National defense | 96 | 98 | 88 | 95 | 98 | 99 | 103 | 84 | 98 | 96 | 101 | 1,056 |  |
+| Social Security Act (grants and administrative expenses) | 40 | 32 | 10 | 49 | 28 | 14 | 33 | 26 | 23 | 37 | 32 | 324 |  |
+| Interest on the public debt | 13 | 16 | 146 | 67 | 9 | 172 | 18 | 17 | 120 | 66 | 10 | 654 |  |
+| Public Works | 73 | 81 | 94 | 99 | 89 | 120 | 99 | 102 | 93 | 97 | 97 | 1,044 |  |
+| Agricultural aid | 79 | 50 | 38 | 75 | 78 | 66 | 65 | 91 | 135 | 132 | 139 | 948 |  |
+| Works Progress Administration | 172 | 193 | 194 | 207 | 195 | 219 | 185 | 160 | 201 | 173 | 173 | 2,072 |  |
+| Other | 155 | 164 | 136 | 133 | 130 | 122 | 139 | 131 | 132 | 127 | 142 | 1,511 |  |
+| Subtotal | 628 | 634 | 706 | 725 | 627 | 812 | 642 | 611 | 802 | 728 | 694 | 7,609 |  |
+| Trust funds, etc.: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Reconstruction Finance Corporation | 58* | 10 | 24 | 19 | 22 | 8 | 38 | 15* | 6* | 57* | - | 15* |  |
+| Commodity Credit Corporation | 10 | 31 | 27 | 23 | 18 | 15 | 10 | - | 2 | 5 | 4* | 137 |  |
+| Unemployment trust fund | 36 | 53 | 40 | 40 | 26 | 19 | 33 | 36 | 44 | 41 | 32 | 400 |  |
+| Old-age reserve account | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 1 | 2 | 1 | 12 |  |
+| Railroad retirement account | 8 | 8 | 8 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 9 | 96 |  |
+| Other | 40* | 43 | 44 | 10 | 2* | 29 | 4* | 27 | 19* | 1 | 18 | 107 |  |
+| Subtotal | 43* | 146 | 144 | 102 | 74 | 81 | 87 | 58 | 31 | 1 | 56 | 737 |  |
+| Redemption of adjusted service bonds | 6 | 5 | 4 | 4 | 3 | 3 | 3 | 2 | 3 | 3 | 2 | 38 |  |
+| Total cash outgo | 591 | 785 | 854 | 831 | 704 | 896 | 732 | 671 | 836 | 732 | 752 | 8,384 |  |
+| EXCESS OF CASH OUTGO | 226 | 153 | 87 | 436 | 183 | 139 | 368 | 90 | 40 | 409 | 200 | 2,331 |  |
+
+* Excess of credits, deduct.
+
+Cash Income and Outgo and Excess of Cash Outgo
+
+(In millions of dollars)
+
+| Category | Jan. | Feb. | Mar. | Apr. | May | June | July | Aug. | Sept. | Oct. | Nov. | Dec. |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Cash income |  |  |  |  |  |  |  |  |  |  |  |  |
+| 1934 | 224 | 216 | 432 | 198 | 228 | 400 | 232 | 296 | 462 | 280 | 245 | 407 |
+| 1935 | 229 | 231 | 621 | 249 | 261 | 479 | 278 | 320 | 440 | 260 | 226 | 453 |
+| 1936 | 249 | 240 | 771 | 255 | 249 | 542 | 311 | 362 | 522 | 299 | 259 | 547 |
+| 1937 | 303 | 326 | 1,115 | 421 | 390 | 925 | 438 | 541 | 852 | 389 | 433 | 930 |
+| 1938 | 395 | 460 | 1,038 | 319 | 519 | 824 | 365 | 632 | 767 | 395 | 521 | 757 |
+| 1939 | 364 | 581 | 796 | 323 | 552 |  |  |  |  |  |  |  |
+| Cash outgo |  |  |  |  |  |  |  |  |  |  |  |  |
+| 1934 | 967 | 647 | 627 | 688 | 541 | 733 | 411 | 525 | 520 | 687 | 598 | 656 |
+| 1935 | 468 | 530 | 577 | 633 | 551 | 737 | 614 | 561 | 610 | 658 | 474 | 632 |
+| 1936 | 431 | 489 | 621 | 650 | 549 | 1,600 | 919 | 707 | 736 | 762 | 602 | 676 |
+| 1937 | 476 | 550 | 791 | 720 | 542 | 758 | 558 | 566 | 649 | 582 | 523 | 679 |
+| 1938 | 537 | 481 | 745 | 774 | 665 | 834 | 591 | 785 | 854 | 831 | 704 | 896 |
+| 1939 | 732 | 671 | 836 | 732 | 752 |  |  |  |  |  |  |  |
+| Excess of cash outgo |  |  |  |  |  |  |  |  |  |  |  |  |
+| 1934 | 743 | 431 | 195 | 490 | 313 | 333 | 179 | 229 | 58 | 407 | 353 | 249 |
+| 1935 | 239 | 299 | 144 | 384 | 290 | 258 | 336 | 241 | 170 | 398 | 248 | 179 |
+| 1936 | 182 | 249 | -150 | 395 | 300 | 1,058 | 608 | 345 | 214 | 463 | 343 | 129 |
+| 1937 | 173 | 224 | -324 | 299 | 152 | -167 | 120 | 25 | -203 | 193 | 90 | -251 |
+| 1938 | 142 | 21 | -293 | 455 | 146 | 10 | 226 | 153 | 87 | 436 | 183 | 139 |
+| 1939 | 368 | 90 | 40 | 409 | 200 |  |  |  |  |  |  |  |
+
+Note: Negative figures denote excess of cash income.
+
+CASH INCOME AND OUTGO AND NET CASH OUTGO
+
+January 1934 to Date
+
+For the basis of these figures see the text in February issue of the Bulletin
+
+15
+
+| Year | Male | Female | Total |
+| --- | --- | --- | --- |
+| 1995 | 2,905 | 1,593 | 4,498 |
+| 1996 | 2,521 | 1,321 | 3,842 |
+| 1997 | 2,500 | 1,410 | 3,910 |
+| 1998 | 2,479 | 1,331 | 3,810 |
+| 1999 | 2,380 | 1,288 | 3,668 |
+| 2000 | 2,473 | 1,318 | 3,791 |
+| 2001 | 2,359 | 1,251 | 3,610 |
+| 2002 | 2,344 | 1,226 | 3,570 |
+| 2003 | 2,331 | 1,212 | 3,543 |
+| 2004 | 2,310 | 1,188 | 3,498 |
+| 2005 | 2,327 | 1,193 | 3,520 |
+| 2006 | 2,292 | 1,171 | 3,463 |
+
+TREASURY GENERAL FUND AND PUBLIC DEBT
+
+—16—
+
+17
+
+Composition of General Fund
+
+(In millions of dollars - on basis of daily Treasury statements, unrevised)
+
+| End of fiscal year or month | Balance > Total | "Working" balance | Seign- lorage | Incre- ment on gold | Inactive gold | Current assets > Total | Bullion, coin and currency | Deposits in Fed. Reserve Banks | Special de- posits e/o sales of Gov't.Secs. | Current liabilities | All other deposits and col- lections |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1933 | 562 | - | - | - | - | 1,103 | 184 | 51 | 837 | 31 | 241 |
+| 1934 | 2,582 | - | - | - | - | 3,033 | 1,045 | 97 | 1,854 | 37 | 451 |
+| 1935 | 1,841 | 1,001 | 140 | 700 | - | 2,016 | 1,044 | 118 | 799 | 55 | 175 |
+| 1936 | 2,682 | 2,225 | 316 | 141 | - | 2,936 | 865 | 862 | 1,151 | 58 | 254 |
+| 1937 | 2,554 | 970 | 356 | 141 | 1,037 | 2,709 | 1,853 | 141 | 649 | 55 | 156 |
+| 1938 | 2,216 | 1,628 | 446 | 142 | - | 2,419 | 830 | 929 | 611 | 49 | 203 |
+| 1938-May | 2,567 | 1,985 | 440 | 142 | - | 2,708 | 779 | 1,203 | 679 | 47 | 141 |
+| June | 2,216 | 1,628 | 446 | 142 | - | 2,419 | 830 | 929 | 611 | 49 | 203 |
+| July | 2,116 | 1,523 | 451 | 142 | - | 2,299 | 886 | 777 | 585 | 50 | 183 |
+| Aug. | 2,260 | 1,663 | 455 | 142 | - | 2,407 | 1,023 | 778 | 556 | 50 | 147 |
+| Sept. | 2,978 | 2,376 | 460 | 142 | - | 3,164 | 1,360 | 963 | 791 | 49 | 186 |
+| Oct. | 2,569 | 1,960 | 467 | 142 | - | 2,733 | 1,330 | 603 | 747 | 53 | 164 |
+| Nov. | 2,447 | 1,827 | 478 | 142 | - | 2,625 | 1,265 | 570 | 736 | 54 | 178 |
+| Deco. | 3,083 | 2,449 | 492 | 142 | - | 3,285 | 1,304 | 1,033 | 888 | 60 | 202 |
+| 1939-Jan | 2,933 | 2,288 | 503 | 142 | - | 3,119 | 1,385 | 792 | 876 | 66 | 186 |
+| Feb. | 3,343 | 2,693 | 508 | 142 | - | 3,517 | 1,354 | 1,222 | 873 | 68 | 174 |
+| Mar. | 3,389 | 2,732 | 515 | 142 | - | 3,635 | 1,313 | 1,388 | 866 | 68 | 246 |
+| Apr. | 3,044 | 2,380 | 522 | 142 | - | 3,230 | 1,329 | 975 | 858 | 68 | 186 |
+| May | 2,924 | 2,254 | 528 | 142 | - | 3,106 | 1,272 | 971 | 792 | 71 | 182 |
+
+Statement of the Outstanding Public Debt on June 30, 1938 and May 31, 1939
+
+(In millions of dollars - on basis of daily Treasury statements, unrevised)
+
+| Category | June 30, 1938 | May 31, 1939 | Increase (+) Decrease (-) | col_5 | June 30, 1938_2 | May 31, 1939_2 | Increase (+) Decrease (-)_2 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Market issues, etc: |  |  |  | Special issues: |  |  |  |
+| Pre-war bonds | 197 | 196 | -1 | Government Life Insurance Fund | 523 | 517 | -6 |
+| Treasury bonds | 21,846 | 25,218 | +3,372 | Old-Age Reserve Account | 662 | 1,094 | +432 |
+| U. S. Savings bonds | 1,237 | 1,806 | +569 | Railroad Retirement Account | 66 | 67 | +1 |
+| Adjusted Service bonds | 319 | 287 | -32 | Government retirement funds | 397 | 458 | +61 |
+| Treasury notes | 9,117 | 7,270 | -1,877 | Adjusted Service Certificate Fund | 26 | 21 | -5 |
+| Treasury bills | 1,154 | 1,308 | +154 | Unemployment Trust Fund | 872 | 1,280 | +408 |
+| Matured debt on which interest has ceased | 141 | 117 | -24 | Postal Saving System | 45 | 128 | +83 |
+| Debt bearing no interest | 448 | 414 | -34 | Federal Deposit Insurance Corporation | 85 | 101 | +16 |
+| Total Market issues, etc | 34,899 | 36,616 | +2,127 | Total Special issues | 2,676 | 3,666 | +990 |
+|  |  |  |  | Total | 37,165 | 40,282 | +3,117 |
+
+Public Debt Accounts
+
+(In millions of dollars - on basis of daily Treasury statements, unrevised)
+
+| Cash | Receipts > Market Operations > Adjusted Serv. Bonds | Exchangep | Cash_2 | Special Series | Total | Expenditures > Market Operations > Exchangep | col_8 | Special Series_2 | Total_2 | Excess of Receipts |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Piecals year 1938 | 4,775.7 | 12.7 | 2,673.8 | 2,158.5 | 9,620.7 | 5,166.0 | 2,673.8 | 1,040.8 | 8,880.6 | 740.1 |
+| 1938-July | 444.3 | .8 | - | 135.7 | 580.8 | 553.1 | - | 1.0 | 554.1 | 26.7 |
+| Aug. | 538.6 | .7 | - | 134.9 | 674.2 | 270.0 | - | 2.5 | 272.5 | 401.7 |
+| Sept. | 1,238.8 | .6 | 423.9 | 35.5 | 1,698.8 | 429.6 | 423.9 | 45.5 | 899.1 | 799.7 |
+| Oct. | 440.9 | .5 | - | 33.5 | 474.9 | 427.4 | - | 17.2 | 444.6 | 30.3 |
+| Nov. | 539.2 | .5 | - | 143.6 | 683.3 | 501.0 | - | 2.0 | 503.0 | 180.3 |
+| Deco. | 1,183.8 | .5 | 928.6 | 68.1 | 2,181.0 | 426.0 | 928.6 | 2.6 | 1,357.2 | 823.8 |
+| 1939-Jan. | 549.5 | .5 | - | 89.5 | 639.5 | 405.1 | - | 30.3 | 435.4 | 204.1 |
+| Feb. | 471.4 | .4 | - | 169.5 | 641.3 | 411.0 | - | 2.9 | 413.9 | 227.4 |
+| Mar. | 571.0 | .6 | 1,266.7 | 89.1 | 1,927.4 | 517.4 | 1,266.7 | 16.7 | 1,800.8 | 126.6 |
+| Apr. | 459.0 | .4 | .1 | 68.0 | 527.5 | 419.8 | .1 | 29.9 | 449.8 | 77.7 |
+| May. | 566.3 | .4 | - | 185.8 | 752.5 | 521.7 | - | 11.9 | 533.6 | 218.9 |
+
+18
+
+Statement Showing Details of Major Financing Operations of the Treasury for Fiscal Years 1938 and 1939
+
+(In millions of dollars)
+
+| Date of issue | Rate Per Cent | Term | Call and maturity dates | Amount issued > Treasury bonds | Treasury notes and certificates | Amount of cash subscriptions tendered | For Cash | Amount of exchanges > Treasury bonds | Treasury notes and certificates_2 | In exchange for > Date of Issue | Rate Per Cent_2 | Call or maturity date |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1937-Sept. 15. | 1-1/4 | 1 yr. 3 mos. | Dec. 15, 1938 | - | 433 | - | - | - | 433 | Sept. 15, 1932 | 3-1/4 | Sept. 15,1937 |
+| Sept. 15. | 2 | 5 years | Sept.15, 1942 | - | 342 | - | - | - | 342 | Sept. 15, 1932 | 3-1/4 | Sept. 15,1937 |
+| Dec. 15. | 2-1/2 | 8 years | Dec. 15, 1945 | 541 | - | 4,084 | 294 | - | 247 | Feb. 1, 1933 | 2-5/8 | Feb. 1,1938 |
+| Deco. 15. | 1-3/4 | 5 years | Dec. 15, 1942 | - | 232 | 2,702 | 219 | - | 13 | Feb. 1, 1933 | 2-5/8 | Feb. 1,1938 |
+| 1938-Mar. 15. | 2-1/2 | 10 years 6 mos. | Sept.15, 1948 | 451 | - | - | - | - | 451 | Mar. 15, 1934 | 3 | Mar. 15,1938 |
+| June 15. | 2-3/4 | 20-25 years | June 15, 1958 June 15, 1963 | 919 | - | - | - | - | 572 347 | June 15, 1933 Sept. 15, 1934 | 2-7/8 2-1/2 | June 15,1938 Sept. 15,1935 |
+| June 15. | 1-1/8 | 5 years | June 15, 1943 | - | 268 | - | - | - | 36 232 | June 15, 1933 Sept. 15, 1934 | 2-7/8 2-1/2 | June 15,1938 Sept. 15,1938 |
+| Sept. 15. | 2-1/2 | 12-14 years | Sept.15, 1950 Sept.15, 1952 | 867 | - | 4,487 | 462 | - | 405 | Sept. 15, 1937 | 1-1/4 | Deco. 15,1938 |
+| Sept. 15. (Add. 6/15/38) | 1-1/8 | 5 years | June 15, 1943 | - | 361 | 3,062 | 342 | - | 19 | Sept. 15, 1937 | 1-1/4 | Dec. 15,1938 |
+| Dec. 15. | 2-3/4 | 22-27 years | Deco. 15, 1960 Dec. 15, 1965 | 591 | - | 5,732 | 403 | - | 188 | Sept. 16, 1935 | 1-1/2 | Mar. 15,1939 |
+| Dec. 15. | 2 | 9 years | Deco. 15, 1947 | 701 | - | - | - | - | 701 | Sept. 16, 1935 | 1-1/2 | Mar. 15,1939 |
+| Deco. 15. | 1-1/8 | 5 years | Dec. 15, 1943 | - | 368 | 3,647 | 329 | - | 39 | Sept. 16, 1935 | 1-1/2 | Mar. 15,1939 |
+| 1939-Mar. 15. (Add. 12/15/38) | 2-3/4 | 22-27 years | Deco. 15, 1960 Dec. 15, 1965 | 894 | - | - | - | - | 894 | June 15, 1934 | 2-1/8 | June 15,1939 |
+| Mar. 15. (Add. 9/15/38) | 2-1/2 | 12-14 years | Sept.15, 1950 Sept.15, 1952 | 320 | - | - | - | - | 320 | June 15, 1934 | 2-1/8 | June 15,1939 |
+| Mar. 15. (Add. 12/15/38) | 1-1/8 | 5 years | Deco. 15, 1943 | - | 53 | - | - | - | 53 | June 15, 1934 | 2-1/8 | June 15,1939 |
+| June 15. | 3/4 | 5 years | June 15, 1944 | - | 416 | - | - | - | 416 | June 15, 1934 | 1-3/8 | Sept. 15,1939 |
+
+Note: For financings in fiscal years 1934-37 see March Bulletin, pages 16 - 17.
+
+19
+
+Composition of the Public Debt
+
+(In millions of dollars - on basis of daily Treasury statements, unrevised)
+
+| End of fiscal year or month | Gross debt > Total > Amount | Interest-bearing debt > Bonds > % of total interest-bearing debt | Notes > Amount | Bills and cts. of indet. > % of total interest-bearing debt | Bills and cts. of indet. > Special issues > Amount | Matured debt > % of total interest-bearing debt | Non-interest-bearing debt > Amount | Special issues > % of total interest-bearing debt | col_10 | Matured debt | Balance in general fund | Gross debt loss balance in general fund | Non-interest-bearing debt | col_15 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1930 | 16,185 | 15,922 | 12,111 | 76.1 | 1,626 | 10.2 | 1,420 | 8.9 | 764 | 4.8 | 32 | 232 | 319 | 15,866 |
+| 1931 | 16,801 | 16,520 | 13,531 | 81.9 | 452 | 2.7 | 2,246 | 13.6 | 291 | 1.8 | 52 | 230 | 472 | 16,329 |
+| 1932 | 19,487 | 19,161 | 14,250 | 74.4 | 1,261 | 6.6 | 3,341 | 17.4 | 309 | 1.6 | 60 | 266 | 417 | 19,070 |
+| 1933 | 22,539 | 22,158 | 14,223 | 64.2 | 4,548 | 20.5 | 3,063 | 13.8 | 323 | 1.5 | 66 | 315 | 862 | 21,677 |
+| 1934 | 27,053 | 26,480 | 16,510 | 62.4 | 6,653 | 25.1 | 2,921 | 11.0 | 396 | 1.5 | 54 | 518 | 2,582 | 24,471 |
+| 1935 | 28,701 | 27,645 | 14,936 | 54.0 | 10,023 | 36.3 | 2,053 | 7.4 | 633 | 2.3 | 231 | 825 | 1,841 | 26,860 |
+| 1936 | 33,779 | 32,989 | 18,628 | 56.5 | 11,381 | 34.5 | 2,354 | 7.1 | 626 | 1.9 | 169 | 620 | 2,682 | 31,097 |
+| 1937 | 36,425 | 35,800 | 21,322 | 59.6 | 10,617 | 29.7 | 2,304 | 6.4 | 1,558 | 4.3 | 119 | 506 | 2,553 | 33,872 |
+| 1938 | 37,165 | 36,576 | 23,599 | 64.5 | 9,147 | 25.0 | 1,154 | 3.2 | 2,676 | 7.3 | 141 | 447 | 2,216 | 34,949 |
+| 1938-May | 37,422 | 36,871 | 22,660 | 61.5 | 10,076 | 27.3 | 1,553 | 4.2 | 2,582 | 7.0 | 101 | 450 | 2,567 | 34,855 |
+| June | 37,165 | 36,576 | 23,599 | 64.5 | 9,147 | 25.0 | 1,154 | 3.2 | 2,676 | 7.3 | 141 | 447 | 2,216 | 34,949 |
+| July | 37,191 | 36,642 | 23,631 | 64.5 | 9,147 | 24.9 | 1,054 | 2.9 | 2,810 | 7.7 | 106 | 443 | 2,116 | 35,075 |
+| Aug. | 37,593 | 37,052 | 23,658 | 63.9 | 9,147 | 24.7 | 1,304 | 3.5 | 2,943 | 7.9 | 102 | 440 | 2,260 | 35,333 |
+| Sept. | 38,393 | 37,850 | 24,549 | 64.9 | 9,067 | 24.0 | 1,302 | 3.4 | 2,933 | 7.7 | 106 | 437 | 2,978 | 35,415 |
+| Oct. | 38,423 | 37,897 | 24,579 | 64.9 | 9,067 | 23.9 | 1,302 | 3.4 | 2,949 | 7.8 | 94 | 433 | 2,569 | 35,854 |
+| Nov. | 38,603 | 38,068 | 24,608 | 64.7 | 9,067 | 23.8 | 1,303 | 3.4 | 3,090 | 8.1 | 105 | 431 | 2,447 | 36,156 |
+| Dec. | 39,427 | 38,899 | 25,940 | 66.7 | 8,496 | 21.8 | 1,306 | 3.4 | 3,156 | 8.1 | 101 | 427 | 3,083 | 36,344 |
+| 1939-Jan. | 39,631 | 39,097 | 26,077 | 66.7 | 8,496 | 21.7 | 1,309 | 3.3 | 3,215 | 8.3 | 109 | 425 | 2,933 | 36,698 |
+| Feb. | 39,858 | 39,326 | 26,137 | 66.5 | 8,496 | 21.6 | 1,310 | 3.3 | 3,382 | 8.6 | 112 | 421 | 3,343 | 36,513 |
+| Mar. | 39,985 | 39,442 | 27,407 | 69.5 | 7,270 | 18.4 | 1,311 | 3.3 | 3,454 | 8.8 | 125 | 419 | 3,389 | 36,596 |
+| Apr. | 40,064 | 39,526 | 27,455 | 69.5 | 7,270 | 18.4 | 1,309 | 3.3 | 3,492 | 8.8 | 122 | 416 | 3,044 | 37,019 |
+| May | 40,282 | 39,751 | 27,507 | 69.2 | 7,270 | 18.3 | 1,308 | 3.3 | 3,666 | 9.2 | 117 | 414 | 2,924 | 37,358 |
+
+Note: Figures in this table are rounded to nearest million and will not necessarily add to totals.
+
+Net Market Purchases or Sales of Government Securities for Treasury Investment Accounts
+
+(In millions of dollars)
+
+| Category | Purchases or sales (-) > Jan. | Feb. | Mar. | Apr. | May | June | July | Aug. | Sept. | Oct. | Nov. | Dec. |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1936. | 18.5 | 4.5 | 32.7 | 19.0 | 15.8 | 30.5 | 15.5 | 3.8 | 47.4 | 27.0 | 5.9 | 24.0 |
+| 1937. | 14.4 | 5.7 | 119.6 | 11.9 | 3.9 | 24.4 | 4.8 | 12.5 | 8.9 | 3.7 | 2.0 | -15.4 |
+| 1938. | -12.0 | -3.0 | 23.3 | 2.5 | -1.9 | .8 | 1.2 | -3.9 | 38.5 | 1.0 | .4 | 6.5 |
+| 1939. | 1.6 | .1 | -12.5 | -37.1 | -40.4 |  |  |  |  |  |  |  |
+
+COMPOSITION OF INTEREST-BEARING PUBLIC DEBT OUTSTANDING
+
+21
+
+Holdings of Direct and Guaranteed Interest-Bearing Obligations of the United States Government
+
+(In millions of dollars)
+
+| End of fiscal year or month | Government agencies and trust funds > Special issues | United States Savings Bonds, 3% Adjusted Service Bonds of 1945, and 2 1/2% Postal Savings Bonds | Market issues | Federal Reserve Banks | Other holders > United States Savings Bonds, 3% Adjusted Service Bonds of 1945, and 2 1/2% Postal Savings Bonds | Market issues otherwise held | Total direct obligations outstanding | Guaranteed obligations > Government agencies and trust funds | Market issues otherwise held_2 | Total guaranteed obligations outstanding |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1930 | 764 | 12 | 230 | 591 | 7 | 14,318 | 15,922 | - | - | - |
+| 1931 | 291 | 12 | 145 | 668 | 10 | 15,394 | 16,520 | - | - | - |
+| 1932 | 309 | 13 | 183 | 1,784 | 23 | 16,849 | 19,161 | - | - | - |
+| 1933 | 323 | 14 | 240 | 1,998 | 39 | 19,544 | 22,158 | - | - | - |
+| 1934 | 396 | 15 | 880 | 2,430 | 63 | 22,696 | 26,480 | - | 581 | 681 |
+| 1935 | 633 | 17 | 967 | 2,430 | 147 | 23,451 | 27,645 | 378 | 3,745 | 4,123 |
+| 1936-Jan | 733 | 19 | 1,140 | 2,430 | 273 | 25,023 | 29,618 | 393 | 4,169 | 4,562 |
+| Feb | 736 | 20 | 1,148 | 2,430 | 297 | 25,015 | 29,646 | 397 | 4,233 | 4,630 |
+| Mar | 733 | 20 | 1,202 | 2,430 | 341 | 25,865 | 30,591 | 395 | 4,259 | 4,654 |
+| Apr | 732 | 19 | 1,220 | 2,430 | 366 | 25,834 | 30,601 | 394 | 4,282 | 4,676 |
+| May | 729 | 20 | 1,234 | 2,430 | 390 | 26,019 | 30,822 | 393 | 4,309 | 4,702 |
+| June | 626 | 20 | 1,280 | 2,430 | 1,128 | 27,272 | 32,756 | 391 | 4,327 | 4,718 |
+| July | 642 | 20 | 1,295 | 2,430 | 1,029 | 27,256 | 32,672 | 391 | 4,333 | 4,724 |
+| Aug | 630 | 21 | 1,315 | 2,430 | 1,007 | 27,218 | 32,621 | 383 | 4,286 | 4,669 |
+| Sept | 627 | 20 | 1,363 | 2,430 | 1,009 | 27,637 | 33,086 | 383 | 4,284 | 4,667 |
+| Oct | 623 | 21 | 1,366 | 2,430 | 1,006 | 27,635 | 33,081 | 382 | 4,285 | 4,667 |
+| Nov | 621 | 21 | 1,391 | 2,430 | 1,013 | 27,609 | 33,085 | 382 | 4,280 | 4,662 |
+| Dec | 632 | 20 | 1,418 | 2,430 | 1,024 | 28,175 | 33,699 | 381 | 4,281 | 4,662 |
+| 1937-Jan | 683 | 21 | 1,437 | 2,430 | 1,045 | 28,206 | 33,822 | 381 | 4,281 | 4,662 |
+| Feb | 762 | 21 | 1,415 | 2,430 | 1,093 | 28,175 | 33,926 | 380 | 4,282 | 4,662 |
+| Mar | 806 | 22 | 1,571 | 2,430 | 1,240 | 27,999 | 34,068 | 376 | 4,286 | 4,662 |
+| Apr | 882 | 22 | 1,578 | 2,526 | 1,262 | 28,028 | 34,298 | 378 | 4,282 | 4,660 |
+| May | 959 | 22 | 1,598 | 2,526 | 1,280 | 28,209 | 34,594 | 382 | 4,278 | 4,660 |
+| June | 1,558 | 22 | 1,618 | 2,526 | 1,288 | 28,791 | 35,803 | 381 | 4,284 | 4,665 |
+| July | 1,699 | 22 | 1,626 | 2,526 | 1,312 | 28,932 | 36,117 | 379 | 4,324 | 4,703 |
+| Aug | 1,815 | 23 | 1,657 | 2,526 | 1,330 | 29,102 | 36,453 | 355 | 4,278 | 4,633 |
+| Sept | 1,905 | 23 | 1,667 | 2,526 | 1,346 | 28,800 | 36,267 | 355 | 4,278 | 4,633 |
+| Oct | 1,991 | 23 | 1,670 | 2,526 | 1,362 | 28,796 | 36,368 | 355 | 4,279 | 4,634 |
+| Nov | 2,118 | 23 | 1,674 | 2,564 | 1,380 | 28,755 | 36,514 | 365 | 4,279 | 4,644 |
+| Dec | 2,227 | 24 | 1,660 | 2,564 | 1,410 | 28,830 | 36,715 | 365 | 4,280 | 4,645 |
+| 1938-Jan | 2,314 | 24 | 1,658 | 2,564 | 1,501 | 28,833 | 36,894 | 357 | 4,289 | 4,646 |
+| Feb | 2,481 | 24 | 1,660 | 2,564 | 1,540 | 28,815 | 37,084 | 357 | 4,289 | 4,646 |
+| Mar | 2,518 | 24 | 1,687 | 2,564 | 1,578 | 28,633 | 37,004 | 355 | 4,291 | 4,646 |
+| Apr | 2,501 | 25 | 1,762 | 2,564 | 1,605 | 28,509 | 36,966 | 353 | 4,294 | 4,647 |
+| May | 2,582 | 25 | 1,752 | 2,564 | 1,631 | 28,319 | 36,873 | 349 | 4,503 | 4,852 |
+| June | 2,676 | 25 | 1,754 | 2,564 | 1,652 | 27,908 | 36,579 | 344 | 4,509 | 4,853 |
+| July | 2,810 | 25 | 1,759 | 2,564 | 1,684 | 27,803 | 36,645 | 345 | 4,719 | 5,064 |
+| Aug | 2,943 | 25 | 1,759 | 2,564 | 1,711 | 28,052 | 37,054 | 344 | 4,671 | 5,015 |
+| Sept | 2,933 | 26 | 1,811 | 2,564 | 1,734 | 28,784 | 37,852 | 344 | 4,665 | 5,009 |
+| Oct | 2,949 | 26 | 1,831 | 2,564 | 1,764 | 28,765 | 37,899 | 328 | 4,673 | 5,001 |
+| Nov | 3,090 | 26 | 1,835 | 2,564 | 1,794 | 28,762 | 38,071 | 325 | 4,668 | 4,993 |
+| Dec | 3,156 | 26 | 1,847 | 2,564 | 1,843 | 29,475 | 38,911 | 325 | 4,667 | 4,992 |
+| 1939-Jan | 3,215 | 26 | 1,856 | 2,564 | 1,977 | 29,469 | 39,107 | 320 | 4,667 | 4,987 |
+| Feb | 3,382 | 27 | 1,860 | 2,564 | 2,032 | 29,466 | 39,331 | 323 | 5,087 | 5,410 |
+| Mar | 3,454 | 27 | 1,860 | 2,564 | 2,083 | 29,454 | 39,442 | 323 | 5,087 | 5,410 |
+| Apr | 3,492 | 27 | 1,840 | 2,564 | 2,131 | 29,471 | 39,525 | 323 | 5,087 | 5,410 |
+| May | 3,666 | 27 | 1,802 | 2,564 | 2,183 | 29,509 | 39,751 | 323 | 5,087 | 5,410 |
+
+Note: Holdings of Government agencies, etc., on basis of their accounts with the Treasury; holdings of Federal Reserve Banks on basis of their statements; other figures on basis of Public Debt Statements and Daily Treasury Statements, unreviewed.
+* Figures partly estimated.
+
+22
+
+Member Bank Holdings of U.S. Government Obligations and Securities Guaranteed by the Government, Mar. 29, 1939
+
+(Book values as reported to the Comptroller of the Currency, and the Board of Governors of the Federal Reserve System.)
+
+(In millions of dollars) 1/
+
+| Category | Direct Government Obligations > Bills | Notes | Bonds maturing > 1939-43 | 1944-48 | 1949-58 | 1959-65 | Securities Guaranteed by the United States > Total | EPC | HOLO | PFMC | Other | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| National banks | 181 | 1,716 | 478 | 1,460 | 2,052 | 959 | 6,846 | 387 | 840 | 336 | 150 | 1,712 |
+| State member banks | 122 | 888 | 235 | 1,059 | 977 | 563 | 3,844 | 258 | 476 | 123 | 91 | 948 |
+| Total member banks | 303 | 2,604 | 713 | 2,520 | 3,029 | 1,521 | 10,691 | 645 | 1,316 | 459 | 240 | 2,660 |
+| Member banks: |  |  |  |  |  |  |  |  |  |  |  |  |
+| New York City | 68 | 831 | 318 | 725 | 650 | 347 | 2,939 | 366 | 508 | 125 | 87 | 1,086 |
+| Chicago | 121 | 212 | 37 | 125 | 333 | 165 | 992 | 81 | 6 | 5 | 14 | 108 |
+| Reserve city | 100 | 977 | 233 | 1,049 | 1,230 | 593 | 4,181 | 109 | 461 | 169 | 84 | 823 |
+| Country | 15 | 585 | 126 | 620 | 817 | 416 | 2,578 | 88 | 340 | 159 | 55 | 643 |
+| Total member banks | 303 | 2,604 | 713 | 2,520 | 3,029 | 1,521 | 10,691 | 645 | 1,316 | 459 | 240 | 2,660 |
+
+(By percent of privately held marketable supply) 2/
+
+| Category | Direct Government Obligations > Bills | Notes | Bonds maturing > 1939-43 | 1944-48 | 1949-58 | 1959-65 | Total | Securities Guaranteed by the United States > RFC | HOLC | FTMO | Other | Total_2 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| National banks | 22 | 28 | 30 | 21 | 22 | 18 | 23 | 47 | 31 | 27 | 47 | 34 |
+| State member banks | 15 | 15 | 15 | 16 | 11 | 11 | 13 | 32 | 18 | 10 | 28 | 19 |
+| Total member banks | 36 | 43 | 45 | 37 | 33 | 29 | 36 | 79 | 49 | 37 | 75 | 52 |
+| Member banks: |  |  |  |  |  |  |  |  |  |  |  |  |
+| New York City | 8 | 14 | 20 | 11 | 7 | 7 | 10 | 45 | 19 | 10 | 27 | 21 |
+| Chicago | 15 | 4 | 2 | 2 | 4 | 3 | 3 | 10 | - | - | 4 | 2 |
+| Reserve city | 12 | 16 | 15 | 16 | 13 | 11 | 14 | 13 | 17 | 13 | 26 | 16 |
+| Country | 2 | 10 | 8 | 8 | 9 | 8 | 9 | 11 | 13 | 13 | 17 | 13 |
+| Total member banks | 36 | 43 | 45 | 37 | 33 | 29 | 36 | 79 | 49 | 37 | 75 | 52 |
+
+1/ The percentage figures are nearest million, and will not necessarily add to total.
+2/ The percentage figures are only roughly accurate because (1) the book value of bank holdings is somewhat greater than their par value, yet they are here given as percentage of the total par amount of the privately held marketable supply in each category; and (2) in the case of direct Government obligations, the deductions required to eliminate bank holdings of U. S. Savings bonds (which are not part of the marketable supply) were estimated.
+
+Privately Held Marketable Supply of Direct and Guaranteed Government Obligations, Mar. 31, 1939*
+
+(In millions of dollars)
+
+| Category | Direct Government Obligations > Bills | Notes | Bonds maturing > 1939 - 43 | 1944 - 48 | 1949 - 58 | 1959 - 65 | Securities Guaranteed by the United States > Total | RFC | HOLC | FMC | Other | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Privately held marketable supply | 834 | 6,030 | 1,590 | 6,684 | 9,125 | 5,281 | 29,545 | 812 | 2,701 | 1,252 | 320 | 5,087 |
+
+The "privately held marketable supply" includes all interest-bearing obligations except U. S. Savings bonds, Adjusted Service bonds, and securities held by the Federal Reserve banks and Federal governmental corporations, credit agencies and trust funds. In a few cases, the figures used were for March 29 instead of March 31.
+
+23
+
+Amount of Interest-Bearing Debt Outstanding, the Computed Annual Interest Charge and the Computed Rate of Interest
+
+Comparative Yields of Average of All Long-Term U.S. Treasury Bonds and Average of High-Grade Corporate Bonds
+
+| End of fiscal year or month | Interest-bearing debt | Computed annual interest charge | Computed rate of interest: Percent |
+| --- | --- | --- | --- |
+| 1916 | $971,562,590 | $23,084,635 | 2.376 |
+| 1917 | 2,712,549,476 | 83,625,482 | 3.120 |
+| 1918 | 11,985,582,436 | 468,618,544 | 3.910 |
+| 1919 | 25,234,496,273 | 1,054,204,509 | 4.178 |
+| 1920 | 24,061,095,361 | 1,016,592,219 | 4.225 |
+| 1921 | 23,737,352,080 | 1,029,917,903 | 4.339 |
+| 1922 | 22,711,035,587 | 962,896,535 | 4.240 |
+| 1923 | 22,007,590,754 | 927,331,341 | 4.214 |
+| 1924 | 20,981,586,429 | 876,960,673 | 4.180 |
+| 1925 | 20,210,906,251 | 829,680,044 | 4.105 |
+| 1926 | 19,383,770,860 | 793,423,952 | 4.093 |
+| 1927 | 18,250,943,965 | 722,675,553 | 3.960 |
+| 1928 | 17,317,695,096 | 671,353,112 | 3.877 |
+| 1929 | 16,638,941,379 | 656,654,311 | 3.946 |
+| 1930 | 15,921,892,350 | 606,031,831 | 3.807 |
+| 1931 | 16,519,588,640 | 588,987,438 | 3.566 |
+| 1932 | 19,161,273,540 | 671,604,676 | 3.505 |
+| 1933 | 22,157,643,120 | 742,175,955 | 3.350 |
+| 1934 | 26,480,487,920 | 842,301,133 | 3.181 |
+| 1935 | 27,645,229,826 | 750,677,802 | 2.716 |
+| 1936 | 32,755,631,770 | 838,002,053 | 2.559 |
+| 1937 | 35,802,586,915 | 924,347,089 | 2.582 |
+| 1938 | 36,575,925,880 | 947,084,058 | 2.589* |
+| 1938-July | 36,641,937,719 | 951,738,835 | 2.597* |
+| Aug. | 37,051,561,281 | 956,207,791 | 2.581* |
+| Sept. | 37,849,982,493 | 977,274,331 | 2.582* |
+| Oct. | 37,896,865,589 | 978,604,732 | 2.582* |
+| Nov. | 38,068,027,769 | 982,917,804 | 2.582* |
+| Dec. | 38,898,851,391 | 1,005,833,188 | 2.586* |
+| 1939-Jan. | 39,097,233,713 | 1,011,231,467 | 2.586* |
+| Feb. | 39,325,527,811 | 1,017,225,042 | 2.587* |
+| Mar. | 39,442,074,957 | 1,026,757,937 | 2.603* |
+| Apr. | 39,525,407,813 | 1,029,353,995 | 2.604* |
+| May. | 39,751,011,399 | 1,035,271,505 | 2.604* |
+
+Note: For monthly figures from June 1916 to June 1923, see report of the Secretary of the Treasury for 1923, page 509; from July 1923 to June 1936, see report of the Secretary of the Treasury for 1936, pages 442 and 443; from July 1936 to June 1937, see report of the Secretary of the Treasury for 1937, page 442. "Interest-Bearing Debt" figures include discount on Treasury Bills, amount being deducted prior to calculating the average interest rate. On basis of Daily Treasury Statements, unreviced. (See heading).
+
+| Date | Long-term Treasury 1/ | Corporate rates 2/ | Corporate, excluding rails 3/ | Spread between long-term Treasury and corporates including rails | Excluding rails |
+| --- | --- | --- | --- | --- | --- |
+| Monthly average of daily figures 1/ 1938-Jan. | 2.65 | 3.17 | 3.08 | .52 | .43 |
+| Feb. | 2.64 | 3.15 | 3.06 | .51 | .42 |
+| Mar. | 2.64 | 3.16 | 3.05 | .52 | .41 |
+| Apr. | 2.62 | 3.23 | 3.08 | .61 | .46 |
+| May | 2.51 | 3.14 | 2.99 | .63 | .48 |
+| June | 2.52 | 3.15 | 2.99 | .63 | .47 |
+| July | 2.52 | 3.12 | 2.98 | .60 | .46 |
+| Aug. | 2.51 | 3.10 | 2.98 | .59 | .47 |
+| Sept. | 2.58 | 3.12 | 2.99 | .54 | .41 |
+| Oct. | 2.48 | 3.07 | 2.94 | .99 | .46 |
+| Nov. | 2.50 | 3.06 | 2.92 | .56 | .42 |
+| Dec. | 2.49 | 3.04 | 2.90 | .55 | .41 |
+| 1939-Jan. | 2.47 | 3.00 | 2.86 | .53 | .39 |
+| Feb. | 2.44 | 2.98 | 2.86 | .54 | .42 |
+| Mar. | 2.34 | 2.98 | 2.85 | .64 | .51 |
+| Apr. | 2.30 | 3.01 | 2.87 | .71 | .57 |
+| May | 2.17 | 2.95 | 2.82 | .78 | .65 |
+| Weekly figures as of Saturday closing prices 5/ |  |  |  |  |  |
+| Apr. 1 | 2.32 | 3.00 | 2.88 | .68 | .56 |
+| Apr. 8 | 2.32 | 3.02 | 2.88 | .70 | .56 |
+| Apr. 15 | 2.30 | 3.01 | 2.88 | .71 | .58 |
+| Apr. 22 | 2.28 | 3.00 | 2.87 | .72 | .59 |
+| Apr. 29 | 2.26 | 3.00 | 2.87 | .74 | .61 |
+| May 6 | 2.22 | 2.96 | 2.84 | .74 | .62 |
+| May 13 | 2.17 | 2.95 | 2.82 | .78 | .65 |
+| May 20 | 2.14 | 2.94 | 2.81 | .80 | .67 |
+| May 27 | 2.14 | 2.94 | 2.82 | .80 | .68 |
+| June 3 | 2.07 | 2.93 | 2.82 | .86 | .75 |
+| June 10 | 2.11 | 2.93 | 2.82 | .82 | .71 |
+
+Note: Monthly figures for 1937 in January bulletin, Page 15. 1/ Average of Treasury bonds due or callable after twelve years. 2/ Average of 20 bonds. 3/ Average of 15 bonds. 4/ January 1938 through April 1938, monthly average of Saturday figures for corporates. 5/ Or the most recent sale if there was no sale on Saturday.
+
+COMPARATIVE YIELDS OF AVERAGE OF ALL LONG TERM U.S. TREASURY AND AVERAGE OF HIGH GRADE CORPORATE BONDS
+
+Yields Based on Saturday Quotations
+
+*Break in line indicates change in composition of Long Term Treasury average
+
+YIELDS OF TREASURY BONDS AND NOTES
+
+Based on Closing Prices
+
+JUNE 15, 1939
+
+55
+
+Note: For callable bonds, yields are computed to, and issues plotted as of, the earliest call date if the bond is selling above par, and as of the final maturity date if the bond is selling below par. The smooth curves are fitted by eye. Dollar amounts shown in descriptions of issues are in millions. Issues for which an exchange offer has been made and has expired are excluded
+
+26
+
+Computed Annual Interest Charge and Interest Rate for Treasury Bonds, Notes, Certificates and Bills, and Special Issues
+
+| Category | Bonds > Charge (In millions of dollars) | Rate (percent) | Notes > Charge (In millions of dollars) | Rate (percent)_2 | Certificates and Bills > Charge (In millions of dollars) | Rate (percent)_3 | Special Issues > Charge (In millions of dollars) | Rate (percent)_4 | Totals > Charge (In millions of dollars) | Rate (percent)_5 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1931-Jan. | 475 | 3.9239 | 55 | 3.5000 | 30 | 2.3008 | 36 | 4.0000 | 596 | 3.7522 |
+| Feb. | 475 | 3.9239 | 55 | 3.5000 | 30 | 2.1755 | 36 | 4.0000 | 596 | 3.7329 |
+| Mar. | 495 | 3.8982 | 16 | 3.5000 | 47 | 2.0415 | 32 | 4.0000 | 590 | 3.6264 |
+| Apr. | 495 | 3.8982 | 16 | 3.5000 | 55 | 1.9917 | 18 | 4.0000 | 584 | 3.5687 |
+| May. | 495 | 3.8982 | 16 | 3.5000 | 55 | 1.9928 | 13 | 4.0000 | 579 | 3.5661 |
+| June. | 521 | 3.8513 | 16 | 3.5000 | 40 | 1.8013 | 12 | 4.0000 | 589 | 3.5657 |
+| July. | 521 | 3.8508 | 16 | 3.5000 | 39 | 1.7309 | 11 | 4.0000 | 587 | 3.5559 |
+| Aug. | 521 | 3.8508 | 16 | 3.5000 | 38 | 1.6411 | 11 | 4.0000 | 586 | 3.5341 |
+| Sept. | 545 | 3.8033 | 16 | 3.5000 | 30 | 1.4887 | 10 | 4.0000 | 601 | 3.5260 |
+| Oct. | 545 | 3.8033 | 16 | 3.5000 | 32 | 1.5968 | 9 | 4.0000 | 602 | 3.5382 |
+| Nov. | 544 | 3.8041 | 16 | 3.5000 | 39 | 1.8824 | 9 | 4.0000 | 608 | 3.5669 |
+| Dec. | 544 | 3.8044 | 20 | 3.2500 | 51 | 2.3037 | 16 | 4.0000 | 631 | 3.5985 |
+| 1932-Jan. | 544 | 3.8036 | 20 | 3.2500 | 51 | 2.3100 | 15 | 4.0000 | 630 | 3.5985 |
+| Feb. | 544 | 3.8036 | 20 | 3.2500 | 64 | 2.5157 | 14 | 4.0000 | 642 | 3.6048 |
+| Mar. | 544 | 3.8036 | 20 | 3.2500 | 86 | 2.9206 | 13 | 4.0000 | 663 | 3.6458 |
+| Apr. | 544 | 3.8036 | 20 | 3.2500 | 85 | 2.7833 | 13 | 4.0000 | 662 | 3.6183 |
+| May. | 543 | 3.8045 | 27 | 3.1777 | 85 | 2.5800 | 12 | 4.0000 | 667 | 3.5640 |
+| June. | 542 | 3.8053 | 39 | 3.1190 | 78 | 2.3248 | 12 | 4.0000 | 671 | 3.5052 |
+| July. | 543 | 3.8047 | 39 | 3.1190 | 77 | 2.2848 | 16 | 4.0000 | 675 | 3.4984 |
+| Aug. | 542 | 3.8047 | 59 | 2.9692 | 70 | 2.2237 | 15 | 4.0000 | 686 | 3.4734 |
+| Sept. | 542 | 3.8047 | 86 | 3.0527 | 60 | 2.0922 | 15 | 4.0000 | 703 | 3.4630 |
+| Oct. | 542 | 3.8047 | 101 | 3.0446 | 49 | 1.9200 | 15 | 4.0000 | 707 | 3.4508 |
+| Nov. | 542 | 3.8047 | 101 | 3.0446 | 48 | 1.8900 | 15 | 4.0000 | 706 | 3.4470 |
+| Dec. | 542 | 3.8066 | 91 | 2.9700 | 50 | 1.7814 | 14 | 4.0000 | 697 | 3.4069 |
+| 1933-Jan. | 542 | 3.8058 | 91 | 2.9700 | 50 | 1.7847 | 14 | 4.0000 | 697 | 3.4070 |
+| Feb. | 542 | 3.8058 | 98 | 2.9414 | 45 | 1.6860 | 14 | 4.0000 | 699 | 3.3950 |
+| Mar. | 542 | 3.8058 | 98 | 2.9414 | 66 | 2.1394 | 13 | 4.0000 | 719 | 3.4266 |
+| Apr. | 542 | 3.8058 | 98 | 2.9414 | 68 | 2.1431 | 13 | 4.0000 | 721 | 3.4209 |
+| May. | 541 | 3.8062 | 115 | 2.9317 | 63 | 2.1093 | 13 | 4.0000 | 732 | 3.4122 |
+| June. | 541 | 3.8062 | 133 | 2.9239 | 55 | 1.7928 | 13 | 4.0000 | 742 | 3.3497 |
+| July. | 542 | 3.8048 | 133 | 2.9239 | 53 | 1.7410 | 16 | 4.0000 | 744 | 3.3439 |
+| Aug. | 569 | 3.7740 | 139 | 2.8302 | 31 | 1.3125 | 15 | 4.0000 | 754 | 3.3185 |
+| Sept. | 569 | 3.7740 | 139 | 2.8302 | 28 | 1.2218 | 15 | 4.0000 | 751 | 3.3132 |
+| Oct. | 569 | 3.7740 | 138 | 2.8302 | 28 | 1.1900 | 15 | 4.0000 | 750 | 3.3099 |
+| Nov. | 590 | 3.7895 | 139 | 2.8301 | 28 | 1.2066 | 15 | 4.0000 | 772 | 3.3328 |
+| Dec. | 590 | 3.7895 | 138 | 2.8296 | 30 | 1.1433 | 15 | 4.0000 | 773 | 3.2964 |
+| 1934-Jan. | 590 | 3.7848 | 151 | 2.7961 | 41 | 1.2316 | 15 | 4.0000 | 797 | 3.2251 |
+| Feb. | 590 | 3.7888 | 174 | 2.7903 | 44 | 1.2395 | 15 | 4.0000 | 823 | 3.1998 |
+| Mar. | 590 | 3.7888 | 187 | 2.8045 | 39 | 1.2661 | 15 | 4.0000 | 831 | 3.2345 |
+| Apr. | 586 | 3.7269 | 180 | 2.7974 | 36 | 1.1881 | 15 | 4.0000 | 817 | 3.1921 |
+| May. | 585 | 3.7245 | 180 | 2.7971 | 34 | 1.1003 | 14 | 4.0000 | 813 | 3.1775 |
+| June. | 609 | 3.6881 | 185 | 2.7758 | 34 | 1.1503 | 14 | 3.8233 | 842 | 3.1810 |
+| July. | 609 | 3.6871 | 185 | 2.7758 | 34 | 1.1314 | 17 | 3.8492 | 845 | 3.1757 |
+| Aug. | 609 | 3.6870 | 185 | 2.7785 | 32 | 1.1195 | 17 | 3.8482 | 843 | 3.1821 |
+| Sept. | 582 | 3.6514 | 206 | 2.6724 | 25 | .9819 | 17 | 3.8470 | 830 | 3.1180 |
+| Oct. | 561 | 3.5449 | 207 | 2.6721 | 25 | .9501 | 17 | 3.8455 | 810 | 3.0390 |
+| Nov. | 559 | 3.5426 | 207 | 2.6721 | 25 | .9152 | 17 | 3.8050 | 808 | 3.0210 |
+| Dec. | 573 | 3.5294 | 231 | 2.5109 | 4 | .1878 | 19 | 3.4800 | 827 | 2.9601 |
+
+27
+
+Computed Annual Interest Charge and Interest Rate for Treasury Bonds, Notes, Certificates and Bills, and Special Issues - Continued.
+
+| Category | Bonds > Charge (In millions of dollars) | Rate (percent) | Notes > Charge (In millions of dollars) | Rate (percent)_2 | Certificates and Bills > Charge (In millions of dollars) | Rate (percent)_3 | Special Issues > Charge (In millions of dollars) | Rate (percent)_4 | Total > Charge (In millions of dollars) | Rate (percent)_5 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1935-Jan. | 573 | 3.5282 | 231 | 2.5109 | 4 | .1989 | 19 | 3.4827 | 827 | 2.9604 |
+| Feb. | 573 | 3.5280 | 231 | 2.5109 | 4 | .1856 | 19 | 3.4789 | 827 | 2.9567 |
+| Mar. | 553 | 3.4041 | 226 | 2.4619 | 3 | .1656 | 19 | 3.4759 | 801 | 2.8574 |
+| Apr. | 516 | 3.3549 | 236 | 2.4068 | 3 | .1557 | 20 | 3.4088 | 775 | 2.7930 |
+| May. | 503 | 3.3270 | 240 | 2.3899 | 3 | .1403 | 20 | 3.3577 | 766 | 2.7637 |
+| June. | 494 | 3.3087 | 233 | 2.3245 | 3 | .1304 | 21 | 3.2894 | 751 | 2.7156 |
+| July. | 489 | 3.3547 | 240 | 2.2772 | 3 | .1206 | 26 | 3.4154 | 758 | 2.7146 |
+| Aug. | 494 | 3.3541 | 239 | 2.2783 | 3 | .1181 | 26 | 3.4319 | 762 | 2.7251 |
+| Sept. | 470 | 3.2867 | 254 | 2.2145 | 3 | .1274 | 25 | 3.5202 | 752 | 2.6429 |
+| Oct. | 454 | 3.2443 | 254 | 2.2144 | 3 | .1428 | 25 | 3.5180 | 736 | 2.5941 |
+| Nov. | 455 | 3.2440 | 254 | 2.2144 | 3 | .1416 | 25 | 3.4537 | 737 | 2.5762 |
+| Dec. | 473 | 3.2219 | 255 | 2.1596 | 3 | .1355 | 25 | 3.4509 | 756 | 2.5537 |
+| 1936-Jan. | 473 | 3.2215 | 255 | 2.1596 | 3 | .1297 | 25 | 3.4545 | 756 | 2.5537 |
+| Feb. | 474 | 3.2210 | 255 | 2.1596 | 3 | .1246 | 25 | 3.4457 | 757 | 2.5534 |
+| Mar. | 509 | 3.2021 | 249 | 2.0895 | 3 | .1228 | 25 | 3.4412 | 786 | 2.5683 |
+| Apr. | 510 | 3.1836 | 249 | 2.0886 | 2 | .1268 | 25 | 3.4349 | 786 | 2.5685 |
+| May. | 510 | 3.1832 | 249 | 2.0886 | 3 | .1373 | 25 | 3.4302 | 787 | 2.5550 |
+| June. | 584 | 3.1357 | 237 | 2.0798 | 3 | .1455 | 21 | 3.3159 | 845 | 2.5617 |
+| July. | 574 | 3.1380 | 237 | 2.0798 | 3 | .1375 | 22 | 3.3182 | 836 | 2.5571 |
+| Aug. | 574 | 3.1380 | 236 | 2.0779 | 3 | .1424 | 21 | 3.2938 | 834 | 2.5559 |
+| Sept. | 600 | 3.1180 | 229 | 2.1053 | 3 | .1486 | 21 | 3.2803 | 853 | 2.5780 |
+| Oct. | 600 | 3.1179 | 229 | 2.1053 | 4 | .1518 | 20 | 3.2674 | 853 | 2.5779 |
+| Nov. | 601 | 3.1178 | 228 | 2.1053 | 4 | .1533 | 20 | 3.2426 | 853 | 2.5775 |
+| Dec. | 633 | 3.0785 | 209 | 2.0305 | 4 | .1461 | 20 | 3.2158 | 866 | 2.5696 |
+| 1937-Jan. | 634 | 3.0782 | 209 | 2.0305 | 4 | .1690 | 21 | 3.1865 | 868 | 2.5681 |
+| Feb. | 635 | 3.0778 | 209 | 2.0285 | 4 | .1880 | 24 | 3.1329 | 872 | 2.5698 |
+| Mar. | 652 | 3.0634 | 194 | 1.9803 | 5 | .2518 | 25 | 3.1612 | 876 | 2.5731 |
+| Apr. | 652 | 3.0632 | 193 | 1.9785 | 7 | .3195 | 28 | 3.1265 | 880 | 2.5680 |
+| May. | 653 | 3.0630 | 193 | 1.9785 | 9 | .3722 | 30 | 3.0928 | 885 | 2.5594 |
+| June. | 653 | 3.0629 | 206 | 1.9451 | 10 | .4241 | 55 | 3.5280 | 924 | 2.5822 |
+| July. | 654 | 3.0627 | 206 | 1.9450 | 11 | .4529 | 60 | 3.5173 | 931 | 2.5786 |
+| Aug. | 654 | 3.0625 | 207 | 1.9450 | 12 | .4669 | 63 | 3.4634 | 936 | 2.5685 |
+| Sept. | 655 | 3.0623 | 192 | 1.8174 | 12 | .5032 | 65 | 3.4295 | 924 | 2.5495 |
+| Oct. | 655 | 3.0622 | 192 | 1.8174 | 12 | .5060 | 68 | 3.4000 | 927 | 2.5503 |
+| Nov. | 656 | 3.0620 | 192 | 1.8174 | 12 | .4880 | 71 | 3.3566 | 931 | 2.5496 |
+| Dec. | 670 | 3.0480 | 189 | 1.7960 | 9 | .4638 | 74 | 3.3218 | 942 | 2.5678 |
+| 1938-Jan. | 673 | 3.0473 | 189 | 1.7960 | 8 | .4018 | 76 | 3.3012 | 946 | 2.5658 |
+| Feb. | 674 | 3.0470 | 189 | 1.7948 | 7 | .3383 | 80 | 3.2518 | 950 | 2.5627 |
+| Mar. | 686 | 3.0359 | 175 | 1.7403 | 5 | .2666 | 82 | 3.2528 | 948 | 2.5631 |
+| Apr. | 687 | 3.0357 | 175 | 1.7403 | 4 | .2265 | 82 | 3.2596 | 948 | 2.5646 |
+| May. | 688 | 3.0355 | 175 | 1.7403 | 3 | .1854 | 83 | 3.2370 | 949 | 2.5757 |
+| June. | 714 | 3.0242 | 146 | 1.5976 | 1 | .1005 | 86 | 3.2180 | 947 | 2.5894 |
+| July. | 715 | 3.0240 | 146 | 1.5976 | * | .0327 | 90 | 3.2256 | 952 | 2.5974 |
+| Aug. | 715 | 3.0239 | 146 | 1.5976 | 1 | .0402 | 94 | 3.2000 | 956 | 2.5808 |
+| Sept. | 738 | 3.0053 | 144 | 1.5932 | 1 | .0640 | 94 | 3.2135 | 977 | 2.5830 |
+| Oct. | 739 | 3.0051 | 144 | 1.5932 | 1 | .0581 | 94 | 3.2136 | 978 | 2.5823 |
+| Nov. | 739 | 3.0050 | 145 | 1.5932 | 1 | .0483 | 98 | 3.1827 | 983 | 2.5820 |
+| Dec. | 771 | 2.9718 | 134 | 1.5835 | * | .0199 | 100 | 3.1726 | 1,006 | 2.5858 |
+| 1939-Jan. | 774 | 2.9714 | 135 | 1.5835 | * | .0129 | 101 | 3.1621 | 1,011 | 2.5865 |
+| Feb. | 776 | 2.9713 | 134 | 1.5835 | * | .0062 | 106 | 3.1344 | 1,017 | 2.5867 |
+| Mar. | 810 | 2.9584 | 108 | 1.4860 | * | .0027 | 108 | 3.1234 | 1,027 | 2.6032 |
+| Apr. | 812 | 2.9583 | 108 | 1.4859 | * | .0083 | 109 | 3.1220 | 1,029 | 2.6043 |
+| May. | 814 | 2.9582 | 108 | 1.4860 | * | .0096 | 113 | 3.0934 | 1,035 | 2.6044 |
+
+Less than $500,000.
+
+COMPOSITION OF PUBLIC DEBT AND COMPUTED ANNUAL INTEREST CHARGE AND INTEREST RATE
+
+Classified by Types of Obligations, Monthly
+
+* For figures see page 19
+
+GOVERNMENTAL CORPORATIONS AND CREDIT AGENCIES
+
+29
+
+30
+
+Governmental Corporations and Credit Agencies
+
+of the United States: Apr. 30, 1939
+
+(Compiled from latest reports received from these agencies)
+
+(In millions of dollars)
+
+| Category | Assets | Liabilities > Guaranteed by United States | Not Guaranteed by United States | Proprietary Interest > Privately owned | Owned by United States |
+| --- | --- | --- | --- | --- | --- |
+| Reconstruction Finance Corp. | 1,775.9 | 821.9 | 85.0 | - | 869.0 |
+| Commodity Credit Corp. | 393.6 | 206.9 | 76.1 | - | 110.6 |
+| Export-Import Bank of Washington | 48.5 | - | .4 | - | 48.1 |
+| Federal Crop Insurance Corp. | 8.0 | - | 3.0 | - | 5.0 |
+| Federal Deposit Insurance Corp. | 467.4 | - | 178.1 | 139.3 | 150.0 |
+| Tennessee Valley Authority | 242.1 | - | 8.8 | - | 233.3 |
+| Public Works Administration | 45.4 | - | - | - | 45.4 |
+| United States Maritime Commission | 257.5 | - | 152.9 | - | 104.6 |
+| Rural Electrification Admin. | 113.1 | - | - | - | 113.1 |
+| Home Owners' Loan Corp. | 3,073.4 | 2,914.3 | 103.6 | - | 55.5 |
+| Federal Savings & Loan Insurance Corp. | 118.8 | - | 1.2 | - | 117.6 |
+| Federal Savings & Loan Assts. | 44.0 | - | - | - | 44.0 |
+| Federal Home Loan Banks | 293.8 | - | 121.1 | 47.9 | 124.8 |
+| Federal Housing Admin. | 41.7 | 2.2 | 1.2 | - | 38.3 |
+| United States Housing Authority | 260.8 | 114.5 | 2.5 | - | 143.8 |
+| Farm Credit Administration | 123.7 | - | 4.5 | - | 119.2 |
+| Federal Farm Mortgage Corp. | 1,617.4 | 1,394.7 | 43.2 | - | 179.5 |
+| Federal Land Banks | 2,333.3 | - | 1,818.3 | 196.8 | 318.2 |
+| Federal Intermediate Credit Banks | 298.2 | - | 192.0 | - | 106.2 |
+| Banks for Cooperatives | 179.6 | - | 3.9 | 3.5 | 172.2 |
+| Production Credit Corp. | 122.3 | - | .3 | - | 122.0 |
+| Regional Agricultural Credit Corps. | 21.9 | - | 3.2 | - | 18.7 |
+| War emergency corps. & agencies (in liquidation): Navy Department (sale of surplus war supplies) | 4.7 | - | - | - | 4.7 |
+| United States Housing Corp. | 1.9 | - | - | - | 1.9 |
+| United States Railroad Admin. | .1 | - | - | - | .1 |
+| United States Spruce Production Corp. | .7 | - | - | - | .7 |
+| War Finance Corp. | 1/ | - | 1/ | - | 1/ |
+| Other: |  |  |  |  |  |
+| Disaster Loan Corp. | 15.0 | - | .1 | - | 15.0 |
+| Electric Hous and Farm Authority | 8.7 | - | 7.8 | - | .9 |
+| Farm Security Administration | 240.8 | - | - | - | 240.8 |
+| Federal National Mortgage Asst. | 118.7 | - | 87.9 | - | 30.8 |
+| Federal Prison Industries, Inc. | 7.5 | - | .2 | - | 7.3 |
+| Interior Department (Indian loans) | 2.3 | - | - | - | 2.3 |
+| Inland Waterways Corp. | 25.8 | - | .8 | - | 25.0 |
+| Panama Railroad Co. | 46.6 | - | .8 | - | 45.8 |
+| Puerto Rico Reconstruction Admin. | 5.2 | - | - | - | 5.2 |
+| R P C Mortgage Company | 57.4 | - | 1.5 | - | 55.9 |
+| Tennessee Valley Associated Cooperatives, Inc. | .3 | - | - | - | .3 |
+| Treasury Department: Railroad loans (Transportation Act, 1920) | 30.2 | - | - | - | 30.2 |
+| Securities received from the Reconstruction Finance Corp. under Act of Feb. 24, 1938 | 2.6 | - | - | - | 2.6 |
+| Total | 12,448.9 | 5,454.6 | 2,898.3 | 387.5 | 3,708.5 |
+
+Note: Figures in this table are rounded to nearest tenth of million and will not necessarily add to totals. Excluding inter-agency transactions. 1/ Less than $100,000.
+
+Proprietary Interest of the United
+
+tes in Governmental Corporations Lending Agencies: Apr. 30, 1939
+
+(Compiled from latest reports received from these agencies)
+
+(In millions of dollars)
+
+| Category | Capital Stock | Surplus | Inter-agency Transactions | Net Pro-prietary Interest of the U. S.* |
+| --- | --- | --- | --- | --- |
+| Stock: |  |  |  |  |
+| Reconstruction Finance Corp. | 500.0 | 234.5 | 187.3 2/6 | 547.5 |
+| Commodity Credit Corp. | 100.0 | - |  | 100.6 |
+| Export-Import Bank of Washington. | 46.0 | 2.1 | - | 48.1 |
+| Federal Crop Insurance Corp. | 5.0 | - | - | 5.0 |
+| Federal Deposit Insurance Corp | 150.0 | - | - | 150.0 |
+| Home Owners' Loan Corp. | 200.0 | 56.4 3/ | 100.0 2/ | 43.6 |
+| Federal Savings and Loan Insurance Corp. | 100.0 | 17.6 | - | 117.6 |
+| Federal Savings and Loan Assn | 44.0 | - | - | 44.0 |
+| Federal Home Loan Banks | 124.7 | - | - | 124.7 |
+| U. S. Housing Authority | 1.0 | 142.8 | - | 143.8 |
+| Federal Farm Mortgage Corp. | 200.0 | - | 20.5 2/ | 179.5 |
+| Federal Land Banks | 125.0 | 186.5 | 6.8 | 318.2 |
+| Federal Intermediate Credit Banks | 70.0 | 47.5 | 11.4 2/ | 106.2 |
+| Banks for Cooperatives | 149.0 | 11.8 | 11.4 | 172.2 |
+| Production Credit Corps | 120.0 | 2.0 | - | 122.0 |
+| Regional Agricultural Credit Corp. | 5.0 | 13.7 | - | 18.7 |
+| U. S. Housing Corp. | 34.2 | 32.2 3/ | - | 1.9 |
+| U. S. Spruce Production Corp. | .1 | .2 | .4 | .7 |
+| War Finance Corp. | 1/ | 1/ | - | 1/ |
+| Disaster Loan Corp. | 16.0 | 1.1 3/ | - | 14.9 |
+| Electric Home and Farm Authority | .9 | .1 | - | .9 |
+| Federal National Mortgage Assn. | 10.0 | 2.3 | 18.5 | 30.8 |
+| Inland Waterways Corp. | 12.0 | 13.0 | - | 25.0 |
+| Panama Railroad Company | 7.0 | 39.4 | .5 2/ | 45.8 |
+| R F C Mortgage Company | 25.0 | 1/ | 30.8 | 55.9 |
+| T V A Cooperatives, Inc. | 1/ | .3 | - | .3 |
+| Total | 2,044.9 | 624.4 | 251.2 2/ | 2,417.9 |
+| Non-Stock: |  |  |  |  |
+| Tennessee Valley Authority |  |  |  | 233.0 |
+| Public Works Admn. |  |  |  | 45.4 |
+| U. S. Maritime Commission |  |  |  | 104.7 |
+| Rural Electrification Admn. |  |  |  | 113.1 |
+| Federal Housing Admn. |  |  |  | 38.3 |
+| Farm Credit Admn. |  |  |  | 119.2 |
+| Navy Department (Sale of surplus war supplies) |  |  |  | 4.7 |
+| U. S. Railroad Admn. |  |  |  | .1 |
+| Farm Security Admn. |  |  |  | 240.8 |
+| Federal Prisons Industries,Inc |  |  |  | 7.3 |
+| Interior Department (Indian loans) |  |  |  | 2.3 |
+| Puerto Rico Reconstruction Admn. |  |  |  | 5.2 |
+| Railroad Loans (Transportation Act, 1920) |  |  |  | 30.2 |
+| Securities received from R F C (Act Feb. 24, 1938) |  |  |  | 2.6 |
+| Total |  |  |  | 946.9 |
+| Special Obligations Held by Treasury: |  |  |  |  |
+| Reconstruction Finance Corporation |  |  |  | 321.5 |
+| Commodity Credit Corp. |  |  |  | 10.0 |
+| Home Owners' Loan Corp. |  |  |  | 12.0 |
+| Tennessee Valley Authority |  |  |  | .3 |
+| Total |  |  |  | 343.8 |
+| Grand Total |  |  |  | 3,708.5 |
+
+Note: Figures in this table are rounded to nearest tenth of million and will not necessarily add to totals. Excluding inter-agency transactions. 1/ Less than $100,000. 2/ Excess inter-agency assets (deduct). 3/ Deficit.
+
+31
+
+Statement of Sources of Funds of Certain Corporations and Agencies Maintaining Checking Accounts with the Treasurer of the United States: First 10 Months, Fiscal Year 1939
+
+(Compiled from latest reports received by the Treasury)
+
+| Category | Appropriations from general fund 1/ | Allocations, and loans from other governmental corporations or agencies | Sale of obligations to Treasury (net) | Sale of obligations in the market (net) | Sale of stock to other agencies | Sale of other property acquired | Repayment of loans 2/ | Interest dividends, assessments, and property income | Other receipts | Total source of funds |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Reconstruction Finance Corporation 3/ | - | $19,450,000 | $542,169,289 | $576,108,333 | - | $238,880 | $354,155,000 | $58,529,919 | $21,915,747 | $488,228,590 |
+| Commodity Credit Corporation | - | - | 10,000,000 | 5,000 | - | - | 50,643,741 | 1,532,870 | 629,161 | 62,800,772 |
+| Export-Import Bank of Washington | - | 2,450,000 | - | - | $25,000,000 | - | 9,790,404 | 1,160,505 | 298,039 | 38,698,948 |
+| Federal Deposit Insurance Corporation | - | - | - | - | - | 91,266 | 7,021,093 | 46,499,043 | 1,070,162 | 54,681,504 |
+| Rural Electrification Administration | $36,466,601 | 19,543,000 | - | - | - | - | 306,398 | 893,791 | 7,217 | 57,217,007 |
+| Home Owners' Loan Corporation | - | - | 3,000,000 | - | - | 14,042,550 | 136,796,646 | 117,750,519 | 367,172 | 265,956,887 |
+| Federal Savings and Loan Insurance Corporation | - | - | - | - | - | - | - | 3,750,712 | 128 | 3,750,840 |
+| Federal Home Loan Banks | - | - | - | 15,818,520 | - | - | 92,561,793 | 5,629,265 | -11,029,535 | 125,039,113 |
+| United States Housing Authority | 4,763,581 | - | - | 114,157,000 | - | - | 472,303 | 3,111,195 | 147,709 | 122,651,788 |
+| Federal Farm Mortgage Corporation | - | - | - | 29,850,000 | - | 1,197,024 | 56,433,774 | 51,905,557 | 1,672,458 | 81,358,813 |
+| Disaster Loan Corporation | 6,000,000 | - | - | - | - | - | 1,052,243 | 130,954 | 34,363 | 7,217,560 |
+| Central Bank for Cooperatives | - | 17,965,349 | - | - | 158,600 | - | 33,896,076 | 1,144,060 | 185,406 | 53,032,931 |
+| Electric Home and Farm Authority | - | - | - | 1,455,503 | - | - | 3,495,245 | 557,441 | 56,120 | 5,564,309 |
+| Total | 47,230,182 | 59,408,349 | 535,169,289 | 677,684,356 | 24,841,400 | 15,569,720 | 746,624,716 | 292,595,831 | 37,413,217 | 1,366,198,482 |
+
+Excess of retirements (deduct).
+
+1/ This is the only item in this statement which constitutes a charge against the Federal Budget. Includes items chargeable to general fund under Section 1 of Public No. 432, approved Feb. 24, 1938.
+
+2/ Receipts from sale of property acquired in liquidation of loans are shown as "Sale of Other Property Acquired."
+3/ Includes Federal National Mortgage Association and the RFC Mortgage Company.
+
+Statement of Uses of Funds of Certain Corporations and Agencies Maintaining Checking Accounts with the Treasurer of the United States: First 10 Months, Fiscal Year 1939
+
+(Compiled from latest reports received by the Treasury - Expenditures on basis of checks issued)
+
+| Category | Expense > Administrative | Nonadministrative | Purchase and improvement of property owned | Loans | Retirement of obligations issued in exchange for mortgages 1/ | Investments (net) | Allocations, rediscouncts, and loans to other governmental corporations or agencies | Interest and dividends paid | Other expenditures | Total usage of funds |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Reconstruction Finance Corporation 2/ | $8,255,725 | $2,781,690 | - | $349,179,143 | - | $25,000,000 | $49,993,000 | $17,440,405 | $171,984 | $452,821,947 |
+| Commodity Credit Corporation | 1,030,268 | - | - | 188,585,899 | - | - | - | 1,888,550 | 321,632 | 191,826,349 |
+| Export-Import Bank of Washington | 45,165 | 80 | - | 20,938,766 | - | - | 17,450,000 | - | 325,636 | 38,759,847 |
+| Federal Deposit Insurance Corporation | 2,606,579 | - | - | 26,523,659 | - | 6,525,152 | - | 20,715,266 | 160,348 | 43,480,700 |
+| Rural Electrification Administration | 1,818,483 | - | - | 51,616,623 | - | - | - | - | 101,482 | 53,536,588 |
+| Home Owners' Loan Corporation | 21,032,310 | 21,410,793 | $27,470,980 | 27,844,577 | $49,764,625 | 1,237,150 | - | 61,519,173 | 8,534,457 | 218,814,065 |
+| Federal Savings and Loan Insurance Corporation | 173,350 | 4,706 | - | - | - | 3,515,722 | - | 34,331 | - | 3,728,109 |
+| Federal Home Loan Banks | 1,031,892 | - | - | 53,513,084 | - | 19,284,142 | - | 3,394,271 | 92,512 | 77,215,901 |
+| United States Housing Authority | 2,432,348 | 2,145,437 | 4,744,745 | 33,907,977 | - | 1,350,000 | - | 31,097 | 58,594 | 44,670,198 |
+| Federal Farm Mortgage Corporation | 6,737,442 | 913,143 | 2,137,177 | 22,186,332 | - | 20,575,000 | - | 27,664,472 | 4,082,425 | 43,145,991 |
+| Disaster Loan Corporation | 493,774 | 10,120 | - | 7,449,790 | - | - | - | - | 21,417 | 7,975,101 |
+| Central Bank for Cooperatives | 104,504 | - | - | 25,767,532 | - | 4,210,500 | 21,989,755 | 202,165 | 504,253 | 52,778,709 |
+| Electric Home and Farm Authority | 296,836 | 129,570 | - | 5,064,443 | - | - | - | 52,077 | 29,096 | 5,572,022 |
+| Total | 46,058,676 | 27,395,539 | 34,352,902 | 812,577,825 | 49,764,625 | 27,497,362 | 89,432,755 | 132,941,807 | 14,403,836 | 1,234,425,327 |
+
+Excess of sales over purchases (deduct).
+
+1/ Receipts received in payment of mortgages appear under "Repayment of Loans" in the statement of sources of funds.
+
+27 Included Federal National Mortgage Association and the FMC Mortgage Company.
+
+32
+
+Statement of Sources of Funds of Certain Governmental Corporations and Agencies Maintaining Checking Accounts with the Treasurer of the United States, from Inception of Organization to Apr. 30, 1939
+
+(Compiled from latest reports received by the Treasury)
+
+| Category | Appropriations from general fund 1/ | Allocations, rediscounts, and loans from other governmental corporations or agencies | Sale of obligations to Treasury (net) | Sale of obligations in the market (net) | Sale of stock to other agencies | Sale of other property acquired | Repayment of loans 2/ | Interests, dividends, assessments, and property income | Other receipts | Total, sources of funds |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Reconstruction Finance Corporation 3/... | $500,000,000 | $24,794,925 | $321,522,878 | $904,729,000 | - | $2,414,511 | $4,631,161,604 | $491,963,720 | $58,286,115 | $6,934,872,753 |
+| Commodity Credit Corporation...... | 194,285,405 | - | 10,000,000 | 206,174,000 | - | - | 533,988,917 | 9,157,256 | 1,027,524 | 954,633,102 |
+| Export-Import Bank of Washington.... | 1,000,000 | 2,792,500 | - | - | $45,000,000 | - | 31,592,289 | 3,252,295 | 594,756 | 84,231,840 |
+| Federal Deposit Insurance Corporation...... | 150,000,000 | - | - | - | 139,299,557 | - | 14,374,252 | 187,973,459 | 2,981,830 | 494,629,098 |
+| Rural Electrification Administration.... | 65,440,707 | 56,700,000 | - | - | - | - | 357,842 | 968,154 | 8,398 | 123,475,101 |
+| Home Owners' Loan Corporation...... | 200,000,000 | - | 12,000,000 | 3,114,453,550 4/ | - | 24,602,317 | 569,316,887 | 617,462,539 | 4,112,349 | 4,541,947,642 |
+| Federal Savings and Loan Insurance Corporation. | - | - | - | - | 100,000,000 | - | - | 20,430,700 | 31,057 | 120,461,757 |
+| Federal Home Loan Banks...... | - | - | 124,741,000 | 129,089,725 | - | - | 342,701,170 | 28,364,692 | 31,820,974 | 656,717,561 |
+| United States Housing Authority | 29,303,970 | - | - | 114,157,000 | - | - | 764,384 | 5,004,457 | 149,612 | 149,379,423 |
+| Federal Farm Mortgage Corp.... | 200,000,000 | - | 35,000,000 | 1,344,909,900 | - | 2,646,000 | 172,640,426 | 293,913,880 | 8,060,076 | 2,057,170,282 |
+| Disaster Loan Corporation...... | 16,000,000 | - | - | - | - | - | 2,084,985 | 228,621 | 59,988 | 18,373,594 |
+| Central Bank for Cooperatives..... | 50,000,000 | 62,244,178 | - | - | 339,700 | - | 161,933,836 | 8,160,262 | 2,305,645 | 284,983,621 |
+| Total......... | 1,406,030,082 | 146,531,603 | 503,263,878 | 5,813,513,175 | 284,639,257 | 29,662,828 | 6,460,916,592 | 1,666,880,035 | 109,438,324 | 16,420,875,774 |
+
+1/ This is the only item in this statement which constitutes a charge against the Federal Budget. Includes items chargeable to general fund under Section 1 of Public No. 432, approved Feb. 24, 1938.
+2/ Receipts from sale of property acquired in liquidation of loans are shown as "Sale of Other Property Acquired."
+3/ Includes Federal National Mortgage Association and the RFC Mortgage Company.
+4/ Retirement of these obligations shown as "Retirement of Obligations Issued in Exchange for Mortgages" in statement of uses of funds.
+
+Statement of Uses of Funds of Certain Governmental Corporations and Agencies Maintaining Checking Accounts with the Treasurer of the United States, from Inception of Organization to Apr. 30, 1939
+
+(Compiled from latest reports received by the Treasury - Expenditures on baels of checks issued.)
+
+| Category | Expenses > Administrative | Nonadministrative | Purchase and improvement of property owned | Loane | Retirement of obligations issued in exchange for mortgages 1/ | Investments (net) 3/ | Allocations, discounts, and loans from other governmental corporations or agencies | Interest and dividends paid | Other expenditures | Total, uses of funds |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Reconstruction Finance Corporation 2/... | $66,258,978 | $6,084,206 | - | $6,517,372,116 | - | $45,000,000 | $87,492,500 | $221,568,516 | $348,078 | $6,944,124,394 |
+| Commodity Credit Corporation...... | 3,084,512 | - | - | 927,451,895 | - | - | - | 16,676,965 | 382,600 | 947,595,972 |
+| Export-Import Bank of Washington.... | 230,960 | 215 | - | 57,682,344 | - | - | 22,792,500 | 1,206,164 | 457,848 | 82,430,031 |
+| Federal Deposit Insurance Corporation..... | 16,024,002 | - | $950,658 | 59,666,723 | - | 345,878,139 | - | 40,000,894 | 482,934 | 463,003,350 |
+| Rural Electrification Administration.... | 5,173,128 | - | - | 111,657,434 | - | - | 2,425 | 547,712 | 117,733 | 117,498,432 |
+| Home Owners' Loan Corporation...... | 170,369,541 | 42,452,962 | 95,676,190 | 3,161,474,253 | $226,224,325 | 314,063,910 | - | 344,150,068 | 11,376,512 | 4,365,787,761 |
+| Federal Savings and Loan Insurance Corporation. | 736,033 | 5,259 | - | - | - | 116,395,483 | - | 3,174,491 | 9,716 | 120,320,982 |
+| Federal Home Loan Banks...... | 6,856,578 | - | - | 499,877,400 | - | 53,867,367 | - | 13,927,794 | 130,355 | 574,659,494 |
+| United States Housing Authority | 3,845,675 | 3,002,961 | 25,476,166 | 37,295,927 | - | 1,350,000 | - | 32,492 | 59,844 | 71,063,065 |
+| Federal Farm Mortgage Corp.... | 52,467,817 | 1,607,166 | 6,139,852 | 961,238,251 | - | 785,579,840 | - | 179,331,673 | 10,306,350 | 1,996,670,949 |
+| Disaster Loan Corporation...... | 1,358,894 | 40,064 | - | 14,323,509 | - | - | - | - | 24,795 | 15,747,262 |
+| Central Bank for Cooperatives..... | 591,136 | - | - | 175,166,462 | - | 45,285,000 | 55,531,718 | 423,296 | 2,929,722 | 279,927,334 |
+| Total......... | 327,057,254 | 53,192,833 | 128,242,866 | 12,523,206,314 | 226,224,325 | 1,707,419,739 | 165,819,143 | 821,040,065 | 26,626,487 | 15,978,729,026 |
+
+1/ Receipts received in payment of mortgages appear under "Repayment of Loans" in the statement of sources of funds.
+2/ Includes Federal National Mortgage Association and the RFO Mortgage Company.
+3/ Includes U. S. Government Bonds in the amount of $302,622,396, as follows-- Federal Deposit Insurance Corp., $227,337,938; Federal Savings and Loan Insurance Corp. $10,997,697; U. S. Housing Authority $1,350,000 and the Banks for Cooperatives $27,885,000; Federal Home Loan Banks $35,001,701.
+
+33
+
+Principal of Outstanding Obligations Guaranteed by the United States
+
+(In millions of dollars - compiled from reports received by the Treasury)
+
+| End of fiscal year or month | Total 1/ | Commodity Credit Corporation notes | Federal Farm Mortgage Corporation bonds | Federal Housing Administration debentures | Home Owners' Loan Corporation bonds | Reconstruction Finance Corporation notes | United States Housing Authority |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1934 | 680.7 | - | 311.6 | - | 134.3 | 234.8 | - |
+| 1935 | 4,122.7 | - | 1,225.6 | - | 2,647.3 | 249.8 | - |
+| 1936 | 4,718.0 | - | 1,422.2 | - | 3,044.2 | 251.6 | - |
+| 1937 | 4,664.6 | - | 1,422.2 | 1.1 | 2,987.1 | 255.2 | - |
+| 1938 | 4,852.7 | 206.2 | 1,409.8 | .6 | 2,937.2 | 298.9 | - |
+| 1938-Apr. | 4,646.8 | - | 1,409.9 | .5 | 2,937.2 | 299.2 | - |
+| May | 4,852.3 | 206.2 | 1,409.8 | .5 | 2,937.2 | 298.6 | - |
+| June | 4,852.7 | 206.2 | 1,409.8 | .6 | 2,937.2 | 298.9 | - |
+| July | 5,064.2 | 206.2 | 1,409.8 | .6 | 2,937.2 | 510.4 | - |
+| Aug. | 5,015.0 | 206.2 | 1,409.8 | .9 | 2,887.6 | 510.5 | - |
+| Sept. | 5,009.4 | 206.2 | 1,404.2 | .9 | 2,887.6 | 510.5 | - |
+| Oct. | 5,000.5 | 206.2 | 1,395.1 | 1.1 | 2,887.6 | 510.5 | - |
+| Nov. | 4,993.3 | 206.2 | 1,387.8 | 1.2 | 2,887.6 | 510.5 | - |
+| Dec. | 4,991.9 | 206.2 | 1,387.8 | 1.3 | 2,887.6 | 509.0 | - |
+| 1939-Jan. | 4,987.0 | 206.2 | 1,382.7 | 1.4 | 2,887.6 | 509.1 | - |
+| Feb. | 5,409.7 | 206.2 | 1,380.9 | 1.7 | 2,887.6 | 819.2 | 114.1 |
+| Mar. | 5,409.9 | 206.2 | 1,380.9 | 1.9 | 2,887.6 | 819.2 | 114.1 |
+| Apr. | 5,409.7 | 206.2 | 1,379.9 | 2.2 | 2,887.8* | 819.5 | 114.1 |
+
+Preliminary l/ Exclusive of obligations sold directly to the Treasury.
+
+Market Financing Operations Conducted by the Treasury for Agencies Issuing Government-Guaranteed Securities
+
+| Agency | Rate and title of issue | Term (years) | Date | Amount issued > Exchanges for other securities | For cash |
+| --- | --- | --- | --- | --- | --- |
+| FFMC | 3% Bonde of 1944-49 | 10-15 | 1934-May 15 | - | $100,045,300 |
+| HOLC | 1-1/2% Bonds, Series C, 1936 | 2 | Aug. 15 | - | $49,736,000 |
+| HOLC | 1-3/4% Bonde, Series D, 1937 | 3 | Aug. 15 | - | $49,843,000 |
+| HOLC | 2% Bonds, Series E, 1938 | 4 | Aug. 15 | - | $49,532,100 |
+| HOLC | 1-1/2% Bonds, Series F, 1939 | 4 | 1935-June 1 | $245,254,750 | $80,000,000 |
+| FFMC | 1-1/2% Bonds of 1939 | 4 | Sept. 3 | - | $85,122,000 |
+| CCC | 3/4% Notes of Series C | 1-1/2 | 1938-May 2 | $58,430,000 | $147,744,000 1/2 |
+| RFC | 7/8% Notes of Series N | 3 | July 20 | - | $211,460,000 1/2 |
+| RFC | 7/8% Notes of Series P | 3 | Nov. 1 | $297,139,000 | - |
+| USHA | 1-3/8% Notes of Series B | 5 | 1939-Feb. 1 | - | $114,146,000 2/1 |
+| RFC | 7/8% Notes of Series R | 2 yr. 11 mo. | Feb. 15 | - | $310,090,000 3/1 |
+| HOLC | 3/8% Bonde, Series K, 1940 | 1 | May 15 | $127,779,400 | - |
+| HOLC | 5/8% Bonds, Series L, 1941 | 2 | May 15 | $191,669,900 | - |
+| HOLC | 1-1/2% Bonds, Series M,1945-47 | 6-8 | June 1 | $687,732,750 1/2 | - |
+
+1 Sold on a subscription basis. Subscriptions were allotted 3/4, with $1,000 minimum allotment.
+2 Sold on a subscription basis. Subscriptions were allotted 4/4, with $1,000 minimum allotment.
+3 Sold on a subscription basis at 100-1/4. Subscriptions were allotted 12/4, with $1,000 minimum allotment.
+4 Tentative figure.
+
+| Year | 2007 | 2008 | 2009 | 2010 | 2011 | 2012 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Number of employees | 15 | 25 | 24 | 23 | 23 | 24 |
+| Number of employees (in thousands) | 0.015 | 0.025 | 0.024 | 0.023 | 0.023 | 0.024 |
+| Number of employees (in millions) | 0.000015 | 0.000025 | 0.000024 | 0.000023 | 0.000023 | 0.000024 |
+
+CAPITAL MOVEMENTS BETWEEN THE UNITED STATES AND FOREIGN COUNTRIES
+
+34
+
+35
+
+Net Capital Movement between the United States and Foreign Countries 1935 through March 1939
+
+(In thousands of dollars. Capital inflow or capital outflow (-))
+
+| Movement during following periods | United Kingdom | France | Germany | Italy | Nether-lands | Switzer-land | Other Europe | Total Europe | Canada | Latin America | Far East | All other | Grand total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| MOVEMENT IN SHORT-TERM BANKING FUNDS: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Jan. 2, 1935-Jan. 1, 1936... | 337,385 | 177,610 | 28,829 | 21,011 | 55,362 | 73,990 | 69,476 | 763,663 | 41,394 | 53,554 | 96,140 | 9,878 | 964,629 |
+| Jan. 1, 1936-Dec. 30, 1936... | 4,166 | 28,599 | 39,892 | 18,254 | 7,229 | 38,550 | 32,192 | 168,882 | 82,251 | 120,672 | 24,609 | 928 | 397,342 |
+| Dec. 30, 1936-Dec. 29, 1937... | 55,151 | -23,162 | 46,003 | -25,896 | 9,283 | 178,423 | 34,625 | 268,427 | -69,087 | 43,678 | 24,083 | -11,507 | 255,594 |
+| Dec. 29, 1937-Dec. 28, 1938... | 174,438 | 47,232 | 15,796 | 4,356 | 5,661 | -84,633 | 99,761 | 262,611 | 111,904 | -18,005 | -77,082 | 13,787 | 293,215 |
+| Dec. 28, 1938-Mar. 29, 1939... | 39,788 | 28,051 | 8,380 | -10,849 | 50,888 | 31,591 | 62,704 | 210,553 | 20,772 | 45,581 | 44,055 | 11,715 | 332,676 |
+| Total | 610,928 | 252,330 | 138,900 | 6,876 | 128,423 | 237,921 | 298,758 | 1,674,136 | 187,234 | 245,480 | 111,805 | 24,801 | 2,243,456 |
+| Week ended 1939-Mar. 8... | 2,852 | 4,946 | -329 | 515 | -3,753 | -1,075 | 6,394 | 9,540 | 361 | 4,194 | -4,017 | 332 | 10,410 |
+| Mar. 15... | 7,160 | -2,077 | 3,795 | -846 | 4,208 | 4,522 | -692 | 16,270 | 7,982 | 3,934 | -8,645 | -1,854 | 17,687 |
+| Mar. 22... | 3,197 | 1,208 | -1,200 | -502 | 19,676 | -8,716 | 18,200 | 31,863 | 16,867 | 20,317 | 4,033 | 3,246 | 76,326 |
+| Mar. 29... | 428 | -161 | 952 | 913 | 4,402 | 16,711 | 19,208 | 33,643 | -2,572 | 6,942 | 5,567 | 2,078 | 45,658 |
+| Total March | 13,637 | 3,910 | 3,218 | 280 | 15,719 | 11,442 | 43,110 | 91,316 | 22,638 | 35,387 | -3,062 | 3,802 | 150,081 |
+| MOVEMENT IN BROKERAGE BALANCES: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Jan. 2, 1935-Jan. 1, 1936... | 13 | 2,418 | -152 | 123 | 1,265 | 2,455 | 1,432 | 7,553 | -4,479 | 968 | 2,878 | -881 | 6,039 |
+| Jan. 1, 1936-Dec. 30, 1936... | 4,016 | 7,977 | -510 | 131 | -2,195 | 6,656 | -1,070 | 15,005 | -3,086 | -5,182 | -788 | 862 | 6,811 |
+| Dec. 30, 1936-Dec. 29, 1937... | 7,494 | 1,123 | 669 | -109 | 5,883 | 1,734 | 4,656 | 21,450 | 11,092 | 3,700 | -1,569 | 14 | 34,687 |
+| Dec. 29, 1937-Dec. 28, 1938... | 1,722 | 1,060 | -191 | 58 | 1,828 | -2,014 | 277 | 2,740 | -940 | -434 | -1,552 | 220 | 34 |
+| Dec. 28, 1938-Mar. 29, 1939... | 3,075 | 3,383 | 29 | 17 | 2,025 | 742 | 1,345 | 10,616 | 3,036 | 1,042 | 1,604 | 55 | 16,353 |
+| Total | 16,320 | 15,961 | -155 | 220 | 8,806 | 9,573 | 6,639 | 57,364 | 5,623 | 94 | 573 | 270 | 63,924 |
+| Week ended 1939-Mar. 8... | 1,410 | -833 | -4 | 1 | -474 | 207 | -396 | -89 | 272 | 281 | -103 | 60 | 421 |
+| Mar. 15... | 528 | -235 | -15 | 3 | 932 | 918 | -320 | 1,911 | 805 | -808 | 93 | -97 | 1,904 |
+| Mar. 22... | 1,300 | 641 | 6 | -27 | 601 | -1,182 | 1,264 | 2,603 | 807 | 1,539 | 475 | 23 | 5,447 |
+| Mar. 29... | -238 | -669 | 70 | -14 | -517 | -1,107 | -709 | -3,184 | 1,109 | -107 | -309 | -115 | -2,606 |
+| Total March | 3,000 | -1,096 | 57 | -37 | 542 | -1,164 | -61 | 1,241 | 2,993 | 905 | 156 | -129 | 5,166 |
+| MOVEMENT IN TRANSACTIONS IN DOMESTIC SECURITIES: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Jan. 2, 1935-Jan. 1, 1936... | 114,780 | 23,394 | -5,353 | -95 | 50,456 | 55,125 | 12,928 | 286,237 | 2,807 | 3,685 | 21,371 | 2,560 | 316,660 |
+| Jan. 1, 1936-Dec. 30, 1936... | 21,915 | 41,352 | -2,102 | -3,235 | 107,149 | 145,036 | 25,604 | 531,719 | 29,840 | 11,841 | 22,763 | 4,530 | 600,693 |
+| Dec. 30, 1936-Dec. 29, 1937... | 81,024 | 5,580 | -9,965 | -1,530 | 56,235 | 75,100 | 17,215 | 223,659 | 4,997 | 2,705 | 10,543 | 2,722 | 244,626 |
+| Dec. 29, 1937-Dec. 28, 1938... | 23,869 | 6,168 | -5,262 | -568 | -900 | 26,487 | 856 | 50,650 | -9,845 | 5,204 | 1,696 | 1,190 | 48,895 |
+| Dec. 28, 1938-Mar. 29, 1939... | -24,319 | 4,233 | -749 | -35 | 4,759 | -23 | -57 | -24,657 | -8,994 | 1,160 | 1,568 | 676 | -30,247 |
+| Total | 448,269 | 72,261 | -23,431 | -5,463 | 217,701 | 301,725 | 56,546 | 1,067,608 | 18,805 | 24,595 | 57,941 | 11,678 | 1,180,627 |
+| Week ended 1939-Mar. 8... | -2,254 | 565 | -118 | 5 | 1,589 | -826 | 129 | -910 | -441 | 74 | -1,284 | 4 | -2,557 |
+| Mar. 15... | 1,574 | 237 | 14 | -28 | -387 | -1,783 | 88 | -285 | -225 | 354 | -434 | 108 | -482 |
+| Mar. 22... | -9,117 | -455 | -70 | 23 | -1,001 | -890 | -940 | -12,450 | -2,254 | 369 | -877 | 130 | -15,082 |
+| Mar. 29... | -364 | -355 | -108 | -35 | 3,510 | 3,753 | 1,712 | 8,113 | -1,357 | 513 | -1,244 | 152 | 6,177 |
+| Total March | -10,161 | -8 | -282 | -35 | 3,711 | 254 | 989 | -5,532 | -4,277 | 1,310 | -3,839 | 394 | -11,944 |
+| MOVEMENT IN TRANSACTIONS IN FOREIGN SECURITIES: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Jan. 2, 1935-Jan. 1, 1936... | 67,757 | 6,818 | 13,275 | 2,949 | 7,408 | -1,191 | 46,129 | 143,145 | -39,715 | 12,700 | 7,914 | 1,114 | 125,158 |
+| Jan. 1, 1936-Dec. 30, 1936... | 48,304 | 11,368 | 9,247 | 6,469 | 3,008 | 11,924 | 41,788 | 135,108 | 41,452 | 2,973 | 9,133 | 2,410 | 191,076 |
+| Dec. 30, 1936-Dec. 29, 1937... | 20,713 | 4,623 | 4,059 | 4,057 | 10,815 | 16,657 | 27,267 | 88,191 | 8,785 | 159,284 | 7,484 | 3,264 | 267,008 |
+| Dec. 29, 1937-Dec. 28, 1938... | -7,694 | 3,352 | 6,482 | 7,027 | 6,106 | 6,694 | 50,687 | 72,654 | -49,392 | -8,644 | 9,271 | 2,869 | 26,758 |
+| Dec. 28, 1938-Mar. 29, 1939... | -1,452 | 117 | 1,833 | 2,552 | 1,346 | 1,298 | 9,007 | 14,701 | 13,111 | 6,242 | 2,358 | 278 | 36,690 |
+| Total | 127,628 | 26,278 | 34,896 | 23,054 | 28,683 | 38,382 | 174,878 | 453,799 | -25,759 | 172,555 | 36,160 | 9,935 | 646,690 |
+| Week ended 1939-Mar. 8... | 152 | 262 | 129 | 53 | 272 | -317 | 270 | 821 | 980 | 829 | 423 | 119 | 3,172 |
+| Mar. 15... | 84 | -271 | 124 | 172 | 11 | -488 | 117 | -251 | -1,437 | 278 | 461 | 42 | -907 |
+| Mar. 22... | -1,022 | 299 | 152 | 37 | 83 | 65 | 1,255 | 869 | -415 | 252 | 186 | -132 | 760 |
+| Mar. 29... | -84 | 215 | 52 | -24 | 195 | 637 | 1,163 | 2,154 | -140 | 193 | 114 | 49 | 2,370 |
+| Total March | -870 | 505 | 457 | 238 | 561 | -103 | 2,805 | 3,593 | -1,012 | 1,552 | 1,184 | 78 | 5,395 |
+| NET CAPITAL MOVEMENT: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Jan. 2, 1935-Jan. 1, 1936... | 554,935 | 210,240 | 36,599 | 23,988 | 114,493 | 130,379 | 129,964 | 1,200,598 | 7 | 70,907 | 128,303 | 12,671 | 1,412,486 |
+| Jan. 1, 1936-Dec. 30, 1936... | 274,401 | 89,296 | 46,527 | 21,619 | 115,191 | 205,156 | 98,514 | 850,714 | 150,457 | 130,304 | 55,717 | 8,730 | 1,195,982 |
+| Dec. 30, 1936-Dec. 29, 1937... | 164,382 | -17,836 | 40,766 | -23,478 | 82,216 | 271,914 | 83,763 | 601,727 | 44,223 | 209,367 | 40,541 | -5,507 | 801,915 |
+| Dec. 29, 1937-Dec. 28, 1938... | 192,335 | 57,812 | 16,825 | 10,873 | 12,695 | -53,466 | 151,581 | 388,655 | 51,727 | -21,879 | -67,667 | 18,066 | 368,902 |
+| Dec. 28, 1938-Mar. 29, 1939... | 17,092 | 27,318 | 9,493 | -8,315 | 59,018 | 33,608 | 72,999 | 211,223 | 27,925 | 54,025 | 49,585 | 12,724 | 355,472 |
+| Total | 1,203,145 | 366,830 | 150,210 | 24,687 | 383,613 | 587,601 | 536,821 | 3,252,907 | 185,903 | 442,724 | 206,479 | 46,684 | 4,134,697 |
+| Week ended 1939-Mar. 8... | 2,160 | 4,940 | -322 | 574 | -2,376 | -2,011 | 6,397 | 9,362 | 1,172 | 5,376 | -4,981 | 515 | 11,446 |
+| Mar. 15... | 9,346 | -2,346 | 3,918 | -499 | 1,764 | 3,169 |  |  |  |  |  |  |  |
+
+CUMULATIVE NET CAPITAL MOVEMENT BETWEEN U.S. AND FOREIGN COUNTRIES
+
+Cumulative Weekly Since January 2, 1935
+
+36
+
+37
+
+Short-Term Foreign Liabilities as Reported by Banks and Bankers in the United States for March 1939
+
+(In thousands of dollars)
+
+| Liabilities as of following dates | United Kingdom | France | Germany | Italy | Nother-lands | Switzer-land | Other Europe | Total Europe | Canada | Latin America | Far East | All other | Grand total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| TOTAL SHORT-TERM FOREIGN LIABILITIES: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 468,734 | 222,031 | 16,884 | 12,099 | 126,335 | 234,900 | 277,862 | 1,358,845 | 214,990 | 269,838 | 248,357 | 39,633 | 2,131,663 |
+| Mar. 15. | 467,855 | 216,258 | 19,820 | 13,198 | 131,270 | 239,623 | 277,993 | 1,366,017 | 221,735 | 271,658 | 241,725 | 38,167 | 2,139,302 |
+| Mar. 22. | 468,107 | 218,909 | 18,546 | 14,161 | 148,535 | 231,766 | 236,129 | 1,396,153 | 239,520 | 292,315 | 250,434 | 41,065 | 2,219,487 |
+| Mar. 29. | 473,899 | 219,521 | 18,726 | 14,827 | 143,895 | 247,093 | 314,728 | 1,432,689 | 236,615 | 300,741 | 250,851 | 43,276 | 2,264,172 |
+| TOTAL LIABILITIES PAYABLE IN DOLLARS: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 396,149 | 218,569 | 16,566 | 11,567 | 125,154 | 234,670 | 276,636 | 1,279,311 | 214,382 | 269,405 | 239,985 | 39,165 | 2,042,248 |
+| Mar. 15. | 397,382 | 213,060 | 19,477 | 12,876 | 130,230 | 239,468 | 276,871 | 1,289,364 | 220,860 | 271,204 | 233,648 | 37,867 | 2,053,143 |
+| Mar. 22. | 392,386 | 215,596 | 18,211 | 13,772 | 145,866 | 227,845 | 293,229 | 1,306,905 | 238,179 | 291,851 | 242,720 | 40,694 | 2,120,309 |
+| Mar. 29. | 396,852 | 216,602 | 18,394 | 14,493 | 141,732 | 246,820 | 313,296 | 1,348,189 | 235,005 | 300,202 | 242,462 | 42,957 | 2,168,815 |
+| Deposits for foreign accounts: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 377,613 | 205,776 | 16,268 | 10,718 | 119,257 | 213,901 | 261,444 | 1,204,977 | 207,504 | 250,173 | 213,888 | 36,830 | 1,913,372 |
+| Mar. 15. | 382,568 | 203,843 | 19,159 | 12,079 | 124,322 | 219,538 | 261,427 | 1,222,936 | 214,147 | 250,985 | 209,674 | 35,933 | 1,933,675 |
+| Mar. 22. | 379,398 | 210,024 | 17,774 | 12,947 | 141,214 | 212,401 | 280,555 | 1,254,313 | 231,838 | 272,377 | 216,381 | 38,134 | 2,013,043 |
+| Mar. 29. | 385,116 | 210,123 | 18,026 | 13,679 | 135,949 | 228,336 | 297,954 | 1,289,183 | 231,865 | 280,000 | 216,278 | 40,794 | 2,058,120 |
+| Bille held for foreign accounts: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 7,866 | 2,411 | 226 | 726 | 5,515 | 19,459 | 13,232 | 49,435 | 6,245 | 18,938 | 25,009 | 1,746 | 101,373 |
+| Mar. 15. | 8,783 | 2,392 | 225 | 703 | 5,539 | 18,601 | 13,424 | 49,667 | 6,305 | 19,930 | 23,193 | 1,352 | 100,447 |
+| Mar. 22. | 7,695 | 2,559 | 277 | 712 | 4,283 | 14,104 | 10,906 | 40,536 | 6,291 | 19,192 | 25,372 | 2,359 | 93,750 |
+| Mar. 29. | 6,900 | 2,665 | 296 | 679 | 5,399 | 17,387 | 12,524 | 45,850 | 2,802 | 19,873 | 25,171 | 2,000 | 95,696 |
+| Short-term United States Government obligations held for foreign account: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 10 | - | - | - | - | - | 1 | 11 | - | - | - | - | 11 |
+| Mar. 15. | 10 | - | - | - | - | - | 1 | 11 | - | - | - | - | 11 |
+| Mar. 22. | 10 | - | - | - | - | - | 1 | 11 | - | - | - | - | 11 |
+| Mar. 29. | 10 | - | - | - | - | - | 1 | 11 | - | - | - | - | 11 |
+| Other liabilities payable in dollars: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 10,660 | 10,382 | 72 | 123 | 382 | 1,310 | 1,959 | 24,888 | 633 | 294 | 1,088 | 589 | 27,492 |
+| Mar. 15. | 6,021 | 6,825 | 93 | 94 | 369 | 1,329 | 2,019 | 16,750 | 408 | 289 | 981 | 582 | 19,010 |
+| Mar. 22. | 5,283 | 3,013 | 160 | 113 | 369 | 1,340 | 1,767 | 12,045 | 50 | 282 | 967 | 161 | 13,505 |
+| Mar. 29. | 4,826 | 3,614 | 72 | 135 | 384 | 1,097 | 2,817 | 13,145 | 338 | 329 | 1,013 | 163 | 14,988 |
+| TOTAL LIABILITIES PAYABLE IN FOREIGN CURRENCIES: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 72,585 | 3,462 | 318 | 532 | 1,181 | 230 | 1,226 | 79,534 | 608 | 433 | 8,372 | 468 | 89,415 |
+| Mar. 15. | 70,473 | 3,198 | 343 | 322 | 1,040 | 155 | 1,122 | 76,653 | 875 | 454 | 7,877 | 300 | 86,159 |
+| Mar. 22. | 75,721 | 3,313 | 335 | 389 | 2,669 | 3,921 | 2,900 | 89,248 | 1,341 | 464 | 7,714 | 411 | 99,178 |
+| Mar. 29. | 77,047 | 2,919 | 332 | 334 | 2,163 | 273 | 1,432 | 64,500 | 1,610 | 539 | 8,389 | 319 | 95,357 |
+| Borrowings from foreign banks: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 31,513 | 519 | 311 | 429 | 180 | 112 | 755 | 33,819 | 248 | 311 | 7,720 | 273 | 42,371 |
+| Mar. 15. | 30,284 | 184 | 335 | 221 | 61 | 39 | 667 | 31,791 | 555 | 316 | 7,215 | 56 | 39,933 |
+| Mar. 22. | 33,394 | 261 | 322 | 272 | 113 | 111 | 734 | 35,207 | 1,005 | 329 | 7,036 | 176 | 43,743 |
+| Mar. 29. | 34,706 | 312 | 321 | 214 | 1,040 | 100 | 896 | 37,589 | 1,316 | 401 | 7,724 | 57 | 47,087 |
+| Acceptances made by foreign banks: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 34,190 | 2,740 | - | 27 | 863 | 64 | 22 | 37,906 | 272 | 4 | 12 | 18 | 38,212 |
+| Mar. 15. | 33,058 | 2,611 | - | 27 | 840 | 60 | 22 | 36,818 | 233 | 4 | 11 | 19 | 37,085 |
+| Mar. 22. | 35,218 | 2,721 | - | 27 | 841 | 51 | 42 | 38,900 | 243 | 4 | 11 | 19 | 39,177 |
+| Mar. 29. | 35,145 | 2,427 | - | 27 | 827 | 48 | 35 | 38,509 | 203 | - | 38 | 81 | 38,831 |
+| Other liabilities payable in foreign currencies: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 6,882 | 203 | 7 | 76 | 138 | 54 | 449 | 7,809 | 88 | 118 | 640 | 177 | 8,832 |
+| Mar. 15. | 7,131 | 203 | 8 | 74 | 139 | 56 | 433 | 8,044 | 87 | 134 | 651 | 225 | 9,141 |
+| Mar. 22. | 7,109 | 331 | 13 | 90 | 1,715 | 3,759 | 2,124 | 15,141 | 93 | 141 | 667 | 216 | 16,258 |
+| Mar. 29. | 7,196 | 180 | 11 | 93 | 296 | 125 | 501 | 8,402 | 91 | 138 | 627 | 187 | 9,439 |
+
+38
+
+Short-Term Foreign Assets as Reported by Banks and Bankers in the United States for March 1939
+
+(In thousands of dollars)
+
+| Assets as of following dates | United Kingdom | France | Germany | Italy | Nether-lands | Switzer-land | Other Europe | Total Europe | Canada | Latin America | Far East | All other | Grand total | col_15 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| TOTAL SHORT-TERM FOREIGN ASSETS: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 88,594 | 15,301 | 83,073 | 13,423 | 22,066 | 3,901 | 48,696 | 275,054 | 46,999 | 99,789 | 124,197 | 14,729 | 560,768 |  |
+| Mar. 15 | 80,555 | 11,605 | 82,214 | 15,168 | 22,793 | 4,102 | 49,519 | 265,956 | 45,762 | 97,675 | 126,210 | 15,117 | 550,720 |  |
+| Mar. 22 | 77,610 | 13,048 | 82,140 | 16,633 | 20,382 | 4,961 | 49,455 | 264,229 | 46,680 | 98,015 | 130,886 | 14,769 | 554,579 |  |
+| Mar. 29 | 82,974 | 13,827 | 81,368 | 16,386 | 20,144 | 3,577 | 48,846 | 267,122 | 46,347 | 99,499 | 125,736 | 14,902 | 553,606 |  |
+| TOTAL ASSETS PAYABLE IN FOREIGN CURRENCIES: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 51,911 | 863 | 637 | 2,057 | 5,306 | 1,525 | 4,649 | 66,948 | 16,577 | 6,038 | 24,335 | 1,162 | 115,060 |  |
+| Mar. 15 | 48,210 | 1,165 | 610 | 2,044 | 4,719 | 1,668 | 5,389 | 63,805 | 14,901 | 5,389 | 24,996 | 1,195 | 110,286 |  |
+| Mar. 22 | 46,532 | 899 | 587 | 1,999 | 3,527 | 1,660 | 5,136 | 60,340 | 15,545 | 6,964 | 24,903 | 1,147 | 108,899 |  |
+| Mar. 29 | 43,676 | 1,426 | 590 | 1,968 | 4,398 | 1,303 | 5,105 | 58,466 | 14,876 | 6,331 | 24,863 | 1,206 | 105,742 |  |
+| Banks own deposits abroad: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 27,900 | 527 | 432 | 195 | 3,808 | 1,323 | 2,276 | 36,461 | 13,783 | 1,257 | 967 | 127 | 52,595 |  |
+| Mar. 15 | 23,086 | 829 | 410 | 188 | 3,217 | 1,486 | 3,003 | 32,219 | 12,339 | 1,256 | 1,276 | 160 | 47,250 |  |
+| Mar. 22 | 21,449 | 531 | 465 | 156 | 2,086 | 1,451 | 2,760 | 28,898 | 12,885 | 1,285 | 1,676 | 173 | 44,917 |  |
+| Mar. 29 | 21,286 | 1,100 | 438 | 150 | 3,055 | 1,119 | 2,720 | 29,868 | 12,302 | 1,241 | 1,869 | 218 | 45,498 |  |
+| Deposits abroad for account of domestic clients: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 4,426 | 137 | 59 | 1,722 | 249 | 68 | 836 | 7,497 | 1,431 | 175 | 19,932 | 151 | 29,186 |  |
+| Mar. 15 | 4,548 | 137 | 59 | 1,715 | 236 | 63 | 864 | 7,622 | 1,269 | 186 | 19,989 | 156 | 29,222 |  |
+| Mar. 22 | 4,439 | 168 | 63 | 1,706 | 180 | 72 | 858 | 7,486 | 1,373 | 176 | 19,990 | 118 | 29,143 |  |
+| Mar. 29 | 4,235 | 119 | 119 | 1,687 | 168 | 63 | 858 | 7,249 | 1,321 | 187 | 19,956 | 100 | 28,813 |  |
+| Other assets payable in foreign currencies: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 19,585 | 199 | 146 | 140 | 1,249 | 134 | 1,537 | 22,990 | 1,363 | 4,606 | 3,436 | 884 | 33,279 |  |
+| Mar. 15 | 20,576 | 199 | 141 | 141 | 1,266 | 119 | 1,522 | 23,964 | 1,293 | 3,947 | 3,731 | 879 | 33,814 |  |
+| Mar. 22 | 20,644 | 200 | 59 | 137 | 1,261 | 137 | 1,518 | 23,956 | 1,287 | 5,503 | 3,237 | 856 | 34,839 |  |
+| Mar. 29 | 18,155 | 207 | 33 | 131 | 1,175 | 121 | 1,527 | 21,349 | 1,253 | 4,903 | 3,038 | 888 | 31,431 |  |
+| TOTAL ASSETS PAYABLE IN DOLLARS: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 36,683 | 14,438 | 82,436 | 11,366 | 16,760 | 2,376 | 44,047 | 208,106 | 30,422 | 93,751 | 99,862 | 13,567 | 445,708 |  |
+| Mar. 15 | 32,345 | 10,440 | 81,604 | 13,124 | 18,074 | 2,434 | 44,130 | 202,151 | 30,861 | 92,286 | 101,214 | 13,922 | 440,434 |  |
+| Mar. 22 | 31,078 | 12,149 | 81,553 | 14,634 | 16,855 | 3,301 | 44,319 | 203,889 | 31,135 | 91,051 | 105,983 | 13,622 | 445,680 |  |
+| Mar. 29 | 39,298 | 12,401 | 80,778 | 14,418 | 15,746 | 2,274 | 43,741 | 208,656 | 31,471 | 93,168 | 100,873 | 13,696 | 447,864 |  |
+| Loans to foreign banks: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 25,292 | 8,920 | 7,461 | 2,421 | 12,293 | 285 | 10,141 | 66,813 | 4,123 | 14,308 | 71,706 | 160 | 157,110 |  |
+| Mar. 15 | 20,460 | 5,131 | 7,545 | 3,627 | 12,300 | 284 | 10,530 | 59,877 | 4,101 | 11,882 | 69,720 | 231 | 145,811 |  |
+| Mar. 22 | 20,018 | 6,691 | 7,427 | 4,521 | 12,543 | 1,223 | 10,410 | 62,833 | 4,363 | 10,580 | 73,938 | 246 | 151,960 |  |
+| Mar. 29 | 28,011 | 7,126 | 7,115 | 4,043 | 11,767 | 340 | 10,257 | 68,659 | 4,785 | 11,329 | 67,753 | 185 | 152,711 |  |
+| Acceptances made for foreign banks: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 3,493 | 2,242 | 57,144 | 7,334 | 2,375 | 1,570 | 10,352 | 84,510 | 3,792 | 13,248 | 2,162 | 4,952 | 108,664 |  |
+| Mar. 15 | 3,499 | 2,173 | 56,077 | 7,799 | 2,376 | 1,619 | 10,599 | 84,102 | 3,847 | 13,336 | 2,032 | 5,138 | 108,958 |  |
+| Mar. 22 | 3,306 | 2,285 | 56,217 | 8,312 | 2,398 | 1,558 | 10,764 | 84,840 | 4,006 | 13,212 | 2,010 | 5,132 | 109,200 |  |
+| Mar. 29 | 3,395 | 2,295 | 55,879 | 8,533 | 2,235 | 1,472 | 10,344 | 84,153 | 4,121 | 13,303 | 2,448 | 5,248 | 109,273 |  |
+| Other assets payable in dollars: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 7,898 | 3,276 | 17,831 | 1,611 | 2,092 | 521 | 23,554 | 56,783 | 22,507 | 66,195 | 25,994 | 8,455 | 179,934 |  |
+| Mar. 15 | 8,386 | 3,136 | 17,982 | 1,698 | 3,438 | 531 | 23,001 | 58,172 | 22,913 | 67,068 | 29,462 | 8,553 | 186,168 |  |
+| Mar. 22 | 7,754 | 3,173 | 17,909 | 1,801 | 1,914 | 520 | 23,145 | 56,216 | 22,766 | 67,259 | 30,935 | 8,244 | 184,520 |  |
+| Mar. 29 | 7,892 | 2,980 | 17,784 | 1,842 | 1,744 | 462 | 23,140 | 55,844 | 22,565 | 68,536 | 30,672 | 8,263 | 185,880 |  |
+
+39
+
+Security Transactions as Reported by Banks, Bankers, Brokers and Dealers in the United States for March 1939
+
+(In thousands of dollars)
+
+| Transactions during week ended- | United Kingdom | France | Germany | Italy | Mother-lands | Switzer-land | Other Europe | Total Europe | Canada | Latin America | Far East | All other | Grand total | col_15 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| TOTAL PURCHASES IN THE UNITED STATES FOR FOREIGN ACCOUNT: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 6,161 | 2,588 | 78 | 74 | 3,573 | 3,410 | 1,677 | 17,561 | 6,839 | 1,101 | 2,357 | 264 | 28,122 |  |
+| Mar. 15. | 7,923 | 2,681 | 131 | 183 | 2,644 | 3,998 | 1,522 | 19,082 | 4,882 | 1,551 | 2,076 | 356 | 27,947 |  |
+| Mar. 22. | 5,963 | 4,034 | 58 | 79 | 2,864 | 4,612 | 2,407 | 20,017 | 5,305 | 1,280 | 1,289 | 331 | 28,222 |  |
+| Mar. 29. | 6,829 | 2,726 | 66 | 52 | 4,805 | 6,687 | 3,638 | 24,803 | 4,149 | 1,122 | 1,797 | 240 | 32,111 |  |
+| Purchases of domestic securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 5,578 | 2,223 | 19 | 17 | 3,107 | 2,820 | 1,185 | 14,949 | 3,140 | 675 | 1,906 | 111 | 20,781 |  |
+| Mar. 15. | 6,910 | 2,225 | 84 | 9 | 2,357 | 3,338 | 1,172 | 16,095 | 4,084 | 994 | 1,428 | 255 | 22,856 |  |
+| Mar. 22. | 5,227 | 3,517 | 27 | 36 | 2,512 | 3,848 | 1,068 | 16,235 | 4,549 | 836 | 1,006 | 236 | 22,862 |  |
+| Mar. 29. | 6,272 | 2,349 | 51 | 46 | 4,443 | 5,587 | 2,364 | 21,112 | 3,384 | 857 | 1,649 | 185 | 27,187 |  |
+| Purchases of foreign securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 583 | 365 | 59 | 57 | 466 | 590 | 492 | 2,612 | 3,699 | 426 | 451 | 153 | 7,341 |  |
+| Mar. 15. | 1,013 | 456 | 47 | 174 | 287 | 660 | 350 | 2,987 | 798 | 557 | 648 | 101 | 5,091 |  |
+| Mar. 22. | 736 | 517 | 31 | 43 | 352 | 764 | 1,339 | 3,782 | 756 | 444 | 283 | 95 | 5,360 |  |
+| Mar. 29. | 557 | 377 | 15 | 6 | 362 | 1,100 | 1,274 | 3,691 | 765 | 265 | 148 | 55 | 4,924 |  |
+| TOTAL SALES IN THE UNITED STATES FOR FOREIGN ACCOUNT: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 6,973 | 1,757 | 143 | 16 | 1,885 | 4,496 | 1,317 | 16,587 | 5,711 | 917 | 3,208 | 141 | 26,564 |  |
+| Mar. 15. | 7,446 | 2,657 | 88 | 39 | 2,783 | 6,216 | 1,353 | 20,582 | 4,747 | 941 | 2,019 | 199 | 28,488 |  |
+| Mar. 22. | 10,371 | 4,094 | 103 | 19 | 3,522 | 5,331 | 2,191 | 25,631 | 7,281 | 647 | 1,971 | 111 | 35,641 |  |
+| Mar. 29. | 5,920 | 2,852 | 193 | 111 | 1,618 | 2,514 | 772 | 13,980 | 4,813 | 433 | 2,901 | 39 | 22,166 |  |
+| Sales of domestic securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 6,281 | 1,658 | 137 | 12 | 1,728 | 3,588 | 1,067 | 14,471 | 3,711 | 601 | 3,190 | 107 | 22,080 |  |
+| Mar. 15. | 6,494 | 2,008 | 70 | 37 | 2,522 | 5,077 | 1,105 | 17,313 | 4,294 | 654 | 1,862 | 147 | 24,270 |  |
+| Mar. 22. | 9,510 | 3,967 | 97 | 13 | 3,273 | 4,641 | 2,094 | 23,595 | 6,747 | 472 | 1,883 | 106 | 32,803 |  |
+| Mar. 29. | 5,018 | 2,704 | 159 | 81 | 1,448 | 2,030 | 662 | 12,102 | 4,292 | 352 | 2,893 | 33 | 19,672 |  |
+| Sales of foreign securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 692 | 99 | 6 | 4 | 157 | 908 | 250 | 2,116 | 2,000 | 316 | 18 | 34 | 4,484 |  |
+| Mar. 15. | 952 | 649 | 18 | 2 | 261 | 1,139 | 248 | 3,269 | 453 | 287 | 157 | 52 | 4,218 |  |
+| Mar. 22. | 861 | 127 | 6 | 6 | 249 | 690 | 97 | 2,036 | 534 | 175 | 88 | 5 | 2,838 |  |
+| Mar. 29. | 902 | 148 | 34 | 30 | 170 | 484 | 110 | 1,878 | 521 | 81 | 8 | 6 | 2,494 |  |
+| TOTAL PURCHASES EXECUTED ABROAD FOR DOMESTIC ACCOUNT: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 441 | 40 | - | - | 59 | - | - | 540 | 1,760 | 389 | 23 | - | 2,712 |  |
+| Mar. 15. | 590 | 101 | - | - | 13 | - | - | 704 | 3,315 | 5 | 39 | 40 | 4,103 |  |
+| Mar. 22. | 736 | 117 | - | - | 25 | 5 | - | 883 | 2,419 | 18 | 9 | 222 | 3,551 |  |
+| Mar. 29. | 301 | 53 | - | - | 14 | 1 | 20 | 389 | 1,896 | - | 26 | - | 2,311 |  |
+| Purchases of domestic securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 183 | - | - | - | - | - | - | 183 | - | - | - | - | 183 |  |
+| Mar. 15. | 118 | 18 | - | - | - | - | - | 136 | 446 | - | - | - | 582 |  |
+| Mar. 22. | 510 | 25 | - | - | 3 | - | - | 538 | 70 | - | - | - | 608 |  |
+| Mar. 29. | 111 | - | - | - | - | - | - | 111 | 455 | - | - | - | 566 |  |
+| Purchases of foreign securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 258 | 40 | - | - | 59 | - | - | 357 | 1,760 | 389 | 23 | - | 2,529 |  |
+| Mar. 15. | 472 | 83 | - | - | 13 | - | - | 568 | 2,869 | 5 | 39 | 40 | 3,521 |  |
+| Mar. 22. | 226 | 92 | - | - | 22 | 5 | - | 345 | 2,349 | 18 | 9 | 222 | 2,943 |  |
+| Mar. 29. | 190 | 53 | - | - | 14 | 1 | 20 | 278 | 1,441 | - | 26 | - | 1,745 |  |
+| TOTAL SALES EXECUTED ABROAD FOR DOMESTIC ACCOUNT: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 709 | 36 | 76 | - | 27 | - | 15 | 863 | 1,187 | 1,063 | 13 | - | 3,126 |  |
+| Mar. 15. | 702 | 41 | 95 | - | 14 | - | 22 | 874 | 1,331 | 1 | 9 | 33 | 2,248 |  |
+| Mar. 22. | 544 | 21 | 127 | - | 41 | 6 | 86 | 825 | 1,388 | - | - | - | 2,213 |  |
+| Mar. 29. | 900 | 39 | 71 | - | 377 | 100 | 11 | 1,498 | 1,263 | 5 | - | - | 2,766 |  |
+| Sales of domestic securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 182 | - | - | - | 8 | - | 11 | 201 | 183 | - | - | - | 384 |  |
+| Mar. 15. | 97 | 38 | - | - | 12 | - | 21 | 168 | 401 | - | - | - | 569 |  |
+| Mar. 22. | 234 | 20 | - | - | 37 | - | 86 | 377 | - | - | - | - | 377 |  |
+| Mar. 29. | 350 | - | - | - | 365 | 100 | 10 | 825 | - | 3 | - | - | 828 |  |
+| Sales of foreign securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 527 | 36 | 76 | - | 19 | - | 4 | 662 | 1,004 | 1,063 | 13 | - | 2,742 |  |
+| Mar. 15. | 605 | 3 | 95 | - | 2 | - | 1 | 706 | 930 | 1 | 9 | 33 | 1,679 |  |
+| Mar. 22. | 310 | 1 | 127 | - | 4 | 6 | - | 448 | 1,388 | - | - | - | 1,836 |  |
+| Mar. 29. | 550 | 39 | 71 | - | 12 | - | 1 | 673 | 1,263 | 2 | - | - | 1,938 |  |
+
+40
+
+Security Transactions in Joint Foreign Arbitrage Accounts as Reported by Brokers and Dealers in the United States for March 1939
+
+(In thousands of dollars)
+
+| Transactions during week ended- | United Kingdom | France | Germany | Italy | Nether-lands | Switzer-land | Other Europe | Total Europe | Canada | Latin America | Far East | All other | Grand total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| TOTAL PURCHASES IN THE UNITED STATES: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 1,508 | - | - | - | 358 | 21 | 24 | 1,911 | 683 | 45 | - | - | 2,639 |
+| Mar. 15. | 3,482 | 2 | - | - | 148 | 65 | 14 | 3,711 | 1,615 | 26 | - | - | 5,352 |
+| Mar. 22. | 1,335 | - | - | - | 100 | 24 | 13 | 1,472 | 1,454 | 8 | - | - | 2,934 |
+| Mar. 29. | 1,231 | - | - | - | 268 | 125 | 21 | 1,645 | 930 | 13 | - | - | 2,588 |
+| Purchases of domestic securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 1,100 | - | - | - | 352 | 17 | - | 1,469 | 41 | - | - | - | 1,510 |
+| Mar. 15. | 2,975 | - | - | - | 147 | 63 | - | 3,185 | 101 | 14 | - | - | 3,300 |
+| Mar. 22. | 1,175 | - | - | - | 97 | 15 | - | 1,287 | 54 | 7 | - | - | 1,348 |
+| Mar. 29. | 979 | - | - | - | 262 | 101 | - | 1,342 | 24 | 5 | - | - | 1,371 |
+| Purchase of foreign securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 408 | - | - | - | 6 | 4 | 24 | 442 | 642 | 45 | - | - | 1,129 |
+| Mar. 15. | 507 | 2 | - | - | 1 | 2 | 14 | 526 | 1,514 | 12 | - | - | 2,052 |
+| Mar. 22. | 160 | - | - | - | 3 | 9 | 13 | 185 | 1,400 | 1 | - | - | 1,586 |
+| Mar. 29. | 252 | - | - | - | 6 | 24 | 21 | 303 | 906 | 8 | - | - | 1,217 |
+| TOTAL SALES IN THE UNITED STATES: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 3,066 | - | - | - | 153 | 78 | - | 3,297 | 699 | - | - | - | 3,996 |
+| Mar. 15. | 2,413 | - | - | - | 386 | 118 | - | 2,917 | 1,428 | - | - | - | 4,345 |
+| Mar. 22. | 6,874 | - | - | - | 376 | 131 | - | 7,382 | 1,116 | 2 | - | - | 8,499 |
+| Mar. 29. | 3,187 | - | - | - | 113 | 7 | 3 | 3,310 | 1,130 | 1 | - | - | 4,441 |
+| Sales of domestic securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 2,650 | - | - | - | 150 | 75 | - | 2,875 | 94 | - | - | - | 2,969 |
+| Mar. 15. | 1,796 | - | - | - | 381 | 107 | - | 2,284 | 71 | - | - | - | 2,355 |
+| Mar. 22. | 5,133 | - | - | - | 371 | 112 | - | 6,216 | 40 | 2 | - | - | 6,258 |
+| Mar. 29. | 2,836 | - | - | - | 112 | 5 | - | 2,953 | 18 | - | - | - | 2,971 |
+| Sales of foreign securities: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8. | 416 | - | - | - | 3 | 3 | - | 422 | 605 | - | - | - | 1,027 |
+| Mar. 15. | 617 | - | - | - | 5 | 11 | - | 633 | 1,357 | - | - | - | 1,990 |
+| Mar. 22. | 1,141 | - | - | - | 5 | 19 | - | 1,165 | 1,076 | - | - | - | 2,241 |
+| Mar. 29. | 351 | - | - | - | 1 | 2 | 3 | 357 | 1,112 | 1 | - | - | 1,470 |
+
+Foreign Balances in Brokerage Accounts as Reported by Brokers and Dealers in the United States for March 1939
+
+(In thousands of dollars)
+
+| Balances as of following dates | United Kingdom | France | Germany | Italy | Mother-lands | Switzer-land | Other Europe | Total Europe | Canada | Latin America | Far East | All other | Grand total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Foreign debit balances: (due from abroad) |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 7,967 | 5,122 | 194 | 81 | 3,027 | 2,065 | 4,372 | 22,528 | 19,317 | 4,431 | 6,972 | 307 | 53,855 |
+| Mar. 15 | 7,615 | 4,941 | 195 | 83 | 2,771 | 2,232 | 4,504 | 22,401 | 19,063 | 4,980 | 7,153 | 372 | 53,968 |
+| Mar. 22 | 7,270 | 4,876 | 194 | 80 | 2,545 | 2,051 | 4,601 | 21,617 | 18,703 | 4,628 | 6,429 | 368 | 51,745 |
+| Mar. 29 | 7,457 | 4,944 | 125 | 109 | 2,704 | 2,100 | 4,367 | 21,806 | 18,112 | 4,609 | 6,747 | 408 | 51,682 |
+| Foreign credit balances: (due to abroad) |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 6,672 | 7,338 | 210 | 157 | 4,501 | 7,793 | 2,965 | 29,636 | 3,081 | 1,928 | 844 | 378 | 35,867 |
+| Mar. 15 | 6,848 | 6,922 | 196 | 162 | 5,177 | 8,878 | 2,937 | 31,120 | 3,632 | 1,669 | 1,118 | 345 | 37,884 |
+| Mar. 22 | 7,803 | 7,498 | 201 | 132 | 5,552 | 7,515 | 4,238 | 32,939 | 4,079 | 2,856 | 869 | 365 | 41,108 |
+| Mar. 29 | 7,752 | 6,897 | 202 | 147 | 5,194 | 6,457 | 3,295 | 29,944 | 4,597 | 2,730 | 878 | 290 | 38,439 |
+
+41
+
+Foreign Purchases and Sales and Net Purchases or Sales of U.S. Domestic Securities
+
+(In thousands of dollars)
+
+| Transactions during week ended - | Total purchases | Total sales | Net purchases or sales (-) | Transactions during week ended -_2 | Total purchases_2 | Total sales_2 | Net purchases or sales (-)_2 | Transactions during week ended -_3 | Total purchases_3 | Total sales_3 | Net purchases or sales (-)_3 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1936-Jan. 8.... | 49,555 | 30,020 | 19,535 | 1937-Feb. 3.... | 65,470 | 55,056 | 10,414 | 1938-Mar. 2.... | 20,043 | 29,772 | -9,729 |
+| 15.... | 49,591 | 49,064 | 527 | 10.... | 98,866 | 66,819 | 32,047 | 9.... | 12,462 | 11,806 | 656 |
+| 22.... | 48,976 | 43,722 | 5,254 | 17.... | 77,632 | 73,754 | 3,878 | 16.... | 12,986 | 15,846 | -2,860 |
+| 29.... | 49,821 | 44,675 | 5,146 | 24.... | 74,863 | 64,632 | 10,231 | 23.... | 18,619 | 17,759 | 860 |
+| Feb. 5.... | 52,463 | 43,821 | 8,642 | Mar. 3.... | 74,784 | 63,616 | 11,168 | Apr. 6.... | 18,967 | 19,058 | -91 |
+| 11.... | 52,605 | 45,394 | 7,211 | 10.... | 113,812 | 85,119 | 28,693 | 13.... | 14,702 | 12,630 | 2,072 |
+| 19.... | 77,355 | 55,391 | 21,964 | 17.... | 84,365 | 74,045 | 10,320 | 20.... | 19,312 | 12,406 | 6,906 |
+| 26.... | 67,493 | 51,904 | 15,589 | 24.... | 66,507 | 69,074 | -2,567 | 27.... | 14,912 | 13,401 | 1,511 |
+| Mar. 4.... | 46,636 | 44,875 | 1,761 | Apr. 7.... | 58,751 | 50,982 | 7,769 | May 4.... | 9,765 | 11,085 | -1,320 |
+| 11.... | 55,716 | 51,901 | 3,815 | 14.... | 58,729 | 58,162 | 567 | 11.... | 11,852 | 14,356 | -2,504 |
+| 18.... | 51,541 | 47,661 | 3,880 | 21.... | 39,674 | 48,278 | -8,604 | 18.... | 12,105 | 12,553 | -448 |
+| 25.... | 47,947 | 33,473 | 14,474 | 28.... | 43,143 | 54,898 | -11,755 | 25.... | 8,816 | 9,291 | -475 |
+| Apr. 1.... | 36,986 | 33,823 | 3,163 | May 5.... | 44,852 | 67,685 | -22,833 | June 1.... | 10,405 | 9,983 | 422 |
+| 8.... | 52,835 | 34,793 | 18,042 | 12.... | 34,423 | 25,111 | 9,312 | 8.... | 11,682 | 12,383 | -701 |
+| 15.... | 33,368 | 22,781 | 10,587 | 19.... | 26,800 | 32,184 | -5,384 | 15.... | 9,021 | 11,977 | -2,956 |
+| 22.... | 42,935 | 31,165 | 11,770 | 26.... | 34,169 | 25,316 | 8,853 | 22.... | 11,375 | 9,257 | 2,118 |
+| 29.... | 49,814 | 40,844 | 8,970 | June 2.... | 18,912 | 14,271 | 4,641 | 29.... | 38,260 | 37,641 | 419 |
+| May 6.... | 36,373 | 51,357 | -14,984 | 9.... | 31,995 | 26,171 | 5,824 | July 6.... | 38,619 | 32,628 | 5,991 |
+| 13.... | 29,848 | 22,903 | 6,945 | 16.... | 32,783 | 26,962 | 5,821 | 13.... | 38,121 | 38,613 | -492 |
+| 20.... | 30,104 | 24,947 | 5,157 | 23.... | 21,651 | 28,638 | -6,987 | 20.... | 32,653 | 35,895 | -3,242 |
+| 27.... | 23,085 | 22,098 | 987 | 30.... | 26,474 | 19,865 | 6,609 | 27.... | 36,049 | 43,931 | -7,882 |
+| June 3.... | 25,015 | 26,629 | -1,614 | July 7.... | 16,717 | 20,597 | -3,880 | Aug. 3.... | 20,541 | 27,220 | -6,679 |
+| 10.... | 51,407 | 29,641 | 21,766 | 14.... | 41,309 | 33,482 | 7,827 | 10.... | 18,739 | 24,969 | -6,230 |
+| 17.... | 37,033 | 29,333 | 7,700 | 21.... | 34,326 | 31,427 | 2,899 | 17.... | 18,802 | 23,812 | -5,010 |
+| 24.... | 36,988 | 24,138 | 12,850 | 28.... | 48,503 | 33,337 | 15,166 | 24.... | 11,570 | 14,965 | -3,395 |
+| July 1.... | 41,305 | 32,955 | 8,350 | Aug. 4.... | 32,886 | 25,129 | 7,757 | 31.... | 20,801 | 23,853 | -3,052 |
+| 8.... | 29,419 | 24,881 | 4,538 | 11.... | 41,681 | 33,544 | 8,137 | Sept. 7.... | 12,060 | 13,819 | -1,759 |
+| 15.... | 39,413 | 32,202 | 7,211 | 18.... | 28,433 | 27,762 | 671 | 14.... | 15,463 | 18,411 | -2,948 |
+| 22.... | 50,306 | 36,865 | 13,441 | 25.... | 31,062 | 25,222 | 5,840 | 21.... | 34,063 | 25,408 | 8,655 |
+| 29.... | 51,101 | 37,643 | 13,458 | Sept. 1.... | 26,590 | 25,761 | 829 | 28.... | 20,902 | 24,745 | -3,843 |
+| Aug. 5.... | 44,399 | 40,386 | 4,013 | 8.... | 26,093 | 23,110 | 2,983 | Oct. 5.... | 43,286 | 26,139 | 17,147 |
+| 12.... | 43,348 | 39,039 | 4,309 | 15.... | 57,789 | 45,416 | 12,373 | 12.... | 48,449 | 29,888 | 18,561 |
+| 19.... | 42,280 | 30,789 | 11,491 | 22.... | 37,904 | 42,671 | -4,767 | 19.... | 46,441 | 37,402 | 9,039 |
+| 26.... | 33,308 | 24,666 | 8,642 | 29.... | 38,753 | 39,000 | -247 | 26.... | 45,644 | 33,412 | 12,232 |
+| Sept. 2.... | 34,058 | 29,016 | 5,042 | Oct. 6.... | 22,337 | 24,753 | -2,416 | Nov. 2.... | 41,470 | 33,198 | 8,272 |
+| 9.... | 31,350 | 27,039 | 4,311 | 13.... | 24,008 | 36,652 | -12,644 | 9.... | 25,338 | 23,665 | 1,673 |
+| 16.... | 54,768 | 40,859 | 13,909 | 20.... | 37,540 | 41,240 | -3,700 | 16.... | 42,393 | 37,886 | 4,507 |
+| 23.... | 45,382 | 28,288 | 17,094 | 27.... | 54,514 | 44,618 | 9,896 | 23.... | 33,318 | 31,704 | 1,614 |
+| 30.... | 50,193 | 48,549 | 1,644 | Nov. 3.... | 32,346 | 24,798 | 7,548 | 30.... | 19,846 | 23,886 | -4,040 |
+| Oct. 7.... | 76,926 | 44,416 | 32,510 | 10.... | 26,527 | 30,716 | -4,189 | Dec. 7.... | 26,323 | 19,764 | 6,559 |
+| 14.... | 83,485 | 42,865 | 40,620 | 17.... | 29,423 | 24,081 | 5,342 | 14.... | 19,917 | 28,398 | -8,481 |
+| 21.... | 98,943 | 52,783 | 46,160 | 24.... | 26,339 | 29,814 | -3,475 | 21.... | 36,607 | 26,963 | 9,644 |
+| 28.... | 74,886 | 49,312 | 25,574 | Dec. 1.... | 26,062 | 19,104 | 6,958 | 28.... | 22,343 | 13,624 | 8,719 |
+| Nov. 4.... | 68,723 | 36,453 | 32,270 | 8.... | 25,512 | 19,482 | 6,030 | 1939-Jan. 4.... | 25,529 | 24,960 | 569 |
+| 11.... | 113,852 | 66,103 | 47,749 | 15.... | 35,481 | 26,796 | 8,685 | 11.... | 30,039 | 28,178 | 1,861 |
+| 18.... | 97,227 | 87,676 | 9,551 | 22.... | 24,631 | 16,525 | 8,106 | 18.... | 21,367 | 29,874 | -8,507 |
+| 25.... | 81,621 | 70,460 | 11,161 | 29.... | 20,602 | 9,888 | 10,714 | 25.... | 20,784 | 37,180 | -16,396 |
+| Dec. 2.... | 57,253 | 45,903 | 11,350 | 1938-Jan. 5.... | 17,083 | 15,195 | 1,888 | Feb. 1.... | 29,450 | 36,458 | -7,008 |
+| 9.... | 44,111 | 53,314 | -9,203 | 12.... | 22,268 | 21,189 | 1,079 | 8.... | 28,615 | 23,014 | 5,601 |
+| 16.... | 63,036 | 48,464 | 14,572 | 19.... | 24,699 | 21,609 | 3,090 | 15.... | 17,529 | 15,519 | 2,010 |
+| 23.... | 60,936 | 44,769 | 16,167 | 26.... | 17,822 | 17,942 | -120 | 22.... | 16,502 | 14,868 | 1,634 |
+| 30.... | 37,272 | 31,650 | 5,622 | Feb. 2.... | 20,255 | 18,017 | 2,238 | Mar. 1.... | 22,205 | 20,272 | 1,933 |
+| 1937-Jan. 6.... | 38,171 | 37,056 | 1,115 | 9.... | 13,626 | 18,587 | -4,961 | 8.... | 22,675 | 25,232 | -2,557 |
+| 13.... | 65,591 | 56,170 | 9,421 | 16.... | 10,704 | 15,302 | -4,598 | 15.... | 26,725 | 27,207 | -482 |
+| 20.... | 81,012 | 60,013 | 20,999 | 23.... | 11,021 | 11,833 | -812 | 22.... | 24,587 | 39,669 | -15,082 |
+| 27.... | 68,904 | 59,867 | 9,037 |  |  |  |  | 29.... | 29,386 | 23,209 | 6,177 |
+
+Note: Includes transactions executed in the United States for foreign account, executed abroad for domestic account, and transactions in joint foreign arbitrage accounts as reported by banks, bankers, brokers and dealers in the United States.
+
+FOREIGN PURCHASES AND SALES OF U.S. DOMESTIC SECURITIES Weekly
+
+42
+
+43
+
+Purchases and Sales of Foreign Exchange, Spot and Forward, as Reported by Banks and Bankers in the United States for March 1939
+
+(In thousands of dollars)
+
+| Transactions during week ended- | United Kingdom | France | Germany | Italy | Nether-lands | Switzer-land | Other Europe | Total Europe | Canada | Latin America | Far East | All other | Grand total | col_15 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| TOTAL PURCHASES: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 Spot............ | 68,193 | 3,218 | 523 | 448 | 3,401 | 1,032 | 3,745 | 80,560 | 22,088 | 634 | 2,938 | 705 | 106,925 |  |
+| Mar. 8 Forward......... | 34,593 | 318 | 150 | 308 | 2,158 | 246 | 662 | 38,435 | 8,020 | - | 2,971 | 1 | 49,427 |  |
+| Mar. 15 Spot............ | 67,022 | 2,064 | 492 | 575 | 2,073 | 893 | 2,968 | 76,087 | 20,899 | 376 | 4,105 | 606 | 102,073 |  |
+| Mar. 15 Forward......... | 35,175 | 229 | 31 | 83 | 1,013 | 45 | 2,450 | 39,026 | 9,987 | 46 | 2,504 | 1 | 51,564 |  |
+| Mar. 22 Spot............ | 77,674 | 3,281 | 414 | 649 | 5,947 | 2,080 | 2,280 | 92,325 | 24,759 | 416 | 2,019 | 439 | 119,958 |  |
+| Mar. 22 Forward......... | 47,982 | 1,153 | 6 | 114 | 2,269 | 506 | 2,294 | 54,624 | 10,678 | 50 | 1,204 | 7 | 66,563 |  |
+| Mar. 29 Spot............ | 67,328 | 3,041 | 515 | 901 | 4,391 | 1,460 | 4,110 | 81,746 | 22,994 | 320 | 1,494 | 564 | 107,113 |  |
+| Mar. 29 Forward......... | 33,836 | 1,152 | 18 | 112 | 2,532 | 515 | 1,299 | 39,464 | 6,576 | 34 | 1,878 | - | 47,952 |  |
+| Purchases from banks: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 Spot............ | 50,046 | 2,399 | 475 | 396 | 3,201 | 1,008 | 3,396 | 60,921 | 14,366 | 478 | 2,429 | 299 | 78,493 |  |
+| Mar. 8 Forward......... | 25,005 | 277 | 150 | 307 | 1,640 | 231 | 301 | 27,911 | 5,625 | - | 2,068 | - | 35,604 |  |
+| Mar. 15 Spot............ | 52,312 | 1,785 | 447 | 422 | 1,865 | 866 | 2,703 | 60,400 | 14,445 | 226 | 3,465 | 31 | 78,567 |  |
+| Mar. 15 Forward......... | 24,165 | 129 | 31 | 83 | 751 | - | 2,244 | 27,403 | 8,117 | - | 1,802 | - | 37,322 |  |
+| Mar. 22 Spot............ | 56,194 | 2,587 | 375 | 522 | 5,238 | 1,865 | 2,149 | 68,930 | 17,816 | 249 | 1,245 | 45 | 88,285 |  |
+| Mar. 22 Forward......... | 32,717 | 1,051 | 6 | 112 | 1,218 | 682 | 1,286 | 37,072 | 7,956 | - | 636 | - | 45,664 |  |
+| Mar. 29 Spot............ | 53,281 | 2,786 | 475 | 726 | 4,036 | 1,267 | 4,029 | 66,600 | 16,443 | 115 | 785 | 102 | 84,045 |  |
+| Mar. 29 Forward......... | 24,522 | 452 | 18 | 111 | 2,305 | 345 | 1,050 | 28,803 | 5,513 | - | 993 | - | 35,309 |  |
+| Purchases from customers other than banks: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 Spot............ | 18,147 | 819 | 48 | 52 | 200 | 24 | 349 | 19,639 | 7,722 | 156 | 509 | 406 | 28,432 |  |
+| Mar. 8 Forward......... | 9,588 | 41 | - | 1 | 518 | 15 | 361 | 10,524 | 2,395 | - | 903 | 1 | 13,823 |  |
+| Mar. 15 Spot............ | 14,710 | 279 | 45 | 153 | 208 | 27 | 265 | 15,687 | 6,454 | 150 | 640 | 575 | 23,506 |  |
+| Mar. 15 Forward......... | 11,010 | 100 | - | - | 262 | 45 | 206 | 11,623 | 1,870 | 46 | 702 | 1 | 14,242 |  |
+| Mar. 22 Spot............ | 21,480 | 694 | 39 | 127 | 709 | 215 | 131 | 23,395 | 6,943 | 167 | 774 | 394 | 31,673 |  |
+| Mar. 22 Forward......... | 15,265 | 102 | - | 2 | 1,051 | 124 | 1,008 | 17,552 | 2,722 | 50 | 568 | 7 | 20,899 |  |
+| Mar. 29 Spot............ | 14,047 | 255 | 40 | 175 | 355 | 193 | 81 | 15,146 | 6,551 | 205 | 709 | 462 | 23,073 |  |
+| Mar. 29 Forward......... | 9,314 | 700 | - | 1 | 227 | 170 | 249 | 10,661 | 1,063 | 34 | 885 | - | 12,643 |  |
+| TOTAL SALES: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 Spot............ | 65,899 | 2,855 | 540 | 562 | 2,913 | 907 | 4,052 | 77,728 | 19,276 | 595 | 3,644 | 181 | 101,421 |  |
+| Mar. 8 Forward......... | 36,161 | 462 | 107 | 22 | 3,240 | 524 | 840 | 41,356 | 10,728 | 364 | 2,483 | 2 | 54,933 |  |
+| Mar. 15 Spot............ | 67,915 | 2,080 | 562 | 557 | 1,732 | 694 | 3,228 | 76,768 | 19,746 | 358 | 2,979 | 61 | 99,912 |  |
+| Mar. 15 Forward......... | 37,456 | 335 | 16 | 10 | 1,868 | 172 | 2,920 | 42,778 | 10,761 | 226 | 2,473 | - | 56,238 |  |
+| Mar. 22 Spot............ | 69,875 | 3,001 | 393 | 770 | 6,335 | 1,956 | 2,574 | 84,904 | 21,633 | 416 | 1,971 | 81 | 109,005 |  |
+| Mar. 22 Forward......... | 58,601 | 1,776 | 9 | 56 | 2,270 | 1,004 | 2,408 | 66,324 | 12,586 | 50 | 1,552 | 3 | 80,515 |  |
+| Mar. 29 Spot............ | 65,828 | 2,419 | 593 | 824 | 4,278 | 1,588 | 4,200 | 79,730 | 23,176 | 445 | 1,992 | 87 | 105,430 |  |
+| Mar. 29 Forward......... | 33,836 | 2,062 | 162 | 66 | 3,127 | 736 | 1,110 | 41,099 | 7,562 | 38 | 1,119 | 2 | 49,820 |  |
+| Sales to banks: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 Spot............ | 52,060 | 2,054 | 350 | 241 | 2,113 | 625 | 3,007 | 60,450 | 12,382 | 32 | 1,912 | 37 | 74,813 |  |
+| Mar. 8 Forward......... | 22,377 | 327 | 105 | 21 | 2,681 | 508 | 803 | 26,822 | 6,910 | 361 | 1,638 | - | 35,731 |  |
+| Mar. 15 Spot............ | 52,518 | 1,382 | 354 | 263 | 1,245 | 410 | 1,657 | 57,829 | 12,319 | 72 | 1,545 | 8 | 71,773 |  |
+| Mar. 15 Forward......... | 25,051 | 267 | 16 | - | 1,649 | 170 | 2,782 | 29,935 | 6,146 | 226 | 2,244 | - | 38,551 |  |
+| Mar. 22 Spot............ | 56,470 | 2,193 | 182 | 341 | 5,669 | 1,637 | 1,584 | 68,076 | 15,593 | 99 | 655 | 16 | 84,439 |  |
+| Mar. 22 Forward......... | 35,604 | 1,556 | 9 | 26 | 1,744 | 701 | 2,264 | 41,964 | 8,978 | 50 | 1,225 | 2 | 52,219 |  |
+| Mar. 29 Spot............ | 51,775 | 1,576 | 352 | 416 | 3,094 | 1,343 | 3,247 | 61,803 | 17,121 | 225 | 577 | 13 | 79,739 |  |
+| Mar. 29 Forward......... | 25,926 | 1,603 | 1 | 61 | 2,611 | 721 | 1,104 | 32,227 | 5,794 | 38 | 712 | - | 38,771 |  |
+| Sales to customers other than banks: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 Spot............ | 13,839 | 801 | 190 | 321 | 800 | 282 | 1,045 | 17,278 | 6,894 | 563 | 1,732 | 144 | 26,611 |  |
+| Mar. 8 Forward......... | 13,784 | 135 | 2 | 1 | 559 | 16 | 37 | 14,534 | 3,818 | 3 | 845 | 2 | 19,202 |  |
+| Mar. 15 Spot............ | 15,397 | 698 | 208 | 294 | 487 | 284 | 1,571 | 18,939 | 7,427 | 286 | 1,434 | 53 | 28,139 |  |
+| Mar. 15 Forward......... | 12,405 | 69 | - | 10 | 219 | 2 | 138 | 12,843 | 4,615 | - | 229 | - | 17,687 |  |
+| Mar. 22 Spot............ | 13,405 | 808 | 211 | 429 | 666 | 319 | 990 | 16,828 | 6,040 | 317 | 1,316 | 65 | 24,566 |  |
+| Mar. 22 Forward......... | 23,137 | 220 | - | 30 | 526 | 303 | 144 | 24,360 | 3,608 | - | 327 | 1 | 28,298 |  |
+| Mar. 29 Spot............ | 14,053 | 843 | 241 | 408 | 1,184 | 245 | 953 | 17,927 | 6,055 | 220 | 1,415 | 74 | 25,691 |  |
+| Mar. 29 Forward......... | 7,910 | 259 | 161 | 5 | 516 | 15 | 6 | 8,872 | 1,768 | - | 407 | 2 | 11,049 |  |
+
+44
+
+Outstanding Forward Exchange Contracts as Reported by Banks and Bankers in the United States during March 1939
+
+(In thousands of dollars)
+
+| Contracts as of following date | United Kingdom | France | Germany | Italy | Nether-lands | Switzer-land | Other Europe | Total Europe | Canada | Latin America | Far East | All other | Grand total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| TOTAL PURCHASE CONTRACTS: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 300,189 | 4,254 | 304 | 349 | 13,151 | 2,380 | 17,602 | 338,229 | 79,944 | 1,192 | 14,081 | 240 | 433,686 |
+| Mar. 15 | 298,067 | 4,088 | 321 | 356 | 13,305 | 2,314 | 17,748 | 336,199 | 85,555 | 1,238 | 14,704 | 220 | 437,916 |
+| Mar. 22 | 316,135 | 4,457 | 231 | 328 | 15,034 | 2,792 | 19,533 | 358,510 | 93,165 | 1,278 | 15,132 | 248 | 468,333 |
+| Mar. 29 | 312,320 | 5,843 | 201 | 362 | 14,530 | 2,808 | 17,215 | 353,273 | 94,393 | 1,312 | 15,785 | 208 | 464,977 |
+| Contracts for purchases from foreign customers: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 84,249 | 1,633 | 205 | 14 | 3,694 | 503 | 3,047 | 93,345 | 11,102 | 886 | 3,547 | 55 | 108,935 |
+| Mar. 15 | 85,019 | 1,432 | 237 | 14 | 3,836 | 501 | 3,323 | 94,362 | 13,594 | 886 | 3,992 | 40 | 112,874 |
+| Mar. 22 | 96,747 | 1,665 | 142 | 14 | 4,376 | 443 | 4,204 | 107,591 | 15,567 | 886 | 4,039 | 40 | 128,123 |
+| Mar. 29 | 97,269 | 2,184 | 117 | 14 | 6,189 | 567 | 4,270 | 110,610 | 14,720 | 886 | 4,299 | 40 | 130,555 |
+| Contracts for purchases from domestic customers: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 215,940 | 2,621 | 99 | 335 | 9,457 | 1,877 | 14,555 | 244,884 | 68,842 | 306 | 10,534 | 185 | 324,751 |
+| Mar. 15 | 213,048 | 2,656 | 84 | 342 | 9,469 | 1,813 | 14,425 | 241,837 | 71,961 | 352 | 10,712 | 180 | 325,042 |
+| Mar. 22 | 219,388 | 2,792 | 89 | 314 | 10,658 | 2,349 | 15,329 | 250,919 | 77,598 | 392 | 11,093 | 208 | 340,210 |
+| Mar. 29 | 215,051 | 3,659 | 84 | 348 | 8,341 | 2,241 | 12,945 | 242,669 | 79,673 | 426 | 11,486 | 168 | 334,422 |
+| TOTAL SALE CONTRACTS: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 320,954 | 6,735 | 694 | 583 | 19,556 | 5,206 | 19,700 | 373,428 | 89,085 | 3,367 | 16,260 | 160 | 482,300 |
+| Mar. 15 | 318,946 | 6,932 | 692 | 600 | 19,644 | 5,129 | 21,462 | 373,405 | 92,494 | 3,559 | 16,489 | 143 | 486,090 |
+| Mar. 22 | 343,590 | 7,611 | 680 | 542 | 21,053 | 5,545 | 23,339 | 402,360 | 99,522 | 3,607 | 16,533 | 171 | 522,193 |
+| Mar. 29 | 334,145 | 9,497 | 832 | 588 | 20,952 | 5,757 | 21,038 | 392,809 | 100,801 | 3,640 | 17,523 | 135 | 514,908 |
+| Contracts for sale to foreign customers: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 107,463 | 4,448 | 383 | 172 | 8,961 | 3,380 | 15,514 | 140,321 | 40,687 | 3,152 | 9,382 | 74 | 193,616 |
+| Mar. 15 | 104,436 | 4,334 | 371 | 172 | 9,566 | 3,383 | 16,185 | 138,447 | 40,299 | 3,343 | 9,527 | 74 | 191,690 |
+| Mar. 22 | 110,837 | 5,265 | 361 | 154 | 10,127 | 3,115 | 17,716 | 147,575 | 40,911 | 3,391 | 9,424 | 74 | 201,375 |
+| Mar. 29 | 105,769 | 7,007 | 362 | 159 | 11,077 | 3,515 | 16,163 | 144,052 | 40,690 | 3,429 | 9,648 | 74 | 197,893 |
+| Contracts for sale to domestic customers: |  |  |  |  |  |  |  |  |  |  |  |  |  |
+| Mar. 8 | 213,491 | 2,287 | 311 | 411 | 10,595 | 1,826 | 4,185 | 233,107 | 48,398 | 215 | 6,878 | 85 | 288,684 |
+| Mar. 15 | 214,510 | 2,598 | 321 | 428 | 10,078 | 1,746 | 5,277 | 234,958 | 52,195 | 216 | 6,962 | 69 | 294,400 |
+| Mar. 22 | 232,753 | 2,346 | 319 | 388 | 10,926 | 2,430 | 5,623 | 254,785 | 58,611 | 216 | 7,109 | 97 | 320,818 |
+| Mar. 29 | 228,376 | 2,490 | 470 | 429 | 9,875 | 2,242 | 4,875 | 248,757 | 60,111 | 211 | 7,875 | 61 | 317,015 |
+
+Net Position in Foreign Currencies of Reporting Banks and Bankers in the United States for March 1939
+
+(Minus indicates short position: In thousands of dollars)
+
+| Position as of following dates | Currency of- > United Kingdom | France | Germany | Italy | Nether-lands | Switzer-land | Other Europe | Total Europe | Canada | Latin America | Far East | All other | Grand total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Mar. 8 | -8,489 | -2,232 | -355 | -970 | -2,857 | -1,597 | -897 | -17,397 | 626 | -163 | -6,217 | 128 | -23,023 |
+| Mar. 15 | -10,789 | -2,335 | -399 | -991 | -3,431 | -1,524 | -1,492 | -20,961 | 950 | -344 | -5,045 | 140 | -25,260 |
+| Mar. 22 | -13,443 | -2,677 | -381 | -1,067 | -3,978 | -1,563 | -1,900 | -25,009 | 2,357 | -349 | -5,375 | 139 | -28,237 |
+| Mar. 29 | -12,344 | -2,807 | -604 | -1,029 | -4,409 | -1,899 | -1,827 | -24,919 | 844 | -480 | -5,213 | 177 | -29,591 |
+
+OTHER MONETARY STATISTICS
+
+45
+
+46
+
+Gold Assets and Liabilities of the Treasury
+
+(in millions of dollars - on basis of daily Treasury statements unrevised)
+
+| End of calendar year or month | Gold Assets | Liabilities > Gold Certificate/ | Gold Reserve against U.S. notes, etc. 2/ | Stabilization Fund 3/ | Gold in General Fund |
+| --- | --- | --- | --- | --- | --- |
+| 1934 | 5,238.6 | 5,274.0 | 156.0 | 1,800.0 | 1,008.6 |
+| 1935 | 10,122.9 | 7,679.5 | 156.0 | 1,800.0 | 487.4 |
+| 1936 | 11,257.6 | 8,959.6 | 156.0 | 1,800.0 | 341.9 |
+| 1937 | 12,760.0 | 9,212.3 | 156.0 | 1,800.0 | 1,591.6 |
+| 1938-May | 12,915.1 | 10,727.3 | 156.0 | 1,800.0 | 231.7 |
+| June | 12,962.9 | 10,723.9 | 156.0 | 1,800.0 | 283.0 |
+| July | 13,017.4 | 10,720.2 | 156.0 | 1,800.0 | 341.1 |
+| Aug. | 13,135.5 | 10,717.1 | 156.0 | 1,800.0 | 462.4 |
+| Sept. | 13,759.3 | 10,994.5 | 156.0 | 1,800.0 | 808.8 |
+| Oct. | 14,064.3 | 11,347.6 | 156.0 | 1,800.0 | 760.6 |
+| Nov. | 14,311.9 | 11,665.3 | 156.0 | 1,800.0 | 667.6 |
+| Dec. | 14,511.2 | 11,872.6 | 156.0 | 1,800.0 | 682.4 |
+| 1939-Jan. | 14,680.9 | 12,022.3 | 156.0 | 1,800.0 | 702.5 |
+| Feb. | 14,874.3 | 12,199.1 | 156.0 | 1,800.0 | 719.2 |
+| Mar. | 15,258.2 | 12,627.0 | 156.0 | 1,800.0 | 675.2 |
+| Apr. | 15,790.6 | 13,176.0 | 156.0 | 1,800.0 | 658.4 |
+| May | 15,956.4 | 13,398.6 | 156.0 | 1,800.0 | 601.6 |
+
+1/ In Federal Reserve Banks, etc., gold certificates fund Board of Governors, Federal Reserve System, and Redemption fund, Federal Reserve notes. 2/ Reserve against $346,681,016 United States notes and $1,167,122 Treasury notes of 1890 outstanding. 3/ This does not include gold in the active portion of the Stabilization Fund.
+
+Net Movement of Gold to and from the United States
+
+(In millions of dollars at $35 per fine ounce - as reported by U. S. Department of Commerce)
+
+| Calendar year or month | United Kingdom | France | Nether- lands | Switze- land | Canada | Mexico | Japan | Bel- gium | British India | Aus- tralia | Philip- pine Islands | Co- lombia | Chile | Peru | China 1/ | All other | Total net import or net exports (-) |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1933...... | 10.8 | -365.1 | 13.4 | -19.7 | 33.6 | 7.2 | 11.3 | -1.5 | 43.3 | 5.4 | 9.7 | .2 | 4.0 | 2.6 | 21.7 | -70.6 | -293.7 |
+| 1934...... | 499.9 | 260.2 | 94.3 | 12.4 | 86.8 | 30.3 | - | 8.9 | 76.8 | 1.0 | 12.0 | 16.9 | 5.5 | 1.4 | 16.5 | 9.1 | 1,132.0 |
+| 1935...... | 315.7 | 934.2 | 227.2 | 1.0 | 95.2 | 13.7 | - | - | 75.3 | 3.5 | 15.3 | 10.9 | 6.6 | .3 | 9.4 | 30.7 | 1,739.0 |
+| 1936...... | 174.1 | 573.7 | 71.0 | 7.5 | 72.6 | 40.0 | - | 3.4 | 77.9 | 23.3 | 21.5 | 11.9 | 7.9 | 4.1 | 7.9 | 19.8 | 1,116.6 |
+| 1937...... | 891.5 | -13.7 | 6.5 | 54.5 | 111.5 | 38.5 | 246.5 | 90.9 | 50.8 | 34.7 | 25.4 | 18.4 | 9.4 | 3.1 | 1.6 | 15.9 | 1,585.5 |
+| 1938...... | 1,208.7 | 81.1 | 163.0 | 1.4 | 76.3 | 36.5 | 168.7 | 15.5 | 16.2 | 39.2 | 27.9 | 10.6 | 8.4 | 4.0 | 11.7 | 104.4 | 1,973.6 |
+| 1938-May...... | 2.9 | - | - | - | .6 | 5.7 | 22.0 | .9 | - | 3.6 | 2.3 | 2.1 | 1.0 | .8 | .1 | 10.8 | 52.8 |
+| June...... | 20.6 | - | .6 | .2 | .7 | .7 | 5.8 | 3.2 | 2.3 | 3.0 | 3.2 | - | .5 | .4 | 1.1 | 13.0 | 55.3 |
+| July...... | 5.0 | .9 | - | - | 1.0 | 11.1 | 28.7 | - | 1.1 | 3.4 | 2.4 | - | .4 | .3 | 1.2 | 8.3 | 63.8 |
+| Aug...... | 91.2 | 4.7 | - | - | 14.3 | 3.2 | 23.5 | 3.2 | - | 2.7 | 1.8 | 2.1 | 1.1 | .3 | 1.5 | 16.4 | 166.0 |
+| Sept...... | 378.0 | - | 47.2 | - | 38.1 | 1.4 | 35.1 | - | - | 3.8 | 2.7 | - | .4 | .4 | 1.5 | 12.3 | 520.9 |
+| Oct...... | 443.4 | 43.0 | 41.8 | - | 10.8 | 2.2 | 5.7 | - | .8 | 3.3 | 2.7 | - | .8 | .2 | 1.2 | 6.5 | 562.4 |
+| Nov...... | 99.1 | - | 27.2 | 1.1 | 7.2 | 3.5 | 5.8 | - | 3.8 | 7.9 | 2.9 | - | .5 | .4 | 2.9 | 15.5 | 177.8 |
+| Dec...... | 101.7 | 37.4 | 46.2 | - | .7 | 2.6 | 14.4 | 2.0 | 1.8 | 6.8 | 2.7 | 2.1 | 1.0 | .4 | 2.0 | 18.7 | 240.5 |
+| 1939-Jan...... | 52.1 | 1.4 | 33.7 | -1.1 | 10.8 | 2.3 | 37.8 | 1.7 | - | 6.6 | 2.8 | 2.1 | .6 | .4 | 2.3 | 1.8 | 156.3 |
+| Feb...... | 165.4 | 1.4 | 29.3 | - | 4.2 | 2.5 | 5.4 | - | - | 4.0 | 2.7 | - | .5 | .3 | 2.4 | 5.0 | 223.3 |
+| Mar...... | 250.0 | .8 | 27.1 | 8.2 | 6.9 | 3.8 | 11.4 | 37.2 | 3.7 | 4.3 | 3.3 | 4.2 | 1.5 | .3 | 1.3 | 1.4 | 365.4 |
+| Apr...... | 384.9 | - | 44.6 | 55.7 | 7.7 | 1.6 | 5.5 | 84.6 | 4.9 | 4.8 | 2.2 | 2.1 | .5 | .3 | .3 | 6.1 | 605.8 |
+| May...... | 302.7 | - | 40.4 | 2.3 | 12.1 | 2.1 | 10.9 | 41.7 | 3.4 | 5.3 | 2.6 | 2.1 | .7 | .3 | 1.3 | 1.5 | 429.4 |
+
+1/ Including Hong Kong.
+
+Monetary Stocks of Gold and Silver
+
+(In millions of dollars - on basis, daily Treasury statements, revised)
+
+| End of fiscal year or month | Gold ($35 per fine ounce) | Silver ($1.29+ per fine ounce) | Ratio of Silver to Gold and Silver in Monetary Stocks |
+| --- | --- | --- | --- |
+| 1934 | 7,856.2 | 898.2 | 10.3 |
+| 1935 | 9,115.6 | 1,463.1 | 13.8 |
+| 1936 | 10,608.4 | 2,249.5 | 17.5 |
+| 1937 | 12,518.3 | 2,542.1 | 17.2 |
+| 1938-May | 12,918.8 | 3,031.1 | 19.0 |
+| June | 12,963.0 | 3,066.4 | 19.1 |
+| July | 13,017.4 | 3,102.9 | 19.2 |
+| Aug. | 13,135.7 | 3,129.4 | 19.2 |
+| Sept. | 13,759.6 | 3,163.0 | 18.7 |
+| Oct. | 14,064.5 | 3,202.5 | 18.5 |
+| Nov. | 14,312.1 | 3,265.2 | 18.6 |
+| Dec. | 14,511.6 | 3,346.8 | 18.7 |
+| 1939-Jan. | 14,681.7 | 3,404.8 | 18.8 |
+| Feb. | 14,874.4 | 3,439.4 | 18.8 |
+| Mar. | 15,258.2 | 3,477.9 | 18.6 |
+| Apr. | 15,790.6 | 3,518.0 | 18.2 |
+| May* | 15,956.4 | 3,547.6 | 18.2 |
+
+MONETARY STOCKS OF GOLD AND SILVER IN U.S.
+
+Gold per Ounce: Through Jan. '34 = $20.67 Thereafter = $35.00
+
+Silver per Ounce $1.29
+
+QUARTERLY (End of Quarter)
+
+Note: $287,000,000 written off as lost. Jan.31, 1934
+
+48
+
+Components of Silver Monetary Stock
+
+(In millions of dollars - on basis of daily Treasury statements, revised)
+
+| End of calendar year or month | Securing silver certificates 1/ > Silver bullion | Silver dollars | In General Fund > Sub-ordinary coin 2/ | Bullion for recoinage 2/ | Silver outside Treasury > Bullion at cost | Silver dollars 1/ | Total Silver at $1.29 per ounce | Sub-ordinary coin 2/ |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1934 | 211.6 | 508.4 | 4.2 | 8.8 | 89.3 | 35.2 | 305.3 | 1,279.7 |
+| 1935 | 576.9 | 508.7 | 4.2 | .2 | 262.7 | 38.4 | 323.5 | 1,970.1 |
+| 1936 | 775.9 | 505.7 | 5.7 | .3 | 347.7 | 41.3 | 350.4 | 2,402.3 |
+| 1937 | 938.8 | 503.7 | 5.4 | - | 428.6 | 43.3 | 366.9 | 2,806.5 |
+| 1938-May | 1,022.9 | 503.7 | 9.4 | 1.2 | 473.0 | 43.3 | 364.3 | 3,031.1 |
+| June | 1,037.2 | 503.6 | 8.7 | 1.3 | 479.6 | 43.4 | 364.7 | 3,066.4 |
+| July | 1,048.9 | 503.6 | 8.6 | 1.2 | 488.0 | 43.5 | 365.0 | 3,102.9 |
+| Aug. | 1,060.6 | 503.6 | 9.8 | .3 | 492.3 | 43.5 | 365.1 | 3,129.4 |
+| Sept. | 1,071.4 | 503.4 | 8.9 | .3 | 499.4 | 43.7 | 366.8 | 3,163.0 |
+| Oct. | 1,086.9 | 503.2 | 7.7 | .4 | 506.7 | 43.9 | 368.1 | 3,202.5 |
+| Nov. | 1,110.1 | 502.9 | 5.5 | .5 | 519.2 | 44.2 | 370.2 | 3,265.2 |
+| Dec. | 1,137.6 | 502.7 | 3.5 | .2 | 535.3 | 44.4 | 372.8 | 3,346.8 |
+| 1939-Jan. | 1,157.8 | 502.7 | 4.1 | .4 | 547.2 | 44.3 | 372.0 | 3,404.8 |
+| Feb. | 1,169.7 | 502.7 | 4.1 | .3 | 554.2 | 44.4 | 372.0 | 3,439.0 |
+| Mar. | 1,185.6 | 502.7 | 4.5 | .3 | 561.1 | 44.4 | 372.0 | 3,477.9 |
+| Apr. | 1,199.2 | 502.6 | 3.6 | .7 | 569.6 | 44.5 | 372.6 | 3,518.0 |
+| May. | 1,212.2 | 502.5 | 3.9 | .4 | 576.3 | 44.5 | 372.6 | 3,547.6 |
+
+1/ Valued at $1.29† per ounce.
+2/ Valued at $1.38† per ounce.
+* Preliminary.
+
+Silver of Specified Classifications Acquired by Mints and Assay Offices
+
+(in millions)
+
+| Calendar year or month | Newly mined domestic 1/ > Own- ces | Dol- lars | National- ized 2/ > Own- ces | Dol- lars_2 | Foreign 3/ > Own- ces | Dol- lars_3 | Total > Own- ces | Dol- lars_4 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1934 | 21.8 | 14.1 | 110.6 | 55.3 | 172.5 | 86.5 | 304.9 | 155.9 |
+| 1935 | 38.0 | 27.3 | 2.0 | 1.0 | 494.4 | 318.2 | 534.3 | 346.5 |
+| 1936 | 61.1 | 47.3 | 14 | 2 | 271.9 | 150.3 | 333.4 | 197.9 |
+| 1937 | 70.6 | 54.6 | - | - | 241.5 | 108.7 | 312.2 | 163.4 |
+| 1938 | 61.6 | 42.2 | - | - | 355.4 | 156.9 | 417.1 | 199.1 |
+| 1938-May | 5.1 | 3.4 | - | - | 26.4 | 11.6 | 31.5 | 15.0 |
+| June | 4.9 | 3.3 | - | - | 22.6 | 10.0 | 27.5 | 13.3 |
+| July | 5.8 | 3.8 | - | - | 18.6 | 8.2 | 24.4 | 12.0 |
+| Aug. | 6.2 | 4.1 | - | - | 18.0 | 8.0 | 24.2 | 12.1 |
+| Sept. | 3.8 | 2.5 | - | - | 22.0 | 9.7 | 25.8 | 12.2 |
+| Oct. | 4.9 | 3.2 | - | - | 25.7 | 11.3 | 30.6 | 14.5 |
+| Nov. | 7.9 | 5.4 | - | - | 40.7 | 17.7 | 48.6 | 23.1 |
+| Dec. | 4.6 | 3.0 | - | - | 57.6 | 24.8 | 62.2 | 27.8 |
+| 1939-Jan. | 4.5 | 2.9 | - | - | 41.3 | 17.8 | 45.8 | 20.7 |
+| Feb. | 5.1 | 3.3 | - | - | 21.2 | 9.1 | 26.3 | 12.4 |
+| Mar. | 5.4 | 3.5 | - | - | 24.6 | 10.6 | 30.0 | 14.1 |
+| Apr. | 4.9 | 3.2 | - | - | 26.1 | 11.2 | 31.0 | 14.4 |
+| May | 4.7 | 3.0 | - | - | 24.7 | 10.6 | 29.3 | 13.6 |
+
+1/ Acquired at 64.64 cents per fine ounce until April 9, 1935; at 71.11¢ cents per fine ounce from that date until April 23, 1935; at 77.57¢ cents from April 23, 1935 to December 31, 1937; and at 64.64¢ cents per fine ounce since December 31, 1937.
+2/ Acquired at 50.01 cents per fine ounces. Exec. Proc. of August 9, 1934, repealed April 28, 1938.
+3/ Acquired at various prices averaging approximately 53¢ cents per ounce.
+
+Silver Production, by Leading Countries
+
+(In thousands of fine ounces) 1/
+
+| Calendar year or month | United States | Canada 2/ | Mexico | Peru | Other America | Europe | Oceania | Japan 3/ | British India | Other Asia | Africa | Total for world |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1933 | 22,621 | 16,395 | 68,101 | 6,761 | 10,819 | 14,769 | 11,553 | 6,680 | 6,080 | 1,104 | 4,076 | 169,159 |
+| 1934 | 32,487 | 17,565 | 74,145 | 10,381 | 10,091 | 14,891 | 11,257 | 7,863 | 5,818 | 1,178 | 4,722 | 190,398 |
+| 1935 | 45,613 | 17,743 | 75,589 | 17,433 | 12,788 | 17,199 | 12,434 | 9,706 | 5,850 | 1,219 | 5,130 | 220,704 |
+| 1936 | 63,351 | 19,584 | 77,464 | 19,901 | 16,539 | 19,703 | 13,194 | 11,670 | 5,977 | 1,733 | 4,580 | 253,696 |
+| 1937 | 71,299 | 24,131 | 84,681 | 16,994 | 15,663 | 20,811 | 14,903 | 12,451 | 6,205 | 1,883 | 4,853 | 273,874 |
+| 1938 | 58,736 | 22,445 | 81,017 | 19,356 | 17,340 | 20,355 | 14,767 | 10,175 | 5,920 | 3,535 | 4,783 | 258,429 |
+| 1938-Apr | 5,044 | 1,430 | 7,153 | 1,350 | 1,425 | 1,600 | 1,170 | 840 | 500 | 290 | 395 | 21,197 |
+| May | 4,813 | 1,509 | 6,244 | 1,525 | 1,500 | 1,675 | 1,135 | 840 | 495 | 300 | 404 | 20,440 |
+| June | 4,679 | 1,603 | 8,417 | 1,300 | 1,400 | 1,675 | 1,361 | 845 | 495 | 325 | 390 | 22,490 |
+| July | 4,530 | 2,112 | 9,019 | 1,900 | 1,450 | 1,700 | 1,361 | 845 | 490 | 275 | 389 | 24,071 |
+| Aug | 5,596 | 2,528 | 9,224 | 1,775 | 1,450 | 1,700 | 1,352 | 845 | 490 | 265 | 394 | 25,619 |
+| Sept | 5,073 | 2,202 | 4,486 | 1,875 | 1,425 | 1,700 | 1,302 | 875 | 490 | 250 | 386 | 20,064 |
+| Oct | 5,441 | 2,400 | 4,160 | 1,800 | 1,425 | 1,800 | 1,084 | 875 | 485 | 300 | 384 | 20,154 |
+| Nov | 2,879 | 2,023 | 2,781 | 1,750 | 1,500 | 1,800 | 1,327 | 875 | 480 | 350 | 394 | 16,159 |
+| Dec | 4,624 | 1,552 | 4,922 | 1,850 | 1,500 | 1,800 | 1,160 | 875 | 485 | 350 | 393 | 19,511 |
+| 1939-Jan | 4,669 | 1,575 | 4,281 | 1,825 | 1,500 | 1,800 | 1,324 | 875 | 485 | 370 | 404 | 19,108 |
+| Feb | 5,268 | 1,454 | 6,794 | 1,700 | 1,500 | 1,800 | 1,169 | 875 | 485 | 400 | 377 | 21,822 |
+| Mar | 5,067 | 1,637 | 5/ | 1,650 | 1,500 | 1,800 | 1,242 | 875 | 585 | 400 | 398 | 21,822 |
+| Apr | 5,336 | 1,411 | 5/ | 1,550 | 1,450 | 1,780 | 1,209 | 875 | 585 | 400 | 415 | 21,822 |
+
+1/ Annual Reports of the Director of the Mint for annual figures through 1937. Releases of American Bureau of Metal Statistics for monthly figures, and 1938 estimate.
+2/ Includes Newfoundland.
+3/ Includes Chosen and Taiwan.
+4/ Burma, refined silver.
+5/ Not yet reported.
+* No longer reported. Estimated at about previous rate.
+
+49
+
+Net Movement of Silver to and from the United States
+
+(In thousands of dollars - as reported by U. S. Department of Commerce)
+
+| Calendar year and month | United Kingdom | Other Europe | Canada | Mexico | Cuba | Chile | Peru | Other Latin America |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1934 | 36,521 | 190 | 438 | 21,995 | -3,780 | 1,550 | 3,906 | 381 |
+| 1935 | 245,133 | 2,457 | 12,147 | 58,325 | -5,611 | 2,920 | 10,199 | -1,228 |
+| 1936 | 53,393 | 856 | 5,416 | 29,925 | -8,951 | 1,048 | 7,408 | 2,738 |
+| 1937 | 34,120 | -25 | 6,798 | 30,203 | -7,451 | 968 | 6,786 | 611 |
+| 1938 | 134,264 | 15,396 2/ | 10,915 | 41,715 | -4,342 | 696 | 7,381 | 2,858 |
+| 1938-May | 10,010 | 2,158 | 1,470 | 2,710 | 1/ | 59 | 667 | 386 |
+| June | 13,813 | 20 | 436 | 3,098 | 13 | 86 | 680 | 249 |
+| July | 8,957 | 4,305 3/ | 874 | 2,918 | 6 | 57 | 519 | 194 |
+| Aug. | 5 | 4 | 988 | 2,600 | -244 | 73 | 608 | 182 |
+| Sept. | 15,301 | 4,300 3/ | 809 | 1,956 | -1,250 | 30 | 978 | 173 |
+| Oct. | 10,169 | 46 | 663 | 2,767 | -993 | 46 | 498 | 312 |
+| Nov. | 15,778 | 4,310 3/ | 708 | 2,635 | -695 | 33 | 631 | 277 |
+| Dec. | 17,075 | 31 | 742 | 1,876 | -1,200 | 36 | 708 | 239 |
+| 1939-Jan. | 5,105 | 20 | 485 | 2,737 | -1,243 | 45 | 739 | 219 |
+| Feb. | 4,083 | -4 | 372 | 2,635 | -1,093 | 38 | 491 | 236 |
+| Mar. | 324 | 8 | 547 | 3,112 | -750 | 42 | 759 | 284 |
+| Apr. | 1,104 | 19 | 263 | 3,194 | -1,250 | 38 | 582 | 223 |
+| May. | 1,017 | 13 | 545 | 3,225 | -492 | 17 | 494 | 321 |
+
+| Calendar year and month | British India | China | Hong Kong | Japan | Other Asia | All other | Total net imports or exports (-) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1934 | -338 | 21,967 | 2,873 | 303 | 134 | 34 | 86,174 |
+| 1935 | 188 | 227 | 6,787 | 843 | 3,224 | 118 | 335,730 |
+| 1936 | 3,024 | 69,996 | 3,463 | 2,144 | 342 | 48 | 170,851 |
+| 1937 | - | 5,614 | 4 | 1,271 | 504 | 433 | 79,835 |
+| 1938 | 150 | - | 61 | 2,930 | 10,808 4/ | 617 | 223,449 |
+| 1938-May | - | - | 5 | 116 | 11 | 44 | 17,636 |
+| June | 45 | - | - | 343 | 63 | 84 | 18,931 |
+| July | - | - | - | 126 | 69 | 108 | 18,133 |
+| Aug. | - | - | - | 117 | 121 | 130 | 4,584 |
+| Sept. | - | - | 2 | 149 | 166 | 19 | 22,635 |
+| Oct. | - | - | - | 171 | 10,065 4/ | 70 | 23,813 |
+| Nov. | 43 | - | 54 | 305 | 75 | 9 | 24,163 |
+| Dec. | 61 | - | - | 413 | 204 | 4 | 20,189 |
+| 1939-Jan. | 1/ | - | - | 270 | 146 | 134 | 8,658 |
+| Feb. | 43 | - | 2 | 630 | 432 | 8 | 7,874 |
+| Mar. | 250 | - | - | 502 | 160 | 44 | 5,284 |
+| Apr. | 86 | - | - | 588 | 217 | 25 | 5,089 |
+| May | - | - | - | 270 | 121 | 9 | 5,540 |
+
+1/ Less than $500.
+2/ Includes net import of $12,950,000 from France.
+3/ Figures for July, Sept. and Nov. 1938 include net imports from France of $4,301,000, $4,300,000 and $4,301,000 respectively.
+4/ Includes net import of $9,791,000 from Siam.
+
+Seigniorage on Silver
+
+(In millions of dollars - on basis of daily Treasury statements)
+
+| Cumulative from Jan. 1, 1934 to end of Calendar year or month | Seigniorage on silver and minor coins | Sources of Seigniorage on Silver Bullion Revalued 1/ > Misc. silver (incl. silver bullion held June 14, 1934 | Newly-mined silver (Froc. Dec. 21,1933) | Silver Purchase Act of June 19, 1934 | Nationalized silver (Froc. of Aug. 9, 1934) | Total Seigniorage on silver revalued | Potential seigniorage on silver bullion at cost in General Fund |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1934 | 4.5 | 48.7 | .4 | 51.1 | 28.5 | 128.7 | 137.5 |
+| 1935 | 18.5 | 48.7 | 16.8 | 226.2 | 34.5 | 326.2 | 276.7 |
+| 1936 | 46.1 | 48.7 | 36.0 | 302.7 | 34.7 | 422.1 | 398.4 |
+| 1937 | 63.7 | 48.7 | 58.0 | 366.7 | 34.7 | 508.1 | 543.9 |
+| 1938-May | 67.2 | 48.7 | 65.0 | 405.1 | 34.7 | 553.5 | 637.6 |
+| June | 67.3 | 48.7 | 66.3 | 411.4 | 34.7 | 561.1 | 652.2 |
+| July | 67.4 | 48.7 | 67.8 | 416.0 | 34.7 | 567.2 | 668.4 |
+| Aug. | 67.5 | 48.7 | 69.4 | 420.4 | 34.7 | 573.2 | 678.5 |
+| Sept. | 68.0 | 48.7 | 70.1 | 425.7 | 34.7 | 579.2 | 693.4 |
+| Oct. | 68.5 | 48.7 | 71.6 | 432.6 | 34.7 | 587.6 | 710.0 |
+| Nov. | 68.9 | 48.7 | 73.8 | 443.0 | 34.7 | 600.2 | 737.0 |
+| Dec. | 69.5 | 48.7 | 74.9 | 457.7 | 34.7 | 616.0 | 773.9 |
+| 1939-Jan. | 69.9 | 48.7 | 76.0 | 468.0 | 34.7 | 627.4 | 790.0 |
+| Feb. | 70.2 | 48.7 | 77.4 | 473.1 | 34.7 | 633.9 | 809.8 |
+| Mar. | 70.7 | 48.7 | 79.0 | 480.3 | 34.7 | 642.7 | 825.1 |
+| Apr. | 71.0 | 48.7 | 80.1 | 486.8 | 34.7 | 650.3 | 844.0 |
+| May | 71.9 | 48.7 | 81.2 | 493.1 | 34.7 | 657.7 | 859.7 |
+
+1/ These items represent the difference between the cost value and the monetary value of silver bullion revalued and held to secure silver certificates.
+
+50
+
+Value of Selected Currencies in Terms of Gold
+
+1928 = 100
+
+| Category | United States | United Kingdom | France | Nether-lands | Switzer-land | Belgium | Japan | Italy | China 1/ |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1931-Dec. | 100 | 69 | 100 | 100 | 101 | 100 | 87 | 97 | 53 |
+| 1932-Dec. | 100 | 67 | 100 | 100 | 100 | 100 | 42 | 97 | 43 |
+| 1933-Dec. | 64 | 67 | 100 | 100 | 100 | 100 | 39 | 100 | 47 |
+| 1934-Dec. | 59 | 60 | 100 | 100 | 100 | 100 | 34 | 96 | 45 |
+| 1935-Dec. | 59 | 60 | 100 | 100 | 100 | 72 | 34 | 91 | 39 |
+| 1936-Dec. | 59 | 60 | 70 | 80 | 70 | 72 | 34 | 59 | 39 |
+| 1937-Dec. | 59 | 61 | 51 | 82 | 71 | 72 | 34 | 59 | 39 |
+| 1938-May. | 59 | 60 | 42 | 81 | 70 | 72 | 34 | 59 | 31 |
+| June. | 59 | 60 | 42 | 81 | 70 | 72 | 34 | 59 | 25 |
+| July. | 59 | 60 | 42 | 81 | 70 | 72 | 34 | 59 | 24 |
+| Aug. | 59 | 59 | 41 | 80 | 70 | 72 | 34 | 59 | 22 |
+| Sept. | 59 | 58 | 41 | 79 | 69 | 72 | 33 | 59 | 22 |
+| Oct. | 59 | 58 | 40 | 80 | 70 | 72 | 33 | 59 | 21 |
+| Nov. | 59 | 57 | 40 | 80 | 69 | 72 | 33 | 59 | 21 |
+| Dec. | 59 | 57 | 40 | 80 | 69 | 72 | 32 | 59 | 21 |
+| 1939-Jan. | 59 | 57 | 40 | 80 | 69 | 72 | 32 | 59 | 21 |
+| Feb. | 59 | 57 | 40 | 79 | 69 | 72 | 32 | 59 | 21 |
+| Mar. | 59 | 57 | 40 | 78 | 69 | 71 | 32 | 59 | 21 |
+| Apr. | 59 | 57 | 40 | 78 | 69 | 72 | 32 | 59 | 21 |
+| May. | 59 | 57 | 40 | 79 | 69 | 72 | 32 | 59 | 21 |
+
+Note: Monthly average of daily quotations. 1/ Average exchange rate for January 1928 = 100.
+
+Indexes of Prices of 40 Foreign Currencies in New York
+
+1935 =100
+
+| Category | Un-weighted (i.e. equal weights) | Weighted by U. S. exports | Weighted by U. S. imports | Weighted according to total foreign trade of each country included |
+| --- | --- | --- | --- | --- |
+| 1935 | 100 | 100 | 100 | 100 |
+| 1936 | 97 | 99 | 99 | 98 |
+| 1937 | 91 | 94 | 96 | 92 |
+| 1938 | 88 | 91 | 93 | 88 |
+| 1938-May | 89 | 92 | 94 | 89 |
+| June | 88 | 92 | 93 | 88 |
+| July | 88 | 91 | 93 | 87 |
+| Aug. | 87 | 91 | 92 | 87 |
+| Sept. | 86 | 90 | 91 | 86 |
+| Oct. | 86 | 89 | 91 | 85 |
+| Nov. | 85 | 89 | 90 | 85 |
+| Dec. | 85 | 88 | 90 | 84 |
+| 1939-Jan. | 85 | 88 | 90 | 84 |
+| Feb. | 86 | 90 | 91 | 85 |
+| Mar. | 86 | 90 | 91 | 85 |
+| Apr. | 86 | 90 1/2 | 91 | 85 |
+| May. | 85 | 89 | 90 | 85 |
+
+1/ Revised.
+
+Indexes of Prices of 40 Foreign Currencies in New York, London, Paris and Tokyo
+
+1935 = 100
+
+| Category | Unweighted (i.e. equal weights) > New York | London | Paris | Tokyo | Weighted according to total foreign trade of each country included in the index > New York | London_2 | Paris_2 | Tokyo_2 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1935 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 |
+| 1936 | 97 | 96 | 105 | 96 | 98 | 96 | 107 | 97 |
+| 1937 | 91 | 90 | 150 | 91 | 92 | 91 | 156 | 93 |
+| 1938 | 88 | 88 | 204 | 88 | 88 | 88 | 212 | 90 |
+| 1938-May | 89 | 87 | 211 | 88 | 89 | 87 | 219 | 89 |
+| June | 88 | 87 | 212 | 87 | 88 | 86 | 220 | 88 |
+| July | 88 | 87 | 212 | 87 | 87 | 86 | 220 | 88 |
+| Aug. | 87 | 87 | 213 | 88 | 87 | 86 | 221 | 89 |
+| Sept. | 86 | 86 | 214 | 88 | 86 | 87 | 222 | 89 |
+| Oct. | 86 | 88 | 216 | 89 | 85 | 87 | 224 | 90 |
+| Nov. | 85 | 89 | 217 | 89 | 85 | 88 | 225 | 90 |
+| Dec. | 85 | 89 | 216 | 90 | 84 | 89 | 225 | 91 |
+| 1939-Jan. | 85 | 89 | 216 | 89 | 84 | 88 | 223 | 90 |
+| Feb. | 86 | 90 | 219 | 91 | 85 | 89 | 225 | 91 |
+| Mar. | 86 | 90 | 218 | 91 | 85 | 89 | 225 | 91 |
+| Apr. | 86 | 90 1/2 | 218 1/2 | 91 1/2 | 85 | 89 | 225 | 91 |
+| May. | 85 | 89 | 215 | 89 | 85 | 89 | 225 | 91 |
+
+1/ Revised.
+
+51
+
+Ratios of Index of Wholesale Prices in 39 Countries to Index of Wholesale Prices in the United States
+
+Ratios of Index of Wholesale Prices in 39 Countries to Index of Wholesale Prices in the United States, the United Kingdom, France, and Japan
+
+1935 = 100
+
+1935 = 100
+
+| Category | Un-weighted (i.e. equal weights) | Weighted by U. S. exports | Weighted by U. S. imports | Weighted according to total foreign trade of each country included |
+| --- | --- | --- | --- | --- |
+| 1935 | 100 | 100 | 100 | 100 |
+| 1936 | 105 1/2 | 105 | 105 | 105 |
+| 1937 | 112 1/2 | 114 | 114 | 114 |
+| 1938 | 122 | 124 | 123 | 126 1/2 |
+| 1938-Mar. | 121 1/2 | 124 | 123 | 124 |
+| Apr. | 122 | 125 | 124 | 125 |
+| May | 123 | 125 | 124 | 126 |
+| June | 122 | 125 | 124 | 126 |
+| July | 121 | 124 | 123 | 125 |
+| Aug. | 122 | 124 | 123 | 126 |
+| Sept. | 122 | 123 | 122 | 125 |
+| Oct. | 124 | 125 | 124 | 127 |
+| Nov. | 124 | 125 | 124 | 127 |
+| Dec. | 125 | 126 | 125 | 128 |
+| 1939-Jan. | 125 | 126 | 125 | 128 1/2 |
+| Feb. | 125 1/2 | 126 | 125 1/2 | 127 |
+| Mar. | 127 | 127 | 126 | 128 |
+
+| Category | Unweighted (i.e. equal weights) > United States | United Kingdom | France | Japan | Weighted according to total foreign trade of each country included in the index > United States | United Kingdom_2 | France_2 | Japan_2 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1935 | 100 | 100 | 100 | 100 | 100 | 100 | 100 | 100 |
+| 1936 | 105 1/2 | 99 | 87 | 99 | 105 | 99 | 86 | 99 |
+| 1937 | 112 1/2 | 98 | 69 | 93 | 114 | 99 | 69 | 95 1/2 |
+| 1938 | 122 | 105 | 61 | 88 | 126 1/2 | 107 1/2 | 60 1/2 | 89 1/2 |
+| 1938-Mar. | 121 1/2 | 102 | 63 | 88 | 124 | 104 | 62 | 89 |
+| Apr. | 122 | 103 | 62 | 90 | 125 | 105 | 61 | 90 |
+| May | 123 | 104 | 61 | 89 | 126 | 106 | 60 | 89 |
+| June | 122 | 105 | 60 | 87 | 126 | 108 1/2 | 59 | 87 |
+| July | 121 | 105 | 61 | 86 | 125 | 107 | 60 | 87 |
+| Aug. | 122 | 107 1/2 | 61 | 87 | 126 | 108 | 60 | 88 |
+| Sept. | 122 | 108 | 61 | 87 | 125 | 110 | 59 | 88 |
+| Oct. | 124 | 107 | 60 | 87 | 127 | 119 | 58 | 88 |
+| Nov. | 124 | 108 | 59 | 87 1/2 | 127 | 110 | 57 | 87 |
+| Dec. | 125 | 108 | 58 | 86 1/2 | 128 | 110 | 56 | 87 |
+| 1939-Jan. | 125 | 110 | 58 | 85 | 128 1/2 | 112 1/2 | 56 1/2 | 85 1/2 |
+| Feb | 125 1/2 | 110 1/2 | 58 | 83 1/2 | 127 | 111 | 55 | 83 |
+| Mar.* | 127 | 111 | 59 | 84 | 128 | 112 | 55 | 82 |
+
+Preliminary 1/ Revised
+
+Preliminary
+1/ Revised
+
+MISCELLANEOUS
+
+53
+
+53
+
+Commodities Imported under Quota Provisions
+
+Preliminary figures for five months of 1939
+
+| Commodity | Quote period | Unit of quantity | Established Quote | Quantity Imported > In January 1/ | In February 1/ | In March 1/ | In April 1/ | In May |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Cattle weighing under 200 pounds each......... | Calendar Year | Head | 100,000 | 5,723 | 9,526 | 16,596 | 14,959 | 16,328 |
+| Cattle weighing 700 pounds or more each, other than dairy cows......... | Calendar Year | Head | 225,000 |  |  |  |  |  |
+|  | First Quarter | Head | 60,000 | 57,575 | 2,425 3/ | 3/ |  |  |
+|  | Second Quarter 2/ | Head | 51,720 |  |  |  | 30,652 | 20,287 4/ |
+|  | From Canada | Head | 8,280 |  |  |  | 8,280 4/ |  |
+|  | Other Countries |  |  |  |  |  |  |  |
+| Whole milk, fresh or sour......... | Calendar Year | Gallon | 3,000,000 | 407 | 398 | 338 | 488 | 363 |
+| Cream, fresh or sour......... | Calendar Year | Gallon | 1,500,000 | 86 | 14 | 133 | 49 | 154 |
+| Fish, fresh or frozen, filleted, etc., Cod, Haddock, Hake, Pollock, Cusk and Rosefish......... | Calendar Year | Pound | 15,000,000 | 1,064,901 | 1,187,589 | 968,914 | 500,267 | 532,588 |
+| White or Irish potatoes: |  |  |  |  |  |  |  |  |
+| Certified seed......... | 12 months from Sept. 15, 1938 | Pound | 90,000,000 | 1,756,703 | 1,348,404 | 33,349,477 | 6,255,452 | 167,217 |
+| Other......... | 12 months from Sept. 15, 1938 | Pound | 60,000,000 | 2,062 | 52,557 | 652,565 | 121,326 | 231,543 |
+| Red cedar shingles from Canada......... | let 6 months Calendar Year | Square | 1,051,168 | 335,355 | 228,166 | 264,911 | 222,736 5/ | 5/ |
+| Molasses and sugar syrups, containing soluble non-sugar solids over 6% of total soluble solids......... | Calendar Year | Gallon | 1,500,000 | 833,857 | 14,862 | 4,872 | 20,664 | 625,745 6/ |
+| Products of Philippine Islands: |  |  |  |  |  |  |  |  |
+| Coconut oil......... | Calendar Year | Pound | 448,000,000 | 26,885,197 | 20,354,521 | 40,677,766 | 22,818,683 | 40,302,420 |
+| Refined sugar......... | Calendar Year | Pound | 112,000,000 | 1,198,779 | 8,991,734 | 5,107,989 | 15,938,690 | 18,629,017 |
+| Unrefined sugar......... | Calendar Year | Pound | 1,792,000,000 | 80,341,856 | 139,357,404 | 168,683,878 | 242,980,098 | 209,037,272 |
+| Cordage | 12 months from May 1, 1938 | Pound | 6,000,000 | 526,852 | 984,923 | 1,126,713 | 1,845,634 | 185,445 |
+
+Partially revised. On February 27, 1939 (T. D. 49811) imports of this class of cattle entitled to reduction in duty under the Canadian Trade Agreement were allocated among countries of export. Tariff rate quota filled February 2, 1939. Tariff rate quota filled April 13, 1939. Import quota filled April 14, 1939. Tariff rate quota filled May 31, 1939.
+
+54
+
+Summary of Criminal Cases in the United States District Courts
+
+Alcohol Tax, Customs, Narcotics, Secret Service and Internal Revenue 1/ for the month of April 1939
+
+INVENTORY OF CASES
+
+| Bureau | Cases pending first of month | New cases | Cases closed | Cases pending end of month | Net change in pending cases |
+| --- | --- | --- | --- | --- | --- |
+| Total | 21,183 | 3,168 | 3,761 | 20,590 | -593 |
+| Alcohol Tax. | 17,062 | 2,272 | 2,899 | 16,435 | -627 |
+| Custome... | 339 | 47 | 73 | 313 | -26 |
+| Narcotics... | 2,266 | 484 | 402 | 2,348 | +82 |
+| Secret Service... | 1,095 | 356 | 371 | 1,080 | -15 |
+| Internal Revenue... | 421 | 9 | 16 | 414 | -7 |
+
+DISPOSITIONS
+
+| Bureau | Number cases closed | Number cases transferred 2/ | Percent released > Before indict. | After indict. | Acquit-tals | Percent convicted > Total | Found guilty | Plead guilty | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Total...... | 3,761 | 193 | 16% | 9% | 3% | 28% | 8% | 64% | 72% |
+| Alcohol Tax. | 2,899 | 133 | 17% | 9% | 4% | 30% | 9% | 61% | 70% |
+| Customs 3/ | 73 | - | 7% | 23% | 2% | 32% | 5% | 63% | 68% |
+| Narcootice 3/ | 402 | 37 | 13% | 10% | 1% | 24% | 6% | 70% | 76% |
+| Secret Service.... | 371 | 23 | 8% | 1% | 3% | 12% | 3% | 85% | 88% |
+| Internal Revenue.... | 16 | - | 4/ | 4/ | 4/ | 4/ | 4/ | 4/ | 4/ |
+
+SENTENCES
+
+| Bureau | Total convictions | Percent imprisoned | Percent prosecuted | Percent fined | Average days imprisonment | Average fine (dollars) | Total fines (dollars) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Total | 2,490 | 61% | 36% | 33% | 410 | 401 | 330,869 |
+| Alcohol Tax | 1,936 | 57% | 37% | 37% | 303 | 405 | 287,856 |
+| Customs | 50 | 82% | 20% | 16% | 281 | 2,344 | 18,755 |
+| Narcotics | 195 | 77% | 31% | 9% | 763 | 492 | 8,361 |
+| Secret Service | 306 | 78% | 35% | 29% | 697 | 177 | 15,897 |
+| Internal Revenue | 3 | 4/ | 4/ | 4/ | 593 | - | - |
+
+1/ Internal revenue cases are those referred by the Penal Division to the Department of Justice with recommendation for criminal prosecu-
+2/ Includes cases transferred to state, local, or other authorities for prosecution and cases closed because of duplicate prosecutions. These cases are not included in calculating percentages.
+3/ Cases in which no arrests were made are not included in calculating percentages.
+4/ Too few cases to show comparative percentages.
+
+Treasury Criminal Cases, by Months
+
+Total Alcohol Tax, Customs, Narcotics, Secret Service, Internal Revenue 1/
+
+INVENTORY OF CASES
+
+| Date | Cases pending first of month | New cases | Cases closed | Cases pending end of month | Net change in pending cases |
+| --- | --- | --- | --- | --- | --- |
+| 1938-Nov... Dec... | 21,407 20,420 | 3,253 3,128 | 4,240 3,390 | 20,420 20,158 | -987 -262 |
+| 1939-Jan... Feb... Mar... Apr... | 20,158 20,564 21,316 21,183 | 3,465 3,106 3,702 3,168 | 3,059 2,354 3,835 3,761 | 20,564 21,316 21,183 20,590 | +406 +752 -133 -593 |
+
+DISPOSITIONS 2/
+
+| Date | Number cases closed | Number cases transferred 3/ | Percent released > Before indict. | After indict. | Acquittale | Percent convicted > Total | Found guilty | Plead guilty | Total |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1938-Nov... Dec... | 4,240 3,390 | 276 177 | 16% 14% | 8% 9% | 5% 4% | 29% 27% | 8% 8% | 63% 65% | 71% 73% |
+| 1939-Jan... Feb... Mar... Apr... | 3,059 2,354 3,835 3,761 | 124 97 161 193 | 18% 23% 16% 16% | 11% 10% 9% 9% | 3% 4% 4% 3% | 32% 37% 29% 28% | 8% 6% 7% 8% | 60% 57% 64% 64% | 68% 63% 71% 72% |
+
+SENTENCES
+
+| Date | Total convictions | Percent imprisoned | Percent probation | Percent fined | Average days imprisonment | Average fine (dollars) | Total fines (dollars) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1938-Nov. Dec... | 2,733 2,275 | 61% 63% | 35% 35% | 30% 29% | 366 372 | 377 452 | 304,367 299,098 |
+| 1939-Jan... Feb... Mar... | 1,937 1,379 2,501 | 60% 67% 62% | 34% 32% 37% | 30% 33% 28% | 416 358 430 | 316 413 310 | 185,943 188,735 216,448 |
+| Apr... | 2,490 | 61% | 36% | 33% | 410 | 401 | 330,869 |
+
+1/ Internal revenue cases are those referred by the Penal Division to the Department of Justice with recommendation for criminal prosecu-tion.
+2/ Narcotic and customs cases in which no arrests were made are not in-cluded in calculating percentages.
+3/ Includes cases transferred to state, local, or other authorities for prosecution and cases closed because of duplicate prosecutions. These cases are not included in calculating percentages.
+* Revised figure.
+
+N
+
+Treasury Bulletin 1939 Treas. HJ 10 .A2 U.S. Treasury Dept.
+
+| 1939 Treasury Bulletin > TITLE c.2 > DATE LOANED | April - June > BORROWER'S NAME | PHONE NUMBER |
+| --- | --- | --- |
+|  |  |  |
+|  |  |  |
+|  |  |  |
+|  |  |  |
+
+U.S. TREASURY LIBRARY
+
+1 0031885
+

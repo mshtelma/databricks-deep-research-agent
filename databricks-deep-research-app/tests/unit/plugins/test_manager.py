@@ -5,11 +5,8 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-import pytest
-
 from deep_research.agent.tools.base import ResearchContext, ResearchTool, ToolDefinition, ToolResult
-from deep_research.plugins.base import PromptProvider, ResearchPlugin, ToolProvider
-from deep_research.plugins.manager import PluginManager, PluginManagerError
+from deep_research.plugins.manager import PluginManager
 
 
 def _mock_app_config(**kwargs: Any) -> MagicMock:

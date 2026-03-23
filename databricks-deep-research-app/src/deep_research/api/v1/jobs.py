@@ -227,8 +227,8 @@ async def submit_job(
 
         try:
             agent_uuid = UUID(body.agent_id)
-        except ValueError:
-            raise HTTPException(status_code=404, detail="Invalid agent ID format")
+        except ValueError as e:
+            raise HTTPException(status_code=404, detail="Invalid agent ID format") from e
 
         agent_service = CustomAgentService(db)
         agent = await agent_service.get_accessible(agent_uuid, user.user_id)

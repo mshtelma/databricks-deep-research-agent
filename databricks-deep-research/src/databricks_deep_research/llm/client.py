@@ -7,6 +7,7 @@ rate-limit-aware endpoint selection, and automatic failover.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
 import os
@@ -252,7 +253,7 @@ class FrameworkLLMClient:
         if self._closed:
             return
         try:
-            loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
             try:
                 asyncio.run(self.aclose())
@@ -505,10 +506,8 @@ class FrameworkLLMClient:
                 if hasattr(exc, "response") and exc.response is not None:
                     retry_header = exc.response.headers.get("retry-after")
                     if retry_header:
-                        try:
+                        with contextlib.suppress(TypeError, ValueError):
                             retry_after = float(retry_header)
-                        except (TypeError, ValueError):
-                            pass
                 if attempt < max_retries - 1:
                     backoff = min(retry_after or ((2 ** attempt) + random.random()), 60.0)
                     logger.warning(
@@ -705,7 +704,7 @@ class FrameworkLLMClient:
         is_tier_config = isinstance(cfg, ModelTierConfig)
 
         # Retry 429 only when no per-request fallback is configured
-        should_retry_rl = is_tier_config and not cfg.fallback_on_429
+        should_retry_rl = isinstance(cfg, ModelTierConfig) and not cfg.fallback_on_429
         try:
             result = await self._retry_with_backoff(
                 lambda _m=model_name: _do_call(_m),

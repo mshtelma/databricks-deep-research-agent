@@ -11,15 +11,12 @@ import asyncio
 import time
 from typing import Any
 
-from mlflow.entities import SpanType
-
 from deep_research.agent.tools.base import (
     ResearchContext,
     ToolDefinition,
     ToolResult,
 )
 from deep_research.core.logging_utils import get_logger
-from deep_research.core.tracing import safe_tool_span
 from deep_research.services.metrics import record_source_query
 from deep_research.services.obo_client import OBODatabricksClient
 
@@ -156,157 +153,143 @@ class GenieTool:
 
         start_time = time.perf_counter()
 
-        # Use safe_tool_span for MLflow tracing (T107)
-        async with safe_tool_span(
-            name=f"genie_query:{self._tool_name}",
-            span_type=SpanType.TOOL,  # type: ignore[arg-type]
-            attributes={
-                "source_type": "genie",
+        try:
+            # Get OBO-authenticated client
+            client = await self._obo_client.get_client(context.user_token)
+
+            # Execute query via executor (SDK is synchronous)
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: self._execute_query(client, question, is_follow_up),
+            )
+
+            duration_ms = (time.perf_counter() - start_time) * 1000
+
+            if result.get("error"):
+                # Genie returned a structured error in the response
+                logger.info(
+                    "GENIE_RESULT_ERROR",
+                    error=result["error"][:200],
+                    space_id=self._space_id,
+                )
+            elif not result.get("columns") and not result.get("narrative") and not result.get("sql"):
+                # Truly empty response — no data, no narrative, no SQL
+                logger.warning(
+                    "GENIE_EMPTY_RESPONSE",
+                    space_id=self._space_id,
+                    question=question[:100],
+                    result_keys=[k for k, v in result.items() if v],
+                )
+
+            # Format the response
+            content = self._format_result(result)
+            row_count = result.get("row_count", 0)
+
+            # Build source for citation tracking (unique URL per query via message_id)
+            msg_id = result.get("message_id", "")
+
+            # Build navigable workspace URL (fragment preserves dedup uniqueness)
+            from deep_research.core.auth import get_workspace_host
+            workspace_host = get_workspace_host()
+            if workspace_host:
+                source_url = f"{workspace_host}/sql/genie/spaces/{self._space_id}#{msg_id}"
+            else:
+                source_url = f"genie://{self._space_id}/{msg_id}"
+
+            sources = [{
+                "type": "genie",
                 "source_name": self._name,
                 "space_id": self._space_id,
-                "question": question[:200],  # Truncate for span attributes
-                "is_follow_up": is_follow_up,
-                "has_conversation_context": self._conversation_id is not None,
-                "obo_authenticated": context.user_token is not None,
-            },
-        ) as span:
-            try:
-                # Get OBO-authenticated client
-                client = await self._obo_client.get_client(context.user_token)
+                "url": source_url,
+                "title": self._name,
+                "content": content[:3000],
+                "generated_sql": result.get("sql"),
+                "row_count": row_count,
+            }]
 
-                # Execute query via executor (SDK is synchronous)
-                loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(
-                    None,
-                    lambda: self._execute_query(client, question, is_follow_up),
-                )
+            # Log final metrics
+            logger.info(
+                "GENIE_SPAN_ATTRS",
+                duration_ms=duration_ms,
+                result_count=row_count,
+                success=True,
+                has_response=True,
+                truncated=result.get("truncated", False),
+                has_sql=result.get("sql") is not None,
+            )
 
-                duration_ms = (time.perf_counter() - start_time) * 1000
+            # Record metrics for monitoring (T108)
+            record_source_query(
+                source_type="genie",
+                source_name=self._name,
+                latency_ms=duration_ms,
+                success=True,
+            )
 
-                if result.get("error"):
-                    # Genie returned a structured error in the response
-                    logger.info(
-                        "GENIE_RESULT_ERROR",
-                        error=result["error"][:200],
-                        space_id=self._space_id,
-                    )
-                elif not result.get("columns") and not result.get("narrative") and not result.get("sql"):
-                    # Truly empty response — no data, no narrative, no SQL
-                    logger.warning(
-                        "GENIE_EMPTY_RESPONSE",
-                        space_id=self._space_id,
-                        question=question[:100],
-                        result_keys=[k for k, v in result.items() if v],
-                    )
-
-                # Format the response
-                content = self._format_result(result)
-                row_count = result.get("row_count", 0)
-
-                # Build source for citation tracking (unique URL per query via message_id)
-                msg_id = result.get("message_id", "")
-
-                # Build navigable workspace URL (fragment preserves dedup uniqueness)
-                from deep_research.core.auth import get_workspace_host
-                workspace_host = get_workspace_host()
-                if workspace_host:
-                    source_url = f"{workspace_host}/sql/genie/spaces/{self._space_id}#{msg_id}"
-                else:
-                    source_url = f"genie://{self._space_id}/{msg_id}"
-
-                sources = [{
-                    "type": "genie",
-                    "source_name": self._name,
+            return ToolResult(
+                content=content,
+                success=True,
+                sources=sources,
+                data={
+                    "question": question,
                     "space_id": self._space_id,
-                    "url": source_url,
-                    "title": self._name,
-                    "content": content[:3000],
-                    "generated_sql": result.get("sql"),
+                    "sql": result.get("sql"),
                     "row_count": row_count,
-                }]
+                    "truncated": result.get("truncated", False),
+                },
+            )
 
-                # Update span with final metrics
-                if span:
-                    span.set_attributes({
-                        "duration_ms": duration_ms,
-                        "result_count": row_count,
-                        "success": True,
-                        "has_response": True,
-                        "truncated": result.get("truncated", False),
-                        "has_sql": result.get("sql") is not None,
-                    })
+        except Exception as e:
+            error_msg = str(e)
+            duration_ms = (time.perf_counter() - start_time) * 1000
 
-                # Record metrics for monitoring (T108)
-                record_source_query(
-                    source_type="genie",
-                    source_name=self._name,
-                    latency_ms=duration_ms,
-                    success=True,
+            # Provide helpful error messages
+            if "PERMISSION_DENIED" in error_msg or "403" in error_msg:
+                error_msg = (
+                    f"Permission denied: You don't have access to Genie space '{self._space_id}'. "
+                    "Please verify your permissions."
+                )
+            elif "NOT_FOUND" in error_msg or "404" in error_msg:
+                error_msg = f"Genie space not found: '{self._space_id}' does not exist."
+            elif "ambiguous" in error_msg.lower():
+                error_msg = (
+                    "Your question is ambiguous. Please be more specific about "
+                    "which data, metrics, or time period you're asking about."
                 )
 
-                return ToolResult(
-                    content=content,
-                    success=True,
-                    sources=sources,
-                    data={
-                        "question": question,
-                        "space_id": self._space_id,
-                        "sql": result.get("sql"),
-                        "row_count": row_count,
-                        "truncated": result.get("truncated", False),
-                    },
-                )
+            # Log error info
+            logger.info(
+                "GENIE_SPAN_ATTRS",
+                duration_ms=duration_ms,
+                result_count=0,
+                success=False,
+                error_type=type(e).__name__,
+            )
 
-            except Exception as e:
-                error_msg = str(e)
-                duration_ms = (time.perf_counter() - start_time) * 1000
+            # Record error metrics for monitoring (T108)
+            record_source_query(
+                source_type="genie",
+                source_name=self._name,
+                latency_ms=duration_ms,
+                success=False,
+                error=error_msg[:200],
+            )
 
-                # Provide helpful error messages
-                if "PERMISSION_DENIED" in error_msg or "403" in error_msg:
-                    error_msg = (
-                        f"Permission denied: You don't have access to Genie space '{self._space_id}'. "
-                        "Please verify your permissions."
-                    )
-                elif "NOT_FOUND" in error_msg or "404" in error_msg:
-                    error_msg = f"Genie space not found: '{self._space_id}' does not exist."
-                elif "ambiguous" in error_msg.lower():
-                    error_msg = (
-                        "Your question is ambiguous. Please be more specific about "
-                        "which data, metrics, or time period you're asking about."
-                    )
+            logger.error(
+                "GENIE_QUERY_ERROR",
+                error=error_msg,
+                error_type=type(e).__name__,
+                space_id=self._space_id,
+                duration_ms=duration_ms,
+                exc_info=True,
+            )
 
-                # Update span with error info
-                if span:
-                    span.set_attributes({
-                        "duration_ms": duration_ms,
-                        "result_count": 0,
-                        "success": False,
-                        "error_type": type(e).__name__,
-                    })
-
-                # Record error metrics for monitoring (T108)
-                record_source_query(
-                    source_type="genie",
-                    source_name=self._name,
-                    latency_ms=duration_ms,
-                    success=False,
-                    error=error_msg[:200],
-                )
-
-                logger.error(
-                    "GENIE_QUERY_ERROR",
-                    error=error_msg,
-                    error_type=type(e).__name__,
-                    space_id=self._space_id,
-                    duration_ms=duration_ms,
-                    exc_info=True,
-                )
-
-                return ToolResult(
-                    content=f"Query failed: {error_msg[:500]}",
-                    success=False,
-                    error=error_msg,
-                )
+            return ToolResult(
+                content=f"Query failed: {error_msg[:500]}",
+                success=False,
+                error=error_msg,
+            )
 
     def _execute_query(
         self,

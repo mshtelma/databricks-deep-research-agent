@@ -1,6 +1,5 @@
 """Message endpoints."""
 
-from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -9,7 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.api.v1.utils import verify_chat_ownership
 from deep_research.core.exceptions import NotFoundError
-from deep_research.services.chat_service import ChatService
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.message import Message, MessageRole
@@ -25,6 +23,7 @@ from deep_research.schemas.message import (
     SendMessageResponse,
 )
 from deep_research.schemas.research import ResearchSession as ResearchSessionSchema
+from deep_research.services.chat_service import ChatService
 from deep_research.services.feedback_service import FeedbackService
 from deep_research.services.message_service import MessageService
 

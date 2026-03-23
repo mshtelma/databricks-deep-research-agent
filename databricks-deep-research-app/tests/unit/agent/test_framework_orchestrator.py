@@ -1320,8 +1320,8 @@ class TestPersistDelta:
     @pytest.mark.asyncio
     async def test_dirty_delta_emits_warning(self, caplog: Any) -> None:
         """Dirty delta → WARNING log with FWK_INCREMENTAL_PERSIST_NOT_IMPLEMENTED."""
-        from deep_research.agent.framework_orchestrator import _persist_delta
         from deep_research.agent.adapters.domain_context import PersistenceDelta
+        from deep_research.agent.framework_orchestrator import _persist_delta
 
         delta = PersistenceDelta()
         delta.new_sources = [{"url": "https://example.com"}]
@@ -1337,8 +1337,8 @@ class TestPersistDelta:
     @pytest.mark.asyncio
     async def test_clean_delta_no_warning(self, caplog: Any) -> None:
         """Clean delta → no warning."""
-        from deep_research.agent.framework_orchestrator import _persist_delta
         from deep_research.agent.adapters.domain_context import PersistenceDelta
+        from deep_research.agent.framework_orchestrator import _persist_delta
 
         delta = PersistenceDelta()
         delta._dirty = False
@@ -1396,6 +1396,7 @@ class TestUnhandledEventLogging:
     def test_replan_triggered_produces_progress(self) -> None:
         """ReplanTriggeredEvent → research_progress with 'replan_triggered'."""
         from databricks_deep_research.events.types import ReplanTriggeredEvent
+
         from deep_research.agent.adapters.domain_context import DomainContextTracker
 
         tracker = DomainContextTracker()
@@ -1414,6 +1415,7 @@ class TestUnhandledEventLogging:
     def test_tool_call_produces_progress_with_tool_name(self) -> None:
         """ToolCallEvent → research_progress with correct tool_name."""
         from databricks_deep_research.events.types import ToolCallEvent
+
         from deep_research.agent.adapters.domain_context import DomainContextTracker
 
         tracker = DomainContextTracker()
@@ -1448,6 +1450,7 @@ class TestUnhandledEventLogging:
     def test_noop_handler_returns_empty(self) -> None:
         """No-op handler (e.g., WorkflowStartedEvent) → returns []."""
         from databricks_deep_research.events.types import WorkflowStartedEvent
+
         from deep_research.agent.adapters.domain_context import DomainContextTracker
 
         tracker = DomainContextTracker()
@@ -1539,6 +1542,7 @@ class TestFinalReportNotTruncated:
     def test_workflow_completed_extracts_full_report(self) -> None:
         """WorkflowCompletedEvent with 5000-char report → delta.final_report is 5000 chars."""
         from databricks_deep_research.events.types import WorkflowCompletedEvent
+
         from deep_research.agent.adapters.domain_context import DomainContextTracker
 
         tracker = DomainContextTracker()
@@ -1564,6 +1568,7 @@ class TestFinalReportNotTruncated:
             AgentOutputEvent,
             WorkflowCompletedEvent,
         )
+
         from deep_research.agent.adapters.domain_context import DomainContextTracker
 
         tracker = DomainContextTracker()
@@ -1720,7 +1725,7 @@ class TestToolRegistration:
 
             async def _empty_execute(state: Any) -> Any:
                 return
-                yield  # noqa: unreachable — makes it an async generator
+                yield  # noqa: F841 - makes it an async generator
 
             mock_exec.execute = _empty_execute
             return mock_exec
@@ -1918,6 +1923,8 @@ class TestFinalReportCapture:
         the full report despite the periodic delta reset."""
         from databricks_deep_research.events.types import (
             ItemCompletedEvent as FwkItemCompletedEvent,
+        )
+        from databricks_deep_research.events.types import (
             WorkflowCompletedEvent as FwkWorkflowCompletedEvent,
         )
 
@@ -2011,6 +2018,8 @@ class TestFinalReportCapture:
         boundary). Control test — report should still be captured."""
         from databricks_deep_research.events.types import (
             ItemCompletedEvent as FwkItemCompletedEvent,
+        )
+        from databricks_deep_research.events.types import (
             WorkflowCompletedEvent as FwkWorkflowCompletedEvent,
         )
 

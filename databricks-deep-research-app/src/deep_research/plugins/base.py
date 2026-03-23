@@ -14,6 +14,8 @@ Plugins can implement one or more protocols:
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from pydantic import BaseModel
+
 from deep_research.agent.tools.base import ResearchContext, ResearchTool
 
 
@@ -168,7 +170,7 @@ class ExtractionConfig:
     """
 
     system_prompt: str
-    extraction_model: type
+    extraction_model: type[BaseModel]
     field_mapping: dict[str, str] = field(default_factory=dict)
 
 

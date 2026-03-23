@@ -17,7 +17,9 @@ from databricks_deep_research.events.types import (
     PlanCreatedEvent,
     StreamEvent,
 )
-from databricks_deep_research.workflow.runtime.plan_execute_contracts import normalize_executable_plan_contract
+from databricks_deep_research.workflow.runtime.plan_execute_contracts import (
+    normalize_executable_plan_contract,
+)
 from databricks_deep_research.workflow.state import WorkflowState
 
 logger = logging.getLogger(__name__)

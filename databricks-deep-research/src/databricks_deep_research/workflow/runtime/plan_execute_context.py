@@ -1,20 +1,8 @@
 from __future__ import annotations
 
-from databricks_deep_research.workflow.runtime_core.selectors import (
-    select_all_observations_text,
-    select_current_plan_title,
-    select_latest_observation_text,
-    select_sources_count,
-)
 from typing import Any
 
 from databricks_deep_research.agents.config import PlanAndExecuteNodeConfig
-from databricks_deep_research.workflow.runtime.planner_context import (
-    build_planner_runtime_context as _build_planner_runtime_context_impl,
-    format_available_sources as _format_available_sources_impl,
-    format_completed_steps as _format_completed_steps_impl,
-    format_reflector_feedback as _format_reflector_feedback_impl,
-)
 from databricks_deep_research.workflow.runtime.plan_execute_formatting import (
     extract_step_title,
     format_all_observations,
@@ -22,7 +10,29 @@ from databricks_deep_research.workflow.runtime.plan_execute_formatting import (
     format_source_quality,
     format_source_topics,
 )
-from databricks_deep_research.workflow.runtime.plan_execute_types import AvailableSourceDescriptor, PlanCycleContext, ReplanFeedbackEntry
+from databricks_deep_research.workflow.runtime.plan_execute_types import (
+    AvailableSourceDescriptor,
+    PlanCycleContext,
+    ReplanFeedbackEntry,
+)
+from databricks_deep_research.workflow.runtime.planner_context import (
+    build_planner_runtime_context as _build_planner_runtime_context_impl,
+)
+from databricks_deep_research.workflow.runtime.planner_context import (
+    format_available_sources as _format_available_sources_impl,
+)
+from databricks_deep_research.workflow.runtime.planner_context import (
+    format_completed_steps as _format_completed_steps_impl,
+)
+from databricks_deep_research.workflow.runtime.planner_context import (
+    format_reflector_feedback as _format_reflector_feedback_impl,
+)
+from databricks_deep_research.workflow.runtime_core.selectors import (
+    select_all_observations_text,
+    select_current_plan_title,
+    select_latest_observation_text,
+    select_sources_count,
+)
 from databricks_deep_research.workflow.state import WorkflowState
 
 
@@ -45,7 +55,6 @@ def build_planner_runtime_context(*, config: PlanAndExecuteNodeConfig, state: Wo
 def build_evaluator_runtime_context(*, config: PlanAndExecuteNodeConfig, state: WorkflowState, pools: dict[str, Any], items: list[Any], current_idx: int, current_item: Any, cycle: int, total_items_processed: int, replan_cycles: int) -> dict[str, Any]:
     remaining = items[current_idx + 1:]
     remaining_text = "\n".join(f"  Step {current_idx + j + 2}/{len(items)}: {extract_step_title(step)}" for j, step in enumerate(remaining)) or "(none — all steps completed)"
-    sources_pool = pools.get("sources")
     return {
         "remaining_steps": remaining_text,
         "total_steps": str(len(items)),

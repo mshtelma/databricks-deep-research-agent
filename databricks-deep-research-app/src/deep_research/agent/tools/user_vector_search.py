@@ -16,15 +16,12 @@ import asyncio
 import time
 from typing import Any
 
-from mlflow.entities import SpanType
-
 from deep_research.agent.tools.base import (
     ResearchContext,
     ToolDefinition,
     ToolResult,
 )
 from deep_research.core.logging_utils import get_logger
-from deep_research.core.tracing import safe_tool_span
 from deep_research.models.data_source import UserDataSource
 from deep_research.schemas.query_config import (
     FilterExpression,
@@ -156,10 +153,10 @@ class UserVectorSearchTool:
             self._enable_hybrid = enable_hybrid
             self._enable_reranking = enable_reranking
             self._num_results = num_results
-            self._score_threshold: float | None = None
+            self._score_threshold = None
             self._query_type = QueryType.HYBRID if enable_hybrid else QueryType.ANN
             self._filter_syntax = FilterSyntax.SQL
-            self._default_filters: list[FilterExpression] = []
+            self._default_filters = []
 
         # Generate tool name from index (unique per source)
         safe_name = index_name.replace(".", "_").replace("-", "_")
@@ -303,209 +300,82 @@ class UserVectorSearchTool:
         start_time = time.perf_counter()
         result_count = 0
 
-        # Use safe_tool_span for MLflow tracing (T107)
-        async with safe_tool_span(
-            name=f"vector_search:{self._tool_name}",
-            span_type=SpanType.TOOL,  # type: ignore[arg-type]
-            attributes={
-                "source_type": "vector_search",
-                "source_name": self._source_name,
-                "index_name": self._index_name,
-                "endpoint_name": self._endpoint_name,
-                "query": query[:200],  # Truncate for span attributes
-                "num_results_requested": num_results,
-                "has_filters": filters is not None,
-                "alternate_query_count": len(alternate_queries),
-                "obo_authenticated": context.user_token is not None,
-            },
-        ) as span:
-            try:
-                # Get OBO-authenticated WorkspaceClient
-                client = await self._obo_client.get_client(context.user_token)
+        try:
+            # Get OBO-authenticated WorkspaceClient
+            client = await self._obo_client.get_client(context.user_token)
 
-                # Discover columns on first execute if not already known
+            # Discover columns on first execute if not already known
+            if not self._columns:
+                await self._discover_columns(client)
                 if not self._columns:
-                    await self._discover_columns(client)
-                    if not self._columns:
-                        return ToolResult(
-                            content=(
-                                f"Cannot query index '{self._index_name}': unable to determine "
-                                f"available columns. The index may not be accessible or may not "
-                                f"have an embedding configuration."
-                            ),
-                            success=False,
-                            error="Column discovery failed",
+                    return ToolResult(
+                        content=(
+                            f"Cannot query index '{self._index_name}': unable to determine "
+                            f"available columns. The index may not be accessible or may not "
+                            f"have an embedding configuration."
+                        ),
+                        success=False,
+                        error="Column discovery failed",
+                    )
+            elif not self._column_roles:
+                # Columns known (from enrichment/config) but roles missing.
+                # Discover roles so the parser maps content correctly.
+                await self._discover_columns(client)
+
+            logger.info(
+                "VECTOR_SEARCH_USING_WORKSPACE_CLIENT",
+                index=self._index_name,
+                query=query[:80],
+                query_type=self._resolve_query_type(),
+                columns=self._columns[:5] if self._columns else [],
+                content_column=self._column_roles.content_column if self._column_roles else None,
+                has_column_roles=self._column_roles is not None,
+                obo_authenticated=context.user_token is not None,
+            )
+
+            # Execute primary query
+            primary_results = await self._execute_single_query(
+                client, query, num_results, filters,
+            )
+
+            # Execute alternate queries sequentially and merge with RRF
+            if alternate_queries and primary_results:
+                all_result_sets: list[list[VectorSearchResult]] = [primary_results]
+                for alt_query in alternate_queries[:5]:  # Cap at 5 alternates
+                    try:
+                        alt_results = await self._execute_single_query(
+                            client, alt_query, num_results, filters,
                         )
-                elif not self._column_roles:
-                    # Columns known (from enrichment/config) but roles missing.
-                    # Discover roles so the parser maps content correctly.
-                    await self._discover_columns(client)
-
-                logger.info(
-                    "VECTOR_SEARCH_USING_WORKSPACE_CLIENT",
-                    index=self._index_name,
-                    query=query[:80],
-                    query_type=self._resolve_query_type(),
-                    columns=self._columns[:5] if self._columns else [],
-                    content_column=self._column_roles.content_column if self._column_roles else None,
-                    has_column_roles=self._column_roles is not None,
-                    obo_authenticated=context.user_token is not None,
-                )
-
-                # Execute primary query
-                primary_results = await self._execute_single_query(
-                    client, query, num_results, filters,
-                )
-
-                # Execute alternate queries sequentially and merge with RRF
-                if alternate_queries and primary_results:
-                    all_result_sets: list[list[VectorSearchResult]] = [primary_results]
-                    for alt_query in alternate_queries[:5]:  # Cap at 5 alternates
-                        try:
-                            alt_results = await self._execute_single_query(
-                                client, alt_query, num_results, filters,
-                            )
-                            if alt_results:
-                                all_result_sets.append(alt_results)
-                        except Exception as e:
-                            logger.warning(
-                                "VS_ALTERNATE_QUERY_FAILED",
-                                query=alt_query[:80],
-                                error=str(e)[:100],
-                            )
-                            continue  # Skip failed alternates
-
-                    if len(all_result_sets) > 1:
-                        results = reciprocal_rank_fusion(all_result_sets)[:num_results]
-                        logger.info(
-                            "VS_MULTI_QUERY_RRF_COMPLETE",
-                            query_count=len(all_result_sets),
-                            fused_result_count=len(results),
+                        if alt_results:
+                            all_result_sets.append(alt_results)
+                    except Exception as e:
+                        logger.warning(
+                            "VS_ALTERNATE_QUERY_FAILED",
+                            query=alt_query[:80],
+                            error=str(e)[:100],
                         )
-                    else:
-                        results = primary_results
+                        continue  # Skip failed alternates
+
+                if len(all_result_sets) > 1:
+                    results = reciprocal_rank_fusion(all_result_sets)[:num_results]
+                    logger.info(
+                        "VS_MULTI_QUERY_RRF_COMPLETE",
+                        query_count=len(all_result_sets),
+                        fused_result_count=len(results),
+                    )
                 else:
                     results = primary_results
+            else:
+                results = primary_results
 
-                if not results:
-                    duration_ms = (time.perf_counter() - start_time) * 1000
-                    if span:
-                        span.set_attributes({
-                            "duration_ms": duration_ms,
-                            "result_count": 0,
-                            "success": True,
-                        })
-                    # Record metrics for monitoring (T108)
-                    record_source_query(
-                        source_type="vector_search",
-                        source_name=self._source_name,
-                        latency_ms=duration_ms,
-                        success=True,
-                    )
-                    return ToolResult(
-                        content="No results found matching your query.",
-                        success=True,
-                        sources=[],
-                        data={"query": query, "num_results": 0},
-                    )
-
-                # Deduplicate and format results
-                unique_results = self._deduplicate_results(results)
-                result_count = len(unique_results)
-
-                logger.info(
-                    "VECTOR_SEARCH_RAW_RESULTS",
-                    index=self._index_name,
-                    query=query[:80],
-                    raw_count=len(unique_results),
-                )
-
-                # Build sources for citation tracking
-                sources: list[dict[str, Any]] = []
-                formatted_results: list[str] = []
-
-                for idx, result in enumerate(unique_results):
-                    # Skip results with empty content (edge case: content_column
-                    # exists but individual rows have NULL content).
-                    if not result.content or not result.content.strip():
-                        continue
-
-                    # Build navigable workspace URL
-                    if result.url:
-                        source_url = result.url
-                    else:
-                        from deep_research.core.auth import get_workspace_host
-                        workspace_host = get_workspace_host()
-                        if workspace_host:
-                            # Parse catalog.schema.table for catalog explorer URL
-                            parts = self._index_name.split(".")
-                            if len(parts) == 3:
-                                base_url = f"{workspace_host}/explore/data/{parts[0]}/{parts[1]}/{parts[2]}"
-                            else:
-                                base_url = f"{workspace_host}/compute/vector-search"
-                            source_url = f"{base_url}#{result.id or idx}"
-                        else:
-                            source_url = f"vs://{self._endpoint_name}/{self._index_name}/{result.id}"
-
-                    # Title fallback: result metadata → source name → last index segment
-                    source_title = result.title or self._source_name or self._index_name.rsplit(".", 1)[-1]
-
-                    sources.append({
-                        "type": "vector_search",
-                        "source_name": self._source_name,
-                        "index_name": self._index_name,
-                        "endpoint_name": self._endpoint_name,
-                        "url": source_url,
-                        "title": source_title,
-                        "content": result.content[:1000] if result.content else "",
-                        "relevance_score": result.score,
-                        "search_index": idx,
-                        "metadata": result.metadata,
-                    })
-
-                    # Format for LLM
-                    url_display = f"\nURL: {result.url}" if result.url else ""
-                    formatted_results.append(
-                        f"[{idx + 1}] **{result.title}** (score: {result.score:.3f}){url_display}\n"
-                        f"    {result.content[:400]}..."
-                        if len(result.content) > 400 else
-                        f"[{idx + 1}] **{result.title}** (score: {result.score:.3f}){url_display}\n"
-                        f"    {result.content}"
-                    )
-
-                # Accurate count after filtering empty results
-                result_count = len(sources)
-                if result_count < len(unique_results):
-                    logger.warning(
-                        "VECTOR_SEARCH_EMPTY_RESULTS_FILTERED",
-                        index=self._index_name,
-                        query=query[:80],
-                        total=len(unique_results),
-                        skipped=len(unique_results) - result_count,
-                        content_column=self._column_roles.content_column if self._column_roles else None,
-                        has_column_roles=self._column_roles is not None,
-                    )
-
-                logger.info(
-                    "VECTOR_SEARCH_RESULTS_ACCEPTED",
-                    index=self._index_name,
-                    query=query[:80],
-                    accepted=result_count,
-                    total=len(unique_results),
-                )
-
-                content = f"Found {result_count} results from {self._source_name}:\n\n"
-                content += "\n\n".join(formatted_results)
-
-                # Update span with final metrics
+            if not results:
                 duration_ms = (time.perf_counter() - start_time) * 1000
-                if span:
-                    span.set_attributes({
-                        "duration_ms": duration_ms,
-                        "result_count": result_count,
-                        "success": True,
-                    })
-
+                logger.info(
+                    "VECTOR_SEARCH_SPAN_ATTRS",
+                    duration_ms=duration_ms,
+                    result_count=0,
+                    success=True,
+                )
                 # Record metrics for monitoring (T108)
                 record_source_query(
                     source_type="vector_search",
@@ -513,64 +383,175 @@ class UserVectorSearchTool:
                     latency_ms=duration_ms,
                     success=True,
                 )
-
                 return ToolResult(
-                    content=content,
+                    content="No results found matching your query.",
                     success=True,
-                    sources=sources,
-                    data={
-                        "query": query,
-                        "num_results": len(unique_results),
-                        "source_name": self._source_name,
-                        "index_name": self._index_name,
-                    },
+                    sources=[],
+                    data={"query": query, "num_results": 0},
                 )
 
-            except Exception as e:
-                error_msg = str(e)
-                duration_ms = (time.perf_counter() - start_time) * 1000
+            # Deduplicate and format results
+            unique_results = self._deduplicate_results(results)
+            result_count = len(unique_results)
 
-                # Provide helpful error messages
-                if "PERMISSION_DENIED" in error_msg or "403" in error_msg:
-                    error_msg = (
-                        f"Permission denied: You don't have access to index '{self._index_name}'. "
-                        "Please verify your permissions."
-                    )
-                elif "NOT_FOUND" in error_msg or "404" in error_msg:
-                    error_msg = f"Index not found: '{self._index_name}' does not exist."
+            logger.info(
+                "VECTOR_SEARCH_RAW_RESULTS",
+                index=self._index_name,
+                query=query[:80],
+                raw_count=len(unique_results),
+            )
 
-                # Update span with error info
-                if span:
-                    span.set_attributes({
-                        "duration_ms": duration_ms,
-                        "result_count": 0,
-                        "success": False,
-                        "error_type": type(e).__name__,
-                    })
+            # Build sources for citation tracking
+            sources: list[dict[str, Any]] = []
+            formatted_results: list[str] = []
 
-                # Record error metrics for monitoring (T108)
-                record_source_query(
-                    source_type="vector_search",
-                    source_name=self._source_name,
-                    latency_ms=duration_ms,
-                    success=False,
-                    error=error_msg[:200],
+            for idx, result in enumerate(unique_results):
+                # Skip results with empty content (edge case: content_column
+                # exists but individual rows have NULL content).
+                if not result.content or not result.content.strip():
+                    continue
+
+                # Build navigable workspace URL
+                if result.url:
+                    source_url = result.url
+                else:
+                    from deep_research.core.auth import get_workspace_host
+                    workspace_host = get_workspace_host()
+                    if workspace_host:
+                        # Parse catalog.schema.table for catalog explorer URL
+                        parts = self._index_name.split(".")
+                        if len(parts) == 3:
+                            base_url = f"{workspace_host}/explore/data/{parts[0]}/{parts[1]}/{parts[2]}"
+                        else:
+                            base_url = f"{workspace_host}/compute/vector-search"
+                        source_url = f"{base_url}#{result.id or idx}"
+                    else:
+                        source_url = f"vs://{self._endpoint_name}/{self._index_name}/{result.id}"
+
+                # Title fallback: result metadata → source name → last index segment
+                source_title = result.title or self._source_name or self._index_name.rsplit(".", 1)[-1]
+
+                sources.append({
+                    "type": "vector_search",
+                    "source_name": self._source_name,
+                    "index_name": self._index_name,
+                    "endpoint_name": self._endpoint_name,
+                    "url": source_url,
+                    "title": source_title,
+                    "content": result.content[:1000] if result.content else "",
+                    "relevance_score": result.score,
+                    "search_index": idx,
+                    "metadata": result.metadata,
+                })
+
+                # Format for LLM
+                url_display = f"\nURL: {result.url}" if result.url else ""
+                formatted_results.append(
+                    f"[{idx + 1}] **{result.title}** (score: {result.score:.3f}){url_display}\n"
+                    f"    {result.content[:400]}..."
+                    if len(result.content) > 400 else
+                    f"[{idx + 1}] **{result.title}** (score: {result.score:.3f}){url_display}\n"
+                    f"    {result.content}"
                 )
 
-                logger.error(
-                    "VECTOR_SEARCH_ERROR",
-                    error=error_msg,
-                    error_type=type(e).__name__,
+            # Accurate count after filtering empty results
+            result_count = len(sources)
+            if result_count < len(unique_results):
+                logger.warning(
+                    "VECTOR_SEARCH_EMPTY_RESULTS_FILTERED",
                     index=self._index_name,
-                    duration_ms=duration_ms,
-                    exc_info=True,
+                    query=query[:80],
+                    total=len(unique_results),
+                    skipped=len(unique_results) - result_count,
+                    content_column=self._column_roles.content_column if self._column_roles else None,
+                    has_column_roles=self._column_roles is not None,
                 )
 
-                return ToolResult(
-                    content=f"Search failed: {error_msg[:500]}",
-                    success=False,
-                    error=error_msg,
+            logger.info(
+                "VECTOR_SEARCH_RESULTS_ACCEPTED",
+                index=self._index_name,
+                query=query[:80],
+                accepted=result_count,
+                total=len(unique_results),
+            )
+
+            content = f"Found {result_count} results from {self._source_name}:\n\n"
+            content += "\n\n".join(formatted_results)
+
+            # Log final metrics
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info(
+                "VECTOR_SEARCH_SPAN_ATTRS",
+                duration_ms=duration_ms,
+                result_count=result_count,
+                success=True,
+            )
+
+            # Record metrics for monitoring (T108)
+            record_source_query(
+                source_type="vector_search",
+                source_name=self._source_name,
+                latency_ms=duration_ms,
+                success=True,
+            )
+
+            return ToolResult(
+                content=content,
+                success=True,
+                sources=sources,
+                data={
+                    "query": query,
+                    "num_results": len(unique_results),
+                    "source_name": self._source_name,
+                    "index_name": self._index_name,
+                },
+            )
+
+        except Exception as e:
+            error_msg = str(e)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+
+            # Provide helpful error messages
+            if "PERMISSION_DENIED" in error_msg or "403" in error_msg:
+                error_msg = (
+                    f"Permission denied: You don't have access to index '{self._index_name}'. "
+                    "Please verify your permissions."
                 )
+            elif "NOT_FOUND" in error_msg or "404" in error_msg:
+                error_msg = f"Index not found: '{self._index_name}' does not exist."
+
+            # Log error info
+            logger.info(
+                "VECTOR_SEARCH_SPAN_ATTRS",
+                duration_ms=duration_ms,
+                result_count=0,
+                success=False,
+                error_type=type(e).__name__,
+            )
+
+            # Record error metrics for monitoring (T108)
+            record_source_query(
+                source_type="vector_search",
+                source_name=self._source_name,
+                latency_ms=duration_ms,
+                success=False,
+                error=error_msg[:200],
+            )
+
+            logger.error(
+                "VECTOR_SEARCH_ERROR",
+                error=error_msg,
+                error_type=type(e).__name__,
+                index=self._index_name,
+                duration_ms=duration_ms,
+                exc_info=True,
+            )
+
+            return ToolResult(
+                content=f"Search failed: {error_msg[:500]}",
+                success=False,
+                error=error_msg,
+            )
 
     async def _discover_columns(self, client: Any) -> None:
         """Discover queryable columns via get_index() on first execute.

@@ -28,6 +28,11 @@ _PATH_KEYWORDS = frozenset({
     'uploads', 'upload', 'data', 'files', 'shared',
 })
 
+# Comparison operators that require NUMERIC values (int/float/long/double).
+# The Databricks Vector Search API rejects these with string values:
+#   "Please use a numeric value: integer, float, double, long."
+_COMPARISON_OPS = frozenset({'<', '<=', '>', '>='})
+
 
 def _title_from_chunk_id(chunk_id: str) -> str:
     """Best-effort: extract a human-readable document title from a VS chunk_id.
@@ -114,7 +119,15 @@ class DatabricksVectorSearchTool:
                     },
                     "filters": {
                         "type": "object",
-                        "description": "Optional filter conditions.",
+                        "description": (
+                            "Optional filter conditions as a JSON object. "
+                            "Keys are column names optionally followed by an operator. "
+                            'Supported: {"col": "val"} (equality), '
+                            '{"col >": 5}, {"col >=": 5}, {"col <": 5}, {"col <=": 5} '
+                            "(comparison — NUMERIC values only). "
+                            "The IN, LIKE, and NOT operators are NOT supported. "
+                            "Do NOT use comparison operators with string/date values."
+                        ),
                     },
                 },
                 "required": ["query"],
@@ -141,8 +154,106 @@ class DatabricksVectorSearchTool:
 
         validated: dict[str, Any] = {"query": query.strip(), "num_results": num_results}
         if "filters" in arguments and arguments["filters"]:
-            validated["filters"] = arguments["filters"]
+            raw = arguments["filters"]
+            if isinstance(raw, str):
+                # LLM may double-encode filters as a JSON or Python dict string.
+                raw = self._try_parse_filter_string(raw)
+            if isinstance(raw, dict):
+                normalized = self._normalize_filters(raw)
+                if normalized:  # don't set empty dict — let execute() fall through to constructor default
+                    validated["filters"] = normalized
+            elif raw is not None:
+                logger.warning(
+                    "VECTOR_SEARCH_FILTER_IGNORED filters=%r (expected dict, got %s)",
+                    arguments["filters"], type(raw).__name__,
+                )
         return validated
+
+    @staticmethod
+    def _normalize_filters(filters: dict[str, Any]) -> dict[str, Any]:
+        """Normalize filter dict, removing operators unsupported by query_index().
+
+        The Databricks Vector Search API dict-key format documents only
+        equality and comparison operators.  This method gracefully handles
+        unsupported operators that LLMs commonly generate:
+
+        * ``IN`` with a non-empty list → equality with the first element.
+        * Any other unsupported operator → key is dropped.
+
+        Supported operators pass through unchanged.  A warning is logged
+        for every rewritten or dropped key.
+        """
+        normalized: dict[str, Any] = {}
+        for key, value in filters.items():
+            parts = key.split(" ", 1)
+            if len(parts) == 2 and parts[1].strip():
+                col, op_raw = parts[0], parts[1].strip().upper()
+                if op_raw == "IN":
+                    if isinstance(value, list) and value:
+                        logger.warning(
+                            "VECTOR_SEARCH_FILTER_NORMALIZED key=%r "
+                            "op=IN downgraded to equality with first value=%r",
+                            key, value[0],
+                        )
+                        normalized[col] = value[0]
+                    else:
+                        logger.warning(
+                            "VECTOR_SEARCH_FILTER_DROPPED key=%r value=%r "
+                            "(IN requires a non-empty list)",
+                            key, value,
+                        )
+                elif op_raw in _COMPARISON_OPS:
+                    if isinstance(value, (int, float)):
+                        normalized[key] = value
+                    else:
+                        logger.warning(
+                            "VECTOR_SEARCH_FILTER_DROPPED key=%r value=%r "
+                            "(comparison operators require numeric values)",
+                            key, value,
+                        )
+                elif op_raw == "!=":
+                    # != is not documented but commonly supported; pass through optimistically.
+                    # If the API rejects it, execute() catches the exception.
+                    normalized[key] = value
+                else:
+                    logger.warning(
+                        "VECTOR_SEARCH_FILTER_DROPPED key=%r op=%r "
+                        "(unsupported in dict-key format)",
+                        key, op_raw,
+                    )
+            else:
+                # Bare column name (equality) or trailing whitespace — always safe.
+                normalized[key.strip()] = value
+        return normalized
+
+    @staticmethod
+    def _try_parse_filter_string(raw: str) -> dict[str, Any] | None:
+        """Attempt to parse a string-valued filters argument into a dict.
+
+        LLMs sometimes double-encode filters (JSON string of a dict) or
+        emit Python dict literal syntax.  This method tries JSON first,
+        then ``ast.literal_eval`` as a safe fallback.
+        """
+        import ast
+        import json as _json
+
+        for parser, label in ((_json.loads, "JSON"), (ast.literal_eval, "Python literal")):
+            try:
+                parsed = parser(raw)
+                if isinstance(parsed, dict):
+                    logger.info(
+                        "VECTOR_SEARCH_FILTER_PARSED format=%s raw=%r", label, raw[:200],
+                    )
+                    return parsed
+            except (ValueError, SyntaxError, _json.JSONDecodeError):
+                continue
+
+        logger.warning(
+            "VECTOR_SEARCH_FILTER_PARSE_FAILED raw=%r "
+            "(not valid JSON or Python literal)",
+            raw[:200],
+        )
+        return None
 
     async def execute(
         self, arguments: dict[str, Any], context: ToolContext
@@ -255,7 +366,7 @@ class DatabricksVectorSearchTool:
                     content=content_text,
                     source_type="enterprise",
                     source_kind=SourceKind.vector_index,
-                    relevance_score=float(_col("score", 0.0) or 0.0),
+                    relevance_score=float(str(_col("score", 0.0) or 0.0)),
                 ))
 
             content = "\n".join(lines) if lines else "No results found."

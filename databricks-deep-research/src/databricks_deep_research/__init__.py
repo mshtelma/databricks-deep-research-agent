@@ -53,6 +53,7 @@ from databricks_deep_research.llm.client import (
     ToolCall,
     parse_model_config,
 )
+from databricks_deep_research.runner import WorkflowResult, WorkflowRunner
 
 # Tool protocol
 from databricks_deep_research.tools.factory import ToolFactoryContext
@@ -62,7 +63,7 @@ from databricks_deep_research.tools.protocol import (
     ToolDefinition,
     ToolResult,
 )
-from databricks_deep_research.tracing import trace_span
+from databricks_deep_research.tracing import setup_mlflow_tracing, shutdown_mlflow_tracing, trace_span
 
 # Workflow types
 from databricks_deep_research.workflow.context import ExecutionContext
@@ -71,9 +72,6 @@ from databricks_deep_research.workflow.definition import (
     WorkflowDefinition,
     WorkflowNode,
 )
-from databricks_deep_research.runner import WorkflowResult, WorkflowRunner
-from databricks_deep_research.workflow.runtime_core import RuntimeState
-from databricks_deep_research.workflow.runtime_core.api import WorkflowRunRequest, WorkflowRunResult
 from databricks_deep_research.workflow.executor import (
     WorkflowExecutor,
     run_workflow,
@@ -85,6 +83,8 @@ from databricks_deep_research.workflow.loader import (  # noqa: F401 — side-ef
     load_workflow_from_string,
     save_workflow,
 )
+from databricks_deep_research.workflow.runtime_core import RuntimeState
+from databricks_deep_research.workflow.runtime_core.api import WorkflowRunRequest, WorkflowRunResult
 
 __all__ = [
     # Workflow definition
@@ -125,6 +125,8 @@ __all__ = [
     "WorkflowRunRequest",
     "WorkflowRunResult",
     # Tracing
+    "setup_mlflow_tracing",
+    "shutdown_mlflow_tracing",
     "trace_span",
     # Errors
     "WorkflowError",

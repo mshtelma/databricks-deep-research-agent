@@ -10,13 +10,13 @@ per Vector Search data source, including:
 Supports functional requirements FR-138 through FR-147.
 """
 
-from enum import Enum
-from typing import Any, Literal
+from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
 
-class QueryType(str, Enum):
+class QueryType(StrEnum):
     """Supported query types for Vector Search.
 
     ANN: Approximate Nearest Neighbor - fast vector search (default)
@@ -29,7 +29,7 @@ class QueryType(str, Enum):
     FULL_TEXT = "FULL_TEXT"
 
 
-class FilterOperator(str, Enum):
+class FilterOperator(StrEnum):
     """Supported filter operators for Vector Search.
 
     Operators vary by column data type:
@@ -49,7 +49,7 @@ class FilterOperator(str, Enum):
     IN = "IN"
 
 
-class FilterSyntax(str, Enum):
+class FilterSyntax(StrEnum):
     """Filter syntax options for Vector Search queries.
 
     SQL: SQL-like syntax for storage-optimized endpoints
@@ -90,7 +90,7 @@ class FilterExpression(BaseModel):
 
     @field_validator("value")
     @classmethod
-    def validate_in_clause_limit(cls, v: Any, info: Any) -> Any:
+    def validate_in_clause_limit(cls, v: Any, _info: Any) -> Any:
         """Validate IN clause doesn't exceed ID limit."""
         if isinstance(v, list) and len(v) > MAX_IN_CLAUSE_IDS:
             raise ValueError(
@@ -199,7 +199,7 @@ class VectorSearchQueryConfig(BaseModel):
 
     @field_validator("num_results")
     @classmethod
-    def validate_results_limit(cls, v: int, info: Any) -> int:
+    def validate_results_limit(cls, v: int, _info: Any) -> int:
         """Validate result limit for HYBRID and FULL_TEXT queries."""
         # This is a soft validation - actual enforcement happens at query time
         # when we know the query type
@@ -271,12 +271,11 @@ def validate_query_config(
         )
 
     # Check result limit for HYBRID/FULL_TEXT
-    if config.query_type in (QueryType.HYBRID, QueryType.FULL_TEXT):
-        if config.num_results > 200:
-            errors.append(
-                f"{config.query_type.value} queries limited to 200 results "
-                f"(requested: {config.num_results})"
-            )
+    if config.query_type in (QueryType.HYBRID, QueryType.FULL_TEXT) and config.num_results > 200:
+        errors.append(
+            f"{config.query_type.value} queries limited to 200 results "
+            f"(requested: {config.num_results})"
+        )
 
     # Check reranking
     if config.enable_reranking and not supports_reranking:
@@ -296,8 +295,7 @@ def validate_query_config(
             )
 
         # Check IN clause limit
-        if f.operator == FilterOperator.IN and isinstance(f.value, list):
-            if len(f.value) > MAX_IN_CLAUSE_IDS:
+        if f.operator == FilterOperator.IN and isinstance(f.value, list) and len(f.value) > MAX_IN_CLAUSE_IDS:
                 errors.append(
                     f"IN filter on '{f.column}' exceeds {MAX_IN_CLAUSE_IDS} ID limit "
                     f"(got {len(f.value)})"

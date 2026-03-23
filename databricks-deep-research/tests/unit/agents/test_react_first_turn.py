@@ -16,12 +16,9 @@ import pytest
 from databricks_deep_research.agents.react_loop import ReactLoop, ReactResult
 from databricks_deep_research.events.types import (
     AgentStreamChunkEvent,
-    ToolCallEvent,
-    ToolResultEvent,
 )
 from databricks_deep_research.llm.client import LLMResponse, ToolCall
-from databricks_deep_research.tools.protocol import ToolContext, ToolDefinition, ToolResult
-
+from databricks_deep_research.tools.protocol import ToolDefinition, ToolResult
 
 # ---------------------------------------------------------------------------
 # Helpers (mirrors patterns from tests/test_react_loop.py)

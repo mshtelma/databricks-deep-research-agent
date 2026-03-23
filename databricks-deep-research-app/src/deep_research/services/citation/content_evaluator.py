@@ -84,7 +84,7 @@ class ContentQuality:
     reason: str  # Human-readable explanation
 
 
-def evaluate_content_quality(content: str, query: str) -> ContentQuality:
+def evaluate_content_quality(content: str, _query: str) -> ContentQuality:
     """Evaluate if crawled content is useful for citation.
 
     Uses heuristics to detect:

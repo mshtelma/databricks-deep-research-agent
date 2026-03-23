@@ -26,7 +26,7 @@ class UserIdentity:
     def from_workspace_user(cls, user: "User") -> "UserIdentity":
         """Create from Databricks workspace user object."""
         return cls(
-            user_id=str(user.id) if user.id else user.user_name,
+            user_id=str(user.id) if user.id else (user.user_name or "unknown"),
             email=user.user_name or "",
             display_name=user.display_name or user.user_name or "Unknown User",
         )

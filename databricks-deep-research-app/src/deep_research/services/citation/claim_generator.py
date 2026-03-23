@@ -277,7 +277,7 @@ Write ONE concise factual claim that is fully supported by the evidence:"""
             return
 
         # Count unique sources
-        unique_sources = len(set(e.source_url for e in evidence_pool if e.source_url))
+        unique_sources = len({e.source_url for e in evidence_pool if e.source_url})
 
         # Format evidence pool for prompt
         evidence_text = "\n".join(

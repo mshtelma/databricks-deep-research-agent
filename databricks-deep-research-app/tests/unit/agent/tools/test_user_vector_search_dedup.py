@@ -1,4 +1,3 @@
-import hashlib
 from unittest.mock import MagicMock
 
 from deep_research.agent.tools.user_vector_search import UserVectorSearchTool

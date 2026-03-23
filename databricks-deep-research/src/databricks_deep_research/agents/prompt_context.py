@@ -508,7 +508,7 @@ def _truncate_text(text: str, max_chars: int) -> str:
     return text
 
 
-from databricks_deep_research.workflow.runtime_core.models import RuntimeState
+from databricks_deep_research.workflow.runtime_core.models import RuntimeState  # noqa: E402
 
 
 def compile_typed_synthesis_context(runtime: RuntimeState | None) -> CompiledSynthesisContext | None:

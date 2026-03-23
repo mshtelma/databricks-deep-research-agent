@@ -1,6 +1,5 @@
 """Unit tests for pipeline configuration classes."""
 
-import pytest
 
 from deep_research.agent.pipeline.config import (
     AgentConfig,

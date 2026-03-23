@@ -11,11 +11,11 @@ This module provides:
 """
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class AgentType(str, Enum):
+class AgentType(StrEnum):
     """Types of agents available in the pipeline."""
 
     COORDINATOR = "coordinator"

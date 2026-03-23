@@ -7,7 +7,7 @@ Part of US5 - Custom Prompt Template Library (T065).
 """
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import Boolean, DateTime, Index, String, Text, func
@@ -17,7 +17,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from deep_research.db.base import Base, UUIDMixin
 
 
-class TemplateType(str, Enum):
+class TemplateType(StrEnum):
     """Types of prompt templates.
 
     Each type serves a different purpose in the research pipeline:
@@ -33,7 +33,7 @@ class TemplateType(str, Enum):
     QUERY = "query"
 
 
-class TemplateVisibility(str, Enum):
+class TemplateVisibility(StrEnum):
     """Visibility levels for prompt templates."""
 
     PRIVATE = "private"  # Only creator can see/use

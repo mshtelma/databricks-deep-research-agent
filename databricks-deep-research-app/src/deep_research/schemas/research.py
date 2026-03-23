@@ -71,3 +71,18 @@ class CancelResearchResponse(BaseSchema):
     session_id: UUID
     status: Literal["cancelled"] = "cancelled"
     partial_results: str | None = None
+
+
+__all__ = [
+    "ReflectionStepSchema",
+    "PlanStepSummary",
+    "ResearchPlanStep",
+    "ResearchPlan",
+    "ResearchSession",
+    "CancelResearchResponse",
+    # Re-exported from models/schemas
+    "QueryClassification",
+    "ResearchDepth",
+    "ResearchStatus",
+    "SourceResponse",
+]

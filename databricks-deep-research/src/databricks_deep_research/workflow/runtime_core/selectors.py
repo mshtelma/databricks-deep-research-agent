@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from databricks_deep_research.workflow.runtime_core.models import RuntimeState
 
@@ -8,7 +8,7 @@ from databricks_deep_research.workflow.runtime_core.models import RuntimeState
 def get_runtime(state: Any) -> RuntimeState | None:
     runtime_state = getattr(state, "runtime_state", None)
     if callable(runtime_state):
-        return runtime_state()
+        return cast(RuntimeState, runtime_state())
     return None
 
 
@@ -37,7 +37,7 @@ def select_discovered_sources(state: Any) -> list[Any]:
 def select_current_plan_title(state: Any) -> str:
     runtime = get_runtime(state)
     planning = getattr(runtime.capabilities, "planning", None) if runtime else None
-    if planning is not None and getattr(planning, "current_plan_title", ""):
+    if planning is not None and hasattr(planning, "current_plan_title") and planning.current_plan_title:
         return str(planning.current_plan_title)
     plan = state.get("plan") if hasattr(state, "get") else None
     if isinstance(plan, dict):
@@ -77,7 +77,7 @@ def select_verification_payload(state: Any) -> dict[str, Any]:
     runtime = get_runtime(state)
     verification = getattr(runtime.capabilities, "verification", None) if runtime else None
     if verification is not None and verification.verification_details:
-        return verification.verification_details
+        return cast(dict[str, Any], verification.verification_details)
     return {}
 
 
@@ -85,7 +85,7 @@ def select_verification_payload(state: Any) -> dict[str, Any]:
 def select_background_summary(state: Any) -> str:
     runtime = get_runtime(state)
     background = getattr(runtime.capabilities, "background", None) if runtime else None
-    if background is not None and getattr(background, "summary", ""):
+    if background is not None and hasattr(background, "summary") and background.summary:
         return str(background.summary)
     fallback = state.get("background_summary") if hasattr(state, "get") else None
     if fallback:
@@ -101,7 +101,7 @@ def select_claims(state: Any) -> list[dict[str, Any]]:
     runtime = get_runtime(state)
     verification = getattr(runtime.capabilities, "verification", None) if runtime else None
     if verification is not None and verification.claims:
-        return verification.claims
+        return cast(list[dict[str, Any]], verification.claims)
     return []
 
 
@@ -128,14 +128,14 @@ def select_analysis_summary(state: Any) -> dict[str, Any]:
     runtime = get_runtime(state)
     verification = getattr(runtime.capabilities, "verification", None) if runtime else None
     if verification is not None and verification.summary.analysis_summary:
-        return verification.summary.analysis_summary
+        return cast(dict[str, Any], verification.summary.analysis_summary)
     return {}
 
 
 def select_final_report(state: Any) -> str:
     runtime = get_runtime(state)
     synthesis = getattr(runtime.capabilities, "synthesis", None) if runtime else None
-    if synthesis is not None and synthesis.report_artifact_id:
+    if runtime is not None and synthesis is not None and synthesis.report_artifact_id:
         artifact = runtime.artifacts.get(synthesis.report_artifact_id)
         if artifact is not None and artifact.payload is not None:
             return str(artifact.payload)

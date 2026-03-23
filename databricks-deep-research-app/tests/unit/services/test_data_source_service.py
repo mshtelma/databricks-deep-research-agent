@@ -5,7 +5,7 @@ for user-configured enterprise data sources.
 """
 
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
@@ -17,7 +17,6 @@ from deep_research.models.data_source import (
     UserDataSource,
 )
 from deep_research.services.data_source_service import DataSourceService
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

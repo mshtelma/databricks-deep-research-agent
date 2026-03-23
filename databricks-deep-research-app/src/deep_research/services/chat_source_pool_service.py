@@ -63,7 +63,7 @@ class ChatSourcePoolService:
     def __init__(
         self,
         session: AsyncSession,
-        embedder: "Embedder | None" = None,
+        embedder: Embedder | None = None,
     ):
         """Initialize the chat source pool service.
 
@@ -74,9 +74,9 @@ class ChatSourcePoolService:
         """
         self._session = session
         self._embedder = embedder
-        self._index: "HybridSearchIndex | None" = None
+        self._index: HybridSearchIndex | None = None
         self._sources: list[Source] = []
-        self._source_embeddings: "NDArray[np.float32] | None" = None
+        self._source_embeddings: NDArray[np.float32] | None = None
 
     async def get_all_sources(
         self,
@@ -120,7 +120,7 @@ class ChatSourcePoolService:
         snippet: str | None = None,
         relevance_score: float | None = None,
         research_session_id: UUID | None = None,
-        **kwargs: "Any",
+        **kwargs: Any,
     ) -> Source:
         """Add a source to the pool or update if URL exists.
 
@@ -179,7 +179,7 @@ class ChatSourcePoolService:
         self,
         chat_id: UUID,
         compute_embeddings: bool = True,
-    ) -> "HybridSearchIndex":
+    ) -> HybridSearchIndex:
         """Build an in-memory hybrid search index for the chat sources.
 
         Combines BM25 keyword search with embeddings for hybrid retrieval.
@@ -250,7 +250,7 @@ class ChatSourcePoolService:
         self,
         query: str,
         limit: int = 10,
-        query_embedding: "NDArray[np.float32] | None" = None,
+        query_embedding: NDArray[np.float32] | None = None,
     ) -> list[Source]:
         """Search sources with hybrid BM25 + vector similarity.
 
@@ -282,7 +282,7 @@ class ChatSourcePoolService:
                 # Continue with BM25-only search
 
         # Search the index
-        results: list["HybridSearchResult"] = self._index.search(
+        results: list[HybridSearchResult] = self._index.search(
             query=query,
             query_embedding=query_embedding,
             limit=limit,

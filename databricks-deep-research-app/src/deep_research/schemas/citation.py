@@ -11,7 +11,8 @@ citation verification feature, including:
 """
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
+from typing import Any
 from uuid import UUID
 
 from pydantic import Field
@@ -20,14 +21,14 @@ from deep_research.schemas.common import BaseSchema
 
 
 # Enums for API layer (mirror database enums)
-class ClaimTypeEnum(str, Enum):
+class ClaimTypeEnum(StrEnum):
     """Type of claim."""
 
     GENERAL = "general"
     NUMERIC = "numeric"
 
 
-class VerificationVerdictEnum(str, Enum):
+class VerificationVerdictEnum(StrEnum):
     """Five-tier verification verdict."""
 
     SUPPORTED = "supported"
@@ -37,7 +38,7 @@ class VerificationVerdictEnum(str, Enum):
     ABSTAINED = "abstained"
 
 
-class ConfidenceLevelEnum(str, Enum):
+class ConfidenceLevelEnum(StrEnum):
     """HaluGate-style confidence level."""
 
     HIGH = "high"
@@ -45,7 +46,7 @@ class ConfidenceLevelEnum(str, Enum):
     LOW = "low"
 
 
-class CorrectionTypeEnum(str, Enum):
+class CorrectionTypeEnum(StrEnum):
     """Citation correction type."""
 
     KEEP = "keep"
@@ -54,7 +55,7 @@ class CorrectionTypeEnum(str, Enum):
     ADD_ALTERNATE = "add_alternate"
 
 
-class DerivationTypeEnum(str, Enum):
+class DerivationTypeEnum(StrEnum):
     """How a numeric value was obtained."""
 
     DIRECT = "direct"
@@ -126,7 +127,7 @@ class ComputationStep(BaseSchema):
     """Single computation step for derived numeric values."""
 
     operation: str
-    inputs: list[dict] = Field(default_factory=list)
+    inputs: list[dict[str, Any]] = Field(default_factory=list)
     result: float
 
 
@@ -139,8 +140,8 @@ class NumericClaimDetail(BaseSchema):
     unit: str | None = None
     entity_reference: str | None = None
     derivation_type: DerivationTypeEnum
-    computation_details: dict | None = None
-    assumptions: dict | None = None
+    computation_details: dict[str, Any] | None = None
+    assumptions: dict[str, Any] | None = None
     qa_verification: list[QAVerificationResult] | None = None
 
 
@@ -236,9 +237,9 @@ class ClaimProvenanceExport(BaseSchema):
     claim_type: ClaimTypeEnum
     verdict: VerificationVerdictEnum | None = None
     confidence_level: ConfidenceLevelEnum | None = None
-    citations: list[dict] = Field(default_factory=list)
+    citations: list[dict[str, Any]] = Field(default_factory=list)
     numeric_detail: NumericClaimDetail | None = None
-    corrections: list[dict] = Field(default_factory=list)
+    corrections: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ProvenanceExport(BaseSchema):

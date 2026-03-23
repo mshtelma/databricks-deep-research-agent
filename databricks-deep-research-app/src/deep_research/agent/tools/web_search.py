@@ -8,25 +8,16 @@ Provides both:
 from dataclasses import dataclass
 from typing import Any
 
-from mlflow.entities import SpanType
-
 from deep_research.agent.tools.base import (
     ResearchContext,
-    ResearchTool,
     ToolDefinition,
     ToolResult,
 )
 from deep_research.agent.tools.url_registry import UrlRegistry
 from deep_research.core.logging_utils import get_logger, truncate
-from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
-    ATTR_SEARCH_COUNT,
-    ATTR_SEARCH_QUERY,
-    ATTR_SEARCH_RESULTS_COUNT,
-    ATTR_SEARCH_TOP_URLS,
     list_to_attr,
     tool_span_name,
-    truncate_for_attr,
 )
 from deep_research.services.search.brave import BraveSearchClient
 from deep_research.services.search.domain_filter import DomainFilter
@@ -74,60 +65,55 @@ async def web_search(
     Returns:
         WebSearchOutput with search results.
     """
-    span_name = tool_span_name("web_search", context)
+    _ = tool_span_name("web_search", context)
 
-    async with safe_tool_span(span_name, SpanType.TOOL, {
-        ATTR_SEARCH_QUERY: truncate_for_attr(query, 150),
-        ATTR_SEARCH_COUNT: count,
-        "search.freshness": freshness or "any",
-    }) as span:
-        search_client = client
+    search_client = client
 
-        logger.info(
-            "WEB_SEARCH_START",
-            query=truncate(query, 80),
-            count=count,
-            freshness=freshness,
+    logger.info(
+        "WEB_SEARCH_START",
+        query=truncate(query, 80),
+        count=count,
+        freshness=freshness,
+    )
+
+    response = await search_client.search(
+        query=query,
+        count=count,
+        freshness=freshness,
+        domain_filter=domain_filter,
+    )
+
+    results = [
+        WebSearchResult(
+            url=r.url,
+            title=r.title,
+            snippet=r.snippet,
+            relevance_score=r.relevance_score or 0.5,
         )
+        for r in response.results
+    ]
 
-        response = await search_client.search(
-            query=query,
-            count=count,
-            freshness=freshness,
-            domain_filter=domain_filter,
-        )
+    # Log results summary
+    urls = [r.url for r in results[:5]]  # First 5 URLs
+    logger.info(
+        "WEB_SEARCH_COMPLETE",
+        query=truncate(query, 60),
+        results=len(results),
+        top_urls=urls,
+    )
 
-        results = [
-            WebSearchResult(
-                url=r.url,
-                title=r.title,
-                snippet=r.snippet,
-                relevance_score=r.relevance_score or 0.5,
-            )
-            for r in response.results
-        ]
+    # Log output attributes
+    logger.info(
+        "WEB_SEARCH_SPAN_ATTRS",
+        results_count=len(results),
+        top_urls=list_to_attr(urls, max_items=5),
+    )
 
-        # Log results summary
-        urls = [r.url for r in results[:5]]  # First 5 URLs
-        logger.info(
-            "WEB_SEARCH_COMPLETE",
-            query=truncate(query, 60),
-            results=len(results),
-            top_urls=urls,
-        )
-
-        # Set output attributes
-        if span:
-            span.set_attributes({
-                ATTR_SEARCH_RESULTS_COUNT: len(results),
-                ATTR_SEARCH_TOP_URLS: list_to_attr(urls, max_items=5),
-            })
-
-        return WebSearchOutput(
-            results=results,
-            query=query,
-            total_results=len(results),
-        )
+    return WebSearchOutput(
+        results=results,
+        query=query,
+        total_results=len(results),
+    )
 
 
 def format_search_results_indexed(

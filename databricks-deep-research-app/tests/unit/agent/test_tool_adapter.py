@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -15,7 +14,6 @@ from deep_research.agent.adapters.tool_adapter import (
     create_framework_tools,
 )
 from deep_research.core.app_config import DomainFilterConfig, DomainFilterMode
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

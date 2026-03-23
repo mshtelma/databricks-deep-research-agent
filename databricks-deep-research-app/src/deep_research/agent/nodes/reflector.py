@@ -197,10 +197,7 @@ async def run_reflector(state: ResearchState, llm: LLMClient) -> ResearchState:
                 structured_output=ReflectorOutput,
             )
 
-            if response.structured:
-                output = response.structured
-            else:
-                output = ReflectorOutput.model_validate_json(response.content)
+            output = response.structured or ReflectorOutput.model_validate_json(response.content)
 
             # Create reflection result (normalize case as defense-in-depth)
             decision = ReflectionDecision(output.decision.lower())

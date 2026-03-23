@@ -13,7 +13,7 @@ Contract: /specs/007-enterprise-data-sources/contracts/discovery.yaml
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from deep_research.core.logging_utils import get_logger
 from deep_research.middleware.auth import CurrentUser

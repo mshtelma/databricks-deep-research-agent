@@ -16,12 +16,13 @@ class TestFromDefaults:
         """With no env vars or deps, all optional fields are None."""
         monkeypatch.delenv("BRAVE_API_KEY", raising=False)
         # Patch WorkspaceClient import to fail (simulate missing creds)
-        with patch(
-            "databricks_deep_research.tools.factory.ToolFactoryContext.from_defaults",
-            wraps=ToolFactoryContext.from_defaults,
+        with (
+            patch(
+                "databricks_deep_research.tools.factory.ToolFactoryContext.from_defaults",
+                wraps=ToolFactoryContext.from_defaults,
+            ),
+            patch.dict("sys.modules", {"databricks.sdk": None}),
         ):
-            # Force workspace_client auto-detect to fail
-            with patch.dict("sys.modules", {"databricks.sdk": None}):
                 ctx = ToolFactoryContext.from_defaults()
 
         assert ctx.crawler is None

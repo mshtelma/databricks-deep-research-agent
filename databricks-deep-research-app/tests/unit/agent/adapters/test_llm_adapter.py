@@ -11,15 +11,13 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 from databricks_deep_research import ModelTierConfig
+
 from deep_research.services.llm.types import (
     ModelEndpoint,
     ModelRole,
-    ModelTier,
     SelectionStrategy,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

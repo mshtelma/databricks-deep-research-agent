@@ -114,7 +114,7 @@ def extract_username_from_token(token: str) -> str:
         # Add padding if needed
         payload_b64 += "=" * (4 - len(payload_b64) % 4)
         payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-        username = payload.get("sub", "")
+        username: str = payload.get("sub", "")
         if username:
             logger.info(f"Extracted username from token: {username}")
             return username
@@ -208,7 +208,7 @@ def discover_autoscaling_endpoint(
             endpoint = ep
             break
 
-    endpoint_name = endpoint.name
+    endpoint_name: str = endpoint.name
     logger.info(f"Discovered endpoint: {endpoint_name}")
     return endpoint_name
 
@@ -245,7 +245,7 @@ def get_lakebase_connection_info(
 
     if endpoint_name:
         # Autoscaling path
-        cred = workspace_client.postgres.generate_database_credential(  # type: ignore[attr-defined]
+        cred = workspace_client.postgres.generate_database_credential(
             endpoint=endpoint_name,
         )
         host = os.environ.get("PGHOST")

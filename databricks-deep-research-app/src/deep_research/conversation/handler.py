@@ -228,7 +228,7 @@ class DefaultConversationHandler:
         self,
         message: str,
         history: list[dict[str, str]] | None,
-        previous_state: Any | None,
+        _previous_state: Any | None,
     ) -> ConversationResponse:
         """Handle refinement requests."""
         context = []
@@ -251,7 +251,7 @@ class DefaultConversationHandler:
     def _handle_expansion(
         self,
         message: str,
-        history: list[dict[str, str]] | None,
+        _history: list[dict[str, str]] | None,
         previous_state: Any | None,
     ) -> ConversationResponse:
         """Handle expansion requests."""
@@ -275,7 +275,7 @@ class DefaultConversationHandler:
             context=[{"type": "task", "content": "comparison"}],
         )
 
-    def _handle_feedback(self, message: str) -> ConversationResponse:
+    def _handle_feedback(self, _message: str) -> ConversationResponse:
         """Handle feedback."""
         return ConversationResponse.direct(
             "Thank you for your feedback! I'll use it to improve future responses. "

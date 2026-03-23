@@ -9,7 +9,7 @@ Allows users to create custom research agents with specific configurations:
 Part of US6 - Custom Agent Configurations (T074, T075).
 """
 
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -21,7 +21,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from deep_research.db.base import BaseModel
 
 
-class AgentVisibility(str, Enum):
+class AgentVisibility(StrEnum):
     """Visibility levels for custom agents."""
 
     PRIVATE = "private"  # Only creator can see/use
@@ -29,7 +29,7 @@ class AgentVisibility(str, Enum):
     SYSTEM = "system"  # System-provided agents (read-only for users)
 
 
-class AgentSourceScope(str, Enum):
+class AgentSourceScope(StrEnum):
     """Source scope options for custom agents."""
 
     ALL = "all"  # Use all available sources
@@ -37,7 +37,7 @@ class AgentSourceScope(str, Enum):
     WEB_ONLY = "web_only"  # Only web search
 
 
-class AgentWorkflowMode(str, Enum):
+class AgentWorkflowMode(StrEnum):
     """Workflow mode options for custom agents."""
 
     PLANNER = "planner"  # Use AI planner to generate steps
@@ -45,14 +45,14 @@ class AgentWorkflowMode(str, Enum):
     HYBRID = "hybrid"  # Preset steps + planner can add more
 
 
-class AgentOutputFormat(str, Enum):
+class AgentOutputFormat(StrEnum):
     """Output format options for custom agents."""
 
     MARKDOWN = "markdown"  # Standard markdown report
     JSON = "json"  # Structured JSON output
 
 
-class AgentResearchDepth(str, Enum):
+class AgentResearchDepth(StrEnum):
     """Research depth options for custom agents."""
 
     LIGHT = "light"  # Quick research (1-3 steps)

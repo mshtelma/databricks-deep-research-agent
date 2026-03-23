@@ -1,6 +1,6 @@
 """Integration tests for OBO authentication middleware flow."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import Request

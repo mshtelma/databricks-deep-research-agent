@@ -1,11 +1,9 @@
 """Unit tests for EvidencePreSelector service."""
 
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from deep_research.services.citation.evidence_selector import EvidencePreSelector, RankedEvidence
+from deep_research.services.citation.evidence_selector import EvidencePreSelector
 
 from .conftest import MockLLMResponse
 
@@ -106,7 +104,7 @@ class TestComputeRelevance:
         span_without_numbers = "Revenue grew significantly last year."
 
         score_with = selector.compute_relevance(query, span_with_numbers)
-        score_without = selector.compute_relevance(query, span_without_numbers)
+        _ = selector.compute_relevance(query, span_without_numbers)
 
         # Both have similar keyword overlap, but numeric content adds boost
         # Just verify numeric content is detected and score is reasonable

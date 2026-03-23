@@ -17,11 +17,6 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-
-from deep_research.core.app_config import clear_config_cache
-from deep_research.core.config import get_settings
-import deep_research.db.session as _db_mod
-from deep_research.db.session import get_database_url
 from tests.shared import (
     brave_client,  # noqa: F401
     cleanup_mlflow_run,  # noqa: F401
@@ -31,6 +26,11 @@ from tests.shared import (
     requires_databricks,  # noqa: F401
     web_crawler,  # noqa: F401
 )
+
+import deep_research.db.session as _db_mod
+from deep_research.core.app_config import clear_config_cache
+from deep_research.core.config import get_settings
+from deep_research.db.session import get_database_url
 
 # Keep stale engines alive so Python's GC doesn't finalize their pooled
 # asyncpg connections (Connection.__del__ → terminate() → transport.abort()

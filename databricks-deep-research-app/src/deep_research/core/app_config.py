@@ -2,11 +2,11 @@
 
 import logging
 import os
-from enum import Enum
+from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from deep_research.core.yaml_loader import load_yaml_config
 
@@ -19,7 +19,7 @@ _project_root = _src_root.parent  # src -> project root
 DEFAULT_CONFIG_PATH = _project_root / "config" / "app.yaml"
 
 
-class ReasoningEffort(str, Enum):
+class ReasoningEffort(StrEnum):
     """Reasoning effort levels for LLM calls."""
 
     LOW = "low"
@@ -27,21 +27,21 @@ class ReasoningEffort(str, Enum):
     HIGH = "high"
 
 
-class SelectionStrategy(str, Enum):
+class SelectionStrategy(StrEnum):
     """Endpoint selection strategy."""
 
     PRIORITY = "priority"
     ROUND_ROBIN = "round_robin"
 
 
-class BackoffStrategy(str, Enum):
+class BackoffStrategy(StrEnum):
     """Backoff strategy for rate limit retries."""
 
     EXPONENTIAL = "exponential"  # delay = base * (2 ** attempt)
     LINEAR = "linear"  # delay = base * (attempt + 1)
 
 
-class DomainFilterMode(str, Enum):
+class DomainFilterMode(StrEnum):
     """Domain filter operation mode."""
 
     INCLUDE = "include"  # Whitelist only - only listed domains allowed
@@ -49,7 +49,7 @@ class DomainFilterMode(str, Enum):
     BOTH = "both"  # Whitelist then blacklist - must be in include AND not in exclude
 
 
-class ResearcherMode(str, Enum):
+class ResearcherMode(StrEnum):
     """Researcher implementation mode for research type profiles."""
 
     REACT = "react"  # ReAct loop with LLM-controlled tool calls
@@ -319,7 +319,7 @@ class TruncationConfig(BaseModel):
     model_config = {"frozen": True}
 
 
-class RelevanceMethod(str, Enum):
+class RelevanceMethod(StrEnum):
     """Method for computing relevance scores."""
 
     SEMANTIC = "semantic"
@@ -327,7 +327,7 @@ class RelevanceMethod(str, Enum):
     HYBRID = "hybrid"
 
 
-class AnswerComparisonMethod(str, Enum):
+class AnswerComparisonMethod(StrEnum):
     """Method for comparing answers in numeric QA verification."""
 
     EXACT_MATCH = "exact_match"
@@ -335,7 +335,7 @@ class AnswerComparisonMethod(str, Enum):
     LERC = "lerc"
 
 
-class ConfidenceEstimationMethod(str, Enum):
+class ConfidenceEstimationMethod(StrEnum):
     """Method for estimating confidence levels."""
 
     LINGUISTIC = "linguistic"
@@ -343,7 +343,7 @@ class ConfidenceEstimationMethod(str, Enum):
     HYBRID = "hybrid"
 
 
-class CorrectionMethod(str, Enum):
+class CorrectionMethod(StrEnum):
     """Method for citation correction."""
 
     KEYWORD_SEMANTIC_HYBRID = "keyword_semantic_hybrid"
@@ -351,7 +351,7 @@ class CorrectionMethod(str, Enum):
     SEMANTIC_ONLY = "semantic_only"
 
 
-class SofteningStrategy(str, Enum):
+class SofteningStrategy(StrEnum):
     """Strategy for softening unverified claims in Stage 7.
 
     - HEDGE: Add hedging words ("reportedly", "allegedly", "according to some sources")
@@ -364,7 +364,7 @@ class SofteningStrategy(str, Enum):
     PARENTHETICAL = "parenthetical"
 
 
-class GenerationMode(str, Enum):
+class GenerationMode(StrEnum):
     """Generation mode for research reports.
 
     - CLASSICAL: Free-form prose with inline [Title](url) links. Best text quality.
@@ -380,7 +380,7 @@ class GenerationMode(str, Enum):
     STRICT = "strict"
 
 
-class SynthesisMode(str, Enum):
+class SynthesisMode(StrEnum):
     """Synthesis approach for report generation.
 
     - INTERLEAVED: Current approach - dump evidence into context, LLM generates
@@ -749,6 +749,12 @@ class CitationVerificationConfig(BaseModel):
         description="Configuration for post-generation verification of structured output",
     )
 
+    # Concurrency for NLI verification (Stage 4)
+    max_concurrent_verifications: int = Field(
+        default=10, ge=1, le=50,
+        description="Max concurrent NLI verification calls (Stage 4). Higher = faster but more API load.",
+    )
+
     # Warning thresholds
     unsupported_claim_warning_threshold: float = Field(default=0.20, ge=0.0, le=1.0)
 
@@ -757,14 +763,29 @@ class CitationVerificationConfig(BaseModel):
         default=True,
         description="Extract claims from <free> blocks that contain factual content",
     )
-    enable_claim_removal: bool = Field(
-        default=True,
-        description="Remove contradicted claims from final report",
+    claim_disposition: dict[str, str] = Field(
+        default_factory=lambda: {
+            "supported": "keep",
+            "partial": "keep",
+            "unsupported": "remove",
+            "contradicted": "remove",
+            "abstained": "keep",
+            "analysis_partial": "keep",
+            "analysis_unsupported": "remove",
+        },
+        description="Stage 8: Maps each verdict to an action (keep, remove, soften).",
     )
-    enable_claim_softening: bool = Field(
-        default=True,
-        description="Soften unsupported claims with hedging language",
-    )
+
+    @field_validator("claim_disposition")
+    @classmethod
+    def _validate_claim_disposition(cls, v: dict[str, str]) -> dict[str, str]:
+        valid_actions = {"keep", "remove", "soften"}
+        for key, action in v.items():
+            if action not in valid_actions:
+                raise ValueError(
+                    f"claim_disposition[{key!r}] = {action!r}, must be one of {valid_actions}"
+                )
+        return v
     max_free_block_claims: int = Field(
         default=20, ge=0, le=100,
         description="Maximum claims to extract from <free> blocks (0 = unlimited)",

@@ -41,7 +41,7 @@ async def check_lakebase_health(
 
         if endpoint_name:
             # Autoscaling health check
-            response = workspace_client.postgres.generate_database_credential(  # type: ignore[attr-defined]
+            response = workspace_client.postgres.generate_database_credential(
                 endpoint=endpoint_name,
             )
         else:

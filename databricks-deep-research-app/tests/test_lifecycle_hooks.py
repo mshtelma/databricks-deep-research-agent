@@ -13,7 +13,7 @@ Tests the core hook emission mechanism including:
 
 import asyncio
 import dataclasses
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
@@ -21,21 +21,19 @@ import pytest
 from pydantic import BaseModel, Field, ValidationError
 
 from deep_research.plugins.lifecycle import (
-    JobSubmittedEvent,
-    JobStartedEvent,
+    EventEmitter,
     JobCompletedEvent,
     JobFailedEvent,
-    SynthesisConfigEvent,
+    JobStartedEvent,
+    JobSubmittedEvent,
     SynthesisChunkEvent,
+    SynthesisConfigEvent,
     ValidationErrorEvent,
     ValidationSuccessEvent,
-    JobLifecycleListener,
-    EventEmitter,
     create_validation_error_event,
     unpack_validation_error,
 )
-from deep_research.plugins.manager import PluginManager, HookMetrics
-
+from deep_research.plugins.manager import PluginManager
 
 # ============================================================================
 # Mock Plugin for Testing
@@ -133,7 +131,7 @@ async def test_hook_emission_basic():
         query="test query",
         user_id="test-user",
         research_config={"mode": "test"},
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     stats = await manager.emit_hook("on_job_submitted", event)
@@ -161,7 +159,7 @@ async def test_hook_emission_multiple_plugins():
 
     event = JobStartedEvent(
         job_id=uuid4(),
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     stats = await manager.emit_hook("on_job_started", event)
@@ -186,7 +184,7 @@ async def test_hook_emission_async_plugin():
         query="test",
         user_id="user",
         research_config={},
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     stats = await manager.emit_hook("on_job_submitted", event)
@@ -220,7 +218,7 @@ async def test_hook_timeout_protection():
         query="test",
         user_id="user",
         research_config={},
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     import time
@@ -256,7 +254,7 @@ async def test_hook_timeout_async():
         query="test",
         user_id="user",
         research_config={},
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     stats = await manager.emit_hook("on_job_submitted", event, timeout_override=1)
@@ -285,7 +283,7 @@ async def test_hook_error_isolation():
         query="test",
         user_id="user",
         research_config={},
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     # Should not raise - error is caught
@@ -319,7 +317,7 @@ async def test_hook_error_isolation_multiple_plugins():
         query="test",
         user_id="user",
         research_config={},
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     stats = await manager.emit_hook("on_job_submitted", event)
@@ -424,7 +422,7 @@ def test_hook_cache_lazy_rebuild():
     manager._plugins = [MockPlugin()]
 
     # Build initial cache
-    cache1 = manager._get_hook_cache()
+    _ = manager._get_hook_cache()
     version1 = manager._cache_version
 
     # Register new plugin
@@ -494,7 +492,7 @@ async def test_feature_flag_disabled():
         query="test",
         user_id="user",
         research_config={},
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     stats = await manager.emit_hook("on_job_submitted", event)
@@ -533,7 +531,7 @@ async def test_feature_flag_allowlist():
         query="test",
         user_id="user",
         research_config={},
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     stats1 = await manager.emit_hook("on_job_submitted", event1)
     assert stats1.get("succeeded") == 1
@@ -541,7 +539,7 @@ async def test_feature_flag_allowlist():
     # Not in allowlist
     event2 = JobStartedEvent(
         job_id=uuid4(),
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     stats2 = await manager.emit_hook("on_job_started", event2)
     assert stats2.get("skipped") is True
@@ -578,7 +576,7 @@ async def test_feature_flag_denylist():
         query="test",
         user_id="user",
         research_config={},
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
     stats = await manager.emit_hook("on_job_submitted", event)
 
@@ -667,7 +665,7 @@ async def test_event_emitter_error_recovery():
                 query="test",
                 user_id="user",
                 research_config={},
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={"job_id": "test"},
         )
@@ -699,7 +697,7 @@ async def test_hook_metrics_tracking():
                 query="test",
                 user_id="user",
                 research_config={},
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
         )
 
@@ -732,7 +730,7 @@ async def test_hook_metrics_with_failures():
             query="test",
             user_id="user",
             research_config={},
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
         ),
     )
 
@@ -758,7 +756,7 @@ def test_event_immutability():
         query="test",
         user_id="user",
         research_config={},
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
     # Should not be able to modify frozen dataclass

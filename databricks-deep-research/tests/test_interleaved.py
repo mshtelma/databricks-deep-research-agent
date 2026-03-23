@@ -20,9 +20,9 @@ from databricks_deep_research.citation.claim_generator import (
     GenerationMode,
     InterleavedGenerationConfig,
     InterleavedGenerator,
-    _has_numeric_content,
     _parse_interleaved_content,
 )
+from databricks_deep_research.citation.utils import has_numeric_content
 from databricks_deep_research.citation.types import (
     InterleavedClaim,
     RankedEvidence,
@@ -254,7 +254,7 @@ def test_parse_content_skips_numbered_list_fragments() -> None:
     ],
 )
 def test_has_numeric_content_variants(text: str, expected: bool) -> None:
-    assert _has_numeric_content(text) is expected
+    assert has_numeric_content(text) is expected
 
 
 # ---------------------------------------------------------------------------

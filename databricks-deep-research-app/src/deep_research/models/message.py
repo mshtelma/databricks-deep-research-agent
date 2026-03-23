@@ -5,8 +5,8 @@ Claims and verification_summary relationships have been removed.
 This data is now stored in the verification_data JSONB column on research_sessions.
 """
 
-from enum import Enum
-from typing import TYPE_CHECKING
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import Boolean, ForeignKey, Index, String, Text
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from deep_research.models.research_session import ResearchSession
 
 
-class MessageRole(str, Enum):
+class MessageRole(StrEnum):
     """Message role enumeration."""
 
     USER = "user"
@@ -46,6 +46,13 @@ class Message(BaseModel):
         index=True,
     )
 
+    # Foreign key to research session (exists in DB schema via migration 001)
+    research_session_id: Mapped[UUID | None] = mapped_column(
+        PGUUID(as_uuid=True),
+        ForeignKey("research_sessions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # Message content
     role: Mapped[MessageRole] = mapped_column(
         String(20),
@@ -66,7 +73,7 @@ class Message(BaseModel):
     )
 
     # Additional metadata
-    metadata_: Mapped[dict] = mapped_column(
+    metadata_: Mapped[dict[str, Any]] = mapped_column(
         "metadata",
         JSONB,
         default=dict,
@@ -78,6 +85,7 @@ class Message(BaseModel):
     research_session: Mapped["ResearchSession | None"] = relationship(
         "ResearchSession",
         back_populates="message",
+        foreign_keys="[ResearchSession.message_id]",
         uselist=False,
     )
     feedback: Mapped["MessageFeedback | None"] = relationship(

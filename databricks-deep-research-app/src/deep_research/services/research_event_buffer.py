@@ -102,7 +102,7 @@ class EventBuffer:
             session_maker = get_session_maker()
             async with session_maker() as db:
                 service = ResearchEventService(db)
-                count = await service.save_events_batch(self._session_id, self._buffer)
+                _ = await service.save_events_batch(self._session_id, self._buffer)
                 await db.commit()
 
             self._total_flushed += len(self._buffer)

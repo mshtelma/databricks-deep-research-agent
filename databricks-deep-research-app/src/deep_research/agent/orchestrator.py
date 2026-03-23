@@ -112,7 +112,6 @@ async def run_research(
     steps_executed = 0
     steps_skipped = 0
     final_report: str | None = None
-    plan_iterations = 0
 
     async for event in stream_research(
         query=query,
@@ -133,7 +132,7 @@ async def run_research(
             if isinstance(event, ResearchCompletedEvent):
                 steps_executed = event.total_steps_executed
                 steps_skipped = event.total_steps_skipped
-                plan_iterations = event.plan_iterations
+                _ = event.plan_iterations
                 final_report = event.final_report
 
     # Build a minimal state for OrchestrationResult compatibility

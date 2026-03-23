@@ -303,7 +303,7 @@ class DiscoveryService:
         result: list[DiscoveredSource] = []
         filtered_count = 0
         for r in enriched:
-            if r is None or isinstance(r, Exception):
+            if r is None or isinstance(r, BaseException):
                 filtered_count += 1
                 continue
             result.append(r)
@@ -415,9 +415,11 @@ class DiscoveryService:
 
         # Try to get row count
         row_count = None
-        if hasattr(index, "status") and index.status:
-            if hasattr(index.status, "num_of_source_rows"):
-                row_count = index.status.num_of_source_rows
+        if (
+            hasattr(index, "status") and index.status
+            and hasattr(index.status, "num_of_source_rows")
+        ):
+            row_count = index.status.num_of_source_rows
 
         # Extract queryable columns via shared utility
         from deep_research.services.vector_search_query import extract_queryable_columns
@@ -803,7 +805,7 @@ class DiscoveryService:
             """Run discovery with timeout, returning partial results on timeout."""
             try:
                 return await asyncio.wait_for(coro, timeout=timeout.total_seconds())
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning(
                     "DISCOVERY_TYPE_TIMEOUT",
                     source_type=source_type.value,

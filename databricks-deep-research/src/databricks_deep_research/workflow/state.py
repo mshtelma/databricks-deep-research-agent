@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from databricks_deep_research.workflow.runtime_core import TypedRuntimeStateStore
+from databricks_deep_research.workflow.runtime_core import RuntimeState, TypedRuntimeStateStore
 from databricks_deep_research.workflow.runtime_core.selectors import resolve_input_key
 
 logger = logging.getLogger(__name__)
@@ -156,7 +156,7 @@ class WorkflowState:
         return None
 
 
-    def runtime_state(self):
+    def runtime_state(self) -> RuntimeState | None:
         """Return a typed runtime snapshot when available."""
         if self.runtime_store is None:
             return None

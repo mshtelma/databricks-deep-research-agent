@@ -45,16 +45,10 @@ from databricks_deep_research.citation.atomic_decomposer import (
 )
 from databricks_deep_research.citation.config import SofteningStrategy
 from databricks_deep_research.citation.types import ClaimInfo, RankedEvidence
+from databricks_deep_research.citation.utils import truncate as _truncate
 from databricks_deep_research.llm.client import FrameworkLLMClient, ModelTier
 
 logger = logging.getLogger(__name__)
-
-
-def _truncate(text: str, max_len: int = 200) -> str:
-    """Truncate *text* for log messages."""
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 3] + "..."
 
 
 # =============================================================================

@@ -269,7 +269,7 @@ class VectorSearchQueryService:
     @staticmethod
     def _parse_response(
         response: Any,
-        requested_columns: list[str],
+        _requested_columns: list[str],
         column_roles: ColumnRoles | None = None,
     ) -> list[VectorSearchResult]:
         """Parse QueryVectorIndexResponse into VectorSearchResult list.
@@ -318,6 +318,8 @@ class VectorSearchQueryService:
                 data_array = arr
 
         # Determine column mapping strategy
+        id_col: str | None
+        content_col: str | None
         if column_roles:
             id_col = column_roles.id_column
             content_col = column_roles.content_column

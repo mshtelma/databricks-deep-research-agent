@@ -15,6 +15,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from databricks_deep_research.citation.types import ContentQuality, RankedEvidence
+from databricks_deep_research.citation.utils import has_numeric_content as _has_numeric
 from databricks_deep_research.llm.client import FrameworkLLMClient, ModelTier
 
 logger = logging.getLogger(__name__)
@@ -69,35 +71,6 @@ class _SpansOutput(BaseModel):
 # -- Public data models ----------------------------------------------------
 
 @dataclass
-class RankedEvidence:
-    """An evidence span with relevance ranking."""
-    source_url: str
-    quote_text: str
-    relevance_score: float
-    canonical_source_url: str | None = None
-    source_title: str | None = None
-    source_id: str | None = None
-    start_offset: int | None = None
-    end_offset: int | None = None
-    section_heading: str | None = None
-    has_numeric_content: bool = False
-    source_pool_index: int | None = None
-    evidence_pool_index: int | None = None
-    is_snippet_based: bool = False
-
-@dataclass
-class ContentQuality:
-    """Result of content quality evaluation."""
-    score: float
-    word_count: int
-    is_paywall: bool = False
-    is_abstract_only: bool = False
-    is_navigation_heavy: bool = False
-    has_numeric_data: bool = False
-    has_specific_facts: bool = False
-    reason: str = ""
-
-@dataclass
 class EvidenceSelectionConfig:
     """Configuration knobs for the evidence selector."""
     max_spans_per_source: int = 10
@@ -110,7 +83,7 @@ class EvidenceSelectionConfig:
     max_chunks_per_source: int = 5
     quality_min_score: float = 0.5
     model_tier: str | ModelTier = "bulk_analysis"
-    max_sources: int = 40
+    max_sources: int = 60
 
 @dataclass
 class EvidenceResult:
@@ -261,10 +234,60 @@ def _keyword_relevance(query: str, text: str) -> float:
         score = min(1.0, score + 0.3)
     return score
 
-def _has_numeric(text: str) -> bool:
-    pats = [r"\$[\d,.]+[BMK]?", r"\d+(?:\.\d+)?%", r"\d{4}",
-            r"\d+(?:,\d{3})+", r"\d+\s*(?:billion|million|thousand)"]
-    return any(re.search(p, text, re.I) for p in pats)
+def _dedup_evidence_cross_source(
+    evidence: list[RankedEvidence],
+    prefix_length: int = 200,
+) -> list[RankedEvidence]:
+    """Remove near-duplicate evidence spans across different sources.
+
+    Uses prefix+length fingerprinting to catch divergent content that
+    shares the same opening (e.g., template docs across cloud providers).
+    """
+    seen: dict[str, RankedEvidence] = {}
+    for ev in evidence:
+        normalized = re.sub(r"\s+", " ", ev.quote_text.strip().lower())
+        # Prefix + length bucket prevents false matches on template boilerplate
+        fingerprint = f"{normalized[:prefix_length]}|{len(normalized) // 50}"
+        existing = seen.get(fingerprint)
+        if existing is None or (ev.relevance_score or 0) > (existing.relevance_score or 0):
+            seen[fingerprint] = ev
+    deduped = list(seen.values())
+    deduped.sort(key=lambda e: e.relevance_score or 0, reverse=True)
+    return deduped
+
+
+# -- Source ranking --------------------------------------------------------
+
+def _rank_source_priority(source: dict[str, Any]) -> float:
+    """Score a source for LLM extraction priority (higher = process first).
+
+    Considers three signals:
+    1. Relevance score from search results (strongest signal)
+    2. Content length (longer = more potential evidence, log-scaled)
+    3. Source type (enterprise sources get a boost)
+    """
+    score = 0.0
+
+    # Relevance from search (0-1 range, 3x weight — primary signal)
+    relevance = float(source.get("relevance_score") or 0.0)
+    score += relevance * 3.0
+
+    # Content richness (log-scaled, diminishing returns past 5K chars)
+    content = source.get("content") or ""
+    content_len = len(content)
+    if content_len > 5000:
+        score += 2.0
+    elif content_len > 1000:
+        score += 1.5
+    elif content_len > 200:
+        score += 0.5
+
+    # Enterprise source boost (trusted, authoritative)
+    source_type = str(source.get("source_type") or "")
+    if source_type in ("genie", "vector_search", "knowledge_assistant", "enterprise"):
+        score += 1.5
+
+    return score
 
 # -- EvidenceSelector ------------------------------------------------------
 
@@ -300,8 +323,13 @@ class EvidenceSelector:
 
         # Cap the number of sources to process via LLM
         if len(good) > self._cfg.max_sources:
+            good.sort(key=_rank_source_priority, reverse=True)
             logger.info(
-                "EVIDENCE_SOURCE_CAP total=%d cap=%d", len(good), self._cfg.max_sources,
+                "EVIDENCE_SOURCE_CAP total=%d cap=%d top_score=%.2f bottom_score=%.2f",
+                len(good),
+                self._cfg.max_sources,
+                _rank_source_priority(good[0]) if good else 0,
+                _rank_source_priority(good[self._cfg.max_sources - 1]) if len(good) >= self._cfg.max_sources else 0,
             )
             good = good[: self._cfg.max_sources]
 
@@ -390,6 +418,12 @@ class EvidenceSelector:
         thr = self._cfg.relevance_threshold
         result = sorted([e for e in pool if e.relevance_score >= thr],
                         key=lambda e: e.relevance_score, reverse=True)
+
+        pre_dedup = len(result)
+        result = _dedup_evidence_cross_source(result)
+        if pre_dedup > len(result):
+            logger.info("EVIDENCE_CROSS_SOURCE_DEDUP before=%d after=%d", pre_dedup, len(result))
+
         logger.info("EVIDENCE_SELECTED spans=%d sources=%d rejected=%d",
                      len(result), len(good), rej)
         return EvidenceResult(evidence=result, sources_accepted=len(good), sources_rejected=rej)
@@ -411,7 +445,7 @@ class EvidenceSelector:
         ]
         results = await asyncio.gather(
             *[self._llm_extract(query, url, t, ch.text)
-              for ch, t in zip(chunks_to_process, titles)],
+              for ch, t in zip(chunks_to_process, titles, strict=True)],
             return_exceptions=True,
         )
         all_sp: list[dict[str, Any]] = []

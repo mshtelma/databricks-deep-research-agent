@@ -14,7 +14,6 @@ from databricks_deep_research.tools.builtins.vector_search import (
 )
 from databricks_deep_research.tools.protocol import ToolContext
 
-
 # ---------------------------------------------------------------------------
 # _title_from_chunk_id
 # ---------------------------------------------------------------------------
@@ -168,3 +167,158 @@ def test_harness_label_falls_back_to_source_name():
             title = source_name
 
     assert title == "vs_compete_intel"
+
+
+# ---------------------------------------------------------------------------
+# _normalize_filters — unsupported operator handling
+# ---------------------------------------------------------------------------
+
+class TestNormalizeFilters:
+    """Normalization of dict-key filter operators for query_index()."""
+
+    def test_equality_passthrough(self):
+        f = {"bulletin_date": "1941-01", "chunk_type": "table"}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == f
+
+    def test_comparison_numeric_passthrough(self):
+        """Numeric values pass through comparison operators."""
+        f = {"score >": 0.5, "count >=": 10, "rank <": 100, "level <=": 3}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == f
+
+    def test_comparison_string_dropped(self):
+        """String values with comparison operators are dropped."""
+        f = {"date >=": "1941-01", "date <": "1942-01"}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == {}
+
+    def test_comparison_mixed_types(self):
+        """Numeric comparisons pass, string comparisons are dropped."""
+        f = {"score >": 0.5, "date >=": "1941-01", "count <": 10}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == {
+            "score >": 0.5,
+            "count <": 10,
+        }
+
+    def test_like_dropped(self):
+        """LIKE is unsupported by the API — should be dropped."""
+        f = {"date LIKE": "1941-%"}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == {}
+
+    def test_ne_passthrough(self):
+        """!= passes through optimistically (commonly supported)."""
+        f = {"status !=": "deleted"}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == f
+
+    def test_in_downgraded_to_equality(self):
+        f = {"chunk_type IN": ["table", "section"]}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == {"chunk_type": "table"}
+
+    def test_in_single_element_list(self):
+        f = {"chunk_type IN": ["table"]}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == {"chunk_type": "table"}
+
+    def test_in_empty_list_dropped(self):
+        assert DatabricksVectorSearchTool._normalize_filters({"c IN": []}) == {}
+
+    def test_in_non_list_dropped(self):
+        assert DatabricksVectorSearchTool._normalize_filters({"c IN": "val"}) == {}
+
+    def test_in_case_insensitive(self):
+        f = {"c in": ["a", "b"]}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == {"c": "a"}
+
+    def test_not_like_dropped(self):
+        """NOT LIKE is multi-word; split(' ', 1) captures it correctly."""
+        f = {"c NOT LIKE": "x%"}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == {}
+
+    def test_not_in_dropped(self):
+        f = {"c NOT IN": ["a", "b"]}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == {}
+
+    def test_between_dropped(self):
+        f = {"c BETWEEN": [1, 10]}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == {}
+
+    def test_mixed_filters_preserves_valid(self):
+        f = {
+            "date >=": "1941-01",
+            "type IN": ["table", "section"],
+            "category": "finance",
+            "score >": 0.5,
+        }
+        # date >= is string → dropped; IN → downgraded; score > is numeric → kept
+        assert DatabricksVectorSearchTool._normalize_filters(f) == {
+            "type": "table",
+            "category": "finance",
+            "score >": 0.5,
+        }
+
+    def test_empty_dict(self):
+        assert DatabricksVectorSearchTool._normalize_filters({}) == {}
+
+    def test_trailing_whitespace_key_treated_as_equality(self):
+        """Key 'col ' (trailing space) should not be misidentified as operator."""
+        f = {"col ": "val"}
+        assert DatabricksVectorSearchTool._normalize_filters(f) == {"col": "val"}
+
+
+# ---------------------------------------------------------------------------
+# _try_parse_filter_string — string-to-dict recovery
+# ---------------------------------------------------------------------------
+
+class TestTryParseFilterString:
+    def test_valid_json(self):
+        result = DatabricksVectorSearchTool._try_parse_filter_string('{"a": "b"}')
+        assert result == {"a": "b"}
+
+    def test_python_dict_literal(self):
+        result = DatabricksVectorSearchTool._try_parse_filter_string("{'a': 'b'}")
+        assert result == {"a": "b"}
+
+    def test_unparseable_returns_none(self):
+        assert DatabricksVectorSearchTool._try_parse_filter_string("not a dict") is None
+
+    def test_non_dict_parsed_returns_none(self):
+        assert DatabricksVectorSearchTool._try_parse_filter_string("[1, 2, 3]") is None
+
+
+# ---------------------------------------------------------------------------
+# validate_arguments — filter normalization integration
+# ---------------------------------------------------------------------------
+
+class TestValidateArgumentsFilters:
+    def _make_tool(self):
+        return DatabricksVectorSearchTool(
+            workspace_client=MagicMock(), name="t", index_name="c.s.i",
+        )
+
+    def test_dict_filters_normalized(self):
+        r = self._make_tool().validate_arguments(
+            {"query": "q", "filters": {"c IN": ["a", "b"]}}
+        )
+        assert r["filters"] == {"c": "a"}
+
+    def test_string_filters_parsed_and_normalized(self):
+        r = self._make_tool().validate_arguments(
+            {"query": "q", "filters": '{"c IN": ["a", "b"]}'}
+        )
+        assert r["filters"] == {"c": "a"}
+
+    def test_python_literal_string_parsed(self):
+        r = self._make_tool().validate_arguments(
+            {"query": "q", "filters": "{'chunk_type': 'table'}"}
+        )
+        assert r["filters"] == {"chunk_type": "table"}
+
+    def test_non_dict_non_string_ignored(self):
+        r = self._make_tool().validate_arguments(
+            {"query": "q", "filters": 42}
+        )
+        assert "filters" not in r
+
+    def test_all_filters_normalized_away_not_set(self):
+        """If all filters are unsupported, filters key should not be set."""
+        r = self._make_tool().validate_arguments(
+            {"query": "q", "filters": {"c BETWEEN": [1, 10]}}
+        )
+        assert "filters" not in r

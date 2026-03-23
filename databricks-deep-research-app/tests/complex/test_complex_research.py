@@ -24,6 +24,7 @@ from uuid import uuid4
 
 import mlflow
 import pytest
+from tests.complex.conftest import requires_all_credentials
 
 from deep_research.agent.orchestrator import (
     OrchestrationConfig,
@@ -33,8 +34,6 @@ from deep_research.agent.state import ResearchState
 from deep_research.agent.tools.web_crawler import WebCrawler
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.search.brave import BraveSearchClient
-from tests.complex.conftest import requires_all_credentials
-
 
 # =============================================================================
 # Grey Reference Detection Utilities
@@ -533,7 +532,7 @@ class TestVerificationMetrics:
 
             if state.verification_summary:
                 s = state.verification_summary
-                print(f"\n📈 Verification Summary:")
+                print("\n📈 Verification Summary:")
                 print(f"   Total claims:  {s.total_claims}")
                 print(f"   ✅ Supported:   {s.supported_count}")
                 print(f"   ⚠️  Partial:     {s.partial_count}")
@@ -543,7 +542,7 @@ class TestVerificationMetrics:
             else:
                 print("\n⚠️  No verification summary available")
 
-            print(f"\n🔘 Grey References:")
+            print("\n🔘 Grey References:")
             print(f"   - True grey:        {grey['true_grey']} (citation markers with no evidence)")
             print(f"   - Removed abstained: {grey['removed_abstained']} (handled correctly)")
             print(f"   - No evidence:      {grey['no_evidence']}")

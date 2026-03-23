@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from databricks_deep_research.workflow.runtime_core.selectors import select_data_landscape, select_discovered_sources
 from typing import Any
+
+from databricks_deep_research.workflow.runtime_core.selectors import (
+    select_data_landscape,
+    select_discovered_sources,
+)
 
 
 def format_completed_steps(completed_steps: list[str]) -> str:

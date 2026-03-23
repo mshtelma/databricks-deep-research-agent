@@ -9,20 +9,18 @@ Tests:
 """
 
 import asyncio
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from deep_research.agent.state import ResearchState, SourceInfo
 from deep_research.agent.nodes.react_researcher import (
+    TOOL_DEPENDENCIES,
+    TOOL_SOURCE_MAPPING,
     ReactResearchState,
     ToolBatch,
     _get_execution_batches,
     _group_tools_by_source,
-    TOOL_DEPENDENCIES,
-    TOOL_SOURCE_MAPPING,
 )
+from deep_research.agent.state import ResearchState, SourceInfo
 from deep_research.services.llm.types import ToolCall
 
 

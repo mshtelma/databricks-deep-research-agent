@@ -149,8 +149,7 @@ class DomainFilter:
                     )
 
         # Check include list (if mode requires it)
-        if mode in (DomainFilterMode.INCLUDE, DomainFilterMode.BOTH):
-            if self._include_patterns:
+        if mode in (DomainFilterMode.INCLUDE, DomainFilterMode.BOTH) and self._include_patterns:
                 for pattern in self._include_patterns:
                     if match_domain_pattern(domain, pattern):
                         return DomainMatchResult(

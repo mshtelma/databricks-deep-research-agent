@@ -6,10 +6,6 @@ persistence delta accumulation, and should_persist / reset logic.
 
 from __future__ import annotations
 
-from typing import Any
-
-import pytest
-
 from databricks_deep_research.events.types import (
     AgentOutputEvent,
     AgentStreamChunkEvent,
@@ -26,12 +22,11 @@ from databricks_deep_research.events.types import (
     WorkflowCompletedEvent,
     WorkflowStartedEvent,
 )
+
 from deep_research.agent.adapters.domain_context import (
-    AppSSEEvent,
     DomainContextTracker,
     PersistenceDelta,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

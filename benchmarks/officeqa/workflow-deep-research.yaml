@@ -1,0 +1,294 @@
+id: officeqa_benchmark_deep
+name: OfficeQA Treasury Bulletin Benchmark (Deep Research)
+description: Answer financial questions over US Treasury Monthly Statement Bulletins (1939-2025) using plan-and-execute orchestration
+version: 2
+required_inputs: [query]
+output_keys: [report]
+
+models:
+  simple: databricks-claude-opus-4-6
+  analytical: databricks-claude-opus-4-6
+  complex: databricks-claude-opus-4-6
+
+tools:
+  - name: treasury_search
+    kind: vector_search
+    config:
+      index_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks_vs_index"
+      num_results: 15
+      query_type: HYBRID
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+    description: >
+      Search US Treasury Monthly Statement Bulletins (1939-2025). Contains financial
+      tables with receipts, outlays, debt, budget figures in Markdown table format.
+      Column headers indicate units (e.g., "In millions of dollars"). Use specific
+      fiscal year, month, and financial category terms in queries.
+  - name: compute
+    kind: compute
+    config:
+      max_execution_seconds: 10
+    description: >
+      Execute Python code for calculations. The math and statistics modules are
+      pre-imported. Variables persist across calls within the same session.
+      Use for any computation: percentages, averages, standard deviations,
+      growth rates, regressions, geometric means, sums, differences, etc.
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 80
+  - name: observations
+    dedup_content_hash: true
+    max_items: 50
+
+root:
+  id: main
+  type: sequence
+  label: OfficeQA Deep Research
+  children:
+    # ---------------------------------------------------------------
+    # Stage 1: Question Analyzer — parse operation schema
+    # ---------------------------------------------------------------
+    - id: question_analyzer
+      type: agent
+      label: Question Analyzer
+      config:
+        subtype: planner
+        model_tier: analytical
+        output_key: operation_schema
+        max_tool_calls: 0
+        output_format: json
+        system_prompt: |
+          You are a question decomposition agent. Analyze the research question and
+          produce a structured operation schema that will guide data retrieval and
+          computation.
+
+          Output JSON with these fields:
+          {{
+            "operation_type": "<type>",
+            "output_shape": "scalar" | "percentage" | "pair" | "list" | "date",
+            "rounding": "none" | "integer" | "hundredths" | "tenths" | "thousandths",
+            "operands": [
+              {{
+                "id": "op1",
+                "description": "what this value represents in plain language",
+                "metric_label": "the exact category/line item name to look for",
+                "time_period": "calendar year 1940" or "fiscal year 1941" or "January 1950",
+                "time_type": "calendar_year" | "fiscal_year" | "specific_month" | "date_range",
+                "unit": "millions of dollars" or "percent" or "count",
+                "aggregation": "annual_total" | "monthly" | "single_value" | "list_of_values",
+                "source_hint": "specific bulletin or table if mentioned in question"
+              }}
+            ],
+            "formula": "percent_change(op1, op2)" | "sum(op1..opN)" | "op1" | "custom: <description>",
+            "constraints": ["any special instructions from the question"]
+          }}
+
+          operation_type must be one of:
+          lookup, sum, difference, percent_change, average, ratio, growth_rate,
+          standard_deviation, geometric_mean, regression, correlation,
+          moving_average, count, list, median, min, max, custom_formula
+
+          TREASURY BULLETIN SPECIFICS:
+          - Fiscal year (FY) runs July 1 - June 30 (e.g., FY1940 = Jul 1939 - Jun 1940)
+          - Calendar year (CY) runs January 1 - December 31
+          - Summary data for CY is typically in the January bulletin of the following year
+          - Tables use "In millions of dollars" unless stated otherwise
+          - Key categories: receipts, outlays/expenditures, debt, trust funds, tax revenue
+
+          IMPORTANT:
+          - Be precise about metric_label: "national defense" is NOT the same as
+            "national defense and related activities"
+          - Distinguish fiscal year vs calendar year explicitly
+          - For list/range questions, create one operand per value needed
+          - Parse the question literally — do not add operations not asked for
+
+    # ---------------------------------------------------------------
+    # Stage 2: Plan-and-Execute Research — retrieve and ground operands
+    # ---------------------------------------------------------------
+    - id: research_cycle
+      type: plan_and_execute
+      label: Grounded Research Cycle
+      config:
+        planner_guidance: |
+          You are planning data retrieval for US Treasury Bulletin financial questions.
+          You will receive an operation_schema describing what operands need to be found.
+
+          Plan 2-3 focused research steps. Each step should target specific operands
+          from the schema. Consider:
+          - Fiscal year vs calendar year for correct bulletin dating
+          - Using bulletin_date filters for targeted retrieval
+          - Searching for related categories to catch label disambiguation issues
+        planner:
+          subtype: planner
+          model_tier: analytical
+          output_key: plan
+          input_keys: [query, operation_schema]
+          system_prompt: |
+            You are a research planner for Treasury Bulletin data retrieval.
+
+            The question requires finding specific operands as described in the
+            operation schema: {operation_schema}
+
+            Create a plan with 2-3 steps where each step retrieves one or more
+            operands. For multi-period questions, plan separate searches per period.
+
+            Output a plan with clear, specific search steps including:
+            - Which operands to target
+            - What search terms and filters to use
+            - Whether to search tables specifically (chunk_type: "table")
+        items_path: steps
+        item_state_key: current_step
+        body:
+          id: researcher
+          type: agent
+          label: Grounded Researcher
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: findings
+            tools: [treasury_search, compute]
+            input_keys: [query, operation_schema]
+            pool_writes:
+              - pool: observations
+                extract: findings
+              - pool: sources
+                extract: sources
+            max_tool_calls: 10
+            system_prompt: |
+              You are a data retrieval and grounding agent for US Treasury Bulletins.
+
+              Operation schema: {operation_schema}
+
+              FOR EACH OPERAND you are searching for:
+              1. Search for data matching the operand's metric_label and time_period.
+              2. When you find a candidate value:
+                 a) Record the EXACT row label and column label from the table
+                 b) Record the EXACT cell value as it appears (do not transform)
+                 c) Record the source file_name and bulletin_date
+              3. Keep ALL candidates if multiple values match — do NOT pick one.
+
+              FILTERING:
+              - bulletin_date: "YYYY-MM" equality filter
+              - chunk_type: "table" for data tables
+              - Combined: {{"chunk_type": "table", "bulletin_date": "1954-01"}}
+              - Comparison operators only work on numeric columns — NOT on text.
+              - To search multiple dates, make separate tool calls.
+
+              CRITICAL RULES:
+              - Record numbers EXACTLY as in the cell — do NOT multiply by unit scale
+              - Do NOT compute derived answers — just collect grounded values
+              - Do NOT substitute values from general knowledge
+              - Use compute tool only for intermediate extraction (e.g., reading values
+                from a row), not final answers
+
+              Output JSON:
+              {{
+                "operands": [
+                  {{
+                    "id": "op1",
+                    "status": "found" | "not_found" | "ambiguous",
+                    "value": <number>,
+                    "unit": "millions of dollars",
+                    "source_file": "treasury_bulletin_YYYY_MM.txt",
+                    "bulletin_date": "YYYY-MM",
+                    "table_section": "section heading",
+                    "row_label": "exact row label",
+                    "column_label": "exact column label",
+                    "exact_cell_text": "value as it appears",
+                    "candidates": [],
+                    "disambiguation_note": ""
+                  }}
+                ],
+                "sources": []
+              }}
+        evaluator:
+          subtype: reflector
+          model_tier: analytical
+          output_key: evaluation
+          input_keys: [query, operation_schema]
+          pool_inject:
+            - pool: observations
+              threshold: 0
+          system_prompt: |
+            Evaluate whether the researcher has found sufficient grounded operands.
+
+            Operation schema: {operation_schema}
+
+            Decide COMPLETE when:
+            - ALL required operands have status "found" or "ambiguous" with candidates
+            - Each value has explicit source attribution (file_name, row/column labels)
+
+            Decide CONTINUE if:
+            - Some operands are still "not_found"
+            - Data found but from wrong time period
+            - Values lack source attribution
+
+            Decide ADJUST if:
+            - Search strategy needs to change (wrong keywords, wrong filters)
+            - Need to search specific bulletin dates not yet tried
+        max_iterations: 3
+        min_iterations: 1
+        max_replan_cycles: 2
+
+    # ---------------------------------------------------------------
+    # Stage 3: Answer Assembler — compute + evidence gate + format
+    # ---------------------------------------------------------------
+    - id: assembler
+      type: agent
+      label: Answer Assembler
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: report
+        tools: [compute]
+        input_keys: [query, operation_schema, findings]
+        pool_inject:
+          - pool: observations
+            threshold: 0
+          - pool: sources
+            threshold: 0
+        max_tool_calls: 5
+        synthesis_context:
+          observations:
+            max_items: 20
+            max_item_chars: 2000
+            compaction:
+              mode: auto
+              max_total_chars: 15000
+              target_chars: 10000
+              summary_model_tier: simple
+              dedupe_key: text
+          sources:
+            max_items: 50
+            max_item_chars: 300
+            compaction:
+              mode: auto
+              max_total_chars: 5000
+              target_chars: 3000
+              summary_model_tier: simple
+              dedupe_key: url
+        system_prompt: |
+          You are the answer assembly agent. You receive:
+          1. The original question: {query}
+          2. The operation schema: {operation_schema}
+          3. Grounded operand findings: {findings}
+
+          STEP 1 — EVIDENCE COMPLETENESS CHECK:
+          For each required operand in the schema, check the findings:
+          - status="found" -> ready
+          - status="ambiguous" -> select candidate whose label most precisely
+            matches the question wording. State your choice briefly.
+          - status="not_found" -> output <FINAL_ANSWER>DATA NOT AVAILABLE</FINAL_ANSWER>
+
+          STEP 2 — COMPUTATION:
+          Use the compute tool for ANY math. NEVER do arithmetic in prose.
+
+          STEP 3 — FORMAT:
+          <FINAL_ANSWER>value</FINAL_ANSWER> with only the computed result.
+
+          ANTI-FABRICATION RULES:
+          - NEVER invent values not in the operand table
+          - NEVER substitute general knowledge or "historical" values
+          - NEVER reinterpret the operation type
+          - DATA NOT AVAILABLE is always better than a fabricated answer

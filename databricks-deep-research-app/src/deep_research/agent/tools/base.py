@@ -8,13 +8,13 @@ and plugin-provided tools follow this protocol.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from uuid import UUID
 
 if TYPE_CHECKING:
+    from deep_research.agent.tools.web_crawler import WebCrawler
     from deep_research.services.llm.client import LLMClient
     from deep_research.services.search.brave import BraveSearchClient
-    from deep_research.agent.tools.web_crawler import WebCrawler
 
 
 @dataclass(frozen=True)

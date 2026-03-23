@@ -37,7 +37,6 @@ from deep_research.agent.tools.research_tools import RESEARCH_TOOLS
 from deep_research.agent.tools.url_registry import UrlRegistry
 from deep_research.agent.tools.web_crawler import WebCrawler, web_crawl
 from deep_research.agent.tools.web_search import format_search_results_indexed, web_search
-from deep_research.services.search.domain_filter import DomainFilter
 from deep_research.core.logging_utils import get_logger, truncate
 from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
@@ -49,6 +48,7 @@ from deep_research.core.tracing_constants import (
 )
 from deep_research.services.llm.types import ModelTier, ToolCall
 from deep_research.services.search.brave import BraveSearchClient
+from deep_research.services.search.domain_filter import DomainFilter
 
 if TYPE_CHECKING:
     from deep_research.services.llm.client import LLMClient
@@ -788,8 +788,9 @@ async def _execute_tool(
                     break
 
             if enterprise_tool:
-                from deep_research.agent.tools.base import ResearchContext
                 from uuid import uuid4
+
+                from deep_research.agent.tools.base import ResearchContext
 
                 context = ResearchContext(
                     chat_id=state.session_id or uuid4(),
@@ -842,29 +843,29 @@ async def _execute_tool(
                     )
                     return f"Validation error: {'; '.join(validation_errors)}"
 
-                result = await enterprise_tool.execute(
+                ent_result = await enterprise_tool.execute(
                     arguments=tc.arguments,
                     context=context,
                 )
 
-                if result.success:
+                if ent_result.success:
                     fallback_url = f"enterprise://{tc.name}"
 
                     # Determine the canonical URL — must match what goes into state.sources
                     # so the post-processing loop can link content back
                     primary_url = fallback_url
-                    if result.sources:
-                        first_url = result.sources[0].get("url")
+                    if ent_result.sources:
+                        first_url = ent_result.sources[0].get("url")
                         if first_url:
                             primary_url = first_url
 
                     await react_state.add_high_quality_source(primary_url)
-                    await react_state.add_crawled_content(primary_url, result.content)
+                    await react_state.add_crawled_content(primary_url, ent_result.content)
 
                     # Add sources to main state for citation tracking
                     ent_source_type = enterprise_tool.definition.source_type
-                    if result.sources:
-                        for src in result.sources:
+                    if ent_result.sources:
+                        for src in ent_result.sources:
                             await state.add_source_async(
                                 SourceInfo(
                                     url=src.get("url", fallback_url),
@@ -880,8 +881,8 @@ async def _execute_tool(
                             SourceInfo(
                                 url=primary_url,
                                 title=tc.name,
-                                snippet=result.content[:500] if result.content else "",
-                                content=result.content,
+                                snippet=ent_result.content[:500] if ent_result.content else "",
+                                content=ent_result.content,
                                 source_type=ent_source_type,
                             )
                         )
@@ -889,13 +890,13 @@ async def _execute_tool(
                     logger.info(
                         "REACT_ENTERPRISE_TOOL_SUCCESS",
                         tool=tc.name,
-                        content_len=len(result.content),
+                        content_len=len(ent_result.content),
                         primary_url=primary_url,
-                        source_count=len(result.sources) if result.sources else 0,
+                        source_count=len(ent_result.sources) if ent_result.sources else 0,
                     )
 
                     # Heuristic quality signal (no LLM cost)
-                    content_len = len(result.content) if result.content else 0
+                    content_len = len(ent_result.content) if ent_result.content else 0
                     if content_len == 0:
                         quality_signal = "empty"
                     elif content_len < 100:
@@ -904,15 +905,15 @@ async def _execute_tool(
                         quality_signal = "good"
                     state.record_source_quality(tc.name, quality_signal)
 
-                    return result.content
+                    return ent_result.content
                 else:
                     logger.error(
                         "REACT_ENTERPRISE_TOOL_FAILED",
                         tool=tc.name,
-                        error=result.error if result.error else "unknown",
+                        error=ent_result.error if ent_result.error else "unknown",
                     )
                     state.record_source_quality(tc.name, "error")
-                    return f"Tool error: {result.error or 'Unknown error'}"
+                    return f"Tool error: {ent_result.error or 'Unknown error'}"
 
             return f"Unknown tool: {tc.name}"
 
@@ -1048,14 +1049,14 @@ def _get_execution_batches(tool_calls: list[ToolCall]) -> list[ToolBatch]:
             ))
         if other_calls:
             batches.append(ToolBatch(
-                tool_types=list(set(tc.name for tc in other_calls)),
+                tool_types=list({tc.name for tc in other_calls}),
                 tool_calls=other_calls,
             ))
     else:
         # No dependencies - all tools in one batch
         if tool_calls:
             batches.append(ToolBatch(
-                tool_types=list(set(tc.name for tc in tool_calls)),
+                tool_types=list({tc.name for tc in tool_calls}),
                 tool_calls=tool_calls,
             ))
 

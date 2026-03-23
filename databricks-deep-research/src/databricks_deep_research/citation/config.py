@@ -50,6 +50,14 @@ class CorrectionMethod(StrEnum):
     SEMANTIC_ONLY = "semantic_only"
 
 
+class ClaimDisposition(StrEnum):
+    """Action to take for a claim based on its verification verdict."""
+
+    KEEP = "keep"
+    REMOVE = "remove"
+    SOFTEN = "soften"
+
+
 class SofteningStrategy(StrEnum):
     """Strategy for softening unverified claims in Stage 7.
 
@@ -107,6 +115,7 @@ class EvidencePreselectionConfig(BaseModel):
     chunk_size: int = Field(default=8000, ge=1000, le=20000)
     chunk_overlap: int = Field(default=1000, ge=0, le=5000)
     max_chunks_per_source: int = Field(default=5, ge=1, le=10)
+    max_sources: int = Field(default=60, ge=10, le=300)
 
     model_config = {"frozen": True}
 
@@ -118,6 +127,10 @@ class InterleavedGenerationConfig(BaseModel):
     min_evidence_similarity: float = Field(default=0.5, ge=0.0, le=1.0)
     retry_on_entailment_failure: bool = True
     max_retries: int = Field(default=3, ge=0, le=10)
+    max_evidence_spans: int = Field(
+        default=120, ge=20, le=500,
+        description="Max evidence spans to include in the generation prompt",
+    )
 
     model_config = {"frozen": True}
 
@@ -140,7 +153,7 @@ class IsolatedVerificationConfig(BaseModel):
     enable_nei_verdict: bool = True
     verification_model_tier: str = Field(default="complex")
     quick_verification_tier: str = Field(default="analytical")
-    max_concurrent_verifications: int = Field(default=5, ge=1, le=20)
+    max_concurrent_verifications: int = Field(default=10, ge=1, le=50)
 
     model_config = {"frozen": True}
 
@@ -300,6 +313,23 @@ class ReactSynthesisConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class ClaimDispositionConfig(BaseModel):
+    """Stage 8: Post-verification claim disposition.
+
+    Maps each verification verdict to an action (keep, remove, soften).
+    """
+
+    supported: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
+    partial: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
+    unsupported: ClaimDisposition = Field(default=ClaimDisposition.REMOVE)
+    contradicted: ClaimDisposition = Field(default=ClaimDisposition.REMOVE)
+    abstained: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
+    analysis_partial: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
+    analysis_unsupported: ClaimDisposition = Field(default=ClaimDisposition.REMOVE)
+
+    model_config = {"frozen": True}
+
+
 # ---------------------------------------------------------------------------
 # Top-level citation config
 # ---------------------------------------------------------------------------
@@ -361,6 +391,9 @@ class CitationConfig(BaseModel):
     )
     post_verification: PostVerificationConfig = Field(
         default_factory=PostVerificationConfig,
+    )
+    claim_disposition: ClaimDispositionConfig = Field(
+        default_factory=ClaimDispositionConfig,
     )
 
     model_config = {"frozen": True}

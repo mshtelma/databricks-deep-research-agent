@@ -87,6 +87,7 @@ class AgentNodeConfig(BaseModel):
     max_tool_calls: int | None = None
     max_retries: int = 2
     max_result_chars: int = 4000  # 0=unlimited; >0 truncates old tool results
+    compaction_strategy: Literal["truncate", "mask"] = "truncate"
     conversation_budget: int | None = None
     pool_inject: list[PoolInjectConfig] = Field(default_factory=list)
     synthesis_context: SynthesisContextConfig | None = None

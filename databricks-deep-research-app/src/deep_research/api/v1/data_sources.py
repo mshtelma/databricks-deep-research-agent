@@ -19,7 +19,9 @@ from deep_research.middleware.auth import AuthenticatedUser, CurrentUser
 from deep_research.models.data_source import (
     DataSourceType,
     DataSourceValidationStatus,
-    DataSourceVisibility,
+)
+from deep_research.models.data_source import (
+    DataSourceVisibility as ModelDataSourceVisibility,
 )
 from deep_research.schemas.data_source import (
     CreateGenieSourceRequest,
@@ -30,6 +32,7 @@ from deep_research.schemas.data_source import (
     DataSourceListResponse,
     DataSourceResponse,
     DataSourceValidationResponse,
+    DataSourceVisibility,
     UpdateDataSourceRequest,
 )
 from deep_research.schemas.query_config import (
@@ -216,7 +219,7 @@ async def create_vector_search_source(
         endpoint_name=request_body.endpoint_name,
         index_name=request_body.index_name,
         description=request_body.description,
-        visibility=request_body.visibility,
+        visibility=ModelDataSourceVisibility(request_body.visibility.value),
         enable_hybrid=request_body.enable_hybrid,
         enable_reranking=request_body.enable_reranking,
         num_results=request_body.num_results,
@@ -255,7 +258,7 @@ async def create_genie_source(
         space_id=request_body.space_id,
         description=request_body.description,
         example_questions=request_body.example_questions,
-        visibility=request_body.visibility,
+        visibility=ModelDataSourceVisibility(request_body.visibility.value),
     )
 
     if error:
@@ -291,7 +294,7 @@ async def create_knowledge_assistant_source(
         endpoint_name=request_body.endpoint_name,
         description=request_body.description,
         pass_context=request_body.pass_context,
-        visibility=request_body.visibility,
+        visibility=ModelDataSourceVisibility(request_body.visibility.value),
     )
 
     if error:

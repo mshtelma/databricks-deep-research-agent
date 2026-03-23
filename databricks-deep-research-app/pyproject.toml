@@ -104,6 +104,8 @@ ignore = [
 "src/deep_research/core/tracing.py" = ["ARG001"]
 # SPA serving uses path but not request
 "src/deep_research/static_files.py" = ["ARG001"]
+# Tests commonly have unused fixture/callback arguments
+"tests/**" = ["ARG001", "ARG002", "ARG005"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["deep_research"]

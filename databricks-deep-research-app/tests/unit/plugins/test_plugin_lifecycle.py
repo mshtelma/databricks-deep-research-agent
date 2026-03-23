@@ -3,16 +3,13 @@
 Tests the full plugin lifecycle from discovery to shutdown.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
-import pytest
-
 from deep_research.agent.tools.base import ResearchContext, ResearchTool, ToolDefinition, ToolResult
-from deep_research.core.app_config import AppConfig, PluginConfig, PluginsConfig
-from deep_research.plugins.base import PromptProvider, ResearchPlugin, ToolProvider
+from deep_research.core.app_config import PluginConfig, PluginsConfig
 from deep_research.plugins.manager import PluginManager
 
 

@@ -157,7 +157,7 @@ class MessageService(BaseRepository[Message]):
                 )
             )
         )
-        count = result.rowcount
+        count: int = result.rowcount  # type: ignore[attr-defined]
         # Flush to ensure deletion is visible before subsequent operations
         await self._session.flush()
         logger.info(f"Deleted {count} messages in chat {chat_id} after {after}")

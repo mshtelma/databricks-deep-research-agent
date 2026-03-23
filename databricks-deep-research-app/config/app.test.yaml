@@ -132,6 +132,7 @@ research_types:
     citation_verification:
       generation_mode: natural
       enable_numeric_qa_verification: false
+      max_concurrent_verifications: 5
 
   medium:
     steps:
@@ -149,6 +150,7 @@ research_types:
       max_tool_calls: 8
     citation_verification:
       generation_mode: natural
+      max_concurrent_verifications: 5
 
   extended:
     steps:
@@ -167,6 +169,7 @@ research_types:
     citation_verification:
       generation_mode: natural
       enable_numeric_qa_verification: false
+      max_concurrent_verifications: 5
 
 # Search configuration
 search:
@@ -274,3 +277,14 @@ citation_verification:
     search_timeout_seconds: 2
 
   unsupported_claim_warning_threshold: 0.20
+
+  # Stage 8: Post-verification claim disposition
+  # Maps each verdict to an action: keep, remove, or soften
+  claim_disposition:
+    supported: keep
+    partial: keep
+    unsupported: remove
+    contradicted: remove
+    abstained: keep
+    analysis_partial: keep
+    analysis_unsupported: remove
