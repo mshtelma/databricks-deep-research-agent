@@ -29,6 +29,7 @@ class EvaluationReport:
     wall_times: list[float]
     model: str = ""
     timestamp: str = ""
+    rate_limited: int = 0
 
     def accuracy_at(self, tolerance: float) -> float:
         scores = self.scores_by_tolerance.get(tolerance, [])
@@ -39,10 +40,11 @@ class EvaluationReport:
         ts = self.timestamp or datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
         lines.append(f"OfficeQA — {self.model or 'Unknown'} — {ts}")
         lines.append("=" * 50)
+        rl_part = f" | Rate Limited: {self.rate_limited}" if self.rate_limited else ""
         lines.append(
             f"Total: {self.total} | Answered: {self.answered} | "
             f"No Answer: {self.no_answers} | Errors: {self.errors} | "
-            f"Timeouts: {self.timeouts}"
+            f"Timeouts: {self.timeouts}{rl_part}"
         )
         lines.append("")
         lines.append("Accuracy (all questions):")
@@ -135,14 +137,21 @@ class OfficeQAEvaluator:
         tolerances: list[float] | None = None,
         model: str = "",
     ) -> EvaluationReport:
-        """Score all results at each tolerance level."""
+        """Score all results at each tolerance level.
+
+        Rate-limited questions (status ``"rate_limited"``) are excluded from
+        scoring so they don't deflate accuracy.
+        """
         if tolerances is None:
             tolerances = [0.0, 0.01, 0.05]
+
+        scorable = [r for r in results if r.status != "rate_limited"]
+        rate_limited_count = len(results) - len(scorable)
 
         scores_by_tolerance: dict[float, list[float]] = {}
         per_question: list[dict[str, Any]] = []
 
-        for r in results:
+        for r in scorable:
             q_scores: dict[float, float] = {}
             for tol in tolerances:
                 if r.predicted_answer is None:
@@ -176,13 +185,14 @@ class OfficeQAEvaluator:
 
         return EvaluationReport(
             total=len(results),
-            answered=sum(1 for r in results if r.predicted_answer is not None),
-            errors=sum(1 for r in results if r.status == "error"),
-            timeouts=sum(1 for r in results if r.status == "timeout"),
-            no_answers=sum(1 for r in results if r.status == "no_answer"),
+            answered=sum(1 for r in scorable if r.predicted_answer is not None),
+            errors=sum(1 for r in scorable if r.status == "error"),
+            timeouts=sum(1 for r in scorable if r.status == "timeout"),
+            no_answers=sum(1 for r in scorable if r.status == "no_answer"),
+            rate_limited=rate_limited_count,
             scores_by_tolerance=scores_by_tolerance,
             per_question=per_question,
-            wall_times=[r.wall_time_seconds for r in results],
+            wall_times=[r.wall_time_seconds for r in scorable],
             model=model,
             timestamp=datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         )

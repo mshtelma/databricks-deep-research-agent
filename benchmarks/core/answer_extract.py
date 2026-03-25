@@ -57,4 +57,24 @@ class XMLTagExtractor:
         if match:
             return match.group(1).strip()
 
+        # Strategy 5: Variable assignment extraction (namespace fallback output)
+        # When the react loop exhausts its tool budget, the compute namespace is
+        # dumped as "Extracted data:\nvar = value\n...". Try to extract the most
+        # likely answer variable.
+        text = raw_output.strip()
+        if text.startswith("Extracted data:"):
+            # Prefer variables whose name signals "result" or "answer"
+            for pat in [
+                r'(?:result|answer|final_?(?:value|answer)|total)\s*=\s*(.+?)(?:\n|$)',
+            ]:
+                matches = re.findall(pat, text, re.MULTILINE | re.IGNORECASE)
+                if matches:
+                    return matches[-1].strip().strip("'\"")
+
+            # Fallback: last numeric variable assignment
+            for line in reversed(text.split("\n")):
+                m = re.match(r"\w+\s*=\s*([\d.,\[\]\-\(\) ]+)$", line.strip())
+                if m:
+                    return m.group(1).strip()
+
         return None

@@ -5,8 +5,18 @@ required_inputs: [query]
 output_keys: [report]
 
 models:
-  simple: databricks-claude-opus-4-6
-  analytical: databricks-claude-opus-4-6
+  simple:
+    endpoints: [databricks-claude-opus-4-6]
+    fallback_on_429: false       # retry with backoff instead of failing
+    tokens_per_minute: 200000    # workspace limit for opus 4.6
+    max_retries: 10              # up to 10 attempts on 429
+    retry_base_backoff: 10.0     # 10s, 20s, 40s, then 60s cap × 6 = ~430s total
+  analytical:
+    endpoints: [databricks-claude-opus-4-6]
+    fallback_on_429: false
+    tokens_per_minute: 200000
+    max_retries: 10
+    retry_base_backoff: 10.0
 
 tools:
   - name: treasury_search
@@ -159,8 +169,10 @@ root:
             extract: findings
           - pool: sources
             extract: sources
-        max_tool_calls: 25
+        max_tool_calls: 200
         compaction_strategy: mask
+        keep_intact_iterations: 25
+        max_result_chars: 6000
         system_prompt: |
           You are a data retrieval and grounding agent. Your job is to find the EXACT
           values needed to answer the question, NOT to compute the final answer.
@@ -298,18 +310,26 @@ root:
         subtype: synthesizer
         model_tier: analytical
         output_key: report
-        tools: [compute]
+        tools: [compute, treasury_grep, treasury_context]
         input_keys: [query, operation_schema, findings]
         pool_inject:
           - pool: sources
             threshold: 0.01  # Enable BM25 relevance scoring (was: 0 = recency-only)
             max_items: 40    # was: default 20 — show more relevant sources to assembler
-        max_tool_calls: 15   # was: 10 — large aggregations (100+ values) need more compute calls
+        max_tool_calls: 20   # was: 15 — room for verification + large aggregation compute calls
         system_prompt: |
           You are the answer assembly agent. You receive:
           1. The original question: {query}
           2. The operation schema: {operation_schema}
           3. Grounded operand findings from the researcher: {findings}
+
+          ## VERIFICATION (treasury_grep / treasury_context)
+          If any operand from the researcher's findings is ambiguous, approximate,
+          or if the table was truncated, verify it with ONE targeted call:
+            treasury_grep(pattern="exact label or value", file_name="from findings")
+            treasury_context(file_name="...", chunk_id="...", window=2)
+          Do NOT use these for broad discovery. Use ONLY for point-verification
+          of specific operands BEFORE computing the final answer.
 
           Follow these steps IN ORDER:
 

@@ -60,8 +60,10 @@ class BuiltinToolFactory:
             return PythonComputeTool(
                 name=decl.name,
                 allowed_modules=decl.config.get("allowed_modules"),
+                extra_modules=decl.config.get("extra_modules"),
                 max_execution_seconds=decl.config.get("max_execution_seconds", 10.0),
                 max_output_chars=decl.config.get("max_output_chars", 10_000),
+                max_code_length=decl.config.get("max_code_length", 20_000),
                 description=decl.description,
             )
 

@@ -124,6 +124,8 @@ class ModelTierConfig:
     fallback_on_429: bool = True
     rotation_strategy: Literal["PRIORITY", "ROUND_ROBIN"] = "PRIORITY"
     tokens_per_minute: int = 0  # 0 = unlimited
+    max_retries: int = 3  # Max retry attempts for rate limits / transient errors
+    retry_base_backoff: float = 2.0  # Base seconds for exponential backoff
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +164,8 @@ def parse_model_config(
                 fallback_on_429=value.get("fallback_on_429", True),
                 rotation_strategy=strategy,
                 tokens_per_minute=value.get("tokens_per_minute", 0),
+                max_retries=value.get("max_retries", 3),
+                retry_base_backoff=float(value.get("retry_base_backoff", 2.0)),
             )
         else:
             raise ValueError(
@@ -483,7 +487,12 @@ class FrameworkLLMClient:
     # -- Retry helper -------------------------------------------------------
 
     async def _retry_with_backoff(
-        self, func: Any, *, max_retries: int = 3, retry_rate_limit: bool = False,
+        self,
+        func: Any,
+        *,
+        max_retries: int = 3,
+        retry_rate_limit: bool = False,
+        retry_base_backoff: float = 2.0,
     ) -> Any:
         """Retry *func* with exponential backoff and jitter on transient failures.
 
@@ -509,7 +518,10 @@ class FrameworkLLMClient:
                         with contextlib.suppress(TypeError, ValueError):
                             retry_after = float(retry_header)
                 if attempt < max_retries - 1:
-                    backoff = min(retry_after or ((2 ** attempt) + random.random()), 60.0)
+                    backoff = min(
+                        retry_after or (retry_base_backoff * (2 ** attempt) + random.random()),
+                        60.0,
+                    )
                     logger.warning(
                         "LLM_RATE_LIMIT_RETRY attempt=%d/%d backoff=%.2fs retry_after=%s",
                         attempt + 1, max_retries, backoff, retry_after,
@@ -709,6 +721,8 @@ class FrameworkLLMClient:
             result = await self._retry_with_backoff(
                 lambda _m=model_name: _do_call(_m),
                 retry_rate_limit=should_retry_rl,
+                max_retries=cfg.max_retries if is_tier_config else 3,
+                retry_base_backoff=cfg.retry_base_backoff if is_tier_config else 2.0,
             )
             if is_tier_config:
                 health = self._get_health(model_name)
@@ -742,6 +756,8 @@ class FrameworkLLMClient:
                         result = await self._retry_with_backoff(
                             lambda _m=fallback: _do_call(_m),
                             retry_rate_limit=True,
+                            max_retries=cfg.max_retries if is_tier_config else 3,
+                            retry_base_backoff=cfg.retry_base_backoff if is_tier_config else 2.0,
                         )
                         fb_health = self._get_health(fallback)
                         fb_health.mark_success()
@@ -805,10 +821,16 @@ class FrameworkLLMClient:
                 kwargs["tools"] = tools
             return await self._get_client().chat.completions.create(**kwargs)
 
+        # Retry 429 only when no per-request fallback is configured
+        should_retry_rl = isinstance(cfg, ModelTierConfig) and not cfg.fallback_on_429
+
         # Attempt to open the stream, with rate-limit fallback.
         try:
             response_stream = await self._retry_with_backoff(
-                lambda _m=model_name: _open_stream(_m)
+                lambda _m=model_name: _open_stream(_m),
+                retry_rate_limit=should_retry_rl,
+                max_retries=cfg.max_retries if is_tier_config else 3,
+                retry_base_backoff=cfg.retry_base_backoff if is_tier_config else 2.0,
             )
         except RateLimitError:
             if is_tier_config:

@@ -438,6 +438,11 @@ class DeltaContextTool:
     see adjacent chunks without reading the entire file.
 
     Uses parameterized SQL (injection-safe).
+
+    Accepts chunk_id as either a full string ID (e.g., ``prefix_c0027``) or a
+    bare numeric index (e.g., ``27``).  When a bare number is passed, the tool
+    reconstructs the compound ID from the file_name stem and retries
+    automatically.
     """
 
     def __init__(
@@ -474,8 +479,12 @@ class DeltaContextTool:
                         "description": "Exact filename (from search results)",
                     },
                     "chunk_id": {
-                        "type": "integer",
-                        "description": "Center chunk ID (from search results)",
+                        "type": "string",
+                        "description": (
+                            "Center chunk ID (from search results). "
+                            "Can be the full ID (e.g., 'treasury_bulletin_1941_01_c0027') "
+                            "or just the numeric index (e.g., '27')."
+                        ),
                     },
                     "window": {
                         "type": "integer",
@@ -495,10 +504,9 @@ class DeltaContextTool:
         if not isinstance(file_name, str) or not file_name.strip():
             raise ValueError("'file_name' must be a non-empty string")
 
-        try:
-            chunk_id = int(arguments["chunk_id"])
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("'chunk_id' must be an integer") from exc
+        chunk_id = str(arguments.get("chunk_id", "")).strip()
+        if not chunk_id:
+            raise ValueError("'chunk_id' must be a non-empty string or integer")
 
         window = min(max(int(arguments.get("window", 2)), 0), _MAX_WINDOW)
 
@@ -508,35 +516,74 @@ class DeltaContextTool:
             "window": window,
         }
 
-    async def execute(
-        self, arguments: dict[str, Any], context: ToolContext
-    ) -> ToolResult:
-        file_name = arguments["file_name"]
-        chunk_id = arguments["chunk_id"]
-        window = arguments.get("window", 2)
+    @staticmethod
+    def _compute_range(chunk_id: str, window: int) -> tuple[str, str]:
+        """Compute start/end IDs for a range query, preserving the ID format.
 
-        start_id = chunk_id - window
-        end_id = chunk_id + window
+        Handles two formats:
+        1. Compound: ``prefix_cNNNN`` → decrement/increment the numeric suffix.
+        2. Pure numeric string: ``"67"`` → decrement/increment the integer.
 
-        cols = ", ".join(self._columns)
-        params: list[dict[str, Any]] = [
-            {"name": "file_name", "value": file_name, "type": "STRING"},
-            {"name": "start_id", "value": str(start_id), "type": "INT"},
-            {"name": "end_id", "value": str(end_id), "type": "INT"},
-        ]
-        sql = (
+        Falls back to an exact-match range (start == end) when the format is
+        unrecognised.
+        """
+        # Compound format: anything ending with _cNNNN (zero-padded)
+        match = re.match(r"^(.+_c)(\d+)$", chunk_id)
+        if match:
+            prefix, num_str = match.group(1), match.group(2)
+            width = len(num_str)
+            center = int(num_str)
+            start = max(0, center - window)
+            end = center + window
+            return f"{prefix}{start:0{width}d}", f"{prefix}{end:0{width}d}"
+
+        # Pure numeric string
+        try:
+            center = int(chunk_id)
+            start = max(0, center - window)
+            end = center + window
+            return str(start), str(end)
+        except ValueError:
+            pass
+
+        # Unrecognised format — exact match only
+        return chunk_id, chunk_id
+
+    def _build_range_sql(self, cols: str) -> str:
+        return (
             f"SELECT {cols} FROM {self._table} "
             f"WHERE file_name = :file_name "
             f"AND {self._order_by} >= :start_id AND {self._order_by} <= :end_id "
             f"ORDER BY {self._order_by}"
         )
 
+    def _range_params(
+        self, file_name: str, start_id: str, end_id: str,
+    ) -> list[dict[str, Any]]:
+        return [
+            {"name": "file_name", "value": file_name, "type": "STRING"},
+            {"name": "start_id", "value": start_id, "type": "STRING"},
+            {"name": "end_id", "value": end_id, "type": "STRING"},
+        ]
+
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolContext
+    ) -> ToolResult:
+        file_name: str = arguments["file_name"]
+        chunk_id_raw: str = str(arguments["chunk_id"])
+        window: int = arguments.get("window", 2)
+
+        cols = ", ".join(self._columns)
+        range_sql = self._build_range_sql(cols)
+
         try:
-            rows, col_names = _execute_sql(self._ws, self._warehouse_id, sql, params)
+            rows, col_names = await self._resolve_context_rows(
+                file_name, chunk_id_raw, window, cols, range_sql,
+            )
         except Exception as exc:
             logger.exception(
-                "DELTA_CONTEXT_ERROR tool=%s table=%s file=%s chunk_id=%d window=%d",
-                self._name, self._table, file_name, chunk_id, window,
+                "DELTA_CONTEXT_ERROR tool=%s table=%s file=%s chunk_id=%s window=%d",
+                self._name, self._table, file_name, chunk_id_raw, window,
             )
             return ToolResult(
                 content=f"Delta context failed: {exc}",
@@ -546,7 +593,7 @@ class DeltaContextTool:
 
         if not rows:
             return ToolResult(
-                content=f"No chunks found for file_name='{file_name}' around chunk_id={chunk_id}",
+                content=f"No chunks found for file_name='{file_name}' around chunk_id={chunk_id_raw}",
                 success=True,
             )
 
@@ -563,8 +610,107 @@ class DeltaContextTool:
             sources=sources,
             data={
                 "file_name": file_name,
-                "chunk_id": chunk_id,
+                "chunk_id": chunk_id_raw,
                 "window": window,
                 "row_count": len(rows),
             },
         )
+
+    # -- Private helpers for multi-strategy chunk resolution ------------------
+
+    async def _resolve_context_rows(
+        self,
+        file_name: str,
+        chunk_id_raw: str,
+        window: int,
+        cols: str,
+        range_sql: str,
+    ) -> tuple[list[list[Any]], list[str]]:
+        """Try multiple strategies to resolve surrounding chunks.
+
+        Strategy 1: Direct range query using chunk_id as-is.
+        Strategy 2: Reconstruct compound ID from file_name stem + bare number.
+        Strategy 3: Fallback — fetch all file chunks and window client-side.
+        """
+        # Strategy 1: use chunk_id directly
+        start_id, end_id = self._compute_range(chunk_id_raw, window)
+        rows, col_names = _execute_sql(
+            self._ws, self._warehouse_id, range_sql,
+            self._range_params(file_name, start_id, end_id),
+        )
+        if len(rows) > 1:
+            logger.info(
+                "DELTA_CONTEXT_RESOLVED strategy=direct rows=%d chunk_id=%s",
+                len(rows), chunk_id_raw,
+            )
+            return rows, col_names
+
+        # Strategy 2: bare number → reconstruct compound ID from file stem
+        if chunk_id_raw.lstrip("-").isdigit():
+            stem = file_name.rsplit(".", 1)[0]  # strip extension
+            reconstructed = f"{stem}_c{int(chunk_id_raw):04d}"
+            start_id, end_id = self._compute_range(reconstructed, window)
+            rows, col_names = _execute_sql(
+                self._ws, self._warehouse_id, range_sql,
+                self._range_params(file_name, start_id, end_id),
+            )
+            if len(rows) > 1:
+                logger.info(
+                    "DELTA_CONTEXT_RESOLVED strategy=reconstruct rows=%d "
+                    "reconstructed=%s",
+                    len(rows), reconstructed,
+                )
+                return rows, col_names
+
+        # Strategy 3: fetch all chunks for this file and window client-side
+        all_sql = (
+            f"SELECT {cols} FROM {self._table} "
+            f"WHERE file_name = :file_name "
+            f"ORDER BY {self._order_by} LIMIT 500"
+        )
+        all_params = [{"name": "file_name", "value": file_name, "type": "STRING"}]
+        all_rows, col_names = _execute_sql(
+            self._ws, self._warehouse_id, all_sql, all_params,
+        )
+        if not all_rows:
+            return [], col_names
+
+        center_idx = self._find_center_row(all_rows, col_names, chunk_id_raw)
+        if center_idx is not None:
+            start_idx = max(0, center_idx - window)
+            end_idx = min(len(all_rows), center_idx + window + 1)
+            logger.info(
+                "DELTA_CONTEXT_RESOLVED strategy=fallback rows=%d center=%d "
+                "total_file_chunks=%d",
+                end_idx - start_idx, center_idx, len(all_rows),
+            )
+            return all_rows[start_idx:end_idx], col_names
+
+        # Nothing matched — return whatever Strategy 1 found (may be 0-1 rows)
+        logger.warning(
+            "DELTA_CONTEXT_NO_MATCH chunk_id=%s file=%s strategies_tried=3",
+            chunk_id_raw, file_name,
+        )
+        return rows, col_names
+
+    @staticmethod
+    def _find_center_row(
+        rows: list[list[Any]],
+        col_names: list[str],
+        chunk_id_raw: str,
+    ) -> int | None:
+        """Find the row index matching chunk_id_raw by exact or suffix match."""
+        cid_col = col_names.index("chunk_id") if "chunk_id" in col_names else 0
+        needle = chunk_id_raw.lower()
+
+        for idx, row in enumerate(rows):
+            val = str(row[cid_col]).lower()
+            # Exact match
+            if val == needle:
+                return idx
+            # Suffix match: chunk_id_raw is a bare number, val ends with _cNNNN
+            if needle.isdigit():
+                suffix_match = re.search(r"_c0*(\d+)$", val)
+                if suffix_match and suffix_match.group(1) == needle.lstrip("0"):
+                    return idx
+        return None

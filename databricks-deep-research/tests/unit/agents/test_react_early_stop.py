@@ -99,6 +99,7 @@ class TestEarlyStopNudge:
             tool_context=ctx,
             node_id="test",
             max_tool_calls=10,
+            force_convergence=True,  # Nudge requires force_convergence
         )
         loop._apply_step_tool_selection = MagicMock()
         loop._execute_single_tool = exec_mock

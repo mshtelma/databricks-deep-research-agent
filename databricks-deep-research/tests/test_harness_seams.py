@@ -39,7 +39,8 @@ def test_build_pool_batches_creates_text_and_source_batches() -> None:
     )
     assert normalized is not None
     batches = _build_pool_batches(normalized, config.pool_writes, config.output_key)
-    assert batches[("observations", "findings")].items == ["fact"]
+    # Normalizer serializes the full dict — "fact" is inside the JSON
+    assert "fact" in batches[("observations", "findings")].items[0]
     assert batches[("sources", "sources")].items == [{"url": "https://example.com", "title": "Example"}]
 
 
@@ -49,10 +50,33 @@ def test_project_research_state_writes_structured_payload() -> None:
     normalized = _normalize_research_output({"findings": "abc", "search_queries": ["x"]}, config, [])
     assert normalized is not None
     state_output, structured = _project_research_state("node", config, state, normalized)
-    assert state_output == "abc"
-    assert structured["findings"] == "abc"
-    assert structured["observation"] == "abc"
+    # Normalizer now serializes full dict — "abc" is inside the JSON
+    assert "abc" in state_output
+    assert "abc" in structured.get("findings", "")
     assert state.get("research_status") is not None
+
+
+def test_normalize_output_excludes_sources_from_state_text() -> None:
+    """Sources should be stripped from state_text but still in normalized.sources."""
+    config = AgentNodeConfig(subtype="researcher", output_key="findings")
+    parsed = {
+        "operands": [{"id": "op1", "value": 42}],
+        "sources": [{"url": "https://example.com", "title": "Ex"}],
+        "sources_found": 1,
+        "sources_used": [],
+    }
+    normalized = _normalize_research_output(parsed, config, [])
+    assert normalized is not None
+    # Sources excluded from state_text
+    assert '"sources"' not in normalized.state_text
+    assert '"sources_found"' not in normalized.state_text
+    assert '"sources_used"' not in normalized.state_text
+    # But operands preserved
+    assert '"operands"' in normalized.state_text
+    assert "42" in normalized.state_text
+    # Sources still available via the sources field
+    assert len(normalized.sources) == 1
+    assert normalized.sources[0]["url"] == "https://example.com"
 
 
 def test_project_research_state_module_helper_matches_harness_shim() -> None:
@@ -61,7 +85,6 @@ def test_project_research_state_module_helper_matches_harness_shim() -> None:
     normalized = _normalize_research_output({"findings": "abc", "search_queries": ["x"]}, config, [])
     assert normalized is not None
     state_output, structured = project_research_state("node", config, state, normalized)
-    assert state_output == "abc"
-    assert structured["findings"] == "abc"
-    assert structured["observation"] == "abc"
+    assert "abc" in state_output
+    assert "abc" in structured.get("findings", "")
     assert state.get("research_status") is not None

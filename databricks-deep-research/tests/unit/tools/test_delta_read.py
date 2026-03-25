@@ -319,11 +319,22 @@ class TestDeltaContextTool:
         with pytest.raises(ValueError, match="chunk_id"):
             tool.validate_arguments({"file_name": "test.txt"})
 
-    def test_validate_arguments_chunk_id_cast_to_int(self) -> None:
+    def test_validate_arguments_chunk_id_kept_as_string(self) -> None:
         tool = self._make_tool()
         args = tool.validate_arguments({"file_name": "test.txt", "chunk_id": "42"})
-        assert args["chunk_id"] == 42
-        assert isinstance(args["chunk_id"], int)
+        assert args["chunk_id"] == "42"
+        assert isinstance(args["chunk_id"], str)
+
+    def test_validate_arguments_chunk_id_int_converted_to_string(self) -> None:
+        tool = self._make_tool()
+        args = tool.validate_arguments({"file_name": "test.txt", "chunk_id": 42})
+        assert args["chunk_id"] == "42"
+        assert isinstance(args["chunk_id"], str)
+
+    def test_validate_arguments_chunk_id_compound(self) -> None:
+        tool = self._make_tool()
+        args = tool.validate_arguments({"file_name": "test.txt", "chunk_id": "test_c0042"})
+        assert args["chunk_id"] == "test_c0042"
 
     def test_validate_arguments_window_capped(self) -> None:
         tool = self._make_tool()
@@ -347,7 +358,7 @@ class TestDeltaContextTool:
 
         assert result.success
         assert len(result.sources) == 2
-        assert result.data["chunk_id"] == 10
+        assert result.data["chunk_id"] == "10"
         assert result.data["window"] == 2
 
         # Verify SQL uses parameterized range query
@@ -389,3 +400,28 @@ class TestDeltaContextTool:
     def test_definition_source_kind_is_delta_table(self) -> None:
         tool = self._make_tool()
         assert str(tool.definition.source_kind) == "delta_table"
+
+    def test_compute_range_compound_id(self) -> None:
+        start, end = DeltaContextTool._compute_range("treasury_bulletin_1941_01_c0027", 3)
+        assert start == "treasury_bulletin_1941_01_c0024"
+        assert end == "treasury_bulletin_1941_01_c0030"
+
+    def test_compute_range_bare_number(self) -> None:
+        start, end = DeltaContextTool._compute_range("67", 2)
+        assert start == "65"
+        assert end == "69"
+
+    def test_compute_range_clamp_to_zero(self) -> None:
+        start, end = DeltaContextTool._compute_range("prefix_c0002", 5)
+        assert start == "prefix_c0000"
+        assert end == "prefix_c0007"
+
+    def test_compute_range_unknown_format_exact_match(self) -> None:
+        start, end = DeltaContextTool._compute_range("unknown_format", 3)
+        assert start == "unknown_format"
+        assert end == "unknown_format"
+
+    def test_compute_range_preserves_zero_padding_width(self) -> None:
+        start, end = DeltaContextTool._compute_range("prefix_c00005", 2)
+        assert start == "prefix_c00003"
+        assert end == "prefix_c00007"

@@ -101,11 +101,39 @@ class ReactResult:
 # ---------------------------------------------------------------------------
 
 
+def _is_structural_line(line: str) -> bool:
+    """Identify lines providing structural context for data interpretation.
+
+    These lines help the LLM understand *what* the numbers represent even
+    though they may not contain data values themselves (e.g., table titles,
+    document metadata, section headings).
+    """
+    lower = line.lower()
+    # Document/file metadata
+    if lower.startswith(("document:", "file:", "bulletin date:", "source:")):
+        return True
+    # Table/section titles
+    if lower.startswith(("table ", "section ", "part ", "exhibit ")):
+        return True
+    # Key-value metadata from tool formatting
+    if "chunk_type=" in lower or "page_info=" in lower or "file_name=" in lower:
+        return True
+    # Markdown table alignment row (keeps column structure interpretable)
+    if line.startswith("| ---") or line.startswith("|---"):
+        return True
+    return False
+
+
+_UNIT_INDICATORS = ("million", "thousand", "billion", "in percent")
+
+
 def _summarize_tool_result(content: str, max_chars: int = 800) -> str:
     """Preserve key data points when compacting a tool result.
 
     Keeps lines that contain pipe characters (markdown table rows),
-    numeric digits (data values), or metadata markers (``[...]`` headers).
+    numeric digits (data values), metadata markers (``[...]`` headers),
+    structural context (table titles, document metadata, section
+    headings), or unit indicators (e.g. "In millions of dollars").
     Discards narrative text and whitespace to fit within *max_chars*.
     """
     lines = content.split("\n")
@@ -120,8 +148,13 @@ def _summarize_tool_result(content: str, max_chars: int = 800) -> str:
         has_pipe = "|" in stripped
         has_number = any(c.isdigit() for c in stripped)
         is_metadata = stripped.startswith("[") and "]" in stripped
+        is_structural = _is_structural_line(stripped)
+        is_unit_line = any(u in stripped.lower() for u in _UNIT_INDICATORS)
 
-        if has_pipe or has_number or is_metadata:
+        if has_pipe or has_number or is_metadata or is_structural or is_unit_line:
+            # Cap structural-only lines to avoid long footnotes bloating output
+            if is_structural and not has_pipe and not has_number and not is_unit_line:
+                stripped = stripped[:120]
             kept.append(stripped)
             char_count += len(stripped) + 1
             if char_count >= max_chars:
@@ -165,6 +198,9 @@ class ReactLoop:
         subtype: str = "",
         max_result_chars: int = 4000,
         compaction_strategy: str = "truncate",
+        keep_intact_iterations: int = 3,
+        dedup_jaccard_threshold: float = 0.8,
+        force_convergence: bool = False,
     ) -> None:
         self._llm = llm_client
         self._ctx = tool_context or ToolContext()
@@ -194,7 +230,11 @@ class ReactLoop:
         self._same_tool_consecutive_rounds: int = 0
         self._last_round_tool: str = ""
         self._budget_warned: bool = False
+        self._force_convergence = force_convergence
+        self._active_tool_names: set[str] | None = None  # None = all tools allowed
         self._compact_after_rounds: int = max(2, max_tool_calls * 2 // 5)
+        self._keep_intact: int = keep_intact_iterations
+        self._jaccard_threshold = dedup_jaccard_threshold
 
     # -- Budget-aware guidance -----------------------------------------------
 
@@ -205,11 +245,58 @@ class ReactLoop:
     ) -> list[dict[str, Any]] | None:
         """Inject budget awareness; return restricted tool_defs or None.
 
+        Forced convergence when stuck in circular search loops (≥4 zero-novel rounds).
         At ≤25% budget remaining (once): warn to start writing findings.
         At ≤2 calls remaining: critical message + restrict to compute-only.
         """
         if remaining <= 0:
             return None
+
+        # Forced convergence: agent stuck in circular search loops.
+        # Only fires when force_convergence is enabled (discovery-style nodes).
+        # Phase 1 (round 4): restrict to compute-only for final calculations.
+        # Phase 2 (round 5+): no tools — execution gate rejects all calls.
+        if self._force_convergence and self._consecutive_zero_novel_rounds >= 4:
+            compute_tool = self._all_tools.get("compute")
+            has_stored_values = (
+                compute_tool is not None
+                and hasattr(compute_tool, "_namespace")
+                and bool(getattr(compute_tool, "_namespace", None))
+            )
+            if has_stored_values:
+                if self._consecutive_zero_novel_rounds == 4:
+                    # Phase 1: compute-only for final calculations
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "FORCED CONVERGENCE: 4 consecutive tool-call rounds returned no "
+                            "new data. You have stored values in compute. Perform any final "
+                            "calculations now, then output your COMPLETE FINDINGS."
+                        ),
+                    })
+                    logger.info(
+                        "REACT_FORCED_CONVERGENCE node=%s zero_novel_rounds=%d phase=compute_only",
+                        self._node_id, self._consecutive_zero_novel_rounds,
+                    )
+                    compute_defs = [
+                        td for td in self._tool_defs
+                        if td["function"]["name"] == "compute"
+                    ]
+                    return compute_defs if compute_defs else []
+                else:
+                    # Phase 2+: no tools — execution gate rejects all calls
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "FINAL WARNING: You must output your COMPLETE FINDINGS now. "
+                            "No more tool calls are available. Write your full output."
+                        ),
+                    })
+                    logger.info(
+                        "REACT_FORCED_CONVERGENCE node=%s zero_novel_rounds=%d phase=text_only",
+                        self._node_id, self._consecutive_zero_novel_rounds,
+                    )
+                    return []  # Empty → _active_tool_names = set() → gate rejects all
 
         if remaining <= 2:
             messages.append({
@@ -259,7 +346,8 @@ class ReactLoop:
         if len(history) > 6:
             del history[0]
 
-    _JACCARD_DEDUP_THRESHOLD = 0.8  # >80% word overlap = near-duplicate
+    # Default Jaccard dedup threshold; overridden by self._jaccard_threshold
+    _JACCARD_DEDUP_THRESHOLD = 0.8
 
     def _is_low_yield_duplicate(self, tool_name: str, rewritten_query: str) -> bool:
         """Return True if this query is a (near-)duplicate of a previous one for this tool."""
@@ -286,7 +374,7 @@ class ReactLoop:
                 continue
             intersection = len(query_words & prev_words)
             union = len(query_words | prev_words)
-            if union > 0 and intersection / union > self._JACCARD_DEDUP_THRESHOLD:
+            if union > 0 and intersection / union > self._jaccard_threshold:
                 logger.info(
                     "REACT_JACCARD_DEDUP_SKIP node=%s tool=%s jaccard=%.2f query=%r prev=%r",
                     self._node_id, tool_name, intersection / union,
@@ -368,6 +456,14 @@ class ReactLoop:
                     if restricted_tools is not None
                     else (self._tool_defs if self._tools else None)
                 )
+
+                # Derive allowed tool names for execution gate
+                if active_tool_defs is not None:
+                    self._active_tool_names = {
+                        td["function"]["name"] for td in active_tool_defs
+                    }
+                else:
+                    self._active_tool_names = None  # None = all tools allowed
 
                 # LLM call
                 if self._stream and call_count == 0 and not first_turn_retried:
@@ -604,28 +700,37 @@ class ReactLoop:
                 # "tool_use without tool_result" errors from Anthropic API)
                 for tc in response.tool_calls:
                     if tc.id not in responded_tc_ids:
-                        messages.append(self._tool_msg(
-                            tc.id, "Skipped: tool call budget exhausted"
-                        ))
+                        messages.append(self._tool_msg(tc.id, ""))
 
-                # Track novel sources for diminishing-returns detection
+                # Track novel sources for diminishing-returns detection.
+                # Restricted calls (gate-blocked) are excluded — they don't
+                # represent failed searches and shouldn't accelerate convergence.
                 novel_urls_this_round: set[str] = set()
+                any_unrestricted = False
                 for tc in response.tool_calls:
                     if tc.id in exec_results:
-                        _, tool_srcs, _ = exec_results[tc.id]
+                        _, tool_srcs, tool_meta = exec_results[tc.id]
+                        if str(tool_meta.get("tool_error", "")).startswith(
+                            "tool_restricted:"
+                        ):
+                            continue
+                        any_unrestricted = True
                         for src in tool_srcs:
                             url = str(src.get("url", "") if isinstance(src, dict) else getattr(src, "url", ""))
                             url = url.rstrip("/").lower()
                             if url and url not in self._seen_source_urls:
                                 novel_urls_this_round.add(url)
+                    elif tc.id in cached_results:
+                        any_unrestricted = True
                 self._seen_source_urls.update(novel_urls_this_round)
 
-                if len(novel_urls_this_round) == 0 and responded_tc_ids:
+                if len(novel_urls_this_round) == 0 and responded_tc_ids and any_unrestricted:
                     self._consecutive_zero_novel_rounds += 1
-                else:
+                elif any_unrestricted:
                     self._consecutive_zero_novel_rounds = 0
+                # When all calls were restricted: counter unchanged
 
-                if self._consecutive_zero_novel_rounds >= 2:
+                if self._force_convergence and self._consecutive_zero_novel_rounds >= 2:
                     logger.info(
                         "REACT_EARLY_STOP_NUDGE node=%s rounds=%d seen_urls=%d",
                         self._node_id, self._consecutive_zero_novel_rounds,
@@ -657,7 +762,7 @@ class ReactLoop:
                     self._same_tool_consecutive_rounds = 0
                     self._last_round_tool = ""
 
-                if self._same_tool_consecutive_rounds >= 3 and len(self._tools) > 1:
+                if self._force_convergence and self._same_tool_consecutive_rounds >= 3 and len(self._tools) > 1:
                     other_tools = [n for n in self._tools if n != self._last_round_tool]
                     logger.info(
                         "REACT_TOOL_DIVERSITY_NUDGE node=%s repeated_tool=%s "
@@ -692,6 +797,28 @@ class ReactLoop:
     ) -> tuple[str, str, list[Any], dict[str, Any]]:
         """Execute one tool call. Returns (tc_id, content, sources, diagnostics)."""
         tool_name = tc.function_name
+
+        # Enforce tool restriction from budget guidance / forced convergence
+        if (
+            self._active_tool_names is not None
+            and tool_name not in self._active_tool_names
+        ):
+            logger.info(
+                "REACT_TOOL_RESTRICTED node=%s tool=%s allowed=%s",
+                self._node_id, tool_name, sorted(self._active_tool_names),
+            )
+            return tc.id, (
+                f"Tool '{tool_name}' is not available in the current phase. "
+                f"Allowed: {sorted(self._active_tool_names) or 'none — output text only'}. "
+                "Write your findings as text."
+            ), [], {
+                "tool_success": False,
+                "tool_error": f"tool_restricted:{tool_name}",
+                "raw_source_count": 0,
+                "accepted_source_count": 0,
+                "rejected_source_count": 0,
+            }
+
         tool = self._tools.get(tool_name)
         if tool is None:
             return tc.id, f"Error: Unknown tool '{tool_name}'", [], {
@@ -724,7 +851,11 @@ class ReactLoop:
                 original_query = str(args.get("query", "")).strip()
                 skip_meta = self._dedup_check_and_register(tool_name, original_query)
                 if skip_meta is not None:
-                    return tc.id, f"Skipped duplicate {tool_name} query", [], skip_meta
+                    logger.info(
+                        "REACT_DEDUP_SKIP node=%s tool=%s query=%r",
+                        self._node_id, tool_name, original_query[:120],
+                    )
+                    return tc.id, "", [], skip_meta
 
                 # Global cache check with original (pre-optimizer) args
                 vs_cached = self._cache.get(tc.function_name, args, scope="")
@@ -1161,8 +1292,9 @@ class ReactLoop:
             # Delay compaction until ~40% of budget is used
             if len(tc_indices) < self._compact_after_rounds:
                 return
-            # Keep last 3 iterations intact (was 2) for better data retention
-            keep_from = tc_indices[-3] if len(tc_indices) >= 3 else 0
+            # Keep last N iterations intact for data retention (configurable)
+            n = min(self._keep_intact, len(tc_indices))
+            keep_from = tc_indices[-n] if n > 0 else 0
             for i in range(keep_from):
                 msg = messages[i]
                 if msg.get("role") == "tool":

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from databricks_deep_research.agents.config import AgentNodeConfig
 from databricks_deep_research.agents.react_loop import (
     ReactLoop,
     ReactResult,
@@ -115,6 +116,173 @@ class TestBudgetGuidance:
         assert result is None
         assert len(msgs) == 0
 
+    def test_forced_convergence_phase1_compute_only(self) -> None:
+        """At round 4 with flag on, restrict to compute-only."""
+        compute = _make_tool("compute")
+        compute._namespace = {"val1": 42}
+        search = _make_search_tool()
+        loop = ReactLoop(MagicMock(), [search, compute], max_tool_calls=80,
+                         force_convergence=True)
+        loop._consecutive_zero_novel_rounds = 4
+        msgs: list[dict] = []
+        restricted = loop._inject_budget_guidance(msgs, remaining=60)
+        assert any("FORCED CONVERGENCE" in m.get("content", "") for m in msgs)
+        assert restricted is not None
+        assert len(restricted) == 1
+        assert restricted[0]["function"]["name"] == "compute"
+
+    def test_forced_convergence_phase2_text_only(self) -> None:
+        """At round 5+ with flag on, return empty list to force text-only."""
+        compute = _make_tool("compute")
+        compute._namespace = {"val1": 42}
+        search = _make_search_tool()
+        loop = ReactLoop(MagicMock(), [search, compute], max_tool_calls=80,
+                         force_convergence=True)
+        loop._consecutive_zero_novel_rounds = 5
+        msgs: list[dict] = []
+        restricted = loop._inject_budget_guidance(msgs, remaining=60)
+        assert any("FINAL WARNING" in m.get("content", "") for m in msgs)
+        assert restricted == []
+
+    def test_no_forced_convergence_without_stored_values(self) -> None:
+        compute = _make_tool("compute")
+        compute._namespace = {}
+        search = _make_search_tool()
+        loop = ReactLoop(MagicMock(), [search, compute], max_tool_calls=80,
+                         force_convergence=True)
+        loop._consecutive_zero_novel_rounds = 4
+        msgs: list[dict] = []
+        restricted = loop._inject_budget_guidance(msgs, remaining=60)
+        assert not any("FORCED CONVERGENCE" in m.get("content", "") for m in msgs)
+        assert restricted is None
+
+    def test_no_forced_convergence_below_threshold(self) -> None:
+        compute = _make_tool("compute")
+        compute._namespace = {"val1": 42}
+        search = _make_search_tool()
+        loop = ReactLoop(MagicMock(), [search, compute], max_tool_calls=80,
+                         force_convergence=True)
+        loop._consecutive_zero_novel_rounds = 3
+        msgs: list[dict] = []
+        restricted = loop._inject_budget_guidance(msgs, remaining=60)
+        assert not any("FORCED CONVERGENCE" in m.get("content", "") for m in msgs)
+        assert restricted is None
+
+    def test_no_convergence_when_flag_false(self) -> None:
+        """With force_convergence=False, no convergence even at high rounds."""
+        compute = _make_tool("compute")
+        compute._namespace = {"val": 42}
+        loop = ReactLoop(MagicMock(), [compute, _make_search_tool()],
+                         max_tool_calls=80, force_convergence=False)
+        loop._consecutive_zero_novel_rounds = 10
+        msgs: list[dict] = []
+        result = loop._inject_budget_guidance(msgs, remaining=60)
+        assert not any("FORCED CONVERGENCE" in m.get("content", "") for m in msgs)
+        assert not any("FINAL WARNING" in m.get("content", "") for m in msgs)
+        assert result is None
+
+    def test_budget_critical_independent_of_flag(self) -> None:
+        """Budget-critical at remaining<=2 fires even when flag is False."""
+        compute = _make_tool("compute")
+        loop = ReactLoop(MagicMock(), [compute, _make_search_tool()],
+                         max_tool_calls=80, force_convergence=False)
+        msgs: list[dict] = []
+        result = loop._inject_budget_guidance(msgs, remaining=2)
+        assert any("CRITICAL" in m.get("content", "") for m in msgs)
+        assert result is not None
+
+    def test_active_tool_names_derived_from_restricted_defs(self) -> None:
+        """Verify _active_tool_names is correctly derived from budget guidance."""
+        compute = _make_tool("compute")
+        compute._namespace = {"val": 42}
+        search = _make_search_tool()
+        loop = ReactLoop(MagicMock(), [search, compute], max_tool_calls=80,
+                         force_convergence=True)
+        loop._consecutive_zero_novel_rounds = 4
+        msgs: list[dict] = []
+        restricted = loop._inject_budget_guidance(msgs, remaining=60)
+        active_tool_defs = restricted if restricted is not None else None
+        if active_tool_defs is not None:
+            names = {td["function"]["name"] for td in active_tool_defs}
+        else:
+            names = None
+        assert names == {"compute"}
+
+
+# ---------------------------------------------------------------------------
+# Execution gate
+# ---------------------------------------------------------------------------
+
+
+class TestToolExecutionGate:
+    @pytest.mark.asyncio
+    async def test_gate_rejects_restricted_tool(self) -> None:
+        compute = _make_tool("compute")
+        search = _make_search_tool()
+        loop = ReactLoop(MagicMock(), [search, compute], max_tool_calls=80)
+        loop._active_tool_names = {"compute"}
+        tc = _tc("tc1", name="treasury_search", code="")
+        tc_id, content, sources, meta = await loop._execute_single_tool(
+            ToolCall(id="tc1", function_name="treasury_search", arguments=json.dumps({"query": "test"})),
+            {"query": "test"},
+        )
+        assert "not available" in content
+        assert meta["tool_error"] == "tool_restricted:treasury_search"
+        assert sources == []
+
+    @pytest.mark.asyncio
+    async def test_gate_allows_permitted_tool(self) -> None:
+        compute = _make_tool("compute")
+        loop = ReactLoop(MagicMock(), [compute], max_tool_calls=80)
+        loop._active_tool_names = {"compute"}
+        tc_id, content, sources, meta = await loop._execute_single_tool(
+            ToolCall(id="tc1", function_name="compute", arguments=json.dumps({"code": "2+2"})),
+            {"code": "2+2"},
+        )
+        assert "not available" not in content
+
+    @pytest.mark.asyncio
+    async def test_gate_allows_all_when_none(self) -> None:
+        compute = _make_tool("compute")
+        loop = ReactLoop(MagicMock(), [compute], max_tool_calls=80)
+        loop._active_tool_names = None
+        tc_id, content, sources, meta = await loop._execute_single_tool(
+            ToolCall(id="tc1", function_name="compute", arguments=json.dumps({"code": "2+2"})),
+            {"code": "2+2"},
+        )
+        assert "not available" not in content
+
+    @pytest.mark.asyncio
+    async def test_gate_rejects_all_on_empty_set(self) -> None:
+        compute = _make_tool("compute")
+        loop = ReactLoop(MagicMock(), [compute], max_tool_calls=80)
+        loop._active_tool_names = set()
+        tc_id, content, sources, meta = await loop._execute_single_tool(
+            ToolCall(id="tc1", function_name="compute", arguments=json.dumps({"code": "2+2"})),
+            {"code": "2+2"},
+        )
+        assert "not available" in content
+        assert meta["tool_error"] == "tool_restricted:compute"
+
+
+# ---------------------------------------------------------------------------
+# Config model
+# ---------------------------------------------------------------------------
+
+
+class TestForceConvergenceConfig:
+    def test_default_false(self) -> None:
+        config = AgentNodeConfig(subtype="researcher")
+        assert config.force_convergence is False
+
+    def test_explicit_true(self) -> None:
+        config = AgentNodeConfig(subtype="researcher", force_convergence=True)
+        assert config.force_convergence is True
+
+    def test_synthesizer_default_false(self) -> None:
+        config = AgentNodeConfig(subtype="synthesizer")
+        assert config.force_convergence is False
+
 
 # ---------------------------------------------------------------------------
 # Namespace fallback
@@ -215,6 +383,35 @@ class TestSummarizeToolResult:
         content = "ab\ncd\n\n"
         result = _summarize_tool_result(content, max_chars=500)
         assert "no tabular data" in result
+
+    def test_preserves_unit_header_lines(self) -> None:
+        content = (
+            "Table 1 — Summary of Budget Results\n"
+            "[In millions of dollars]\n"
+            "| Category | FY 1940 | FY 1941 |\n"
+            "| National defense | 2,602 | 3,100 |\n"
+            "Some narrative explanation here.\n"
+        )
+        result = _summarize_tool_result(content, max_chars=500)
+        assert "millions of dollars" in result.lower()
+        assert "| Category" in result
+        assert "narrative" not in result
+
+    def test_preserves_unit_header_without_digits(self) -> None:
+        """Unit lines like 'In thousands' contain no digits but must be kept."""
+        content = (
+            "In thousands of dollars\n"
+            "Some narrative text without numbers or pipes.\n"
+        )
+        result = _summarize_tool_result(content, max_chars=500)
+        assert "thousands of dollars" in result.lower()
+
+    def test_unit_line_not_truncated_at_120(self) -> None:
+        """Unit lines should not be capped at 120 chars like structural lines."""
+        long_unit = "[In millions of dollars, seasonally adjusted at annual rates]"
+        content = f"{long_unit}\n| A | B |"
+        result = _summarize_tool_result(content, max_chars=500)
+        assert long_unit in result
 
 
 class TestDelayedCompaction:

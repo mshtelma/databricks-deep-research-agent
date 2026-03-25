@@ -186,11 +186,17 @@ def select_step_title(state: Any) -> str:
 
 
 def select_findings_text(state: Any) -> str:
-    latest = select_latest_observation_text(state)
-    if latest:
-        return latest
-    fallback = state.get("findings") if hasattr(state, "get") else None
-    return str(fallback or "")
+    # Direct state value takes priority — this is the researcher's actual output.
+    # The runtime evidence observation may be a normalized/summarized version
+    # that loses structured data (e.g., JSON operand tables).
+    direct = state.get("findings") if hasattr(state, "get") else None
+    if direct is not None:
+        text = str(direct).strip() if not isinstance(direct, str) else direct.strip()
+        if text:
+            return text
+    # Fallback to latest observation (backward compat for workflows without
+    # a researcher node that sets output_key=findings).
+    return select_latest_observation_text(state)
 
 
 def select_plan_object(state: Any) -> Any | None:

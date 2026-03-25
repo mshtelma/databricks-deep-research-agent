@@ -13,11 +13,17 @@ from benchmarks.core.types import QuestionResult
 logger = logging.getLogger(__name__)
 
 
+_TERMINAL_STATUSES = frozenset({"success", "no_answer", "timeout", "error"})
+
+
 class ResultStore:
     """Append-only JSONL storage with resume support.
 
     Each line is a self-contained JSON object representing one QuestionResult.
     Single-writer assumed (BenchmarkRunner serialises writes via asyncio.Lock).
+
+    On resume, only questions with terminal status are skipped.
+    ``rate_limited`` questions are automatically retried.
     """
 
     def __init__(self, path: Path) -> None:
@@ -25,7 +31,7 @@ class ResultStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
     def completed_uids(self) -> set[str]:
-        """Read all UIDs already in the file. Tolerates truncated last line."""
+        """Return UIDs with terminal status.  Rate-limited UIDs are retryable."""
         uids: set[str] = set()
         if not self._path.exists():
             return uids
@@ -36,7 +42,8 @@ class ResultStore:
                     continue
                 try:
                     data = json.loads(line)
-                    uids.add(data["uid"])
+                    if data.get("status") in _TERMINAL_STATUSES:
+                        uids.add(data["uid"])
                 except (json.JSONDecodeError, KeyError):
                     logger.warning(
                         "RESULT_STORE_SKIP_LINE path=%s line=%d reason=malformed",
@@ -55,10 +62,10 @@ class ResultStore:
             os.fsync(f.fileno())
 
     def load_all(self) -> list[QuestionResult]:
-        """Load all results, skip malformed lines with warning."""
-        results: list[QuestionResult] = []
+        """Load results, last-write-wins per UID for retried questions."""
+        by_uid: dict[str, QuestionResult] = {}
         if not self._path.exists():
-            return results
+            return []
         with open(self._path, encoding="utf-8") as f:
             for line_num, line in enumerate(f, 1):
                 line = line.strip()
@@ -66,7 +73,7 @@ class ResultStore:
                     continue
                 try:
                     data = json.loads(line)
-                    results.append(QuestionResult(**data))
+                    by_uid[data["uid"]] = QuestionResult(**data)
                 except (json.JSONDecodeError, KeyError, TypeError) as exc:
                     logger.warning(
                         "RESULT_STORE_SKIP_LINE path=%s line=%d error=%s",
@@ -74,4 +81,4 @@ class ResultStore:
                         line_num,
                         exc,
                     )
-        return results
+        return list(by_uid.values())

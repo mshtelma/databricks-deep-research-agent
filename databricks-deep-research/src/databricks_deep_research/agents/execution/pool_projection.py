@@ -34,8 +34,21 @@ def build_research_pool_batch(
 
 
 def extract_pool_items(output: Any, pool_write: PoolWriteConfig, output_key: str = "") -> list[Any]:
-    if pool_write.extract == output_key and isinstance(output, str) and output.strip():
-        return [output]
+    if pool_write.extract == output_key:
+        if isinstance(output, str) and output.strip():
+            return [output]
+        # Non-string outputs (list, dict): serialize to string so the
+        # observation pool doesn't silently drop structured findings.
+        if output is not None and not isinstance(output, str):
+            import json
+            try:
+                serialized = json.dumps(output, default=str, ensure_ascii=False)
+                if serialized.strip() and serialized != "null":
+                    return [serialized]
+            except (TypeError, ValueError):
+                fallback = str(output)
+                if fallback.strip():
+                    return [fallback]
     current = output
     for part in pool_write.extract.split("."):
         if isinstance(current, dict):

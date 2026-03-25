@@ -7,6 +7,8 @@ import logging
 import time
 from pathlib import Path
 
+from openai import RateLimitError
+
 from databricks_deep_research import (
     FrameworkLLMClient,
     WorkflowDefinition,
@@ -131,14 +133,29 @@ class BenchmarkRunner:
                         error_message=f"Timed out after {self._config.timeout_per_question}s",
                         metadata=q.metadata,
                     )
-                except Exception as exc:
+                except RateLimitError as exc:
                     qr = QuestionResult(
                         uid=q.uid,
                         question=q.question,
                         expected_answer=q.expected_answer,
                         predicted_answer=None,
                         raw_output="",
-                        status="error",
+                        status="rate_limited",
+                        wall_time_seconds=time.monotonic() - t0,
+                        num_sources=0,
+                        error_message=str(exc)[:500],
+                        metadata=q.metadata,
+                    )
+                except Exception as exc:
+                    # Safety net: check if a wrapped exception is really a rate limit
+                    is_rate_limit = "429" in str(exc) or "rate_limit" in str(exc).lower()
+                    qr = QuestionResult(
+                        uid=q.uid,
+                        question=q.question,
+                        expected_answer=q.expected_answer,
+                        predicted_answer=None,
+                        raw_output="",
+                        status="rate_limited" if is_rate_limit else "error",
                         wall_time_seconds=time.monotonic() - t0,
                         num_sources=0,
                         error_message=str(exc)[:500],

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 from databricks_deep_research.agents.config import AgentNodeConfig
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -122,24 +125,20 @@ def normalize_research_output(
     substantive_source_count = sum(1 for source in merged_sources if isinstance(source, dict) and source.get("admission_status") == "accepted")
     low_value_source_count = sum(1 for source in merged_sources if isinstance(source, dict) and source.get("admission_status") == "accepted_low_value")
     evidence_quality_summary = "full_text" if substantive_source_count else "metadata_only" if low_value_source_count else "empty"
-    fallback_text = ""
-    for key in ("summary", "analysis", "response", "answer", "message"):
-        value = parsed.get(key)
-        if isinstance(value, str) and has_substantive_text(value, min_length=20):
-            fallback_text = value.strip()
-            break
-    observation_text = str(
-        parsed.get("observation") or parsed.get("findings") or parsed.get(config.output_key) or fallback_text or ""
-    ).strip()
-    findings_text = str(parsed.get("findings") or observation_text).strip()
-    state_text = observation_text or findings_text
-    raw_observation = str(
-        parsed.get("observation") or parsed.get("findings") or parsed.get(config.output_key) or fallback_text or ""
-    ).strip()
-    if not state_text and merged_sources:
-        state_text = build_observation_from_sources(merged_sources)
-        observation_text = state_text
-        findings_text = state_text
+    # Serialize the dict as state_text, excluding sources (already extracted
+    # above for pool writes). Sources can be 100K-500K chars of raw search
+    # results — including them in state_text bloats downstream agent prompts.
+    import json as _json
+
+    _STRIP_FROM_STATE_TEXT = {"sources", "sources_found", "sources_used"}
+    state_dict = {k: v for k, v in parsed.items() if k not in _STRIP_FROM_STATE_TEXT}
+    state_text = _json.dumps(state_dict, default=str, ensure_ascii=False)
+    observation_text = state_text
+    findings_text = state_text
+    logger.info(
+        "NORMALIZE_OUTPUT output_key=%s state_text_source=dict_serialized state_text_len=%d preview=%r",
+        config.output_key, len(state_text), state_text[:150],
+    )
     derived_status = "ok" if substantive_source_count else "insufficient_data" if low_value_source_count or merged_sources else ("ok" if state_text else "insufficient_data")
     return NormalizedResearchOutput(
         state_text=state_text,
@@ -150,7 +149,7 @@ def normalize_research_output(
         key_points=list(parsed.get("key_points", []) or []),
         research_status=str(parsed.get("research_status", derived_status)),
         blocking_reason=parsed.get("blocking_reason"),
-        repair_mode=("source_backed_observation" if merged_sources and not raw_observation else "fallback_text_field" if fallback_text and not raw_observation else None),
+        repair_mode=None,
         skip_observation_writes=not bool(observation_text.strip()),
         skip_source_writes=not bool(merged_sources),
         substantive_source_count=substantive_source_count,

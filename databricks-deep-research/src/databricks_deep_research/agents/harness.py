@@ -399,6 +399,9 @@ async def execute_agent(
                 subtype=config.subtype,
                 max_result_chars=config.max_result_chars,
                 compaction_strategy=config.compaction_strategy,
+                keep_intact_iterations=config.keep_intact_iterations,
+                dedup_jaccard_threshold=config.dedup_jaccard_threshold,
+                force_convergence=config.force_convergence,
             )
             result = await loop.execute(messages)
             content = result.content
@@ -999,17 +1002,18 @@ def _parse_output(content: Any, config: AgentNodeConfig) -> Any:
             # Try to extract JSON from markdown code blocks
             if "```json" in content:
                 start = content.index("```json") + 7
-                end = content.index("```", start)
-                try:
-                    parsed = json.loads(content[start:end].strip())
-                    logger.info(
-                        "AGENT_OUTPUT_PARSE format=json_codeblock input_type=str "
-                        "output_type=%s output_len=%d",
-                        type(parsed).__name__, len(str(parsed)),
-                    )
-                    return parsed
-                except json.JSONDecodeError:
-                    pass
+                end = content.find("```", start)
+                if end != -1:
+                    try:
+                        parsed = json.loads(content[start:end].strip())
+                        logger.info(
+                            "AGENT_OUTPUT_PARSE format=json_codeblock input_type=str "
+                            "output_type=%s output_len=%d",
+                            type(parsed).__name__, len(str(parsed)),
+                        )
+                        return parsed
+                    except json.JSONDecodeError:
+                        pass
             # Try json_repair if available
             try:
                 import json_repair

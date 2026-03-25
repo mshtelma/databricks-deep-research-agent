@@ -1,13 +1,17 @@
 """Python compute tool — sandboxed code execution for deterministic calculations.
 
 Provides a ``PythonComputeTool`` that executes LLM-generated Python code in a
-restricted sandbox.  Only ``math`` and ``statistics`` are available.  Variables
-persist across calls within a single tool instance (i.e., within one workflow
-run), enabling multi-step computation.
+restricted sandbox.  A wide range of stdlib modules are available by default,
+and third-party modules (e.g. numpy) can be added per-instance via
+``extra_modules``.  Variables persist across calls within a single tool instance
+(i.e., within one workflow run), enabling multi-step computation.
 
 Security:
     - ``__import__``, ``exec``, ``eval``, ``compile``, ``open`` are blocked
     - ``getattr``/``setattr``/``delattr`` are blocked (prevents attribute escape)
+    - AST validation blocks dunder attribute access (prevents ``module.__builtins__``
+      and class-hierarchy escapes)
+    - Per-instance import guard prevents module leakage between tool instances
     - Timeout via ``asyncio.wait_for`` + thread pool executor
     - Output truncated to ``max_output_chars``
 """
@@ -18,15 +22,21 @@ import ast
 import asyncio
 import collections as _collections_mod
 import contextlib
+import datetime as _datetime_mod
 import decimal as _decimal_mod
 import fractions as _fractions_mod
 import functools as _functools_mod
 import io
 import itertools as _itertools_mod
+import json as _json_mod
 import logging
 import math
+import operator as _operator_mod
 import re as _re_mod
 import statistics
+import string as _string_mod
+import textwrap as _textwrap_mod
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -43,7 +53,7 @@ logger = logging.getLogger(__name__)
 # Sandbox configuration
 # ---------------------------------------------------------------------------
 
-_SAFE_BUILTINS: dict[str, Any] = {
+_SAFE_BUILTINS_BASE: dict[str, Any] = {
     # Constructors / types
     "int": int,
     "float": float,
@@ -108,6 +118,13 @@ _ALLOWED_IMPORT_MODULES: dict[str, Any] = {
     "itertools": _itertools_mod,
     "functools": _functools_mod,
     "collections": _collections_mod,
+    "copy": __import__("copy"),
+    "calendar": __import__("calendar"),
+    "datetime": _datetime_mod,
+    "json": _json_mod,
+    "operator": _operator_mod,
+    "string": _string_mod,
+    "textwrap": _textwrap_mod,
 }
 
 
@@ -118,25 +135,78 @@ def _restricted_import(
     fromlist: tuple[str, ...] = (),
     level: int = 0,
 ) -> Any:
-    """Allow importing only whitelisted modules in the compute sandbox."""
+    """Allow importing only whitelisted modules in the compute sandbox.
+
+    Retained at module level for backward compatibility.  New instances use
+    per-instance closures instead (see ``PythonComputeTool.__init__``).
+    """
     if name not in _ALLOWED_IMPORT_MODULES:
+        available = ", ".join(sorted(_ALLOWED_IMPORT_MODULES.keys()))
         raise ImportError(
-            f"Module '{name}' is not available. "
-            "math and statistics are pre-imported — use them directly."
+            f"Module '{name}' is not available. Available: {available}"
         )
     return _ALLOWED_IMPORT_MODULES[name]
 
 
-_SAFE_BUILTINS["__import__"] = _restricted_import
+# ---------------------------------------------------------------------------
+# AST security validation
+# ---------------------------------------------------------------------------
 
-_MAX_CODE_LENGTH = 5_000
+# Dunder attributes that enable sandbox escapes.  Blocks:
+#   - module.__builtins__['__import__']('os')    → import escape
+#   - ().__class__.__bases__[0].__subclasses__()  → class hierarchy escape
+#   - func.__globals__                            → code introspection escape
+_BLOCKED_DUNDER_ATTRS: frozenset[str] = frozenset({
+    # Module / import escape
+    "__builtins__", "__import__", "__loader__", "__spec__",
+    # Class hierarchy escape
+    "__subclasses__", "__bases__", "__mro__", "__class__",
+    # Attribute / code introspection escape
+    "__globals__", "__code__", "__func__", "__self__",
+    "__dict__",
+    # Object lifecycle (bound methods expose __globals__)
+    "__init__", "__new__", "__del__",
+    "__reduce__", "__reduce_ex__",
+    # Descriptor protocol escape
+    "__getattr__", "__setattr__", "__delattr__",
+    "__set_name__", "__init_subclass__",
+})
+
+
+def _validate_ast(tree: ast.Module) -> None:
+    """Reject code that accesses dangerous dunder attributes.
+
+    Walks the entire AST and raises ``ValueError`` for attribute access
+    (``obj.__builtins__``) or bare name references (``__import__``) that
+    match the blocklist.  Legitimate dunders like ``__len__``, ``__add__``,
+    ``__contains__``, ``__str__``, ``__repr__`` are NOT blocked.
+    """
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in _BLOCKED_DUNDER_ATTRS:
+            raise ValueError(
+                f"Access to '.{node.attr}' is not allowed in the compute sandbox"
+            )
+        if isinstance(node, ast.Name) and node.id in _BLOCKED_DUNDER_ATTRS:
+            raise ValueError(
+                f"Reference to '{node.id}' is not allowed in the compute sandbox"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_MAX_CODE_LENGTH = 20_000
+
+_MAX_NAMESPACE_ENTRIES = 200
 
 _DEFAULT_DESCRIPTION = (
     "Execute Python code for calculations. "
-    "The `math` and `statistics` modules are pre-imported. "
+    "Available modules: math, statistics, decimal, datetime, json, re, "
+    "fractions, itertools, functools, collections, operator, copy, "
+    "calendar, string, textwrap. "
     "Variables persist across calls within the same session. "
-    "Use for any computation: percentages, averages, standard deviations, "
-    "growth rates, regressions, geometric means, etc."
+    "Use print() or end with an expression to see results."
 )
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="compute")
@@ -144,6 +214,10 @@ _EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="compute")
 
 class _SandboxSyntaxError(Exception):
     """Raised inside the sandbox to signal a SyntaxError back to execute()."""
+
+
+class _SandboxSecurityError(Exception):
+    """Raised inside the sandbox for blocked dunder attribute access."""
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +231,15 @@ class PythonComputeTool:
     Implements ``ResearchTool`` protocol.  Intended for deterministic numerical
     computation within agent workflows — the LLM writes Python code and receives
     the printed output and/or the value of the last expression.
+
+    Parameters
+    ----------
+    allowed_modules
+        If provided, **replaces** the default module whitelist entirely.
+        Only the listed modules (plus any in *extra_modules*) will be available.
+    extra_modules
+        Extends the module set (default or replaced) with additional modules.
+        Non-installed modules are skipped with a warning.
     """
 
     def __init__(
@@ -164,22 +247,78 @@ class PythonComputeTool:
         *,
         name: str = "compute",
         allowed_modules: list[str] | None = None,
+        extra_modules: list[str] | None = None,
         max_execution_seconds: float = 10.0,
         max_output_chars: int = 10_000,
+        max_code_length: int = _MAX_CODE_LENGTH,
         description: str = "",
     ) -> None:
         self._name = name
         self._max_execution_seconds = max_execution_seconds
         self._max_output_chars = max_output_chars
+        self._max_code_length = max_code_length
         self._description = description or _DEFAULT_DESCRIPTION
 
-        # Build the pre-injected modules dict.
-        self._modules: dict[str, Any] = {"math": math, "statistics": statistics}
-        for mod_name in allowed_modules or []:
-            if mod_name not in self._modules:
-                logger.warning("COMPUTE_SKIP_MODULE module=%s reason=not_whitelisted", mod_name)
+        # ---- Per-instance module configuration ----
+        if allowed_modules is not None:
+            # Complete replacement: only listed modules are available.
+            base: dict[str, Any] = {}
+            for mod_name in allowed_modules:
+                if mod_name in _ALLOWED_IMPORT_MODULES:
+                    base[mod_name] = _ALLOWED_IMPORT_MODULES[mod_name]
+                else:
+                    try:
+                        base[mod_name] = __import__(mod_name)
+                    except ImportError:
+                        logger.warning(
+                            "COMPUTE_SKIP_MODULE module=%s reason=not_installed",
+                            mod_name,
+                        )
+        else:
+            base = dict(_ALLOWED_IMPORT_MODULES)
 
-        # Persistent namespace for cross-call variable sharing.
+        # Extend with extra modules (third-party or additional stdlib).
+        for mod_name in extra_modules or []:
+            if mod_name not in base:
+                try:
+                    base[mod_name] = __import__(mod_name)
+                    logger.info(
+                        "COMPUTE_EXTRA_MODULE module=%s status=loaded", mod_name
+                    )
+                except ImportError:
+                    logger.warning(
+                        "COMPUTE_SKIP_MODULE module=%s reason=not_installed",
+                        mod_name,
+                    )
+
+        self._allowed_modules: dict[str, Any] = base
+        self._modules: dict[str, Any] = dict(base)
+
+        # ---- Per-instance restricted import (closure) ----
+        allowed_ref = self._allowed_modules
+
+        def _instance_import(
+            name: str,
+            globals: dict[str, Any] | None = None,
+            locals: dict[str, Any] | None = None,
+            fromlist: tuple[str, ...] = (),
+            level: int = 0,
+        ) -> Any:
+            if name not in allowed_ref:
+                available = ", ".join(sorted(allowed_ref.keys()))
+                raise ImportError(
+                    f"Module '{name}' is not available. Available: {available}"
+                )
+            return allowed_ref[name]
+
+        # ---- Per-instance safe builtins ----
+        self._safe_builtins: dict[str, Any] = dict(_SAFE_BUILTINS_BASE)
+        self._safe_builtins["__import__"] = _instance_import
+
+        # ---- Thread safety ----
+        self._lock = threading.Lock()
+
+        # ---- Persistent namespace for cross-call variable sharing ----
         self._namespace: dict[str, Any] = {}
 
     # -- ResearchTool protocol -----------------------------------------------
@@ -195,11 +334,12 @@ class PythonComputeTool:
                     "code": {
                         "type": "string",
                         "description": (
-                            "Python code to execute. `math` and `statistics` modules "
-                            "are pre-imported. Variables persist across calls. "
+                            "Python code to execute. Many stdlib modules are "
+                            "pre-imported (math, statistics, datetime, json, etc.). "
+                            "Variables persist across calls. "
                             "Use print() or end with an expression to see results."
                         ),
-                        "maxLength": _MAX_CODE_LENGTH,
+                        "maxLength": self._max_code_length,
                     },
                 },
                 "required": ["code"],
@@ -213,8 +353,8 @@ class PythonComputeTool:
         code = arguments.get("code", "")
         if not isinstance(code, str) or not code.strip():
             raise ValueError("'code' must be a non-empty string")
-        if len(code) > _MAX_CODE_LENGTH:
-            raise ValueError(f"Code exceeds maximum length of {_MAX_CODE_LENGTH} characters")
+        if len(code) > self._max_code_length:
+            raise ValueError(f"Code exceeds maximum length of {self._max_code_length} characters")
         return {"code": code.strip()}
 
     async def execute(
@@ -262,21 +402,20 @@ class PythonComputeTool:
         Returns a string combining captured stdout and the value of the last
         expression (if any).
         """
-        # Build execution globals: safe builtins + whitelisted modules + persistent ns.
-        exec_globals: dict[str, Any] = {
-            "__builtins__": _SAFE_BUILTINS,
-            **self._modules,
-            **self._namespace,
-        }
-
-        # Try to detect and capture the last expression's value.
+        # Parse and validate AST before execution.
         try:
             tree = ast.parse(code, mode="exec")
         except SyntaxError as e:
             raise _SandboxSyntaxError(str(e)) from e
 
+        # Security: block dunder attribute access (prevents sandbox escapes).
+        try:
+            _validate_ast(tree)
+        except ValueError as e:
+            raise _SandboxSecurityError(str(e)) from e
+
+        # Detect and capture the last expression's value.
         if tree.body and isinstance(tree.body[-1], ast.Expr):
-            # Wrap the last expression: __result__ = <expr>
             last_node = tree.body.pop()
             assign = ast.Assign(
                 targets=[ast.Name(id="__result__", ctx=ast.Store())],
@@ -288,16 +427,39 @@ class PythonComputeTool:
 
         compiled = compile(tree, "<compute>", "exec")
 
-        # Capture stdout.
+        # Build execution globals: persistent namespace first, then modules
+        # on top (so user variables like `math = 42` cannot shadow modules).
+        with self._lock:
+            exec_globals: dict[str, Any] = {
+                "__builtins__": self._safe_builtins,
+                **self._namespace,
+                **self._modules,
+            }
+
+        # Capture stdout.  exec() runs outside the lock so the timeout
+        # mechanism (asyncio.wait_for) can cancel it.
         stdout_buf = io.StringIO()
         with contextlib.redirect_stdout(stdout_buf):
             exec(compiled, exec_globals)  # noqa: S102 — sandboxed exec
 
         # Persist user-defined variables (exclude builtins and modules).
-        for k, v in exec_globals.items():
-            if k.startswith("__") or k in self._modules:
-                continue
-            self._namespace[k] = v
+        with self._lock:
+            for k, v in exec_globals.items():
+                if k.startswith("__") or k in self._modules:
+                    continue
+                self._namespace[k] = v
+
+            # Evict oldest entries if namespace grows too large.
+            if len(self._namespace) > _MAX_NAMESPACE_ENTRIES:
+                keys = list(self._namespace.keys())
+                evict_count = len(keys) - _MAX_NAMESPACE_ENTRIES
+                for k in keys[:evict_count]:
+                    del self._namespace[k]
+                logger.info(
+                    "COMPUTE_NAMESPACE_EVICTION evicted=%d remaining=%d",
+                    evict_count,
+                    _MAX_NAMESPACE_ENTRIES,
+                )
 
         # Build output.
         stdout_text = stdout_buf.getvalue()

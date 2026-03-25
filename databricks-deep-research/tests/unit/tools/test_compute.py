@@ -276,6 +276,12 @@ class TestValidation:
     def test_code_too_long_rejected(self) -> None:
         tool = _make_tool()
         with pytest.raises(ValueError, match="maximum length"):
+            tool.validate_arguments({"code": "x" * 21000})
+
+    def test_custom_code_length_limit(self) -> None:
+        from databricks_deep_research.tools.builtins.compute import PythonComputeTool
+        tool = PythonComputeTool(max_code_length=5000)
+        with pytest.raises(ValueError, match="maximum length"):
             tool.validate_arguments({"code": "x" * 6000})
 
     def test_valid_code_passes(self) -> None:
@@ -426,3 +432,203 @@ class TestExtendedModuleWhitelist:
         await _run(tool, "import decimal\nx = decimal.Decimal('3.14')")
         out = await _run(tool, "print(x * 2)")
         assert "6.28" in out
+
+
+# ---------------------------------------------------------------------------
+# Security: sandbox escape prevention (AST dunder blocker)
+# ---------------------------------------------------------------------------
+
+
+class TestSandboxEscapePrevention:
+    @pytest.mark.asyncio
+    async def test_dunder_builtins_access_blocked(self) -> None:
+        """statistics.__builtins__ must not be accessible."""
+        tool = _make_tool()
+        result = await _run_result(tool, "statistics.__builtins__")
+        assert result.success is False
+        assert "__builtins__" in result.content
+
+    @pytest.mark.asyncio
+    async def test_dunder_class_access_blocked(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(tool, "().__class__")
+        assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_class_hierarchy_chain_blocked(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(tool, "().__class__.__bases__[0].__subclasses__()")
+        assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_module_globals_blocked(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(tool, "math.sqrt.__globals__")
+        assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_dunder_dict_blocked(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(tool, "math.__dict__")
+        assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_safe_dunders_allowed(self) -> None:
+        """Legitimate dunders like __len__ should still work."""
+        tool = _make_tool()
+        result = await _run_result(tool, "[1,2,3].__len__()")
+        assert result.success
+        assert "3" in result.content
+
+    @pytest.mark.asyncio
+    async def test_safe_dunder_add_allowed(self) -> None:
+        """Arithmetic dunders should work."""
+        tool = _make_tool()
+        result = await _run_result(tool, "(5).__add__(3)")
+        assert result.success
+        assert "8" in result.content
+
+    @pytest.mark.asyncio
+    async def test_safe_dunder_contains_allowed(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(tool, "'hello'.__contains__('ell')")
+        assert result.success
+        assert "True" in result.content
+
+
+# ---------------------------------------------------------------------------
+# Per-instance module isolation
+# ---------------------------------------------------------------------------
+
+
+class TestPerInstanceModules:
+    @pytest.mark.asyncio
+    async def test_allowed_modules_restricts(self) -> None:
+        """allowed_modules should restrict to only listed modules."""
+        tool = _make_tool(allowed_modules=["math"])
+        result = await _run_result(tool, "import statistics")
+        assert result.success is False
+        assert "not available" in result.content.lower()
+
+    @pytest.mark.asyncio
+    async def test_allowed_modules_includes_requested(self) -> None:
+        tool = _make_tool(allowed_modules=["math", "json"])
+        result = await _run_result(tool, "import json\nprint(json.dumps({'a': 1}))")
+        assert result.success
+        assert '"a"' in result.content
+
+    @pytest.mark.asyncio
+    async def test_two_instances_independent(self) -> None:
+        """Two instances with different allowed_modules must not leak."""
+        tool_a = _make_tool(allowed_modules=["math", "json"])
+        tool_b = _make_tool(allowed_modules=["math"])
+        # A can import json
+        result_a = await _run_result(tool_a, "import json\njson.dumps({})")
+        assert result_a.success
+        # B cannot
+        result_b = await _run_result(tool_b, "import json")
+        assert result_b.success is False
+
+    @pytest.mark.asyncio
+    async def test_extra_modules_extends_defaults(self) -> None:
+        """extra_modules should extend (not replace) defaults."""
+        # Use a stdlib module that's NOT in the default list as extra
+        tool = _make_tool(extra_modules=["uuid"])
+        result = await _run_result(tool, "import uuid\nprint(type(uuid.uuid4()))")
+        assert result.success
+        assert "UUID" in result.content
+        # Default modules still available
+        result2 = await _run_result(tool, "import math\nmath.sqrt(4)")
+        assert result2.success
+
+    @pytest.mark.asyncio
+    async def test_extra_module_not_installed_skipped(self) -> None:
+        """Non-existent extra module is skipped gracefully."""
+        tool = _make_tool(extra_modules=["nonexistent_module_xyz_123"])
+        result = await _run_result(tool, "math.sqrt(4)")
+        assert result.success
+        assert "2" in result.content
+
+
+# ---------------------------------------------------------------------------
+# New stdlib modules
+# ---------------------------------------------------------------------------
+
+
+class TestNewStdlibModules:
+    @pytest.mark.asyncio
+    async def test_datetime_works(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(
+            tool, "import datetime\nprint(datetime.date(2024, 1, 15))"
+        )
+        assert result.success
+        assert "2024-01-15" in result.content
+
+    @pytest.mark.asyncio
+    async def test_json_loads_works(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(
+            tool, "import json\nprint(json.loads('{\"a\": 1}'))"
+        )
+        assert result.success
+        assert "'a'" in result.content
+
+    @pytest.mark.asyncio
+    async def test_operator_works(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(
+            tool, "import operator\nprint(operator.add(2, 3))"
+        )
+        assert result.success
+        assert "5" in result.content
+
+    @pytest.mark.asyncio
+    async def test_string_works(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(
+            tool, "import string\nprint(string.ascii_lowercase[:5])"
+        )
+        assert result.success
+        assert "abcde" in result.content
+
+    @pytest.mark.asyncio
+    async def test_textwrap_works(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(
+            tool, "import textwrap\nprint(textwrap.shorten('Hello World!', width=8))"
+        )
+        assert result.success
+        assert "[...]" in result.content or "Hello" in result.content
+
+
+# ---------------------------------------------------------------------------
+# Namespace safety
+# ---------------------------------------------------------------------------
+
+
+class TestNamespaceSafety:
+    @pytest.mark.asyncio
+    async def test_variable_cannot_shadow_module(self) -> None:
+        """Assigning math = 42 must not kill the math module on next call."""
+        tool = _make_tool()
+        await _run(tool, "math = 42")
+        result = await _run_result(tool, "math.sqrt(9)")
+        assert result.success
+        assert "3" in result.content
+
+    @pytest.mark.asyncio
+    async def test_code_length_20k_accepted(self) -> None:
+        """Code up to 20K chars should be accepted."""
+        tool = _make_tool()
+        code = "x = 1\n" * 3300  # ~19.8K chars
+        code += "x"
+        result = tool.validate_arguments({"code": code})
+        assert "code" in result
+
+    @pytest.mark.asyncio
+    async def test_code_length_over_limit_rejected(self) -> None:
+        """Code over the limit should be rejected."""
+        tool = _make_tool()
+        with pytest.raises(ValueError, match="maximum length"):
+            tool.validate_arguments({"code": "x" * 21000})

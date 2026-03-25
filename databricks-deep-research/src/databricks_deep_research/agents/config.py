@@ -88,6 +88,9 @@ class AgentNodeConfig(BaseModel):
     max_retries: int = 2
     max_result_chars: int = 4000  # 0=unlimited; >0 truncates old tool results
     compaction_strategy: Literal["truncate", "mask"] = "truncate"
+    keep_intact_iterations: int = 3  # Recent tool-calling iterations to keep uncompacted
+    dedup_jaccard_threshold: float = 0.8  # Jaccard word overlap threshold for near-dedup (0.0-1.0)
+    force_convergence: bool = False  # Gate novelty/anti-loop heuristics (convergence, nudges)
     conversation_budget: int | None = None
     pool_inject: list[PoolInjectConfig] = Field(default_factory=list)
     synthesis_context: SynthesisContextConfig | None = None
