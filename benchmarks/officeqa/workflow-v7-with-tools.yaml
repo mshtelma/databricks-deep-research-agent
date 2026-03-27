@@ -70,7 +70,7 @@ tools:
     kind: compute
     config:
       max_execution_seconds: 30
-      max_code_length: 30000
+      max_code_length: 50000
       extra_modules: [numpy, scipy, pandas]
     description: >
       Execute Python code for calculations and data analysis.
@@ -194,7 +194,7 @@ root:
             extract: findings
           - pool: sources
             extract: sources
-        max_tool_calls: 80
+        max_tool_calls: 120
         force_convergence: true
         convergence_rounds: 10
         compaction_strategy: mask
@@ -384,9 +384,9 @@ root:
         pool_tools:
           - observations
           - sources
-        max_tool_calls: 30
+        max_tool_calls: 50
         per_tool_limits:
-          treasury_grep: 3
+          treasury_grep: 8
         dedup_jaccard_threshold: 0.95
         system_prompt: |
           You are a verifier and calculator. Your job is to:
@@ -417,6 +417,13 @@ root:
           for unit mismatch (millions vs thousands, percent vs ratio).
           If percent_change result exceeds 1000%, verify the operand order (larger is later for
           positive change) and units. Negative results: verify the sign direction matches the question.
+
+          UNIT EXTRACTION — CRITICAL:
+          When reading a Treasury table value, check the table header for unit
+          indicators: "In millions of dollars", "In thousands", "Percent".
+          - If table says "In millions" and you extract 2602, value IS 2,602 million.
+          - If question asks "in millions" and table uses millions, report raw cell value.
+          - If units differ between operands, convert to the same unit BEFORE computing.
 
           DECISION RULES:
           - Prefer exact lexical match to the question wording.
@@ -512,6 +519,10 @@ root:
           6. If MATCH -> pass through assembled_answer's final_value.
           7. If MISMATCH -> use compute to recalculate with the correct value.
           8. If you cannot find the source_file info, pass through unchanged (do not guess).
+
+          FILE EXTENSION: All Treasury Bulletin files use .txt extension (e.g.,
+          treasury_bulletin_1985_03.txt). NEVER use .csv, .xlsx, or other extensions.
+          If source_file from findings has a wrong extension, correct it to .txt.
 
           BUDGET: 10 tool calls maximum. Verify the ONE most impactful operand. Do not re-search broadly.
 

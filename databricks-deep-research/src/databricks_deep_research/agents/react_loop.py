@@ -353,6 +353,58 @@ class ReactLoop:
         normalized = " ".join(str(rewritten_query).lower().split())
         return f"{tool_name}:{normalized}"
 
+    def _canonical_dedup_signature(self, tool_name: str, args: dict[str, Any]) -> str:
+        """Build a stable, argument-aware canonical signature for dedup.
+
+        Separate from rendered_query_text (which serves prompt/logging).
+        Deterministic: sorted keys, lowercased, empty values omitted.
+
+        For tools with a ``query`` or ``question`` key, uses the normalized
+        query text (backward-compatible with existing VS dedup).  For all
+        other tools, includes every non-empty argument value.
+        """
+        query = args.get("query") or args.get("question")
+        if query:
+            normalized = " ".join(str(query).lower().split())
+            return f"{tool_name}:{normalized}"
+
+        # Non-query tools: canonical signature from sorted, non-empty args
+        # TODO: use json.dumps(v, sort_keys=True) for dict/list values
+        parts: list[str] = []
+        for k in sorted(args.keys()):
+            v = args[k]
+            if v is None or v == "":
+                continue
+            v_str = " ".join(str(v).lower().split())
+            parts.append(f"{k}={v_str}")
+        return f"{tool_name}:{' '.join(parts)}"
+
+    def _is_known_duplicate_sig(self, canonical_sig: str, tool_name: str) -> bool:
+        """Check-only (no registration) — is this signature already known?
+
+        Returns True if ``canonical_sig`` matches an existing entry in
+        ``_step_query_signatures`` by exact match or Jaccard near-duplicate.
+        Does **not** register the signature.
+        """
+        if canonical_sig in self._step_query_signatures:
+            return True
+        sig_body = canonical_sig.split(":", 1)[1] if ":" in canonical_sig else ""
+        sig_words = set(sig_body.split())
+        if len(sig_words) < 2:
+            return False
+        for prev_sig in self._step_query_signatures:
+            if not prev_sig.startswith(f"{tool_name}:"):
+                continue
+            prev_body = prev_sig.split(":", 1)[1]
+            prev_words = set(prev_body.split())
+            if not prev_words:
+                continue
+            intersection = len(sig_words & prev_words)
+            union = len(sig_words | prev_words)
+            if union > 0 and intersection / union > self._jaccard_threshold:
+                return True
+        return False
+
     def _record_tool_outcome(self, tool_name: str, meta: dict[str, Any], rewritten_query: str) -> None:
         history = self._tool_outcome_history.setdefault(tool_name, [])
         history.append({**meta, "rewritten_query": rewritten_query})
@@ -723,8 +775,9 @@ class ReactLoop:
                         messages.append(self._tool_msg(tc.id, ""))
 
                 # Track novel sources for diminishing-returns detection.
-                # Restricted calls (gate-blocked) are excluded — they don't
-                # represent failed searches and shouldn't accelerate convergence.
+                # Restricted calls (gate-blocked) and builtin tool calls
+                # (compute) are excluded — they don't represent retrieval
+                # attempts and shouldn't accelerate convergence.
                 novel_urls_this_round: set[str] = set()
                 any_unrestricted = False
                 for tc in response.tool_calls:
@@ -734,6 +787,11 @@ class ReactLoop:
                             "tool_restricted:"
                         ):
                             continue
+                        # Builtin tools (compute, compute_namespace) process
+                        # data, not retrieve sources — exclude from
+                        # convergence tracking.
+                        if tool_meta.get("evidence_quality") == "builtin":
+                            continue
                         any_unrestricted = True
                         for src in tool_srcs:
                             url = str(src.get("url", "") if isinstance(src, dict) else getattr(src, "url", ""))
@@ -741,6 +799,10 @@ class ReactLoop:
                             if url and url not in self._seen_source_urls:
                                 novel_urls_this_round.add(url)
                     elif tc.id in cached_results:
+                        # Exclude cached builtin tools from convergence
+                        tool = self._all_tools.get(tc.function_name)
+                        if tool and tool_source_kind(tool.definition) == "builtin":
+                            continue
                         any_unrestricted = True
                 self._seen_source_urls.update(novel_urls_this_round)
 
@@ -748,7 +810,7 @@ class ReactLoop:
                     self._consecutive_zero_novel_rounds += 1
                 elif any_unrestricted:
                     self._consecutive_zero_novel_rounds = 0
-                # When all calls were restricted: counter unchanged
+                # When all calls were restricted or builtin: counter unchanged
 
                 if self._force_convergence and self._consecutive_zero_novel_rounds >= 2:
                     logger.info(
@@ -982,7 +1044,20 @@ class ReactLoop:
                     [query[:200] for query in planned.alternate_queries],
                 )
 
-            skip_meta = self._dedup_check_and_register(tool_name, planned.rewritten_query)
+            # For delta tools (file_name + pattern), include all retrieval-
+            # shaping args in the dedup key so different patterns on the same
+            # file are not falsely deduplicated.
+            if source_kind in ("delta_table",):
+                dedup_parts = []
+                for k in sorted(planned.arguments.keys()):
+                    v = planned.arguments[k]
+                    if v is not None and v != "" and k != "_alternate_queries":
+                        dedup_parts.append(f"{k}={str(v).lower().strip()}")
+                dedup_query = " ".join(dedup_parts)
+            else:
+                dedup_query = planned.rewritten_query
+
+            skip_meta = self._dedup_check_and_register(tool_name, dedup_query)
             if skip_meta is not None:
                 return tc.id, f"Skipped duplicate {tool_name} query", [], skip_meta
 
