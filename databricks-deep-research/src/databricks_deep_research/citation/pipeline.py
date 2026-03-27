@@ -28,7 +28,7 @@ import time
 from collections import Counter
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from hashlib import md5
+from hashlib import sha256
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
@@ -2473,7 +2473,7 @@ def _build_softened_fact_text(claim_text: str, context: str | None) -> str:
         "According to available information,",
         "Reportedly,",
     ]
-    hedge_idx = md5(clean_text.encode("utf-8")).digest()[0] % len(hedging_phrases)
+    hedge_idx = sha256(clean_text.encode("utf-8")).digest()[0] % len(hedging_phrases)
     hedge = hedging_phrases[hedge_idx]
     return f"{hedge} {_normalize_softened_lead(clean_text)}"
 

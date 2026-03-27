@@ -1,5 +1,7 @@
 """FastAPI application entry point."""
 
+import databricks_deep_research._fips_compat  # noqa: F401  # FIPS md5 patch
+
 import asyncio
 import contextlib
 import logging

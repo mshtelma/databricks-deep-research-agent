@@ -16,6 +16,8 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+import databricks_deep_research._fips_compat  # noqa: F401, E402  # FIPS md5 patch
+
 # Load .env file
 from dotenv import load_dotenv  # noqa: E402
 

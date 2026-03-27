@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 def _build_request_id(tool_name: str, arguments: dict[str, Any], scope: str) -> str:
     raw = json.dumps({"tool": tool_name, "args": arguments, "scope": scope}, sort_keys=True)
-    return hashlib.md5(raw.encode()).hexdigest()
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ class ToolCallCache:
 
     def _make_key(self, tool_name: str, arguments: dict[str, Any], scope: str = "") -> str:
         raw = json.dumps({"tool": tool_name, "args": arguments, "scope": scope}, sort_keys=True)
-        return hashlib.md5(raw.encode()).hexdigest()
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     def get(
         self,
@@ -201,6 +201,8 @@ class ReactLoop:
         keep_intact_iterations: int = 3,
         dedup_jaccard_threshold: float = 0.8,
         force_convergence: bool = False,
+        convergence_rounds: int = 4,
+        per_tool_limits: dict[str, int] | None = None,
     ) -> None:
         self._llm = llm_client
         self._ctx = tool_context or ToolContext()
@@ -231,10 +233,19 @@ class ReactLoop:
         self._last_round_tool: str = ""
         self._budget_warned: bool = False
         self._force_convergence = force_convergence
+        self._convergence_rounds = convergence_rounds
         self._active_tool_names: set[str] | None = None  # None = all tools allowed
         self._compact_after_rounds: int = max(2, max_tool_calls * 2 // 5)
         self._keep_intact: int = keep_intact_iterations
         self._jaccard_threshold = dedup_jaccard_threshold
+        self._per_tool_limits: dict[str, int] = dict(per_tool_limits) if per_tool_limits else {}
+        self._per_tool_counts: dict[str, int] = {}
+        # Pre-compute set for O(1) lookup — budget-free tools don't count
+        # against max_tool_calls budget.
+        self._budget_free_tools: frozenset[str] = frozenset(
+            t.definition.name for t in tools
+            if t.definition.metadata.get("budget_free", False)
+        )
 
     # -- Budget-aware guidance -----------------------------------------------
 
@@ -256,7 +267,7 @@ class ReactLoop:
         # Only fires when force_convergence is enabled (discovery-style nodes).
         # Phase 1 (round 4): restrict to compute-only for final calculations.
         # Phase 2 (round 5+): no tools — execution gate rejects all calls.
-        if self._force_convergence and self._consecutive_zero_novel_rounds >= 4:
+        if self._force_convergence and self._consecutive_zero_novel_rounds >= self._convergence_rounds:
             compute_tool = self._all_tools.get("compute")
             has_stored_values = (
                 compute_tool is not None
@@ -264,23 +275,24 @@ class ReactLoop:
                 and bool(getattr(compute_tool, "_namespace", None))
             )
             if has_stored_values:
-                if self._consecutive_zero_novel_rounds == 4:
+                if self._consecutive_zero_novel_rounds == self._convergence_rounds:
                     # Phase 1: compute-only for final calculations
                     messages.append({
                         "role": "system",
                         "content": (
-                            "FORCED CONVERGENCE: 4 consecutive tool-call rounds returned no "
+                            f"FORCED CONVERGENCE: {self._convergence_rounds} consecutive tool-call rounds returned no "
                             "new data. You have stored values in compute. Perform any final "
                             "calculations now, then output your COMPLETE FINDINGS."
                         ),
                     })
                     logger.info(
-                        "REACT_FORCED_CONVERGENCE node=%s zero_novel_rounds=%d phase=compute_only",
-                        self._node_id, self._consecutive_zero_novel_rounds,
+                        "REACT_FORCED_CONVERGENCE node=%s zero_novel_rounds=%d threshold=%d phase=compute_only",
+                        self._node_id, self._consecutive_zero_novel_rounds, self._convergence_rounds,
                     )
                     compute_defs = [
                         td for td in self._tool_defs
                         if td["function"]["name"] == "compute"
+                        or td["function"]["name"] in self._budget_free_tools
                     ]
                     return compute_defs if compute_defs else []
                 else:
@@ -293,8 +305,8 @@ class ReactLoop:
                         ),
                     })
                     logger.info(
-                        "REACT_FORCED_CONVERGENCE node=%s zero_novel_rounds=%d phase=text_only",
-                        self._node_id, self._consecutive_zero_novel_rounds,
+                        "REACT_FORCED_CONVERGENCE node=%s zero_novel_rounds=%d threshold=%d phase=text_only",
+                        self._node_id, self._consecutive_zero_novel_rounds, self._convergence_rounds,
                     )
                     return []  # Empty → _active_tool_names = set() → gate rejects all
 
@@ -315,6 +327,7 @@ class ReactLoop:
             compute_defs = [
                 td for td in self._tool_defs
                 if td["function"]["name"] == "compute"
+                or td["function"]["name"] in self._budget_free_tools
             ]
             return compute_defs if compute_defs else None
 
@@ -599,10 +612,20 @@ class ReactLoop:
                 to_execute: list[tuple[ToolCall, dict[str, Any]]] = []
                 sources_before_round = len(sources)
 
+                budget_exhausted = False
                 for tc in response.tool_calls:
-                    if call_count >= self._max_tool_calls:
-                        break
-                    call_count += 1
+                    is_free = tc.function_name in self._budget_free_tools
+
+                    if not is_free:
+                        if budget_exhausted or call_count >= self._max_tool_calls:
+                            budget_exhausted = True
+                            responded_tc_ids.add(tc.id)
+                            messages.append(self._tool_msg(
+                                tc.id, "Error: tool call budget exhausted",
+                            ))
+                            continue
+                        call_count += 1
+
                     try:
                         args = json.loads(tc.arguments) if tc.arguments else {}
                     except json.JSONDecodeError:
@@ -692,9 +715,6 @@ class ReactLoop:
                             tool_success=bool(tool_result_meta.get("tool_success", True)),
                             tool_error=str(tool_result_meta.get("tool_error", "") or ""),
                         ))
-
-                    if call_count >= self._max_tool_calls:
-                        break
 
                 # Ensure ALL tool_calls have tool_result messages (prevents
                 # "tool_use without tool_result" errors from Anthropic API)
@@ -840,6 +860,27 @@ class ReactLoop:
             self._node_id, tool_name,
             {k: str(v)[:200] for k, v in log_args.items()},
         )
+
+        # ── Per-tool call limits ────────────────────────────
+        if tool_name in self._per_tool_limits:
+            limit = self._per_tool_limits[tool_name]
+            count = self._per_tool_counts.get(tool_name, 0)
+            self._per_tool_counts[tool_name] = count + 1  # always count attempt
+            if count >= limit:
+                logger.info(
+                    "REACT_TOOL_BUDGET_EXHAUSTED node=%s tool=%s used=%d limit=%d",
+                    self._node_id, tool_name, count, limit,
+                )
+                return tc.id, (
+                    f"Tool '{tool_name}' budget exhausted ({count}/{limit} calls used). "
+                    f"Use a different tool or write your findings."
+                ), [], {
+                    "tool_success": False,
+                    "tool_error": f"tool_budget_exhausted:{tool_name}",
+                    "raw_source_count": 0,
+                    "accepted_source_count": 0,
+                    "rejected_source_count": 0,
+                }
 
         try:
             # Check for VS query optimization (LLM or passthrough mode)

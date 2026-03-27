@@ -402,6 +402,8 @@ async def execute_agent(
                 keep_intact_iterations=config.keep_intact_iterations,
                 dedup_jaccard_threshold=config.dedup_jaccard_threshold,
                 force_convergence=config.force_convergence,
+                convergence_rounds=config.convergence_rounds,
+                per_tool_limits=config.per_tool_limits,
             )
             result = await loop.execute(messages)
             content = result.content
@@ -692,6 +694,20 @@ async def _build_input(
             continue
         context[key] = value
 
+    # Auto-inject compute namespace summary for downstream agents.
+    # Enables prompts to reference {compute_namespace} without discovery calls.
+    ns_summary = "(compute tool not available)"
+    for tool in tools:
+        if hasattr(tool, "namespace_snapshot") and callable(tool.namespace_snapshot):
+            try:
+                ns_summary = tool.namespace_snapshot()
+            except Exception:
+                logger.warning("NAMESPACE_SNAPSHOT_FAILED node=%s", _node_id, exc_info=True)
+                ns_summary = "(error reading compute namespace)"
+            break
+    if context.get("compute_namespace") is None:
+        context["compute_namespace"] = ns_summary
+
     sources_pool = pools.get("sources")
     if sources_pool is not None and sources_pool.count() > 0:
         pooled_sources = sources_pool.snapshot()
@@ -702,11 +718,12 @@ async def _build_input(
             if isinstance(item, dict):
                 quality = str(item.get("evidence_quality", "unknown"))
                 quality_counts[quality] = quality_counts.get(quality, 0) + 1
-        context.setdefault("source_quality", {
-            "substantive_sources": substantive,
-            "low_value_sources": low_value,
-            "quality_counts": quality_counts,
-        })
+        if context.get("source_quality") is None:
+            context["source_quality"] = {
+                "substantive_sources": substantive,
+                "low_value_sources": low_value,
+                "quality_counts": quality_counts,
+            }
 
     # Render prompts with variable substitution.
     # ``state.query`` is always available; context keys only override when

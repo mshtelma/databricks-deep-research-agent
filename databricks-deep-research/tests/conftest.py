@@ -1,6 +1,8 @@
 """Shared test fixtures for the framework test suite."""
 from __future__ import annotations
 
+import databricks_deep_research._fips_compat  # noqa: F401  # FIPS md5 patch
+
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any, TypeVar

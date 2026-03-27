@@ -283,6 +283,54 @@ class TestForceConvergenceConfig:
         config = AgentNodeConfig(subtype="synthesizer")
         assert config.force_convergence is False
 
+    def test_convergence_rounds_config_field(self) -> None:
+        """AgentNodeConfig accepts convergence_rounds with default=4."""
+        config = AgentNodeConfig(subtype="researcher")
+        assert config.convergence_rounds == 4
+        config2 = AgentNodeConfig(subtype="researcher", convergence_rounds=10)
+        assert config2.convergence_rounds == 10
+
+    def test_custom_convergence_threshold_phase1(self) -> None:
+        """With threshold=6, phase 1 fires at round 6."""
+        compute = _make_tool("compute")
+        compute._namespace = {"val1": 42}
+        search = _make_search_tool()
+        loop = ReactLoop(MagicMock(), [search, compute], max_tool_calls=80,
+                         force_convergence=True, convergence_rounds=6)
+        loop._consecutive_zero_novel_rounds = 6
+        msgs: list[dict] = []
+        restricted = loop._inject_budget_guidance(msgs, remaining=60)
+        assert any("FORCED CONVERGENCE" in m.get("content", "") for m in msgs)
+        assert restricted is not None
+        assert len(restricted) == 1
+        assert restricted[0]["function"]["name"] == "compute"
+
+    def test_custom_threshold_no_convergence_at_default(self) -> None:
+        """With threshold=6, round 4 does NOT fire convergence."""
+        compute = _make_tool("compute")
+        compute._namespace = {"val1": 42}
+        search = _make_search_tool()
+        loop = ReactLoop(MagicMock(), [search, compute], max_tool_calls=80,
+                         force_convergence=True, convergence_rounds=6)
+        loop._consecutive_zero_novel_rounds = 4
+        msgs: list[dict] = []
+        restricted = loop._inject_budget_guidance(msgs, remaining=60)
+        assert not any("FORCED CONVERGENCE" in m.get("content", "") for m in msgs)
+        assert restricted is None
+
+    def test_custom_threshold_10_phase2(self) -> None:
+        """With threshold=10, round 11 fires phase 2 (text-only)."""
+        compute = _make_tool("compute")
+        compute._namespace = {"val1": 42}
+        search = _make_search_tool()
+        loop = ReactLoop(MagicMock(), [search, compute], max_tool_calls=80,
+                         force_convergence=True, convergence_rounds=10)
+        loop._consecutive_zero_novel_rounds = 11
+        msgs: list[dict] = []
+        restricted = loop._inject_budget_guidance(msgs, remaining=60)
+        assert any("FINAL WARNING" in m.get("content", "") for m in msgs)
+        assert restricted == []
+
 
 # ---------------------------------------------------------------------------
 # Namespace fallback

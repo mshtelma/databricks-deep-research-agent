@@ -5,7 +5,7 @@ description = "Deep Research application - FastAPI backend + React frontend for 
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "databricks-deep-research",
+    "databricks-deep-research[all]",
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
     "pydantic>=2.5.0",

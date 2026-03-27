@@ -632,3 +632,302 @@ class TestNamespaceSafety:
         tool = _make_tool()
         with pytest.raises(ValueError, match="maximum length"):
             tool.validate_arguments({"code": "x" * 21000})
+
+
+# ---------------------------------------------------------------------------
+# Sandbox introspection contract (Change 6e)
+# ---------------------------------------------------------------------------
+
+
+class TestSandboxIntrospectionContract:
+    """Verify sandbox contract: introspection builtins are not available,
+    but try/except NameError works for variable existence checks."""
+
+    @pytest.mark.asyncio
+    async def test_globals_not_available(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(tool, "globals()")
+        assert result.success is False
+        assert "NameError" in result.content
+
+    @pytest.mark.asyncio
+    async def test_vars_not_available(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(tool, "vars()")
+        assert result.success is False
+        assert "NameError" in result.content
+
+    @pytest.mark.asyncio
+    async def test_locals_not_available(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(tool, "locals()")
+        assert result.success is False
+        assert "NameError" in result.content
+
+    @pytest.mark.asyncio
+    async def test_dir_not_available(self) -> None:
+        tool = _make_tool()
+        result = await _run_result(tool, "dir()")
+        assert result.success is False
+        assert "NameError" in result.content
+
+    @pytest.mark.asyncio
+    async def test_try_bare_except_works(self) -> None:
+        """Bare except works for variable existence checks."""
+        tool = _make_tool()
+        out = await _run(tool, "try:\n    missing_var\nexcept:\n    print('not found')")
+        assert "not found" in out
+
+    @pytest.mark.asyncio
+    async def test_try_except_with_existing_var(self) -> None:
+        tool = _make_tool()
+        await _run(tool, "op1 = 42")
+        out = await _run(tool, "try:\n    print('op1 =', op1)\nexcept:\n    print('not found')")
+        assert "op1 = 42" in out
+
+    @pytest.mark.asyncio
+    async def test_cross_call_dict_growth(self) -> None:
+        """Dict created in call 1, mutated in call 2, persists."""
+        tool = _make_tool()
+        await _run(tool, "d = {}; d['op1'] = 100")
+        await _run(tool, "d['op2'] = 200")
+        out = await _run(tool, "print(d)")
+        assert "'op1': 100" in out
+        assert "'op2': 200" in out
+
+    # -- namespace_snapshot() tests (Change 7) --------------------------------
+
+    @pytest.mark.asyncio
+    async def test_namespace_snapshot_returns_stored_vars(self) -> None:
+        tool = _make_tool()
+        await _run(tool, "op1 = 42")
+        await _run(tool, "op2 = 99")
+        snap = tool.namespace_snapshot()
+        assert "op1 = 42" in snap
+        assert "op2 = 99" in snap
+
+    def test_namespace_snapshot_empty(self) -> None:
+        tool = _make_tool()
+        snap = tool.namespace_snapshot()
+        assert snap == "(empty — no variables stored)"
+
+    @pytest.mark.asyncio
+    async def test_namespace_snapshot_filters_underscore_prefix(self) -> None:
+        tool = _make_tool()
+        await _run(tool, "_tmp = 1")
+        await _run(tool, "op1 = 2")
+        snap = tool.namespace_snapshot()
+        assert "op1 = 2" in snap
+        assert "_tmp" not in snap
+
+    @pytest.mark.asyncio
+    async def test_namespace_snapshot_truncates_long_values(self) -> None:
+        tool = _make_tool()
+        await _run(tool, "big = list(range(100))")
+        snap = tool.namespace_snapshot()
+        assert "big = " in snap
+        assert "..." in snap
+
+    @pytest.mark.asyncio
+    async def test_namespace_snapshot_total_truncation(self) -> None:
+        """Store many variables — total capped at 2000 chars with '... (N more)'."""
+        tool = _make_tool()
+        # Create 50 variables with moderately long values
+        for i in range(50):
+            await _run(tool, f"var_{i:03d} = 'value_{i:03d}_padding_text_here'")
+        snap = tool.namespace_snapshot()
+        assert len(snap) <= 2200  # allow small overshoot for the truncation message
+        assert "... (" in snap
+        assert "more variables)" in snap
+
+    @pytest.mark.asyncio
+    async def test_namespace_snapshot_excludes_non_safe_types(self) -> None:
+        """Non-safe-type objects (custom classes) are excluded from snapshot."""
+        tool = _make_tool()
+        await _run(tool, "op1 = 42")
+        # Inject a non-safe-type object directly
+        tool._namespace["broken"] = type("Broken", (), {})()
+        snap = tool.namespace_snapshot()
+        assert "op1 = 42" in snap
+        assert "broken" not in snap
+
+    @pytest.mark.asyncio
+    async def test_namespace_snapshot_contains_dict_with_braces(self) -> None:
+        """Dict values with braces appear literally (no escaping needed)."""
+        tool = _make_tool()
+        await _run(tool, "d = {'a': 1, 'b': 2}")
+        snap = tool.namespace_snapshot()
+        assert "d = " in snap
+        assert "'a'" in snap
+        assert "'b'" in snap
+
+
+# ---------------------------------------------------------------------------
+# Submodule imports (Change 8 — Phase 1a)
+# ---------------------------------------------------------------------------
+
+
+class TestSubmoduleImports:
+    @pytest.mark.asyncio
+    async def test_submodule_from_import(self) -> None:
+        """from collections.abc import Mapping should work."""
+        tool = _make_tool()
+        result = await _run_result(
+            tool, "from collections.abc import Mapping\nprint(isinstance({}, Mapping))"
+        )
+        assert result.success
+        assert "True" in result.content
+
+    @pytest.mark.asyncio
+    async def test_submodule_bare_import(self) -> None:
+        """import collections.abc — returns root module per CPython protocol."""
+        tool = _make_tool()
+        result = await _run_result(
+            tool, "import collections\nfrom collections import OrderedDict\nprint(OrderedDict())"
+        )
+        assert result.success
+
+    @pytest.mark.asyncio
+    async def test_submodule_nonexistent_raises(self) -> None:
+        """import collections.nonexistent → clear ImportError."""
+        tool = _make_tool()
+        result = await _run_result(tool, "from collections import nonexistent_xyz")
+        assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_blocked_root_with_submodule(self) -> None:
+        """import os.path → ImportError (os not whitelisted)."""
+        tool = _make_tool()
+        result = await _run_result(tool, "import os.path")
+        assert result.success is False
+        assert "not available" in result.content.lower()
+
+    @pytest.mark.asyncio
+    async def test_submodule_extra_numpy(self) -> None:
+        """from numpy.linalg import norm — via extra_modules."""
+        pytest.importorskip("numpy")
+        tool = _make_tool(extra_modules=["numpy"])
+        result = await _run_result(
+            tool, "from numpy.linalg import norm\nprint(norm([3, 4]))"
+        )
+        assert result.success
+        assert "5" in result.content
+
+
+# ---------------------------------------------------------------------------
+# Safe builtins expansion (Change 8 — Phase 1b)
+# ---------------------------------------------------------------------------
+
+
+class TestSafeBuiltinsExpansion:
+    @pytest.mark.asyncio
+    async def test_exception_types_in_try_except(self) -> None:
+        """try: 1/0 except ZeroDivisionError: 'caught'."""
+        tool = _make_tool()
+        out = await _run(
+            tool, "try:\n    1/0\nexcept ZeroDivisionError:\n    print('caught')"
+        )
+        assert "caught" in out
+
+    @pytest.mark.asyncio
+    async def test_hasattr_available(self) -> None:
+        tool = _make_tool()
+        out = await _run(tool, "hasattr([], 'append')")
+        assert "True" in out
+
+    @pytest.mark.asyncio
+    async def test_hex_bin_oct(self) -> None:
+        tool = _make_tool()
+        out = await _run(tool, "print(hex(255), bin(10), oct(8))")
+        assert "0xff" in out
+        assert "0b1010" in out
+        assert "0o10" in out
+
+    @pytest.mark.asyncio
+    async def test_value_error_catchable(self) -> None:
+        tool = _make_tool()
+        out = await _run(
+            tool, "try:\n    int('abc')\nexcept ValueError:\n    print('caught ValueError')"
+        )
+        assert "caught ValueError" in out
+
+    @pytest.mark.asyncio
+    async def test_key_error_catchable(self) -> None:
+        tool = _make_tool()
+        out = await _run(
+            tool, "try:\n    {}['missing']\nexcept KeyError:\n    print('caught KeyError')"
+        )
+        assert "caught KeyError" in out
+
+    @pytest.mark.asyncio
+    async def test_name_error_catchable(self) -> None:
+        tool = _make_tool()
+        out = await _run(
+            tool, "try:\n    undefined_xyz\nexcept NameError:\n    print('caught NameError')"
+        )
+        assert "caught NameError" in out
+
+
+# ---------------------------------------------------------------------------
+# list_user_namespace() (Change 8 — Phase 1c)
+# ---------------------------------------------------------------------------
+
+
+class TestListUserNamespace:
+    @pytest.mark.asyncio
+    async def test_list_user_namespace_basic(self) -> None:
+        tool = _make_tool()
+        await _run(tool, "op1 = 42")
+        await _run(tool, "op2 = 99")
+        entries = tool.list_user_namespace()
+        names = {e["name"] for e in entries}
+        assert "op1" in names
+        assert "op2" in names
+
+    @pytest.mark.asyncio
+    async def test_list_user_namespace_prefix(self) -> None:
+        tool = _make_tool()
+        await _run(tool, "op1 = 10")
+        await _run(tool, "op2 = 20")
+        await _run(tool, "total = 30")
+        entries = tool.list_user_namespace(prefix="op")
+        names = {e["name"] for e in entries}
+        assert names == {"op1", "op2"}
+
+    @pytest.mark.asyncio
+    async def test_list_user_namespace_names(self) -> None:
+        tool = _make_tool()
+        await _run(tool, "op1 = 10")
+        await _run(tool, "op2 = 20")
+        await _run(tool, "op3 = 30")
+        entries = tool.list_user_namespace(names=["op1"])
+        assert len(entries) == 1
+        assert entries[0]["name"] == "op1"
+
+    @pytest.mark.asyncio
+    async def test_list_user_namespace_filters_modules(self) -> None:
+        """Stored module refs are excluded (not safe type)."""
+        tool = _make_tool()
+        await _run(tool, "import math")
+        # math module in namespace should be filtered out
+        entries = tool.list_user_namespace()
+        names = {e["name"] for e in entries}
+        assert "math" not in names
+
+    @pytest.mark.asyncio
+    async def test_list_user_namespace_filters_underscore(self) -> None:
+        tool = _make_tool()
+        await _run(tool, "_tmp = 1")
+        await _run(tool, "visible = 2")
+        entries = tool.list_user_namespace()
+        names = {e["name"] for e in entries}
+        assert "_tmp" not in names
+        assert "visible" in names
+
+    @pytest.mark.asyncio
+    async def test_list_user_namespace_truncates(self) -> None:
+        tool = _make_tool()
+        await _run(tool, "big = list(range(200))")
+        entries = tool.list_user_namespace(max_value_repr=50)
+        assert len(entries) == 1
+        assert entries[0]["value"].endswith("...")

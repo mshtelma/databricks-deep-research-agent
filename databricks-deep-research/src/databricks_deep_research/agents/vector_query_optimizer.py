@@ -334,8 +334,8 @@ Return ONLY valid JSON (no markdown, no commentary):
         """Stable dedup key: hash of content (or fallback to title + snippet)."""
         text = source.content or source.snippet or ""
         if text:
-            return hashlib.md5(text.encode()).hexdigest()
-        return hashlib.md5(f"{source.title}|{source.snippet}".encode()).hexdigest()
+            return hashlib.sha256(text.encode()).hexdigest()
+        return hashlib.sha256(f"{source.title}|{source.snippet}".encode()).hexdigest()
 
     # -- Stage 3: LLM Reranking --
 

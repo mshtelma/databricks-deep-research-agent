@@ -22,7 +22,7 @@ class TestClaimFingerprinting:
         fp1 = IsolatedVerifier.fingerprint_claim(claim)
         fp2 = IsolatedVerifier.fingerprint_claim(claim)
         assert fp1 == fp2
-        assert len(fp1) == 16  # 16-char MD5 hash
+        assert len(fp1) == 16  # 16-char SHA-256 hash
 
     def test_fingerprint_case_insensitive(self) -> None:
         """Test fingerprinting is case-insensitive."""

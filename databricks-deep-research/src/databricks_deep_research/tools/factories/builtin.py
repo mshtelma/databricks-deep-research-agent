@@ -7,7 +7,7 @@ from databricks_deep_research.tools.protocol import ResearchTool
 from databricks_deep_research.workflow.definition import ToolDeclaration
 
 _SUPPORTED_KINDS = frozenset({
-    "web_search", "web_crawl", "file_search", "compute",
+    "web_search", "web_crawl", "file_search", "compute", "compute_namespace",
     "delta_read", "delta_grep", "delta_context",
 })
 
@@ -64,6 +64,26 @@ class BuiltinToolFactory:
                 max_execution_seconds=decl.config.get("max_execution_seconds", 10.0),
                 max_output_chars=decl.config.get("max_output_chars", 10_000),
                 max_code_length=decl.config.get("max_code_length", 20_000),
+                description=decl.description,
+            )
+
+        if decl.kind == "compute_namespace":
+            from databricks_deep_research.tools.builtins.compute import PythonComputeTool
+            from databricks_deep_research.tools.builtins.compute_namespace import (
+                ComputeNamespaceListTool,
+            )
+
+            def _resolve_compute() -> PythonComputeTool | None:
+                """Lazy resolution: look up sibling 'compute' tool from resolver cache."""
+                compute_name = decl.config.get("compute_tool_name", "compute")
+                cached = ctx.extras.get("_resolver_cache", {}).get(compute_name)
+                if isinstance(cached, PythonComputeTool):
+                    return cached
+                return None
+
+            return ComputeNamespaceListTool(
+                compute_resolver=_resolve_compute,
+                name=decl.name,
                 description=decl.description,
             )
 

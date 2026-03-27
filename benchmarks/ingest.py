@@ -16,6 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import databricks_deep_research._fips_compat  # noqa: F401, E402  # FIPS md5 patch
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)-5s %(name)s — %(message)s",

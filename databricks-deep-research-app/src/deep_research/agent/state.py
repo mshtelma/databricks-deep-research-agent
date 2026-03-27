@@ -456,7 +456,7 @@ class ResearchState:
     # Maps claim fingerprint -> VerificationResult to avoid redundant verification
     # of identical/near-identical claims within the same research session.
     # The cache is NOT persisted - it's cleared when a new research session starts.
-    # Key: 16-char MD5 hash of normalized claim text
+    # Key: 16-char SHA-256 hash of normalized claim text
     # Value: VerificationResult from isolated_verifier
     _verification_cache: dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -890,7 +890,7 @@ class ResearchState:
         """Get a cached verification result by claim fingerprint.
 
         Args:
-            claim_fingerprint: 16-char MD5 hash of normalized claim.
+            claim_fingerprint: 16-char SHA-256 hash of normalized claim.
 
         Returns:
             Cached VerificationResult or None if not cached.
@@ -904,7 +904,7 @@ class ResearchState:
         Use cache_verification_async() for parallel tool execution.
 
         Args:
-            claim_fingerprint: 16-char MD5 hash of normalized claim.
+            claim_fingerprint: 16-char SHA-256 hash of normalized claim.
             result: VerificationResult to cache.
         """
         self._verification_cache[claim_fingerprint] = result
@@ -913,7 +913,7 @@ class ResearchState:
         """Cache a verification result for future reuse (async-safe).
 
         Args:
-            claim_fingerprint: 16-char MD5 hash of normalized claim.
+            claim_fingerprint: 16-char SHA-256 hash of normalized claim.
             result: VerificationResult to cache.
         """
         async with self._cache_lock:

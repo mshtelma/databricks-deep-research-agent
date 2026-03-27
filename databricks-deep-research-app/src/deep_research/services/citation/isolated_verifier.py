@@ -362,12 +362,12 @@ class IsolatedVerifier:
             claim_text: The claim text to fingerprint.
 
         Returns:
-            16-character MD5 hash of normalized claim.
+            16-character SHA-256 hash of normalized claim.
         """
         # Normalize: lowercase, remove punctuation, sort words
         normalized = re.sub(r"[^\w\s]", "", claim_text.lower())
         words = sorted(normalized.split())
-        return hashlib.md5(" ".join(words).encode()).hexdigest()[:16]
+        return hashlib.sha256(" ".join(words).encode()).hexdigest()[:16]
 
     def _format_claims_for_batch(
         self,

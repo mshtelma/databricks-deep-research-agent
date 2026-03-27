@@ -99,6 +99,39 @@ _SAFE_BUILTINS_BASE: dict[str, Any] = {
     "ord": ord,
     "hash": hash,
     "id": id,
+    # Number formatting
+    "hex": hex,
+    "bin": bin,
+    "oct": oct,
+    # Inspection (safe — returns bool only)
+    "ascii": ascii,
+    "callable": callable,
+    "hasattr": hasattr,
+    # Object / type
+    "object": object,
+    "slice": slice,
+    "memoryview": memoryview,
+    "property": property,
+    "staticmethod": staticmethod,
+    "classmethod": classmethod,
+    "super": super,
+    # Exception types (precise try/except)
+    "Exception": Exception,
+    "ValueError": ValueError,
+    "TypeError": TypeError,
+    "KeyError": KeyError,
+    "IndexError": IndexError,
+    "ZeroDivisionError": ZeroDivisionError,
+    "StopIteration": StopIteration,
+    "ArithmeticError": ArithmeticError,
+    "OverflowError": OverflowError,
+    "RuntimeError": RuntimeError,
+    "AttributeError": AttributeError,
+    "NameError": NameError,
+    "ImportError": ImportError,
+    "LookupError": LookupError,
+    "NotImplementedError": NotImplementedError,
+    "FileNotFoundError": FileNotFoundError,
     # None / True / False are always available
     "None": None,
     "True": True,
@@ -139,13 +172,26 @@ def _restricted_import(
 
     Retained at module level for backward compatibility.  New instances use
     per-instance closures instead (see ``PythonComputeTool.__init__``).
+
+    Supports submodule imports (e.g. ``from numpy.polynomial import polynomial``)
+    by traversing attributes of whitelisted root modules.
     """
-    if name not in _ALLOWED_IMPORT_MODULES:
+    root = name.split(".")[0]
+    if root not in _ALLOWED_IMPORT_MODULES:
         available = ", ".join(sorted(_ALLOWED_IMPORT_MODULES.keys()))
         raise ImportError(
             f"Module '{name}' is not available. Available: {available}"
         )
-    return _ALLOWED_IMPORT_MODULES[name]
+    mod = _ALLOWED_IMPORT_MODULES[root]
+    for part in name.split(".")[1:]:
+        try:
+            mod = getattr(mod, part)
+        except AttributeError:
+            raise ImportError(f"Module '{name}' has no submodule '{part}'") from None
+    # CPython protocol: with fromlist → return leaf; without → return root
+    if fromlist:
+        return mod
+    return _ALLOWED_IMPORT_MODULES[root]
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +245,9 @@ def _validate_ast(tree: ast.Module) -> None:
 _MAX_CODE_LENGTH = 20_000
 
 _MAX_NAMESPACE_ENTRIES = 200
+
+_NS_MAX_VALUE_REPR = 200
+_NS_MAX_TOTAL_CHARS = 2000
 
 _DEFAULT_DESCRIPTION = (
     "Execute Python code for calculations. "
@@ -304,12 +353,24 @@ class PythonComputeTool:
             fromlist: tuple[str, ...] = (),
             level: int = 0,
         ) -> Any:
-            if name not in allowed_ref:
+            root = name.split(".")[0]
+            if root not in allowed_ref:
                 available = ", ".join(sorted(allowed_ref.keys()))
                 raise ImportError(
                     f"Module '{name}' is not available. Available: {available}"
                 )
-            return allowed_ref[name]
+            mod = allowed_ref[root]
+            for part in name.split(".")[1:]:
+                try:
+                    mod = getattr(mod, part)
+                except AttributeError:
+                    raise ImportError(
+                        f"Module '{name}' has no submodule '{part}'"
+                    ) from None
+            # CPython protocol: with fromlist → return leaf; without → return root
+            if fromlist:
+                return mod
+            return allowed_ref[root]
 
         # ---- Per-instance safe builtins ----
         self._safe_builtins: dict[str, Any] = dict(_SAFE_BUILTINS_BASE)
@@ -348,6 +409,73 @@ class PythonComputeTool:
             source_type="builtin",
             source_kind=SourceKind.builtin,
         )
+
+    # -- Namespace inspection (framework-facing, NOT exposed to sandbox) -----
+
+    _SAFE_NAMESPACE_TYPES = (int, float, str, bool, list, dict, tuple, type(None))
+
+    def list_user_namespace(
+        self,
+        *,
+        prefix: str | None = None,
+        names: list[str] | None = None,
+        max_items: int = 50,
+        include_values: bool = True,
+        max_value_repr: int = _NS_MAX_VALUE_REPR,
+    ) -> list[dict[str, Any]]:
+        """Return filtered, structured snapshot of user-defined variables.
+
+        Thread-safe.  Does not execute code or modify namespace.
+        """
+        with self._lock:
+            entries: list[dict[str, Any]] = []
+            for k, v in self._namespace.items():
+                if k.startswith("_"):
+                    continue
+                if not isinstance(v, self._SAFE_NAMESPACE_TYPES):
+                    continue
+                if names is not None and k not in names:
+                    continue
+                if prefix is not None and not k.startswith(prefix):
+                    continue
+                entry: dict[str, Any] = {"name": k, "type": type(v).__name__}
+                if include_values:
+                    val_repr = repr(v)
+                    if len(val_repr) > max_value_repr:
+                        val_repr = val_repr[:max_value_repr] + "..."
+                    entry["value"] = val_repr
+                entries.append(entry)
+                if len(entries) >= max_items:
+                    break
+            return entries
+
+    def namespace_snapshot(self) -> str:
+        """Return prompt-safe summary of user-defined variables.
+
+        Used by the agent harness to inject namespace state into downstream
+        agent prompts, eliminating namespace-discovery tool calls.
+        Delegates to ``list_user_namespace`` for filtering/repr logic.
+        """
+        entries = self.list_user_namespace(
+            max_items=50, max_value_repr=_NS_MAX_VALUE_REPR,
+        )
+        if not entries:
+            return "(empty — no variables stored)"
+
+        lines = [f"  {e['name']} = {e.get('value', '?')}" for e in entries]
+        result = "\n".join(lines)
+        if len(result) > _NS_MAX_TOTAL_CHARS:
+            truncated: list[str] = []
+            chars = 0
+            for line in lines:
+                if chars + len(line) + 1 > _NS_MAX_TOTAL_CHARS:
+                    remaining_count = len(lines) - len(truncated)
+                    truncated.append(f"  ... ({remaining_count} more variables)")
+                    break
+                truncated.append(line)
+                chars += len(line) + 1
+            result = "\n".join(truncated)
+        return result
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         code = arguments.get("code", "")

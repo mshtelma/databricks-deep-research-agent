@@ -71,12 +71,28 @@ tools:
     config:
       max_execution_seconds: 30
       max_code_length: 30000
-      extra_modules: [numpy]
+      extra_modules: [numpy, scipy, pandas]
     description: >
-      Execute Python code for calculations. Available modules: math, statistics,
-      decimal, datetime, json, re, fractions, itertools, functools, collections,
-      operator, copy, calendar, string, textwrap, numpy (if installed).
-      Variables persist across calls within the same session.
+      Execute Python code for calculations and data analysis.
+      Standard library: math, statistics, decimal, datetime, json, re,
+      fractions, itertools, functools, collections, operator, copy,
+      calendar, string, textwrap.
+      Data science: numpy, scipy, pandas (if installed).
+      Submodule imports: from numpy.polynomial import polynomial, etc.
+      Exception types: ValueError, TypeError, KeyError, IndexError, etc.
+      Variables persist across calls. Use print() or end with expression.
+      NOT available: globals(), vars(), locals(), dir(), eval(), exec(), open(),
+      getattr(), setattr().
+  - name: compute_namespace_list
+    kind: compute_namespace
+    config:
+      compute_tool_name: compute
+    description: >
+      List variables stored in the shared compute namespace. Returns names,
+      types, and values of variables persisted by compute() calls. Use this
+      to check what operands the researcher stored before computing.
+      Supports filtering: prefix="op" for operand variables.
+      This tool is free — it does not count against your tool call budget.
 
 pools:
   - name: sources
@@ -171,7 +187,7 @@ root:
         subtype: researcher
         model_tier: analytical
         output_key: findings
-        tools: [treasury_search, treasury_file_read, treasury_grep, treasury_context, compute]
+        tools: [treasury_search, treasury_file_read, treasury_grep, treasury_context, compute, compute_namespace_list]
         input_keys: [query, operation_schema]
         pool_writes:
           - pool: observations
@@ -180,6 +196,7 @@ root:
             extract: sources
         max_tool_calls: 80
         force_convergence: true
+        convergence_rounds: 10
         compaction_strategy: mask
         keep_intact_iterations: 25
         max_result_chars: 6000
@@ -248,14 +265,33 @@ root:
           Treasury summary data for a calendar year is typically in the January bulletin
           of the following year (e.g., 1940 data -> treasury_bulletin_1941_01.txt).
 
+          COMPUTE SANDBOX — IMPORTANT:
+          - Variables persist across calls and are shared with downstream agents.
+          - NOT available (NameError): globals(), vars(), locals(), dir(), eval(), exec(), open()
+          - To check if a variable exists, use try/except NameError.
+          - Exception types available: ValueError, TypeError, KeyError, IndexError, ZeroDivisionError, NameError, etc.
+
+          OPERAND STORAGE CONVENTION:
+          After extracting a value for an operand, immediately store it via compute():
+            compute(code="op1 = 2602")
+            compute(code="op1_unit = 'millions of dollars'")
+            compute(code="op1_source_file = 'treasury_bulletin_1940_03.txt'")
+          Use schema operand IDs (op1, op2, ...) as variable names.
+          Optionally store companion metadata: op1_unit, op1_source_file, op1_row_label, op1_column_label.
+          Do NOT use globals(), vars(), dir(), or operand_map dicts.
+          Do NOT build aggregate structures — just store individual variables.
+
           EXTRACTION PROTOCOL — CRITICAL:
-          After finding a relevant value, IMMEDIATELY use compute to store it:
-            compute(code="defense_1940 = 2602; print('Stored: defense_1940 =', defense_1940)")
-          Variables persist across ALL compute calls — they survive compaction.
+          After finding a relevant value, IMMEDIATELY store it as a named variable:
+            compute(code="op1 = 2602; print('Stored: op1 =', op1)")
+          ALWAYS use op1, op2, op3... keys matching the operation_schema operand IDs.
+          Do NOT invent ad-hoc names like defense_1940 — downstream agents expect opN names.
+          Optionally store units alongside: compute(code="op1_unit = 'millions of dollars'")
+          Variables persist across ALL compute calls and are shared with downstream agents.
 
           UNIT RECORDING:
           When storing a value, also record the table's unit header alongside it:
-            compute(code="defense_1940 = 2602; defense_1940_unit = 'millions of dollars'")
+            compute(code="op1 = 2602; op1_unit = 'millions of dollars'")
           Check the table title or header row for the unit. Common patterns:
             "In millions of dollars" -> cell value IS in millions, do NOT rescale.
             "In thousands" -> cell value IS in thousands.
@@ -339,7 +375,7 @@ root:
         subtype: synthesizer
         model_tier: analytical
         output_key: assembled_answer
-        tools: [compute, treasury_grep]
+        tools: [compute, compute_namespace_list, treasury_grep]
         input_keys: [query, operation_schema, findings]
         pool_inject:
           - pool: sources
@@ -349,17 +385,32 @@ root:
           - observations
           - sources
         max_tool_calls: 30
+        per_tool_limits:
+          treasury_grep: 3
         dedup_jaccard_threshold: 0.95
         system_prompt: |
           You are a verifier and calculator. Your job is to:
-          1. select grounded operands,
-          2. perform any needed computation,
-          3. return a compact structured handoff for the final formatter.
+          1. call compute_namespace_list(prefix="op") to see what operands the researcher stored,
+          2. select grounded operands,
+          3. perform any needed computation,
+          4. return a compact structured handoff for the final formatter.
 
           Inputs:
           - Question: {query}
           - Operation schema: {operation_schema}
           - Findings: {findings}
+
+          WORKFLOW:
+          1. Call compute_namespace_list(prefix="op") to see what operands the researcher stored.
+          2. If required operands (from operation_schema) are present, compute the answer directly.
+          3. If an operand is missing, extract it from the findings JSON.
+          4. Use compute() for all calculations — never compute in your head.
+          5. Output structured JSON result.
+
+          SHARED COMPUTE NAMESPACE (auto-injected preview):
+          {compute_namespace}
+          Use compute_namespace_list() for the authoritative, filterable view.
+          Do NOT use globals(), vars(), or dir() — they are not available in the sandbox.
 
           SCALE VALIDATION (before computing):
           If two operands that should be the same unit differ by ~10x, 100x, or 1000x, check
@@ -394,9 +445,9 @@ root:
           suspicious operand before outputting. The most common cause is selecting the wrong row.
 
           TREASURY_GREP USAGE:
-          Use treasury_grep ONLY to spot-check a specific operand's value in its source_file
-          when the findings contain an ambiguous or suspicious value. Limit grep calls to 3 maximum.
-          Spend the rest of your budget on compute.
+          Use treasury_grep ONLY after a reverse-check fails on a specific operand value.
+          You have a hard limit of 3 treasury_grep calls — further calls will be blocked.
+          Spend your budget on compute verification instead.
 
           OUTPUT CONTRACT:
           Return JSON only in this shape:
@@ -445,7 +496,13 @@ root:
           - Assembled answer: {assembled_answer}
 
           PROTOCOL:
-          1. Parse assembled_answer. If status is "data_not_available", pass it through unchanged.
+          1. Parse assembled_answer.
+             - If status is "computed" or "verified": proceed to verification (step 2).
+             - If status is "data_not_available" AND findings or operation_schema contain a source_file:
+               attempt ONE targeted recovery: treasury_grep(file_name=<source_file>, pattern=<key term>, chunk_type="table").
+               If you find the needed value, compute the answer and output status="corrected".
+               If not, output status="data_not_available" after at most 2 tool calls.
+             - If status is "data_not_available" with no source_file hint: pass through unchanged.
           2. Identify the single operand with LARGEST IMPACT on final_value
              (for percent_change, both start and end matter; for lookups, the single value).
           3. Get source_file, row_label, and column_label from assembled_answer's
@@ -493,7 +550,11 @@ root:
           FORMAT NORMALIZATION:
           - Strip currency symbols ($, USD) from inside the FINAL_ANSWER tag unless the question
             explicitly requests a dollar-formatted answer.
-          - For percentages: include the % symbol only if the operation_schema.output_shape is "percentage".
+          - For percentages: include the % symbol if ANY of:
+            (a) operation_schema.output_shape is "percentage", OR
+            (b) the question explicitly asks for "percent", "percentage", or "%", OR
+            (c) the operation is CAGR, growth_rate, or percent_change.
+            Do NOT add % for ratio, coefficient, correlation, or elasticity operations.
           - For lists: use Python list format [val1, val2, val3] with no currency symbols.
           - If verified_answer contains "correction_detail", use the corrected final_value.
 

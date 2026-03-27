@@ -6,7 +6,7 @@ pattern.
 
 Token-optimisation features:
 - Batch verification: process up to 10 claim/evidence pairs per LLM call
-- MD5-based verification cache to skip duplicate claim+evidence pairs
+- SHA-256-based verification cache to skip duplicate claim+evidence pairs
 - Model tier escalation: quick path for high-confidence, full path otherwise
 - Structured output with JSON fallback parsing
 
@@ -211,7 +211,7 @@ class IsolatedVerifier:
 
     - **Single-claim**: Full or quick verification of one claim at a time.
     - **Batch**: Groups multiple claims into a single LLM call (up to
-      ``DEFAULT_BATCH_SIZE`` pairs) with an MD5-based cache to skip
+      ``DEFAULT_BATCH_SIZE`` pairs) with a SHA-256-based cache to skip
       previously-verified claim+evidence pairs.
     """
 
@@ -304,7 +304,7 @@ class IsolatedVerifier:
             claims: List of ``(claim_text, evidence)`` tuples.
             batch_size: Number of claims per batch (default 10).
             use_quick_verification: Use faster, simpler verification.
-            verification_cache: Optional dict keyed by MD5 fingerprint
+            verification_cache: Optional dict keyed by SHA-256 fingerprint
                 for result re-use across invocations.
 
         Returns:
@@ -442,17 +442,17 @@ class IsolatedVerifier:
         """Create normalised fingerprint for claim caching.
 
         Normalisation: lowercase, remove punctuation, sort words, then
-        MD5-hash to a 16-character hex digest.
+        SHA-256-hash to a 16-character hex digest.
 
         Args:
             claim_text: The claim text to fingerprint.
 
         Returns:
-            16-character MD5 hex digest.
+            16-character SHA-256 hex digest.
         """
         normalised = re.sub(r"[^\w\s]", "", claim_text.lower())
         words = sorted(normalised.split())
-        return hashlib.md5(" ".join(words).encode()).hexdigest()[:16]
+        return hashlib.sha256(" ".join(words).encode()).hexdigest()[:16]
 
     @staticmethod
     def fingerprint_pair(claim_text: str, evidence_text: str) -> str:
@@ -466,12 +466,12 @@ class IsolatedVerifier:
             evidence_text: The evidence quote text.
 
         Returns:
-            16-character MD5 hex digest.
+            16-character SHA-256 hex digest.
         """
         claim_norm = re.sub(r"[^\w\s]", "", claim_text.lower())
         evidence_norm = re.sub(r"[^\w\s]", "", evidence_text.lower())
         combined = f"{sorted(claim_norm.split())}|{sorted(evidence_norm.split())}"
-        return hashlib.md5(combined.encode()).hexdigest()[:16]
+        return hashlib.sha256(combined.encode()).hexdigest()[:16]
 
     # -- verdict parsing ---------------------------------------------------
 

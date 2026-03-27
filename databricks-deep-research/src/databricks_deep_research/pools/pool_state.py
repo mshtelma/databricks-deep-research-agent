@@ -39,7 +39,7 @@ class PoolState:
 
     def _content_hash(self, item: Any) -> str:
         """Hash item content for dedup."""
-        return hashlib.md5(
+        return hashlib.sha256(
             json.dumps(item, sort_keys=True, default=str).encode()
         ).hexdigest()
 

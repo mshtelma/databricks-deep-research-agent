@@ -72,7 +72,7 @@ def reciprocal_rank_fusion(
                 doc_key = result.url
             else:
                 content_preview = result.content[:200] if result.content else result.id
-                doc_key = hashlib.md5(content_preview.encode()).hexdigest()[:16]
+                doc_key = hashlib.sha256(content_preview.encode()).hexdigest()[:16]
 
             scores[doc_key] = scores.get(doc_key, 0.0) + 1.0 / (k + rank + 1)
             if doc_key not in docs or result.score > docs[doc_key].score:
@@ -691,7 +691,7 @@ class UserVectorSearchTool:
         unique: list[VectorSearchResult] = []
         for result in results:
             content_preview = result.content[:500] if result.content else result.id
-            content_hash = hashlib.md5(content_preview.encode()).hexdigest()[:16]
+            content_hash = hashlib.sha256(content_preview.encode()).hexdigest()[:16]
             if content_hash not in seen:
                 seen.add(content_hash)
                 unique.append(result)

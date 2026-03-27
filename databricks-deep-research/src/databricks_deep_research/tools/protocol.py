@@ -64,6 +64,7 @@ class ToolKind(StrEnum):
     genie = "genie"
     knowledge_assistant = "knowledge_assistant"
     compute = "compute"
+    compute_namespace = "compute_namespace"
     delta_read = "delta_read"
     delta_grep = "delta_grep"
     custom = "custom"
@@ -77,6 +78,7 @@ _TOOL_KIND_TO_SOURCE_KIND: dict[str, str] = {
     ToolKind.genie: SourceKind.sql_analytics,
     ToolKind.knowledge_assistant: SourceKind.qa_assistant,
     ToolKind.compute: SourceKind.builtin,
+    ToolKind.compute_namespace: SourceKind.builtin,
     ToolKind.delta_read: SourceKind.delta_table,
     ToolKind.delta_grep: SourceKind.delta_table,
 }

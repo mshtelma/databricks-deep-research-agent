@@ -385,7 +385,7 @@ class KnowledgeAssistantTool:
 
             # Generate unique URL per response to avoid dedup collisions
             import hashlib
-            response_hash = hashlib.md5(answer[:200].encode()).hexdigest()[:12] if answer else "empty"
+            response_hash = hashlib.sha256(answer[:200].encode()).hexdigest()[:12] if answer else "empty"
 
             for idx, citation in enumerate(citations):
                 # Build navigable workspace URL

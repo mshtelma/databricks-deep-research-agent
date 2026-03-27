@@ -42,6 +42,9 @@ class ToolResolver:
         self._legacy: ToolRegistry | None = legacy_registry
         self._overrides: dict[str, ResearchTool] = {}
         self._cache: dict[str, ResearchTool] = {}
+        # Share cache ref so sibling-resolution closures (e.g. compute_namespace)
+        # can look up tools created by other factories.
+        self._context.extras["_resolver_cache"] = self._cache
 
     def override(self, name: str, tool: ResearchTool) -> None:
         """Register a runtime override (highest priority)."""
