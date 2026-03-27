@@ -57,6 +57,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workflow", type=str, default=None, help="Workflow YAML filename")
     parser.add_argument("--limit", type=int, default=None, help="Max questions to run")
     parser.add_argument("--no-resume", action="store_true", help="Start fresh, ignore prior results")
+    parser.add_argument(
+        "--retry-status", type=str, default=None,
+        help="Comma-separated statuses to retry on resume (e.g., timeout,error)",
+    )
     parser.add_argument("--results-dir", type=str, default=None)
     parser.add_argument(
         "--trace-output", nargs="?", const="auto", default=None,
@@ -80,6 +84,24 @@ async def run_officeqa(args: argparse.Namespace) -> None:
     config_path = BENCHMARKS_DIR / "officeqa" / "config.yaml"
     config = load_config(config_path)
 
+    # Parse and validate --retry-status
+    _KNOWN_STATUSES = {"success", "error", "timeout", "no_answer", "rate_limited"}
+    retry_statuses: frozenset[str] = frozenset()
+    if args.retry_status:
+        raw = frozenset(s.strip() for s in args.retry_status.split(",") if s.strip())
+        unknown = raw - _KNOWN_STATUSES
+        if unknown:
+            logger.error(
+                "Unknown status(es): %s. Valid: %s",
+                ", ".join(sorted(unknown)),
+                ", ".join(sorted(_KNOWN_STATUSES)),
+            )
+            sys.exit(1)
+        retry_statuses = raw
+
+    if args.retry_status and args.no_resume:
+        logger.warning("--retry-status has no effect with --no-resume (all questions run fresh)")
+
     # Build RunConfig with CLI overrides
     run_cfg = config.get("run", {})
     run_config = RunConfig(
@@ -87,6 +109,7 @@ async def run_officeqa(args: argparse.Namespace) -> None:
         timeout_per_question=args.timeout or run_cfg.get("timeout_per_question", 300),
         results_dir=args.results_dir or run_cfg.get("results_dir", "results/officeqa"),
         resume=not args.no_resume,
+        retry_statuses=retry_statuses,
     )
 
     # Load workflow (with env var interpolation for ${VAR:-default} patterns)
@@ -150,6 +173,8 @@ async def run_officeqa(args: argparse.Namespace) -> None:
         model,
         results_path,
     )
+    if retry_statuses:
+        logger.info("BENCHMARK_RETRY_STATUSES statuses=%s", ",".join(sorted(retry_statuses)))
 
     # Trace collection setup
     sys.path.insert(0, str(BENCHMARKS_DIR.parent / "databricks-deep-research"))

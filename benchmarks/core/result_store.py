@@ -30,8 +30,16 @@ class ResultStore:
         self._path = path
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
-    def completed_uids(self) -> set[str]:
-        """Return UIDs with terminal status.  Rate-limited UIDs are retryable."""
+    def completed_uids(
+        self, *, exclude_statuses: frozenset[str] = frozenset()
+    ) -> set[str]:
+        """Return UIDs with terminal status.
+
+        UIDs whose *only* terminal entries match ``exclude_statuses`` are
+        excluded from the completed set, making them eligible for retry.
+        Rate-limited UIDs are always retryable (not in _TERMINAL_STATUSES).
+        """
+        effective_terminal = _TERMINAL_STATUSES - exclude_statuses
         uids: set[str] = set()
         if not self._path.exists():
             return uids
@@ -42,7 +50,7 @@ class ResultStore:
                     continue
                 try:
                     data = json.loads(line)
-                    if data.get("status") in _TERMINAL_STATUSES:
+                    if data.get("status") in effective_terminal:
                         uids.add(data["uid"])
                 except (json.JSONDecodeError, KeyError):
                     logger.warning(

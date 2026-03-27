@@ -42,3 +42,4 @@ class RunConfig:
     timeout_per_question: int = 300
     results_dir: str = "results"
     resume: bool = True
+    retry_statuses: frozenset[str] = field(default_factory=frozenset)

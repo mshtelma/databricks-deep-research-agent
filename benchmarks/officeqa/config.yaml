@@ -27,7 +27,7 @@ warehouse_id: ${OFFICEQA_WAREHOUSE_ID}
 # Run parameters
 run:
   concurrency: 3
-  timeout_per_question: 600
+  timeout_per_question: 1800
   results_dir: benchmarks/results/officeqa
   resume: true
 

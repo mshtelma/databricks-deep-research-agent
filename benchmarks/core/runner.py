@@ -70,7 +70,11 @@ class BenchmarkRunner:
     ) -> list[QuestionResult]:
         """Run all questions through the workflow with concurrency control."""
         store = ResultStore(results_path)
-        completed = store.completed_uids() if self._config.resume else set()
+        completed = (
+            store.completed_uids(exclude_statuses=self._config.retry_statuses)
+            if self._config.resume
+            else set()
+        )
         pending = [q for q in questions if q.uid not in completed]
 
         logger.info(
