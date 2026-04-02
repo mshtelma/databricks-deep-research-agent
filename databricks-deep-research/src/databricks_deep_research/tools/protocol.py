@@ -67,6 +67,7 @@ class ToolKind(StrEnum):
     compute_namespace = "compute_namespace"
     delta_read = "delta_read"
     delta_grep = "delta_grep"
+    delta_table_read = "delta_table_read"
     custom = "custom"
 
 
@@ -81,6 +82,7 @@ _TOOL_KIND_TO_SOURCE_KIND: dict[str, str] = {
     ToolKind.compute_namespace: SourceKind.builtin,
     ToolKind.delta_read: SourceKind.delta_table,
     ToolKind.delta_grep: SourceKind.delta_table,
+    ToolKind.delta_table_read: SourceKind.delta_table,
 }
 
 

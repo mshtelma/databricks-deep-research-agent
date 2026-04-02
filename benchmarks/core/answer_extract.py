@@ -12,6 +12,13 @@ class AnswerExtractor(Protocol):
     def extract(self, raw_output: str) -> str | None: ...
 
 
+def _canonicalize_answer(answer: str) -> str:
+    """Normalize formatting differences that cause false negatives."""
+    answer = answer.replace("\u2212", "-")  # Unicode minus → ASCII
+    answer = re.sub(r"(?<!\w)\$", "", answer)  # Strip $ not inside words
+    return answer.strip()
+
+
 class XMLTagExtractor:
     """Extracts from <FINAL_ANSWER>...</FINAL_ANSWER> with fallbacks.
 
@@ -36,12 +43,12 @@ class XMLTagExtractor:
         pattern = rf"<{self._tag}>(.*?)</{self._tag}>"
         matches = re.findall(pattern, raw_output, re.DOTALL)
         if matches:
-            return matches[-1].strip()
+            return _canonicalize_answer(matches[-1].strip())
 
         # Strategy 2: Case-insensitive XML tag
         matches = re.findall(pattern, raw_output, re.DOTALL | re.IGNORECASE)
         if matches:
-            return matches[-1].strip()
+            return _canonicalize_answer(matches[-1].strip())
 
         # Strategy 3: Bold markdown — **FINAL ANSWER**: value or **FINAL_ANSWER**: value
         tag_human = self._tag.replace("_", " ")
@@ -49,13 +56,13 @@ class XMLTagExtractor:
             md_pattern = rf"\*\*{re.escape(variant)}\*\*[:\s]+(.+?)(?:\n\n|\Z)"
             match = re.search(md_pattern, raw_output, re.IGNORECASE | re.DOTALL)
             if match:
-                return match.group(1).strip()
+                return _canonicalize_answer(match.group(1).strip())
 
         # Strategy 4: "Final Answer:" prefix
         prefix_pattern = rf"(?:^|\n)\s*{re.escape(tag_human)}[:\s]+(.+?)(?:\n\n|\n(?=[A-Z#*])|\Z)"
         match = re.search(prefix_pattern, raw_output, re.IGNORECASE | re.DOTALL)
         if match:
-            return match.group(1).strip()
+            return _canonicalize_answer(match.group(1).strip())
 
         # Strategy 5: Variable assignment extraction (namespace fallback output)
         # When the react loop exhausts its tool budget, the compute namespace is

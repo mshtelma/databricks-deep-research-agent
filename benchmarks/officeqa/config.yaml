@@ -10,6 +10,7 @@ repo:
 catalog: ${OFFICEQA_CATALOG:-main}
 schema: ${OFFICEQA_SCHEMA:-officeqa_benchmark}
 delta_table: treasury_chunks
+tables_delta_table: treasury_tables  # v9+: structured JSON table records (omit to skip)
 vector_index: treasury_chunks_vs_index
 vs_endpoint_name: ${OFFICEQA_VS_ENDPOINT:-one-env-shared-endpoint-1}
 embedding_model: databricks-qwen3-embedding-0-6b
@@ -26,10 +27,15 @@ warehouse_id: ${OFFICEQA_WAREHOUSE_ID}
 
 # Run parameters
 run:
-  concurrency: 3
-  timeout_per_question: 1800
+  concurrency: 1
+  timeout_per_question: 3600
   results_dir: benchmarks/results/officeqa
   resume: true
 
 # Model (overridable via CLI --model)
 model: databricks-claude-opus-4-6
+
+# Multi-workspace LLM load balancing (comma-separated CLI profile names).
+# Profiles must exist in ~/.databrickscfg and host the same model endpoints.
+# Leave empty for single-workspace mode.
+workspace_profiles: df1,df2,e2-demo-west,e2-dogfood

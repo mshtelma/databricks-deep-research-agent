@@ -277,6 +277,7 @@ class FrameworkLLMClient:
         *,
         model: str = "databricks-claude-haiku-4-5",
         model_mapping: dict[str, str | ModelTierConfig] | None = None,
+        profile: str | None = None,
     ) -> FrameworkLLMClient:
         """Create a client authenticated against Databricks serving endpoints.
 
@@ -297,6 +298,13 @@ class FrameworkLLMClient:
             Explicit tier → endpoint mapping.  Takes precedence over *model*.
             Values can be plain strings or ``ModelTierConfig`` instances for
             multi-endpoint failover.
+        profile:
+            Databricks CLI profile name from ``~/.databrickscfg``.
+            When provided, passed directly to ``WorkspaceClient(profile=...)``.
+            When *None* (default), the SDK resolves auth automatically
+            (including the ``DATABRICKS_CONFIG_PROFILE`` env var).
+            Ignored when ``DATABRICKS_HOST`` + ``DATABRICKS_TOKEN`` are set
+            (Path 1 takes precedence).
         """
         mapping: dict[str, str | ModelTierConfig] = (
             dict(model_mapping)
@@ -320,7 +328,7 @@ class FrameworkLLMClient:
         try:
             from databricks.sdk import WorkspaceClient
 
-            w = WorkspaceClient()
+            w = WorkspaceClient(profile=profile) if profile else WorkspaceClient()
             sdk_host = (w.config.host or "").rstrip("/")
             if not sdk_host:
                 raise RuntimeError("WorkspaceClient resolved but host is empty")

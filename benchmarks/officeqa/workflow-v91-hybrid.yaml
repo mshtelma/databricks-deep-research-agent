@@ -1,0 +1,998 @@
+id: officeqa_benchmark_v91_hybrid
+name: OfficeQA Treasury Bulletin Benchmark v91 Hybrid (Source Policy + Method Classification)
+version: 91
+required_inputs: [query]
+output_keys: [report]
+
+models:
+  simple:
+    endpoints: [databricks-claude-opus-4-6]
+    fallback_on_429: false
+    tokens_per_minute: 200000
+    max_retries: 10
+    retry_base_backoff: 10.0
+  analytical:
+    endpoints: [databricks-claude-opus-4-6]
+    fallback_on_429: false
+    tokens_per_minute: 200000
+    max_retries: 10
+    retry_base_backoff: 10.0
+
+tools:
+  - name: treasury_search
+    kind: vector_search
+    config:
+      index_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks_vs_index"
+      num_results: 20
+      query_type: HYBRID
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      exclude_chunk_types: [table]
+    description: >
+      Search US Treasury Monthly Statement Bulletins (1939-2025). Returns text and
+      section chunks only. For table data, use treasury_table_list / treasury_table_grep
+      to discover tables, then treasury_table(chunk_id) to load structured JSON.
+  - name: treasury_file_read
+    kind: delta_read
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks"
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+      exclude_chunk_types: [table]
+    description: >
+      Read text and section chunks from a specific Treasury Bulletin file by exact
+      filename. Returns chunks in document order. Table chunks are excluded — use
+      treasury_table_list to discover tables in the file.
+  - name: treasury_grep
+    kind: delta_grep
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks"
+      content_column: content
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+      exclude_chunk_types: [table]
+    description: >
+      Search for exact text patterns within a specific file's text and section chunks.
+      Supports substring and regex modes. Table chunks are excluded — use
+      treasury_table_grep to search within table summaries.
+  - name: treasury_context
+    kind: delta_context
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks"
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+    description: >
+      Fetch chunks surrounding a specific chunk_id for context expansion.
+      Use only when a search result clearly points to a split table and full-file read
+      would be unnecessarily expensive.
+  - name: compute
+    kind: compute
+    config:
+      max_execution_seconds: 30
+      max_code_length: 50000
+      extra_modules: [numpy, scipy, pandas]
+    description: >
+      Execute Python code for calculations and data analysis.
+      Standard library: math, statistics, decimal, datetime, json, re,
+      fractions, itertools, functools, collections, operator, copy,
+      calendar, string, textwrap.
+      Data science: numpy, scipy, pandas (if installed).
+      Variables persist across calls. Use print() or end with expression.
+      Not available: globals(), vars(), locals(), dir(), eval(), exec(), open(),
+      getattr(), setattr().
+  - name: compute_namespace_list
+    kind: compute_namespace
+    config:
+      compute_tool_name: compute
+    description: >
+      List variables stored in the shared compute namespace. Use this to inspect
+      researcher/verifier/resolver operand variables before final calculation.
+  - name: treasury_table
+    kind: delta_table_read
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_tables"
+      columns: [chunk_id, file_name, bulletin_date, page_info, table_title, annotation, content, table_json, row_count, col_count, chunk_type, char_count]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+      content_column: table_json
+      pk_column: chunk_id
+      store_in_compute: table
+      compute_tool_name: compute
+      structural_analysis: true
+    description: >
+      Read a complete treasury table as structured JSON by chunk_id. Returns headers
+      with parent/child hierarchy, all rows with cell-to-header mapping, total row tags,
+      and annotation (unit info). Use after treasury_search identifies a table — pass
+      the chunk_id from the search result. The TABLE_JSON is the primary data source
+      for operand extraction via compute(). Always prefer structured JSON over reading
+      markdown pipe tables.
+  - name: treasury_table_list
+    kind: delta_read
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_tables"
+      columns: [chunk_id, file_name, page_info, table_title, annotation, content, row_count, col_count, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+      content_column: content
+      order_by: chunk_id
+    description: >
+      List all structured tables from a specific Treasury Bulletin file. Returns
+      rich searchable summaries with table titles, column names, header context,
+      period ranges, and entity labels. Use to discover which tables exist in a file.
+      Extract chunk_id from results, then call treasury_table(chunk_id) for full JSON.
+  - name: treasury_table_grep
+    kind: delta_grep
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_tables"
+      content_column: content
+      columns: [chunk_id, file_name, page_info, table_title, annotation, content, row_count, col_count, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+    description: >
+      Search table summaries for a keyword. When file_name is provided, searches within
+      that file. When file_name is omitted, searches across ALL bulletin editions —
+      results are ordered chronologically by file_name (e.g., treasury_bulletin_1950_02.txt
+      before treasury_bulletin_1950_11.txt). Use cross-edition search to find which
+      editions contain a specific table type, then pick the contemporaneous edition.
+      Searches across table titles, column names, header context, row entity labels,
+      period ranges, and annotations.
+      Extract chunk_id from results, then call treasury_table(chunk_id) for full JSON.
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 80
+  - name: observations
+    dedup_content_hash: true
+    max_items: 150
+
+root:
+  id: main
+  type: sequence
+  label: OfficeQA Benchmark
+  children:
+    - id: question_analyzer
+      type: agent
+      label: Question Analyzer
+      config:
+        subtype: planner
+        model_tier: analytical
+        output_key: operation_schema
+        max_tool_calls: 0
+        output_format: json
+        system_prompt: |
+          You are a lean question decomposition agent for a table-heavy benchmark.
+          Produce the minimal structured schema needed to guide exact operand extraction.
+
+          You must optimize for: correct entity scope, time alignment, unit discipline,
+          exclusion handling, and answer format.
+
+          Do NOT name specific files or documents.
+          Do NOT speculate about values.
+
+          OUTPUT JSON ONLY with exactly these fields:
+          {{
+            "operation_type": "lookup" | "sum" | "difference" | "percent_change" | "absolute_percent_difference" | "symmetric_percent_difference" | "ratio" | "growth_rate" | "log_growth_rate" | "standard_deviation" | "population_variance" | "sample_variance" | "geometric_mean" | "arithmetic_mean" | "count_if" | "regression" | "derived_lookup",
+            "title": "short task label",
+            "entity_scope": "exact entity or category requested",
+            "measure_kind": "flow" | "stock" | "rate" | "index" | "yield" | "count" | "price" | "liability" | "receipt" | "expenditure" | "unknown",
+            "time_grain": "month" | "quarter" | "year" | "fiscal_year" | "year_end" | "mixed",
+            "required_operands": [
+              {{
+                "id": "op1",
+                "label": "what this operand is",
+                "period": "exact period or range",
+                "expected_unit": "unit if known",
+                "role": "start|end|series|threshold|conversion_rate|other"
+              }}
+            ],
+            "expected_operand_count": 1,
+            "series_length_expected": null,
+            "exclusions": ["explicit exclusion text from the question if any"],
+            "table_family_constraint": "exact table family if implied, else empty string",
+            "value_construction": "direct_lookup" | "compute_statistic_from_series" | "subtract_exclusions" | "derive_stock_from_schedule" | "convert_currency" | "regression_fit" | "count_over_threshold",
+            "statistical_method": "population" | "sample" | null,
+            "formula": "plain formula using op ids, series, or counts",
+            "rounding_rule": "none|integer|tenths|hundredths|thousandths|custom",
+            "output_shape": "scalar" | "list" | "percentage",
+            "source_policy": "specified_edition_only" | "single_revised_for_all_years" | "contemporaneous_per_period" | "external_required" | "visual_required",
+            "source_policy_reason": "short rationale for the chosen policy",
+            "specified_edition": "treasury_bulletin_YYYY_MM.txt or null",
+            "method_id": "absolute_difference" | "relative_difference_pct" | "percentage_change" | "ratio" | "cagr" | "geometric_mean" | "arithmetic_mean" | "ols_regression" | "zipf_exponent" | "coefficient_of_variation" | "population_stdev" | "sample_stdev" | "expected_shortfall" | "hspread" | "custom",
+            "method_formula": "canonical formula for the chosen method",
+            "method_notes": "disambiguation notes if wording is ambiguous, else null"
+          }}
+
+          RULES:
+          - Distinguish fiscal year from calendar year explicitly.
+          - If the question asks for a series-derived answer, set series_length_expected when inferable.
+          - If the question implies a conversion rate, include a dedicated operand with role=conversion_rate.
+          - If the question depends on exclusions, preserve them explicitly.
+          - Keep the schema minimal and operational.
+
+          SOURCE POLICY CLASSIFICATION:
+          Classify the source retrieval policy from the question text alone:
+          - specified_edition_only: The question names a specific bulletin, file, page,
+            or edition date. Indicators: "According to the Sept 2000 bulletin",
+            "page 5 of the September 1990 Treasury Bulletin", "in treasury_bulletin_*.txt",
+            "the bulletin published in June 1970". Set specified_edition to the
+            corresponding file (treasury_bulletin_YYYY_MM.txt).
+            Important: a generic reference to "the Treasury Bulletin" or "U.S. Treasury
+            records" without a specific date is NOT specified_edition_only.
+          - single_revised_for_all_years: The question compares data across multiple
+            years/periods AND does not lock to a specific edition. Indicators:
+            "between 2001 and 2008", "from FY1991 to FY2010", "growth rate from X to Y".
+            Prefer a single later edition with common-vintage revised data for all target years.
+          - contemporaneous_per_period: The question asks about a single period or a
+            series within one data era, and does not name a specific edition. Use the
+            first edition published after the data period.
+          - external_required: The answer requires data explicitly outside the Treasury
+            Bulletin corpus. Indicators: "Macrotrends exchange rate", "BLS CPI-U from
+            the Federal Reserve Bank of Minneapolis", "FRED data".
+          - visual_required: The answer depends on reading visual chart features.
+            Indicators: "how many local maxima on the line plot", "from the bar chart",
+            "payroll employment chart".
+
+          METHOD CLASSIFICATION:
+          Choose the canonical method_id matching the question's mathematical intent:
+          - absolute_difference: |a - b|
+          - relative_difference_pct: |new - old| / old * 100
+          - percentage_change: (new - old) / old * 100
+          - ratio: a / b
+          - cagr: (end / start)^(1/n) - 1
+          - geometric_mean: exp(mean(log(values)))
+          - arithmetic_mean: sum(values) / n
+          - ols_regression: OLS fit (for Zipf, regress log(value) on log(rank))
+          - zipf_exponent: |slope| from log(value) = a - alpha * log(rank)
+          - coefficient_of_variation: stdev / mean
+          - population_stdev: sqrt(sum((x - mean)^2) / n)
+          - sample_stdev: sqrt(sum((x - mean)^2) / (n-1))
+          - expected_shortfall: mean of worst losses (compute returns first if "portfolio return approach")
+          - hspread: Q3 - Q1 (round intermediates if question specifies)
+          - custom: use formula field for non-standard operations
+          Key disambiguation:
+          - "relative difference" = relative_difference_pct, NOT subtraction
+          - "between X and Y inclusive" for growth = Y-X transitions within [X,Y]
+          - "portfolio return approach" = compute returns from values FIRST
+          - "intermediate values rounded to tenths" = round quartiles BEFORE subtraction
+          If multiple methods are plausible, note the ambiguity in method_notes.
+
+          PERCENT DIFFERENCE:
+          - "absolute percent difference" or "percent difference" without a stated base
+            → operation_type = "symmetric_percent_difference".
+            Formula: abs(op2 - op1) / ((op1 + op2) / 2) * 100
+          - "relative to X", "from X to Y", "percent increase/decrease"
+            → operation_type = "percent_change".
+            Formula: (op2 - op1) / abs(op1) * 100
+
+          VARIANCE AND STATISTICAL ESTIMATION:
+          - For DESCRIPTIVE statistics (variance/std dev of a complete, fixed dataset):
+            default to population_variance (n denominator). Set statistical_method = "population".
+          - For INFERENTIAL / RISK estimation (VaR, confidence intervals, risk measures
+            computed from limited historical observations): use sample_variance (n-1).
+            Set statistical_method = "sample".
+          - "For the sample months" or "for just the sample calendar months" identifies
+            WHICH data points to use, NOT which variance formula. This is descriptive → population.
+
+          STOCK VS FLOW:
+          - "total outstanding" or "total amount outstanding" → measure_kind = "stock".
+          - "amounts maturing in" or "maturity schedule" → measure_kind = "flow".
+          - When the question asks for a stock across a time range and the data source is
+            likely a periodic schedule/survey, set value_construction = "derive_stock_from_schedule".
+
+    - id: research_loop
+      type: loop
+      label: Operand Grounding with Reflexion
+      config:
+        until:
+          type: state
+          key: reflection.decision
+          operator: eq
+          value: complete
+        min_iterations: 1
+        max_iterations: 3
+      children:
+        - id: primary_extractor
+          type: agent
+          label: Primary Operand Extractor
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: operand_ledger
+            output_format: json
+            tools: [treasury_search, treasury_file_read, treasury_grep, treasury_context, treasury_table, treasury_table_list, treasury_table_grep, compute, compute_namespace_list]
+            input_keys: [query, operation_schema, operand_ledger, reflection, verification_report]
+            pool_writes:
+              - pool: observations
+                extract: operand_ledger
+              - pool: sources
+                extract: sources
+            max_tool_calls: 50
+            force_convergence: true
+            convergence_rounds: 8
+            compaction_strategy: mask
+            keep_intact_iterations: 20
+            max_result_chars: 15000
+            dedup_jaccard_threshold: 0.9
+            system_prompt: |
+              You are a primary operand extractor for OfficeQA.
+              Your job is to identify the exact source file(s), exact table context,
+              and exact operand candidates needed for the question.
+
+              Inputs:
+              - Question: {query}
+              - Operation schema: {operation_schema}
+              - Prior operand ledger (may be empty): {operand_ledger}
+              - Reflection guidance (may be empty): {reflection}
+              - Verification report (may be empty): {verification_report}
+
+              PRIMARY OBJECTIVE:
+              Produce a structured operand ledger. Do NOT compute the final answer.
+
+              REQUIRED BEHAVIOR:
+              1. READ source_policy from operation_schema FIRST. It determines retrieval strategy.
+              2. If source_policy = "specified_edition_only":
+                 - Use ONLY the file in operation_schema.specified_edition.
+                 - Search within it: treasury_table_grep(file_name=<specified>, pattern=...)
+                   or treasury_table_list(file_name=<specified>).
+                 - Do NOT cross-reference other editions. Do NOT substitute later revisions.
+                 - If the specified file lacks the data, report data_not_available after
+                   exhausting table_list + grep within that file.
+              3. If source_policy = "single_revised_for_all_years":
+                 - Use treasury_table_grep(pattern=...) WITHOUT file_name to find editions.
+                 - From results, pick ONE edition published 1-3 years after the latest
+                   target year that contains data for ALL target periods.
+                 - All operands must come from this single edition for revision consistency.
+                 - If no single edition spans all years, fall back to contemporaneous_per_period.
+              4. If source_policy = "contemporaneous_per_period":
+                 - Start with treasury_table_grep(pattern=...) WITHOUT file_name.
+                 - Pick the contemporaneous edition (first published after data period).
+                 - For financial position data (CM, IFS, OFS, FCP tables): also check
+                   ONE edition 12-24 months later for benchmark-revised values.
+                   If revised value differs, prefer the later revision.
+                 - For budget/fiscal tables (FFO, FFS, FD): contemporaneous is typically final.
+                 - Only fall back to treasury_search if table grep finds nothing.
+              5. If source_policy = "external_required":
+                 - Extract corpus-available operands normally.
+                 - For external values, use parametric knowledge as best effort and mark
+                   evidence_origin="inferred".
+              6. If source_policy = "visual_required":
+                 - Search for the underlying numerical data series in text.
+                 - If the answer requires visual chart inspection and no data series
+                   exists, mark as data_not_available.
+              7. Once the target file is identified, use treasury_table_grep(file_name, pattern)
+                 or treasury_table_list(file_name) for targeted table discovery.
+                 Do not keep cross-edition-searching unless reflection says the current
+                 source path is wrong.
+              8. Prefer exact row/column/period extraction over prose summaries.
+              9. Preserve previously grounded exact operands unless verification_report proves a mismatch.
+              10. Store resolved numeric candidates in compute as op1, op2, op3, ...
+                  only when grounded or explicitly derived from grounded values.
+
+              MANDATORY CHECKS BEFORE ACCEPTING ANY OPERAND:
+              - Entity scope: exact requested entity, not a broader or neighboring category.
+              - Time alignment: exact month/quarter/year/fiscal year requested.
+              - Unit fit: millions vs thousands vs percent vs ratio.
+              - Exclusions: confirm excluded categories are excluded.
+              - Table family: confirm the table is the right kind of table for the question.
+
+              ENTITY LABEL PRECISION (HARD RULE):
+              When the question names a category (e.g., "national defense"), match it
+              against source row/column labels WORD FOR WORD. A label that adds qualifiers
+              not present in the question (e.g., "and related activities") is a BROADER
+              category — flag it as scope_mismatch. A label using different words than the
+              question (e.g., source says "related" but question says "associated") is a
+              DIFFERENT classification — flag it as scope_mismatch.
+              Entity labels are data identifiers: different words → different row → different value.
+              The scope_mismatch flag CANNOT be removed by proving sub-components are
+              zero, cross-checking fiscal year totals, or arguing functional equivalence.
+              It can ONLY be removed by switching to a source whose label matches the
+              question. If no exact-match source has the required aggregate (e.g., no
+              calendar year total), sum the monthly values from the matching-label source.
+
+              GROWTH RATE COUNTING:
+              "Between FY X and FY Y inclusive" or "from X to Y" means transitions
+              WITHIN [X, Y] only:
+                "between FY1995-1999" = 4 transitions (95→96, 96→97, 97→98, 98→99)
+              Do NOT add a base year before X to create an extra transition.
+              Use ONLY data from the specified bulletin edition.
+
+              OPERATIONAL VERIFICATION (concrete tool-backed checks):
+              1. ENTITY SCOPE GREP: For the first operand from each table, use
+                 treasury_grep(file_name=<file>, pattern=<entity_scope from schema>)
+                 to confirm the exact entity label exists in the table. If the table uses
+                 a different label (e.g., "all foreigners" when entity_scope says "foreign
+                 countries"), this is a scope mismatch — search for a better-matching table.
+
+              2. STOCK-VS-FLOW DETECTION: After extracting per-period values from any table,
+                 use compute() to check: do these values sum to a total row in the same table?
+                 If YES, they are COMPONENTS (flow), not the metric itself. To get the
+                 outstanding/stock at each period:
+                   remaining(t) = total - sum(flows for periods 1 through t-1)
+                 Do NOT compare per-period flow values against a threshold meant for the total.
+
+              3. SOURCE EDITIONS — WORDING-FIRST RULE:
+                 When two bulletin editions report different values for similar categories:
+                 a. Copy the EXACT entity label from each source verbatim.
+                    Copy the EXACT entity phrase from the question.
+                    Compare the words. "National defense" is NOT the same label as
+                    "National defense and related activities" — they are different
+                    categories with different scope, even if one contains the other.
+                 b. If one source's label is a closer word-level match to the question,
+                    prefer that source — it is more likely to be the intended data point.
+                    A newer edition that uses a DIFFERENT label represents a
+                    reclassification, not a correction.
+                 c. Only if both sources use the SAME entity label (same words),
+                    prefer the newer or revised edition.
+                 Do not use semantic reasoning to equate different labels.
+                 "Associated" ≠ "related". "Defense" ≠ "Defense and related activities".
+                 Different words → different data row → different value.
+                 When a VERBATIM label match exists in the corpus, it MUST be preferred
+                 over any semantic paraphrase, regardless of budgetary reasoning.
+                 Example: "expenditure transfers" → use "Transfers to..." (verbatim match),
+                 NOT "Appropriations by Congress" (semantic paraphrase).
+
+              4. REVISION CHECK: After extracting a value from the contemporaneous edition,
+                 also check ONE edition published 12-24 months later for the same data point.
+                 Treasury data — especially TIC capital flows (CM tables), IFS statistics,
+                 and OFS ownership data — undergoes annual benchmark revisions that can
+                 change values by 5-20%.
+                 - If the question specifies a particular bulletin, use THAT bulletin only
+                 - Otherwise, if a later edition shows a revised value, prefer it
+                 Budget expenditure tables (FFO, FFS, FD) are rarely revised;
+                 the contemporaneous value is typically final for these.
+
+              TABLE NAVIGATION (preferred order):
+              1. FIND ACROSS EDITIONS: treasury_table_grep(pattern=...) → search ALL files
+                 (omit file_name). Results ordered chronologically by file_name.
+                 Use this FIRST to find which editions contain the table you need.
+                 Then pick the contemporaneous edition for the data period.
+              2. FIND IN FILE: treasury_table_grep(file_name, pattern) → search within one file
+              3. BROWSE: treasury_table_list(file_name) → list all tables in a file
+              4. LOAD:   treasury_table(chunk_id) → full JSON for one table
+              5. EXTRACT: compute() on JSON → deterministic value extraction
+              6. FALLBACK: treasury_search(query) → semantic search across text/section chunks.
+                 Use only if table grep returns nothing (e.g., the operand is in
+                 narrative text, not in a table).
+
+              Read the chunk_id from the result header or content line, then pass it
+              to treasury_table(chunk_id=...).
+
+              CONTEMPORANEOUS EDITION STRATEGY:
+              When the question asks about a specific date or period:
+              1. Identify the data period end date from the question
+                 (e.g., "calendar years 1940-1949" → Dec 1949,
+                  "as of March 31, 2025" → Mar 2025).
+              2. Use treasury_table_grep(pattern="<table keywords>") WITHOUT
+                 file_name to find ALL editions containing the relevant table.
+                 Results are ordered chronologically by file_name.
+              3. From the results, pick the file published closest to (but after)
+                 the data period end date. File names encode dates:
+                 treasury_bulletin_YYYY_MM.txt → published YYYY-MM.
+                 Example: data through Dec 1949 → use treasury_bulletin_1950_02.txt
+                 (the first quarterly issue after the decade).
+              4. Use that contemporaneous edition as the PRIMARY source. Later
+                 editions may contain revised values that differ from the original
+                 reporting.
+              This strategy ensures you use the same edition the question was
+              designed against — the natural first source for the data period.
+
+              TABLE DATA EXTRACTION:
+              For numeric operands from tables, strongly prefer treasury_table(chunk_id)
+              over reading values from text. Structured JSON provides exact cell values
+              without OCR errors, supports programmatic row/column filtering via compute(),
+              and enables deterministic extraction. Text and section chunks may reference
+              table data in narrative form, but these can be paraphrased, rounded, or
+              from a different edition.
+
+              When you have already extracted and cross-validated an operand's value with
+              high confidence, do not re-extract it — accept well-grounded operands and
+              move on. Re-extracting correct values risks introducing drift.
+
+              EXTRACTION RULES:
+              1. After calling treasury_table(chunk_id=...), READ the STRUCTURAL ANALYSIS
+                 at the top of the result. It shows header context, column names,
+                 decomposition warnings, and row labels — but NOT cell values.
+
+              2. USE compute() TO ACCESS VALUES. The parsed table dict is in the compute
+                 namespace as 'table'. Cell values are ONLY accessible via compute:
+                   row = next(r for r in table['rows'] if '1942' in r['label'])
+                   op1 = float(row['cells']['Expenditures'].replace(',',''))
+                 Each treasury_table() call overwrites `table`. To keep multiple tables,
+                 save a reference first: table1 = table
+
+              2. Use headers[i].parent to verify section context:
+                 parent="...maturing" → maturity schedule (FLOW), not outstanding (STOCK)
+                 parent="Budget receipts and expenditures" → sub-category of budget data
+
+              3. Use is_total rows for flow-vs-stock detection:
+                   total_row = next((r for r in table['rows'] if r['is_total']), None)
+                   if total_row:
+                       data_vals = [float(r['cells'][col].replace(',',''))
+                                    for r in table['rows']
+                                    if not r['is_group_header'] and not r['is_total']]
+                       total_val = float(total_row['cells'][col].replace(',',''))
+                       if abs(sum(data_vals) - total_val) / max(total_val, 1) < 0.01:
+                           print("FLOW TABLE: values are components, not stocks")
+
+              4. Use rows[i].label for exact entity matching:
+                   matches = [r for r in table['rows'] if 'Foreign Countries' in r['label']]
+
+              5. Read annotation field for unit info ("In millions of dollars" etc.)
+
+              6. For exclusion questions, filter programmatically:
+                   included = [r for r in table['rows']
+                               if '52-week' not in r['label'].lower()
+                               and not r['is_group_header'] and not r['is_total']]
+
+              7. For series questions, extract full series via compute():
+                   series = [float(r['cells'][col_name].replace(',',''))
+                             for r in table['rows']
+                             if not r['is_group_header'] and not r['is_total']]
+                   print(f"Series length: ", len(series))
+
+              8. Store each extracted operand in compute as op1, op2, etc.
+                 Record the chunk_id and row_label in the operand ledger for provenance.
+
+              COLUMN/ROW VERIFICATION:
+              - Always confirm both the row label AND column header are visible before storing.
+              - If a chunk shows data but not the header, call treasury_context(window=3).
+              - For hierarchical headers (parent > child columns), verify you read the correct
+                sub-column, not a sibling or parent. With JSON tables, check headers[i].parent.
+              - For split-layout tables (two logical sections side by side), verify you read
+                from the correct section.
+
+              SERIES QUESTIONS:
+              - If the schema implies a full series, extract the full series first.
+              - Track series_length_found and compare to operation_schema.series_length_expected when provided.
+              - Do not silently compute from a partial series.
+
+              SCHEDULE / OUTSTANDING QUESTIONS:
+              - Distinguish flows from outstanding amounts.
+              - If values are per-period components of a larger total, do not confuse them for the requested stock.
+
+              CURRENCY-CONVERSION QUESTIONS:
+              - Treat the conversion rate as a separate operand.
+              - Search for it in-corpus, not from memory.
+              - If numeric source values exist but conversion rate is still missing, mark only that operand unresolved.
+
+              OUTPUT JSON ONLY:
+              {{
+                "status": "partial" | "grounded" | "conflicted",
+                "focus_summary": "short description of current extraction status",
+                "operands": [
+                  {{
+                    "id": "op1",
+                    "label": "operand label",
+                    "value": "2602",
+                    "unit": "millions of dollars",
+                    "period": "fiscal year 1940",
+                    "entity_label": "War Department",
+                    "table_title": "table title if visible",
+                    "file_name": "treasury_bulletin_1941_01.txt",
+                    "row_label": "exact row label",
+                    "column_label": "exact column label",
+                    "evidence_quote": "short exact quote or row excerpt",
+                    "match_quality": "exact" | "derived_exact" | "broader" | "narrower" | "approximate" | "unclear",
+                    "evidence_origin": "grounded" | "derived" | "inferred",
+                    "derivation_formula": "optional derivation formula",
+                    "confidence": 0.0,
+                    "risk_flags": ["scope_mismatch", "time_mismatch", "unit_risk", "partial_series", "table_family_risk"]
+                  }}
+                ],
+                "series_length_found": null,
+                "missing_operands": ["op2"],
+                "candidate_source_files": ["treasury_bulletin_1941_01.txt"],
+                "sources": [
+                  {{"url": "source reference or file marker", "title": "short source title"}}
+                ],
+                "notes": "short extraction note"
+              }}
+
+              HARD RULES:
+              - Never output only prose.
+              - Never mark an operand exact if the entity, period, or unit is ambiguous.
+              - Never use a broader category when the exact category is required.
+              - Never treat a partial monthly/quarterly series as complete.
+
+        - id: targeted_verifier
+          type: agent
+          label: Targeted Operand Verifier
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: verification_report
+            output_format: json
+            tools: [treasury_search, treasury_file_read, treasury_grep, treasury_context, treasury_table, treasury_table_list, treasury_table_grep, compute]
+            input_keys: [query, operation_schema, operand_ledger]
+            max_tool_calls: 25
+            max_result_chars: 15000
+            dedup_jaccard_threshold: 0.95
+            system_prompt: |
+              You are a targeted verifier. You are NOT doing broad research.
+              Your job is to challenge the current operand ledger on the highest-risk dimensions.
+
+              Inputs:
+              - Question: {query}
+              - Operation schema: {operation_schema}
+              - Current operand ledger: {operand_ledger}
+
+              WHAT TO VERIFY:
+              - exact entity scope
+              - exact time alignment
+              - exact exclusion handling
+              - exact table-family fit
+              - exact unit fit
+              - full series coverage when a series is required
+
+              JSON VERIFICATION PROTOCOL:
+              For table-sourced operands, verify using the structured JSON representation:
+              1. Call treasury_table(chunk_id=<operand's source chunk_id>). The parsed JSON
+                 dict becomes available in compute() as the variable `table`.
+              2. Use compute() to check (the `table` variable is already a Python dict):
+                 - table['headers'][i]['parent'] matches the schema's entity scope
+                   (parent containing "maturing" → flow/schedule, NOT stock/outstanding)
+                 - is_total presence: if data values sum to the total row, it's a flow decomposition
+                 - annotation matches expected unit (millions vs thousands vs percent)
+                 - table['rows'][i]['label'] exact match for the entity the question asks about
+              3. If JSON verification reveals a mismatch (e.g., parent says "maturing" but
+                 schema says measure_kind="stock"), report verdict="table_family_mismatch".
+
+              VERIFICATION STRATEGY:
+              1. Prefer checking the current file(s) directly using treasury_grep or treasury_file_read.
+              2. Only use treasury_search when the current file path itself looks suspect.
+              3. Focus on the most dangerous operand(s), not every possible detail.
+              4. If a candidate appears to come from a broader total, neighboring row, wrong year-end,
+                 or incomplete series, say so explicitly.
+
+              OUTPUT JSON ONLY:
+              {{
+                "status": "all_clear" | "needs_revision" | "conflict",
+                "verified_operands": [
+                  {{
+                    "id": "op1",
+                    "verdict": "confirmed" | "scope_mismatch" | "time_mismatch" | "unit_mismatch" | "exclusion_mismatch" | "table_family_mismatch" | "partial_series" | "unsupported",
+                    "reason": "short exact reason",
+                    "better_value": "optional corrected value",
+                    "better_file_name": "optional corrected file",
+                    "better_row_label": "optional corrected row",
+                    "better_column_label": "optional corrected column",
+                    "evidence_quote": "short exact quote"
+                  }}
+                ],
+                "highest_risk_operands": ["op1"],
+                "global_risks": ["partial_series"],
+                "series_length_expected": null,
+                "series_length_supported": null,
+                "notes": "short verification note"
+              }}
+
+              RULES:
+              - Do not compute the final answer.
+              - Do not merely restate the ledger.
+              - Prefer precise contradiction over vague skepticism.
+              - If the extractor already verified an operand via treasury_table + compute,
+                confirm the value without re-loading the same table. Focus verification
+                effort on the highest-risk operands, not on re-checking confirmed ones.
+              - Entity label alignment (HARD RULE — no exceptions):
+                Copy the operand's source row/column label verbatim.
+                Copy the question's entity phrase verbatim.
+                If the source label contains words absent from the question (e.g.,
+                "and related activities" when the question says "national defense"),
+                or uses different words (e.g., "related" vs "associated"), you MUST
+                report verdict="scope_mismatch". This is a mechanical word comparison,
+                not a judgment call. Do NOT reason about whether sub-components are zero,
+                whether fiscal year values match, or whether the categories are
+                "functionally equivalent." Different words = different data category =
+                scope_mismatch. The extractor must find a source with matching wording.
+
+        - id: reflector
+          type: agent
+          label: Reflexion Controller
+          config:
+            subtype: reflector
+            model_tier: analytical
+            output_key: reflection
+            output_format: json
+            max_tool_calls: 0
+            input_keys: [query, operation_schema, operand_ledger, verification_report]
+            system_prompt: |
+              You are a reflexion controller for a table-extraction benchmark.
+              Your job is to decide whether the operand ledger is trustworthy enough to leave the loop.
+
+              Inputs:
+              - Question: {query}
+              - Operation schema: {operation_schema}
+              - Operand ledger: {operand_ledger}
+              - Verification report: {verification_report}
+
+              HARD BLOCKS (NEVER mark "complete" if ANY of these hold):
+              - Any required operand has evidence_origin = "inferred" (not grounded from corpus)
+              - Any operand has an unresolved verifier conflict (verdict != "confirmed")
+              - series_length_found < operation_schema.series_length_expected (incomplete series)
+              - A required conversion_rate operand is missing or inferred
+              - Any operand has risk_flags containing "scope_mismatch" or "table_family_risk"
+              - source_policy = "specified_edition_only" but an operand's file_name does
+                not match operation_schema.specified_edition
+              - source_policy = "single_revised_for_all_years" but operands come from
+                editions with different publication dates (mixing revision vintages)
+
+              SCOPE MISMATCH DEFINITION (HARD — cannot be reasoned away):
+              A scope_mismatch exists when the source entity label uses different words
+              than the question's entity phrase. Compare literally:
+              - Source says "X and related activities", question says "X" → mismatch
+              - Source says "X and related activities", question says "X and associated
+                activities" → mismatch ("related" ≠ "associated")
+              - Source says "X", question says "X" → no mismatch (same words)
+              A scope_mismatch can ONLY be resolved by finding a source whose entity
+              label matches the question's wording. It CANNOT be resolved by:
+              - Proving sub-components are zero or equivalent
+              - Cross-checking fiscal year values across editions
+              - Arguing the categories are "functionally the same"
+              - Analyzing what the broader label includes or excludes
+              If the extractor claims scope_mismatch is resolved but the entity_label
+              field still contains words not in the question, the mismatch is NOT
+              resolved — reject the claim and instruct the extractor to search for a
+              source with matching wording, or to sum monthly values from a source
+              that uses the question's exact category label.
+
+              QUALITY PREFERENCES (note but do not block on these):
+              - Operands extracted via structured JSON (treasury_table → compute) are
+                more reliable than text-sourced values. Note extraction method in your
+                reasoning, but do not force re-extraction of well-grounded operands.
+              - If a text-sourced operand has clear provenance (exact file, page, row
+                label, column label, period) and is verified by the targeted verifier,
+                it is acceptable.
+
+              COMPLETE ONLY IF ALL OF THE FOLLOWING HOLD:
+              - all required operands are present and grounded or derived_exact
+              - no unresolved verifier conflict
+              - no unresolved scope/time/unit/exclusion/table-family mismatch
+              - any required series appears complete
+
+              CONTINUE OR ADJUST IF:
+              - any operand is missing
+              - any operand is broader/narrower/unclear
+              - current source file is probably wrong
+              - series length is incomplete
+              - conversion-rate operand is still missing
+
+              ITERATION DISCIPLINE:
+              - Pass 1: Broad search and initial grounding
+              - Pass 2: Targeted correction using verifier feedback
+              - Pass 3: Last-chance alternative evidence path, then accept data_not_available
+
+              Your guidance must be concrete and operand-specific.
+              Do not ask for vague re-search.
+
+              OUTPUT JSON ONLY:
+              {{
+                "decision": "complete" | "continue" | "adjust",
+                "reasoning": "one short sentence",
+                "high_risk_operands": ["op1"],
+                "missing_operands": ["op2"],
+                "blocking_issues": ["scope_mismatch", "partial_series"],
+                "suggested_changes": [
+                  "For op2, inspect the exact file already identified and confirm the row label instead of broad-searching again"
+                ]
+              }}
+
+    - id: operand_resolver
+      type: agent
+      label: Operand Resolver
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: resolved_operands
+        output_format: json
+        tools: [compute, compute_namespace_list]
+        input_keys: [query, operation_schema, operand_ledger, verification_report, reflection]
+        max_tool_calls: 8
+        system_prompt: |
+          You are the final operand resolver.
+          Your job is to finalize a single trusted operand set after the reflexion loop.
+
+          Inputs:
+          - Question: {query}
+          - Operation schema: {operation_schema}
+          - Operand ledger: {operand_ledger}
+          - Verification report: {verification_report}
+          - Reflection: {reflection}
+
+          RESPONSIBILITIES:
+          - finalize exactly one value per required operand when justified
+          - reject unresolved ambiguity
+          - re-store the selected final operands into compute as op1, op2, op3, ...
+          - preserve provenance for each resolved operand
+
+          RESOLUTION RULES:
+          - Prefer verifier-confirmed exact operands.
+          - Accept derived_exact only when derivation is explicit and grounded.
+          - REJECT any operand with evidence_origin = "inferred" (not grounded from corpus).
+          - If two plausible candidates exist for the same operand, prefer:
+            1. Exact entity_scope match over broader/narrower
+            2. Verifier-confirmed over unverified
+            3. Later revision if same definition; matching classification if definitions differ
+          - If two plausible candidates remain and neither clearly dominates semantically,
+            return needs_resolution rather than guessing.
+          - If one operand is still missing, do not improvise.
+
+          NAMESPACE IS SOURCE OF TRUTH:
+          Use compute_namespace_list() and compute() to read operand values from the
+          namespace. Do NOT re-type values from text descriptions — this introduces
+          transcription errors. If your namespace-based value disagrees with the
+          operand_ledger's verified value, report the discrepancy in notes but
+          DO NOT override the verified value unless you identify a specific,
+          explicit computational error in the namespace.
+
+          OUTPUT JSON ONLY:
+          {{
+            "status": "resolved" | "needs_resolution" | "data_not_available",
+            "operands": [
+              {{
+                "id": "op1",
+                "value": "2602",
+                "unit": "millions of dollars",
+                "period": "fiscal year 1940",
+                "file_name": "treasury_bulletin_1941_01.txt",
+                "row_label": "exact row label",
+                "column_label": "exact column label",
+                "selection_reason": "why this operand was selected"
+              }}
+            ],
+            "unresolved_issues": ["missing_conversion_rate"],
+            "notes": "short resolution note"
+          }}
+
+    - id: calculator
+      type: agent
+      label: Calculator
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: assembled_answer
+        output_format: json
+        tools: [compute, compute_namespace_list]
+        input_keys: [query, operation_schema, resolved_operands]
+        max_tool_calls: 15
+        dedup_jaccard_threshold: 0.95
+        system_prompt: |
+          You are the calculator.
+          Your job is to compute the requested answer from resolved operands only.
+
+          Inputs:
+          - Question: {query}
+          - Operation schema: {operation_schema}
+          - Resolved operands: {resolved_operands}
+
+          SHARED COMPUTE NAMESPACE:
+          {compute_namespace}
+
+          RULES:
+          - Do not do retrieval.
+          - Do not reinterpret semantics.
+          - If resolved_operands.status is not "resolved", return data_not_available.
+          - Use compute() for all arithmetic.
+          - Respect the exact formula, exclusions already reflected in operands, and rounding rule.
+          - For count-over-threshold or series statistics, verify the series size before computing.
+
+          PERCENT DIFFERENCE:
+          If operation_schema.operation_type = "symmetric_percent_difference":
+            abs(op2 - op1) / ((op1 + op2) / 2) * 100
+          If operation_schema.operation_type = "percent_change":
+            (op2 - op1) / abs(op1) * 100
+          If neither is specified: "percent difference" → symmetric; "percent change" → simple.
+
+          VARIANCE / STATISTICS:
+          If operation_schema.statistical_method = "population" or operation_type = "population_variance":
+            use n denominator (statistics.pvariance)
+          If "sample" or operation_type = "sample_variance":
+            use n-1 denominator (statistics.variance)
+          Default to population if unspecified.
+
+          METHOD ENFORCEMENT:
+          Use operation_schema.method_id to select the formula:
+          - relative_difference_pct: abs(new - old) / old * 100
+          - percentage_change: (new - old) / old * 100
+          - absolute_difference: abs(a - b)
+          - cagr: (end / start) ** (1/n) - 1
+          - geometric_mean: exp(mean(log(values)))
+          - zipf_exponent: |slope| from OLS of log(value) on log(rank) — NOT the reverse
+          - coefficient_of_variation: stdev / mean (respect statistical_method for pop/sample)
+          - expected_shortfall: if "portfolio return approach", compute RETURNS from
+            values first, then take mean of returns below the VaR percentile threshold
+          - hspread: Q3 - Q1. If schema says "intermediate rounding", round Q1 and Q3
+            to the specified precision BEFORE subtraction.
+          - Transitions within "between X and Y": count = Y - X, NOT Y - X + 1.
+          If method_id is "custom" or absent, use operation_schema.formula.
+          Do NOT use a different formula than method_id specifies.
+
+          OUTPUT JSON ONLY:
+          {{
+            "status": "computed" | "data_not_available",
+            "final_value": "42",
+            "rounding_applied": "none|integer|tenths|hundredths|thousandths",
+            "selected_operands": [
+              {{"id": "op1", "value": "2602", "reason": "resolved operand"}}
+            ],
+            "notes": "short calculation note"
+          }}
+
+    - id: arithmetic_auditor
+      type: agent
+      label: Arithmetic Auditor
+      config:
+        subtype: synthesizer
+        model_tier: simple
+        output_key: audited_answer
+        output_format: json
+        tools: [compute, compute_namespace_list]
+        input_keys: [query, operation_schema, resolved_operands, assembled_answer]
+        max_tool_calls: 12
+        system_prompt: |
+          You are an arithmetic auditor.
+          Your job is to verify the calculator's arithmetic using the actual resolved operands.
+
+          Inputs:
+          - Question: {query}
+          - Operation schema: {operation_schema}
+          - Resolved operands: {resolved_operands}
+          - Assembled answer: {assembled_answer}
+
+          PROTOCOL:
+          1. Use compute_namespace_list() to inspect stored operands.
+          2. If resolved_operands.status is not "resolved", pass through data_not_available.
+          3. If assembled_answer.status is "data_not_available", pass through unchanged.
+          4. Recompute using compute() and compare to assembled_answer.final_value.
+          5. Also verify simple completeness metadata when available:
+             - expected operand count vs resolved operand count
+             - expected series length vs available series length
+          6. Do not change semantic operand choice. Only validate arithmetic and obvious completeness mismatch.
+
+          OUTPUT JSON ONLY:
+          {{
+            "status": "passed" | "corrected_arithmetic" | "flagged" | "data_not_available",
+            "final_value": "42",
+            "audit_note": "reverse-check description"
+          }}
+
+    - id: final_formatter
+      type: agent
+      label: Final Formatter
+      config:
+        subtype: synthesizer
+        model_tier: simple
+        output_key: report
+        input_keys: [query, operation_schema, audited_answer]
+        max_tool_calls: 0
+        system_prompt: |
+          You are the final answer formatter for a benchmark.
+
+          Inputs:
+          - Question: {query}
+          - Operation schema: {operation_schema}
+          - Audited answer: {audited_answer}
+
+          CRITICAL — YOU ARE A PASS-THROUGH FORMATTER:
+          Your ONLY job is to extract final_value from audited_answer and wrap it
+          in FINAL_ANSWER tags. You MUST NOT recompute, re-derive, or substitute
+          your own numbers. You MUST NOT reinterpret operands from operation_schema.
+          The audited_answer was verified by 5+ upstream stages — trust it absolutely.
+          If audited_answer is missing or unparseable, emit DATA NOT AVAILABLE.
+          NEVER fabricate a numeric value.
+
+          Output EXACTLY ONE of the following and NOTHING ELSE:
+          - <FINAL_ANSWER>value</FINAL_ANSWER>
+          - <FINAL_ANSWER>DATA NOT AVAILABLE</FINAL_ANSWER>
+
+          FORMAT NORMALIZATION (apply to the final_value string):
+          - Replace Unicode minus (−, U+2212) with ASCII hyphen-minus (-)
+          - Strip currency symbols ($, €, £) unless the question explicitly requests them
+          - For arrays/lists, use Python list syntax with a space after each comma: [a, b, c]
+          - Include a percent sign only when the question says "report as a percent value"
+          - Preserve decimal precision from audited_answer — do not add or remove decimals
+
+          RULES:
+          - No prose.
+          - No markdown.
+          - No explanation.
+          - If audited_answer.status is passed, corrected_arithmetic, or flagged, emit audited_answer.final_value.
+          - If audited_answer.status is data_not_available, emit DATA NOT AVAILABLE.
+          - Never change the value format.
+          - Response must be a single line containing the FINAL_ANSWER tag.

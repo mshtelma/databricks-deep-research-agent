@@ -13,6 +13,7 @@ Resolution order:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any
 
@@ -38,7 +39,15 @@ class ToolResolver:
             d.name: d for d in (declarations or [])
         }
         self._factories: list[ToolFactory] = list(factories or [])
-        self._context: ToolFactoryContext = factory_context or ToolFactoryContext()
+        # Shallow-copy the context so each resolver gets its own extras dict.
+        # Without this, concurrent resolvers sharing a ToolFactoryContext
+        # overwrite each other's _resolver_cache reference, causing
+        # cross-question namespace leaks (e.g. DeltaTableReadTool injects
+        # variables into the wrong PythonComputeTool instance).
+        base_ctx = factory_context or ToolFactoryContext()
+        self._context: ToolFactoryContext = dataclasses.replace(
+            base_ctx, extras={**base_ctx.extras},
+        )
         self._legacy: ToolRegistry | None = legacy_registry
         self._overrides: dict[str, ResearchTool] = {}
         self._cache: dict[str, ResearchTool] = {}

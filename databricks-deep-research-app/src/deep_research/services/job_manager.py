@@ -675,8 +675,13 @@ class JobManager:
                     # We just iterate to completion
                     pass
 
+            # The orchestrator uses independent DB sessions for all writes
+            # (EventBuffer, persist_research_session_complete_update_independent,
+            # etc.), so the connection held by this `async with` block may go
+            # stale during long research runs.  All post-stream DB operations
+            # therefore use fresh sessions obtained via get_session_maker().
+            timed_out = False
             async with session_maker() as db:
-                # H1: Wrap research execution with timeout
                 timeout = config.research_timeout_seconds
                 try:
                     await asyncio.wait_for(
@@ -684,56 +689,88 @@ class JobManager:
                         timeout=timeout,
                     )
                 except TimeoutError:
-                    logger.error(
-                        "RESEARCH_TIMEOUT",
-                        session_id=str(session_id),
-                        timeout_seconds=timeout,
-                    )
-                    session = await db.get(ResearchSession, session_id)
-                    if session and session.status == ResearchStatus.IN_PROGRESS:
-                        session.status = ResearchStatus.FAILED
-                        session.error_message = (
-                            f"Research timed out after {timeout} seconds"
+                    timed_out = True
+
+            # -- Post-stream handling with fresh sessions --
+
+            if timed_out:
+                logger.error(
+                    "RESEARCH_TIMEOUT",
+                    session_id=str(session_id),
+                    timeout_seconds=timeout,
+                )
+                try:
+                    timeout_sm = get_session_maker()
+                    async with timeout_sm() as timeout_db:
+                        session = await timeout_db.get(
+                            ResearchSession, session_id,
                         )
-                        session.completed_at = datetime.now(UTC)
-                        await db.commit()
-                    return
-
-                # Mark completed
-                session = await db.get(ResearchSession, session_id)
-                if session and session.status == ResearchStatus.IN_PROGRESS:
-                    duration_seconds = (
-                        (datetime.now(UTC) - session.created_at).total_seconds()
-                        if session.created_at
-                        else 0.0
-                    )
-                    session.status = ResearchStatus.COMPLETED
-                    session.completed_at = datetime.now(UTC)
-                    await db.commit()
-                    logger.info(
-                        "JOB_COMPLETED",
+                        if session and session.status == ResearchStatus.IN_PROGRESS:
+                            session.status = ResearchStatus.FAILED
+                            session.error_message = (
+                                f"Research timed out after {timeout} seconds"
+                            )
+                            session.completed_at = datetime.now(UTC)
+                            await timeout_db.commit()
+                except Exception as timeout_persist_err:
+                    logger.warning(
+                        "TIMEOUT_PERSIST_FAILED",
                         session_id=str(session_id),
+                        error=str(timeout_persist_err)[:200],
                     )
+                return
 
-                    # Emit lifecycle hook: job_completed
-                    if plugin_manager:
-                        try:
-                            from deep_research.plugins.lifecycle import EventEmitter
+            # Orchestrator already committed COMPLETED via independent session
+            # (persist_research_session_complete_update_independent).
+            # Read with a fresh session for logging + lifecycle hook only.
+            try:
+                completion_sm = get_session_maker()
+                async with completion_sm() as completion_db:
+                    session = await completion_db.get(
+                        ResearchSession, session_id,
+                    )
+                    if session and session.status == ResearchStatus.COMPLETED:
+                        duration_seconds = (
+                            (datetime.now(UTC) - session.created_at).total_seconds()
+                            if session.created_at
+                            else 0.0
+                        )
+                        logger.info(
+                            "JOB_COMPLETED",
+                            session_id=str(session_id),
+                        )
 
-                            emitter = EventEmitter(plugin_manager)
-                            await emitter.job_completed(
-                                job_id=session_id,
-                                duration_seconds=duration_seconds,
-                                output=None,  # Output not available in job_manager context
-                                output_type=output_type or "generic",
-                                event_count=0,  # Not tracked here
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "LIFECYCLE_HOOK_EMISSION_FAILED",
-                                hook="on_job_completed",
-                                error=str(e)[:200],
-                            )
+                        # Emit lifecycle hook: job_completed
+                        if plugin_manager:
+                            try:
+                                from deep_research.plugins.lifecycle import EventEmitter
+
+                                emitter = EventEmitter(plugin_manager)
+                                await emitter.job_completed(
+                                    job_id=session_id,
+                                    duration_seconds=duration_seconds,
+                                    output=None,
+                                    output_type=output_type or "generic",
+                                    event_count=0,
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    "LIFECYCLE_HOOK_EMISSION_FAILED",
+                                    hook="on_job_completed",
+                                    error=str(e)[:200],
+                                )
+                    elif session:
+                        logger.warning(
+                            "JOB_COMPLETION_STATUS_UNEXPECTED",
+                            session_id=str(session_id),
+                            actual_status=str(session.status),
+                        )
+            except Exception as completion_err:
+                logger.warning(
+                    "JOB_COMPLETION_CHECK_FAILED",
+                    session_id=str(session_id),
+                    error=str(completion_err)[:200],
+                )
 
         except asyncio.CancelledError:
             logger.info(
@@ -760,7 +797,7 @@ class JobManager:
             error_session_maker = get_session_maker()
             async with error_session_maker() as db:
                 session = await db.get(ResearchSession, session_id)
-                if session:
+                if session and session.status == ResearchStatus.IN_PROGRESS:
                     session.status = ResearchStatus.FAILED
                     session.error_message = str(e)[:500]  # Truncate error message
                     session.completed_at = datetime.now(UTC)
@@ -802,6 +839,13 @@ class JobManager:
                                 hook="on_job_failed",
                                 error=str(hook_error)[:200],
                             )
+                elif session:
+                    logger.info(
+                        "JOB_ERROR_SKIPPED_TERMINAL_STATUS",
+                        session_id=str(session_id),
+                        current_status=str(session.status),
+                        error=str(e)[:200],
+                    )
 
         finally:
             self._active_tasks.pop(session_id, None)

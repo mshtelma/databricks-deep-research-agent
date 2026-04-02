@@ -46,12 +46,17 @@ _MAX_RESULT_COUNT = 20
 
 @dataclass(frozen=True)
 class SearchResult:
-    """A single result returned by a :class:`SearchClient`."""
+    """A single result returned by a :class:`SearchClient`.
+
+    The *content* field carries full page text when the search provider
+    returns it (e.g. Jina).  Snippet-only providers leave it ``None``.
+    """
 
     url: str
     title: str
     snippet: str
     relevance_score: float = 0.5
+    content: str | None = None
 
 
 @runtime_checkable
@@ -142,10 +147,12 @@ class WebSearchTool:
         *,
         domain_filter: list[str] | None = None,
         max_results: int = 5,
+        max_content_per_result: int = 5000,
     ) -> None:
         self._client = search_client
         self._domain_filter = domain_filter or []
         self._max_results = min(max(max_results, 1), _MAX_RESULT_COUNT)
+        self._max_content_per_result = max_content_per_result
 
         self._definition = ToolDefinition(
             name="web_search",
@@ -296,18 +303,30 @@ class WebSearchTool:
                 else:
                     idx = len(formatted_lines)
 
+                # Truncate content when present.
+                source_content: str | None = None
+                if result.content:
+                    source_content = result.content[: self._max_content_per_result]
+
                 sources.append(
                     SourceInfo(
                         url=result.url,
                         title=result.title,
                         snippet=result.snippet,
+                        content=source_content,
                         source_type="web",
                     )
                 )
+
                 # LLM sees indices only — never raw URLs.
-                formatted_lines.append(
-                    f"[{idx}] **{result.title}**\n    {result.snippet}"
-                )
+                if source_content:
+                    formatted_lines.append(
+                        f"[{idx}] **{result.title}**\n{source_content}"
+                    )
+                else:
+                    formatted_lines.append(
+                        f"[{idx}] **{result.title}**\n    {result.snippet}"
+                    )
 
             if not formatted_lines:
                 content = "No search results found. Try a different query."

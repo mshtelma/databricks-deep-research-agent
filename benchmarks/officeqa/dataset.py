@@ -13,16 +13,19 @@ from benchmarks.core.types import BenchmarkQuestion
 logger = logging.getLogger(__name__)
 
 
+_BUNDLED_DIR = Path(__file__).resolve().parent
+
+
 class OfficeQADataset:
     """Load questions from OfficeQA CSV and flag external-source questions."""
 
     def __init__(
         self,
-        repo_path: Path,
+        repo_path: Path | None = None,
         dataset_name: str = "officeqa_pro",
     ) -> None:
-        self._repo_path = repo_path
-        self._csv_path = repo_path / f"{dataset_name}.csv"
+        self._repo_path = repo_path or _BUNDLED_DIR
+        self._csv_path = self._repo_path / f"{dataset_name}.csv"
 
     def load_questions(self) -> list[BenchmarkQuestion]:
         """Load questions from CSV. Flag external-source questions."""

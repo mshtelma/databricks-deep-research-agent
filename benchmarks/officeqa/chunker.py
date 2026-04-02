@@ -11,10 +11,12 @@ The OfficeQA `transform_parsed_files.py` produces files named
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -433,3 +435,326 @@ def chunk_file(file_path: Path, config: ChunkConfig | None = None) -> list[Chunk
         sum(c.char_count for c in chunks),
     )
     return chunks
+
+
+# ---------------------------------------------------------------------------
+# Structured table records (v9+)
+# ---------------------------------------------------------------------------
+
+_ANNOTATION_RE = re.compile(
+    r"\([Ii]n\s+(millions|billions|thousands|percent|basis\s+points)[^)]*\)"
+)
+
+
+@dataclass
+class TableRecord:
+    """Structured table record for the ``treasury_tables`` Delta table.
+
+    Each record mirrors a table-type (or table-containing section) chunk in
+    ``treasury_chunks`` and carries the complete JSON representation of the
+    table.  The ``chunk_id`` field matches the corresponding ``Chunk.chunk_id``
+    so the agent can look up the JSON by chunk_id after finding the table via
+    vector search or grep.
+    """
+
+    chunk_id: str = ""
+    file_name: str = ""
+    bulletin_date: str = ""
+    page_info: str = ""
+    table_title: str = ""
+    annotation: str = ""
+    content: str = ""  # brief summary for _format_rows display
+    table_json: str = ""  # complete JSON string
+    row_count: int = 0
+    col_count: int = 0
+    chunk_type: str = "table"
+    char_count: int = 0
+
+
+def _extract_annotation(text: str) -> str:
+    """Extract unit annotation like '(In millions of dollars)' from text."""
+    m = _ANNOTATION_RE.search(text)
+    return m.group(0) if m else ""
+
+
+def _chunk_contains_table(chunk: Chunk) -> bool:
+    """Check if a chunk's content contains a markdown table."""
+    return any(_is_table_line(line) for line in chunk.content.split("\n"))
+
+
+def _extract_pre_table_title(content: str) -> str:
+    """Extract the table title line from text preceding the markdown table.
+
+    Treasury bulletins often have a title line like:
+    ``## TABLE TSO-3 — Interest-Bearing Marketable Public Debt Securities``
+    before the pipe-delimited table.  This title contains the table identifier
+    (TSO-3, CM-I-1, etc.) that agents search for but which doesn't appear in
+    ``page_info`` (section heading) or column names.
+    """
+    lines = content.split("\n")
+    # Collect non-metadata text lines that appear before the first table line
+    candidates: list[str] = []
+    _METADATA_PREFIXES = ("Document:", "Bulletin date:", "Section:", "chunk_id:")
+    for line in lines:
+        stripped = line.strip()
+        if _is_table_line(stripped):
+            break
+        if not stripped:
+            continue
+        if stripped.startswith(_METADATA_PREFIXES):
+            continue
+        cleaned = stripped.lstrip("#").strip().rstrip("*").strip()
+        if len(cleaned) > 5:
+            candidates.append(cleaned)
+    # Return all candidate lines joined — these typically include the table
+    # designation ("TABLE TSO-3 — ...") and/or the annotation ("(In millions...)")
+    return " | ".join(candidates) if candidates else ""
+
+
+_MAX_ENTITY_LABELS = 30
+_ENTITY_HALF = _MAX_ENTITY_LABELS // 2
+
+
+def _build_table_summary(
+    table_data: dict[str, Any],
+    file_name: str,
+    bulletin_date: str,
+    page_info: str,
+    table_title: str,
+    annotation: str,
+    pre_table_title: str = "",
+) -> str:
+    """Build a rich, search-optimized summary for a structured table record.
+
+    The summary is stored in the ``content`` column of ``treasury_tables``
+    and serves as the search target for ``treasury_table_grep`` and the
+    display body for ``treasury_table_list``.  It must contain ALL terms
+    an agent might grep for: table titles, column names, header parent
+    chains, entity row labels, period ranges, total row labels, and unit
+    annotations.
+
+    Returns
+    -------
+    str
+        Multi-line summary text.  ``chunk_id:`` is NOT included here —
+        it is prepended per-record by ``build_table_records`` since split
+        table chunks have different chunk_ids.
+    """
+    headers = table_data.get("headers", [])
+    rows = table_data.get("rows", [])
+    row_count = table_data.get("row_count", len(rows))
+    col_count = len(headers)
+
+    parts: list[str] = []
+
+    # Document context
+    if file_name:
+        parts.append(f"Document: {file_name}")
+    if bulletin_date:
+        parts.append(f"Bulletin date: {bulletin_date}")
+    if page_info:
+        parts.append(f"Section: {page_info}")
+
+    # Table title
+    if table_title:
+        parts.append(f"TABLE: {table_title}")
+
+    # Pre-table title (contains table identifiers like "TSO-3", "CM-I-1")
+    if pre_table_title and pre_table_title != table_title:
+        parts.append(f"Title: {pre_table_title}")
+
+    # Unit annotation
+    if annotation:
+        parts.append(annotation)
+
+    # Header parent chains (critical for flow-vs-stock: "maturing", "by Issue").
+    # Preserve column order; deduplicate only exact-identical chains.
+    parent_unique = list(dict.fromkeys(
+        h["parent"] for h in headers if h.get("parent")
+    ))
+    if parent_unique:
+        parts.append(f"Header context: {'; '.join(parent_unique)}")
+
+    # Column names
+    if headers:
+        col_names = [h.get("name", "") for h in headers]
+        parts.append(f"Columns: {' | '.join(col_names)}")
+
+    # Classify rows for period range, totals, entities
+    data_labels: list[str] = []
+    total_labels: list[str] = []
+    for r in rows:
+        label = r.get("label", "").strip()
+        if not label:
+            continue
+        if r.get("is_total"):
+            total_labels.append(label)
+        elif not r.get("is_group_header"):
+            data_labels.append(label)
+
+    # Period range (first and last data row labels)
+    if data_labels:
+        first, last = data_labels[0], data_labels[-1]
+        if first != last:
+            parts.append(f"Period range: {first} — {last}")
+        else:
+            parts.append(f"Period: {first}")
+
+    # Shape
+    parts.append(f"{row_count} data rows | {col_count} columns")
+
+    # Total row labels
+    if total_labels:
+        parts.append(f"Total rows: {', '.join(total_labels)}")
+
+    # Entity samples (all labels up to cap, first+last halves if over cap)
+    if data_labels:
+        if len(data_labels) <= _MAX_ENTITY_LABELS:
+            entity_text = ", ".join(data_labels)
+        else:
+            head = data_labels[:_ENTITY_HALF]
+            tail = data_labels[-_ENTITY_HALF:]
+            entity_text = ", ".join(head) + ", ..., " + ", ".join(tail)
+        parts.append(f"Entities: {entity_text}")
+
+    return "\n".join(parts)
+
+
+def build_table_records(
+    chunks: list[Chunk],
+    parsed_tables_by_file: dict[str, Any],
+) -> list[TableRecord]:
+    """Build :class:`TableRecord` objects by matching Chunks to ParsedTable data.
+
+    Runs AFTER the existing ``chunk_file()`` pipeline — it does NOT modify
+    any Chunks.  The ``chunk_id`` in each ``TableRecord`` is the SAME as
+    the matched ``Chunk.chunk_id``, creating the FK link to ``treasury_chunks``.
+
+    For split tables (a large table split across multiple consecutive chunks),
+    all split chunks get a ``TableRecord`` with the same ``table_json``, so the
+    agent can look up ANY chunk_id and get the complete table.
+
+    Parameters
+    ----------
+    chunks:
+        All chunks produced by ``chunk_file()`` for one or more files.
+    parsed_tables_by_file:
+        Mapping from file stem (e.g., ``"treasury_bulletin_1941_01"``) to a
+        list of ``ParsedTable`` objects (from ``parse_html_tables_structured``),
+        in document order.
+
+    Returns
+    -------
+    list[TableRecord]
+    """
+    from collections import defaultdict
+
+    # Group chunks by file
+    by_file: dict[str, list[Chunk]] = defaultdict(list)
+    for chunk in chunks:
+        stem = Path(chunk.file_name).stem if chunk.file_name else ""
+        if stem:
+            by_file[stem].append(chunk)
+
+    records: list[TableRecord] = []
+
+    for stem, file_chunks in by_file.items():
+        parsed_tables = list(parsed_tables_by_file.get(stem, []))
+        if not parsed_tables:
+            continue
+
+        table_idx = 0  # index into parsed_tables for this file
+
+        # Track consecutive table chunks for split-table handling
+        i = 0
+        while i < len(file_chunks):
+            chunk = file_chunks[i]
+            is_table_chunk = chunk.chunk_type == "table"
+            is_section_with_table = (
+                chunk.chunk_type == "section" and _chunk_contains_table(chunk)
+            )
+
+            if not (is_table_chunk or is_section_with_table):
+                i += 1
+                continue
+
+            if table_idx >= len(parsed_tables):
+                logger.warning(
+                    "TABLE_RECORD_MISMATCH file=%s chunk_idx=%d table_idx=%d "
+                    "no_more_parsed_tables=%d",
+                    stem, i, table_idx, len(parsed_tables),
+                )
+                i += 1
+                continue
+
+            pt = parsed_tables[table_idx]
+            table_idx += 1
+
+            # Parse JSON to extract metadata
+            try:
+                table_data = _json.loads(pt.table_json) if pt.table_json else {}
+            except (ValueError, TypeError):
+                table_data = {}
+
+            row_count = table_data.get("row_count", 0)
+            col_count = len(table_data.get("headers", []))
+            annotation = _extract_annotation(chunk.content)
+            table_title = chunk.page_info or ""
+            pre_table_title = _extract_pre_table_title(chunk.content)
+
+            # Build rich, searchable summary (without chunk_id — added per-record)
+            base_summary = _build_table_summary(
+                table_data,
+                file_name=chunk.file_name,
+                bulletin_date=chunk.bulletin_date,
+                page_info=chunk.page_info,
+                table_title=table_title,
+                annotation=annotation,
+                pre_table_title=pre_table_title,
+            )
+
+            # Collect all chunk_ids for this table (handles split tables)
+            table_chunk_ids = [chunk.chunk_id]
+
+            # Look ahead for consecutive table chunks from the same heading
+            # (split table detection: same page_info, sequential chunk_ids)
+            if is_table_chunk:
+                j = i + 1
+                while j < len(file_chunks):
+                    next_chunk = file_chunks[j]
+                    if (
+                        next_chunk.chunk_type == "table"
+                        and next_chunk.page_info == chunk.page_info
+                    ):
+                        table_chunk_ids.append(next_chunk.chunk_id)
+                        j += 1
+                    else:
+                        break
+                i = j  # skip past all split chunks
+            else:
+                i += 1
+
+            # Create one TableRecord per chunk_id (same JSON for all split parts).
+            # Each record gets its own chunk_id: line in content so the agent
+            # can extract it from list/grep results for follow-up calls.
+            for cid in table_chunk_ids:
+                records.append(TableRecord(
+                    chunk_id=cid,
+                    file_name=chunk.file_name,
+                    bulletin_date=chunk.bulletin_date,
+                    page_info=chunk.page_info,
+                    table_title=table_title,
+                    annotation=annotation,
+                    content=f"chunk_id: {cid}\n{base_summary}",
+                    table_json=pt.table_json,
+                    row_count=row_count,
+                    col_count=col_count,
+                    chunk_type="table",
+                    char_count=len(pt.table_json),
+                ))
+
+    logger.info(
+        "TABLE_RECORDS_BUILT total=%d files=%d",
+        len(records), len(by_file),
+    )
+    return records

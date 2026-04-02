@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import statistics
-import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -105,31 +104,13 @@ class EvaluationReport:
         return "\n".join(lines)
 
 
-def _import_reward(officeqa_repo_path: Path) -> Callable[..., float]:
-    """Import score_answer from the official reward.py."""
-    reward_path = officeqa_repo_path / "reward.py"
-    if not reward_path.exists():
-        raise FileNotFoundError(
-            f"reward.py not found at {reward_path}. "
-            "Ensure OfficeQA repo is cloned."
-        )
-
-    # Insert repo path so reward.py's imports work
-    repo_str = str(officeqa_repo_path)
-    if repo_str not in sys.path:
-        sys.path.insert(0, repo_str)
-
-    from reward import score_answer  # type: ignore[import-untyped]
-
-    return score_answer  # type: ignore[no-any-return]
-
-
 class OfficeQAEvaluator:
     """Score benchmark results using the official OfficeQA reward function."""
 
-    def __init__(self, officeqa_repo_path: Path) -> None:
-        self._score_fn = _import_reward(officeqa_repo_path)
-        self._repo_path = officeqa_repo_path
+    def __init__(self, officeqa_repo_path: Path | None = None) -> None:
+        from benchmarks.officeqa.reward import score_answer
+
+        self._score_fn: Callable[..., float] = score_answer
 
     def evaluate(
         self,

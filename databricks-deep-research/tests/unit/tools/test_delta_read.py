@@ -425,3 +425,115 @@ class TestDeltaContextTool:
         start, end = DeltaContextTool._compute_range("prefix_c00005", 2)
         assert start == "prefix_c00003"
         assert end == "prefix_c00007"
+
+
+# ---------------------------------------------------------------------------
+# exclude_chunk_types — DeltaReadTool
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaReadToolExcludeChunkTypes:
+    """Tests for the exclude_chunk_types config on DeltaReadTool."""
+
+    @pytest.mark.asyncio
+    async def test_exclude_adds_not_in_to_sql(self) -> None:
+        ws = _make_ws_mock([], _COL_NAMES)
+        tool = DeltaReadTool(
+            **_tool_kwargs(), workspace_client=ws,
+            exclude_chunk_types=["table"],
+        )
+        ctx = ToolContext(query="test")
+        await tool.execute({"file_name": "test.txt"}, ctx)
+
+        call_args = ws.statement_execution.execute_statement.call_args
+        sql = call_args.kwargs.get("statement", call_args[1].get("statement", ""))
+        params = call_args.kwargs.get("parameters", call_args[1].get("parameters", []))
+        assert "NOT IN" in sql
+        assert any(p.name == "excl_ct_0" and p.value == "table" for p in params)
+
+    def test_schema_removes_excluded_from_enum(self) -> None:
+        tool = DeltaReadTool(
+            **_tool_kwargs(), workspace_client=_make_ws_empty(),
+            exclude_chunk_types=["table"],
+        )
+        defn = tool.definition
+        ct_prop = defn.parameters["properties"].get("chunk_type")
+        assert ct_prop is not None
+        assert "table" not in ct_prop["enum"]
+        assert "section" in ct_prop["enum"]
+        assert "text" in ct_prop["enum"]
+
+    def test_schema_removes_param_when_all_excluded(self) -> None:
+        tool = DeltaReadTool(
+            **_tool_kwargs(), workspace_client=_make_ws_empty(),
+            exclude_chunk_types=["table", "section", "text"],
+        )
+        defn = tool.definition
+        assert "chunk_type" not in defn.parameters["properties"]
+
+    @pytest.mark.asyncio
+    async def test_empty_exclusion_no_not_in(self) -> None:
+        ws = _make_ws_mock([], _COL_NAMES)
+        tool = DeltaReadTool(
+            **_tool_kwargs(), workspace_client=ws,
+            exclude_chunk_types=[],
+        )
+        ctx = ToolContext(query="test")
+        await tool.execute({"file_name": "test.txt"}, ctx)
+
+        call_args = ws.statement_execution.execute_statement.call_args
+        sql = call_args.kwargs.get("statement", call_args[1].get("statement", ""))
+        assert "NOT IN" not in sql
+
+
+# ---------------------------------------------------------------------------
+# exclude_chunk_types — DeltaGrepTool
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaGrepToolExcludeChunkTypes:
+    """Tests for the exclude_chunk_types config on DeltaGrepTool."""
+
+    @pytest.mark.asyncio
+    async def test_exclude_adds_not_in_to_sql(self) -> None:
+        ws = _make_ws_mock([], _COL_NAMES)
+        tool = DeltaGrepTool(
+            **{**_tool_kwargs(), "name": "test_grep"}, workspace_client=ws,
+            exclude_chunk_types=["table"],
+        )
+        ctx = ToolContext(query="test")
+        await tool.execute({"file_name": "test.txt", "pattern": "something"}, ctx)
+
+        call_args = ws.statement_execution.execute_statement.call_args
+        sql = call_args.kwargs.get("statement", call_args[1].get("statement", ""))
+        params = call_args.kwargs.get("parameters", call_args[1].get("parameters", []))
+        assert "NOT IN" in sql
+        assert any(p.name == "excl_ct_0" and p.value == "table" for p in params)
+
+    def test_schema_removes_excluded_from_enum(self) -> None:
+        tool = DeltaGrepTool(
+            **{**_tool_kwargs(), "name": "test_grep"}, workspace_client=_make_ws_empty(),
+            exclude_chunk_types=["table"],
+        )
+        defn = tool.definition
+        ct_prop = defn.parameters["properties"].get("chunk_type")
+        assert ct_prop is not None
+        assert "table" not in ct_prop["enum"]
+        assert "section" in ct_prop["enum"]
+
+    @pytest.mark.asyncio
+    async def test_multiple_exclusions(self) -> None:
+        ws = _make_ws_mock([], _COL_NAMES)
+        tool = DeltaGrepTool(
+            **{**_tool_kwargs(), "name": "test_grep"}, workspace_client=ws,
+            exclude_chunk_types=["table", "section"],
+        )
+        ctx = ToolContext(query="test")
+        await tool.execute({"file_name": "test.txt", "pattern": "x"}, ctx)
+
+        call_args = ws.statement_execution.execute_statement.call_args
+        sql = call_args.kwargs.get("statement", call_args[1].get("statement", ""))
+        params = call_args.kwargs.get("parameters", call_args[1].get("parameters", []))
+        assert "NOT IN" in sql
+        assert any(p.name == "excl_ct_0" and p.value == "table" for p in params)
+        assert any(p.name == "excl_ct_1" and p.value == "section" for p in params)

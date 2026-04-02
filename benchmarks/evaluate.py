@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import logging
 import sys
 from pathlib import Path
@@ -52,31 +51,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tolerances", type=str, default="0.0,0.01,0.05", help="Comma-separated tolerances")
     parser.add_argument("--model", type=str, default="", help="Model name for report")
     parser.add_argument("--output", type=str, default=None, help="Save report to file")
+    parser.add_argument(
+        "--uids", type=str, default=None,
+        help="Comma-separated UID substrings to filter results (e.g., 0029,0030,0057)",
+    )
     return parser.parse_args()
 
 
 def _resolve_results_path(results_arg: str) -> Path:
     """Resolve to a JSONL file — handles run dirs, results dirs, and legacy flat files."""
-    p = Path(results_arg)
-    if p.is_file():
-        return p
-    if p.is_dir():
-        # Run directory containing results.jsonl directly
-        direct = p / "results.jsonl"
-        if direct.exists():
-            return direct
-        # Results directory with run-*/results.jsonl subdirectories
-        run_dirs = sorted(p.glob("run-*/results.jsonl"))
-        if run_dirs:
-            return run_dirs[-1]
-        # Legacy: flat run-*.jsonl files
-        files = sorted(p.glob("run-*.jsonl"))
-        if files:
-            return files[-1]
-        print(f"No results found in {p}")
+    from benchmarks.core.run_dir import resolve_results_path
+
+    try:
+        return resolve_results_path(results_arg)
+    except FileNotFoundError as exc:
+        print(str(exc))
         sys.exit(1)
-    print(f"Results path not found: {p}")
-    sys.exit(1)
 
 
 def evaluate_officeqa(args: argparse.Namespace) -> None:
@@ -84,21 +74,22 @@ def evaluate_officeqa(args: argparse.Namespace) -> None:
     from benchmarks.core.result_store import ResultStore
     from benchmarks.officeqa.evaluator import OfficeQAEvaluator
 
-    # Load config for repo path
+    # Load config
     config_path = BENCHMARKS_DIR / "officeqa" / "config.yaml"
     config = load_config(config_path)
-    repo_path = Path(config["repo"]["local_path"])
-
-    if not repo_path.exists():
-        print(f"OfficeQA repo not found at {repo_path}.")
-        print("Run: uv run benchmarks/ingest.py officeqa")
-        sys.exit(1)
 
     # Load results
     results_path = _resolve_results_path(args.results)
     logger.info("EVALUATE_LOAD results=%s", results_path)
     store = ResultStore(results_path)
     results = store.load_all()
+
+    if args.uids:
+        from benchmarks.core.uid_filter import filter_by_uid_fragments, parse_uid_fragments
+
+        fragments = parse_uid_fragments(args.uids)
+        results = filter_by_uid_fragments(results, fragments, lambda r: r.uid)
+        logger.info("FILTERED to %d results by UID substring match", len(results))
 
     if not results:
         print(f"No results found in {results_path}")
@@ -109,8 +100,8 @@ def evaluate_officeqa(args: argparse.Namespace) -> None:
     # Parse tolerances
     tolerances = [float(t) for t in args.tolerances.split(",")]
 
-    # Evaluate
-    evaluator = OfficeQAEvaluator(repo_path)
+    # Evaluate (uses bundled reward.py)
+    evaluator = OfficeQAEvaluator()
     model_name = args.model or config.get("model", "")
     report = evaluator.evaluate(results, tolerances=tolerances, model=model_name)
 
@@ -125,22 +116,20 @@ def evaluate_officeqa(args: argparse.Namespace) -> None:
         output_path.write_text(report_text, encoding="utf-8")
         print(f"\nReport saved to {output_path}")
 
-    # Also save per-question details as JSON (in same directory as results)
-    details_path = results_path.parent / "results.eval.json"
-    details = {
-        "summary": {
-            "total": report.total,
-            "answered": report.answered,
-            "errors": report.errors,
-            "timeouts": report.timeouts,
-            "accuracy": {
-                str(tol): report.accuracy_at(tol) for tol in tolerances
-            },
-        },
-        "per_question": report.per_question,
-    }
-    details_path.write_text(json.dumps(details, indent=2, default=str), encoding="utf-8")
-    print(f"Details saved to {details_path}")
+    # Write standard evaluation artifacts
+    from benchmarks.core.mlflow_utils import (
+        log_evaluation_to_mlflow,
+        write_evaluation_artifacts,
+    )
+
+    eval_json, eval_txt = write_evaluation_artifacts(report, results_path.parent)
+    print(f"Details saved to {eval_json}")
+
+    # Log to active MLflow run if one exists (no-ops otherwise)
+    log_evaluation_to_mlflow(
+        report,
+        artifact_paths=[results_path, eval_json, eval_txt],
+    )
 
 
 def main() -> None:

@@ -322,3 +322,132 @@ class TestValidateArgumentsFilters:
             {"query": "q", "filters": {"c BETWEEN": [1, 10]}}
         )
         assert "filters" not in r
+
+
+# ---------------------------------------------------------------------------
+# exclude_chunk_types — DatabricksVectorSearchTool
+# ---------------------------------------------------------------------------
+
+
+def _make_vs_mock_with_chunk_types(
+    rows: list[list[object]],
+    col_names: list[str],
+) -> MagicMock:
+    """Create a mock workspace_client for VS that returns given rows."""
+    ws = MagicMock()
+    ws.vector_search_indexes.get_index.return_value = SimpleNamespace(
+        primary_key="chunk_id",
+        delta_sync_index_spec=None,
+    )
+    manifest = SimpleNamespace(
+        columns=[SimpleNamespace(name=n) for n in col_names],
+    )
+    result_data = SimpleNamespace(data_array=rows)
+    ws.vector_search_indexes.query_index.return_value = SimpleNamespace(
+        manifest=manifest, result=result_data,
+    )
+    return ws
+
+
+class TestVectorSearchExcludeChunkTypes:
+    """Tests for the exclude_chunk_types config on DatabricksVectorSearchTool."""
+
+    _COL_NAMES = ["chunk_id", "content", "chunk_type", "score"]
+
+    _MIXED_ROWS = [
+        ["c001", "Text about budget", "text", 0.9],
+        ["c002", "| Table | Data |", "table", 0.85],
+        ["c003", "Section header", "section", 0.8],
+        ["c004", "| More | Table |", "table", 0.75],
+        ["c005", "Narrative paragraph", "text", 0.7],
+    ]
+
+    @pytest.mark.asyncio
+    async def test_post_filters_excluded_types(self) -> None:
+        ws = _make_vs_mock_with_chunk_types(self._MIXED_ROWS, self._COL_NAMES)
+        tool = DatabricksVectorSearchTool(
+            workspace_client=ws,
+            name="test_vs",
+            index_name="test.idx",
+            columns=self._COL_NAMES,
+            exclude_chunk_types=["table"],
+        )
+        ctx = ToolContext(query="test")
+        result = await tool.execute({"query": "budget data", "num_results": 10}, ctx)
+
+        assert result.success
+        # Only text + section rows should be in output (3 out of 5)
+        assert len(result.sources) == 3
+        for src in result.sources:
+            assert "table" not in src.title.lower() or "Table" not in src.content
+
+    @pytest.mark.asyncio
+    async def test_over_fetches_when_excluding(self) -> None:
+        ws = _make_vs_mock_with_chunk_types([], self._COL_NAMES)
+        tool = DatabricksVectorSearchTool(
+            workspace_client=ws,
+            name="test_vs",
+            index_name="test.idx",
+            columns=self._COL_NAMES,
+            exclude_chunk_types=["table"],
+        )
+        ctx = ToolContext(query="test")
+        await tool.execute({"query": "q", "num_results": 10}, ctx)
+
+        call_kwargs = ws.vector_search_indexes.query_index.call_args.kwargs
+        # Should over-fetch: min(10*2, 50) = 20
+        assert call_kwargs["num_results"] == 20
+
+    @pytest.mark.asyncio
+    async def test_trims_to_requested_count(self) -> None:
+        # 5 text rows — agent asks for 3
+        text_rows = [
+            [f"c{i}", f"text {i}", "text", 0.9 - i * 0.1]
+            for i in range(5)
+        ]
+        ws = _make_vs_mock_with_chunk_types(text_rows, self._COL_NAMES)
+        tool = DatabricksVectorSearchTool(
+            workspace_client=ws,
+            name="test_vs",
+            index_name="test.idx",
+            columns=self._COL_NAMES,
+            exclude_chunk_types=["table"],
+        )
+        ctx = ToolContext(query="test")
+        result = await tool.execute({"query": "q", "num_results": 3}, ctx)
+
+        assert len(result.sources) == 3
+
+    @pytest.mark.asyncio
+    async def test_no_chunk_type_column_graceful(self) -> None:
+        """When chunk_type column is missing, no filtering occurs."""
+        cols = ["chunk_id", "content", "score"]
+        rows = [["c1", "text", 0.9]]
+        ws = _make_vs_mock_with_chunk_types(rows, cols)
+        tool = DatabricksVectorSearchTool(
+            workspace_client=ws,
+            name="test_vs",
+            index_name="test.idx",
+            columns=cols,
+            exclude_chunk_types=["table"],
+        )
+        ctx = ToolContext(query="test")
+        result = await tool.execute({"query": "q"}, ctx)
+
+        assert result.success
+        assert len(result.sources) == 1
+
+    @pytest.mark.asyncio
+    async def test_no_exclusion_no_over_fetch(self) -> None:
+        ws = _make_vs_mock_with_chunk_types([], self._COL_NAMES)
+        tool = DatabricksVectorSearchTool(
+            workspace_client=ws,
+            name="test_vs",
+            index_name="test.idx",
+            columns=self._COL_NAMES,
+        )
+        ctx = ToolContext(query="test")
+        await tool.execute({"query": "q", "num_results": 10}, ctx)
+
+        call_kwargs = ws.vector_search_indexes.query_index.call_args.kwargs
+        assert call_kwargs["num_results"] == 10

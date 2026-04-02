@@ -50,6 +50,7 @@ class DatabricksToolFactory:
                 filters_json=decl.config.get("filters_json"),
                 description=decl.description,
                 metadata=vs_metadata,
+                exclude_chunk_types=decl.config.get("exclude_chunk_types"),
             )
 
         if decl.kind == "genie":

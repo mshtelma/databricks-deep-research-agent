@@ -1,10 +1,13 @@
-"""JSONL-based atomic append + resume for benchmark results."""
+"""JSONL-based append + resume for benchmark results.
+
+Uses read-modify-write instead of append mode for UC Volume FUSE
+compatibility (FUSE doesn't support lseek/fsync required by ``open(…, "a")``).
+"""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import asdict
 from pathlib import Path
 
@@ -61,13 +64,21 @@ class ResultStore:
         return uids
 
     def append(self, result: QuestionResult) -> None:
-        """Atomic append: write line + fsync."""
+        """Append a result line using read-modify-write for FUSE compatibility.
+
+        UC Volume FUSE doesn't support append mode (``open(…, "a")``) or
+        ``fsync`` because both require ``lseek``.  Instead we read the
+        existing content and write the whole file back in ``"w"`` mode
+        (truncate + sequential write — no seeking).
+        """
         data = asdict(result)
         line = json.dumps(data, ensure_ascii=False, default=str)
-        with open(self._path, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-            f.flush()
-            os.fsync(f.fileno())
+        existing = ""
+        try:
+            existing = self._path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            pass
+        self._path.write_text(existing + line + "\n", encoding="utf-8")
 
     def load_all(self) -> list[QuestionResult]:
         """Load results, last-write-wins per UID for retried questions."""

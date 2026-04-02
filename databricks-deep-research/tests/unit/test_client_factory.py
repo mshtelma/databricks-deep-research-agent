@@ -102,6 +102,43 @@ class TestFromDatabricksModelMapping:
             assert client._models[tier] == "databricks-claude-haiku-4-5"
 
 
+class TestFromDatabricksProfile:
+    """profile parameter is forwarded to WorkspaceClient."""
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("databricks.sdk.WorkspaceClient")
+    def test_profile_passed_to_workspace_client(self, mock_ws_cls: MagicMock) -> None:
+        mock_ws = MagicMock()
+        mock_ws.config.host = "https://profile-workspace.cloud.databricks.com"
+        mock_ws.config.authenticate.return_value = {"Authorization": "Bearer tok"}
+        mock_ws_cls.return_value = mock_ws
+
+        FrameworkLLMClient.from_databricks(profile="my-profile")
+
+        mock_ws_cls.assert_called_once_with(profile="my-profile")
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("databricks.sdk.WorkspaceClient")
+    def test_none_profile_uses_default_constructor(self, mock_ws_cls: MagicMock) -> None:
+        mock_ws = MagicMock()
+        mock_ws.config.host = "https://default.cloud.databricks.com"
+        mock_ws.config.authenticate.return_value = {"Authorization": "Bearer tok"}
+        mock_ws_cls.return_value = mock_ws
+
+        FrameworkLLMClient.from_databricks()
+
+        mock_ws_cls.assert_called_once_with()
+
+    @patch.dict(
+        "os.environ",
+        {"DATABRICKS_HOST": "https://h.com", "DATABRICKS_TOKEN": "t"},
+        clear=False,
+    )
+    def test_profile_ignored_when_direct_token_set(self) -> None:
+        client = FrameworkLLMClient.from_databricks(profile="should-be-ignored")
+        assert client._client.api_key == "t"
+
+
 class TestFromDatabricksNoCredentials:
     """Path 3: no credentials → RuntimeError."""
 

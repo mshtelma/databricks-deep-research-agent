@@ -60,7 +60,7 @@ from databricks_deep_research.tools.factory import ToolFactory, ToolFactoryConte
 from databricks_deep_research.tools.protocol import ResearchTool, ToolContext, UrlRegistry
 from databricks_deep_research.tools.registry import ToolRegistry
 from databricks_deep_research.tools.resolver import ToolResolver
-from databricks_deep_research.tracing import trace_span
+from databricks_deep_research.tracing import get_current_span, trace_span
 from databricks_deep_research.workflow.conditions import (
     StateCondition,
     evaluate_state_condition,
@@ -710,13 +710,14 @@ class WorkflowExecutor:
                 errors.append(str(ref_name))
                 logger.warning("TOOL_NOT_FOUND ref=%s error=%s", ref, exc)
 
+        resolved_names = [t.definition.name for t in tools]
         logger.info(
             "AGENT_TOOLS_RESOLVED node=%s config_tool_refs=%d "
-            "resolved_tools=%d tool_names=%s max_tool_calls=%d",
+            "resolved_tools=%d tool_names=%s max_tool_calls=%s",
             node.id,
             len(config.tools),
             len(tools),
-            [t.definition.name for t in tools],
+            resolved_names,
             config.max_tool_calls,
         )
 
@@ -731,6 +732,16 @@ class WorkflowExecutor:
                 raise WorkflowError(
                     f"Node {node.id!r} is missing declared tools: {errors}"
                 )
+
+        # Attach tool resolution details to the parent node span
+        node_span = get_current_span()
+        if node_span:
+            node_span.set_attributes({
+                "node.resolved_tools": str(resolved_names),
+                "node.missing_tools": str(errors) if errors else "[]",
+                "node.config_tool_refs": len(config.tools),
+                "node.max_tool_calls": config.max_tool_calls,
+            })
 
         # Add pool tools if configured (with registry for hybrid search)
         if config.pool_tools:
@@ -761,6 +772,11 @@ class WorkflowExecutor:
             "AGENT_TOKENS node=%s tokens=%d cumulative=%d usage=%s",
             node.id, agent_tokens, self._total_tokens, output.token_usage,
         )
+        if node_span:
+            node_span.set_attributes({
+                "node.agent_tokens": agent_tokens,
+                "node.cumulative_tokens": self._total_tokens,
+            })
 
         tool_result_events = [
             event for event in output.events if isinstance(event, ToolResultEvent)

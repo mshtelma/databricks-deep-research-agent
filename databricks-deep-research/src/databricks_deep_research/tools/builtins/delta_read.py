@@ -19,9 +19,10 @@ exact value that semantic search misses (e.g., a row that is purely numeric).
 
 from __future__ import annotations
 
+import json as _json
 import logging
 import re
-from typing import Any
+from typing import Any, Callable
 
 from databricks_deep_research.tools.protocol import (
     SourceInfo,
@@ -38,6 +39,22 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _MAX_LIMIT = 100
+_ALL_CHUNK_TYPES = ("table", "section", "text")
+
+
+def _append_chunk_type_exclusion(
+    where: str,
+    params: list[dict[str, Any]],
+    exclude_chunk_types: list[str],
+) -> str:
+    """Append ``chunk_type NOT IN (...)`` to a SQL WHERE clause (parameterized)."""
+    if not exclude_chunk_types:
+        return where
+    placeholders = ", ".join(f":excl_ct_{i}" for i in range(len(exclude_chunk_types)))
+    where += f" AND chunk_type NOT IN ({placeholders})"
+    for i, ct in enumerate(exclude_chunk_types):
+        params.append({"name": f"excl_ct_{i}", "value": ct, "type": "STRING"})
+    return where
 
 
 def _execute_sql(
@@ -102,7 +119,7 @@ def _format_rows(
         chunk_id = str(row_dict.get("chunk_id", idx))
 
         lines.append(
-            f"[{idx}] chunk_type={chunk_type} | page_info={page_info}\n{content_text}"
+            f"[{idx}] chunk_id={chunk_id} | chunk_type={chunk_type} | page_info={page_info}\n{content_text}"
         )
 
         source_url = f"delta://{table_name}/{chunk_id}"
@@ -146,6 +163,7 @@ class DeltaReadTool:
         warehouse_id: str,
         content_column: str = "content",
         order_by: str = "chunk_id",
+        exclude_chunk_types: list[str] | None = None,
     ) -> None:
         self._name = name
         self._description = description
@@ -155,30 +173,34 @@ class DeltaReadTool:
         self._warehouse_id = warehouse_id
         self._content_col = content_column
         self._order_by = order_by
+        self._exclude_chunk_types = exclude_chunk_types or []
 
     @property
     def definition(self) -> ToolDefinition:
+        properties: dict[str, Any] = {
+            "file_name": {
+                "type": "string",
+                "description": "Exact filename to read (e.g., treasury_bulletin_1950_02.txt)",
+            },
+            "limit": {
+                "type": "integer",
+                "description": f"Max chunks to return (default 50, max {_MAX_LIMIT})",
+                "default": 50,
+            },
+        }
+        allowed_types = [t for t in _ALL_CHUNK_TYPES if t not in self._exclude_chunk_types]
+        if allowed_types:
+            properties["chunk_type"] = {
+                "type": "string",
+                "description": "Optional filter: " + ", ".join(allowed_types),
+                "enum": list(allowed_types),
+            }
         return ToolDefinition(
             name=self._name,
             description=self._description,
             parameters={
                 "type": "object",
-                "properties": {
-                    "file_name": {
-                        "type": "string",
-                        "description": "Exact filename to read (e.g., treasury_bulletin_1950_02.txt)",
-                    },
-                    "chunk_type": {
-                        "type": "string",
-                        "description": "Optional filter: table, section, or text",
-                        "enum": ["table", "section", "text"],
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": f"Max chunks to return (default 50, max {_MAX_LIMIT})",
-                        "default": 50,
-                    },
-                },
+                "properties": properties,
                 "required": ["file_name"],
                 "additionalProperties": False,
             },
@@ -211,6 +233,7 @@ class DeltaReadTool:
         if chunk_type:
             where += " AND chunk_type = :chunk_type"
             params.append({"name": "chunk_type", "value": chunk_type, "type": "STRING"})
+        where = _append_chunk_type_exclusion(where, params, self._exclude_chunk_types)
 
         sql = f"SELECT {cols} FROM {self._table} {where} ORDER BY {self._order_by} LIMIT {limit}"
 
@@ -276,6 +299,7 @@ class DeltaGrepTool:
         warehouse_id: str,
         content_column: str = "content",
         order_by: str = "chunk_id",
+        exclude_chunk_types: list[str] | None = None,
     ) -> None:
         self._name = name
         self._description = description
@@ -285,41 +309,45 @@ class DeltaGrepTool:
         self._warehouse_id = warehouse_id
         self._content_col = content_column
         self._order_by = order_by
+        self._exclude_chunk_types = exclude_chunk_types or []
 
     @property
     def definition(self) -> ToolDefinition:
+        properties: dict[str, Any] = {
+            "file_name": {
+                "type": "string",
+                "description": "Filename to search within. Omit to search ALL files (cross-file search).",
+            },
+            "pattern": {
+                "type": "string",
+                "description": "Text pattern to search for",
+            },
+            "mode": {
+                "type": "string",
+                "description": "Match mode: 'substring' (case-insensitive, default) or 'regex'",
+                "enum": ["substring", "regex"],
+                "default": "substring",
+            },
+            "limit": {
+                "type": "integer",
+                "description": f"Max results (default 20, max {_MAX_LIMIT})",
+                "default": 20,
+            },
+        }
+        allowed_types = [t for t in _ALL_CHUNK_TYPES if t not in self._exclude_chunk_types]
+        if allowed_types:
+            properties["chunk_type"] = {
+                "type": "string",
+                "description": "Optional filter: " + ", ".join(allowed_types),
+                "enum": list(allowed_types),
+            }
         return ToolDefinition(
             name=self._name,
             description=self._description,
             parameters={
                 "type": "object",
-                "properties": {
-                    "file_name": {
-                        "type": "string",
-                        "description": "Exact filename to search within",
-                    },
-                    "pattern": {
-                        "type": "string",
-                        "description": "Text pattern to search for",
-                    },
-                    "mode": {
-                        "type": "string",
-                        "description": "Match mode: 'substring' (case-insensitive, default) or 'regex'",
-                        "enum": ["substring", "regex"],
-                        "default": "substring",
-                    },
-                    "chunk_type": {
-                        "type": "string",
-                        "description": "Optional filter: table, section, or text",
-                        "enum": ["table", "section", "text"],
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": f"Max results (default 20, max {_MAX_LIMIT})",
-                        "default": 20,
-                    },
-                },
-                "required": ["file_name", "pattern"],
+                "properties": properties,
+                "required": ["pattern"],
                 "additionalProperties": False,
             },
             source_type="enterprise",
@@ -327,9 +355,11 @@ class DeltaGrepTool:
         )
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        file_name = arguments.get("file_name", "")
-        if not isinstance(file_name, str) or not file_name.strip():
-            raise ValueError("'file_name' must be a non-empty string")
+        raw_file_name = arguments.get("file_name", "")
+        if raw_file_name and isinstance(raw_file_name, str) and raw_file_name.strip():
+            file_name: str | None = raw_file_name.strip()
+        else:
+            file_name = None  # Cross-file search
 
         pattern = arguments.get("pattern", "")
         if not isinstance(pattern, str) or not pattern.strip():
@@ -346,18 +376,19 @@ class DeltaGrepTool:
             except re.error as exc:
                 raise ValueError(f"Invalid regex pattern: {exc}") from exc
 
+        default_limit = 20 if file_name else 30
         return {
-            "file_name": file_name.strip(),
+            "file_name": file_name,
             "pattern": pattern.strip(),
             "mode": mode,
             "chunk_type": arguments.get("chunk_type"),
-            "limit": min(int(arguments.get("limit", 20)), _MAX_LIMIT),
+            "limit": min(int(arguments.get("limit", default_limit)), _MAX_LIMIT),
         }
 
     async def execute(
         self, arguments: dict[str, Any], context: ToolContext
     ) -> ToolResult:
-        file_name = arguments["file_name"]
+        file_name = arguments.get("file_name")
         pattern = arguments["pattern"]
         mode = arguments.get("mode", "substring")
         chunk_type = arguments.get("chunk_type")
@@ -365,10 +396,14 @@ class DeltaGrepTool:
 
         cols = ", ".join(self._columns)
         params: list[dict[str, Any]] = [
-            {"name": "file_name", "value": file_name, "type": "STRING"},
             {"name": "pattern", "value": pattern, "type": "STRING"},
         ]
-        where = "WHERE file_name = :file_name"
+
+        if file_name:
+            where = "WHERE file_name = :file_name"
+            params.insert(0, {"name": "file_name", "value": file_name, "type": "STRING"})
+        else:
+            where = "WHERE 1=1"
 
         if mode == "regex":
             where += f" AND {self._content_col} RLIKE :pattern"
@@ -381,15 +416,18 @@ class DeltaGrepTool:
         if chunk_type:
             where += " AND chunk_type = :chunk_type"
             params.append({"name": "chunk_type", "value": chunk_type, "type": "STRING"})
+        where = _append_chunk_type_exclusion(where, params, self._exclude_chunk_types)
 
-        sql = f"SELECT {cols} FROM {self._table} {where} ORDER BY {self._order_by} LIMIT {limit}"
+        # Cross-file: order chronologically by file_name; within-file: order by chunk_id
+        order = self._order_by if file_name else f"file_name, {self._order_by}"
+        sql = f"SELECT {cols} FROM {self._table} {where} ORDER BY {order} LIMIT {limit}"
 
         try:
             rows, col_names = _execute_sql(self._ws, self._warehouse_id, sql, params)
         except Exception as exc:
             logger.exception(
                 "DELTA_GREP_ERROR tool=%s table=%s file=%s pattern=%s mode=%s",
-                self._name, self._table, file_name, pattern[:100], mode,
+                self._name, self._table, file_name or "(all)", pattern[:100], mode,
             )
             return ToolResult(
                 content=f"Delta grep failed: {exc}",
@@ -398,8 +436,9 @@ class DeltaGrepTool:
             )
 
         if not rows:
+            scope = f"file_name='{file_name}'" if file_name else "all files"
             return ToolResult(
-                content=f"No matches for pattern='{pattern}' ({mode}) in file_name='{file_name}'",
+                content=f"No matches for pattern='{pattern}' ({mode}) in {scope}",
                 success=True,
             )
 
@@ -714,3 +753,338 @@ class DeltaContextTool:
                 if suffix_match and suffix_match.group(1) == needle.lstrip("0"):
                     return idx
         return None
+
+
+# ---------------------------------------------------------------------------
+# DeltaTableReadTool — read a single row by primary key
+# ---------------------------------------------------------------------------
+
+
+class DeltaTableReadTool:
+    """Read a single row from a Delta table by primary key lookup.
+
+    Generic framework tool — works with any Delta table, not just treasury.
+    Designed for structured-data-beside-chunks patterns where a separate table
+    stores enriched representations (e.g., JSON table structures) keyed by the
+    same chunk_id used in the main chunks table.
+
+    Implements the ``ResearchTool`` protocol.
+    """
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        description: str,
+        table_name: str,
+        columns: list[str],
+        workspace_client: Any,
+        warehouse_id: str,
+        content_column: str = "content",
+        pk_column: str = "chunk_id",
+        store_in_compute: str | None = None,
+        compute_resolver: Callable[[], Any] | None = None,
+        structural_analysis: bool = False,
+    ) -> None:
+        self._name = name
+        self._description = description
+        self._table = table_name
+        self._columns = columns
+        self._ws = workspace_client
+        self._warehouse_id = warehouse_id
+        self._content_col = content_column
+        self._pk_col = pk_column
+        self._store_as = store_in_compute
+        self._resolve_compute = compute_resolver
+        self._enable_analysis = structural_analysis
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self._name,
+            description=self._description,
+            parameters={
+                "type": "object",
+                "properties": {
+                    "chunk_id": {
+                        "type": "string",
+                        "description": (
+                            f"Primary key value to look up in the "
+                            f"'{self._pk_col}' column "
+                            f"(e.g., treasury_bulletin_1977_03_c0015)"
+                        ),
+                    },
+                    "file_name": {
+                        "type": "string",
+                        "description": "Optional safety filter: exact filename",
+                    },
+                },
+                "required": ["chunk_id"],
+                "additionalProperties": False,
+            },
+            source_type="enterprise",
+            source_kind=SourceKind.delta_table,
+        )
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        pk_value = arguments.get("chunk_id", "")
+        if not isinstance(pk_value, str) or not pk_value.strip():
+            raise ValueError("'chunk_id' must be a non-empty string")
+        return {
+            "chunk_id": pk_value.strip(),
+            "file_name": (arguments.get("file_name") or "").strip() or None,
+        }
+
+    async def execute(
+        self, arguments: dict[str, Any], context: ToolContext,
+    ) -> ToolResult:
+        pk_value = arguments["chunk_id"]
+        file_name = arguments.get("file_name")
+
+        cols = ", ".join(self._columns)
+        params: list[dict[str, Any]] = [
+            {"name": "pk_value", "value": pk_value, "type": "STRING"},
+        ]
+        where = f"WHERE {self._pk_col} = :pk_value"
+        if file_name:
+            where += " AND file_name = :file_name"
+            params.append(
+                {"name": "file_name", "value": file_name, "type": "STRING"},
+            )
+
+        sql = f"SELECT {cols} FROM {self._table} {where} LIMIT 1"
+
+        try:
+            rows, col_names = _execute_sql(
+                self._ws, self._warehouse_id, sql, params,
+            )
+        except Exception as exc:
+            logger.exception(
+                "DELTA_TABLE_READ_ERROR tool=%s table=%s pk=%s",
+                self._name, self._table, pk_value,
+            )
+            return ToolResult(
+                content=f"Table read failed: {exc}",
+                success=False,
+                error=str(exc),
+            )
+
+        if not rows:
+            return ToolResult(
+                content=(
+                    f"No row found for {self._pk_col}='{pk_value}'"
+                    + (f" file_name='{file_name}'" if file_name else "")
+                ),
+                success=True,
+            )
+
+        row_dict = dict(zip(col_names, rows[0])) if len(col_names) == len(rows[0]) else {}
+
+        # Parse JSON + inject into compute namespace
+        parsed = self._parse_and_inject(row_dict, pk_value)
+
+        # Build source info for URL registry
+        source_url = f"delta://{self._table}/{pk_value}"
+        if context.url_registry is not None:
+            context.url_registry.register(source_url)
+        fn = str(row_dict.get("file_name", ""))
+        source = SourceInfo(
+            url=source_url,
+            title=f"{fn} [{row_dict.get('table_title', '')}]" if fn else pk_value,
+            snippet=str(row_dict.get("content", ""))[:500],
+            content="",
+            source_type="enterprise",
+            source_kind=SourceKind.delta_table,
+        )
+
+        # When structural analysis is enabled and JSON parsed successfully,
+        # output ONLY the analysis + row labels. Raw values are hidden —
+        # accessible only via compute namespace. This forces the agent to
+        # use compute() for value extraction instead of eyeballing text.
+        if self._enable_analysis and parsed:
+            analysis = self._analyze_table_structure(parsed, row_dict, pk_value)
+            return ToolResult(
+                content=analysis,
+                success=True,
+                sources=[source],
+                data={"chunk_id": pk_value, "row_count": 1},
+            )
+
+        # Fallback: raw content via _format_rows (no analysis, or JSON parse failed)
+        content, sources_fmt = _format_rows(
+            rows, col_names,
+            content_column=self._content_col,
+            tool_name=self._name,
+            table_name=self._table,
+            context=context,
+        )
+        return ToolResult(
+            content=content,
+            success=True,
+            sources=sources_fmt,
+            data={"chunk_id": pk_value, "row_count": 1},
+        )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _parse_and_inject(
+        self, row_dict: dict[str, Any], pk_value: str,
+    ) -> dict[str, Any] | None:
+        """Parse JSON from content column, inject into compute, return parsed dict."""
+        json_str = str(row_dict.get(self._content_col, ""))
+        if not json_str or json_str == "None":
+            return None
+        try:
+            parsed = _json.loads(json_str)
+        except (ValueError, TypeError):
+            logger.warning(
+                "DELTA_TABLE_READ_JSON_PARSE_FAIL tool=%s pk=%s",
+                self._name, pk_value,
+            )
+            return None
+
+        if self._store_as and self._resolve_compute:
+            compute_tool = self._resolve_compute()  # type: ignore[misc]
+            if compute_tool is not None:
+                compute_tool.inject_variable(self._store_as, parsed)  # type: ignore[union-attr]
+                logger.info(
+                    "DELTA_TABLE_READ_INJECTED tool=%s var=%s keys=%s",
+                    self._name, self._store_as,
+                    list(parsed.keys())[:5] if isinstance(parsed, dict) else type(parsed).__name__,
+                )
+        return parsed
+
+    @staticmethod
+    def _analyze_table_structure(
+        parsed: dict[str, Any],
+        row_dict: dict[str, Any],
+        pk_value: str,
+    ) -> str:
+        """Produce structural diagnostics for a parsed table JSON.
+
+        Shows header parents, columns, decomposition status, row labels,
+        and period range.  Contains NO raw cell values — the agent must
+        use ``compute()`` on the namespace variable to access data.
+
+        All checks are generic (pure structure and math, no domain keywords).
+        """
+        headers = parsed.get("headers", [])
+        rows = parsed.get("rows", [])
+
+        lines: list[str] = ["STRUCTURAL ANALYSIS:"]
+
+        # -- Source edition (helps detect cross-edition mixing) --
+        src_file = str(row_dict.get("file_name", ""))
+        src_date = str(row_dict.get("bulletin_date", ""))
+        if src_file:
+            edition = f"  Source: {src_file}"
+            if src_date:
+                edition += f" ({src_date})"
+            lines.append(edition)
+
+        # -- Table title from pre-table text (TSO-3, CM-I-1, etc.) --
+        table_title = str(row_dict.get("table_title", ""))
+        if table_title:
+            lines.append(f"  Table: {table_title}")
+
+        # -- Header parents (section context, shown as-is) --
+        parents = sorted({h["parent"] for h in headers if h.get("parent")})
+        for p in parents:
+            lines.append(f"  Header context: {p}")
+
+        # -- Column names --
+        col_names = [h.get("name", "") for h in headers]
+        if col_names:
+            lines.append(f"  Columns: {' | '.join(col_names)}")
+
+        # -- Annotation (from surrounding metadata) --
+        annotation = str(row_dict.get("annotation", ""))
+        if annotation:
+            lines.append(f"  Annotation: {annotation}")
+
+        # -- Total rows + decomposition check (pure math) --
+        data_rows = [r for r in rows
+                     if not r.get("is_group_header") and not r.get("is_total")]
+        total_rows = [r for r in rows if r.get("is_total")]
+
+        for total_row in total_rows:
+            total_label = total_row.get("label", "")
+            decomp_found = False
+            for cname, total_val_str in total_row.get("cells", {}).items():
+                try:
+                    total_val = float(
+                        str(total_val_str).replace(",", "").replace("$", "").strip()
+                    )
+                except (ValueError, TypeError):
+                    continue
+                if total_val == 0:
+                    continue
+                data_sum = 0.0
+                valid_count = 0
+                for dr in data_rows:
+                    val_str = dr.get("cells", {}).get(cname, "")
+                    try:
+                        data_sum += float(
+                            str(val_str).replace(",", "").replace("$", "").strip()
+                        )
+                        valid_count += 1
+                    except (ValueError, TypeError):
+                        continue
+                if valid_count > 1:
+                    ratio = data_sum / total_val
+                    if 0.95 <= ratio <= 1.05:
+                        lines.append(
+                            f"  Total row: \"{total_label}\" [{cname}] = {total_val_str}"
+                        )
+                        lines.append(
+                            f"  ⚠ DECOMPOSITION: {valid_count} data values in \"{cname}\" "
+                            f"sum to {data_sum:,.0f} ≈ total {total_val:,.0f} "
+                            f"(ratio {ratio:.3f}). "
+                            f"Values are COMPONENTS of the total row, "
+                            f"not independent observations."
+                        )
+                        decomp_found = True
+                        break
+            if not decomp_found and total_label:
+                lines.append(f"  Total row: \"{total_label}\"")
+
+        # -- Shape + period range --
+        if data_rows:
+            first_label = data_rows[0].get("label", "")
+            last_label = data_rows[-1].get("label", "")
+            period = (
+                f"{first_label} — {last_label}"
+                if first_label != last_label
+                else first_label
+            )
+            lines.append(f"  Data rows: {len(data_rows)} | Period: {period}")
+
+        # -- Row labels (structure only, no values) --
+        labels = [r.get("label", "") for r in data_rows if r.get("label")]
+        _MAX_LABELS = 30
+        _HALF = _MAX_LABELS // 2
+        if labels:
+            if len(labels) <= _MAX_LABELS:
+                label_text = ", ".join(labels)
+            else:
+                label_text = (
+                    ", ".join(labels[:_HALF])
+                    + ", ..., "
+                    + ", ".join(labels[-_HALF:])
+                )
+            lines.append(f"  Row labels: {label_text}")
+
+        # -- Compute namespace note --
+        lines.append("")
+        lines.append(
+            "Data stored in compute namespace as 'table'. "
+            "Use compute() to access values:"
+        )
+        lines.append(
+            "  row = next(r for r in table['rows'] if '<label>' in r['label'])"
+        )
+        lines.append("  value = row['cells']['<column_name>']")
+
+        return "\n".join(lines)

@@ -90,6 +90,7 @@ class DatabricksVectorSearchTool:
         filters_json: str | None = None,
         description: str = "",
         metadata: dict[str, Any] | None = None,
+        exclude_chunk_types: list[str] | None = None,
     ) -> None:
         self._ws = workspace_client
         self._name = name
@@ -99,6 +100,7 @@ class DatabricksVectorSearchTool:
         self._query_type = query_type
         self._filters_json = filters_json
         self._description = description or f"Vector search over {index_name}"
+        self._exclude_chunk_types = exclude_chunk_types or []
         self._pk_col: str | None = None
         self._content_col: str | None = None
 
@@ -265,10 +267,15 @@ class DatabricksVectorSearchTool:
             if self._columns is None:
                 self._columns = self._discover_columns()
 
+            # Over-fetch when excluding chunk types to compensate for filtered rows
+            effective_num = num_results
+            if self._exclude_chunk_types:
+                effective_num = min(num_results * 2, 50)
+
             kwargs: dict[str, Any] = {
                 "index_name": self._index_name,
                 "query_text": query,
-                "num_results": num_results,
+                "num_results": effective_num,
             }
             if self._columns:
                 kwargs["columns"] = self._columns
@@ -299,6 +306,14 @@ class DatabricksVectorSearchTool:
                 rows = data_array.data_array or []
             else:
                 rows = []
+
+            # Post-filter excluded chunk types and trim to requested count
+            if self._exclude_chunk_types and rows and col_names:
+                ct_idx = col_names.index("chunk_type") if "chunk_type" in col_names else -1
+                if ct_idx >= 0:
+                    rows = [r for r in rows if r[ct_idx] not in self._exclude_chunk_types]
+            if self._exclude_chunk_types:
+                rows = rows[:num_results]
 
             for idx, row in enumerate(rows):
                 row_values = row
