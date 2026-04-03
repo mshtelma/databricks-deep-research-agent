@@ -300,6 +300,7 @@ class DeltaGrepTool:
         content_column: str = "content",
         order_by: str = "chunk_id",
         exclude_chunk_types: list[str] | None = None,
+        date_column: str | None = None,
     ) -> None:
         self._name = name
         self._description = description
@@ -310,6 +311,7 @@ class DeltaGrepTool:
         self._content_col = content_column
         self._order_by = order_by
         self._exclude_chunk_types = exclude_chunk_types or []
+        self._date_col = date_column
 
     @property
     def definition(self) -> ToolDefinition:
@@ -340,6 +342,28 @@ class DeltaGrepTool:
                 "type": "string",
                 "description": "Optional filter: " + ", ".join(allowed_types),
                 "enum": list(allowed_types),
+            }
+        if self._date_col:
+            properties["pub_year_start"] = {
+                "type": "integer",
+                "description": (
+                    f"Filter: publication year >= value "
+                    f"(derived from {self._date_col} column)"
+                ),
+            }
+            properties["pub_year_end"] = {
+                "type": "integer",
+                "description": (
+                    f"Filter: publication year <= value "
+                    f"(derived from {self._date_col} column)"
+                ),
+            }
+            properties["pub_month"] = {
+                "type": "integer",
+                "description": (
+                    f"Filter: publication month = value (1-12, "
+                    f"derived from {self._date_col} column)"
+                ),
             }
         return ToolDefinition(
             name=self._name,
@@ -377,13 +401,23 @@ class DeltaGrepTool:
                 raise ValueError(f"Invalid regex pattern: {exc}") from exc
 
         default_limit = 20 if file_name else 30
-        return {
+        validated: dict[str, Any] = {
             "file_name": file_name,
             "pattern": pattern.strip(),
             "mode": mode,
             "chunk_type": arguments.get("chunk_type"),
             "limit": min(int(arguments.get("limit", default_limit)), _MAX_LIMIT),
         }
+        # Date filters (only active when date_column is configured)
+        if self._date_col:
+            for key in ("pub_year_start", "pub_year_end", "pub_month"):
+                raw = arguments.get(key)
+                if raw is not None:
+                    try:
+                        validated[key] = int(raw)
+                    except (ValueError, TypeError):
+                        pass  # ignore unparseable date filter
+        return validated
 
     async def execute(
         self, arguments: dict[str, Any], context: ToolContext
@@ -416,6 +450,43 @@ class DeltaGrepTool:
         if chunk_type:
             where += " AND chunk_type = :chunk_type"
             params.append({"name": "chunk_type", "value": chunk_type, "type": "STRING"})
+
+        # Date filters (config-driven: only active when date_column is set)
+        if self._date_col:
+            pub_year_start = arguments.get("pub_year_start")
+            pub_year_end = arguments.get("pub_year_end")
+            pub_month = arguments.get("pub_month")
+            if pub_year_start is not None:
+                where += (
+                    f" AND CAST(SUBSTRING({self._date_col}, 1, 4) AS INT)"
+                    " >= :pub_year_start"
+                )
+                params.append({
+                    "name": "pub_year_start",
+                    "value": str(pub_year_start),
+                    "type": "INT",
+                })
+            if pub_year_end is not None:
+                where += (
+                    f" AND CAST(SUBSTRING({self._date_col}, 1, 4) AS INT)"
+                    " <= :pub_year_end"
+                )
+                params.append({
+                    "name": "pub_year_end",
+                    "value": str(pub_year_end),
+                    "type": "INT",
+                })
+            if pub_month is not None:
+                where += (
+                    f" AND CAST(SUBSTRING({self._date_col}, 6, 2) AS INT)"
+                    " = :pub_month"
+                )
+                params.append({
+                    "name": "pub_month",
+                    "value": str(pub_month),
+                    "type": "INT",
+                })
+
         where = _append_chunk_type_exclusion(where, params, self._exclude_chunk_types)
 
         # Cross-file: order chronologically by file_name; within-file: order by chunk_id
@@ -948,10 +1019,39 @@ class DeltaTableReadTool:
         if self._store_as and self._resolve_compute:
             compute_tool = self._resolve_compute()  # type: ignore[misc]
             if compute_tool is not None:
-                compute_tool.inject_variable(self._store_as, parsed)  # type: ignore[union-attr]
+                injectable: Any = parsed
+                # Wrap in Table class when the parsed dict has table structure.
+                # Table.__getitem__ and .get() preserve backward compatibility
+                # with existing code that accesses table['rows'], table['headers'].
+                if (
+                    isinstance(parsed, dict)
+                    and "headers" in parsed
+                    and "rows" in parsed
+                ):
+                    try:
+                        from databricks_deep_research.tools.builtins.table_api import (  # noqa: PLC0415
+                            Table,
+                        )
+
+                        injectable = Table(
+                            parsed,
+                            chunk_id=pk_value,
+                            file_name=str(row_dict.get("file_name", "")),
+                            title=str(row_dict.get("table_title", "")),
+                            annotation=str(row_dict.get("annotation", "")),
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "DELTA_TABLE_READ_TABLE_WRAP_FAIL pk=%s",
+                            pk_value,
+                            exc_info=True,
+                        )
+                compute_tool.inject_variable(self._store_as, injectable)  # type: ignore[union-attr]
                 logger.info(
-                    "DELTA_TABLE_READ_INJECTED tool=%s var=%s keys=%s",
-                    self._name, self._store_as,
+                    "DELTA_TABLE_READ_INJECTED tool=%s var=%s type=%s keys=%s",
+                    self._name,
+                    self._store_as,
+                    type(injectable).__name__,
                     list(parsed.keys())[:5] if isinstance(parsed, dict) else type(parsed).__name__,
                 )
         return parsed
@@ -1076,15 +1176,51 @@ class DeltaTableReadTool:
                 )
             lines.append(f"  Row labels: {label_text}")
 
+        # -- Orientation detection --
+        # Heuristic: if the first data row labels are years/months, the
+        # "real" entity names are column headers, not row labels.
+        _TEMPORAL_RE = re.compile(
+            r"^\d{4}$|^\d{4}\s*\(|^\d{4}-"
+            r"|^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)",
+            re.IGNORECASE,
+        )
+        sample_labels = [
+            r.get("label", "").strip()
+            for r in data_rows[:5]
+            if r.get("label", "").strip()
+        ]
+        temporal_count = sum(
+            1 for lbl in sample_labels if _TEMPORAL_RE.match(lbl)
+        )
+        if temporal_count >= 3 and len(sample_labels) >= 3:
+            lines.append("")
+            lines.append(
+                "ORIENTATION: entities-as-COLUMNS (rows are time periods)"
+            )
+            lines.append(
+                "  To extract data for a named entity, use: "
+                "table.series('<column_name>', as_float=True)"
+            )
+        else:
+            lines.append("")
+            lines.append(
+                "ORIENTATION: entities-as-ROWS (rows are named entities)"
+            )
+            lines.append(
+                "  To extract data for a named entity, use: "
+                "table.cell('<row_label>', '<column>', as_float=True)"
+            )
+
         # -- Compute namespace note --
         lines.append("")
         lines.append(
             "Data stored in compute namespace as 'table'. "
-            "Use compute() to access values:"
+            "Additional access methods:"
         )
-        lines.append(
-            "  row = next(r for r in table['rows'] if '<label>' in r['label'])"
-        )
-        lines.append("  value = row['cells']['<column_name>']")
+        lines.append("  table.cell('row_label', 'column', as_float=True)")
+        lines.append("  table.series('column', as_float=True)")
+        lines.append("  table.find_rows('pattern')")
+        lines.append("  table.find_columns('pattern')")
+        lines.append("  table.to_dataframe()")
 
         return "\n".join(lines)

@@ -192,6 +192,7 @@ class BuiltinToolFactory:
                 content_column=decl.config.get("content_column", "content"),
                 order_by=decl.config.get("order_by", "chunk_id"),
                 exclude_chunk_types=decl.config.get("exclude_chunk_types"),
+                date_column=decl.config.get("date_column"),
             )
 
         if decl.kind == "delta_context":

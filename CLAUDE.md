@@ -19,6 +19,11 @@ Deep research agent with multi-agent architecture (Coordinator, Planner, Researc
 | `make dev-frontend` | Frontend only with Vite |
 | `make install` | Install all dependencies (backend + frontend + e2e) |
 | `make quickstart` | Set up local development environment |
+| `make worktree BRANCH=<name>` | Create worktree from current branch with .env symlinks |
+| `make worktree BRANCH=<name> INSTALL=1` | Create worktree + install dependencies |
+| `make worktree-list` | List all worktrees |
+| `make worktree-remove BRANCH=<name>` | Remove a worktree |
+| `make worktree-link BRANCH=<name>` | Re-link .env files in existing worktree |
 
 ### Database
 | Command | Description |
@@ -95,6 +100,46 @@ uv run mypy src/deep_research --strict
 uv run ruff check src/deep_research
 cd frontend && npm run typecheck
 tail -f /tmp/deep-research-dev.log   # Dev server logs
+```
+
+## Git Worktree Workflow
+
+**Always use worktrees for new features and bugfixes.** This keeps the main checkout clean and allows parallel development.
+
+### Creating a Worktree
+```bash
+# Branch from current branch (default)
+make worktree BRANCH=feature-new-tool
+
+# Branch from a specific ref
+make worktree BRANCH=fix-bug BASE=main
+
+# Create + install dependencies in one step
+make worktree BRANCH=feature-new-tool INSTALL=1
+```
+
+Worktrees are created at `../.worktrees/<branch>/`. All gitignored `.env*` files are automatically symlinked from the main worktree so secrets, benchmark configs, and local overrides are shared.
+
+### Working in a Worktree
+```bash
+cd ../.worktrees/feature-new-tool
+make install    # first time only (or use INSTALL=1 above)
+make dev        # start dev server
+make test       # run tests
+```
+
+To run a dev server on a different port (avoids collision with main): `PORT=8001 make dev`
+
+### Cleanup
+```bash
+make worktree-remove BRANCH=feature-new-tool                  # keep branch
+make worktree-remove BRANCH=feature-new-tool DELETE_BRANCH=1  # remove branch too
+```
+
+### Re-linking Env Files
+If you add a new `.env.*` file to the main worktree, re-link all worktrees:
+```bash
+make worktree-link BRANCH=feature-new-tool
 ```
 
 ## Project Structure (uv Workspace Monorepo)
