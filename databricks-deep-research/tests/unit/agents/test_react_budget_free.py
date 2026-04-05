@@ -14,8 +14,7 @@ import pytest
 
 from databricks_deep_research.agents.react_loop import ReactLoop
 from databricks_deep_research.llm.client import LLMResponse, ToolCall
-from databricks_deep_research.tools.protocol import ToolContext, ToolDefinition, ToolResult
-
+from databricks_deep_research.tools.protocol import ToolDefinition, ToolResult
 
 # ---------------------------------------------------------------------------
 # Helpers

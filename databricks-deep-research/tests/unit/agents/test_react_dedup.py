@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 from databricks_deep_research.agents.react_loop import ReactLoop
-from databricks_deep_research.llm.client import ToolCall
 
 
 def _make_loop() -> ReactLoop:

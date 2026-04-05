@@ -13,7 +13,6 @@ from databricks_deep_research.tools.builtins.compute_namespace import (
 )
 from databricks_deep_research.tools.protocol import ToolContext
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

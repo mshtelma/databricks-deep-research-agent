@@ -10,12 +10,11 @@ import pytest
 
 from databricks_deep_research.tools.builtins.delta_read import (
     DeltaContextTool,
-    DeltaReadTool,
     DeltaGrepTool,
+    DeltaReadTool,
     DeltaTableReadTool,
 )
 from databricks_deep_research.tools.protocol import ToolContext, UrlRegistry
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

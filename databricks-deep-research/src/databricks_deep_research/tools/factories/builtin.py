@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 _SUPPORTED_KINDS = frozenset({
     "web_search", "web_crawl", "file_search", "compute", "compute_namespace",
     "delta_read", "delta_grep", "delta_context", "delta_table_read",
+    "table_read",
 })
 
 _SEARCH_PROVIDERS = frozenset({"brave", "jina"})
@@ -95,6 +96,7 @@ class BuiltinToolFactory:
                 max_content_per_result=decl.config.get(
                     "max_content_per_result", 5000
                 ),
+                extract_tables=decl.config.get("extract_tables", True),
             )
 
         if decl.kind == "web_crawl":
@@ -109,6 +111,7 @@ class BuiltinToolFactory:
                 crawler=crawler,
                 timeout=decl.config.get("timeout", 30.0),
                 max_content_length=decl.config.get("max_content_length", 50_000),
+                extract_tables=decl.config.get("extract_tables", True),
             )
 
         if decl.kind == "file_search":
@@ -248,6 +251,28 @@ class BuiltinToolFactory:
                 store_in_compute=store_as,
                 compute_resolver=_compute_resolver,
                 structural_analysis=bool(decl.config.get("structural_analysis")),
+            )
+
+        if decl.kind == "table_read":
+            from databricks_deep_research.tools.builtins.table_read import TableReadTool
+
+            # Optional: auto-inject table into sibling compute namespace
+            _compute_resolver = None
+            store_as = decl.config.get("store_in_compute", "web_table")
+            if store_as:
+                _compute_name = decl.config.get("compute_tool_name", "compute")
+
+                def _resolve_compute() -> Any:  # type: ignore[misc]
+                    cached = ctx.extras.get("_resolver_cache", {}).get(_compute_name)
+                    return cached if hasattr(cached, "inject_variable") else None
+
+                _compute_resolver = _resolve_compute
+
+            return TableReadTool(
+                name=decl.name,
+                description=decl.description or None,
+                store_in_compute=store_as,
+                compute_resolver=_compute_resolver,
             )
 
         raise ValueError(f"Unsupported kind: {decl.kind}")
