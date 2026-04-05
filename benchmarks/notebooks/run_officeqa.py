@@ -17,8 +17,8 @@
 # MAGIC   workflows that use web search tools; the v8-hybrid workflow does **not**.
 # MAGIC
 # MAGIC ### How to Run
-# MAGIC 1. Fill in the **warehouse_id** widget (required)
-# MAGIC 2. Adjust other widgets as needed (model, concurrency, limit, etc.)
+# MAGIC 1. Edit the **Configuration** constants in Cell 3
+# MAGIC 2. Ensure secrets scope exists (for BRAVE_API_KEY if using web search tools)
 # MAGIC 3. Run All
 
 # COMMAND ----------
@@ -29,25 +29,26 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
-# -- Widgets ----------------------------------------------------------------
-# Create all configurable parameters as Databricks widgets.
-# Widget values persist across cluster restarts and re-runs.
+# -- Configuration (edit these values) ----------------------------------------
+WAREHOUSE_ID = "59d2ebcf58480621"
+CATALOG = "main"
+SCHEMA = "mshtelma"
+VS_ENDPOINT = "msh_vs"
+MODEL = "databricks-claude-opus-4-6"
+WORKFLOW_FILE = "workflow-v84-enhanced.yaml"
+CONCURRENCY = 1
+TIMEOUT = 6000
+LIMIT: int | None = 1                  # None = all questions
+UIDS: str | None = None                   # None = all; or comma-separated UID fragments
+RESUME = False
+RETRY_STATUSES: frozenset[str] = frozenset({"timeout"})
+RESULTS_PATH ="/Workspace/Users/michael.shtelma@databricks.com/experiments/officeqa"
+# Auth — Databricks CLI profile from ~/.databrickscfg (None = notebook context auto-detect)
+PROFILE: str | None = None
 
-dbutils.widgets.text("warehouse_id", "f45852ca675f5dcb", "SQL Warehouse ID (required)")
-dbutils.widgets.text("catalog", "main", "Unity Catalog Name")
-dbutils.widgets.text("schema", "officeqa_benchmark", "Schema Name")
-dbutils.widgets.text("vs_endpoint", "dbdemos_vs_endpoint", "Vector Search Endpoint")
-dbutils.widgets.text("model", "databricks-claude-opus-4-6", "Model Endpoint")
-dbutils.widgets.text("workflow_file", "workflow-v9-hybrid.yaml", "Workflow YAML filename")
-dbutils.widgets.text("concurrency", "1", "Parallel questions")
-dbutils.widgets.text("timeout", "3600", "Timeout per question (seconds)")
-dbutils.widgets.text("limit", "", "Max questions (empty = all)")
-dbutils.widgets.text("uids", "", "UID filter (comma-separated, empty = all)")
-dbutils.widgets.dropdown("resume", "no", ["yes", "no"], "Resume from prior run")
-dbutils.widgets.text("retry_statuses", "timeout", "Retry statuses on resume (comma-separated, empty = none)")
-dbutils.widgets.text("brave_secret_scope", "deep-research-secrets", "Secret scope for BRAVE_API_KEY (optional)")
-dbutils.widgets.text("brave_secret_key", "BRAVE_API_KEY", "Secret key name")
-dbutils.widgets.text("results_path", "/Volumes/main/officeqa_benchmark/results", "Results directory (empty = UC volume)")
+# Secrets — scope/key for dbutils.secrets (set to empty string to skip)
+BRAVE_SECRET_SCOPE = "msh"
+BRAVE_SECRET_KEY = "BRAVE_API_KEY"
 
 # COMMAND ----------
 
@@ -56,30 +57,24 @@ import os
 import sys
 from pathlib import Path
 
-warehouse_id = dbutils.widgets.get("warehouse_id").strip()
-catalog = dbutils.widgets.get("catalog").strip()
-schema = dbutils.widgets.get("schema").strip()
-vs_endpoint = dbutils.widgets.get("vs_endpoint").strip()
-model = dbutils.widgets.get("model").strip()
-workflow_file = dbutils.widgets.get("workflow_file").strip()
-concurrency = int(dbutils.widgets.get("concurrency").strip() or "1")
-timeout = int(dbutils.widgets.get("timeout").strip() or "1800")
-limit_str = dbutils.widgets.get("limit").strip()
-limit = int(limit_str) if limit_str else None
-uids = dbutils.widgets.get("uids").strip() or None
-resume = dbutils.widgets.get("resume") == "yes"
-retry_statuses_raw = dbutils.widgets.get("retry_statuses").strip()
-retry_statuses: frozenset[str] = frozenset(
-    s.strip() for s in retry_statuses_raw.split(",") if s.strip()
-)
-brave_scope = dbutils.widgets.get("brave_secret_scope").strip()
-brave_key_name = dbutils.widgets.get("brave_secret_key").strip()
-results_base = dbutils.widgets.get("results_path").strip()
-if not results_base:
-    results_base = f"/Volumes/{catalog}/{schema}/results"
+warehouse_id = WAREHOUSE_ID
+catalog = CATALOG
+schema = SCHEMA
+vs_endpoint = VS_ENDPOINT
+model = MODEL
+workflow_file = WORKFLOW_FILE
+concurrency = CONCURRENCY
+timeout = TIMEOUT
+limit = LIMIT
+uids = UIDS
+resume = RESUME
+retry_statuses = RETRY_STATUSES
+brave_scope = BRAVE_SECRET_SCOPE
+brave_key_name = BRAVE_SECRET_KEY
+results_base = RESULTS_PATH or f"/Volumes/{catalog}/{schema}/results"
 
 assert warehouse_id, (
-    "warehouse_id widget is required — set it to your SQL warehouse ID"
+    "WAREHOUSE_ID is required — set it in the Configuration cell"
 )
 
 # Detect repo root — walk up from CWD until we find benchmarks/core/.
@@ -108,26 +103,27 @@ print(f"Retry statuses:  {', '.join(sorted(retry_statuses)) or 'none'}")
 
 # COMMAND ----------
 
-# -- Environment variables + secrets ----------------------------------------
-# The workflow YAML uses ${OFFICEQA_WAREHOUSE_ID} etc. which are resolved
-# by _interpolate_recursive() reading os.environ at YAML parse time.
-# These MUST be set before Cell 9 loads the workflow.
+# -- Secrets & YAML variable bindings -----------------------------------------
+# Build a variables dict for YAML interpolation (replaces os.environ).
+# The workflow YAML uses ${OFFICEQA_*} / ${OFFICEQA_*:-default} patterns.
+yaml_vars: dict[str, str] = {
+    "OFFICEQA_CATALOG": catalog,
+    "OFFICEQA_SCHEMA": schema,
+    "OFFICEQA_WAREHOUSE_ID": warehouse_id,
+    "OFFICEQA_VS_ENDPOINT": vs_endpoint,
+}
 
-os.environ["OFFICEQA_CATALOG"] = catalog
-os.environ["OFFICEQA_SCHEMA"] = schema
-os.environ["OFFICEQA_WAREHOUSE_ID"] = warehouse_id
-os.environ["OFFICEQA_VS_ENDPOINT"] = vs_endpoint
-
+# Load BRAVE_API_KEY from Databricks secrets (not env vars)
+brave_api_key: str | None = None
 if brave_scope:
     try:
         brave_api_key = dbutils.secrets.get(scope=brave_scope, key=brave_key_name)
-        os.environ["BRAVE_API_KEY"] = brave_api_key
         print(f"BRAVE_API_KEY loaded from scope={brave_scope}, key={brave_key_name}")
     except Exception as e:
         print(f"WARNING: Could not load BRAVE_API_KEY: {e}")
-        print("Web search tools will not be available (not needed for v8-hybrid)")
+        print("Web search tools will not be available")
 else:
-    print("No brave_secret_scope set — skipping BRAVE_API_KEY (not needed for v8-hybrid)")
+    print("No brave_secret_scope set — skipping BRAVE_API_KEY")
 
 # COMMAND ----------
 
@@ -222,7 +218,7 @@ workflow_path = Path(BENCHMARKS_DIR) / "officeqa" / workflow_file
 assert workflow_path.exists(), f"Workflow not found: {workflow_path}"
 
 raw_yaml = yaml.safe_load(workflow_path.read_text())
-interpolated = _interpolate_recursive(raw_yaml)
+interpolated = _interpolate_recursive(raw_yaml, variables=yaml_vars)
 workflow_def = load_workflow_from_dict(interpolated)
 
 print(f"Workflow: {workflow_def.id} ({workflow_def.name})")
@@ -232,15 +228,18 @@ print(f"Timeout:  {workflow_def.timeout_seconds}s")
 # COMMAND ----------
 
 # -- Create LLM client & tool factory --------------------------------------
-# Inside Databricks notebooks, WorkspaceClient() auto-detects auth from
-# the notebook execution context — no token or profile needed.
+# Uses notebook context by default. Set PROFILE to a ~/.databrickscfg profile
+# name to target a different workspace.
 
-llm_client = FrameworkLLMClient.from_databricks(model=model)
+from databricks.sdk import WorkspaceClient
+
+_ws = WorkspaceClient(profile=PROFILE) if PROFILE else None
+llm_client = FrameworkLLMClient.from_databricks(model=model, profile=PROFILE)
 pool = WorkspacePool.single(llm_client)
-factory = ToolFactoryContext.from_defaults()
+factory = ToolFactoryContext.from_defaults(workspace_client=_ws, brave_api_key=brave_api_key)
 
-print(f"LLM client ready (model={model})")
-print(f"Tool factory ready (search_client={'yes' if factory.search_client else 'no'})")
+print(f"LLM client ready (model={model}, profile={PROFILE or 'auto'})")
+print(f"Tool factory ready (brave={'yes' if brave_api_key else 'no'}, search_client={'yes' if factory.search_client else 'no'})")
 
 # COMMAND ----------
 

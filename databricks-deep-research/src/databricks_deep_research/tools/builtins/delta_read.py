@@ -952,7 +952,7 @@ class DeltaTableReadTool:
         row_dict = dict(zip(col_names, rows[0])) if len(col_names) == len(rows[0]) else {}
 
         # Parse JSON + inject into compute namespace
-        parsed = self._parse_and_inject(row_dict, pk_value)
+        parsed, table_wrapped = self._parse_and_inject(row_dict, pk_value)
 
         # Build source info for URL registry
         source_url = f"delta://{self._table}/{pk_value}"
@@ -973,7 +973,9 @@ class DeltaTableReadTool:
         # accessible only via compute namespace. This forces the agent to
         # use compute() for value extraction instead of eyeballing text.
         if self._enable_analysis and parsed:
-            analysis = self._analyze_table_structure(parsed, row_dict, pk_value)
+            analysis = self._analyze_table_structure(
+                parsed, row_dict, pk_value, table_wrapped=table_wrapped,
+            )
             return ToolResult(
                 content=analysis,
                 success=True,
@@ -1002,11 +1004,16 @@ class DeltaTableReadTool:
 
     def _parse_and_inject(
         self, row_dict: dict[str, Any], pk_value: str,
-    ) -> dict[str, Any] | None:
-        """Parse JSON from content column, inject into compute, return parsed dict."""
+    ) -> tuple[dict[str, Any] | None, bool]:
+        """Parse JSON from content column, inject into compute.
+
+        Returns ``(parsed_dict, table_wrapped)`` where *table_wrapped* is
+        ``True`` only when a :class:`Table` instance was successfully
+        injected (not a raw dict fallback).
+        """
         json_str = str(row_dict.get(self._content_col, ""))
         if not json_str or json_str == "None":
-            return None
+            return None, False
         try:
             parsed = _json.loads(json_str)
         except (ValueError, TypeError):
@@ -1014,8 +1021,9 @@ class DeltaTableReadTool:
                 "DELTA_TABLE_READ_JSON_PARSE_FAIL tool=%s pk=%s",
                 self._name, pk_value,
             )
-            return None
+            return None, False
 
+        table_wrapped = False
         if self._store_as and self._resolve_compute:
             compute_tool = self._resolve_compute()  # type: ignore[misc]
             if compute_tool is not None:
@@ -1040,9 +1048,12 @@ class DeltaTableReadTool:
                             title=str(row_dict.get("table_title", "")),
                             annotation=str(row_dict.get("annotation", "")),
                         )
+                        table_wrapped = True
                     except Exception:  # noqa: BLE001
-                        logger.debug(
-                            "DELTA_TABLE_READ_TABLE_WRAP_FAIL pk=%s",
+                        logger.error(
+                            "DELTA_TABLE_READ_TABLE_WRAP_FAIL pk=%s — "
+                            "falling back to raw dict; LLM will NOT have "
+                            "Table API methods (cell, series, find_rows, …)",
                             pk_value,
                             exc_info=True,
                         )
@@ -1054,19 +1065,25 @@ class DeltaTableReadTool:
                     type(injectable).__name__,
                     list(parsed.keys())[:5] if isinstance(parsed, dict) else type(parsed).__name__,
                 )
-        return parsed
+        return parsed, table_wrapped
 
     @staticmethod
     def _analyze_table_structure(
         parsed: dict[str, Any],
         row_dict: dict[str, Any],
         pk_value: str,
+        *,
+        table_wrapped: bool,
     ) -> str:
         """Produce structural diagnostics for a parsed table JSON.
 
         Shows header parents, columns, decomposition status, row labels,
         and period range.  Contains NO raw cell values — the agent must
         use ``compute()`` on the namespace variable to access data.
+
+        When *table_wrapped* is ``False`` (Table construction failed),
+        the method hints reference raw dict access instead of Table API
+        methods so the LLM doesn't call methods that don't exist.
 
         All checks are generic (pure structure and math, no domain keywords).
         """
@@ -1197,30 +1214,52 @@ class DeltaTableReadTool:
             lines.append(
                 "ORIENTATION: entities-as-COLUMNS (rows are time periods)"
             )
-            lines.append(
-                "  To extract data for a named entity, use: "
-                "table.series('<column_name>', as_float=True)"
-            )
+            if table_wrapped:
+                lines.append(
+                    "  To extract data for a named entity, use: "
+                    "table.series('<column_name>', as_float=True)"
+                )
+            else:
+                lines.append(
+                    "  To extract a column, iterate: "
+                    "[row['cells']['<column>'] for row in table['rows']]"
+                )
         else:
             lines.append("")
             lines.append(
                 "ORIENTATION: entities-as-ROWS (rows are named entities)"
             )
-            lines.append(
-                "  To extract data for a named entity, use: "
-                "table.cell('<row_label>', '<column>', as_float=True)"
-            )
+            if table_wrapped:
+                lines.append(
+                    "  To extract data for a named entity, use: "
+                    "table.cell('<row_label>', '<column>', as_float=True)"
+                )
+            else:
+                lines.append(
+                    "  To extract a cell, find the row by label and index "
+                    "into row['cells']['<column>']"
+                )
 
         # -- Compute namespace note --
         lines.append("")
-        lines.append(
-            "Data stored in compute namespace as 'table'. "
-            "Additional access methods:"
-        )
-        lines.append("  table.cell('row_label', 'column', as_float=True)")
-        lines.append("  table.series('column', as_float=True)")
-        lines.append("  table.find_rows('pattern')")
-        lines.append("  table.find_columns('pattern')")
-        lines.append("  table.to_dataframe()")
+        if table_wrapped:
+            lines.append(
+                "Data stored in compute namespace as 'table'. "
+                "Additional access methods:"
+            )
+            lines.append("  table.cell('row_label', 'column', as_float=True)")
+            lines.append("  table.series('column', as_float=True)")
+            lines.append("  table.find_rows('pattern')")
+            lines.append("  table.find_columns('pattern')")
+            lines.append("  table.to_dataframe()")
+        else:
+            lines.append(
+                "Data stored in compute namespace as 'table' (raw dict). "
+                "Access methods:"
+            )
+            lines.append("  table['headers']  — list of column header dicts")
+            lines.append("  table['rows']     — list of row dicts")
+            lines.append("  row['label']      — row label string")
+            lines.append("  row['cells']      — dict mapping column name → value")
 
         return "\n".join(lines)

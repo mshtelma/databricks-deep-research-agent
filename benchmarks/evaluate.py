@@ -35,7 +35,7 @@ def _load_dotenv() -> None:
     except ImportError:
         return
     root = BENCHMARKS_DIR.parent
-    for name in (".env.officeqa", ".env.ais", ".env", ".env.test"):
+    for name in (".env.officeqa", ".env", ".env.test"):
         candidate = root / name
         if candidate.exists():
             load_dotenv(candidate, override=False)
