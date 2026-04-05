@@ -57,7 +57,12 @@ from databricks_deep_research.pools.pool_state import PoolConfig, PoolState
 from databricks_deep_research.tools.factories.builtin import BuiltinToolFactory
 from databricks_deep_research.tools.factories.databricks import DatabricksToolFactory
 from databricks_deep_research.tools.factory import ToolFactory, ToolFactoryContext
-from databricks_deep_research.tools.protocol import ResearchTool, ToolContext, UrlRegistry
+from databricks_deep_research.tools.protocol import (
+    ResearchTool,
+    TableRegistry,
+    ToolContext,
+    UrlRegistry,
+)
 from databricks_deep_research.tools.registry import ToolRegistry
 from databricks_deep_research.tools.resolver import ToolResolver
 from databricks_deep_research.tracing import get_current_span, trace_span
@@ -304,11 +309,13 @@ class WorkflowExecutor:
         strict_tool_resolution: bool = False,
         enterprise_tools: list[ResearchTool] | None = None,
         url_registry: UrlRegistry | None = None,
+        table_registry: TableRegistry | None = None,
         context: ExecutionContext | None = None,
     ) -> None:
         self._defn = definition
         self._llm = llm_client
         self._url_registry = url_registry or UrlRegistry()
+        self._table_registry = table_registry or TableRegistry()
         self._context = context
         self._total_tokens: int = 0
         self._strict_tool_resolution = strict_tool_resolution
@@ -762,6 +769,7 @@ class WorkflowExecutor:
             tools=tools,
             pools=self._pools,
             url_registry=self._url_registry,
+            table_registry=self._table_registry,
             tool_call_cache=self._context.tool_call_cache if self._context else None,
         )
 
@@ -815,7 +823,7 @@ class WorkflowExecutor:
             attributes={"tool.name": ref.name},
         ) as tool_span:
             validated = tool.validate_arguments(args)
-            ctx = ToolContext(query=state.query, url_registry=self._url_registry)
+            ctx = ToolContext(query=state.query, url_registry=self._url_registry, table_registry=self._table_registry)
             result = await tool.execute(validated, ctx)
 
             if tool_span:

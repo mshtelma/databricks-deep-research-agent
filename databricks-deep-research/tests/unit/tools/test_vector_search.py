@@ -12,7 +12,7 @@ from databricks_deep_research.tools.builtins.vector_search import (
     DatabricksVectorSearchTool,
     _title_from_chunk_id,
 )
-from databricks_deep_research.tools.protocol import ToolContext
+from databricks_deep_research.tools.protocol import TableRegistry, ToolContext
 
 # ---------------------------------------------------------------------------
 # _title_from_chunk_id
@@ -451,3 +451,113 @@ class TestVectorSearchExcludeChunkTypes:
 
         call_kwargs = ws.vector_search_indexes.query_index.call_args.kwargs
         assert call_kwargs["num_results"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Table detection and registration in VS results
+# ---------------------------------------------------------------------------
+
+_TABLE_CONTENT = (
+    "Revenue breakdown:\n\n"
+    "| Region | Revenue |\n"
+    "|---|---|\n"
+    "| US | 12B |\n"
+    "| EU | 8B |\n\n"
+    "End of data."
+)
+
+
+def _make_vs_mock_with_content(
+    content: str,
+    col_names: list[str] | None = None,
+) -> MagicMock:
+    """Create a VS mock returning a single row with given content."""
+    if col_names is None:
+        col_names = ["chunk_id", "content", "score"]
+    rows = [["doc_1", content, 0.95]]
+
+    ws = MagicMock()
+    manifest = SimpleNamespace(
+        columns=[SimpleNamespace(name=c) for c in col_names],
+    )
+    data_array = SimpleNamespace(data_array=rows)
+    ws.vector_search_indexes.query_index.return_value = SimpleNamespace(
+        manifest=manifest, result=data_array,
+    )
+    return ws
+
+
+class TestVectorSearchTableRegistration:
+    @pytest.mark.asyncio
+    async def test_tables_detected_and_registered(self) -> None:
+        ws = _make_vs_mock_with_content(_TABLE_CONTENT)
+        reg = TableRegistry()
+        tool = DatabricksVectorSearchTool(
+            workspace_client=ws,
+            name="test_vs",
+            index_name="test.idx",
+            columns=["chunk_id", "content", "score"],
+        )
+        ctx = ToolContext(query="revenue", table_registry=reg)
+
+        result = await tool.execute({"query": "revenue"}, ctx)
+
+        assert result.success
+        assert len(reg) >= 1
+        assert result.data.get("table_count", 0) >= 1
+
+        entry = reg.resolve(0)
+        assert entry is not None
+        assert entry.source_kind == "vector_index"
+
+    @pytest.mark.asyncio
+    async def test_no_crash_without_registry(self) -> None:
+        ws = _make_vs_mock_with_content(_TABLE_CONTENT)
+        tool = DatabricksVectorSearchTool(
+            workspace_client=ws,
+            name="test_vs",
+            index_name="test.idx",
+            columns=["chunk_id", "content", "score"],
+        )
+        ctx = ToolContext(query="revenue", table_registry=None)
+
+        result = await tool.execute({"query": "revenue"}, ctx)
+
+        assert result.success
+        # No table_count in data when registry is None
+        assert "table_count" not in result.data
+
+    @pytest.mark.asyncio
+    async def test_no_tables_in_plain_content(self) -> None:
+        ws = _make_vs_mock_with_content("Just plain text with no tables at all.")
+        reg = TableRegistry()
+        tool = DatabricksVectorSearchTool(
+            workspace_client=ws,
+            name="test_vs",
+            index_name="test.idx",
+            columns=["chunk_id", "content", "score"],
+        )
+        ctx = ToolContext(query="test", table_registry=reg)
+
+        result = await tool.execute({"query": "test"}, ctx)
+
+        assert result.success
+        assert len(reg) == 0
+        assert "table_count" not in result.data
+
+    @pytest.mark.asyncio
+    async def test_capacity_overflow_handled(self) -> None:
+        ws = _make_vs_mock_with_content(_TABLE_CONTENT)
+        reg = TableRegistry(max_tables=0)
+        tool = DatabricksVectorSearchTool(
+            workspace_client=ws,
+            name="test_vs",
+            index_name="test.idx",
+            columns=["chunk_id", "content", "score"],
+        )
+        ctx = ToolContext(query="revenue", table_registry=reg)
+
+        result = await tool.execute({"query": "revenue"}, ctx)
+
+        assert result.success
+        assert len(reg) == 0

@@ -14,6 +14,7 @@ from deep_research.agent.framework_orchestrator import (
     _filter_workflow_tools,
     _resolve_workflow,
 )
+from deep_research.plugins.base import WorkflowProviderPlugin
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -50,7 +51,7 @@ def _make_plugin(
     raises: Exception | None = None,
 ) -> Any:
     """Create a mock plugin implementing WorkflowProviderPlugin."""
-    plugin = MagicMock()
+    plugin = MagicMock(spec=WorkflowProviderPlugin)
     plugin.name = name
 
     if raises:

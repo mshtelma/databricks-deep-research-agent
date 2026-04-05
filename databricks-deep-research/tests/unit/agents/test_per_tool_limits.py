@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -12,7 +12,6 @@ from pydantic import ValidationError
 from databricks_deep_research.agents.config import AgentNodeConfig
 from databricks_deep_research.agents.react_loop import ReactLoop
 from databricks_deep_research.llm.client import ToolCall
-
 
 # ---------------------------------------------------------------------------
 # Config parsing tests
@@ -212,8 +211,10 @@ class TestReactLoopPerToolLimits:
 
 def test_officeqa_yaml_prompts_pass_template_validation() -> None:
     """All system_prompt values in the OfficeQA YAML must pass template security validation."""
-    import yaml
     from pathlib import Path
+
+    import yaml
+
     from databricks_deep_research.templates.renderer import SafeTemplateRenderer
 
     yaml_path = (

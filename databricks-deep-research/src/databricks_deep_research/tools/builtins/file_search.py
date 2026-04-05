@@ -126,7 +126,7 @@ class FileSearchTool:
         return {"query": query, "top_k": top_k}
 
     async def execute(
-        self, arguments: dict[str, Any], context: ToolContext  # noqa: ARG002
+        self, arguments: dict[str, Any], context: ToolContext,
     ) -> ToolResult:
         """Search the file index and return matching passages."""
         query: str = arguments["query"]
@@ -150,6 +150,7 @@ class FileSearchTool:
         # Build sources and formatted output
         sources: list[SourceInfo] = []
         lines: list[str] = []
+        all_tables: list[dict[str, Any]] = []
 
         for idx, (score, chunk) in enumerate(scored):
             source_label = chunk.get("source", "unknown")
@@ -166,17 +167,85 @@ class FileSearchTool:
                 source_type="file",
             ))
 
+            # Detect tables in chunk content
+            result_table_count = 0
+            if content_text and context.table_registry is not None:
+                try:
+                    from databricks_deep_research.tools.builtins.text_utils import (  # noqa: PLC0415
+                        detect_markdown_tables,
+                    )
+
+                    for pt in detect_markdown_tables(content_text):
+                        tbl_entry: dict[str, Any] = {
+                            "markdown": pt.markdown,
+                            "table_json": pt.table_json,
+                            "row_count": pt.row_count,
+                            "col_count": pt.col_count,
+                            "source": source_label,
+                        }
+                        try:
+                            tbl_idx = context.table_registry.register(
+                                pt.table_json,
+                                source_kind="file",
+                                source_label=source_label,
+                                markdown=pt.markdown,
+                            )
+                            tbl_entry["table_idx"] = tbl_idx
+                        except ValueError:
+                            logger.warning(
+                                "FILE_SEARCH_TABLE_REGISTER_SKIPPED source=%s reason=capacity",
+                                source_label[:80],
+                            )
+                            break  # registry full — skip remaining tables
+                        all_tables.append(tbl_entry)
+                        result_table_count += 1
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "FILE_SEARCH_TABLE_DETECT_FAILED source=%s",
+                        source_label[:80],
+                        exc_info=True,
+                    )
+
             location = f" (page {page})" if page else ""
             highlight = self._highlight(content_text, query)
+
+            # Build table annotation
+            if result_table_count > 0:
+                result_tbl_indices = [
+                    t["table_idx"]
+                    for t in all_tables[-result_table_count:]
+                    if "table_idx" in t
+                ]
+                if result_tbl_indices:
+                    idx_str = ", ".join(
+                        f"table_idx={i}" for i in result_tbl_indices
+                    )
+                    table_note = (
+                        f"\n    [contains {result_table_count} table(s): "
+                        f"{idx_str}]"
+                    )
+                else:
+                    table_note = (
+                        f"\n    [contains {result_table_count} table(s)]"
+                    )
+            else:
+                table_note = ""
+
             lines.append(
-                f"[{idx}] {source_label}{location} (score: {score:.2f})\n"
+                f"[{idx}] {source_label}{location} (score: {score:.2f})"
+                f"{table_note}\n"
                 f"    {highlight}"
             )
+
+        data: dict[str, Any] = {"query": query, "num_results": len(scored)}
+        if all_tables:
+            data["tables"] = all_tables
+            data["table_count"] = len(all_tables)
 
         return ToolResult(
             content="\n\n".join(lines),
             sources=sources,
-            data={"query": query, "num_results": len(scored)},
+            data=data,
         )
 
     # -- Ranking -------------------------------------------------------------

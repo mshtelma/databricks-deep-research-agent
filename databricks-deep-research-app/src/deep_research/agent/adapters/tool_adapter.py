@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from databricks_deep_research.tools.builtins.web_search import SearchResult
 from databricks_deep_research.tools.protocol import (
     ResearchTool,
     SourceKind,
@@ -309,7 +310,16 @@ class BraveSearchAdapter:
                 before, len(results),
             )
 
-        return list(results)
+        return [
+            SearchResult(
+                url=r.url,
+                title=getattr(r, "title", ""),
+                snippet=getattr(r, "snippet", ""),
+                relevance_score=getattr(r, "relevance_score", 0.5),
+                content=getattr(r, "content", None),
+            )
+            for r in results
+        ]
 
 
 async def create_framework_tools(

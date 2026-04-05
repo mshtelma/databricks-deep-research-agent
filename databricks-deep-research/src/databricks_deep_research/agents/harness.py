@@ -65,7 +65,12 @@ from databricks_deep_research.events.types import (
 from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.pools.pool_state import PoolState
 from databricks_deep_research.templates.renderer import SafeTemplateRenderer
-from databricks_deep_research.tools.protocol import ResearchTool, ToolContext, UrlRegistry
+from databricks_deep_research.tools.protocol import (
+    ResearchTool,
+    TableRegistry,
+    ToolContext,
+    UrlRegistry,
+)
 from databricks_deep_research.tracing import trace_span
 from databricks_deep_research.workflow.runtime_core.selectors import (
     resolve_input_key,
@@ -181,6 +186,7 @@ async def execute_agent(
     pools: dict[str, PoolState],
     *,
     url_registry: UrlRegistry | None = None,
+    table_registry: TableRegistry | None = None,
     stream: bool = False,
     tool_call_cache: Any | None = None,
     runtime_context: Mapping[str, Any] | None = None,
@@ -359,6 +365,7 @@ async def execute_agent(
         tool_ctx = ToolContext(
             query=state.query,
             url_registry=url_registry,
+            table_registry=table_registry,
             current_step=state.get("current_step"),
             background_summary=_resolve_background_summary(state),
             recent_observations=summarize_recent_observations(state.get_all("findings")),

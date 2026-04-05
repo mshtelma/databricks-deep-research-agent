@@ -58,12 +58,18 @@ from databricks_deep_research.runner import WorkflowResult, WorkflowRunner
 # Tool protocol
 from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.tools.protocol import (
+    RegisteredTable,
     ResearchTool,
+    TableRegistry,
     ToolContext,
     ToolDefinition,
     ToolResult,
 )
-from databricks_deep_research.tracing import setup_mlflow_tracing, shutdown_mlflow_tracing, trace_span
+from databricks_deep_research.tracing import (
+    setup_mlflow_tracing,
+    shutdown_mlflow_tracing,
+    trace_span,
+)
 
 # Workflow types
 from databricks_deep_research.workflow.context import ExecutionContext
@@ -105,6 +111,8 @@ __all__ = [
     "FrameworkEvent",
     # Tool protocol & factory
     "ResearchTool",
+    "TableRegistry",
+    "RegisteredTable",
     "ToolContext",
     "ToolDefinition",
     "ToolResult",

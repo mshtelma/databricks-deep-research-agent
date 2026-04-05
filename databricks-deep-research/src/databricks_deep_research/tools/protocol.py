@@ -18,6 +18,8 @@ URLs — which prevents hallucinated URL injection.
 
 from __future__ import annotations
 
+import copy
+import threading
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
@@ -68,6 +70,7 @@ class ToolKind(StrEnum):
     delta_read = "delta_read"
     delta_grep = "delta_grep"
     delta_table_read = "delta_table_read"
+    table_read = "table_read"
     custom = "custom"
 
 
@@ -83,6 +86,7 @@ _TOOL_KIND_TO_SOURCE_KIND: dict[str, str] = {
     ToolKind.delta_read: SourceKind.delta_table,
     ToolKind.delta_grep: SourceKind.delta_table,
     ToolKind.delta_table_read: SourceKind.delta_table,
+    ToolKind.table_read: SourceKind.builtin,
 }
 
 
@@ -254,6 +258,107 @@ class UrlRegistry:
 
 
 # ---------------------------------------------------------------------------
+# Table registry — source-agnostic structured table storage
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class RegisteredTable:
+    """A table registered from any source (web, file, vector search, etc.)."""
+
+    table_json: dict[str, Any]
+    source_kind: str  # SourceKind value: "web", "file", "vector_index", etc.
+    source_label: str  # URL, filename, index name
+    markdown: str = ""  # Pre-rendered markdown for quick display
+
+
+class TableRegistry:
+    """Maps integer indices to structured tables within a workflow run.
+
+    Source-agnostic — any tool can register tables.  Modeled after
+    :class:`UrlRegistry`: created once per workflow run, shared across all
+    tool calls via :class:`ToolContext`.
+
+    Registration validates that ``table_json`` contains the required
+    ``"headers"`` and ``"rows"`` keys.  A capacity limit prevents unbounded
+    growth when crawling many pages.
+    """
+
+    __slots__ = ("_lock", "_tables", "_max_tables")
+
+    _DEFAULT_MAX_TABLES = 200
+
+    def __init__(self, *, max_tables: int = _DEFAULT_MAX_TABLES) -> None:
+        self._lock = threading.Lock()
+        self._tables: list[RegisteredTable] = []
+        self._max_tables = max_tables
+
+    def register(
+        self,
+        table_json: dict[str, Any],
+        *,
+        source_kind: str = "",
+        source_label: str = "",
+        markdown: str = "",
+    ) -> int:
+        """Validate *table_json*, store, and return its integer index.
+
+        The dict is **deep-copied** on registration so callers cannot
+        mutate the stored data after the fact.
+
+        Raises:
+            TypeError: If *table_json* is not a dict.
+            ValueError: If *table_json* lacks ``"headers"`` or ``"rows"`` keys,
+                or if the registry has reached its capacity limit.
+        """
+        if not isinstance(table_json, dict):
+            raise TypeError(
+                f"table_json must be a dict, got {type(table_json).__name__}"
+            )
+        if "headers" not in table_json or "rows" not in table_json:
+            raise ValueError(
+                "table_json must contain 'headers' and 'rows' keys; "
+                f"got keys: {sorted(table_json.keys())}"
+            )
+
+        with self._lock:
+            if len(self._tables) >= self._max_tables:
+                raise ValueError(
+                    f"TableRegistry capacity limit reached ({self._max_tables}). "
+                    "Oldest tables are not evicted — raise the limit or reduce "
+                    "the number of tables extracted per workflow."
+                )
+
+            index = len(self._tables)
+            self._tables.append(
+                RegisteredTable(
+                    table_json=copy.deepcopy(table_json),
+                    source_kind=source_kind,
+                    source_label=source_label,
+                    markdown=markdown,
+                )
+            )
+            return index
+
+    def resolve(self, index: int) -> RegisteredTable | None:
+        """Resolve an index back to its :class:`RegisteredTable`.
+
+        Returns ``None`` if *index* is out of range.
+        """
+        with self._lock:
+            if 0 <= index < len(self._tables):
+                return self._tables[index]
+            return None
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._tables)
+
+    def __repr__(self) -> str:
+        return f"TableRegistry(count={len(self._tables)})"
+
+
+# ---------------------------------------------------------------------------
 # Execution context
 # ---------------------------------------------------------------------------
 
@@ -269,6 +374,7 @@ class ToolContext:
 
     query: str = ""
     url_registry: UrlRegistry | None = None
+    table_registry: TableRegistry | None = None
     current_step: Any | None = None
     background_summary: str = ""
     recent_observations: list[str] = field(default_factory=list)

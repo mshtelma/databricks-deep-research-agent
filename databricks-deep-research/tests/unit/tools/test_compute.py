@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 import pytest
 
 from databricks_deep_research.tools.builtins.compute import PythonComputeTool
@@ -11,7 +9,6 @@ from databricks_deep_research.tools.factories.builtin import BuiltinToolFactory
 from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.tools.protocol import ToolContext
 from databricks_deep_research.workflow.definition import ToolDeclaration
-
 
 # ---------------------------------------------------------------------------
 # Helpers
