@@ -32,6 +32,7 @@ from databricks_deep_research.citation.types import (
     InterleavedClaim,
     RankedEvidence,
 )
+from databricks_deep_research.citation.utils import has_numeric_content as _has_numeric_content
 from databricks_deep_research.llm.client import FrameworkLLMClient, ModelTier
 
 logger = logging.getLogger(__name__)
@@ -118,11 +119,11 @@ class ClaimEvidenceMatchOutput(BaseModel):
 _STRICT_GENERATION_PROMPT = """\
 You are a Research Synthesizer generating a comprehensive response with inline citations.
 
-## STRICT LENGTH REQUIREMENT
-- Target length: {target_word_count} words MINIMUM
-- This is a MINIMUM target - use all the evidence provided to write a thorough report
+## LENGTH REQUIREMENT
+- Target length: {target_word_count} words — write a thorough report that reaches this target
+- Maximum: {max_word_count} words — do not exceed this limit
+- Do NOT stop writing before reaching the target unless you have exhausted all relevant evidence
 - Cover ALL aspects of the research query comprehensively
-- DO NOT truncate or summarize prematurely - be thorough and detailed
 - Structure your response with clear sections and subsections
 
 ## CRITICAL RULE: Reference-First Generation
@@ -131,13 +132,12 @@ For EVERY claim you make:
 2. THEN write the claim constrained by that evidence
 3. IMMEDIATELY cite the evidence using [source_index] notation
 
-## CITATION DIVERSITY REQUIREMENT (CRITICAL)
-- You have {source_count} different sources available - USE THEM ALL
-- DISTRIBUTE citations across multiple sources - do NOT over-rely on any single source
+## CITATION DIVERSITY
+- Cite the most relevant sources for each claim — do NOT force-cite irrelevant sources
+- DISTRIBUTE citations across sources — do NOT over-rely on any single source
 - Each source should be cited at most 3-4 times maximum
-- If making similar claims, use evidence from DIFFERENT sources when possible
-- Aim to cite at least {min_sources_to_cite} different sources throughout your response
-- Variety in sources increases credibility and provides multiple perspectives
+- If multiple sources say the same thing, cite the BEST one, not all of them
+- Aim to cite at least {min_sources_to_cite} different sources, but only if genuinely relevant
 
 ## Evidence Pool ({evidence_count} evidence spans from {source_count} sources)
 {evidence_pool}
@@ -156,7 +156,7 @@ For EVERY claim you make:
 - **Fact Claims**: Verifiable source-grounded statements with inline citations
 - **Numeric Claims**: Statistics, values, metrics [1] - ensure exact match with source
 - **Analysis Blocks**: Use `<analysis>...</analysis>` only for interpretation of already-established cited facts
-- **Free Blocks**: Use `<free>...</free>` only for headings, transitions, or structural sentences with no factual payload
+- **Free Blocks**: Use `<free>...</free>` ONLY for markdown headings (## or ###) and single-sentence transitions between sections — NOTHING else
 
 ### Structure
 - Use markdown headings (##, ###) to organize your response
@@ -186,10 +186,13 @@ Only use a markdown table if the query explicitly calls for tabular comparison.
 - KEEP analysis bounded: use language like "may indicate", "suggests", or "appears consistent with"
 - NEVER combine a table block with narrative commentary in the same paragraph
 - NEVER write a comparison across multiple quarters unless every referenced value is cited
-- NEVER stop writing until you've reached the target word count
+- Avoid filler, but ensure thorough coverage — do not stop before reaching the target
 - NEVER cite the same source more than 4 times
 - NEVER use structured lists when a table is requested - use markdown table syntax
 - NEVER add meta-commentary about the report
+- NEVER include a "How to read this report" section or describe your citation process
+- NEVER reference the <free> or <analysis> tags in your visible text — they are internal markup only
+- NEVER wrap executive summaries, introductions, or any multi-sentence content in <free> tags
 - NEVER offer follow-up work or additional analyses
 - NEVER end with questions or invitations for feedback
 
@@ -200,8 +203,8 @@ the consumer electronics segment [3]. Analysts noted that market expansion in Eu
 contributed significantly [4]."
 
 ## Response
-Generate a well-structured, comprehensive response ({target_word_count}+ words) with inline \
-citations for every claim. Remember to use diverse sources and explicit `<analysis>` / `<free>` tags when appropriate:"""
+Generate a well-structured response (target: {target_word_count} words, max: {max_word_count} words) with inline \
+citations for every claim:"""
 
 _NATURAL_GENERATION_PROMPT = """\
 You are a Research Synthesizer writing an engaging, comprehensive report.
@@ -234,8 +237,8 @@ You are a Research Synthesizer writing an engaging, comprehensive report.
 - Put interpretation inside `<analysis>...</analysis>` blocks
 - Put structural transitions/openers inside `<free>...</free>` blocks
 - Keep introductions and conclusions structural unless analysis is clearly grounded
-- Aim for approximately {target_word_count} words
-- Cover the topic comprehensively and thoroughly
+- Target: {target_word_count} words — write a thorough report (max: {max_word_count} words)
+- Cover the topic comprehensively — do not stop before reaching the word target
 
 ### Tables
 For comparative data, use markdown tables:
@@ -258,6 +261,8 @@ For comparative data, use markdown tables:
 - Don't use structured lists when tables are requested
 - Don't introduce new numeric/date/entity payload in `<analysis>` blocks
 - Don't put factual claims inside `<free>` blocks
+- Don't use `<free>` for anything other than headings and single-sentence transitions
+- Don't describe the citation system or tagging approach in the output
 - Don't add meta-commentary about the report itself
 - Don't offer follow-up work or additional analyses
 - Don't end with questions or engagement prompts
@@ -271,7 +276,7 @@ project continued expansion, with some estimates suggesting renewables could acc
 of global electricity generation by 2030 [2]."
 
 ## Response
-Write an engaging, well-researched report ({target_word_count} words target) using `<analysis>` and `<free>` blocks where appropriate:"""
+Write an engaging, well-researched report (target: {target_word_count} words, max: {max_word_count} words) using `<analysis>` and `<free>` blocks where appropriate:"""
 
 _CLAIM_EVIDENCE_MATCHING_PROMPT = """\
 Match this claim to the most relevant evidence span.
@@ -488,6 +493,12 @@ class InterleavedGenerator:
             len(previous_content),
         )
 
+        logger.info(
+            "GENERATION_EVIDENCE_POOL evidence=%d unique_sources=%d",
+            len(evidence_pool),
+            unique_sources,
+        )
+
         # Format evidence pool for the prompt
         evidence_text = "\n".join(
             f"[{i}] Source: {e.source_title or 'Unknown'}\n"
@@ -495,7 +506,8 @@ class InterleavedGenerator:
             for i, e in enumerate(evidence_pool)
         )
 
-        min_sources_to_cite = max(2, unique_sources // 2)
+        min_sources_to_cite = max(2, min(10, unique_sources // 3))
+        max_word_count = int(target_word_count * 1.3)
 
         # Select prompt template
         mode = self._config.generation_mode
@@ -504,6 +516,7 @@ class InterleavedGenerator:
                 query=query,
                 evidence_pool=evidence_text,
                 target_word_count=target_word_count,
+                max_word_count=max_word_count,
                 evidence_count=len(evidence_pool),
                 source_count=unique_sources,
             )
@@ -517,6 +530,7 @@ class InterleavedGenerator:
                 query=query,
                 evidence_pool=evidence_text,
                 target_word_count=target_word_count,
+                max_word_count=max_word_count,
                 evidence_count=len(evidence_pool),
                 source_count=unique_sources,
                 min_sources_to_cite=min_sources_to_cite,
@@ -929,14 +943,3 @@ def _is_markdown_table_block(block: str) -> bool:
     if not all(line.startswith("|") for line in table_lines[:2]):
         return False
     return bool(re.fullmatch(r"\|?[\s:\-|]+\|?", table_lines[1]))
-
-
-def _has_numeric_content(text: str) -> bool:
-    """Return ``True`` when *text* contains numbers / statistics."""
-    patterns = [
-        r"\$[\d,.]+[BMK]?",         # Currency
-        r"\d+(?:\.\d+)?%",          # Percentages
-        r"\d+(?:,\d{3})+",          # Large numbers
-        r"\d+\s*(?:billion|million|thousand)",  # Written numbers
-    ]
-    return any(re.search(p, text, re.IGNORECASE) for p in patterns)

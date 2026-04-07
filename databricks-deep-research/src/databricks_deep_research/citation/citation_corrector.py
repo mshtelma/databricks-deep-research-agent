@@ -25,6 +25,7 @@ from databricks_deep_research.citation.types import (
     CorrectionResult,
     RankedEvidence,
 )
+from databricks_deep_research.citation.utils import truncate as _truncate
 from databricks_deep_research.llm.client import FrameworkLLMClient, ModelTier
 
 logger = logging.getLogger(__name__)
@@ -37,20 +38,6 @@ class _MatchContext:
     scopes: frozenset[str]
     metrics: frozenset[str]
     qualifiers: frozenset[str]
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _truncate(text: str | None, max_length: int = 100) -> str:
-    """Truncate text for logging, adding ellipsis if truncated."""
-    if text is None:
-        return "<none>"
-    if len(text) <= max_length:
-        return text
-    return text[:max_length] + "..."
 
 
 # ---------------------------------------------------------------------------

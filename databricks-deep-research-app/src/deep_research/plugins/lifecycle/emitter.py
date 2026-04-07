@@ -23,24 +23,26 @@ await plugin_manager.emit_hook("on_job_submitted", event)
 await event_emitter.job_submitted(job.id, chat_id, query)
 """
 
+import contextlib
 import logging
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from .events import (
-    JobSubmittedEvent,
-    JobStartedEvent,
+    GenericEvent,
     JobCompletedEvent,
     JobFailedEvent,
-    SynthesisConfigEvent,
-    SynthesisStartedEvent,
+    JobStartedEvent,
+    JobSubmittedEvent,
+    StreamEvent,
     SynthesisChunkEvent,
     SynthesisCompletedEvent,
+    SynthesisConfigEvent,
+    SynthesisStartedEvent,
     ValidationErrorEvent,
     ValidationSuccessEvent,
-    StreamEvent,
-    GenericEvent,
 )
 
 if TYPE_CHECKING:
@@ -62,7 +64,7 @@ def unpack_validation_error(error: Exception) -> dict[str, Any]:
     Returns:
         Dict with keys: error_type, message, errors, fields
     """
-    error_info = {
+    error_info: dict[str, Any] = {
         "error_type": type(error).__name__,
         "message": str(error)[:500],
         "errors": [],
@@ -91,10 +93,8 @@ def unpack_validation_error(error: Exception) -> dict[str, Any]:
 
             except AttributeError:
                 # Pydantic v1 fallback
-                try:
+                with contextlib.suppress(Exception):
                     error_info["errors"] = error.errors()
-                except Exception:
-                    pass
 
             except Exception as unpack_err:
                 logger.warning(
@@ -159,7 +159,7 @@ class EventEmitter:
                 query=query,
                 user_id=user_id,
                 research_config=research_config,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={"job_id": str(job_id), "chat_id": chat_id},
         )
@@ -175,7 +175,7 @@ class EventEmitter:
             "on_job_started",
             lambda: JobStartedEvent(
                 job_id=job_id,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={"job_id": str(job_id)},
         )
@@ -206,7 +206,7 @@ class EventEmitter:
                 output=output,
                 output_type=output_type,
                 metrics=metrics,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={
                 "job_id": str(job_id),
@@ -241,7 +241,7 @@ class EventEmitter:
                 error_type=type(error).__name__,
                 is_recoverable=is_recoverable,
                 error_context=error_context,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={
                 "job_id": str(job_id),
@@ -297,7 +297,7 @@ class EventEmitter:
                 schema_required_fields=schema_required_fields,
                 verify_sources=verify_sources,
                 enable_post_verification=enable_post_verification,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={"job_id": str(job_id), "output_type": output_type},
         )
@@ -322,7 +322,7 @@ class EventEmitter:
                 job_id=job_id,
                 first_event_type=first_event_type,
                 elapsed_ms=elapsed_ms,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={"job_id": str(job_id)},
         )
@@ -351,7 +351,7 @@ class EventEmitter:
                 chunk_length=len(content_chunk),
                 cumulative_length=cumulative_length,
                 metadata=metadata,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={"job_id": str(job_id)},
         )
@@ -379,7 +379,7 @@ class EventEmitter:
                 total_chunks=total_chunks,
                 total_length=total_length,
                 duration_ms=duration_ms,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={"job_id": str(job_id)},
         )
@@ -421,7 +421,7 @@ class EventEmitter:
                 raw_output_preview=raw_output[:500] if raw_output else None,
                 attempt_number=attempt_number,
                 max_attempts=max_attempts,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={
                 "job_id": str(job_id),
@@ -452,7 +452,7 @@ class EventEmitter:
                 output_type=output_type,
                 field_count=field_count,
                 attempt_number=attempt_number,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={"job_id": str(job_id)},
         )
@@ -484,7 +484,7 @@ class EventEmitter:
                 event_type=event_type,
                 event_data=event_data,
                 sequence=sequence,
-                timestamp=datetime.now(timezone.utc),
+                timestamp=datetime.now(UTC),
             ),
             fallback_data={"job_id": str(job_id), "event_type": event_type},
         )
@@ -525,7 +525,7 @@ class EventEmitter:
                 event = GenericEvent(
                     hook_name=hook_name,
                     data=fallback_data,
-                    timestamp=datetime.now(timezone.utc),
+                    timestamp=datetime.now(UTC),
                 )
             else:
                 # Skip emission entirely
@@ -533,7 +533,7 @@ class EventEmitter:
 
         try:
             await self._pm.emit_hook(hook_name, event)
-        except Exception as e:
+        except Exception:
             logger.exception(
                 "PLUGIN_HOOK_EMISSION_FAILED hook=%s",
                 hook_name,

@@ -20,7 +20,6 @@ from trafilatura import bare_extraction
 
 from deep_research.agent.tools.base import (
     ResearchContext,
-    ResearchTool,
     ToolDefinition,
     ToolResult,
 )
@@ -31,12 +30,7 @@ from deep_research.core.logging_utils import (
     log_crawl_request,
     log_crawl_response,
 )
-from deep_research.core.tracing import safe_tool_span
 from deep_research.core.tracing_constants import (
-    ATTR_CRAWL_FAILED,
-    ATTR_CRAWL_SUCCESSFUL,
-    ATTR_CRAWL_URLS_COUNT,
-    list_to_attr,
     tool_span_name,
 )
 from deep_research.services.search.domain_filter import DomainFilter
@@ -94,7 +88,7 @@ def _is_private_ip(hostname: str) -> bool:
     try:
         # Resolve hostname to IP addresses
         addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC)
-        for family, _, _, _, sockaddr in addr_info:
+        for _family, _, _, _, sockaddr in addr_info:
             ip_str = sockaddr[0]
             try:
                 ip = ipaddress.ip_address(ip_str)
@@ -442,29 +436,22 @@ async def web_crawl(
     Returns:
         CrawlOutput with crawl results.
     """
-    span_name = tool_span_name("web_crawl", context)
+    _ = tool_span_name("web_crawl", context)
 
     logger.info(f"Crawling {len(urls)} URLs")
 
-    async with safe_tool_span(
-        span_name,
-        attributes={
-            ATTR_CRAWL_URLS_COUNT: len(urls),
-            "crawl.urls": list_to_attr(urls, max_items=5),
-        },
-    ) as span:
-        output = await crawler.crawl(urls)
+    output = await crawler.crawl(urls)
 
-        logger.info(f"Crawled {output.successful_count} successfully, {output.failed_count} failed")
+    logger.info(f"Crawled {output.successful_count} successfully, {output.failed_count} failed")
 
-        # Set output attributes
-        if span:
-            span.set_attributes({
-                ATTR_CRAWL_SUCCESSFUL: output.successful_count,
-                ATTR_CRAWL_FAILED: output.failed_count,
-            })
+    # Log output attributes
+    logger.info(
+        "WEB_CRAWL_SPAN_ATTRS",
+        successful=output.successful_count,
+        failed=output.failed_count,
+    )
 
-        return output
+    return output
 
 
 # =============================================================================
@@ -564,7 +551,7 @@ class WebCrawlTool:
                         source_title = entry.get("title")
                 elif isinstance(url_registry, dict):
                     # Fallback: dict-based registry
-                    for key, entry in url_registry.items():
+                    for _key, entry in url_registry.items():
                         if entry.get("index") == index:
                             resolved_url = entry.get("url") or entry.get("source_url")
                             source_title = entry.get("title")

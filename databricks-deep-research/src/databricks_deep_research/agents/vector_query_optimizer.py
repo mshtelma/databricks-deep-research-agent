@@ -133,7 +133,8 @@ class VectorQueryOptimizer:
         async def _safe_execute(query: str) -> ToolResult | None:
             try:
                 args = tool.validate_arguments({"query": query, "num_results": 10})
-                return await tool.execute(args, tool_context)
+                result: ToolResult = await tool.execute(args, tool_context)
+                return result
             except Exception:
                 logger.exception(
                     "VS_CALL_FAILED tool=%s query=%s",
@@ -157,10 +158,7 @@ class VectorQueryOptimizer:
                 trace,
             )
 
-        if len(results) > 1:
-            merged = self._rrf_merge(results, k=cfg.rrf_k)
-        else:
-            merged = results[0]
+        merged = self._rrf_merge(results, k=cfg.rrf_k) if len(results) > 1 else results[0]
 
         trace["rrf_result_count"] = len(merged.sources)
         trace["stage2_ms"] = int((time.monotonic() - t1) * 1000)
@@ -336,8 +334,8 @@ Return ONLY valid JSON (no markdown, no commentary):
         """Stable dedup key: hash of content (or fallback to title + snippet)."""
         text = source.content or source.snippet or ""
         if text:
-            return hashlib.md5(text.encode()).hexdigest()
-        return hashlib.md5(f"{source.title}|{source.snippet}".encode()).hexdigest()
+            return hashlib.sha256(text.encode()).hexdigest()
+        return hashlib.sha256(f"{source.title}|{source.snippet}".encode()).hexdigest()
 
     # -- Stage 3: LLM Reranking --
 
@@ -388,7 +386,7 @@ Return ONLY valid JSON: {{"scores": [s0, s1, ...]}}"""
             else:
                 scores.append(5.0)
 
-        scored = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+        scored = sorted(zip(candidates, scores, strict=False), key=lambda x: x[1], reverse=True)
         return [src for src, score in scored if score >= cfg.rerank_threshold][:10]
 
     # -- Utilities --
@@ -410,14 +408,16 @@ Return ONLY valid JSON: {{"scores": [s0, s1, ...]}}"""
         text = text.strip("`\n ")
 
         try:
-            return json.loads(text)
+            parsed: dict[str, Any] = json.loads(text)
+            return parsed
         except json.JSONDecodeError:
             pass
 
         match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
         if match:
             try:
-                return json.loads(match.group())
+                parsed_match: dict[str, Any] = json.loads(match.group())
+                return parsed_match
             except json.JSONDecodeError:
                 pass
 

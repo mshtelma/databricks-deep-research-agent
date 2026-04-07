@@ -23,8 +23,6 @@ class Base(DeclarativeBase):
 
     metadata = MetaData(naming_convention=convention)
 
-    # Type annotations for mypy
-    __name__: str
 
     @declared_attr.directive
     def __tablename__(cls) -> str:

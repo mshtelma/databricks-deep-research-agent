@@ -2,13 +2,13 @@
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel
 
 
-class ModelTier(str, Enum):
+class ModelTier(StrEnum):
     """Model capability tiers."""
 
     SIMPLE = "simple"  # Fast, low-latency, low-cost
@@ -18,7 +18,7 @@ class ModelTier(str, Enum):
     FAST = "fast"  # Non-structured quick tasks (GPT 5.2)
 
 
-class ReasoningEffort(str, Enum):
+class ReasoningEffort(StrEnum):
     """Reasoning effort levels."""
 
     LOW = "low"
@@ -26,7 +26,7 @@ class ReasoningEffort(str, Enum):
     HIGH = "high"
 
 
-class SelectionStrategy(str, Enum):
+class SelectionStrategy(StrEnum):
     """Endpoint selection strategy."""
 
     PRIORITY = "priority"  # Use first healthy endpoint
@@ -118,8 +118,7 @@ class EndpointHealth:
         Returns:
             True if the endpoint was reset to healthy, False otherwise.
         """
-        if not self.is_healthy and self.rate_limited_until:
-            if datetime.now(UTC) >= self.rate_limited_until:
+        if not self.is_healthy and self.rate_limited_until and datetime.now(UTC) >= self.rate_limited_until:
                 # Give the endpoint another chance
                 self.is_healthy = True
                 self.consecutive_errors = 0

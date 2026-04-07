@@ -10,6 +10,7 @@ import pytest
 from deep_research.agent.adapters.tool_adapter import (
     BraveSearchAdapter,
     CrawlerAdapter,
+    EnterpriseToolAdapter,
     create_framework_tools,
 )
 from deep_research.core.app_config import DomainFilterConfig, DomainFilterMode
@@ -266,3 +267,46 @@ class TestCreateFrameworkTools:
         assert isinstance(crawl_tool._crawler, CrawlerAdapter)
         # And the adapter should wrap our original mock
         assert crawl_tool._crawler._crawler is mock_crawler
+
+
+# ---------------------------------------------------------------------------
+# EnterpriseToolAdapter — passthrough metadata
+# ---------------------------------------------------------------------------
+
+
+class TestEnterpriseToolAdapterPassthrough:
+    """Verify VS enterprise tools get query_policy=passthrough in metadata."""
+
+    def test_vs_tool_gets_passthrough_policy(self) -> None:
+        """Vector search enterprise tool should have query_policy=passthrough."""
+        app_tool = MagicMock()
+        app_tool.definition = SimpleNamespace(
+            name="my_vs_index",
+            description="Enterprise VS index",
+            parameters={"type": "object", "properties": {}},
+            source_type="vector_search",
+        )
+        app_tool.source_type = "vector_search"
+
+        adapter = EnterpriseToolAdapter(app_tool)
+        defn = adapter.definition
+
+        assert defn.metadata["query_policy"] == "passthrough"
+        assert defn.source_kind == "vector_index"
+
+    def test_non_vs_tool_no_passthrough_policy(self) -> None:
+        """Genie (SQL analytics) enterprise tool should NOT have query_policy."""
+        app_tool = MagicMock()
+        app_tool.definition = SimpleNamespace(
+            name="my_genie_space",
+            description="Genie analytics",
+            parameters={"type": "object", "properties": {}},
+            source_type="genie",
+        )
+        app_tool.source_type = "genie"
+
+        adapter = EnterpriseToolAdapter(app_tool)
+        defn = adapter.definition
+
+        assert "query_policy" not in defn.metadata
+        assert defn.source_kind == "sql_analytics"

@@ -11,15 +11,13 @@ Tests for:
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from deep_research.schemas.data_source import DataSourceType
 from deep_research.schemas.discovery import (
     DiscoveredSource,
-    DiscoveryError,
-    DiscoveryResponse,
     DiscoveryStatus,
 )
 from deep_research.services.discovery_cache import DiscoveryCache
@@ -651,8 +649,6 @@ class TestGracefulDegradation:
             await asyncio.sleep(100)  # Will timeout
 
         # We patch at a higher level - make the discover_genie_spaces slow
-        original_discover_genie = service.discover_genie_spaces
-
         async def timeout_genie(token: str | None) -> tuple:
             await asyncio.sleep(100)
             return [], None
@@ -660,8 +656,7 @@ class TestGracefulDegradation:
         # Serving succeeds
         mock_client.serving_endpoints.list.return_value = [mock_serving_endpoint]
 
-        with patch.object(service, "_get_client", return_value=mock_client):
-            with patch.object(service, "discover_genie_spaces", side_effect=timeout_genie):
+        with patch.object(service, "_get_client", return_value=mock_client), patch.object(service, "discover_genie_spaces", side_effect=timeout_genie):
                 response = await service.discover_all(
                     user_id="test-user-id",
                     user_token="test-token",
@@ -681,12 +676,12 @@ class TestGracefulDegradation:
         mock_cache: MagicMock,
     ) -> None:
         """Each discovery type should have independent timeout."""
-        service = DiscoveryService(cache=mock_cache)
+        _ = DiscoveryService(cache=mock_cache)
 
         # Verify timeout constants are defined
-        assert DISCOVERY_TIMEOUT_VS == timedelta(seconds=15)
-        assert DISCOVERY_TIMEOUT_GENIE == timedelta(seconds=10)
-        assert DISCOVERY_TIMEOUT_SERVING == timedelta(seconds=10)
+        assert timedelta(seconds=15) == DISCOVERY_TIMEOUT_VS
+        assert timedelta(seconds=10) == DISCOVERY_TIMEOUT_GENIE
+        assert timedelta(seconds=10) == DISCOVERY_TIMEOUT_SERVING
 
     @pytest.mark.asyncio
     async def test_partial_results_are_cached(
@@ -708,7 +703,7 @@ class TestGracefulDegradation:
         mock_client.serving_endpoints.list.return_value = [mock_serving_endpoint]
 
         with patch.object(service, "_get_client", return_value=mock_client):
-            response = await service.discover_all(
+            _ = await service.discover_all(
                 user_id="test-user-id",
                 user_token="test-token",
                 force_refresh=True,
@@ -734,7 +729,7 @@ class TestGracefulDegradation:
         mock_client.serving_endpoints.list.side_effect = Exception("Serving Error")
 
         with patch.object(service, "_get_client", return_value=mock_client):
-            response = await service.discover_all(
+            _ = await service.discover_all(
                 user_id="test-user-id",
                 user_token="test-token",
                 force_refresh=True,

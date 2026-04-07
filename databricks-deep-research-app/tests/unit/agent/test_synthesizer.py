@@ -184,8 +184,8 @@ class TestRunSynthesizer:
     ):
         """Test that synthesizer uses the COMPLEX model tier with depth-appropriate tokens."""
         # Arrange
-        from deep_research.services.llm.types import ModelTier
         from deep_research.agent.config import get_report_limits
+        from deep_research.services.llm.types import ModelTier
 
         mock_llm_client.complete = AsyncMock(
             return_value=LLMResponse(
@@ -382,8 +382,9 @@ class TestStructuredSynthesizer:
     async def test_pydantic_validation_failure_raises_exception(self, mock_llm_client: AsyncMock):
         """Test that Pydantic validation errors raise StructuredSynthesisError."""
         from pydantic import BaseModel, Field
-        from deep_research.core.exceptions import StructuredSynthesisError
+
         from deep_research.agent.nodes.synthesizer import run_structured_synthesizer
+        from deep_research.core.exceptions import StructuredSynthesisError
 
         class StrictSchema(BaseModel):
             value: int = Field(..., le=10)
@@ -422,8 +423,9 @@ class TestStructuredSynthesizer:
     async def test_streaming_fallback_after_validation_failure(self, mock_llm_client: AsyncMock):
         """Test that streaming fallback works after validation failure."""
         from pydantic import BaseModel, Field
-        from deep_research.core.exceptions import StructuredSynthesisError
+
         from deep_research.agent.nodes.synthesizer import run_structured_synthesizer
+        from deep_research.core.exceptions import StructuredSynthesisError
 
         class StrictSchema(BaseModel):
             value: int = Field(..., le=10)

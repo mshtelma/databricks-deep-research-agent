@@ -9,6 +9,12 @@ This module implements the 6-stage citation verification pipeline:
 6. Numeric QA Verification - QA-based verification for numeric claims
 """
 
+from deep_research.services.citation.citation_corrector import (
+    CitationCorrector,
+    CorrectionMetrics,
+    CorrectionResult,
+    CorrectionType,
+)
 from deep_research.services.citation.claim_generator import InterleavedClaim, InterleavedGenerator
 from deep_research.services.citation.confidence_classifier import (
     ConfidenceClassifier,
@@ -31,12 +37,6 @@ from deep_research.services.citation.numeric_verifier import (
     NumericVerificationResult,
     NumericVerifier,
     QAVerificationResult,
-)
-from deep_research.services.citation.citation_corrector import (
-    CitationCorrector,
-    CorrectionType,
-    CorrectionResult,
-    CorrectionMetrics,
 )
 from deep_research.services.citation.pipeline import CitationVerificationPipeline, VerificationEvent
 

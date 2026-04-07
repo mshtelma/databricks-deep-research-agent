@@ -1,8 +1,13 @@
 """FastAPI application entry point."""
 
+import databricks_deep_research._fips_compat  # noqa: F401  # FIPS md5 patch
+
 import asyncio
+import contextlib
 import logging
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,7 +32,7 @@ logger = logging.getLogger(__name__)
 SESSION_CLEANUP_INTERVAL_SECONDS = 300
 
 
-async def cleanup_expired_sessions_task(session_maker) -> None:
+async def cleanup_expired_sessions_task(session_maker: Any) -> None:
     """Background task to clean up expired incognito sessions periodically.
 
     Runs every 5 minutes to delete expired sessions and their associated chats.
@@ -54,7 +59,7 @@ async def cleanup_expired_sessions_task(session_maker) -> None:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
     settings = get_settings()
 
@@ -163,10 +168,8 @@ async def lifespan(app: FastAPI):
     # Cancel session cleanup task
     if hasattr(app.state, "cleanup_task") and app.state.cleanup_task:
         app.state.cleanup_task.cancel()
-        try:
+        with contextlib.suppress(asyncio.CancelledError):
             await app.state.cleanup_task
-        except asyncio.CancelledError:
-            pass
         logger.info("Session cleanup task stopped")
 
     # Stop job manager first (cancels running jobs)
@@ -259,15 +262,15 @@ def create_app() -> FastAPI:
     )
 
     # Register exception handlers
-    app.add_exception_handler(AppException, app_exception_handler)
-    app.add_exception_handler(HTTPException, http_exception_handler)
+    app.add_exception_handler(AppException, app_exception_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore[arg-type]
 
     # Include API routers
     app.include_router(api_v1_router, prefix="/api/v1")
 
     # Health check endpoint
     @app.get("/health")
-    async def health_check():
+    async def health_check() -> dict[str, str]:
         """Health check endpoint for load balancers."""
         return {"status": "healthy", "service": "deep-research-agent"}
 

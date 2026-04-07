@@ -1,7 +1,7 @@
 """Pagination utilities."""
 
 from collections.abc import Sequence
-from typing import Generic, TypeVar
+from typing import Any, Generic, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -59,10 +59,10 @@ class PaginatedResponse(BaseModel, Generic[T]):
 
 
 def paginate_query(
-    query,
+    query: Any,
     limit: int,
     offset: int,
-):
+) -> Any:
     """Apply pagination to SQLAlchemy query.
 
     Args:

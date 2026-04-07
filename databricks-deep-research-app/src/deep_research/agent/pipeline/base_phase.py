@@ -63,7 +63,7 @@ class BaseResearchPhase(ABC):
         """Tool names this phase can use. Override to customize."""
         return ["web_search", "web_crawl"]
 
-    def should_run(self, context: "ResearchContext") -> bool:
+    def should_run(self, _context: ResearchContext) -> bool:
         """Check if phase should execute based on context.
 
         Override for conditional phases that depend on plugin_data.
@@ -77,7 +77,7 @@ class BaseResearchPhase(ABC):
         """
         return True
 
-    def get_formatted_prompt(self, context: "ResearchContext") -> str:
+    def get_formatted_prompt(self, _context: ResearchContext) -> str:
         """Format prompt with context variables.
 
         Override for dynamic prompt templating.
@@ -93,10 +93,10 @@ class BaseResearchPhase(ABC):
 
     async def execute(
         self,
-        context: "ResearchContext",
-        state: "ResearchState",
+        context: ResearchContext,
+        state: ResearchState,
         config: dict[str, Any],
-    ) -> "ResearchState":
+    ) -> ResearchState:
         """Execute this phase using the researcher agent pattern.
 
         Default implementation:

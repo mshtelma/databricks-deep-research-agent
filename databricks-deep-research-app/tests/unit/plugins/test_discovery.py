@@ -1,9 +1,6 @@
 """Unit tests for plugin discovery module."""
 
-from typing import Any
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from deep_research.plugins.discovery import (
     PLUGIN_ENTRY_POINT_GROUP,

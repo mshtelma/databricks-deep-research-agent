@@ -67,7 +67,7 @@ class OrchestrationConfig:
     session_pre_created: bool = False
     # Structured output configuration
     output_format: str = "markdown"  # "markdown" or "json"
-    output_schema: type | None = None  # Pydantic model for JSON output
+    output_schema: type | dict[str, Any] | None = None  # Pydantic model or JSON schema for output
 
     # Synthesis mode and post-verification configuration
     synthesis_mode: str = "simple"  # "simple" or "reclaim"

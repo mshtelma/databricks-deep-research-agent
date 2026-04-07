@@ -29,7 +29,6 @@ from databricks_deep_research.events.types import (
     ItemCompletedEvent,
     ItemStartedEvent,
     PlanCreatedEvent,
-    StreamEvent,
     ToolCallEvent,
     WorkflowCompletedEvent,
 )
@@ -48,7 +47,6 @@ from tests.helpers import (
 
 # Enterprise test uses requires_databricks (no Brave needed)
 from tests.integration.conftest import requires_databricks
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -313,7 +311,7 @@ class TestCitationVerification:
         assert len(overlapping_keywords) >= 1, (
             "Report does not reference any source content. "
             "No keywords from source titles/snippets appear in the report.\n"
-            f"Source keywords sample: {sorted(list(source_keywords))[:20]}\n"
+            f"Source keywords sample: {sorted(source_keywords)[:20]}\n"
             f"Report preview: {report_str[:300]}"
         )
 
@@ -329,7 +327,7 @@ class TestCitationVerification:
         print(f"{'='*60}")
         print(f"Source keywords extracted: {len(source_keywords)}")
         print(f"Keywords found in report: {len(overlapping_keywords)}")
-        print(f"Overlap sample: {sorted(list(overlapping_keywords))[:15]}")
+        print(f"Overlap sample: {sorted(overlapping_keywords)[:15]}")
         print(f"Report length: {len(report_str)} chars")
         print(f"\nEvent summary: {event_summary(events)}")
         print_full_diagnostics(events, state)
@@ -621,7 +619,7 @@ class TestCitationVerification:
 
         # -- Formatted quality metrics summary --
         print(f"\n{'='*60}")
-        print(f"REPORT QUALITY METRICS")
+        print("REPORT QUALITY METRICS")
         print(f"{'='*60}")
         print(f"  Duration:            {duration_s:.1f}s")
         if total_duration_ms:

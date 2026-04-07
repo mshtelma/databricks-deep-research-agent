@@ -446,7 +446,7 @@ class FileUploadService(BaseRepository[UploadedFile]):
                 logger.warning("Docling conversion returned no document object")
                 return None
 
-            markdown = document.export_to_markdown()
+            markdown: str = document.export_to_markdown()
             if not markdown or not markdown.strip():
                 logger.warning("Docling extracted no text from PDF")
                 return None

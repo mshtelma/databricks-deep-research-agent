@@ -1,7 +1,7 @@
 """Tests for Stage 7: Atomic Fact Decomposition service."""
 
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

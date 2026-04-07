@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TypedDict
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
 
 class SessionStatusResponse(TypedDict):
@@ -17,13 +17,13 @@ class SessionStatusResponse(TypedDict):
     max_chats: int
     expires_at: str | None
 
-from deep_research.models.chat import Chat, ChatType
-from deep_research.models.incognito_session import (
+from deep_research.models.chat import Chat, ChatType  # noqa: E402
+from deep_research.models.incognito_session import (  # noqa: E402
     MAX_INCOGNITO_CHATS,
     SESSION_TTL_HOURS,
     IncognitoSession,
 )
-from deep_research.services.base import BaseRepository
+from deep_research.services.base import BaseRepository  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

@@ -25,7 +25,6 @@ import os
 
 import mlflow
 import pytest
-
 from tests.shared import (
     brave_client,  # noqa: F401
     cleanup_mlflow_run,  # noqa: F401
@@ -35,7 +34,6 @@ from tests.shared import (
     requires_databricks,  # noqa: F401
     web_crawler,  # noqa: F401
 )
-
 
 # ---------------------------------------------------------------------------
 # MLflow Configuration
@@ -70,7 +68,7 @@ def setup_mlflow_tracking() -> None:
     if has_databricks:
         # Set tracking URI to Databricks
         mlflow.set_tracking_uri("databricks")
-        print(f"\n📊 MLflow: Tracking to Databricks workspace")
+        print("\n📊 MLflow: Tracking to Databricks workspace")
     else:
         # Fall back to local tracking if no credentials
         print("\n⚠️  MLflow: No Databricks credentials, using local tracking")

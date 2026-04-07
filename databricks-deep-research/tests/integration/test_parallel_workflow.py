@@ -21,7 +21,6 @@ import pytest
 
 from databricks_deep_research.events.types import (
     NodeStartedEvent,
-    StreamEvent,
     ToolCallEvent,
     WorkflowCompletedEvent,
 )
@@ -83,7 +82,7 @@ class TestParallelWorkflow:
         observations_pool = state.pools.get("observations")
         assert observations_pool is not None, "observations pool should exist"
         assert observations_pool.count() > 0, (
-            f"observations pool is empty — researchers did not write findings"
+            "observations pool is empty — researchers did not write findings"
         )
 
         # Final report should have substance

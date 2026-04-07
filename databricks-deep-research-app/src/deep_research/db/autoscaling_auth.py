@@ -113,7 +113,7 @@ class AutoscalingCredentialProvider(BaseLakebaseCredentialProvider):
             payload_b64 = token.split(".")[1]
             payload_b64 += "=" * (4 - len(payload_b64) % 4)
             payload = json.loads(base64.urlsafe_b64decode(payload_b64))
-            username = payload.get("sub", "")
+            username: str = payload.get("sub", "")
             if username:
                 logger.info(f"Extracted username from token: {username}")
                 return username

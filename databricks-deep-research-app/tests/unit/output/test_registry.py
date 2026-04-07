@@ -5,7 +5,7 @@ from typing import Any
 import pytest
 
 from deep_research.output.base import SynthesizerConfig
-from deep_research.output.protocol import DefaultOutputTypeProvider, OutputTypeProvider
+from deep_research.output.protocol import DefaultOutputTypeProvider
 from deep_research.output.registry import (
     OutputTypeRegistry,
     get_output_registry,

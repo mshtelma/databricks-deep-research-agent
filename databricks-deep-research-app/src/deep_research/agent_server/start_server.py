@@ -23,8 +23,8 @@ def create_agent_app() -> FastAPI:
         Configured FastAPI application.
     """
     # Setup tracing first
-    settings = get_settings()
-    setup_tracing(experiment_name=settings.mlflow_experiment_name)
+    _ = get_settings()
+    setup_tracing()
 
     # Create and return the app
     app = create_app()

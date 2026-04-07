@@ -10,7 +10,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from databricks_deep_research.tools.protocol import ResearchTool, SourceKind, ToolDefinition, ToolResult
+from databricks_deep_research.tools.protocol import (
+    ResearchTool,
+    SourceKind,
+    ToolDefinition,
+    ToolResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -147,35 +152,43 @@ class EnterpriseToolAdapter:
             or getattr(self._tool, "source_type", None)
             or "enterprise"
         )
+        source_kind_val = _APP_SOURCE_TYPE_TO_KIND.get(
+            source_type_str, SourceKind.vector_index
+        )
+        metadata: dict[str, Any] = {
+            "source_name": (
+                getattr(self._tool, "_source_name", None)
+                or getattr(self._tool, "source_name", None)
+                or name
+            ),
+            "source_description": description,
+            "backend": type(self._tool).__name__,
+            "index_name": getattr(self._tool, "_index_name", None),
+            "endpoint_name": getattr(self._tool, "_endpoint_name", None),
+            "source_type": (
+                getattr(app_definition, "source_type", None)
+                or getattr(self._tool, "source_type", None)
+                or "enterprise"
+            ),
+        }
+        # VS tools: passthrough sends LLM query directly to embedding API
+        if source_kind_val == SourceKind.vector_index:
+            metadata["query_policy"] = "passthrough"
+
         return ToolDefinition(
             name=name,
             description=description,
             parameters=params,
             source_type=source_type_str,
-            source_kind=_APP_SOURCE_TYPE_TO_KIND.get(source_type_str, SourceKind.vector_index),
-            metadata={
-                "source_name": (
-                    getattr(self._tool, "_source_name", None)
-                    or getattr(self._tool, "source_name", None)
-                    or name
-                ),
-                "source_description": description,
-                "backend": type(self._tool).__name__,
-                "index_name": getattr(self._tool, "_index_name", None),
-                "endpoint_name": getattr(self._tool, "_endpoint_name", None),
-                "source_type": (
-                    getattr(app_definition, "source_type", None)
-                    or getattr(self._tool, "source_type", None)
-                    or "enterprise"
-                ),
-            },
+            source_kind=source_kind_val,
+            metadata=metadata,
         )
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Pass-through validation (app tools handle their own validation)."""
         return arguments
 
-    async def execute(self, arguments: dict[str, Any], context: Any = None) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: Any = None) -> ToolResult:
         """Execute the underlying app tool with correct calling convention.
 
         App enterprise tools follow the protocol:
@@ -183,7 +196,8 @@ class EnterpriseToolAdapter:
         NOT **kwargs unpacking.
         """
         try:
-            from uuid import UUID as _UUID, uuid4 as _uuid4
+            from uuid import UUID as _UUID
+            from uuid import uuid4 as _uuid4
 
             from deep_research.agent.tools.base import ResearchContext as AppResearchContext
 
@@ -295,7 +309,7 @@ class BraveSearchAdapter:
                 before, len(results),
             )
 
-        return results
+        return list(results)
 
 
 async def create_framework_tools(
@@ -332,7 +346,9 @@ async def create_framework_tools(
     # Web search tool
     if brave_client is not None:
         try:
-            from databricks_deep_research.tools.builtins.web_search import WebSearchTool
+            from databricks_deep_research.tools.builtins.web_search import (
+                WebSearchTool,
+            )
 
             adapted_client = BraveSearchAdapter(
                 client=brave_client,
@@ -347,7 +363,9 @@ async def create_framework_tools(
     # Web crawl tool
     if crawler is not None:
         try:
-            from databricks_deep_research.tools.builtins.web_crawl import WebCrawlTool
+            from databricks_deep_research.tools.builtins.web_crawl import (
+                WebCrawlTool,
+            )
 
             adapted_crawler = CrawlerAdapter(crawler)
             tools.append(WebCrawlTool(crawler=adapted_crawler))

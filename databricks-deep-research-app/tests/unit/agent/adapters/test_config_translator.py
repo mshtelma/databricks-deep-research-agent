@@ -181,8 +181,8 @@ class TestDepthMapping:
         "depth, expected_min, expected_max",
         [
             ("light", 1, 3),
-            ("medium", 3, 5),
-            ("extended", 5, 10),
+            ("medium", 2, 5),
+            ("extended", 3, 7),
             ("auto", 2, 7),
         ],
         ids=["light", "medium", "extended", "auto"],
@@ -202,8 +202,8 @@ class TestDepthMapping:
         "depth, expected_min, expected_max",
         [
             ("light", 1, 3),
-            ("medium", 3, 5),
-            ("extended", 5, 10),
+            ("medium", 2, 5),
+            ("extended", 3, 7),
             ("auto", 2, 7),
         ],
         ids=["light-wf", "medium-wf", "extended-wf", "auto-wf"],

@@ -16,8 +16,10 @@ _project_root = Path(__file__).resolve().parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+import databricks_deep_research._fips_compat  # noqa: F401, E402  # FIPS md5 patch
+
 # Load .env file
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
 
 _env_file = _project_root / ".env"
 if _env_file.exists():
@@ -26,7 +28,7 @@ if _env_file.exists():
 # Configure logging with third-party suppression
 # This ensures our custom logging (agent transitions, tool calls, etc.) is visible
 # while suppressing verbose DEBUG output from openai, httpx, httpcore, etc.
-from deep_research.middleware.logging import setup_logging
+from deep_research.middleware.logging import setup_logging  # noqa: E402
 
 _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 setup_logging(log_level=_log_level, log_format="text")

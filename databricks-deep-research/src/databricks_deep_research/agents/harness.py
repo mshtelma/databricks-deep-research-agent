@@ -9,6 +9,7 @@ an agent node.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -19,18 +20,28 @@ from typing import Any
 from databricks_deep_research.agents.builtins.registry import get_builtin
 from databricks_deep_research.agents.config import AgentNodeConfig, PoolWriteConfig
 from databricks_deep_research.agents.execution.output_normalizer import (
+    NormalizedResearchOutput,
     build_observation_records,
     build_source_records,
-    NormalizedResearchOutput,
-    build_observation_from_sources as _build_observation_from_sources,
-    has_substantive_text as _has_substantive_text,
-    is_semantically_empty as _is_semantically_empty,
     merge_and_dedup_sources,
+)
+from databricks_deep_research.agents.execution.output_normalizer import (
+    build_observation_from_sources as _build_observation_from_sources,
+)
+from databricks_deep_research.agents.execution.output_normalizer import (
+    has_substantive_text as _has_substantive_text,
+)
+from databricks_deep_research.agents.execution.output_normalizer import (
+    is_semantically_empty as _is_semantically_empty,
+)
+from databricks_deep_research.agents.execution.output_normalizer import (
     normalize_research_output as _normalize_research_output_impl,
 )
 from databricks_deep_research.agents.execution.pool_projection import (
     PoolWriteBatch,
     build_research_pool_batch,
+)
+from databricks_deep_research.agents.execution.pool_projection import (
     extract_pool_items as _extract_pool_items,
 )
 from databricks_deep_research.agents.execution.state_projection import (
@@ -38,10 +49,10 @@ from databricks_deep_research.agents.execution.state_projection import (
 )
 from databricks_deep_research.agents.isolation import AgentInput, AgentOutput
 from databricks_deep_research.agents.prompt_context import (
-    compile_typed_synthesis_context,
     CompiledSynthesisContext,
     compile_pool_section,
     compile_synthesis_context,
+    compile_typed_synthesis_context,
     merge_token_usage,
 )
 from databricks_deep_research.agents.react_loop import ReactLoop
@@ -56,8 +67,11 @@ from databricks_deep_research.pools.pool_state import PoolState
 from databricks_deep_research.templates.renderer import SafeTemplateRenderer
 from databricks_deep_research.tools.protocol import ResearchTool, ToolContext, UrlRegistry
 from databricks_deep_research.tracing import trace_span
+from databricks_deep_research.workflow.runtime_core.selectors import (
+    resolve_input_key,
+    select_background_summary,
+)
 from databricks_deep_research.workflow.state import WorkflowState
-from databricks_deep_research.workflow.runtime_core.selectors import resolve_input_key, select_background_summary
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +95,7 @@ def _serialize_for_context(value: Any) -> str:
     if isinstance(value, str):
         return value
     if hasattr(value, "model_dump_json"):
-        return value.model_dump_json(indent=2)
+        return str(value.model_dump_json(indent=2))
     if isinstance(value, dict):
         return json.dumps(value, indent=2, default=str)
     if isinstance(value, list | tuple):
@@ -272,10 +286,7 @@ async def execute_agent(
 
             # -- Inject compiled synthesis context into template vars ---------
             if synthesis_context is not None:
-                if runtime_context is None:
-                    runtime_context = {}
-                else:
-                    runtime_context = dict(runtime_context)
+                runtime_context = {} if runtime_context is None else dict(runtime_context)
                 runtime_context["all_observations"] = synthesis_context.all_observations
 
                 runtime_context["fallback_discovery_sources"] = synthesis_context.fallback_discovery_sources
@@ -382,11 +393,17 @@ async def execute_agent(
                 tool_context=tool_ctx,
                 cache=tool_call_cache,
                 node_id=node_id,
-                max_tool_calls=config.max_tool_calls,
+                max_tool_calls=config.max_tool_calls or 20,
                 model_tier=config.model_tier,
                 stream=stream,
                 subtype=config.subtype,
                 max_result_chars=config.max_result_chars,
+                compaction_strategy=config.compaction_strategy,
+                keep_intact_iterations=config.keep_intact_iterations,
+                dedup_jaccard_threshold=config.dedup_jaccard_threshold,
+                force_convergence=config.force_convergence,
+                convergence_rounds=config.convergence_rounds,
+                per_tool_limits=config.per_tool_limits,
             )
             result = await loop.execute(messages)
             content = result.content
@@ -604,10 +621,8 @@ async def execute_agent(
         if state.runtime_store is not None:
             runtime = state.runtime_store.runtime()
             if config.subtype == "coordinator" and hasattr(state_output, "complexity"):
-                try:
+                with contextlib.suppress(Exception):
                     state.runtime_store.set_coordination(state_output)
-                except Exception:
-                    pass
             if node_id in runtime.nodes:
                 runtime.nodes[node_id].output_key = config.output_key
                 runtime.nodes[node_id].output_preview = preview[:400]
@@ -679,6 +694,20 @@ async def _build_input(
             continue
         context[key] = value
 
+    # Auto-inject compute namespace summary for downstream agents.
+    # Enables prompts to reference {compute_namespace} without discovery calls.
+    ns_summary = "(compute tool not available)"
+    for tool in tools:
+        if hasattr(tool, "namespace_snapshot") and callable(tool.namespace_snapshot):
+            try:
+                ns_summary = tool.namespace_snapshot()
+            except Exception:
+                logger.warning("NAMESPACE_SNAPSHOT_FAILED node=%s", _node_id, exc_info=True)
+                ns_summary = "(error reading compute namespace)"
+            break
+    if context.get("compute_namespace") is None:
+        context["compute_namespace"] = ns_summary
+
     sources_pool = pools.get("sources")
     if sources_pool is not None and sources_pool.count() > 0:
         pooled_sources = sources_pool.snapshot()
@@ -689,11 +718,12 @@ async def _build_input(
             if isinstance(item, dict):
                 quality = str(item.get("evidence_quality", "unknown"))
                 quality_counts[quality] = quality_counts.get(quality, 0) + 1
-        context.setdefault("source_quality", {
-            "substantive_sources": substantive,
-            "low_value_sources": low_value,
-            "quality_counts": quality_counts,
-        })
+        if context.get("source_quality") is None:
+            context["source_quality"] = {
+                "substantive_sources": substantive,
+                "low_value_sources": low_value,
+                "quality_counts": quality_counts,
+            }
 
     # Render prompts with variable substitution.
     # ``state.query`` is always available; context keys only override when
@@ -804,15 +834,14 @@ def _inject_sources_into_output(
     if isinstance(output, dict):
         if not output.get("sources"):
             output["sources"] = source_records
-    elif hasattr(output, "sources"):
-        if not output.sources:
-            try:
-                output.sources = source_records
-            except Exception:
-                logger.warning(
-                    "SYNTH_SOURCE_INJECT_FAILED output_type=%s",
-                    type(output).__name__,
-                )
+    elif hasattr(output, "sources") and not output.sources:
+        try:
+            output.sources = source_records
+        except Exception:
+            logger.warning(
+                "SYNTH_SOURCE_INJECT_FAILED output_type=%s",
+                type(output).__name__,
+            )
 
     # -- Phase 2: Enrich existing sources that lack URLs ---
     existing: list[Any] | None = None
@@ -990,17 +1019,18 @@ def _parse_output(content: Any, config: AgentNodeConfig) -> Any:
             # Try to extract JSON from markdown code blocks
             if "```json" in content:
                 start = content.index("```json") + 7
-                end = content.index("```", start)
-                try:
-                    parsed = json.loads(content[start:end].strip())
-                    logger.info(
-                        "AGENT_OUTPUT_PARSE format=json_codeblock input_type=str "
-                        "output_type=%s output_len=%d",
-                        type(parsed).__name__, len(str(parsed)),
-                    )
-                    return parsed
-                except json.JSONDecodeError:
-                    pass
+                end = content.find("```", start)
+                if end != -1:
+                    try:
+                        parsed = json.loads(content[start:end].strip())
+                        logger.info(
+                            "AGENT_OUTPUT_PARSE format=json_codeblock input_type=str "
+                            "output_type=%s output_len=%d",
+                            type(parsed).__name__, len(str(parsed)),
+                        )
+                        return parsed
+                    except json.JSONDecodeError:
+                        pass
             # Try json_repair if available
             try:
                 import json_repair
@@ -1214,45 +1244,3 @@ def _build_data_landscape(sources: list[Any]) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Pool extraction
-# ---------------------------------------------------------------------------
-
-
-def _extract_pool_items(
-    output: Any, pw: PoolWriteConfig, output_key: str = ""
-) -> list[Any]:
-    """Extract items from agent output for pool writes.
-
-    Handles three cases:
-    1. Structured output (dict/model): navigate dot-path normally.
-    2. Self-referential: ``extract`` matches ``output_key`` and output is a
-       non-navigable type (e.g. plain text).  The entire output IS the value.
-    3. Mismatch: ``extract`` path doesn't exist on a plain string → empty list.
-    """
-    # Case 2: self-referential extraction — the output itself is the value.
-    # e.g. output_key="findings", extract="findings", output is a markdown string.
-    if (
-        pw.extract == output_key
-        and isinstance(output, str)
-        and output.strip()
-    ):
-        return [output]
-
-    # Case 1: navigate dot-path on structured output
-    current = output
-    for part in pw.extract.split("."):
-        if isinstance(current, dict):
-            current = current.get(part)
-        elif hasattr(current, part):
-            current = getattr(current, part)
-        else:
-            return []
-        if current is None:
-            return []
-
-    if isinstance(current, list):
-        return [item for item in current if not _is_semantically_empty(item)]
-    if _is_semantically_empty(current):
-        return []
-    return [current]

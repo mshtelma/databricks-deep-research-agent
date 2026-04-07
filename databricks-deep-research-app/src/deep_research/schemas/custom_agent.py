@@ -10,7 +10,7 @@ Part of US6 - Custom Agent Configurations (T079).
 
 import re
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
@@ -63,7 +63,7 @@ def _validate_domain_filter_fields(
                 raise ValueError(msg)
 
 
-class AgentVisibility(str, Enum):
+class AgentVisibility(StrEnum):
     """Visibility levels for custom agents."""
 
     PRIVATE = "private"
@@ -71,7 +71,7 @@ class AgentVisibility(str, Enum):
     SYSTEM = "system"
 
 
-class AgentSourceScope(str, Enum):
+class AgentSourceScope(StrEnum):
     """Source scope options for custom agents."""
 
     ALL = "all"
@@ -79,7 +79,7 @@ class AgentSourceScope(str, Enum):
     WEB_ONLY = "web_only"
 
 
-class AgentWorkflowMode(str, Enum):
+class AgentWorkflowMode(StrEnum):
     """Workflow mode options for custom agents."""
 
     PLANNER = "planner"
@@ -87,14 +87,14 @@ class AgentWorkflowMode(str, Enum):
     HYBRID = "hybrid"
 
 
-class AgentOutputFormat(str, Enum):
+class AgentOutputFormat(StrEnum):
     """Output format options for custom agents."""
 
     MARKDOWN = "markdown"
     JSON = "json"
 
 
-class AgentResearchDepth(str, Enum):
+class AgentResearchDepth(StrEnum):
     """Research depth options for custom agents."""
 
     LIGHT = "light"

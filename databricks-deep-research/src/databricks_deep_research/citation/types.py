@@ -20,8 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
-from uuid import UUID
+from typing import Any, cast
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -122,16 +121,16 @@ class RankedEvidence:
     relevance to the research query and carries metadata about its source.
     """
 
-    source_id: UUID | None
     source_url: str
     quote_text: str
-    start_offset: int | None
-    end_offset: int | None
-    section_heading: str | None
     relevance_score: float
-    has_numeric_content: bool
+    source_id: str | None = None
     canonical_source_url: str | None = None
     source_title: str | None = None
+    start_offset: int | None = None
+    end_offset: int | None = None
+    section_heading: str | None = None
+    has_numeric_content: bool = False
     source_pool_index: int | None = None
     evidence_pool_index: int | None = None
     is_snippet_based: bool = False
@@ -458,13 +457,13 @@ class ContentQuality:
     """
 
     score: float  # 0.0 -- 1.0, higher is better
-    has_specific_facts: bool
-    has_numeric_data: bool
-    is_abstract_only: bool
-    is_paywall: bool
-    is_navigation_heavy: bool
     word_count: int
-    reason: str  # Human-readable explanation
+    has_specific_facts: bool = False
+    has_numeric_data: bool = False
+    is_abstract_only: bool = False
+    is_paywall: bool = False
+    is_navigation_heavy: bool = False
+    reason: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -522,7 +521,7 @@ class VerificationOutput(BaseModel):
             if any(compact.startswith(prefix) for prefix in none_like_prefixes):
                 return None
             return [normalized]
-        return value
+        return cast("list[str] | None", value)
 
 
 class BatchVerificationItem(BaseModel):

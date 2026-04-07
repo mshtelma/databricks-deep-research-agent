@@ -20,7 +20,6 @@ from databricks_deep_research.events.types import (
     PlanAndExecuteExitEvent,
     ReplanTriggeredEvent,
 )
-from databricks_deep_research.pools.pool_state import PoolConfig, PoolState
 from databricks_deep_research.workflow.definition import (
     NodeType,
     WorkflowDefinition,
@@ -30,10 +29,13 @@ from databricks_deep_research.workflow.executor import WorkflowExecutor
 from databricks_deep_research.workflow.state import WorkflowState
 from tests.conftest import (
     build_mock_llm_client as _mock_llm_client,
+)
+from tests.conftest import (
     collect_events as _collect_events,
+)
+from tests.conftest import (
     events_of_type as _events_of_type,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

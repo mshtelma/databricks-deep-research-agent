@@ -13,9 +13,8 @@ from typing import TYPE_CHECKING, Any
 from mlflow.entities import SpanType
 
 from deep_research.agent.state import SourceInfo
-from deep_research.agent.tools.web_crawler import WebCrawler, web_crawl
+from deep_research.agent.tools.web_crawler import web_crawl
 from deep_research.agent.tools.web_search import web_search
-from deep_research.services.search.domain_filter import DomainFilter
 from deep_research.core.logging_utils import (
     get_logger,
     log_tool_call,
@@ -30,7 +29,7 @@ from deep_research.core.tracing_constants import (
     truncate_for_attr,
 )
 from deep_research.services.llm.types import ModelTier
-from deep_research.services.search.brave import BraveSearchClient
+from deep_research.services.search.domain_filter import DomainFilter
 
 if TYPE_CHECKING:
     from deep_research.agent.state import ResearchState
@@ -61,9 +60,9 @@ async def execute_custom_phase(
     phase_name: str,
     prompt: str,
     tools: list[str],
-    context: "ResearchContext",
-    state: "ResearchState",
-    config: dict[str, Any],
+    context: ResearchContext,
+    state: ResearchState,
+    config: dict[str, Any],  # noqa: ARG001
 ) -> PhaseResult:
     """Execute a custom research phase.
 
@@ -281,7 +280,7 @@ Provide structured findings with source attribution."""
 
 
 async def _generate_search_queries(
-    llm: "LLMClient",
+    llm: LLMClient,
     phase_name: str,
     prompt: str,
     max_queries: int = 3,

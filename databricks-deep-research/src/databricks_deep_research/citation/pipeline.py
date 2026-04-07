@@ -21,18 +21,36 @@ draft into claims and then reuses the same downstream verification stages.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
 from collections import Counter
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from hashlib import md5
+from hashlib import sha256
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 from databricks_deep_research.citation.citation_keys import build_citation_key_map
-from databricks_deep_research.citation.config import CitationConfig
+from databricks_deep_research.citation.claim_classifier import (
+    classify_claim_role,
+    contains_material_analysis,
+    extract_factual_core,
+)
+from databricks_deep_research.citation.confidence_classifier import (
+    confidence_score_from_level as _confidence_score_from_level,
+)
+from databricks_deep_research.citation.confidence_classifier import (
+    extract_numeric_tokens,
+    extract_temporal_tokens,
+    quote_overlap_score,
+)
+from databricks_deep_research.citation.config import (
+    CitationConfig,
+    ClaimDisposition,
+    SynthesisMode,
+)
 from databricks_deep_research.citation.types import (
     AnalysisSummaryInfo,
     ClaimInfo,
@@ -52,7 +70,9 @@ from databricks_deep_research.citation.types import (
     VerificationSummaryInfo,
     VerificationVerdict,
 )
+from databricks_deep_research.citation.utils import truncate as _truncate
 from databricks_deep_research.llm.client import FrameworkLLMClient
+from databricks_deep_research.tracing import trace_span
 
 logger = logging.getLogger(__name__)
 
@@ -61,133 +81,46 @@ logger = logging.getLogger(__name__)
 # Helper
 # ---------------------------------------------------------------------------
 
-def _truncate(text: str, max_len: int = 100) -> str:
-    """Truncate *text* to *max_len* characters with ellipsis."""
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 3] + "..."
-
-
-def _confidence_score_from_level(level: str | None) -> float:
-    """Map a qualitative confidence label to a coarse numeric score."""
-    mapping = {
-        "high": 0.9,
-        "medium": 0.6,
-        "low": 0.3,
-    }
-    return mapping.get((level or "").lower(), 0.0)
-
-
 def _counter_dict(values: list[str]) -> dict[str, int]:
     """Return a stable string counter for debug logging."""
     return dict(sorted(Counter(value for value in values if value).items()))
 
 
-_ANALYSIS_ROLE_CUES = (
-    "suggests",
-    "may indicate",
-    "appears consistent with",
-    "appears to",
-    "indicates",
-    "reflects",
-    "demonstrates",
-    "shows that",
-    "implies",
-    "signals",
-    "points to",
-    "distorted",
-    "obscured",
-    "momentum",
-    "trajectory",
-    "resilience",
-    "headwind",
-    "tailwind",
-    "positioned",
-    "strong foundation",
-    "healthy performance",
-    "strong performance",
-    "positive momentum",
-    "complex earnings picture",
-    "earnings picture",
-    "growth driver",
-    "bright spot",
-    "current earnings trajectory",
-    "essential context",
-    "comparable store sales momentum",
-)
-_STRUCTURAL_TEXT_PATTERNS = (
-    "introduction",
-    "conclusion",
-    "overview",
-    "summary",
-    "in summary",
-    "overall",
-    "the following sections",
-    "this report examines",
-    "this analysis examines",
-)
-_FACTUAL_PAYLOAD_PATTERNS = re.compile(
-    r"\b("
-    r"reported|increased|decreased|declined|reached|totaled|includes|announced|"
-    r"delivered|generated|recorded|operating profit|operating loss|eps|sales|guidance|"
-    r"quarter|full-year|fiscal|digital growth|ecommerce"
-    r")\b",
-    re.IGNORECASE,
-)
-_ANALYSIS_SPLIT_MARKERS = (
-    " indicating ",
-    " suggesting ",
-    " reflecting ",
-    " demonstrating ",
-    " showing ",
-    " highlighting ",
-    " marking ",
-    " continuing ",
-    " which suggests ",
-    " which indicates ",
-    " which reflects ",
-    " which demonstrates ",
-)
-_ANALYSIS_TAIL_PATTERN = re.compile(
-    r",\s*(?:"
-    r"marking|continuing|demonstrating|highlighting|suggesting|indicating|"
-    r"reflecting|showing|underscoring"
-    r")\b.*$",
-    re.IGNORECASE,
-)
-_LEADING_CONCESSIVE_PATTERN = re.compile(
-    r"^(?:(?:some sources indicate that|according to available information,|reportedly,)\s+)?"
-    r"(?:(?:despite|while|although|though|however)\b[^,]*,\s*)+",
-    re.IGNORECASE,
-)
-_MATERIAL_ANALYSIS_MARKERS = (
-    "because",
-    "due to",
-    "driven by",
-    "reflects",
-    "indicates",
-    "suggests",
-    "demonstrates",
-    "strongest",
-    "weakest",
-    "accelerating",
-    "momentum",
-    "trajectory",
-    "healthy",
-    "robust",
-    "resilience",
-    "outperformed",
-    "exceeded expectations",
-    "non-recurring",
-)
-_QUARTER_OR_DATE_PATTERN = re.compile(
-    r"\b(?:q[1-4]|20\d{2}|first quarter|second quarter|third quarter|fourth quarter|full-year)\b",
-    re.IGNORECASE,
-)
-_NUMERIC_TEXT_PATTERN = re.compile(
-    r"[$€£]?\(?\d[\d,]*(?:\.\d+)?(?:\s*(?:%|million|billion|m|b|k|x))?\)?",
-    re.IGNORECASE,
-)
+def _evidence_info_from_ranked(ranked: RankedEvidence) -> EvidenceInfo:
+    """Convert RankedEvidence to EvidenceInfo (lossless field copy)."""
+    return EvidenceInfo(
+        source_url=ranked.source_url or "",
+        canonical_source_url=ranked.canonical_source_url,
+        source_title=ranked.source_title,
+        quote_text=ranked.quote_text,
+        start_offset=ranked.start_offset,
+        end_offset=ranked.end_offset,
+        section_heading=ranked.section_heading,
+        relevance_score=ranked.relevance_score,
+        has_numeric_content=ranked.has_numeric_content,
+        source_pool_index=ranked.source_pool_index,
+        evidence_pool_index=ranked.evidence_pool_index,
+    )
+
+
+def _claim_info_from_interleaved(claim: InterleavedClaim) -> ClaimInfo:
+    """Convert InterleavedClaim to ClaimInfo with evidence conversion."""
+    return ClaimInfo(
+        claim_text=claim.claim_text,
+        claim_type=claim.claim_type,
+        position_start=claim.position_start,
+        position_end=claim.position_end,
+        evidence=(
+            _evidence_info_from_ranked(claim.evidence) if claim.evidence else None
+        ),
+        evidences=[_evidence_info_from_ranked(e) for e in claim.evidences],
+        citation_key=claim.citation_key,
+        citation_keys=claim.citation_keys,
+        claim_role=claim.claim_role,
+        verification_text=claim.verification_text,
+        analysis_parent_claim_indices=claim.analysis_parent_claim_indices,
+        from_free_block=claim.from_free_block,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -232,13 +165,13 @@ class EvidenceSelector(Protocol):
 class ClaimGenerator(Protocol):
     """Stage 2: generates claims interleaved with evidence."""
 
-    async def synthesize_with_streaming(
+    def synthesize_with_streaming(
         self,
         query: str,
         evidence_pool: list[RankedEvidence],
-        previous_content: str,
-        target_word_count: int,
-        max_tokens: int,
+        previous_content: str = ...,
+        target_word_count: int = ...,
+        max_tokens: int = ...,
     ) -> AsyncGenerator[tuple[str, InterleavedClaim | None], None]: ...
 
 
@@ -263,7 +196,8 @@ class IsolatedVerifierProtocol(Protocol):
         self,
         claim_text: str,
         evidence: RankedEvidence,
-        use_quick_verification: bool,
+        *,
+        use_quick_verification: bool = ...,
     ) -> VerificationResult: ...
 
 
@@ -306,7 +240,7 @@ class AnalysisGroundingVerifierProtocol(Protocol):
 class VerificationRetrieverProtocol(Protocol):
     """Stage 7: revises claims after atomic verification retrieval."""
 
-    async def retrieve_and_revise(
+    def retrieve_and_revise(
         self,
         claims: list[ClaimInfo],
         evidence_pool: list[RankedEvidence],
@@ -497,10 +431,16 @@ class CitationVerificationPipeline:
             logger.warning("CITATION_PIPELINE_STAGE1_ERROR", exc_info=True)
             return []
 
-        # Sort by relevance and limit
+        # Sort by relevance and cap to configured maximum
         all_evidence.sort(key=lambda e: e.relevance_score, reverse=True)
-        max_total = max_spans * min(len(indexed_sources), 10)
+        pre_cap_count = len(all_evidence)
+        max_total = self.config.interleaved_generation.max_evidence_spans
         all_evidence = all_evidence[:max_total]
+        if len(all_evidence) < pre_cap_count:
+            logger.info(
+                "EVIDENCE_POOL_CAPPED pre=%d post=%d cap=%d",
+                pre_cap_count, len(all_evidence), max_total,
+            )
 
         for evidence_index, evidence in enumerate(all_evidence):
             if getattr(evidence, "canonical_source_url", None) is None:
@@ -593,7 +533,7 @@ class CitationVerificationPipeline:
         previous_content = "\n\n".join(observations) if observations else ""
         claim_index = 0
 
-        async for content, claim in self.claim_generator.synthesize_with_streaming(  # type: ignore[attr-defined]
+        async for content, claim in self.claim_generator.synthesize_with_streaming(
             query=query,
             evidence_pool=evidence_pool,
             previous_content=previous_content,
@@ -637,35 +577,6 @@ class CitationVerificationPipeline:
         )
         return overlap.score
 
-    @staticmethod
-    def _extract_numeric_tokens(text: str) -> set[str]:
-        """Extract normalized numeric/financial tokens from text."""
-        tokens: set[str] = set()
-        for match in _NUMERIC_TEXT_PATTERN.findall(text):
-            normalized = re.sub(r"\s+", "", match).lower().replace(",", "")
-            if normalized:
-                tokens.add(normalized)
-        return tokens
-
-    @staticmethod
-    def _extract_temporal_tokens(text: str) -> set[str]:
-        """Extract coarse quarter/year scope tokens from text."""
-        return {
-            match.strip().lower()
-            for match in _QUARTER_OR_DATE_PATTERN.findall(text)
-        }
-
-    @staticmethod
-    def _quote_overlap_score(claim_text: str, evidence_quote: str | None) -> float:
-        """Compute deterministic word overlap without depending on classifier internals."""
-        if not evidence_quote:
-            return 0.0
-        claim_words = set(re.findall(r"\b\w{4,}\b", claim_text.lower()))
-        evidence_words = set(re.findall(r"\b\w{4,}\b", evidence_quote.lower()))
-        if not claim_words:
-            return 0.0
-        return len(claim_words & evidence_words) / len(claim_words)
-
     def _has_exact_numeric_support(
         self,
         claim: ClaimInfo,
@@ -675,15 +586,15 @@ class CitationVerificationPipeline:
         if claim.claim_type != "numeric" or not evidence_quote:
             return False
 
-        claim_numbers = self._extract_numeric_tokens(claim.claim_text)
-        evidence_numbers = self._extract_numeric_tokens(evidence_quote)
+        claim_numbers = extract_numeric_tokens(claim.claim_text)
+        evidence_numbers = extract_numeric_tokens(evidence_quote)
         if not claim_numbers or not claim_numbers.issubset(evidence_numbers):
             return False
 
-        claim_temporal_tokens = self._extract_temporal_tokens(claim.claim_text)
-        evidence_temporal_tokens = self._extract_temporal_tokens(evidence_quote)
-        if claim_temporal_tokens and evidence_temporal_tokens:
-            return not claim_temporal_tokens.isdisjoint(evidence_temporal_tokens)
+        claim_temporal = extract_temporal_tokens(claim.claim_text)
+        evidence_temporal = extract_temporal_tokens(evidence_quote)
+        if claim_temporal and evidence_temporal:
+            return not claim_temporal.isdisjoint(evidence_temporal)
         return True
 
     def _deterministic_confidence_result(
@@ -720,7 +631,7 @@ class CitationVerificationPipeline:
             )
 
         evidence_match_score = self._score_claim_evidence_text(claim_text, evidence_quote)
-        quote_overlap = self._quote_overlap_score(claim_text, evidence_quote)
+        quote_overlap = quote_overlap_score(claim_text, evidence_quote)
 
         if self._has_exact_numeric_support(claim, evidence_quote):
             return ConfidenceResult(
@@ -730,7 +641,7 @@ class CitationVerificationPipeline:
                 reasoning="Numeric claim exactly matches the cited evidence.",
             )
 
-        if self._contains_material_analysis(lowered):
+        if contains_material_analysis(lowered):
             level = ConfidenceLevel.LOW if evidence_match_score < 0.75 else ConfidenceLevel.MEDIUM
             score = 0.35 if level == ConfidenceLevel.LOW else 0.55
             return ConfidenceResult(
@@ -857,130 +768,6 @@ class CitationVerificationPipeline:
             source_pool_index=evidences[0].source_pool_index,
         )
 
-    @staticmethod
-    def _claim_has_citation_keys(claim: ClaimInfo) -> bool:
-        return bool(claim.citation_keys or claim.citation_key)
-
-    @staticmethod
-    def _looks_structural(text: str) -> bool:
-        stripped = text.strip().lower()
-        if not stripped:
-            return True
-        if stripped.startswith("#"):
-            return True
-        if re.match(r"^\*\*[^*]+\*\*:\s*", text.strip()):
-            return True
-        if stripped.endswith(":") and not _FACTUAL_PAYLOAD_PATTERNS.search(stripped):
-            return True
-        return any(pattern in stripped for pattern in _STRUCTURAL_TEXT_PATTERNS)
-
-    @staticmethod
-    def _contains_metric_payload(text: str) -> bool:
-        for match in _NUMERIC_TEXT_PATTERN.finditer(text):
-            raw = match.group(0).strip().lower()
-            if re.fullmatch(r"20\d{2}", raw):
-                continue
-            if re.fullmatch(r"\(?\d+\)?", raw):
-                continue
-            return True
-        return False
-
-    @staticmethod
-    def _contains_numeric_or_date_payload(text: str) -> bool:
-        if CitationVerificationPipeline._contains_metric_payload(text):
-            return True
-        return bool(
-            _QUARTER_OR_DATE_PATTERN.search(text)
-            and _FACTUAL_PAYLOAD_PATTERNS.search(text)
-        )
-
-    @staticmethod
-    def _contains_analysis_cues(text: str) -> bool:
-        lowered = text.lower()
-        return any(cue in lowered for cue in _ANALYSIS_ROLE_CUES)
-
-    @staticmethod
-    def _contains_material_analysis(text: str) -> bool:
-        lowered = text.lower()
-        return any(marker in lowered for marker in _MATERIAL_ANALYSIS_MARKERS)
-
-    @staticmethod
-    def _contains_factual_payload(claim: ClaimInfo) -> bool:
-        text = claim.claim_text.strip()
-        return bool(
-            (
-                claim.claim_type == "numeric"
-                and CitationVerificationPipeline._contains_metric_payload(text)
-            )
-            or CitationVerificationPipeline._claim_has_citation_keys(claim)
-            or CitationVerificationPipeline._contains_numeric_or_date_payload(text)
-            or _FACTUAL_PAYLOAD_PATTERNS.search(text)
-        )
-
-    @staticmethod
-    def _extract_factual_core(text: str) -> str | None:
-        stripped = text.strip()
-        lowered = stripped.lower()
-        stripped = re.sub(_LEADING_CONCESSIVE_PATTERN, "", stripped).strip()
-        lowered = stripped.lower()
-
-        trimmed = re.sub(_ANALYSIS_TAIL_PATTERN, "", stripped).rstrip(" ,;:")
-        if trimmed and trimmed != stripped:
-            return trimmed
-
-        for marker in _ANALYSIS_SPLIT_MARKERS:
-            index = lowered.find(marker)
-            if index <= 0:
-                continue
-            core = stripped[:index].rstrip(" ,;:")
-            if core:
-                core = re.sub(r"^(?:while|although|though)\s+", "", core, flags=re.IGNORECASE)
-                return core
-        return None
-
-    def _classify_claim_role(
-        self,
-        claim: ClaimInfo,
-    ) -> str:
-        """Classify a claim as fact, analysis, or free after generation."""
-        text = claim.claim_text.strip()
-        explicit_role = claim.claim_role or ClaimRole.FACT.value
-
-        if explicit_role == ClaimRole.FREE.value:
-            if self._looks_structural(text) and not _FACTUAL_PAYLOAD_PATTERNS.search(text):
-                return ClaimRole.FREE.value
-            if (
-                not self._claim_has_citation_keys(claim)
-                and not _FACTUAL_PAYLOAD_PATTERNS.search(text)
-                and not self._contains_numeric_or_date_payload(text)
-            ):
-                return ClaimRole.FREE.value
-            if claim.claim_type == "numeric" and self._contains_metric_payload(text):
-                return ClaimRole.FACT.value
-            if self._contains_analysis_cues(text):
-                return ClaimRole.ANALYSIS.value
-            return ClaimRole.FACT.value
-
-        if explicit_role == ClaimRole.ANALYSIS.value:
-            if not self._contains_analysis_cues(text) and self._contains_factual_payload(claim):
-                return ClaimRole.FACT.value
-            return ClaimRole.ANALYSIS.value
-
-        if self._looks_structural(text) and not self._contains_factual_payload(claim):
-            return ClaimRole.FREE.value
-
-        if self._contains_analysis_cues(text):
-            if claim.claim_type == "numeric" and self._extract_factual_core(text):
-                return ClaimRole.FACT.value
-            return ClaimRole.ANALYSIS.value
-
-        if claim.claim_type == "numeric":
-            if not self._contains_metric_payload(text) and self._looks_structural(text):
-                return ClaimRole.FREE.value
-            return ClaimRole.FACT.value
-
-        return ClaimRole.FACT.value
-
     def _link_analysis_claims(self, claims: list[ClaimInfo]) -> None:
         """Link analysis claims to nearby fact claims they interpret."""
         fact_indices = [
@@ -1018,7 +805,7 @@ class CitationVerificationPipeline:
     def _classify_and_link_claims(self, claims: list[ClaimInfo]) -> None:
         """Stage 2.1: enforce fact/analysis/free boundaries before verification."""
         for claim in claims:
-            claim.claim_role = self._classify_claim_role(claim)
+            claim.claim_role = classify_claim_role(claim)
             claim.verification_text = None
             claim.analysis_parent_claim_indices = []
             claim.abstained = False
@@ -1031,7 +818,7 @@ class CitationVerificationPipeline:
                 claim.verification_method = VerificationMethod.GROUNDING.value
                 continue
 
-            factual_core = self._extract_factual_core(claim.claim_text)
+            factual_core = extract_factual_core(claim.claim_text)
             if factual_core and factual_core != claim.claim_text:
                 claim.verification_text = factual_core
             claim.verification_method = (
@@ -1374,6 +1161,8 @@ class CitationVerificationPipeline:
 
         self._active_claims_context = claims
         try:
+            # Phase 1: Pre-filter — handle FREE and no-evidence claims immediately
+            verify_tasks: list[tuple[int, ClaimInfo]] = []
             for claim_index, claim in enumerate(claims):
                 if target_roles is not None and claim.claim_role not in target_roles:
                     continue
@@ -1422,18 +1211,46 @@ class CitationVerificationPipeline:
                         },
                     )
                     continue
+                verify_tasks.append((claim_index, claim))
 
-                try:
-                    for event in await self._verify_claim_once(claim_index, claim):
-                        yield event
+            # Phase 2: Parallel verification with bounded concurrency
+            concurrency = getattr(
+                self.config.isolated_verification,
+                "max_concurrent_verifications", 5,
+            )
+            sem = asyncio.Semaphore(concurrency)
 
-                except Exception:
-                    logger.warning(
-                        "CLAIM_VERIFICATION_ERROR claim=%s",
-                        _truncate(claim.claim_text, 50),
-                        exc_info=True,
-                    )
-                    claim.abstained = True
+            async def _bounded_verify(
+                claim_index: int, claim: ClaimInfo,
+            ) -> list[VerificationEvent]:
+                async with sem:
+                    try:
+                        return await self._verify_claim_once(claim_index, claim)
+                    except Exception:
+                        logger.warning(
+                            "CLAIM_VERIFICATION_ERROR claim=%s",
+                            _truncate(claim.claim_text, 50),
+                            exc_info=True,
+                        )
+                        claim.abstained = True
+                        return []
+
+            all_event_lists = await asyncio.gather(
+                *[_bounded_verify(i, c) for i, c in verify_tasks],
+            )
+
+            # Phase 3: Yield events in original claim order (gather preserves order)
+            for events in all_event_lists:
+                for event in events:
+                    yield event
+
+            # Observability: warn on high abstain rate
+            abstained = sum(1 for c in claims if c.abstained)
+            if claims and abstained / len(claims) > 0.10:
+                logger.warning(
+                    "HIGH_ABSTAIN_RATE rate=%.1f%% abstained=%d total=%d",
+                    abstained / len(claims) * 100, abstained, len(claims),
+                )
         finally:
             self._active_claims_context = []
 
@@ -1587,19 +1404,7 @@ class CitationVerificationPipeline:
                 result.correction_type == CorrectionAction.REPLACE
                 and result.corrected_evidence
             ):
-                claim.evidence = EvidenceInfo(
-                    source_url=result.corrected_evidence.source_url or "",
-                    canonical_source_url=result.corrected_evidence.canonical_source_url,
-                    source_title=result.corrected_evidence.source_title,
-                    quote_text=result.corrected_evidence.quote_text,
-                    start_offset=result.corrected_evidence.start_offset,
-                    end_offset=result.corrected_evidence.end_offset,
-                    section_heading=result.corrected_evidence.section_heading,
-                    relevance_score=result.corrected_evidence.relevance_score,
-                    has_numeric_content=result.corrected_evidence.has_numeric_content,
-                    source_pool_index=result.corrected_evidence.source_pool_index,
-                    evidence_pool_index=result.corrected_evidence.evidence_pool_index,
-                )
+                claim.evidence = _evidence_info_from_ranked(result.corrected_evidence)
                 claim.evidences = [claim.evidence]
                 self._refresh_claim_citation_keys(claim, evidence_pool)
                 logger.info(
@@ -1679,19 +1484,7 @@ class CitationVerificationPipeline:
                 if claim.evidence and not claim.evidences:
                     claim.evidences = [claim.evidence]
                 for alternate in result.alternate_evidence:
-                    alternate_info = EvidenceInfo(
-                        source_url=alternate.source_url or "",
-                        canonical_source_url=alternate.canonical_source_url,
-                        source_title=alternate.source_title,
-                        quote_text=alternate.quote_text,
-                        start_offset=alternate.start_offset,
-                        end_offset=alternate.end_offset,
-                        section_heading=alternate.section_heading,
-                        relevance_score=alternate.relevance_score,
-                        has_numeric_content=alternate.has_numeric_content,
-                        source_pool_index=alternate.source_pool_index,
-                        evidence_pool_index=alternate.evidence_pool_index,
-                    )
+                    alternate_info = _evidence_info_from_ranked(alternate)
                     if all(
                         existing.source_url != alternate_info.source_url
                         or existing.quote_text != alternate_info.quote_text
@@ -1824,35 +1617,43 @@ class CitationVerificationPipeline:
         modifications: list[tuple[str, ClaimInfo]] = []
 
         for claim in claims:
+            # Determine verdict key for disposition lookup
             if claim.abstained:
+                verdict_key = "abstained"
+            elif claim.claim_role == ClaimRole.ANALYSIS.value:
+                if claim.verification_verdict == "partial":
+                    verdict_key = "analysis_partial"
+                elif claim.verification_verdict == "unsupported":
+                    verdict_key = "analysis_unsupported"
+                elif claim.verification_verdict == "contradicted":
+                    verdict_key = "contradicted"
+                else:
+                    continue
+            elif claim.claim_role == ClaimRole.FACT.value:
+                verdict_key = claim.verification_verdict or "abstained"
+            else:
                 continue
 
-            if (
+            disposition = getattr(
+                self.config.claim_disposition, verdict_key, ClaimDisposition.KEEP,
+            )
+
+            if disposition == ClaimDisposition.REMOVE:
+                modifications.append(("remove", claim))
+            elif disposition == ClaimDisposition.SOFTEN:
+                action = (
+                    "soften_analysis"
+                    if claim.claim_role == ClaimRole.ANALYSIS.value
+                    else "soften"
+                )
+                modifications.append((action, claim))
+            elif (  # "keep" — check for rewrite (EXCLUSIVE with remove/soften)
                 claim.claim_role == ClaimRole.FACT.value
                 and claim.verification_text
                 and claim.verification_text != claim.claim_text
                 and claim.verification_verdict in ("supported", "partial")
             ):
                 modifications.append(("rewrite", claim))
-
-            if claim.claim_role == ClaimRole.ANALYSIS.value:
-                if claim.verification_verdict == "contradicted":
-                    modifications.append(("remove", claim))
-                elif claim.verification_verdict == "unsupported":
-                    action = (
-                        "remove"
-                        if self._contains_numeric_or_date_payload(claim.claim_text)
-                        else "soften_analysis"
-                    )
-                    modifications.append((action, claim))
-                elif claim.verification_verdict == "partial":
-                    modifications.append(("soften_analysis", claim))
-                continue
-
-            if claim.verification_verdict == "contradicted":
-                modifications.append(("remove", claim))
-            elif claim.verification_verdict == "unsupported":
-                modifications.append(("soften", claim))
 
         if not modifications:
             return content, 0, 0, 0
@@ -1986,524 +1787,483 @@ class CitationVerificationPipeline:
         self.last_routing_summary = {}
         self._verification_route_stats = []
 
-        # ------------------------------------------------------------------
-        # Stage 1: Pre-select evidence
-        # ------------------------------------------------------------------
-        evidence_pool = await self.preselect_evidence(sources, query)
-        self.last_evidence_pool = list(evidence_pool)
+        async with trace_span("citation.pipeline", attributes={"sources": len(sources), "target_words": target_word_count, "max_tokens": max_tokens}):
 
-        sources_with_content = sum(1 for s in sources if s.get("content"))
-        logger.info(
-            "CITATION_PIPELINE_STAGE1_RESULT evidence=%d sources=%d "
-            "with_content=%d",
-            len(evidence_pool),
-            len(sources),
-            sources_with_content,
-        )
+            # ------------------------------------------------------------------
+            # Stage 1: Pre-select evidence
+            # ------------------------------------------------------------------
+            async with trace_span("citation.stage1.evidence_selection", attributes={"sources": len(sources)}) as span:
+                evidence_pool = await self.preselect_evidence(sources, query)
+                self.last_evidence_pool = list(evidence_pool)
 
-        if not evidence_pool:
-            skipped_summary = VerificationSummaryInfo(
-                total_claims=0,
-                supported_count=0,
-                partial_count=0,
-                unsupported_count=0,
-                contradicted_count=0,
-                abstained_count=0,
-                unsupported_rate=0.0,
-                contradicted_rate=0.0,
-                warning=False,
-                citation_corrections=0,
-            )
-            self.last_verification_summary = skipped_summary
-            logger.warning(
-                "CITATION_PIPELINE_EMPTY_EVIDENCE sources=%d with_content=%d",
-                len(sources),
-                sources_with_content,
-            )
+                sources_with_content = sum(1 for s in sources if s.get("content"))
+                logger.info(
+                    "CITATION_PIPELINE_STAGE1_RESULT evidence=%d sources=%d "
+                    "with_content=%d",
+                    len(evidence_pool),
+                    len(sources),
+                    sources_with_content,
+                )
+                if span:
+                    span.set_attributes({
+                        "evidence_count": len(evidence_pool),
+                        "sources_with_content": sources_with_content,
+                        "sources_input": len(sources),
+                    })
+
+            if not evidence_pool:
+                skipped_summary = VerificationSummaryInfo(
+                    total_claims=0,
+                    supported_count=0,
+                    partial_count=0,
+                    unsupported_count=0,
+                    contradicted_count=0,
+                    abstained_count=0,
+                    unsupported_rate=0.0,
+                    contradicted_rate=0.0,
+                    warning=False,
+                    citation_corrections=0,
+                )
+                self.last_verification_summary = skipped_summary
+                logger.warning(
+                    "CITATION_PIPELINE_EMPTY_EVIDENCE sources=%d with_content=%d",
+                    len(sources),
+                    sources_with_content,
+                )
+                yield VerificationEvent(
+                    event_type="verification_summary",
+                    data={
+                        "verification_skipped": True,
+                        "reason": "empty_evidence_pool",
+                        "total_claims": 0,
+                        "supported": 0,
+                        "partial": 0,
+                        "unsupported": 0,
+                        "contradicted": 0,
+                        "abstained_count": 0,
+                        "supported_rate": 0.0,
+                        "warning": False,
+                        "analysis_summary": skipped_summary.analysis_summary.to_dict(),
+                        "routing_summary": {},
+                    },
+                )
+                return
+
+            generated_claims: list[ClaimInfo] = []
+            full_content = draft_content or ""
+
+            # ------------------------------------------------------------------
+            # Stage 2: Generate with interleaved claims or parse an existing draft
+            # ------------------------------------------------------------------
+            async with trace_span("citation.stage2.interleaved_generation", attributes={"target_words": target_word_count, "max_tokens": max_tokens}) as span:
+                if draft_content is not None:
+                    from databricks_deep_research.citation.claim_generator import (
+                        _parse_interleaved_content,
+                    )
+
+                    parsed_claims = _parse_interleaved_content(
+                        draft_content,
+                        evidence_pool,
+                    )
+                    for parsed_claim in parsed_claims:
+                        generated_claims.append(_claim_info_from_interleaved(parsed_claim))
+                elif self.config.synthesis_mode == SynthesisMode.REACT:
+                    from databricks_deep_research.citation.react_generator import (
+                        ReactGenerator,
+                    )
+
+                    react_gen = ReactGenerator(self.llm)
+                    async for react_content, react_claim in react_gen.synthesize(
+                        query=query,
+                        evidence_pool=evidence_pool,
+                        target_word_count=target_word_count,
+                        max_tokens=max_tokens,
+                        max_tool_calls=self.config.react_synthesis.max_tool_calls,
+                        section_descriptions="\n".join(observations) if observations else "",
+                    ):
+                        if react_content:
+                            full_content = react_content
+                            yield react_content
+
+                        if react_claim:
+                            generated_claims.append(_claim_info_from_interleaved(react_claim))
+
+                else:
+                    async for interleaved_content, interleaved_claim in self.generate_with_interleaving(
+                        evidence_pool=evidence_pool,
+                        observations=observations,
+                        query=query,
+                        target_word_count=target_word_count,
+                        max_tokens=max_tokens,
+                    ):
+                        if interleaved_content:
+                            full_content = interleaved_content
+                            yield interleaved_content
+
+                        if interleaved_claim:
+                            generated_claims.append(_claim_info_from_interleaved(interleaved_claim))
+
+                logger.info(
+                    "CITATION_PIPELINE_STAGE2_RESULT content_chars=%d generated_claims=%d types=%s",
+                    len(full_content),
+                    len(generated_claims),
+                    _counter_dict([claim.claim_type for claim in generated_claims]),
+                )
+
+                # ------------------------------------------------------------------
+                # Stage 2.1: Fact vs analysis boundary enforcement
+                # ------------------------------------------------------------------
+                self._classify_and_link_claims(generated_claims)
+
+                # ------------------------------------------------------------------
+                # Stage 2.5: Fallback evidence matching for uncited fact claims
+                # ------------------------------------------------------------------
+                if evidence_pool:
+                    _assign_fallback_evidence(
+                        generated_claims,
+                        evidence_pool,
+                        scorer=getattr(self.corrector, "score_claim_evidence", None),
+                    )
+                logger.info(
+                    "CITATION_PIPELINE_STAGE25_RESULT fallback_evidence=%d",
+                    sum(1 for claim in generated_claims if claim.has_fallback_evidence),
+                )
+
+                if span:
+                    span.set_attributes({"claims_generated": len(generated_claims), "content_length": len(full_content)})
+
+            # ------------------------------------------------------------------
+            # Stage 3: Classify confidence after role enforcement and fallback evidence
+            # ------------------------------------------------------------------
+            async with trace_span("citation.stage3.confidence", attributes={"claims": len(generated_claims)}) as span:
+                for claim_info in generated_claims:
+                    confidence = self.classify_confidence_result(claim_info)
+                    claim_info.confidence_level = confidence.level.value
+                    claim_info.routing_confidence_score = confidence.score
+                    logger.debug(
+                        "CLAIM_ROUTED role=%s type=%s route=%s score=%.2f indicators=%s "
+                        "fallback=%s evidence_match=%.2f claim=%s",
+                        claim_info.claim_role,
+                        claim_info.claim_type,
+                        claim_info.confidence_level,
+                        confidence.score,
+                        confidence.indicators,
+                        claim_info.has_fallback_evidence,
+                        claim_info.evidence_match_score or 0.0,
+                        _truncate(claim_info.claim_text, 100),
+                    )
+
+                routes = _counter_dict([claim.confidence_level or "" for claim in generated_claims])
+                logger.info(
+                    "CITATION_PIPELINE_STAGE3_RESULT routes=%s",
+                    routes,
+                )
+
+                if span:
+                    span.set_attributes({"routes": str(routes)})
+
+                for claim_index, claim_info in enumerate(generated_claims):
+                    yield VerificationEvent(
+                        event_type="claim_generated",
+                        data={
+                            "claim_index": claim_index,
+                            "claim_text": claim_info.claim_text,
+                            "claim_type": claim_info.claim_type,
+                            "claim_role": claim_info.claim_role,
+                            "position_start": claim_info.position_start,
+                            "position_end": claim_info.position_end,
+                            "citation_key": claim_info.citation_key,
+                            "citation_keys": claim_info.citation_keys or [],
+                            "evidence": (
+                                claim_info.evidence.to_dict()
+                                if claim_info.evidence
+                                else None
+                            ),
+                            "confidence_level": claim_info.confidence_level,
+                            "verification_method": claim_info.verification_method,
+                        },
+                    )
+
+            # ------------------------------------------------------------------
+            # Stage 4: Verify all claims (includes inline Stage 6 numeric QA)
+            # ------------------------------------------------------------------
+            async with trace_span("citation.stage4.verification") as span:
+                async for event in self.verify_claims(
+                    generated_claims,
+                    target_roles={ClaimRole.FACT.value},
+                ):
+                    yield event
+                logger.info(
+                    "CITATION_PIPELINE_STAGE4_FACT_RESULT verdicts=%s",
+                    _counter_dict(
+                        [
+                            claim.verification_verdict or "abstained"
+                            for claim in generated_claims
+                            if claim.claim_role == ClaimRole.FACT.value
+                        ]
+                    ),
+                )
+                if span:
+                    verdicts = _counter_dict([c.verification_verdict or "abstained" for c in generated_claims if c.claim_role == ClaimRole.FACT.value])
+                    span.set_attributes({"verdicts": str(verdicts), "claims_verified": sum(1 for c in generated_claims if c.claim_role == ClaimRole.FACT.value)})
+
+            # ------------------------------------------------------------------
+            # Stage 5: Correct citations for non-supported claims
+            # ------------------------------------------------------------------
+            async with trace_span("citation.stage5.correction") as span:
+                correction_count = 0
+                async for event in self.correct_citations(generated_claims, evidence_pool):
+                    if event.event_type == "correction_metrics":
+                        correction_count = event.data.get("total_corrected", 0)
+                    yield event
+                if span:
+                    span.set_attributes({"corrections_made": correction_count})
+
+            # ------------------------------------------------------------------
+            # Stage 7: ARE-style Verification Retrieval (placeholder)
+            # ------------------------------------------------------------------
+            # Stage 7 is complex (atomic decomposition, external search,
+            # revision) and tightly coupled to specific tool implementations.
+            # The framework exposes a hook point: callers that have a
+            # VerificationRetriever can run it on the claims that still
+            # need revision.
+            stage_7_claims = [
+                c
+                for c in generated_claims
+                if (
+                    c.claim_role == ClaimRole.FACT.value
+                    and c.verification_verdict
+                    in self.config.verification_retrieval.trigger_on_verdicts
+                    and not c.abstained
+                )
+            ]
+            stage_7_metrics: dict[str, Any] | None = None
+            if (
+                stage_7_claims
+                and self.config.enable_verification_retrieval
+                and self.verification_retriever is not None
+            ):
+                async with trace_span("citation.stage7.retrieval", attributes={"claims": len(stage_7_claims)}) as span:
+                    logger.info(
+                        "CITATION_PIPELINE_STAGE7_START claims=%d trigger_verdicts=%s",
+                        len(stage_7_claims),
+                        [c.verification_verdict for c in stage_7_claims],
+                    )
+                    yield VerificationEvent(
+                        event_type="stage_7_ready",
+                        data={
+                            "claims_count": len(stage_7_claims),
+                            "verdicts": [
+                                c.verification_verdict for c in stage_7_claims
+                            ],
+                        },
+                    )
+                    revisions: list[Any] = []
+                    async for stage_7_item in self.verification_retriever.retrieve_and_revise(
+                        claims=generated_claims,
+                        evidence_pool=evidence_pool,
+                        report_content=full_content,
+                        research_query=query,
+                    ):
+                        if hasattr(stage_7_item, "revision_type"):
+                            revisions.append(stage_7_item)
+                            continue
+                        if hasattr(stage_7_item, "event_type") and hasattr(stage_7_item, "data"):
+                            yield VerificationEvent(
+                                event_type=str(stage_7_item.event_type),
+                                data=dict(stage_7_item.data),
+                            )
+
+                    if revisions:
+                        full_content = self.verification_retriever.apply_all_revisions(
+                            full_content,
+                            revisions,
+                        )
+                        for revision in revisions:
+                            for claim in generated_claims:
+                                if (
+                                    claim.position_start == revision.original_position_start
+                                    and claim.position_end == revision.original_position_end
+                                    and claim.claim_text == revision.original_claim
+                                ):
+                                    claim.claim_text = revision.revised_claim
+                                    if revision.revision_type == "fully_verified":
+                                        claim.verification_verdict = "supported"
+                                        claim.verification_reasoning = (
+                                            "Stage 7 verified the claim via atomic fact retrieval."
+                                        )
+                                        claim.verification_confidence = max(
+                                            claim.verification_confidence or 0.0,
+                                            0.85,
+                                        )
+                                    elif revision.revision_type == "partially_softened":
+                                        claim.verification_verdict = "partial"
+                                        claim.verification_reasoning = (
+                                            "Stage 7 softened unverified atomic facts."
+                                        )
+                                        claim.verification_confidence = max(
+                                            claim.verification_confidence or 0.0,
+                                            0.7,
+                                        )
+                                    else:
+                                        claim.verification_verdict = "unsupported"
+                                        claim.verification_reasoning = (
+                                            "Stage 7 could not verify the claim and softened it."
+                                        )
+                                        claim.verification_confidence = (
+                                            claim.verification_confidence or 0.5
+                                        )
+                                    break
+                        _recalculate_claim_positions(full_content, generated_claims)
+
+                    metrics = getattr(self.verification_retriever, "metrics", None)
+                    if metrics is not None and hasattr(metrics, "to_dict"):
+                        stage_7_metrics = metrics.to_dict()
+                        logger.info(
+                            "CITATION_PIPELINE_STAGE7_RESULT metrics=%s",
+                            stage_7_metrics,
+                        )
+                    if span and stage_7_metrics:
+                        span.set_attributes({"claims_revised": stage_7_metrics.get("claims_fully_verified", 0) + stage_7_metrics.get("claims_partially_softened", 0)})
+
+            # ------------------------------------------------------------------
+            # Stage 4b: Verify analysis after facts are finalized
+            # ------------------------------------------------------------------
+            async with trace_span("citation.stage4b.verification_analysis") as span:
+                async for event in self.verify_claims(
+                    generated_claims,
+                    target_roles={ClaimRole.ANALYSIS.value},
+                ):
+                    yield event
+                logger.info(
+                    "CITATION_PIPELINE_STAGE4_ANALYSIS_RESULT verdicts=%s",
+                    _counter_dict(
+                        [
+                            claim.verification_verdict or "abstained"
+                            for claim in generated_claims
+                            if claim.claim_role == ClaimRole.ANALYSIS.value
+                        ]
+                    ),
+                )
+                if span:
+                    verdicts = _counter_dict([c.verification_verdict or "abstained" for c in generated_claims if c.claim_role == ClaimRole.ANALYSIS.value])
+                    span.set_attributes({"verdicts": str(verdicts)})
+
+            # ------------------------------------------------------------------
+            # Stage 8: Post-verification claim modification
+            # ------------------------------------------------------------------
+            async with trace_span("citation.stage8.post_processing") as span:
+                (
+                    full_content,
+                    stage_8_removed,
+                    stage_8_softened,
+                    stage_8_rewritten,
+                ) = await self.process_unverified_claims(full_content, generated_claims)
+                if span:
+                    span.set_attributes({"removed": stage_8_removed, "softened": stage_8_softened, "rewritten": stage_8_rewritten})
+
+                if stage_8_removed > 0 or stage_8_softened > 0 or stage_8_rewritten > 0:
+                    yield VerificationEvent(
+                        event_type="claims_processed",
+                        data={
+                            "removed_count": stage_8_removed,
+                            "softened_count": stage_8_softened,
+                            "rewritten_count": stage_8_rewritten,
+                        },
+                    )
+                    yield VerificationEvent(
+                        event_type="content_revised",
+                        data={
+                            "content": full_content,
+                            "stage": "claim_modification",
+                            "removed": stage_8_removed,
+                            "softened": stage_8_softened,
+                            "rewritten": stage_8_rewritten,
+                        },
+                    )
+
+            full_content = _strip_reclaim_block_tags(full_content)
+            _recalculate_claim_positions(full_content, generated_claims)
+
+            # ------------------------------------------------------------------
+            # Summary
+            # ------------------------------------------------------------------
+            summary = _build_verification_summary(generated_claims, correction_count)
+            summary.routing_summary = self._build_routing_summary()
+            if stage_7_metrics:
+                summary.claim_revisions = (
+                    stage_7_metrics.get("claims_fully_verified", 0)
+                    + stage_7_metrics.get("claims_partially_softened", 0)
+                    + stage_7_metrics.get("claims_fully_softened", 0)
+                )
+                summary.atomic_facts_total = stage_7_metrics.get("total_atomic_facts", 0)
+                summary.atomic_facts_verified = stage_7_metrics.get("facts_verified", 0)
+                summary.atomic_facts_softened = stage_7_metrics.get("facts_softened", 0)
+                summary.claims_fully_verified = stage_7_metrics.get("claims_fully_verified", 0)
+                summary.claims_partially_softened = stage_7_metrics.get(
+                    "claims_partially_softened", 0
+                )
+                summary.claims_fully_softened = stage_7_metrics.get(
+                    "claims_fully_softened", 0
+                )
+                summary.external_searches = stage_7_metrics.get("external_searches", 0)
+                summary.new_sources_added = stage_7_metrics.get("new_sources_added", 0)
+            self.last_generated_claims = list(generated_claims)
+            self.last_verification_summary = summary
+            self.last_final_content = full_content
+            self.last_routing_summary = dict(summary.routing_summary)
+
             yield VerificationEvent(
                 event_type="verification_summary",
                 data={
-                    "verification_skipped": True,
-                    "reason": "empty_evidence_pool",
-                    "total_claims": 0,
-                    "supported": 0,
-                    "partial": 0,
-                    "unsupported": 0,
-                    "contradicted": 0,
-                    "abstained_count": 0,
-                    "supported_rate": 0.0,
-                    "warning": False,
-                    "analysis_summary": skipped_summary.analysis_summary.to_dict(),
-                    "routing_summary": {},
-                },
-            )
-            return
-
-        generated_claims: list[ClaimInfo] = []
-        full_content = draft_content or ""
-
-        # ------------------------------------------------------------------
-        # Stage 2: Generate with interleaved claims or parse an existing draft
-        # ------------------------------------------------------------------
-        if draft_content is not None:
-            from databricks_deep_research.citation.claim_generator import (
-                _parse_interleaved_content,
-            )
-
-            parsed_claims = _parse_interleaved_content(
-                draft_content,
-                evidence_pool,
-            )
-            for claim in parsed_claims:
-                generated_claims.append(
-                    ClaimInfo(
-                        claim_text=claim.claim_text,
-                        claim_type=claim.claim_type,
-                        position_start=claim.position_start,
-                        position_end=claim.position_end,
-                        evidence=(
-                            EvidenceInfo(
-                                source_url=claim.evidence.source_url or "",
-                                canonical_source_url=claim.evidence.canonical_source_url,
-                                source_title=claim.evidence.source_title,
-                                quote_text=claim.evidence.quote_text,
-                                start_offset=claim.evidence.start_offset,
-                                end_offset=claim.evidence.end_offset,
-                                section_heading=claim.evidence.section_heading,
-                                relevance_score=claim.evidence.relevance_score,
-                                has_numeric_content=claim.evidence.has_numeric_content,
-                                source_pool_index=claim.evidence.source_pool_index,
-                                evidence_pool_index=claim.evidence.evidence_pool_index,
-                            )
-                            if claim.evidence
-                            else None
-                        ),
-                        evidences=[
-                            EvidenceInfo(
-                                source_url=evidence.source_url or "",
-                                canonical_source_url=evidence.canonical_source_url,
-                                source_title=evidence.source_title,
-                                quote_text=evidence.quote_text,
-                                start_offset=evidence.start_offset,
-                                end_offset=evidence.end_offset,
-                                section_heading=evidence.section_heading,
-                                relevance_score=evidence.relevance_score,
-                                has_numeric_content=evidence.has_numeric_content,
-                                source_pool_index=evidence.source_pool_index,
-                                evidence_pool_index=evidence.evidence_pool_index,
-                            )
-                            for evidence in claim.evidences
-                        ],
-                        citation_key=claim.citation_key,
-                        citation_keys=claim.citation_keys,
-                        claim_role=claim.claim_role,
-                        verification_text=claim.verification_text,
-                        analysis_parent_claim_indices=claim.analysis_parent_claim_indices,
-                        from_free_block=claim.from_free_block,
-                    )
-                )
-        else:
-            async for content, claim in self.generate_with_interleaving(
-                evidence_pool=evidence_pool,
-                observations=observations,
-                query=query,
-                target_word_count=target_word_count,
-                max_tokens=max_tokens,
-            ):
-                if content:
-                    full_content = content
-                    yield content
-
-                if claim:
-                    claim_info = ClaimInfo(
-                        claim_text=claim.claim_text,
-                        claim_type=claim.claim_type,
-                        position_start=claim.position_start,
-                        position_end=claim.position_end,
-                        evidence=(
-                            EvidenceInfo(
-                                source_url=claim.evidence.source_url or "",
-                                canonical_source_url=claim.evidence.canonical_source_url,
-                                source_title=claim.evidence.source_title,
-                                quote_text=claim.evidence.quote_text,
-                                start_offset=claim.evidence.start_offset,
-                                end_offset=claim.evidence.end_offset,
-                                section_heading=claim.evidence.section_heading,
-                                relevance_score=claim.evidence.relevance_score,
-                                has_numeric_content=claim.evidence.has_numeric_content,
-                                source_pool_index=claim.evidence.source_pool_index,
-                                evidence_pool_index=claim.evidence.evidence_pool_index,
-                            )
-                            if claim.evidence
-                            else None
-                        ),
-                        evidences=[
-                            EvidenceInfo(
-                                source_url=evidence.source_url or "",
-                                canonical_source_url=evidence.canonical_source_url,
-                                source_title=evidence.source_title,
-                                quote_text=evidence.quote_text,
-                                start_offset=evidence.start_offset,
-                                end_offset=evidence.end_offset,
-                                section_heading=evidence.section_heading,
-                                relevance_score=evidence.relevance_score,
-                                has_numeric_content=evidence.has_numeric_content,
-                                source_pool_index=evidence.source_pool_index,
-                                evidence_pool_index=evidence.evidence_pool_index,
-                            )
-                            for evidence in claim.evidences
-                        ],
-                        citation_key=claim.citation_key,
-                        citation_keys=claim.citation_keys,
-                        claim_role=claim.claim_role,
-                        verification_text=claim.verification_text,
-                        analysis_parent_claim_indices=claim.analysis_parent_claim_indices,
-                        from_free_block=claim.from_free_block,
-                    )
-
-                    generated_claims.append(claim_info)
-
-        logger.info(
-            "CITATION_PIPELINE_STAGE2_RESULT content_chars=%d generated_claims=%d types=%s",
-            len(full_content),
-            len(generated_claims),
-            _counter_dict([claim.claim_type for claim in generated_claims]),
-        )
-
-        # ------------------------------------------------------------------
-        # Stage 2.1: Fact vs analysis boundary enforcement
-        # ------------------------------------------------------------------
-        self._classify_and_link_claims(generated_claims)
-
-        # ------------------------------------------------------------------
-        # Stage 2.5: Fallback evidence matching for uncited fact claims
-        # ------------------------------------------------------------------
-        if evidence_pool:
-            _assign_fallback_evidence(
-                generated_claims,
-                evidence_pool,
-                scorer=getattr(self.corrector, "score_claim_evidence", None),
-            )
-        logger.info(
-            "CITATION_PIPELINE_STAGE25_RESULT fallback_evidence=%d",
-            sum(1 for claim in generated_claims if claim.has_fallback_evidence),
-        )
-
-        # ------------------------------------------------------------------
-        # Stage 3: Classify confidence after role enforcement and fallback evidence
-        # ------------------------------------------------------------------
-        for claim_info in generated_claims:
-            confidence = self.classify_confidence_result(claim_info)
-            claim_info.confidence_level = confidence.level.value
-            claim_info.routing_confidence_score = confidence.score
-            logger.debug(
-                "CLAIM_ROUTED role=%s type=%s route=%s score=%.2f indicators=%s "
-                "fallback=%s evidence_match=%.2f claim=%s",
-                claim_info.claim_role,
-                claim_info.claim_type,
-                claim_info.confidence_level,
-                confidence.score,
-                confidence.indicators,
-                claim_info.has_fallback_evidence,
-                claim_info.evidence_match_score or 0.0,
-                _truncate(claim_info.claim_text, 100),
-            )
-
-        logger.info(
-            "CITATION_PIPELINE_STAGE3_RESULT routes=%s",
-            _counter_dict([claim.confidence_level or "" for claim in generated_claims]),
-        )
-
-        for claim_index, claim_info in enumerate(generated_claims):
-            yield VerificationEvent(
-                event_type="claim_generated",
-                data={
-                    "claim_index": claim_index,
-                    "claim_text": claim_info.claim_text,
-                    "claim_type": claim_info.claim_type,
-                    "claim_role": claim_info.claim_role,
-                    "position_start": claim_info.position_start,
-                    "position_end": claim_info.position_end,
-                    "citation_key": claim_info.citation_key,
-                    "citation_keys": claim_info.citation_keys or [],
-                    "evidence": (
-                        claim_info.evidence.to_dict()
-                        if claim_info.evidence
-                        else None
-                    ),
-                    "confidence_level": claim_info.confidence_level,
-                    "verification_method": claim_info.verification_method,
+                    "total_claims": summary.total_claims,
+                    "supported": summary.supported_count,
+                    "partial": summary.partial_count,
+                    "unsupported": summary.unsupported_count,
+                    "contradicted": summary.contradicted_count,
+                    "abstained_count": summary.abstained_count,
+                    "supported_rate": summary.supported_rate,
+                    "citation_corrections": correction_count,
+                    "warning": summary.warning,
+                    "unsupported_rate": summary.unsupported_rate,
+                    "contradicted_rate": summary.contradicted_rate,
+                    "analysis_summary": summary.analysis_summary.to_dict(),
+                    "routing_summary": summary.routing_summary,
                 },
             )
 
-        # ------------------------------------------------------------------
-        # Stage 4: Verify all claims (includes inline Stage 6 numeric QA)
-        # ------------------------------------------------------------------
-        async for event in self.verify_claims(
-            generated_claims,
-            target_roles={ClaimRole.FACT.value},
-        ):
-            yield event
-        logger.info(
-            "CITATION_PIPELINE_STAGE4_FACT_RESULT verdicts=%s",
-            _counter_dict(
-                [
-                    claim.verification_verdict or "abstained"
-                    for claim in generated_claims
-                    if claim.claim_role == ClaimRole.FACT.value
-                ]
-            ),
-        )
-
-        # ------------------------------------------------------------------
-        # Stage 5: Correct citations for non-supported claims
-        # ------------------------------------------------------------------
-        correction_count = 0
-        async for event in self.correct_citations(generated_claims, evidence_pool):
-            if event.event_type == "correction_metrics":
-                correction_count = event.data.get("total_corrected", 0)
-            yield event
-
-        # ------------------------------------------------------------------
-        # Stage 7: ARE-style Verification Retrieval (placeholder)
-        # ------------------------------------------------------------------
-        # Stage 7 is complex (atomic decomposition, external search,
-        # revision) and tightly coupled to specific tool implementations.
-        # The framework exposes a hook point: callers that have a
-        # VerificationRetriever can run it on the claims that still
-        # need revision.
-        stage_7_claims = [
-            c
-            for c in generated_claims
-            if (
-                c.claim_role == ClaimRole.FACT.value
-                and c.verification_verdict
-                in self.config.verification_retrieval.trigger_on_verdicts
-                and not c.abstained
-            )
-        ]
-        stage_7_metrics: dict[str, Any] | None = None
-        if (
-            stage_7_claims
-            and self.config.enable_verification_retrieval
-            and self.verification_retriever is not None
-        ):
             logger.info(
-                "CITATION_PIPELINE_STAGE7_START claims=%d trigger_verdicts=%s",
-                len(stage_7_claims),
-                [c.verification_verdict for c in stage_7_claims],
+                "CITATION_PIPELINE_COMPLETE claims=%d verified=%d supported=%d partial=%d "
+                "unsupported=%d contradicted=%d analysis_supported=%d routing=%s",
+                len(generated_claims),
+                sum(1 for c in generated_claims if c.verification_verdict),
+                sum(
+                    1
+                    for c in generated_claims
+                    if c.verification_verdict == "supported"
+                ),
+                sum(
+                    1
+                    for c in generated_claims
+                    if c.claim_role == ClaimRole.FACT.value and c.verification_verdict == "partial"
+                ),
+                sum(
+                    1
+                    for c in generated_claims
+                    if c.claim_role == ClaimRole.FACT.value and c.verification_verdict == "unsupported"
+                ),
+                sum(
+                    1
+                    for c in generated_claims
+                    if c.claim_role == ClaimRole.FACT.value and c.verification_verdict == "contradicted"
+                ),
+                sum(
+                    1
+                    for c in generated_claims
+                    if c.claim_role == ClaimRole.ANALYSIS.value and c.verification_verdict == "supported"
+                ),
+                summary.routing_summary,
             )
-            yield VerificationEvent(
-                event_type="stage_7_ready",
-                data={
-                    "claims_count": len(stage_7_claims),
-                    "verdicts": [
-                        c.verification_verdict for c in stage_7_claims
-                    ],
-                },
-            )
-            revisions: list[Any] = []
-            async for stage_7_item in self.verification_retriever.retrieve_and_revise(
-                claims=generated_claims,
-                evidence_pool=evidence_pool,
-                report_content=full_content,
-                research_query=query,
-            ):
-                if hasattr(stage_7_item, "revision_type"):
-                    revisions.append(stage_7_item)
-                    continue
-                if hasattr(stage_7_item, "event_type") and hasattr(stage_7_item, "data"):
-                    yield VerificationEvent(
-                        event_type=str(stage_7_item.event_type),
-                        data=dict(stage_7_item.data),
-                    )
-
-            if revisions:
-                full_content = self.verification_retriever.apply_all_revisions(
-                    full_content,
-                    revisions,
-                )
-                for revision in revisions:
-                    for claim in generated_claims:
-                        if (
-                            claim.position_start == revision.original_position_start
-                            and claim.position_end == revision.original_position_end
-                            and claim.claim_text == revision.original_claim
-                        ):
-                            claim.claim_text = revision.revised_claim
-                            if revision.revision_type == "fully_verified":
-                                claim.verification_verdict = "supported"
-                                claim.verification_reasoning = (
-                                    "Stage 7 verified the claim via atomic fact retrieval."
-                                )
-                                claim.verification_confidence = max(
-                                    claim.verification_confidence or 0.0,
-                                    0.85,
-                                )
-                            elif revision.revision_type == "partially_softened":
-                                claim.verification_verdict = "partial"
-                                claim.verification_reasoning = (
-                                    "Stage 7 softened unverified atomic facts."
-                                )
-                                claim.verification_confidence = max(
-                                    claim.verification_confidence or 0.0,
-                                    0.7,
-                                )
-                            else:
-                                claim.verification_verdict = "unsupported"
-                                claim.verification_reasoning = (
-                                    "Stage 7 could not verify the claim and softened it."
-                                )
-                                claim.verification_confidence = (
-                                    claim.verification_confidence or 0.5
-                                )
-                            break
-                _recalculate_claim_positions(full_content, generated_claims)
-
-            metrics = getattr(self.verification_retriever, "metrics", None)
-            if metrics is not None and hasattr(metrics, "to_dict"):
-                stage_7_metrics = metrics.to_dict()
-                logger.info(
-                    "CITATION_PIPELINE_STAGE7_RESULT metrics=%s",
-                    stage_7_metrics,
-                )
-
-        # ------------------------------------------------------------------
-        # Stage 4b: Verify analysis after facts are finalized
-        # ------------------------------------------------------------------
-        async for event in self.verify_claims(
-            generated_claims,
-            target_roles={ClaimRole.ANALYSIS.value},
-        ):
-            yield event
-        logger.info(
-            "CITATION_PIPELINE_STAGE4_ANALYSIS_RESULT verdicts=%s",
-            _counter_dict(
-                [
-                    claim.verification_verdict or "abstained"
-                    for claim in generated_claims
-                    if claim.claim_role == ClaimRole.ANALYSIS.value
-                ]
-            ),
-        )
-
-        # ------------------------------------------------------------------
-        # Stage 8: Post-verification claim modification
-        # ------------------------------------------------------------------
-        stage_8_removed = 0
-        stage_8_softened = 0
-        stage_8_rewritten = 0
-
-        # Always run post-verification claim modification
-        (
-            full_content,
-            stage_8_removed,
-            stage_8_softened,
-            stage_8_rewritten,
-        ) = await self.process_unverified_claims(full_content, generated_claims)
-
-        if stage_8_removed > 0 or stage_8_softened > 0 or stage_8_rewritten > 0:
-            yield VerificationEvent(
-                event_type="claims_processed",
-                data={
-                    "removed_count": stage_8_removed,
-                    "softened_count": stage_8_softened,
-                    "rewritten_count": stage_8_rewritten,
-                },
-            )
-            yield VerificationEvent(
-                event_type="content_revised",
-                data={
-                    "content": full_content,
-                    "stage": "claim_modification",
-                    "removed": stage_8_removed,
-                    "softened": stage_8_softened,
-                    "rewritten": stage_8_rewritten,
-                },
-            )
-
-        full_content = _strip_reclaim_block_tags(full_content)
-        _recalculate_claim_positions(full_content, generated_claims)
-
-        # ------------------------------------------------------------------
-        # Summary
-        # ------------------------------------------------------------------
-        summary = _build_verification_summary(generated_claims, correction_count)
-        summary.routing_summary = self._build_routing_summary()
-        if stage_7_metrics:
-            summary.claim_revisions = (
-                stage_7_metrics.get("claims_fully_verified", 0)
-                + stage_7_metrics.get("claims_partially_softened", 0)
-                + stage_7_metrics.get("claims_fully_softened", 0)
-            )
-            summary.atomic_facts_total = stage_7_metrics.get("total_atomic_facts", 0)
-            summary.atomic_facts_verified = stage_7_metrics.get("facts_verified", 0)
-            summary.atomic_facts_softened = stage_7_metrics.get("facts_softened", 0)
-            summary.claims_fully_verified = stage_7_metrics.get("claims_fully_verified", 0)
-            summary.claims_partially_softened = stage_7_metrics.get(
-                "claims_partially_softened", 0
-            )
-            summary.claims_fully_softened = stage_7_metrics.get(
-                "claims_fully_softened", 0
-            )
-            summary.external_searches = stage_7_metrics.get("external_searches", 0)
-            summary.new_sources_added = stage_7_metrics.get("new_sources_added", 0)
-        self.last_generated_claims = list(generated_claims)
-        self.last_verification_summary = summary
-        self.last_final_content = full_content
-        self.last_routing_summary = dict(summary.routing_summary)
-
-        yield VerificationEvent(
-            event_type="verification_summary",
-            data={
-                "total_claims": summary.total_claims,
-                "supported": summary.supported_count,
-                "partial": summary.partial_count,
-                "unsupported": summary.unsupported_count,
-                "contradicted": summary.contradicted_count,
-                "abstained_count": summary.abstained_count,
-                "supported_rate": summary.supported_rate,
-                "citation_corrections": correction_count,
-                "warning": summary.warning,
-                "unsupported_rate": summary.unsupported_rate,
-                "contradicted_rate": summary.contradicted_rate,
-                "analysis_summary": summary.analysis_summary.to_dict(),
-                "routing_summary": summary.routing_summary,
-            },
-        )
-
-        logger.info(
-            "CITATION_PIPELINE_COMPLETE claims=%d verified=%d supported=%d partial=%d "
-            "unsupported=%d contradicted=%d analysis_supported=%d routing=%s",
-            len(generated_claims),
-            sum(1 for c in generated_claims if c.verification_verdict),
-            sum(
-                1
-                for c in generated_claims
-                if c.verification_verdict == "supported"
-            ),
-            sum(
-                1
-                for c in generated_claims
-                if c.claim_role == ClaimRole.FACT.value and c.verification_verdict == "partial"
-            ),
-            sum(
-                1
-                for c in generated_claims
-                if c.claim_role == ClaimRole.FACT.value and c.verification_verdict == "unsupported"
-            ),
-            sum(
-                1
-                for c in generated_claims
-                if c.claim_role == ClaimRole.FACT.value and c.verification_verdict == "contradicted"
-            ),
-            sum(
-                1
-                for c in generated_claims
-                if c.claim_role == ClaimRole.ANALYSIS.value and c.verification_verdict == "supported"
-            ),
-            summary.routing_summary,
-        )
 
     # ===================================================================
     # Utilities
@@ -2713,7 +2473,7 @@ def _build_softened_fact_text(claim_text: str, context: str | None) -> str:
         "According to available information,",
         "Reportedly,",
     ]
-    hedge_idx = md5(clean_text.encode("utf-8")).digest()[0] % len(hedging_phrases)
+    hedge_idx = sha256(clean_text.encode("utf-8")).digest()[0] % len(hedging_phrases)
     hedge = hedging_phrases[hedge_idx]
     return f"{hedge} {_normalize_softened_lead(clean_text)}"
 

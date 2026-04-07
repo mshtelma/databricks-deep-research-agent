@@ -5,7 +5,6 @@ Tier 2: fast, fully mocked, no credentials needed, <30s total.
 
 from __future__ import annotations
 
-import json
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -18,9 +17,7 @@ from databricks_deep_research.events.types import (
     LoopIterationEvent,
     NodeErrorEvent,
     NodeSkippedEvent,
-    NodeStartedEvent,
     WorkflowCompletedEvent,
-    WorkflowStartedEvent,
 )
 from databricks_deep_research.workflow.conditions import StateCondition
 from databricks_deep_research.workflow.definition import (
@@ -33,7 +30,11 @@ from databricks_deep_research.workflow.executor import WorkflowExecutor
 from databricks_deep_research.workflow.state import WorkflowState
 from tests.conftest import (
     build_mock_llm_client as _mock_llm_client,
+)
+from tests.conftest import (
     collect_events as _collect_events,
+)
+from tests.conftest import (
     events_of_type as _events_of_type,
 )
 
@@ -201,9 +202,8 @@ class TestErrorResilience:
         executor = WorkflowExecutor(defn, _mock_llm_client())
         state = WorkflowState(query="test")
 
-        with patch(PATCH_TARGET, side_effect=always_fail):
-            with pytest.raises(RuntimeError, match="permanent failure"):
-                await _collect_events(executor, state)
+        with patch(PATCH_TARGET, side_effect=always_fail), pytest.raises(RuntimeError, match="permanent failure"):
+            await _collect_events(executor, state)
 
     # 4. Skip in parallel node
     @pytest.mark.asyncio
@@ -401,9 +401,8 @@ class TestErrorResilience:
         executor = WorkflowExecutor(defn, _mock_llm_client())
         state = WorkflowState(query="test")
 
-        with patch(PATCH_TARGET, side_effect=fake_execute_agent):
-            with pytest.raises(RuntimeError, match="first agent crashed"):
-                await _collect_events(executor, state)
+        with patch(PATCH_TARGET, side_effect=fake_execute_agent), pytest.raises(RuntimeError, match="first agent crashed"):
+            await _collect_events(executor, state)
 
         # Second agent never ran
         assert executed == []
@@ -561,9 +560,8 @@ class TestErrorResilience:
         executor = WorkflowExecutor(defn, _mock_llm_client())
         state = WorkflowState(query="test")
 
-        with patch(PATCH_TARGET, side_effect=always_fail):
-            with pytest.raises(RuntimeError, match="failed"):
-                await _collect_events(executor, state)
+        with patch(PATCH_TARGET, side_effect=always_fail), pytest.raises(RuntimeError, match="failed"):
+            await _collect_events(executor, state)
 
     # 10. Nested error handling: sequence in loop with skippable failing agent
     @pytest.mark.asyncio

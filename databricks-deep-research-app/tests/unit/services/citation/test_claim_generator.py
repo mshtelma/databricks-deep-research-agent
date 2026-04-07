@@ -1,7 +1,5 @@
 """Unit tests for InterleavedGenerator service."""
 
-import json
-from unittest.mock import AsyncMock, patch
 
 import pytest
 

@@ -289,7 +289,7 @@ class TestMultiSourceWorkflow:
 
         print(f"\nElapsed: {elapsed:.1f}s")
         print(f"Report length: {len(report_str)} chars")
-        print(f"\n--- FULL REPORT ---")
+        print("\n--- FULL REPORT ---")
         print(report_str)
         print_pool_summary(state)
         print_search_queries(events)

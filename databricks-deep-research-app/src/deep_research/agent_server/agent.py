@@ -6,7 +6,7 @@ for Databricks Agent Server deployment.
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator, Generator
+from collections.abc import Generator
 from typing import Any
 from uuid import uuid4
 
@@ -17,10 +17,27 @@ from deep_research.agent.orchestrator import (
 )
 from deep_research.agent_server.utils import (
     extract_messages,
-    transform_event_to_databricks,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _create_services() -> tuple[Any, Any, Any]:
+    """Create shared services (LLM, Brave, Crawler) for agent handlers.
+
+    Returns:
+        Tuple of (LLMClient, BraveSearchClient, WebCrawler).
+    """
+    from deep_research.agent.tools.web_crawler import WebCrawler
+    from deep_research.services.llm.client import LLMClient
+    from deep_research.services.llm.config import ModelConfig
+    from deep_research.services.search.brave import BraveSearchClient
+
+    model_config = ModelConfig()
+    llm = LLMClient(model_config)
+    brave_client = BraveSearchClient()
+    crawler = WebCrawler()
+    return llm, brave_client, crawler
 
 
 def invoke(
@@ -59,40 +76,45 @@ def invoke(
     # Configure orchestration
     config = OrchestrationConfig(
         max_plan_iterations=3,
-        max_concurrent_steps=2,
     )
 
     logger.info(f"Invoke: processing query '{query[:100]}...'")
+
+    # Create shared services
+    llm, brave_client, crawler = _create_services()
 
     # Run research synchronously
     try:
         result = asyncio.run(
             run_research(
                 query=query,
+                llm=llm,
+                brave_client=brave_client,
+                crawler=crawler,
                 conversation_history=conversation_history,
                 session_id=session_id,
                 config=config,
             )
         )
 
-        # Format sources
+        # Format sources from state
         sources = [
             {
                 "url": s.url,
                 "title": s.title,
                 "snippet": s.snippet,
             }
-            for s in result.sources[:10]
+            for s in result.state.sources[:10]
         ]
 
         return {
-            "content": result.final_report,
+            "content": result.state.final_report or "",
             "metadata": {
-                "session_id": str(result.session_id),
-                "steps_completed": result.steps_completed,
-                "sources_count": len(result.sources),
+                "session_id": str(session_id),
+                "steps_executed": result.steps_executed,
+                "sources_count": len(result.state.sources),
                 "sources": sources,
-                "research_time_seconds": result.research_time,
+                "total_duration_ms": result.total_duration_ms,
             },
         }
 
@@ -140,39 +162,44 @@ def stream(
     # Configure orchestration
     config = OrchestrationConfig(
         max_plan_iterations=3,
-        max_concurrent_steps=2,
     )
 
     logger.info(f"Stream: processing query '{query[:100]}...'")
 
-    # Create async generator wrapper
-    async def async_stream() -> AsyncGenerator[dict[str, Any], None]:
-        try:
-            async for event in stream_research(
-                query=query,
-                conversation_history=conversation_history,
-                session_id=session_id,
-                config=config,
-            ):
-                yield transform_event_to_databricks(event)
-        except Exception as e:
-            logger.error(f"Stream research failed: {e}")
-            yield {
-                "type": "error",
-                "content": f"Research failed: {e!s}",
-            }
+    # Create shared services
+    llm, brave_client, crawler = _create_services()
 
     # Run async generator synchronously
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     try:
-        agen = async_stream()
+        agen = stream_research(
+            query=query,
+            llm=llm,
+            brave_client=brave_client,
+            crawler=crawler,
+            conversation_history=conversation_history,
+            session_id=session_id,
+            config=config,
+        )
         while True:
             try:
                 event = loop.run_until_complete(agen.__anext__())
-                yield event
+                # Convert event to dict for Databricks protocol
+                if isinstance(event, str):
+                    yield {"type": "text", "content": event}
+                elif hasattr(event, "model_dump"):
+                    yield event.model_dump()
+                else:
+                    yield {"type": "event", "data": str(event)}
             except StopAsyncIteration:
                 break
+    except Exception as e:
+        logger.error(f"Stream research failed: {e}")
+        yield {
+            "type": "error",
+            "content": f"Research failed: {e!s}",
+        }
     finally:
         loop.close()

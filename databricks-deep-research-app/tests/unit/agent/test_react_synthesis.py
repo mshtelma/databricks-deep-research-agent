@@ -21,7 +21,6 @@ from deep_research.agent.nodes.react_synthesizer import (
 )
 from deep_research.agent.tools.evidence_registry import (
     EvidenceRegistry,
-    IndexedEvidence,
     RetrievalContext,
 )
 from deep_research.agent.tools.synthesis_tools import (
@@ -32,7 +31,6 @@ from deep_research.agent.tools.synthesis_tools import (
     get_synthesis_tool_names,
 )
 from deep_research.services.citation.evidence_selector import RankedEvidence
-
 
 # ============================================================================
 # RetrievalContext Tests
@@ -196,7 +194,7 @@ class TestEvidenceRegistry:
         pool = create_evidence_pool()
         registry = EvidenceRegistry(pool)
 
-        results = registry.search("machine learning")
+        _ = registry.search("machine learning")
 
         audit = registry.get_access_audit()
         assert len(audit) > 0

@@ -9,7 +9,7 @@ Part of 007-enterprise-data-sources feature (T091).
 """
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
@@ -18,7 +18,7 @@ from pydantic import Field
 from deep_research.schemas.common import BaseSchema, TimestampMixin
 
 
-class FileProcessingStatus(str, Enum):
+class FileProcessingStatus(StrEnum):
     """Processing status for uploaded files."""
 
     PENDING = "pending"
@@ -27,7 +27,7 @@ class FileProcessingStatus(str, Enum):
     FAILED = "failed"
 
 
-class FileType(str, Enum):
+class FileType(StrEnum):
     """Supported file types for upload."""
 
     PDF = "pdf"

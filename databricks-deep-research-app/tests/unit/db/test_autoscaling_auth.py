@@ -25,9 +25,8 @@ class TestAutoscalingCredentialProviderInit:
         settings = MagicMock()
         settings.endpoint_name = None
 
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(ValueError, match="ENDPOINT_NAME is required"):
-                AutoscalingCredentialProvider(settings)
+        with patch.dict("os.environ", {}, clear=True), pytest.raises(ValueError, match="ENDPOINT_NAME is required"):
+            AutoscalingCredentialProvider(settings)
 
     def test_accepts_endpoint_from_settings(self) -> None:
         """Creates provider when endpoint_name is in settings."""
@@ -77,9 +76,8 @@ class TestAutoscalingCredentialProviderMethods:
         """Raises ValueError when PGHOST is not set."""
         provider = self._make_provider()
 
-        with patch.dict("os.environ", {}, clear=True):
-            with pytest.raises(ValueError, match="PGHOST is required"):
-                provider.get_host()
+        with patch.dict("os.environ", {}, clear=True), pytest.raises(ValueError, match="PGHOST is required"):
+            provider.get_host()
 
     def test_get_port_default(self) -> None:
         """Default port is 5432."""

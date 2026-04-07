@@ -97,7 +97,7 @@ class SourceService(BaseRepository[Source]):
             Source(
                 research_session_id=research_session_id,
                 url=str(source_data.get("url", "")),
-                title=_truncate_title(source_data.get("title")),  # type: ignore[arg-type]
+                title=_truncate_title(source_data.get("title")),
                 snippet=source_data.get("snippet"),
                 content=source_data.get("content"),
                 relevance_score=source_data.get("relevance_score"),

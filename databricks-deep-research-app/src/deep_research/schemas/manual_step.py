@@ -6,13 +6,13 @@ with specific sources per step, bypassing or augmenting the planner.
 Part of 007-enterprise-data-sources feature (T050).
 """
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class SourceConstraintType(str, Enum):
+class SourceConstraintType(StrEnum):
     """How strictly to enforce source constraints."""
 
     REQUIRED = "required"

@@ -36,29 +36,29 @@ endpoints:
     supports_structured_output: true
 
   sonnet:
-    endpoint_identifier: databricks-claude-sonnet-4-5
+    endpoint_identifier: databricks-claude-sonnet-4-6
     max_context_window: 128000
-    tokens_per_minute: 50000
+    tokens_per_minute: 200000
     supports_structured_output: true
     supports_prompt_caching: true  # Claude supports cache_control
 
   opus:
-    endpoint_identifier: databricks-claude-opus-4-5
+    endpoint_identifier: databricks-claude-opus-4-6
     max_context_window: 128000
     tokens_per_minute: 200000  # Databricks allows 200k ITPM for Opus 4.5
     supports_structured_output: true
     supports_prompt_caching: true  # Claude supports cache_control
 
   gpt5:
-    endpoint_identifier: databricks-gpt-5-2
+    endpoint_identifier: databricks-gpt-5-4
     max_context_window: 128000
-    tokens_per_minute: 50000
+    tokens_per_minute: 200000
     supports_structured_output: true
 
   gemini3pro:
-    endpoint_identifier: databricks-gemini-3-pro
+    endpoint_identifier: databricks-gemini-3-1-pro
     max_context_window: 1000000  # 1M tokens - excellent for large documents
-    tokens_per_minute: 500000    # High throughput
+    tokens_per_minute: 2000000    # High throughput
     supports_structured_output: true
     supports_temperature: true
 
@@ -81,9 +81,8 @@ models:
   # TIER 2: ANALYTICAL - Medium operations (research, planning)
   analytical:
     endpoints:
-      - haiku
+      - sonnet
       - gpt5mini
-      - gemini3flash
     temperature: 0.7
     max_tokens: 8000
     reasoning_effort: medium
@@ -103,18 +102,16 @@ models:
     reasoning_budget: 8000
     tokens_per_minute: 100000
     rotation_strategy: priority
-    fallback_on_429: true
+    fallback_on_429: false
 
   # TIER 4: BULK_ANALYSIS - Large-context analysis tasks (Gemini 3 Pro)
   # Use for: NLI/entailment, evidence extraction, classification, decomposition
   # NOT for: Text synthesis (use Claude for synthesis quality)
   bulk_analysis:
     endpoints:
+      - sonnet
       - gpt5
-      - gpt5mini
-      - gemini3flash
-      - haiku
-    temperature: 0.3  # Lower temperature for analytical consistency
+    temperature: 0.6
     max_tokens: 16000
     reasoning_effort: medium
     tokens_per_minute: 500000  # Higher throughput
@@ -272,7 +269,7 @@ research_types:
     report_limits:
       min_words: 800
       max_words: 2000
-      max_tokens: 4000
+      max_tokens: 8000
 
     # Researcher configuration
     researcher:
@@ -286,6 +283,7 @@ research_types:
       generation_mode: natural
       enable_numeric_qa_verification: false
       enable_verification_retrieval: true  # Stage 7 enabled for all depths
+      max_concurrent_verifications: 8
       verification_retrieval:
         max_searches_per_fact: 1           # Keep lightweight
         max_atomic_facts_per_claim: 3      # Reduce for speed
@@ -300,8 +298,8 @@ research_types:
     # Report length limits
     report_limits:
       min_words: 1200
-      max_words: 2000
-      max_tokens: 4000
+      max_words: 3000
+      max_tokens: 12000
 
     # Researcher configuration
     researcher:
@@ -314,6 +312,7 @@ research_types:
     citation_verification:
       generation_mode: natural
       enable_verification_retrieval: true   # Enable Stage 7 for medium
+      max_concurrent_verifications: 10
       verification_retrieval:
         max_searches_per_fact: 1            # Reduced budget for medium
 
@@ -327,8 +326,8 @@ research_types:
     # Report length limits
     report_limits:
       min_words: 1500
-      max_words: 3200
-      max_tokens: 8000
+      max_words: 4000
+      max_tokens: 16000
 
     # Researcher configuration
     researcher:
@@ -342,6 +341,7 @@ research_types:
       generation_mode: natural
       enable_numeric_qa_verification: true
       enable_verification_retrieval: true   # Enable Stage 7 with full budget
+      max_concurrent_verifications: 15
       react_synthesis:
         max_tool_calls: 200          # Increased from 125 - enough for 11 sections at 20 calls each
         tool_budget_per_section: 20  # More budget per section
@@ -614,3 +614,14 @@ citation_verification:
 
   # Warning thresholds
   unsupported_claim_warning_threshold: 0.20
+
+  # Stage 8: Post-verification claim disposition
+  # Maps each verdict to an action: keep, remove, or soften
+  claim_disposition:
+    supported: keep
+    partial: keep
+    unsupported: remove
+    contradicted: remove
+    abstained: keep
+    analysis_partial: keep
+    analysis_unsupported: remove

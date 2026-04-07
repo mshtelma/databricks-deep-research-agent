@@ -35,11 +35,11 @@ if TYPE_CHECKING:
 from deep_research.core.app_config import (
     CitationVerificationConfig,
     GenerationMode,
-    GroundingValidationConfig,
     SynthesisMode,
     get_app_config,
 )
 from deep_research.core.logging_utils import get_logger, truncate
+from deep_research.services.citation.atomic_decomposer import ClaimRevision
 from deep_research.services.citation.citation_corrector import CitationCorrector, CorrectionType
 from deep_research.services.citation.claim_generator import InterleavedClaim, InterleavedGenerator
 from deep_research.services.citation.confidence_classifier import ConfidenceClassifier
@@ -47,12 +47,13 @@ from deep_research.services.citation.content_evaluator import evaluate_content_q
 from deep_research.services.citation.evidence_selector import EvidencePreSelector, RankedEvidence
 from deep_research.services.citation.isolated_verifier import IsolatedVerifier
 from deep_research.services.citation.numeric_verifier import NumericVerifier
-from deep_research.services.citation.atomic_decomposer import ClaimRevision
 from deep_research.services.citation.verification_retriever import (
     NewExternalEvidence,
-    VerificationEvent as Stage7Event,
-    VerificationRetriever,
     VerificationRetrievalMetrics,
+    VerificationRetriever,
+)
+from deep_research.services.citation.verification_retriever import (
+    VerificationEvent as Stage7Event,
 )
 from deep_research.services.llm.client import LLMClient
 
@@ -618,9 +619,8 @@ class CitationVerificationPipeline:
                 )
 
             elif result.correction_type == CorrectionType.REMOVE:
-                # No suitable evidence found - demote to unsupported for softening
-                # This ensures the claim goes through _soften_claim() in post-processing
-                # which removes the citation marker and adds hedging language
+                # No suitable evidence found - demote to unsupported.
+                # The framework's Stage 8 will remove it based on claim_disposition config.
                 logger.warning(
                     "CITATION_DEMOTED_TO_UNSUPPORTED",
                     claim_text=truncate(claim.claim_text, 100),
@@ -1062,7 +1062,7 @@ class CitationVerificationPipeline:
         self,
         state: ResearchState,
         evidence_pool: list[RankedEvidence],
-        max_tokens: int = 2000,
+        max_tokens: int = 2000,  # noqa: ARG002
     ) -> AsyncGenerator[VerificationEvent | str, None]:
         """Run ReAct-based synthesis with grounded generation.
 
@@ -1078,7 +1078,6 @@ class CitationVerificationPipeline:
             Content chunks (str) and VerificationEvents.
         """
         from deep_research.agent.nodes.react_synthesizer import (
-            ReactSynthesisEvent,
             run_react_synthesis,
             run_react_synthesis_sectioned,
         )
@@ -1207,15 +1206,15 @@ class CitationVerificationPipeline:
             claim_info.confidence_level = self.classify_confidence(claim_info)
 
         # Stage 4: Verify all claims
-        async for event in self.verify_claims(generated_claims):
-            yield event
+        async for v_event in self.verify_claims(generated_claims):
+            yield v_event
 
         # Stage 5: Correct citations if needed
         correction_count = 0
-        async for event in self.correct_citations(generated_claims, evidence_pool):
-            if event.event_type == "correction_metrics":
-                correction_count = event.data.get("total_corrected", 0)
-            yield event
+        async for c_event in self.correct_citations(generated_claims, evidence_pool):
+            if c_event.event_type == "correction_metrics":
+                correction_count = c_event.data.get("total_corrected", 0)
+            yield c_event
 
         # Stage 7: ARE-style Verification Retrieval for unsupported/partial claims
         stage_7_metrics: VerificationRetrievalMetrics | None = None
@@ -1318,36 +1317,10 @@ class CitationVerificationPipeline:
 
                 stage_7_metrics = verification_retriever.metrics
 
-        # Stage 8: Post-verification claim modification (remove contradicted, soften unsupported)
-        stage_8_removed = 0
-        stage_8_softened = 0
+        # Stage 8 is handled by the framework pipeline (process_unverified_claims)
+        # when use_framework=True. The app legacy path no longer does Stage 8.
 
-        if self.config.enable_claim_removal or self.config.enable_claim_softening:
-            full_content, stage_8_removed, stage_8_softened = await self._process_unverified_claims(
-                full_content, generated_claims
-            )
-
-            if stage_8_removed > 0 or stage_8_softened > 0:
-                yield VerificationEvent(
-                    event_type="claims_processed",
-                    data={
-                        "removed_count": stage_8_removed,
-                        "softened_count": stage_8_softened,
-                    },
-                )
-
-                # Emit content_revised event so frontend can update
-                yield VerificationEvent(
-                    event_type="content_revised",
-                    data={
-                        "content": full_content,
-                        "stage": "claim_modification",
-                        "removed": stage_8_removed,
-                        "softened": stage_8_softened,
-                    },
-                )
-
-        # Update verification summary after Stage 7 and 8
+        # Update verification summary after Stage 7
         state.update_verification_summary()
 
         if state.verification_summary:
@@ -1691,7 +1664,7 @@ class CitationVerificationPipeline:
 
         # Count duplicates BEFORE this index (same as EvidenceRegistry)
         count = 0
-        for idx, ev in enumerate(evidence_pool[:index]):
+        for _idx, ev in enumerate(evidence_pool[:index]):
             try:
                 other_parsed = urlparse(ev.source_url or "")
                 other_domain = other_parsed.netloc.replace("www.", "")
@@ -1754,10 +1727,7 @@ class CitationVerificationPipeline:
             return True
 
         # Questions are often structural ("What are the key findings?")
-        if stripped.endswith("?") and len(stripped) < 50:
-            return True
-
-        return False
+        return stripped.endswith("?") and len(stripped) < 50
 
     def _find_claim_by_position(
         self,
@@ -1804,7 +1774,6 @@ class CitationVerificationPipeline:
             new_evidence_items: New evidence with pre-assigned citation keys.
             key_to_evidence: Citation key to evidence map to update.
         """
-        import re
 
         for item in new_evidence_items:
             # Add source to state (required for persistence FK constraint)
@@ -1945,356 +1914,6 @@ class CitationVerificationPipeline:
         return updated_count
 
     # =========================================================================
-    # Stage 8: Post-verification claim modification
-    # =========================================================================
-
-    async def _process_unverified_claims(
-        self,
-        content: str,
-        claims: list[ClaimInfo],
-    ) -> tuple[str, int, int]:
-        """Process contradicted/unsupported claims in a single pass.
-
-        Removes contradicted claims and softens unsupported claims with hedging.
-        All modifications are done in position-descending order to maintain
-        correct positions for subsequent modifications.
-
-        Args:
-            content: Report content to modify.
-            claims: List of claims to process.
-
-        Returns:
-            Tuple of (modified_content, removed_count, softened_count).
-        """
-        import re
-
-        # Collect all modifications
-        modifications: list[tuple[str, ClaimInfo]] = []
-
-        if self.config.enable_claim_removal:
-            for claim in claims:
-                if claim.verification_verdict == "contradicted" and not claim.abstained:
-                    modifications.append(("remove", claim))
-
-        if self.config.enable_claim_softening:
-            for claim in claims:
-                if claim.verification_verdict == "unsupported" and not claim.abstained:
-                    modifications.append(("soften", claim))
-
-        if not modifications:
-            return content, 0, 0
-
-        # Sort by position descending - process from end to start
-        modifications.sort(key=lambda x: x[1].position_start, reverse=True)
-
-        # Merge overlapping claims
-        modifications = self._merge_overlapping_modifications(modifications)
-
-        removed_count = 0
-        softened_count = 0
-
-        for action, claim in modifications:
-            # Skip if claim is in special context (table, code block)
-            context = self._is_in_special_context(content, claim.position_start)
-            if context == "code":
-                logger.debug(
-                    "SKIP_CLAIM_IN_CODE_BLOCK",
-                    claim_text=truncate(claim.claim_text, 50),
-                )
-                continue
-
-            if action == "remove":
-                # Remove contradicted claim
-                content = self._remove_claim(content, claim, context)
-                removed_count += 1
-                logger.info(
-                    "CLAIM_REMOVED",
-                    claim_text=truncate(claim.claim_text, 50),
-                    verdict=claim.verification_verdict,
-                    position=(claim.position_start, claim.position_end),
-                )
-            else:  # soften
-                # Soften unsupported claim with hedging
-                content = self._soften_claim(content, claim, context)
-                softened_count += 1
-                logger.info(
-                    "CLAIM_SOFTENED",
-                    claim_text=truncate(claim.claim_text, 50),
-                )
-
-        # Clean up empty sections after removals
-        if removed_count > 0:
-            content = self._clean_empty_sections(content)
-
-        # Recalculate all claim positions after modifications
-        self._recalculate_claim_positions(content, claims)
-
-        logger.info(
-            "STAGE8_COMPLETE",
-            removed=removed_count,
-            softened=softened_count,
-            modifications_total=len(modifications),
-        )
-
-        return content, removed_count, softened_count
-
-    def _merge_overlapping_modifications(
-        self,
-        modifications: list[tuple[str, ClaimInfo]],
-    ) -> list[tuple[str, ClaimInfo]]:
-        """Merge overlapping modifications to avoid position conflicts.
-
-        Args:
-            modifications: List of (action, claim) tuples, sorted by position desc.
-
-        Returns:
-            Merged list with overlapping claims combined.
-        """
-        if len(modifications) <= 1:
-            return modifications
-
-        merged: list[tuple[str, ClaimInfo]] = []
-        for action, claim in modifications:
-            if not merged:
-                merged.append((action, claim))
-                continue
-
-            prev_action, prev_claim = merged[-1]
-            # Check for overlap (note: sorted descending, so current is BEFORE prev)
-            if claim.position_end > prev_claim.position_start:
-                # Overlap detected - keep the more severe action
-                if action == "remove" or prev_action == "remove":
-                    # If either is remove, remove the combined span
-                    merged_action = "remove"
-                else:
-                    merged_action = "soften"
-
-                # Merge positions (take widest span)
-                prev_claim.position_start = min(claim.position_start, prev_claim.position_start)
-                prev_claim.position_end = max(claim.position_end, prev_claim.position_end)
-                merged[-1] = (merged_action, prev_claim)
-            else:
-                merged.append((action, claim))
-
-        return merged
-
-    def _remove_claim(self, content: str, claim: ClaimInfo, context: str | None) -> str:
-        """Remove a contradicted claim from content.
-
-        Args:
-            content: Report content.
-            claim: Claim to remove.
-            context: Special context ("table", "list", None).
-
-        Returns:
-            Content with claim removed.
-        """
-        # For tables/lists, mark as removed but keep structure
-        if context == "table":
-            # In table: replace with [removed]
-            before = content[:claim.position_start]
-            after = content[claim.position_end:]
-            return before + "[removed for factual inaccuracy]" + after
-
-        if context == "list":
-            # In list: remove entire list item (line)
-            start = content.rfind("\n", 0, claim.position_start) + 1
-            end = content.find("\n", claim.position_end)
-            if end == -1:
-                end = len(content)
-            return content[:start] + content[end:]
-
-        # Normal paragraph: remove with whitespace cleanup
-        before = content[:claim.position_start].rstrip()
-        after = content[claim.position_end:].lstrip()
-
-        # Add space between remaining content
-        if before and after and not before.endswith("\n") and not after.startswith("\n"):
-            return before + " " + after
-        return before + after
-
-    def _soften_claim(self, content: str, claim: ClaimInfo, context: str | None) -> str:
-        """Soften an unsupported claim with hedging language.
-
-        Args:
-            content: Report content.
-            claim: Claim to soften.
-            context: Special context ("table", "list", None).
-
-        Returns:
-            Content with softened claim.
-        """
-        import re
-
-        claim_text = claim.claim_text
-
-        # Remove citation markers if present
-        clean_text = re.sub(r'\s*\[[A-Za-z][A-Za-z0-9-]*(?:-\d+)?\]\s*', '', claim_text).strip()
-
-        # Check if already hedged
-        if not self._needs_hedging(clean_text):
-            logger.debug(
-                "SKIP_ALREADY_HEDGED",
-                claim_text=truncate(clean_text, 50),
-            )
-            return content
-
-        # For tables, just add [unverified] marker
-        if context == "table":
-            before = content[:claim.position_start]
-            after = content[claim.position_end:]
-            return before + f"{clean_text} [unverified]" + after
-
-        # Choose hedging phrase based on content
-        hedging_phrases = [
-            "It has been suggested that",
-            "Some sources indicate that",
-            "According to available information,",
-            "Reportedly,",
-        ]
-
-        # Use a consistent hedge based on claim text hash for reproducibility
-        hedge_idx = hash(clean_text) % len(hedging_phrases)
-        hedge = hedging_phrases[hedge_idx]
-
-        # Lowercase first letter after hedge
-        if clean_text and clean_text[0].isupper():
-            clean_text = clean_text[0].lower() + clean_text[1:]
-
-        softened = f"{hedge} {clean_text}"
-
-        before = content[:claim.position_start]
-        after = content[claim.position_end:]
-
-        return before + softened + after
-
-    def _needs_hedging(self, text: str) -> bool:
-        """Check if text already has hedging language.
-
-        Args:
-            text: Text to check.
-
-        Returns:
-            True if text needs hedging (doesn't already have it).
-        """
-        existing_hedges = [
-            "it appears", "it seems", "may have", "might be",
-            "reportedly", "allegedly", "according to", "suggests that",
-            "it has been suggested", "some sources indicate", "available information",
-            "unverified", "uncertain", "possibly", "potentially",
-        ]
-        lower = text.lower()
-        return not any(hedge in lower for hedge in existing_hedges)
-
-    def _is_in_special_context(self, content: str, position: int) -> str | None:
-        """Check if position is inside special markdown context.
-
-        Args:
-            content: Full content.
-            position: Position to check.
-
-        Returns:
-            "table", "list", "code", or None.
-        """
-        # Find surrounding context
-        start = max(0, position - 200)
-        before = content[start:position]
-        lines_before = before.split('\n')
-
-        if not lines_before:
-            return None
-
-        last_line = lines_before[-1]
-
-        # In table? Look for | characters on same line
-        if '|' in last_line:
-            return "table"
-
-        # In list? Look for leading - or * or numbered
-        stripped = last_line.strip()
-        if stripped.startswith(('-', '*', '+')):
-            return "list"
-        if stripped and stripped[0].isdigit() and '.' in stripped[:3]:
-            return "list"
-
-        # In code block? Count backticks
-        if before.count('```') % 2 == 1:
-            return "code"
-
-        return None
-
-    def _clean_empty_sections(self, content: str) -> str:
-        """Remove empty section headers after claim removal.
-
-        Args:
-            content: Content that may have empty sections.
-
-        Returns:
-            Content with empty sections removed.
-        """
-        import re
-
-        # Pattern: header followed by only whitespace until next header or EOF
-        # Must be careful not to remove headers followed by content
-        lines = content.split('\n')
-        cleaned_lines: list[str] = []
-        i = 0
-
-        while i < len(lines):
-            line = lines[i]
-
-            # Check if this is a header
-            if line.strip().startswith('#'):
-                # Look ahead to see if there's content before next header
-                j = i + 1
-                has_content = False
-                while j < len(lines):
-                    next_line = lines[j].strip()
-                    if next_line.startswith('#'):
-                        break
-                    if next_line and not next_line.isspace():
-                        has_content = True
-                        break
-                    j += 1
-
-                if has_content:
-                    cleaned_lines.append(line)
-                else:
-                    # Skip empty section header
-                    logger.debug(
-                        "EMPTY_SECTION_REMOVED",
-                        header=line.strip(),
-                    )
-            else:
-                cleaned_lines.append(line)
-
-            i += 1
-
-        return '\n'.join(cleaned_lines)
-
-    def _recalculate_claim_positions(
-        self,
-        content: str,
-        claims: list[ClaimInfo],
-    ) -> None:
-        """Update claim positions to match modified content.
-
-        Args:
-            content: Modified content.
-            claims: Claims to update.
-        """
-        for claim in claims:
-            # Find the claim text in the new content
-            new_pos = content.find(claim.claim_text)
-            if new_pos >= 0:
-                claim.position_start = new_pos
-                claim.position_end = new_pos + len(claim.claim_text)
-            else:
-                # Claim was removed or significantly modified - mark as abstained
-                if claim.verification_verdict == "contradicted":
-                    claim.abstained = True
-
-    # =========================================================================
     # Grounding Validation (Scientific Citation Style)
     # =========================================================================
 
@@ -2351,12 +1970,13 @@ class CitationVerificationPipeline:
                     continue
 
                 # Check if this is a topic sentence after a header
-                if config.allow_topic_sentences:
-                    if i > 0 and parsed_blocks[i - 1].tag_type == "free":
-                        prev_content = parsed_blocks[i - 1].text.strip()
-                        if prev_content.startswith("#"):
-                            # Allow topic sentence after header
-                            continue
+                if (
+                    config.allow_topic_sentences
+                    and i > 0 and parsed_blocks[i - 1].tag_type == "free"
+                    and parsed_blocks[i - 1].text.strip().startswith("#")
+                ):
+                    # Allow topic sentence after header
+                    continue
 
                 validated_count += 1
 
@@ -2509,6 +2129,7 @@ REASON: [One sentence explanation]"""
             Tuple of (has_claims, detected_claim_text).
         """
         import re
+
         from deep_research.services.llm.types import ModelTier
 
         # Quick heuristic checks (skip LLM call when possible)
@@ -2589,10 +2210,7 @@ Answer ONLY "STRUCTURAL" or "FACTUAL":"""
             text
         ))
 
-        if not has_specifics and len(text) < 100:
-            return True  # Likely common knowledge
-
-        return False
+        return not has_specifics and len(text) < 100
 
     async def _remediate_validation_issues(
         self,

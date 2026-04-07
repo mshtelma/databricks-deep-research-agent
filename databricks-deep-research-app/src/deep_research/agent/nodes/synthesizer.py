@@ -5,7 +5,10 @@ from typing import Any
 
 from mlflow.entities import SpanType
 
-from deep_research.agent.config import get_endpoint_override, get_report_limits, get_synthesizer_config
+from deep_research.agent.config import (
+    get_endpoint_override,
+    get_report_limits,
+)
 from deep_research.agent.prompts.synthesizer import (
     STREAMING_SYNTHESIZER_SYSTEM_PROMPT,
     STRUCTURED_SYNTHESIZER_SYSTEM_PROMPT,
@@ -25,7 +28,7 @@ from deep_research.services.llm.types import ModelTier
 logger = get_logger(__name__)
 
 
-def _get_schema_name(output_schema: type | dict | None) -> str | None:
+def _get_schema_name(output_schema: type | dict[str, Any] | None) -> str | None:
     """Get a display name for the output schema.
 
     Handles both Pydantic class types (with __name__) and JSON schema dicts.
@@ -39,8 +42,10 @@ def _get_schema_name(output_schema: type | dict | None) -> str | None:
     if output_schema is None:
         return None
     if isinstance(output_schema, dict):
-        return output_schema.get("title", "dict_schema")
-    return getattr(output_schema, "__name__", str(type(output_schema)))
+        title: str = output_schema.get("title", "dict_schema")
+        return title
+    name: str = getattr(output_schema, "__name__", str(type(output_schema)))
+    return name
 
 
 async def run_synthesizer(state: ResearchState, llm: LLMClient) -> ResearchState:
@@ -261,9 +266,13 @@ async def run_structured_synthesizer(state: ResearchState, llm: LLMClient) -> Re
             else:
                 # Fallback: try to parse response as JSON
                 try:
-                    state.final_report_structured = state.output_schema.model_validate_json(
-                        response.content
-                    )
+                    schema_cls = state.output_schema
+                    if schema_cls is not None and hasattr(schema_cls, 'model_validate_json'):
+                        state.final_report_structured = schema_cls.model_validate_json(
+                            response.content
+                        )
+                    else:
+                        raise ValueError('output_schema does not support model_validate_json')
                     state.final_report = response.content
                     logger.info(
                         "STRUCTURED_SYNTHESIZER_COMPLETE_FALLBACK",
@@ -450,8 +459,7 @@ async def post_verify_structured_output(
         Updated state with verified and corrected structured output.
     """
     from deep_research.services.citation.claim_extractor import StructuredClaimExtractor
-    from deep_research.services.citation.evidence_selector import RankedEvidence
-    from deep_research.services.citation.post_verifier import PostVerifier, VerifiedClaim
+    from deep_research.services.citation.post_verifier import PostVerifier
 
     span_name = research_span_name(PHASE_SYNTHESIS, "post_verification")
 
@@ -523,7 +531,7 @@ async def post_verify_structured_output(
         return state
 
 
-def _build_evidence_pool(state: ResearchState) -> list:
+def _build_evidence_pool(state: ResearchState) -> list[Any]:
     """Build evidence pool from state sources and observations.
 
     Converts SourceInfo objects to RankedEvidence format required by verifiers.
@@ -553,7 +561,7 @@ def _build_evidence_pool(state: ResearchState) -> list:
         return evidence_pool
 
     # Otherwise, build from sources + observations
-    for i, source in enumerate(state.sources[:30]):  # Limit for performance
+    for _i, source in enumerate(state.sources[:30]):  # Limit for performance
         # Use snippet as evidence if available
         quote = source.snippet or ""
         if not quote and state.all_observations:
@@ -585,14 +593,13 @@ def _build_evidence_pool(state: ResearchState) -> list:
 
 def _apply_corrections(
     output: Any,
-    verified_claims: list,
+    verified_claims: list[Any],
 ) -> Any:
     """Apply verification corrections back to structured output.
 
     Only applies source_refs corrections (not text changes) to preserve
     the original content while fixing citation references.
     """
-    import re
 
     from deep_research.services.citation.post_verifier import VerifiedClaim
 
@@ -625,13 +632,12 @@ def _apply_corrections(
     return output.__class__.model_validate(data)
 
 
-def _get_source_refs_path(field_path: str, data: dict) -> str | None:
+def _get_source_refs_path(field_path: str, data: dict[str, Any]) -> str | None:
     """Determine source_refs path for a given text field path.
 
     Auto-discovers by checking what source_refs fields exist at that location.
     No hardcoded schema knowledge.
     """
-    import re
 
     # Extract the base path (parent object)
     if "." in field_path:
@@ -658,7 +664,7 @@ def _get_source_refs_path(field_path: str, data: dict) -> str | None:
     return None
 
 
-def _get_nested_value(data: dict, path: str) -> Any:
+def _get_nested_value(data: dict[str, Any], path: str) -> Any:
     """Get value from nested dict using dot notation with array support."""
     import re
 
@@ -685,7 +691,7 @@ def _get_nested_value(data: dict, path: str) -> Any:
     return current
 
 
-def _set_nested_value(data: dict, path: str, value: Any) -> None:
+def _set_nested_value(data: dict[str, Any], path: str, value: Any) -> None:
     """Set value in nested dict using dot notation with array support.
 
     Args:
@@ -698,7 +704,7 @@ def _set_nested_value(data: dict, path: str, value: Any) -> None:
     keys = re.split(r"\.(?![^\[]*\])", path)  # Split on dots not inside brackets
     current = data
 
-    for i, key in enumerate(keys[:-1]):
+    for _i, key in enumerate(keys[:-1]):
         # Handle array notation
         match = re.match(r"(\w+)\[(\d+)\]", key)
         if match:

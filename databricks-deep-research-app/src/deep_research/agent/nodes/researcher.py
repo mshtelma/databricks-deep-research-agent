@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING, Any
 from mlflow.entities import SpanType
 from pydantic import BaseModel, Field
 
-from deep_research.agent.config import get_endpoint_override, get_researcher_config, get_researcher_config_for_depth
+from deep_research.agent.config import (
+    get_endpoint_override,
+    get_researcher_config,
+    get_researcher_config_for_depth,
+)
 from deep_research.agent.nodes.react_researcher import ReactResearchEvent
 from deep_research.agent.prompts.researcher import (
     RESEARCHER_SYSTEM_PROMPT,
@@ -21,7 +25,6 @@ from deep_research.agent.tools.source_routing import (
 )
 from deep_research.agent.tools.web_crawler import WebCrawler, web_crawl
 from deep_research.agent.tools.web_search import web_search
-from deep_research.services.search.domain_filter import DomainFilter
 from deep_research.core.logging_utils import (
     get_logger,
     log_search_queries_generated,
@@ -45,6 +48,7 @@ from deep_research.core.tracing_constants import (
 from deep_research.schemas.manual_step import SourceConstraint
 from deep_research.services.llm.types import ModelTier
 from deep_research.services.search.brave import BraveSearchClient
+from deep_research.services.search.domain_filter import DomainFilter
 
 if TYPE_CHECKING:
     from deep_research.agent.state import PlanStep
@@ -558,10 +562,7 @@ async def run_researcher(
                 structured_output=ResearcherOutput,
             )
 
-            if response.structured:
-                output = response.structured
-            else:
-                output = ResearcherOutput.model_validate_json(response.content)
+            output = response.structured or ResearcherOutput.model_validate_json(response.content)
 
             # Update step and state
             state.mark_step_complete(output.observation)

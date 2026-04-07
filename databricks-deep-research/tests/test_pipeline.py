@@ -1010,15 +1010,15 @@ def test_build_verification_summary_splits_fact_and_analysis_metrics() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stage8_softens_partial_analysis_claims() -> None:
-    """Partial analysis should be hedged locally instead of left unchanged."""
+async def test_stage8_keeps_partial_analysis_claims_by_default() -> None:
+    """With default disposition, partial analysis claims are kept (not softened)."""
     pipeline = _build_pipeline()
     claim = _make_claim_info(
         claim_text="This indicates strong demand.",
         claim_role=ClaimRole.ANALYSIS.value,
         verification_verdict="partial",
         position_start=0,
-        position_end=28,
+        position_end=30,
     )
 
     content, removed, softened, rewritten = await pipeline.process_unverified_claims(
@@ -1026,11 +1026,148 @@ async def test_stage8_softens_partial_analysis_claims() -> None:
         [claim],
     )
 
+    # Default analysis_partial = KEEP, so no modifications
     assert removed == 0
+    assert softened == 0
+    assert rewritten == 0
+
+
+@pytest.mark.asyncio
+async def test_stage8_disposition_remove() -> None:
+    """Unsupported fact claims are removed with default disposition."""
+    pipeline = _build_pipeline()
+    claim = _make_claim_info(
+        claim_text="Revenue was $5B.",
+        claim_role=ClaimRole.FACT.value,
+        verification_verdict="unsupported",
+        position_start=0,
+        position_end=16,
+    )
+
+    content, removed, softened, rewritten = await pipeline.process_unverified_claims(
+        "Revenue was $5B.",
+        [claim],
+    )
+
+    assert removed == 1
+    assert softened == 0
+
+
+@pytest.mark.asyncio
+async def test_stage8_disposition_keep() -> None:
+    """Unsupported fact claims are kept when disposition says keep."""
+    from databricks_deep_research.citation.config import ClaimDisposition, ClaimDispositionConfig
+
+    cfg = CitationConfig(
+        claim_disposition=ClaimDispositionConfig(unsupported=ClaimDisposition.KEEP),
+    )
+    pipeline = _build_pipeline(config=cfg)
+    claim = _make_claim_info(
+        claim_text="Revenue was $5B.",
+        claim_role=ClaimRole.FACT.value,
+        verification_verdict="unsupported",
+        position_start=0,
+        position_end=16,
+    )
+
+    content, removed, softened, rewritten = await pipeline.process_unverified_claims(
+        "Revenue was $5B.",
+        [claim],
+    )
+
+    assert removed == 0
+    assert softened == 0
+    assert "Revenue was $5B." in content
+
+
+@pytest.mark.asyncio
+async def test_stage8_disposition_soften() -> None:
+    """Partial fact claims are softened when disposition says soften."""
+    from databricks_deep_research.citation.config import ClaimDisposition, ClaimDispositionConfig
+
+    cfg = CitationConfig(
+        claim_disposition=ClaimDispositionConfig(partial=ClaimDisposition.SOFTEN),
+    )
+    pipeline = _build_pipeline(config=cfg)
+    claim = _make_claim_info(
+        claim_text="Revenue grew by 20%.",
+        claim_role=ClaimRole.FACT.value,
+        verification_verdict="partial",
+        position_start=0,
+        position_end=20,
+    )
+
+    content, removed, softened, rewritten = await pipeline.process_unverified_claims(
+        "Revenue grew by 20%.",
+        [claim],
+    )
+
+    assert softened == 1
+    assert removed == 0
+
+
+@pytest.mark.asyncio
+async def test_stage8_rewrite_exclusive_with_soften() -> None:
+    """A claim set to SOFTEN must NOT also get a rewrite modification."""
+    from databricks_deep_research.citation.config import ClaimDisposition, ClaimDispositionConfig
+
+    cfg = CitationConfig(
+        claim_disposition=ClaimDispositionConfig(partial=ClaimDisposition.SOFTEN),
+    )
+    pipeline = _build_pipeline(config=cfg)
+    claim = _make_claim_info(
+        claim_text="Revenue grew by 20%.",
+        claim_role=ClaimRole.FACT.value,
+        verification_verdict="partial",
+        verification_text="Revenue increased approximately 20%.",
+        position_start=0,
+        position_end=20,
+    )
+
+    content, removed, softened, rewritten = await pipeline.process_unverified_claims(
+        "Revenue grew by 20%.",
+        [claim],
+    )
+
+    # Soften takes precedence — no rewrite should happen
     assert softened == 1
     assert rewritten == 0
-    assert content != "This indicates strong demand."
-    assert claim.verification_verdict == "partial"
+
+
+@pytest.mark.asyncio
+async def test_stage8_analysis_disposition() -> None:
+    """analysis_partial and analysis_unsupported overrides work correctly."""
+    from databricks_deep_research.citation.config import ClaimDisposition, ClaimDispositionConfig
+
+    cfg = CitationConfig(
+        claim_disposition=ClaimDispositionConfig(
+            analysis_partial=ClaimDisposition.SOFTEN,
+            analysis_unsupported=ClaimDisposition.REMOVE,
+        ),
+    )
+    pipeline = _build_pipeline(config=cfg)
+    partial_claim = _make_claim_info(
+        claim_text="This suggests growth.",
+        claim_role=ClaimRole.ANALYSIS.value,
+        verification_verdict="partial",
+        position_start=0,
+        position_end=20,
+    )
+    unsupported_claim = _make_claim_info(
+        claim_text=" This implies decline.",
+        claim_role=ClaimRole.ANALYSIS.value,
+        verification_verdict="unsupported",
+        position_start=20,
+        position_end=42,
+    )
+
+    content, removed, softened, rewritten = await pipeline.process_unverified_claims(
+        "This suggests growth. This implies decline.",
+        [partial_claim, unsupported_claim],
+    )
+
+    assert softened == 1
+    assert removed == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1284,3 +1421,39 @@ def test_position_tracking_keeps_original_on_miss() -> None:
     # Original positions preserved — no regex fallback corruption
     assert claim.position_start == 100
     assert claim.position_end == 140
+
+
+# ---------------------------------------------------------------------------
+# T105-15: Cross-source evidence deduplication
+# ---------------------------------------------------------------------------
+
+
+def test_dedup_evidence_cross_source() -> None:
+    """Near-duplicate evidence with same prefix should be deduped; different content preserved."""
+    from databricks_deep_research.citation.evidence_selector import _dedup_evidence_cross_source
+
+    shared_prefix = "Databricks provides a unified analytics platform " * 5  # ~250 chars
+    ev1 = _make_ranked_evidence(
+        quote_text=shared_prefix,
+        source_url="https://a.com",
+        relevance_score=0.8,
+    )
+    ev2 = _make_ranked_evidence(
+        quote_text=shared_prefix,
+        source_url="https://b.com",
+        relevance_score=0.9,
+    )
+    ev3 = _make_ranked_evidence(
+        quote_text="Completely different evidence about machine learning.",
+        source_url="https://c.com",
+        relevance_score=0.7,
+    )
+
+    result = _dedup_evidence_cross_source([ev1, ev2, ev3])
+
+    # Two duplicates → one kept (higher score), plus the unique one
+    assert len(result) == 2
+    # Higher-scoring duplicate kept
+    urls = {e.source_url for e in result}
+    assert "https://b.com" in urls
+    assert "https://c.com" in urls

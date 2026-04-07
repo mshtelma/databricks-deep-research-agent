@@ -28,15 +28,15 @@ Example usage:
     response = await handler.handle(intent, message, history, state)
 """
 
-from deep_research.conversation.intent import (
-    ConversationIntent,
-    IntentType,
-    IntentClassifier,
-    DefaultIntentClassifier,
-)
 from deep_research.conversation.handler import (
     ConversationHandler,
     DefaultConversationHandler,
+)
+from deep_research.conversation.intent import (
+    ConversationIntent,
+    DefaultIntentClassifier,
+    IntentClassifier,
+    IntentType,
 )
 from deep_research.conversation.protocol import ConversationProvider
 

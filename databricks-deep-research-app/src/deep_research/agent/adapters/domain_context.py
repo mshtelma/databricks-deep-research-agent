@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 from databricks_deep_research.events.types import (
     AgentOutputEvent,
@@ -28,8 +28,8 @@ from databricks_deep_research.events.types import (
     CoordinatorClassifiedEvent,
     EvaluationDecisionEvent,
     ItemCompletedEvent,
-    ItemStartedEvent,
     ItemsExtractedEvent,
+    ItemStartedEvent,
     LoopExitEvent,
     LoopIterationEvent,
     NodeCompletedEvent,
@@ -181,7 +181,7 @@ class DomainContextTracker:
 
 
 def _handle_coordinator(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: CoordinatorClassifiedEvent
+    e = cast(CoordinatorClassifiedEvent, event)
     delta.complexity = e.complexity
     delta.recommended_depth = e.recommended_depth
     delta.is_simple = e.is_simple
@@ -200,7 +200,7 @@ def _handle_coordinator(event: StreamEvent, delta: PersistenceDelta) -> list[App
 
 
 def _handle_background(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: BackgroundCompletedEvent
+    e = cast(BackgroundCompletedEvent, event)
     delta.data_landscape = e.data_landscape
     delta.query_decomposition = e.query_decomposition
     delta._dirty = True
@@ -214,7 +214,7 @@ def _handle_background(event: StreamEvent, delta: PersistenceDelta) -> list[AppS
 
 
 def _handle_plan_created(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: PlanCreatedEvent
+    e = cast(PlanCreatedEvent, event)
     delta.plan = {"title": e.title, "thought": e.thought, "steps": e.steps}
     delta.plan_steps = e.steps
     delta._dirty = True
@@ -232,7 +232,7 @@ def _handle_plan_created(event: StreamEvent, delta: PersistenceDelta) -> list[Ap
 
 
 def _handle_item_started(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: ItemStartedEvent
+    e = cast(ItemStartedEvent, event)
     delta._step_sources_found = 0  # Reset for new step
     return [AppSSEEvent(
         event_type="step_started",
@@ -245,7 +245,7 @@ def _handle_item_started(event: StreamEvent, delta: PersistenceDelta) -> list[Ap
 
 
 def _handle_item_completed(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: ItemCompletedEvent
+    e = cast(ItemCompletedEvent, event)
     sources_found = delta._step_sources_found
     delta._step_sources_found = 0  # Reset for next step
     delta.step_updates[str(e.item_index)] = {
@@ -263,23 +263,23 @@ def _handle_item_completed(event: StreamEvent, delta: PersistenceDelta) -> list[
     )]
 
 
-def _handle_reflection(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: ReflectionDecisionEvent
+def _handle_reflection(event: StreamEvent, _delta: PersistenceDelta) -> list[AppSSEEvent]:
+    e = cast(ReflectionDecisionEvent, event)
     return [AppSSEEvent(
         event_type="reflection_decision",
         data={"decision": e.decision, "reasoning": e.reasoning},
     )]
 
 
-def _handle_stream_chunk(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: AgentStreamChunkEvent
+def _handle_stream_chunk(event: StreamEvent, _delta: PersistenceDelta) -> list[AppSSEEvent]:
+    e = cast(AgentStreamChunkEvent, event)
     return [AppSSEEvent(
         event_type="stream_chunk",
         data={"chunk": e.chunk, "node_id": e.node_id, "subtype": e.subtype},
     )]
 
 
-def _handle_synthesis_started(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
+def _handle_synthesis_started(event: StreamEvent, _delta: PersistenceDelta) -> list[AppSSEEvent]:
     return [AppSSEEvent(
         event_type="synthesis_started",
         data={
@@ -290,7 +290,7 @@ def _handle_synthesis_started(event: StreamEvent, delta: PersistenceDelta) -> li
 
 
 def _handle_agent_output(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: AgentOutputEvent
+    e = cast(AgentOutputEvent, event)
     if e.output_key == "report":
         delta.final_report = e.output_preview
         delta._dirty = True
@@ -308,7 +308,7 @@ def _handle_workflow_completed(event: StreamEvent, delta: PersistenceDelta) -> l
     # WorkflowCompletedEvent carries the FULL report from state.get("report").
     # AgentOutputEvent.output_preview is truncated to 200 chars (harness.py:227),
     # so this is the authoritative source for the complete final report.
-    e: WorkflowCompletedEvent = event  # type: ignore[assignment]
+    e = cast(WorkflowCompletedEvent, event)
     if e.final_report:
         delta.final_report = e.final_report
     delta._dirty = True
@@ -318,8 +318,8 @@ def _handle_workflow_completed(event: StreamEvent, delta: PersistenceDelta) -> l
     )]
 
 
-def _handle_node_error(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: NodeErrorEvent
+def _handle_node_error(event: StreamEvent, _delta: PersistenceDelta) -> list[AppSSEEvent]:
+    e = cast(NodeErrorEvent, event)
     return [AppSSEEvent(
         event_type="node_error",
         data={
@@ -333,8 +333,8 @@ def _handle_node_error(event: StreamEvent, delta: PersistenceDelta) -> list[AppS
 # --- Verification event handlers ---
 
 
-def _handle_claim_generated(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: ClaimGeneratedEvent
+def _handle_claim_generated(event: StreamEvent, _delta: PersistenceDelta) -> list[AppSSEEvent]:
+    e = cast(ClaimGeneratedEvent, event)
     return [AppSSEEvent(
         event_type="research_progress",
         data={
@@ -347,7 +347,7 @@ def _handle_claim_generated(event: StreamEvent, delta: PersistenceDelta) -> list
 
 
 def _handle_claim_verified(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: ClaimVerifiedEvent
+    e = cast(ClaimVerifiedEvent, event)
     delta._dirty = True
     return [AppSSEEvent(
         event_type="research_progress",
@@ -362,8 +362,8 @@ def _handle_claim_verified(event: StreamEvent, delta: PersistenceDelta) -> list[
     )]
 
 
-def _handle_citation_corrected(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: CitationCorrectedEvent
+def _handle_citation_corrected(event: StreamEvent, _delta: PersistenceDelta) -> list[AppSSEEvent]:
+    e = cast(CitationCorrectedEvent, event)
     return [AppSSEEvent(
         event_type="research_progress",
         data={
@@ -376,8 +376,8 @@ def _handle_citation_corrected(event: StreamEvent, delta: PersistenceDelta) -> l
     )]
 
 
-def _handle_numeric_claim_detected(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: NumericClaimDetectedEvent
+def _handle_numeric_claim_detected(event: StreamEvent, _delta: PersistenceDelta) -> list[AppSSEEvent]:
+    e = cast(NumericClaimDetectedEvent, event)
     return [AppSSEEvent(
         event_type="research_progress",
         data={
@@ -390,7 +390,7 @@ def _handle_numeric_claim_detected(event: StreamEvent, delta: PersistenceDelta) 
 
 
 def _handle_verification_summary(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e = event  # type: VerificationSummaryEvent
+    e = cast(VerificationSummaryEvent, event)
     delta.verification_summary = {
         "total_claims": e.total_claims,
         "verified_claims": e.verified_claims,
@@ -417,8 +417,8 @@ def _handle_verification_summary(event: StreamEvent, delta: PersistenceDelta) ->
 # --- Progress event handlers (provide frontend visibility) ---
 
 
-def _handle_replan_triggered(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e: ReplanTriggeredEvent = event  # type: ignore[assignment]
+def _handle_replan_triggered(event: StreamEvent, _delta: PersistenceDelta) -> list[AppSSEEvent]:
+    e = cast(ReplanTriggeredEvent, event)
     return [AppSSEEvent(
         event_type="research_progress",
         data={
@@ -430,8 +430,8 @@ def _handle_replan_triggered(event: StreamEvent, delta: PersistenceDelta) -> lis
     )]
 
 
-def _handle_tool_call(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e: ToolCallEvent = event  # type: ignore[assignment]
+def _handle_tool_call(event: StreamEvent, _delta: PersistenceDelta) -> list[AppSSEEvent]:
+    e = cast(ToolCallEvent, event)
     return [AppSSEEvent(
         event_type="research_progress",
         data={
@@ -444,7 +444,7 @@ def _handle_tool_call(event: StreamEvent, delta: PersistenceDelta) -> list[AppSS
 
 
 def _handle_tool_result(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e: ToolResultEvent = event  # type: ignore[assignment]
+    e = cast(ToolResultEvent, event)
     # Store cumulative source count (replace, not add — it's already cumulative
     # from ReactLoop: source_count=len(sources) where sources grows per tool call)
     delta._step_sources_found = e.source_count
@@ -460,8 +460,8 @@ def _handle_tool_result(event: StreamEvent, delta: PersistenceDelta) -> list[App
     )]
 
 
-def _handle_evaluation_decision(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
-    e: EvaluationDecisionEvent = event  # type: ignore[assignment]
+def _handle_evaluation_decision(event: StreamEvent, _delta: PersistenceDelta) -> list[AppSSEEvent]:
+    e = cast(EvaluationDecisionEvent, event)
     return [AppSSEEvent(
         event_type="research_progress",
         data={
@@ -476,7 +476,7 @@ def _handle_evaluation_decision(event: StreamEvent, delta: PersistenceDelta) -> 
 # --- No-op handler for infrastructure events (acknowledged, not forwarded) ---
 
 
-def _handle_noop(event: StreamEvent, delta: PersistenceDelta) -> list[AppSSEEvent]:
+def _handle_noop(_event: StreamEvent, _delta: PersistenceDelta) -> list[AppSSEEvent]:
     return []
 
 

@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncGenerator
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -26,12 +25,12 @@ from databricks_deep_research.agents.config import (
 from databricks_deep_research.agents.harness import execute_agent
 from databricks_deep_research.errors import (
     NodeBudgetExceededError,
-    PlanningContractError,
     WorkflowCancelledError,
     WorkflowError,
     WorkflowExecutionError,
 )
 from databricks_deep_research.events.types import (
+    AgentOutputEvent,
     BranchSelectedEvent,
     EvaluationDecisionEvent,
     ItemCompletedEvent,
@@ -45,12 +44,12 @@ from databricks_deep_research.events.types import (
     NodeSkippedEvent,
     NodeStartedEvent,
     PlanAndExecuteExitEvent,
-    ReflectionDecisionEvent,
     ReplanTriggeredEvent,
     StreamEvent,
+    ToolCallEvent,
     ToolResultEvent,
-    WorkflowFailedEvent,
     WorkflowCompletedEvent,
+    WorkflowFailedEvent,
     WorkflowStartedEvent,
 )
 from databricks_deep_research.llm.client import FrameworkLLMClient
@@ -68,52 +67,97 @@ from databricks_deep_research.workflow.conditions import (
 )
 from databricks_deep_research.workflow.context import ExecutionContext
 from databricks_deep_research.workflow.definition import NodeType, WorkflowDefinition, WorkflowNode
-from databricks_deep_research.workflow.runtime.context import PlanExecuteRunnerDeps, PlanExecuteRuntimeContext
+from databricks_deep_research.workflow.runtime.context import (
+    PlanExecuteRunnerDeps,
+    PlanExecuteRuntimeContext,
+)
 from databricks_deep_research.workflow.runtime.plan_execute_context import (
     build_evaluator_runtime_context as _build_evaluator_runtime_context_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_context import (
     build_planner_runtime_context as _build_planner_runtime_context_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_context import (
     format_available_sources as _format_available_sources_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_context import (
     format_completed_steps as _format_completed_steps_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_context import (
     format_reflector_feedback as _format_reflector_feedback_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_contracts import (
+    NormalizedPlanContract,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_contracts import (
+    extract_raw_plan_contract as _extract_raw_plan_contract_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_contracts import (
+    finalize_plan_contract as _finalize_plan_contract_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_contracts import (
+    normalize_executable_plan_contract as _normalize_executable_plan_contract_impl,
 )
 from databricks_deep_research.workflow.runtime.plan_execute_execution import (
     append_completed_step as _append_completed_step_impl,
-    append_replan_feedback as _append_replan_feedback_impl,
-    build_available_source_catalog as _build_available_source_catalog_impl,
-    extract_decision as _extract_decision_impl,
-    extract_reasoning as _extract_reasoning_impl,
-    extract_evidence_sufficiency as _extract_evidence_sufficiency_impl,
-    extract_failure_mode as _extract_failure_mode_impl,
-    normalize_evaluation_decision as _normalize_evaluation_decision_impl,
-    populate_synthesis_state as _populate_synthesis_state_impl,
 )
-from databricks_deep_research.workflow.runtime.plan_execute_runner import run_plan_execute
-from databricks_deep_research.workflow.runtime.plan_execute_contracts import (
-    NormalizedPlanContract,
-    extract_raw_plan_contract as _extract_raw_plan_contract_impl,
-    finalize_plan_contract as _finalize_plan_contract_impl,
-    normalize_executable_plan_contract as _normalize_executable_plan_contract_impl,
+from databricks_deep_research.workflow.runtime.plan_execute_execution import (
+    append_replan_feedback as _append_replan_feedback_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_execution import (
+    build_available_source_catalog as _build_available_source_catalog_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_execution import (
+    extract_decision as _extract_decision_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_execution import (
+    extract_evidence_sufficiency as _extract_evidence_sufficiency_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_execution import (
+    extract_failure_mode as _extract_failure_mode_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_execution import (
+    extract_reasoning as _extract_reasoning_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_execution import (
+    normalize_evaluation_decision as _normalize_evaluation_decision_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_execution import (
+    populate_synthesis_state as _populate_synthesis_state_impl,
 )
 from databricks_deep_research.workflow.runtime.plan_execute_formatting import (
     extract_step_title as _extract_step_title_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_formatting import (
     format_all_observations as _format_all_observations_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_formatting import (
     format_plan_for_reflector as _format_plan_for_reflector_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_formatting import (
     format_source_quality as _format_source_quality_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_formatting import (
     format_source_topics as _format_source_topics_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_formatting import (
     obs_to_text as _obs_to_text_impl,
 )
 from databricks_deep_research.workflow.runtime.plan_execute_recovery import (
     coerce_discovered_sources as _coerce_discovered_sources_impl,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_recovery import (
     hydrate_pools_from_discovered_sources as _hydrate_pools_from_discovered_sources_impl,
 )
+from databricks_deep_research.workflow.runtime.plan_execute_runner import run_plan_execute
 from databricks_deep_research.workflow.runtime.plan_execute_types import (
     AvailableSourceDescriptor,
     PlanCycleContext,
     ReplanFeedbackEntry,
 )
-from databricks_deep_research.workflow.state import WorkflowState
-from databricks_deep_research.workflow.runtime_core.api import WorkflowRunRequest, WorkflowRunResult
 from databricks_deep_research.workflow.runtime_core import TypedRuntimeStateStore
+from databricks_deep_research.workflow.runtime_core.api import WorkflowRunRequest, WorkflowRunResult
+from databricks_deep_research.workflow.state import WorkflowState
 
 
 def _deserialize_condition(cond: Any) -> StateCondition:
@@ -150,72 +194,50 @@ def _now() -> str:
 
 def _event_detail(event: StreamEvent) -> str:
     """Extract a compact log-friendly summary from a stream event."""
-    name = type(event).__name__
-
-    if name == "ItemStartedEvent":
-        e: Any = event
-        return f"item_index={e.item_index} total={e.total_items} summary={e.item_summary[:200]!r}"
-    if name == "ItemCompletedEvent":
-        e = event
-        return f"item_index={e.item_index} items_processed={e.items_processed}"  # type: ignore[union-attr]
-    if name == "ItemsExtractedEvent":
-        e = event
-        return f"total_items={e.total_items} cycle={e.cycle}"  # type: ignore[union-attr]
-    if name == "EvaluationDecisionEvent":
-        e = event
-        return f"decision={e.decision} reasoning={e.reasoning[:500]!r}"  # type: ignore[union-attr]
-    if name == "PlanAndExecuteExitEvent":
-        e = event
-        planned = getattr(e, "total_planned", "?")  # type: ignore[union-attr]
-        return (  # type: ignore[union-attr]
-            f"reason={e.reason} items={e.total_items_processed}/{planned} "
-            f"replans={e.replan_cycles}"
-        )
-    if name == "ToolCallEvent":
-        e = event
-        args = getattr(e, "arguments", {})
-        args_display = {k: str(v)[:200] for k, v in args.items()}
-        return f"tool={e.tool_name} args={args_display}"  # type: ignore[union-attr]
-    if name == "ToolResultEvent":
-        e = event
+    if isinstance(event, ItemStartedEvent):
+        return f"item_index={event.item_index} total={event.total_items} summary={event.item_summary[:200]!r}"
+    if isinstance(event, ItemCompletedEvent):
+        return f"item_index={event.item_index} items_processed={event.items_processed}"
+    if isinstance(event, ItemsExtractedEvent):
+        return f"total_items={event.total_items} cycle={event.cycle}"
+    if isinstance(event, EvaluationDecisionEvent):
+        return f"decision={event.decision} reasoning={event.reasoning[:500]!r}"
+    if isinstance(event, PlanAndExecuteExitEvent):
         return (
-            f"tool={e.tool_name} result_len={len(e.result_summary)} "
-            f"accepted={getattr(e, 'accepted_source_count', e.source_count)} "
-            f"raw={getattr(e, 'raw_source_count', 0)}"
-        )  # type: ignore[union-attr]
-    if name == "NodeStartedEvent":
-        e = event
-        return f"type={e.node_type} label={e.label!r}"  # type: ignore[union-attr]
-    if name == "NodeCompletedEvent":
-        e = event
-        return f"duration_ms={e.duration_ms:.0f}"  # type: ignore[union-attr]
-    if name == "NodeErrorEvent":
-        e = event
-        return f"error={e.error_message[:300]!r} retry={e.will_retry}"  # type: ignore[union-attr]
-    if name == "NodeSkippedEvent":
-        e = event
-        return f"reason={e.reason[:200]!r}"  # type: ignore[union-attr]
-    if name == "WorkflowStartedEvent":
-        e = event
-        return f"workflow={e.workflow_name!r}"  # type: ignore[union-attr]
-    if name == "WorkflowCompletedEvent":
-        e = event
-        return f"duration_ms={e.duration_ms:.0f} sources={e.total_sources}"  # type: ignore[union-attr]
-    if name == "LoopIterationEvent":
-        e = event
-        return f"iteration={e.iteration}/{e.max_iterations}"  # type: ignore[union-attr]
-    if name == "LoopExitEvent":
-        e = event
-        return f"reason={e.reason} iterations={e.total_iterations}"  # type: ignore[union-attr]
-    if name == "BranchSelectedEvent":
-        e = event
-        return f"branch={e.branch_index} {e.condition_summary}"  # type: ignore[union-attr]
-    if name == "ReplanTriggeredEvent":
-        e = event
-        return f"cycle={e.cycle} remaining={e.items_remaining}"  # type: ignore[union-attr]
-    if name == "AgentOutputEvent":
-        e = event
-        return f"key={e.output_key} preview={e.output_preview[:200]!r}"  # type: ignore[union-attr]
+            f"reason={event.reason} items={event.total_items_processed}/{event.total_planned} "
+            f"replans={event.replan_cycles}"
+        )
+    if isinstance(event, ToolCallEvent):
+        args_display = {k: str(v)[:200] for k, v in event.arguments.items()}
+        return f"tool={event.tool_name} args={args_display}"
+    if isinstance(event, ToolResultEvent):
+        return (
+            f"tool={event.tool_name} result_len={len(event.result_summary)} "
+            f"accepted={event.accepted_source_count} "
+            f"raw={event.raw_source_count}"
+        )
+    if isinstance(event, NodeStartedEvent):
+        return f"type={event.node_type} label={event.label!r}"
+    if isinstance(event, NodeCompletedEvent):
+        return f"duration_ms={event.duration_ms:.0f}"
+    if isinstance(event, NodeErrorEvent):
+        return f"error={event.error_message[:300]!r} retry={event.will_retry}"
+    if isinstance(event, NodeSkippedEvent):
+        return f"reason={event.reason[:200]!r}"
+    if isinstance(event, WorkflowStartedEvent):
+        return f"workflow={event.workflow_name!r}"
+    if isinstance(event, WorkflowCompletedEvent):
+        return f"duration_ms={event.duration_ms:.0f} sources={event.total_sources}"
+    if isinstance(event, LoopIterationEvent):
+        return f"iteration={event.iteration}/{event.max_iterations}"
+    if isinstance(event, LoopExitEvent):
+        return f"reason={event.reason} iterations={event.total_iterations}"
+    if isinstance(event, BranchSelectedEvent):
+        return f"branch={event.branch_index} {event.condition_summary}"
+    if isinstance(event, ReplanTriggeredEvent):
+        return f"cycle={event.cycle} remaining={event.items_remaining}"
+    if isinstance(event, AgentOutputEvent):
+        return f"key={event.output_key} preview={event.output_preview[:200]!r}"
 
     return str(event)[:150]
 
@@ -298,8 +320,8 @@ class WorkflowExecutor:
         self._workflow_total_steps_executed = 0
 
         registry = tool_registry or ToolRegistry()
-        factories = list(tool_factories or [BuiltinToolFactory(), DatabricksToolFactory()])
-        context = factory_context or ToolFactoryContext()
+        resolved_factories: list[ToolFactory] = list(tool_factories or [BuiltinToolFactory(), DatabricksToolFactory()])
+        resolved_factory_context = factory_context or ToolFactoryContext()
 
         # Build resolver: prefer explicit resolver, else wrap registry
         if tool_resolver is not None:
@@ -307,8 +329,8 @@ class WorkflowExecutor:
         else:
             self._resolver = ToolResolver(
                 declarations=list(definition.tools) if definition.tools else None,
-                factories=factories,
-                factory_context=context,
+                factories=resolved_factories,
+                factory_context=resolved_factory_context,
                 legacy_registry=registry,
             )
 
@@ -361,6 +383,7 @@ class WorkflowExecutor:
                 "workflow.name": self._defn.name,
                 "workflow.id": self._defn.id,
                 "query": (state.query or "")[:200],
+                "workflow.query": (state.query or "")[:500],
             },
         ) as wf_span:
             yield self._emit(WorkflowStartedEvent(
@@ -1026,7 +1049,12 @@ async def run_workflow_typed(request: WorkflowRunRequest, llm_client: FrameworkL
         events.append(event)
     runtime = state.runtime_state()
     if runtime is None:
-        raise WorkflowExecutionError("Typed runtime state was not initialized")
+        raise WorkflowExecutionError(
+            "Typed runtime state was not initialized",
+            state=state,
+            events=events,
+            cause=RuntimeError("Typed runtime state was not initialized"),
+        )
     return WorkflowRunResult(runtime_state=runtime, events=events)
 
 

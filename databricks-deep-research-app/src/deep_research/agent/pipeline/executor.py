@@ -14,10 +14,11 @@ The PipelineExecutor handles:
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
-from deep_research.agent.pipeline.config import AgentConfig, AgentType, PipelineConfig
+from deep_research.agent.pipeline.config import AgentConfig, PipelineConfig
 from deep_research.agent.pipeline.protocols import (
     CustomPhase,
     PhaseInsertion,
@@ -35,7 +36,7 @@ logger = get_logger(__name__)
 # Type alias for agent functions
 AgentFunction = Callable[["ResearchState", dict[str, Any]], "ResearchState"]
 AsyncAgentFunction = Callable[
-    ["ResearchState", dict[str, Any]], "ResearchState"
+    ["ResearchState", dict[str, Any]], Awaitable["ResearchState"]
 ]
 
 
@@ -230,7 +231,7 @@ class PipelineExecutor:
         agents_executed: list[str] = []
 
         # Find starting agent
-        current_agent = self._config.start_agent
+        current_agent: str | None = self._config.start_agent
         if current_agent not in self._effective_agents:
             # Find first enabled agent if start_agent is disabled
             for agent_name in self._effective_agents:
@@ -541,18 +542,21 @@ class PipelineExecutor:
 
         # Check step completion
         if condition == "step_incomplete":
-            if hasattr(state, "current_step_index") and hasattr(state, "plan"):
-                if state.plan and state.plan.steps:
+            if (
+                hasattr(state, "current_step_index")
+                and hasattr(state, "plan")
+                and state.plan and state.plan.steps
+            ):
                     current_idx = state.current_step_index
                     if current_idx < len(state.plan.steps):
                         current_step = state.plan.steps[current_idx]
-                        return current_step.status != "completed"
+                        return bool(current_step.status != "completed")
             return False
 
         # Check overall completion
         if condition == "not_complete":
             if hasattr(state, "status"):
-                return state.status != "complete"
+                return bool(state.status != "complete")
             return False
 
         # Default: condition not recognized, don't loop

@@ -22,7 +22,6 @@ import pytest
 from databricks_deep_research.events.types import (
     ItemCompletedEvent,
     ItemStartedEvent,
-    PlanAndExecuteExitEvent,
     PlanCreatedEvent,
 )
 from databricks_deep_research.llm.client import FrameworkLLMClient
@@ -39,7 +38,7 @@ from tests.helpers import (
     print_search_queries,
     tool_calls_for_node,
 )
-from tests.integration.conftest import skip_if_transient_provider_failure, requires_databricks
+from tests.integration.conftest import requires_databricks, skip_if_transient_provider_failure
 
 
 @pytest.mark.integration
@@ -276,7 +275,6 @@ class TestEnterpriseWorkflow:
         # Dedup instrumentation should exist; duplicate rejections are workload-dependent
         sources_dedup = getattr(sources_pool.stats, "rejected_duplicate_key", 0) + getattr(sources_pool.stats, "rejected_duplicate_hash", 0)
         observations_dedup = getattr(observations_pool.stats, "rejected_duplicate_key", 0) + getattr(observations_pool.stats, "rejected_duplicate_hash", 0)
-        total_dedup = sources_dedup + observations_dedup
         total_attempts = getattr(sources_pool.stats, "attempted", 0) + getattr(observations_pool.stats, "attempted", 0)
         tool_calls = tool_calls_for_node(events, "researcher")
         assert total_attempts > 0, (

@@ -1,6 +1,5 @@
 """Unit tests for output base types."""
 
-import pytest
 
 from deep_research.output.base import SynthesisReport, SynthesizerConfig
 

@@ -46,6 +46,29 @@ What topics from remaining steps are NOT covered by current sources?
 - Having good sources for 50% does NOT justify skipping the other 50%
 - Each remaining step represents a research question - analyze it
 - Be explicit about coverage gaps in your reasoning
+
+## Source Saturation Signal
+
+### Diminishing Returns Detection
+- If the last 2+ steps returned mostly DUPLICATE results (same document titles
+  or content snippets as earlier steps), remaining steps targeting the SAME
+  sources will yield diminishing returns.
+- If most collected evidence already has rich, substantive content (not just
+  metadata or snippets), the available sources have been sufficiently mined.
+
+### Early Completion Triggers
+Consider marking COMPLETE when ALL hold:
+1. Minimum steps completed
+2. Most collected sources have substantive evidence (not just metadata/snippets)
+3. Remaining steps target sources that have already been queried multiple times
+   with similar queries and are unlikely to yield new information
+4. Coverage of the user's core question is substantive
+
+### Do NOT Complete Early When:
+- Remaining steps target DIFFERENT sources that have NOT been queried yet
+  (source-focused plans assign different sources to different steps)
+- Web search steps remain and no external validation has been gathered
+- The query explicitly asks for perspectives not yet covered
 """
 
 REFLECTOR_USER_PROMPT = """Evaluate research progress.

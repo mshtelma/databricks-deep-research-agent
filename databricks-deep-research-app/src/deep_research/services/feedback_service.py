@@ -192,8 +192,8 @@ class FeedbackService:
         if not feedback:
             return False
 
-        # Note: session.delete() is synchronous in SQLAlchemy, not async
-        self._session.delete(feedback)
+        # session.delete() needs to be awaited for AsyncSession
+        await self._session.delete(feedback)
         await self._session.flush()
 
         logger.info(

@@ -3,7 +3,6 @@
 Tests the TOKEN OPTIMIZATION exact match heuristic.
 """
 
-import pytest
 
 from deep_research.services.citation.numeric_verifier import is_exact_numeric_match
 

@@ -137,6 +137,7 @@ def setup_logging(log_level: str = "INFO", log_format: str = "text") -> None:
     console_handler.setLevel(getattr(logging, log_level.upper()))
 
     # Choose formatter based on format type
+    formatter: logging.Formatter
     if log_format.lower() == "json":
         formatter = JsonFormatter(datefmt="%Y-%m-%dT%H:%M:%S")
     elif sys.stdout.isatty() and os.environ.get("TERM"):

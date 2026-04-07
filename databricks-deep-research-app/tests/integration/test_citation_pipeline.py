@@ -20,8 +20,8 @@ import pytest
 from tests.integration.conftest import requires_all_credentials
 
 from deep_research.agent.tools.web_crawler import WebCrawler
-from deep_research.services.llm.client import LLMClient
 from deep_research.core.exceptions import ExternalServiceError
+from deep_research.services.llm.client import LLMClient
 from deep_research.services.search.brave import BraveSearchClient
 
 
@@ -43,14 +43,14 @@ class TestCitationPipelineIntegration:
         # from deep_research.services.citation.pipeline import CitationPipeline
 
         # Sample synthesized content with claims
-        content = """
+        _content = """
         Apple Inc. reported revenue of $383 billion in fiscal year 2023.
         The company's iPhone segment generated approximately 52% of total revenue.
         Tim Cook has been CEO of Apple since 2011.
         """
 
         # Sample source content
-        sources = [
+        _sources = [
             {
                 "url": "https://example.com/apple-financials",
                 "content": "Apple Inc. reported total revenue of $383.3 billion for fiscal year 2023. "
@@ -216,7 +216,10 @@ class TestCitationPipelineIntegration:
         which should trigger classical synthesis instead of interleaved generation.
         """
         from deep_research.agent.state import ResearchState, SourceInfo
-        from deep_research.services.citation.pipeline import CitationVerificationPipeline, VerificationEvent
+        from deep_research.services.citation.pipeline import (
+            CitationVerificationPipeline,
+            VerificationEvent,
+        )
 
         # Create state with sources that have no content (empty strings or None)
         state = ResearchState(

@@ -91,7 +91,7 @@ async def create_tools_from_user_sources(
 def _create_vector_search_tool(
     source: UserDataSource,
     obo_client: OBODatabricksClient,
-) -> "ResearchTool | None":
+) -> ResearchTool | None:
     """Create VectorSearchTool from UserDataSource config."""
     from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
 
@@ -114,7 +114,7 @@ def _create_vector_search_tool(
 def _create_genie_tool(
     source: UserDataSource,
     obo_client: OBODatabricksClient,
-) -> "ResearchTool | None":
+) -> ResearchTool | None:
     """Create GenieTool from UserDataSource config."""
     from deep_research.agent.tools.genie import GenieTool
 
@@ -132,7 +132,7 @@ def _create_genie_tool(
 def _create_knowledge_assistant_tool(
     source: UserDataSource,
     obo_client: OBODatabricksClient,
-) -> "ResearchTool | None":
+) -> ResearchTool | None:
     """Create KnowledgeAssistantTool from UserDataSource config."""
     from deep_research.agent.tools.knowledge_assistant import (
         create_knowledge_assistant_from_user_source,

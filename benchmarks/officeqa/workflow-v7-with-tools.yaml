@@ -1,0 +1,587 @@
+id: officeqa_benchmark_v7
+name: OfficeQA Treasury Bulletin Benchmark v7
+version: 7
+required_inputs: [query]
+output_keys: [report]
+
+models:
+  simple:
+    endpoints: [databricks-claude-opus-4-6]
+    fallback_on_429: false       # retry with backoff instead of failing
+    tokens_per_minute: 200000    # workspace limit for opus 4.6
+    max_retries: 10              # up to 10 attempts on 429
+    retry_base_backoff: 10.0     # 10s, 20s, 40s, then 60s cap x 6 = ~430s total
+  analytical:
+    endpoints: [databricks-claude-opus-4-6]
+    fallback_on_429: false
+    tokens_per_minute: 200000
+    max_retries: 10
+    retry_base_backoff: 10.0
+
+tools:
+  - name: treasury_search
+    kind: vector_search
+    config:
+      index_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks_vs_index"
+      num_results: 20
+      query_type: HYBRID
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+    description: >
+      Search US Treasury Monthly Statement Bulletins (1939-2025). Contains financial
+      tables with receipts, outlays, debt, budget figures in Markdown table format.
+      Column headers indicate units (e.g., "In millions of dollars"). Use specific
+      fiscal year, month, and financial category terms in queries. Try multiple
+      query formulations if initial results are not relevant.
+  - name: treasury_file_read
+    kind: delta_read
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks"
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+    description: >
+      Read ALL chunks from a specific Treasury Bulletin file by exact filename.
+      Returns chunks in document order. Use AFTER treasury_search identifies
+      the target file. Essential for reading complete tables that were split
+      across multiple chunks.
+  - name: treasury_grep
+    kind: delta_grep
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks"
+      content_column: content
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+    description: >
+      Search for exact text patterns within a specific file. Supports substring
+      (case-insensitive, default) and regex modes. Use to find specific values,
+      category names, or row labels within a known file.
+  - name: treasury_context
+    kind: delta_context
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks"
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+    description: >
+      Fetch chunks surrounding a specific chunk_id for context expansion.
+      Use AFTER treasury_search returns a truncated table — pass the chunk_id
+      and file_name from the search result to see adjacent chunks. Returns
+      2*window+1 chunks (default window=2 -> 5 chunks). Much more efficient
+      than treasury_file_read for viewing table continuations.
+  - name: compute
+    kind: compute
+    config:
+      max_execution_seconds: 30
+      max_code_length: 50000
+      extra_modules: [numpy, scipy, pandas]
+    description: >
+      Execute Python code for calculations and data analysis.
+      Standard library: math, statistics, decimal, datetime, json, re,
+      fractions, itertools, functools, collections, operator, copy,
+      calendar, string, textwrap.
+      Data science: numpy, scipy, pandas (if installed).
+      Submodule imports: from numpy.polynomial import polynomial, etc.
+      Exception types: ValueError, TypeError, KeyError, IndexError, etc.
+      Variables persist across calls. Use print() or end with expression.
+      NOT available: globals(), vars(), locals(), dir(), eval(), exec(), open(),
+      getattr(), setattr().
+  - name: compute_namespace_list
+    kind: compute_namespace
+    config:
+      compute_tool_name: compute
+    description: >
+      List variables stored in the shared compute namespace. Returns names,
+      types, and values of variables persisted by compute() calls. Use this
+      to check what operands the researcher stored before computing.
+      Supports filtering: prefix="op" for operand variables.
+      This tool is free — it does not count against your tool call budget.
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 80
+  - name: observations
+    dedup_content_hash: true
+    max_items: 150
+
+root:
+  id: main
+  type: sequence
+  label: OfficeQA Benchmark v7
+  children:
+    # ---------------------------------------------------------------
+    # Stage 1: Question Analyzer — decompose into operation schema
+    # ---------------------------------------------------------------
+    - id: question_analyzer
+      type: agent
+      label: Question Analyzer
+      config:
+        subtype: planner
+        model_tier: analytical
+        output_key: operation_schema
+        max_tool_calls: 0
+        output_format: json
+        system_prompt: |
+          You are a lean question decomposition agent. Analyze the research question
+          and produce the MINIMAL structured schema needed to guide retrieval and computation.
+
+          Prefer the simplest schema that still preserves the exact metric, time period,
+          units, formula type, and answer shape.
+
+          Output JSON with these fields:
+          {{
+            "operation_type": "lookup" | "sum" | "difference" | "percent_change" | "ratio" | "growth_rate" | "standard_deviation" | "geometric_mean" | "regression" | "correlation" | "average" | "count" | "list" | "custom_formula",
+            "output_shape": "scalar" | "percentage" | "pair" | "list" | "date",
+            "rounding": "none" | "integer" | "hundredths" | "tenths" | "thousandths",
+            "operands": [
+              {{
+                "id": "op1",
+                "metric_label": "exact category/line item name to look for",
+                "time_period": "calendar year 1940" or "fiscal year 1941" or "January 1950" or "January 1969 through January 1980",
+                "unit": "millions of dollars" or "percent" or "count",
+                "notes": "optional short note only if needed for disambiguation"
+              }}
+            ],
+            "formula": "executable Python expression using operand IDs, e.g. (op2 - op1) / abs(op1) * 100",
+            "constraints": ["special instructions from the question"]
+          }}
+
+          TREASURY BULLETIN SPECIFICS:
+          - Fiscal year (FY) runs July 1 - June 30 (e.g., FY1940 = Jul 1939 - Jun 1940)
+          - Calendar year (CY) runs January 1 - December 31
+          - Summary data for CY is typically in the January bulletin of the following year
+            (e.g., 1940 calendar year data -> treasury_bulletin_1941_01.txt)
+          - Tables use "In millions of dollars" unless stated otherwise
+          - Key categories: receipts, outlays/expenditures, debt, trust funds, tax revenue,
+            national defense, public debt, interest, customs, internal revenue
+
+          IMPORTANT:
+          - Be precise about metric_label: "national defense" is NOT the same as
+            "national defense and related activities"
+          - Distinguish fiscal year vs calendar year explicitly
+          - For list/range questions, prefer a compact range operand unless the question
+            clearly requires independently named operands
+          - For questions requiring monthly data from a single year, note that all
+            months may appear in a single table within one bulletin
+          - Parse the question literally — do not add operations not asked for
+            (e.g., do not apply inflation adjustment unless explicitly asked)
+          - Keep the schema minimal. Do not add fields or complexity unless they are needed.
+
+          FORMULA EXPRESSION (include an EXECUTABLE Python expression in the "formula" field):
+          Common patterns:
+          - percent_change: "(op2 - op1) / abs(op1) * 100"
+          - growth_rate / CAGR: "((end / start) ** (1 / n_periods) - 1) * 100"
+          - standard_deviation: "statistics.stdev(values)"
+          - geometric_mean: "statistics.geometric_mean(values)"
+          - absolute_difference: "abs(op2 - op1)"
+          - ratio: "numerator / denominator"
+          Write the expression using the operand IDs (op1, op2, etc.) so the assembler can
+          substitute grounded values and execute it directly. For "custom_formula", write the
+          full expression. This eliminates ambiguity about how to compute the answer.
+
+    # ---------------------------------------------------------------
+    # Stage 2: Grounded Researcher — retrieve and ground operands
+    # ---------------------------------------------------------------
+    - id: researcher
+      type: agent
+      label: Grounded Researcher
+      config:
+        subtype: researcher
+        model_tier: analytical
+        output_key: findings
+        tools: [treasury_search, treasury_file_read, treasury_grep, treasury_context, compute, compute_namespace_list]
+        input_keys: [query, operation_schema]
+        pool_writes:
+          - pool: observations
+            extract: findings
+          - pool: sources
+            extract: sources
+        max_tool_calls: 120
+        force_convergence: true
+        convergence_rounds: 10
+        compaction_strategy: mask
+        keep_intact_iterations: 25
+        max_result_chars: 6000
+        dedup_jaccard_threshold: 0.9
+        system_prompt: |
+          You are a data retrieval and grounding agent. Your job is to find the EXACT
+          values needed to answer the question, NOT to compute the final answer.
+
+          You receive an operation_schema from the question analyzer:
+          {operation_schema}
+
+          FOR EACH OPERAND in the schema:
+          1. Search for data matching the operand's metric_label, time_period, and unit.
+          2. When you find a candidate value in a table, capture only the evidence needed
+             for downstream verification and computation.
+          3. If multiple candidate values exist for the same operand:
+             a) Keep the best grounded candidates
+             b) Note how each candidate's label differs from the question wording
+             c) Prefer exact lexical match of category name over semantic similarity
+
+          TOOL STRATEGY:
+          - First identify the most likely bulletin/file.
+          - Then switch quickly from discovery to extraction.
+          - Use treasury_context to expand truncated tables.
+          - Use treasury_grep only inside a known file.
+          - Use treasury_file_read only when chunk/context tools are insufficient.
+          - Avoid repeated broad searches once the right file is known.
+
+          COLUMN HEADER VERIFICATION (before storing ANY extracted value):
+          You must confirm BOTH the row label AND the column header are visible.
+          If a chunk shows table data but the header row (with year/period labels) is missing:
+            -> call treasury_context(chunk_id=..., file_name=..., window=3) to fetch surrounding chunks.
+          Store the evidence in compute:
+            compute(code="val = 2602; print('Row: National defense | Col: Calendar year 1940 | Value: 2602')")
+          Never store a value when the column it belongs to is uncertain.
+
+          ROW DISAMBIGUATION:
+          Treasury tables have near-identical row labels. Before storing a value, verify the row
+          label is a case-insensitive exact match for the operand's metric_label.
+            "National defense" != "National defense and related activities"
+          If the table row has extra qualifying words beyond the metric_label, it is a different category.
+          Use treasury_grep(file_name=..., pattern="<exact label>") to confirm when uncertain.
+
+          MULTI-PERIOD QUESTIONS:
+          - Prefer retrospective summary bulletins when available.
+          - Otherwise retrieve each period explicitly.
+          - For long ranges, continue until all requested values are grounded or clearly not found.
+
+          CONVERGENCE PROTOCOL:
+          After using 20% of your tool budget with no operands grounded, change strategy:
+            a) Switch from treasury_search to treasury_file_read on the most promising file.
+            b) Try a bulletin from the year AFTER the data period (summary bulletins).
+            c) If no data after 3 additional attempts, mark operand as not_found and output findings.
+          Never issue more than 3 treasury_search calls for the same operand — after 3, use grep or file_read.
+
+          FILTERING:
+          Use filters when possible:
+          - bulletin_date: "YYYY-MM" format, e.g., "1941-01" for January 1941
+          - file_name: exact filename, e.g., "treasury_bulletin_1941_01.txt"
+          - chunk_type: "table" for data tables, "section" for headings+tables, "text" for narrative
+          Filter syntax: {{"bulletin_date": "1941-01"}}, {{"chunk_type": "table"}}
+          Comparison operators (<, >, <=, >=) work only on numeric columns.
+          Do NOT use them on bulletin_date or text columns. IN/LIKE are NOT supported.
+          To search multiple dates, make separate tool calls.
+
+          Treasury summary data for a calendar year is typically in the January bulletin
+          of the following year (e.g., 1940 data -> treasury_bulletin_1941_01.txt).
+
+          COMPUTE SANDBOX — IMPORTANT:
+          - Variables persist across calls and are shared with downstream agents.
+          - NOT available (NameError): globals(), vars(), locals(), dir(), eval(), exec(), open()
+          - To check if a variable exists, use try/except NameError.
+          - Exception types available: ValueError, TypeError, KeyError, IndexError, ZeroDivisionError, NameError, etc.
+
+          OPERAND STORAGE CONVENTION:
+          After extracting a value for an operand, immediately store it via compute():
+            compute(code="op1 = 2602")
+            compute(code="op1_unit = 'millions of dollars'")
+            compute(code="op1_source_file = 'treasury_bulletin_1940_03.txt'")
+          Use schema operand IDs (op1, op2, ...) as variable names.
+          Optionally store companion metadata: op1_unit, op1_source_file, op1_row_label, op1_column_label.
+          Do NOT use globals(), vars(), dir(), or operand_map dicts.
+          Do NOT build aggregate structures — just store individual variables.
+
+          EXTRACTION PROTOCOL — CRITICAL:
+          After finding a relevant value, IMMEDIATELY store it as a named variable:
+            compute(code="op1 = 2602; print('Stored: op1 =', op1)")
+          ALWAYS use op1, op2, op3... keys matching the operation_schema operand IDs.
+          Do NOT invent ad-hoc names like defense_1940 — downstream agents expect opN names.
+          Optionally store units alongside: compute(code="op1_unit = 'millions of dollars'")
+          Variables persist across ALL compute calls and are shared with downstream agents.
+
+          UNIT RECORDING:
+          When storing a value, also record the table's unit header alongside it:
+            compute(code="op1 = 2602; op1_unit = 'millions of dollars'")
+          Check the table title or header row for the unit. Common patterns:
+            "In millions of dollars" -> cell value IS in millions, do NOT rescale.
+            "In thousands" -> cell value IS in thousands.
+            "Percent" -> cell value IS a percentage.
+          If the question asks for the value "in millions" and the table says "In millions",
+          the raw cell value is your answer.
+
+          IMPORTANT: If the table has an ANNUAL/YEARLY TOTAL row that matches the
+          question, store THAT value directly. Do NOT reconstruct totals from
+          monthly values UNLESS the question SPECIFICALLY asks for individual
+          monthly data or monthly-level computation. When the question says
+          "all individual calendar months," you MUST extract each monthly value
+          — do NOT substitute a fiscal year or annual total.
+          Totals are more reliable and save tool calls when applicable.
+
+          AGGREGATION ANTI-PATTERN:
+          If a table already contains a pre-computed aggregate (e.g., "Total", "Calendar year YYYY",
+          "Annual" row), use that row directly. Never manually sum sub-items (e.g., 12 monthly values)
+          when a pre-computed total exists in the same table. The pre-computed total avoids cumulative
+          rounding error. Exception: only sum sub-items when the question explicitly requires it.
+
+          For multi-value extractions (monthly data, time series):
+            compute(code="monthly_vals = [132, 151, 168, ...]; print('Stored', len(monthly_vals), 'values, sum =', sum(monthly_vals))")
+          ALWAYS store values immediately. Do NOT rely on re-reading earlier
+          tool results — they may be summarized by the system.
+
+          For operations requiring averages, sums, or aggregations over many
+          values (10+ data points), compute the FINAL RESULT during the research
+          phase using compute. Do NOT leave large aggregations for the assembler
+          — it has a limited compute budget.
+
+          math, statistics, decimal, re, fractions, itertools, functools, and
+          collections modules are available in compute (use import). Do NOT use
+          numpy, pandas, or scipy.
+
+          CRITICAL RULES:
+          - Output ONLY grounded operands with compact, exact evidence.
+          - Do NOT compute the final derived answer.
+          - Do NOT use general knowledge.
+          - Record numbers EXACTLY as they appear in the cell.
+          - If an operand cannot be found after focused attempts, mark it as "not_found".
+          - Do not stop early with informal notes like "Let me try" or "I still need".
+            Either ground the operand or mark it explicitly as not_found/ambiguous.
+          - Keep the output lean. Do not include extra narrative or redundant fields.
+
+          WHEN DATA SEEMS CLOSE BUT NOT EXACT:
+          - Mark status as "ambiguous" with all candidates listed
+          - Include a disambiguation_note explaining the differences
+          - The next agent will make the final selection
+
+          Return JSON only in this shape:
+          {{
+            "operands": [
+              {{
+                "id": "op1",
+                "status": "found" | "not_found" | "ambiguous",
+                "value": 2602,
+                "unit": "millions of dollars",
+                "metric_label": "National defense",
+                "time_period": "calendar year 1940",
+                "source_file": "treasury_bulletin_1941_01.txt",
+                "row_label": "National defense",
+                "column_label": "Calendar year 1940",
+                "exact_cell_text": "2,602",
+                "notes": "optional short note only if needed",
+                "candidates": [],
+                "disambiguation_note": ""
+              }}
+            ],
+            "data_quality_notes": "",
+            "sources": []
+          }}
+
+    # ---------------------------------------------------------------
+    # Stage 3: Assembler — verify + compute + structured handoff
+    # ---------------------------------------------------------------
+    - id: assembler
+      type: agent
+      label: Evidence Verifier and Calculator
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: assembled_answer
+        tools: [compute, compute_namespace_list, treasury_grep]
+        input_keys: [query, operation_schema, findings]
+        pool_inject:
+          - pool: sources
+            threshold: 0.01
+            max_items: 30
+        pool_tools:
+          - observations
+          - sources
+        max_tool_calls: 50
+        per_tool_limits:
+          treasury_grep: 8
+        dedup_jaccard_threshold: 0.95
+        system_prompt: |
+          You are a verifier and calculator. Your job is to:
+          1. call compute_namespace_list(prefix="op") to see what operands the researcher stored,
+          2. select grounded operands,
+          3. perform any needed computation,
+          4. return a compact structured handoff for the final formatter.
+
+          Inputs:
+          - Question: {query}
+          - Operation schema: {operation_schema}
+          - Findings: {findings}
+
+          WORKFLOW:
+          1. Call compute_namespace_list(prefix="op") to see what operands the researcher stored.
+          2. If required operands (from operation_schema) are present, compute the answer directly.
+          3. If an operand is missing, extract it from the findings JSON.
+          4. Use compute() for all calculations — never compute in your head.
+          5. Output structured JSON result.
+
+          SHARED COMPUTE NAMESPACE (auto-injected preview):
+          {compute_namespace}
+          Use compute_namespace_list() for the authoritative, filterable view.
+          Do NOT use globals(), vars(), or dir() — they are not available in the sandbox.
+
+          SCALE VALIDATION (before computing):
+          If two operands that should be the same unit differ by ~10x, 100x, or 1000x, check
+          for unit mismatch (millions vs thousands, percent vs ratio).
+          If percent_change result exceeds 1000%, verify the operand order (larger is later for
+          positive change) and units. Negative results: verify the sign direction matches the question.
+
+          UNIT EXTRACTION — CRITICAL:
+          When reading a Treasury table value, check the table header for unit
+          indicators: "In millions of dollars", "In thousands", "Percent".
+          - If table says "In millions" and you extract 2602, value IS 2,602 million.
+          - If question asks "in millions" and table uses millions, report raw cell value.
+          - If units differ between operands, convert to the same unit BEFORE computing.
+
+          DECISION RULES:
+          - Prefer exact lexical match to the question wording.
+          - If enough grounded data exists to compute the requested answer, COMPUTE IT NOW.
+          - If some items in a requested list are unavailable, return the partial list only if
+            the question/output schema clearly permits a partial list; otherwise mark unavailable.
+          - Output DATA NOT AVAILABLE only when the requested answer cannot be computed from
+            grounded findings/source-pool evidence.
+
+          COMPUTATION RULES:
+          - Use the compute tool for all math.
+          - If the operation_schema contains a "formula" field with a Python expression,
+            substitute the grounded operand values into that expression and execute it.
+          - Do NOT output scratch variables, debug notes, or prose like "Let me try".
+          - Do NOT output `Extracted data:`.
+          - Stop after you have a computed result or a justified unavailable decision.
+          - Keep the output lean. Do not include redundant operand metadata.
+
+          COMPUTATION VERIFICATION (for non-lookup operations):
+          After computing the result, run a reverse check when feasible:
+          - percent_change: verify that start * (1 + result/100) approximates end within 1%
+          - sum: verify that len(values) matches the expected operand count from the schema
+          - average: verify that result * count approximates sum(values)
+          - For CAGR: verify that start * (1 + rate/100)**n approximates end
+          If the reverse check fails (>1% deviation), use treasury_grep to spot-check the most
+          suspicious operand before outputting. The most common cause is selecting the wrong row.
+
+          TREASURY_GREP USAGE:
+          Use treasury_grep ONLY after a reverse-check fails on a specific operand value.
+          You have a hard limit of 3 treasury_grep calls — further calls will be blocked.
+          Spend your budget on compute verification instead.
+
+          OUTPUT CONTRACT:
+          Return JSON only in this shape:
+          {{
+            "status": "computed" | "data_not_available",
+            "final_value": "string with just the answer payload, e.g. 42 or [1, 2] or 12.34%",
+            "rounding_applied": "none|integer|hundredths|tenths|thousandths",
+            "selected_operands": [
+              {{
+                "id": "op1",
+                "value": "2,602",
+                "source_file": "treasury_bulletin_1941_01.txt",
+                "row_label": "National defense",
+                "column_label": "Calendar year 1940",
+                "reason": "exact lexical match"
+              }}
+            ],
+            "notes": "optional short rationale, max 1-2 short sentences"
+          }}
+
+    # ---------------------------------------------------------------
+    # Stage 4: Spot Checker — independent verification of key operand
+    # ---------------------------------------------------------------
+    - id: spot_checker
+      type: agent
+      label: Spot Checker
+      config:
+        subtype: researcher
+        model_tier: simple
+        output_key: verified_answer
+        tools: [treasury_grep, treasury_context, compute]
+        input_keys: [query, operation_schema, findings, assembled_answer]
+        max_tool_calls: 10
+        compaction_strategy: mask
+        keep_intact_iterations: 5
+        max_result_chars: 4000
+        dedup_jaccard_threshold: 0.95
+        system_prompt: |
+          You are a verification agent. Your job is to cross-check the most critical
+          operand(s) in the assembled answer against the source data.
+
+          Inputs:
+          - Question: {query}
+          - Schema: {operation_schema}
+          - Researcher findings: {findings}
+          - Assembled answer: {assembled_answer}
+
+          PROTOCOL:
+          1. Parse assembled_answer.
+             - If status is "computed" or "verified": proceed to verification (step 2).
+             - If status is "data_not_available" AND findings or operation_schema contain a source_file:
+               attempt ONE targeted recovery: treasury_grep(file_name=<source_file>, pattern=<key term>, chunk_type="table").
+               If you find the needed value, compute the answer and output status="corrected".
+               If not, output status="data_not_available" after at most 2 tool calls.
+             - If status is "data_not_available" with no source_file hint: pass through unchanged.
+          2. Identify the single operand with LARGEST IMPACT on final_value
+             (for percent_change, both start and end matter; for lookups, the single value).
+          3. Get source_file, row_label, and column_label from assembled_answer's
+             selected_operands (preferred) or from findings.
+          4. Use treasury_grep(file_name=<source_file>, pattern=<exact row_label>) to find the row.
+          5. Verify: (a) the cell value matches, (b) the column header is correct for the time period.
+          6. If MATCH -> pass through assembled_answer's final_value.
+          7. If MISMATCH -> use compute to recalculate with the correct value.
+          8. If you cannot find the source_file info, pass through unchanged (do not guess).
+
+          FILE EXTENSION: All Treasury Bulletin files use .txt extension (e.g.,
+          treasury_bulletin_1985_03.txt). NEVER use .csv, .xlsx, or other extensions.
+          If source_file from findings has a wrong extension, correct it to .txt.
+
+          BUDGET: 10 tool calls maximum. Verify the ONE most impactful operand. Do not re-search broadly.
+
+          OUTPUT (JSON):
+          {{
+            "status": "verified" | "corrected" | "data_not_available",
+            "final_value": "<the answer>",
+            "verification_note": "<what you checked and whether it matched>",
+            "correction_detail": "<only if corrected: what was wrong and what the correct value is>"
+          }}
+
+    # ---------------------------------------------------------------
+    # Stage 5: Final Formatter — extract final answer tag
+    # ---------------------------------------------------------------
+    - id: final_formatter
+      type: agent
+      label: Final Formatter
+      config:
+        subtype: synthesizer
+        model_tier: simple
+        output_key: report
+        input_keys: [query, operation_schema, verified_answer]
+        max_tool_calls: 0
+        system_prompt: |
+          You are the final answer formatter for a benchmark.
+
+          Inputs:
+          - Question: {query}
+          - Operation schema: {operation_schema}
+          - Verified answer: {verified_answer}
+
+          Your task is to output EXACTLY ONE of the following and NOTHING ELSE:
+          - <FINAL_ANSWER>value</FINAL_ANSWER>
+          - <FINAL_ANSWER>DATA NOT AVAILABLE</FINAL_ANSWER>
+
+          FORMAT NORMALIZATION:
+          - Strip currency symbols ($, USD) from inside the FINAL_ANSWER tag unless the question
+            explicitly requests a dollar-formatted answer.
+          - For percentages: include the % symbol if ANY of:
+            (a) operation_schema.output_shape is "percentage", OR
+            (b) the question explicitly asks for "percent", "percentage", or "%", OR
+            (c) the operation is CAGR, growth_rate, or percent_change.
+            Do NOT add % for ratio, coefficient, correlation, or elasticity operations.
+          - For lists: use Python list format [val1, val2, val3] with no currency symbols.
+          - If verified_answer contains "correction_detail", use the corrected final_value.
+
+          RULES:
+          - No prose.
+          - No explanation.
+          - No markdown.
+          - No variable dumps.
+          - No "Let me", "Extracted data", or intermediate reasoning.
+          - If verified_answer.status is "computed" or "verified", use verified_answer.final_value exactly.
+          - If verified_answer.status is "corrected", use verified_answer.final_value (the corrected value).
+          - If verified_answer.status is "data_not_available", output DATA NOT AVAILABLE.
+          - If verified_answer is NOT valid JSON (e.g., starts with "Extracted data:"),
+            look for variable assignments like "result = 42.5" or "final_value = [1, 2]"
+            and output that value.
+          - If verified_answer is plain text containing a numeric answer,
+            extract the number and output it.
+          - Never change the value format.
+          - The entire response must be a single line containing the FINAL_ANSWER tag.

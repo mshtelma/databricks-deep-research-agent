@@ -1,0 +1,35 @@
+# OfficeQA benchmark configuration
+# All ${VAR} references are interpolated from environment variables at load time.
+
+repo:
+  url: https://github.com/databricks/officeqa
+  local_path: ${OFFICEQA_REPO_PATH:-benchmarks/data/officeqa}
+  branch: main
+
+# Unity Catalog coordinates (AIS workspace)
+catalog: ${OFFICEQA_CATALOG:-main}
+schema: ${OFFICEQA_SCHEMA:-officeqa_benchmark}
+delta_table: treasury_chunks
+vector_index: treasury_chunks_vs_index
+vs_endpoint_name: ${OFFICEQA_VS_ENDPOINT:-one-env-shared-endpoint-1}
+embedding_model: databricks-qwen3-embedding-0-6b
+
+# Chunking parameters
+chunking:
+  chunk_max_chars: 2000
+  chunk_overlap_chars: 200
+  table_max_chars: 8000
+  section_max_chars: 12000
+
+# SQL warehouse for delta_read / delta_grep tools
+warehouse_id: ${OFFICEQA_WAREHOUSE_ID}
+
+# Run parameters
+run:
+  concurrency: 3
+  timeout_per_question: 1800
+  results_dir: benchmarks/results/officeqa
+  resume: true
+
+# Model (overridable via CLI --model)
+model: databricks-claude-opus-4-6

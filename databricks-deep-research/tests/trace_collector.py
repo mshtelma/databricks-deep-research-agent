@@ -363,23 +363,23 @@ class TraceCollector:
             return False
 
         try:
-            import mlflow
+            from databricks_deep_research.tracing import setup_mlflow_tracing
 
-            mlflow.set_tracking_uri("databricks")
             experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME")
             if not experiment_name:
                 logger.warning(
                     "MLFLOW_EXPERIMENT_NAME not set — add it to .env.test"
                 )
                 return False
-            mlflow.set_experiment(experiment_name)
+
+            if not setup_mlflow_tracing(experiment_name=experiment_name):
+                return False
+
+            # experiment_id needed by _search_traces() for filter query
+            import mlflow
+
             exp = mlflow.get_experiment_by_name(experiment_name)
             self._experiment_id = exp.experiment_id if exp else None
-
-            # Enable async logging for non-blocking trace delivery
-            with contextlib.suppress(Exception):
-                mlflow.config.enable_async_logging()
-
             return True
         except Exception as e:
             logger.warning("MLflow setup failed: %s", e)
@@ -428,13 +428,12 @@ class TraceCollector:
     def _flush(self) -> None:
         """Flush async MLflow trace logging."""
         try:
-            import mlflow
+            from databricks_deep_research.tracing import shutdown_mlflow_tracing
 
-            if hasattr(mlflow, "flush_trace_async_logging"):
-                mlflow.flush_trace_async_logging(terminate=True)
+            shutdown_mlflow_tracing()
         except Exception as e:
             logger.debug("MLflow flush failed: %s", e)
-        # Give traces time to be delivered
+        # Allow time for traces to propagate to backend before searching
         time.sleep(3)
 
     def _search_traces(self) -> Any | None:

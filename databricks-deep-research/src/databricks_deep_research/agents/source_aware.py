@@ -8,18 +8,17 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from databricks_deep_research.tools.protocol import (
-    ResearchTool,
-    SourceKind,
-    ToolDefinition,
-    ToolResult,
-)
 from databricks_deep_research.agents.query_policy import (
     EvidenceContract,
     QueryPolicyRegistry,
     RetrievalIntent,
     RetrievalNeed,
-    RetrievalOutcome,
+)
+from databricks_deep_research.tools.protocol import (
+    ResearchTool,
+    SourceKind,
+    ToolDefinition,
+    ToolResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,7 +125,7 @@ def tool_source_kind(definition: ToolDefinition) -> str:
     # Prefer explicit source_kind if set (not the default "builtin" for enterprise tools)
     source_kind = getattr(definition, "source_kind", None)
     if source_kind and source_kind != "builtin":
-        return source_kind
+        return str(source_kind)
 
     # Fallback: heuristic inference for tools without source_kind
     source_type = (definition.source_type or "").lower()
@@ -407,8 +406,8 @@ def admit_tool_result(
     root_query: str,
 ) -> AdmittedToolResult:
     """Keep only step-relevant sources and sanitize tool content for the LLM."""
-    raw_sources = [_normalize_source(source, definition) for source in result.sources]
-    raw_sources = [source for source in raw_sources if source is not None]
+    _maybe_sources = [_normalize_source(source, definition) for source in result.sources]
+    raw_sources: list[dict[str, Any]] = [source for source in _maybe_sources if source is not None]
 
     if not raw_sources and result.success and result.content.strip():
         synthetic = _build_synthetic_source(definition, result.content)
@@ -431,31 +430,69 @@ def admit_tool_result(
     )
     if not profile["terms"] and not profile["phrases"]:
         is_valid = result.success and not _tool_result_is_empty_or_error(result)
-        early_accepted = raw_sources if is_valid else []
-        early_substantive, early_low, early_eq = _classify_sources_by_quality(early_accepted)
-        return AdmittedToolResult(
-            content=result.content,
-            accepted_sources=early_accepted,
-            rejected_sources=[] if is_valid else raw_sources,
-            raw_sources=raw_sources,
-            accepted_count=len(early_accepted),
-            rejected_count=0 if is_valid else len(raw_sources),
-            accepted_substantive_count=len(early_substantive),
-            accepted_low_value_count=len(early_low),
-            evidence_quality=early_eq,
-        )
+        if not is_valid:
+            return AdmittedToolResult(
+                content=result.content,
+                accepted_sources=[],
+                rejected_sources=raw_sources,
+                raw_sources=raw_sources,
+                accepted_count=0,
+                rejected_count=len(raw_sources),
+                accepted_substantive_count=0,
+                accepted_low_value_count=0,
+                evidence_quality="empty",
+            )
+        # Enterprise sources: still filter by relevance_score even without profile
+        source_kind = tool_source_kind(definition)
+        if source_kind in _ENTERPRISE_SOURCE_KINDS:
+            # Fall through to normal scoring — relevance_score provides signal
+            pass
+        else:
+            # Non-enterprise (web): accept all when profile is empty
+            early_substantive, early_low, early_eq = _classify_sources_by_quality(raw_sources)
+            return AdmittedToolResult(
+                content=result.content,
+                accepted_sources=raw_sources,
+                rejected_sources=[],
+                raw_sources=raw_sources,
+                accepted_count=len(raw_sources),
+                rejected_count=0,
+                accepted_substantive_count=len(early_substantive),
+                accepted_low_value_count=len(early_low),
+                evidence_quality=early_eq,
+            )
 
     for source in raw_sources:
         score, reason = _score_source_relevance(source, profile)
         source["admission_score"] = score
         source["admission_reason"] = reason
-        if _should_accept_source(definition, result, source, score):
+        accepted_flag = _should_accept_source(definition, result, source, score)
+        logger.info(
+            "ADMISSION_SOURCE_SCORE tool=%s title=%r relevance_score=%s "
+            "admission_score=%d accepted=%s reason=%s",
+            definition.name,
+            str(source.get("title", ""))[:120],
+            source.get("relevance_score"),
+            score,
+            accepted_flag,
+            reason[:200],
+        )
+        if accepted_flag:
             accepted.append(source)
         else:
             rejected.append(source)
 
     if accepted:
-        content = _format_admitted_sources(definition.name, accepted)
+        # Delta tools produce well-structured content with document ordering
+        # and complete table data.  Prefer the tool's native formatting over
+        # the generic _format_admitted_sources() which truncates aggressively
+        # (5 sources × 300 chars for non-enterprise — destroys numeric values).
+        # The tool's own `limit` parameter controls content volume.
+        source_kind_str = tool_source_kind(definition)
+        if source_kind_str == "delta_table" and result.content.strip():
+            content = result.content
+        else:
+            content = _format_admitted_sources(definition.name, accepted)
     elif rejected:
         rejected_titles = ", ".join(
             source.get("title") or source.get("url", "")
@@ -828,11 +865,25 @@ _ENTERPRISE_SOURCE_KINDS = frozenset({
     SourceKind.vector_index,
     SourceKind.sql_analytics,
     SourceKind.qa_assistant,
+    SourceKind.delta_table,
     # Keep backward compat with old string values
     "vector_search",
     "genie",
     "knowledge_assistant",
 })
+
+# Minimum cosine similarity for VS sources to get an enterprise boost.
+# 0.5+ = strong match (full boost), 0.3-0.5 = moderate (partial boost).
+_VS_STRONG_RELEVANCE_THRESHOLD = 0.5
+_VS_MODERATE_RELEVANCE_THRESHOLD = 0.3
+
+# Minimum cosine similarity for VS sources to pass the fallback acceptance
+# gate in _should_accept_source, independent of the keyword-based admission
+# score.  This is a separate signal: even if the combined admission_score is
+# below the nominal threshold of 2, a VS source whose upstream embedding
+# similarity meets this bar is accepted because the embedding search already
+# performed semantic matching.
+_VS_RELEVANCE_FALLBACK_THRESHOLD = 0.3
 
 
 def _score_source_relevance(source: dict[str, Any], profile: dict[str, Any]) -> tuple[int, str]:
@@ -858,8 +909,12 @@ def _score_source_relevance(source: dict[str, Any], profile: dict[str, Any]) -> 
     enterprise_boost = 0
     if source_kind in _ENTERPRISE_SOURCE_KINDS and relevance_score is not None:
         try:
-            if float(relevance_score) > 0:
-                enterprise_boost = 2
+            rs = float(relevance_score)
+            if rs >= _VS_STRONG_RELEVANCE_THRESHOLD:
+                enterprise_boost = 2   # Strong semantic match
+            elif rs >= _VS_MODERATE_RELEVANCE_THRESHOLD:
+                enterprise_boost = 1   # Moderate match — needs keyword support too
+            # Below threshold: no boost — must pass on keywords alone
         except (TypeError, ValueError):
             pass
     score += enterprise_boost
@@ -902,14 +957,22 @@ def _should_accept_source(
     source_kind = str(source.get("source_kind") or tool_source_kind(definition))
     relevance_score = source.get("relevance_score")
 
+    # Delta tools are deliberately invoked for a specific file — never filter.
+    if source_kind in {SourceKind.delta_table, "delta_read", "delta_grep", "delta_table"}:
+        return True
+
     if source_kind in {SourceKind.sql_analytics, SourceKind.qa_assistant, "genie", "knowledge_assistant"}:
         return True
 
     if source_kind in {SourceKind.vector_index, "vector_search"}:
         if score >= 2:
             return True
+        # Fallback: accept if the upstream embedding similarity alone is
+        # strong enough, even when keyword overlap is low.  This is a
+        # separate gate from the combined admission_score — see the
+        # _VS_RELEVANCE_FALLBACK_THRESHOLD docstring for rationale.
         try:
-            return float(relevance_score or 0.0) > 0.0
+            return float(relevance_score or 0.0) >= _VS_RELEVANCE_FALLBACK_THRESHOLD
         except (TypeError, ValueError):
             return False
 
@@ -936,11 +999,31 @@ def _extract_phrases(text: str) -> list[str]:
 
 
 def _format_admitted_sources(tool_name: str, sources: list[dict[str, Any]]) -> str:
+    # Enterprise sources (vector_index, sql_analytics, qa_assistant) carry full
+    # structured content (tables, SQL results) that gets destroyed by aggressive
+    # truncation.  Give them substantially more room so the LLM can actually read
+    # the data rows rather than just column headers.
+    is_enterprise = any(
+        s.get("source_kind") in ("vector_index", "sql_analytics", "qa_assistant")
+        for s in sources[:1]
+    )
+
+    if is_enterprise:
+        max_sources = 10
+        max_chars = 2000
+    else:
+        max_sources = 5
+        max_chars = 300
+
     lines = [f"Accepted relevant results from {tool_name}:"]
-    for source in sources[:5]:
+    for source in sources[:max_sources]:
         title = source.get("title") or source.get("url", "")
-        snippet = source.get("snippet") or source.get("content") or ""
-        lines.append(f"- {title}: {str(snippet)[:300]}")
+        # Prefer full content for enterprise sources (snippet is often truncated)
+        if is_enterprise:
+            text = source.get("content") or source.get("snippet") or ""
+        else:
+            text = source.get("snippet") or source.get("content") or ""
+        lines.append(f"- {title}: {str(text)[:max_chars]}")
     return "\n".join(lines)
 
 

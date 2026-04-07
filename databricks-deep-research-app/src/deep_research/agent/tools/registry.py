@@ -7,6 +7,7 @@ and conversion to OpenAI function calling format.
 """
 
 import logging
+from collections.abc import Iterator
 from typing import Any
 
 from deep_research.agent.tools.base import ResearchTool, ToolDefinition, ToolMap
@@ -96,7 +97,7 @@ class ToolRegistry:
                 return self._wrapped.validate_arguments(arguments)
 
         prefixed_tool = PrefixedTool(tool, prefixed_name)
-        self._tools[prefixed_name] = prefixed_tool  # type: ignore[assignment]
+        self._tools[prefixed_name] = prefixed_tool
         logger.debug(
             "Registered tool with prefix: %s (original: %s)",
             prefixed_name,
@@ -192,6 +193,6 @@ class ToolRegistry:
         """Check if a tool is registered."""
         return name in self._tools
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[ResearchTool]:
         """Iterate over registered tools."""
         return iter(self._tools.values())

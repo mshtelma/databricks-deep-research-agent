@@ -1,14 +1,11 @@
 """Unit tests for ConfidenceClassifier service."""
 
-import pytest
 
 from deep_research.services.citation.confidence_classifier import (
     ConfidenceClassifier,
     ConfidenceLevel,
     ConfidenceResult,
 )
-
-from .conftest import MockLLMResponse
 
 
 class TestClassify:
@@ -132,7 +129,7 @@ class TestIsHighConfidence:
         classifier = ConfidenceClassifier()
 
         # Use multiple high-confidence indicators to reach threshold
-        result = classifier.is_high_confidence(
+        _ = classifier.is_high_confidence(
             "According to the official report, data shows that sales grew by 50% as stated in the analysis.",
             "sales grew by 50%",
         )
@@ -164,7 +161,7 @@ class TestShouldUseQuickVerification:
         classifier = ConfidenceClassifier()
 
         # Strong attribution with quote match
-        result = classifier.should_use_quick_verification(
+        _ = classifier.should_use_quick_verification(
             "According to data, as stated in the report, revenue was exactly $5B as shown.",
             "revenue was $5B",
         )

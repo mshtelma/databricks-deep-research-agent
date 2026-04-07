@@ -10,7 +10,7 @@ Part of 007-enterprise-data-sources feature (T085, T086).
 """
 
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
@@ -22,7 +22,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from deep_research.db.base import BaseModel
 
 
-class FileType(str, Enum):
+class FileType(StrEnum):
     """Supported file types for upload.
 
     Supported types (FR-059: no OCR required):
@@ -38,7 +38,7 @@ class FileType(str, Enum):
     DOCX = "docx"
 
 
-class FileProcessingStatus(str, Enum):
+class FileProcessingStatus(StrEnum):
     """Processing status for uploaded files.
 
     Tracks the chunking pipeline state:

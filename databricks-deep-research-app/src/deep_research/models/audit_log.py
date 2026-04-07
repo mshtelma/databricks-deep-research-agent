@@ -1,7 +1,8 @@
 """AuditLog SQLAlchemy model."""
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import DateTime, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from deep_research.db.base import Base, UUIDMixin
 
 
-class AuditAction(str, Enum):
+class AuditAction(StrEnum):
     """Audit action types."""
 
     CREATE = "create"
@@ -55,7 +56,7 @@ class AuditLog(Base, UUIDMixin):
     )
 
     # Additional context (matches migration column name)
-    details: Mapped[dict | None] = mapped_column(
+    details: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB,
         nullable=True,
     )
@@ -85,7 +86,7 @@ class AuditLog(Base, UUIDMixin):
         action: AuditAction,
         resource_type: str,
         resource_id: str | None = None,
-        details: dict | None = None,
+        details: dict[str, Any] | None = None,
         ip_address: str | None = None,
         user_agent: str | None = None,
     ) -> "AuditLog":

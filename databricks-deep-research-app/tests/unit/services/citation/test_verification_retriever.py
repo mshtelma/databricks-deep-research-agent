@@ -1,7 +1,7 @@
 """Tests for Stage 7: Verification Retrieval service."""
 
 from dataclasses import dataclass
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -9,13 +9,12 @@ from deep_research.services.citation.atomic_decomposer import (
     AtomicFact,
     ClaimDecomposition,
     ClaimRevision,
-    EvidenceSource,
 )
 from deep_research.services.citation.verification_retriever import (
     InternalPoolSearcher,
     VerificationEvent,
-    VerificationRetriever,
     VerificationRetrievalMetrics,
+    VerificationRetriever,
 )
 
 

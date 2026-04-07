@@ -7,12 +7,17 @@ LLMClient and ModelConfig.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
+from databricks_deep_research import ModelTierConfig
 
-from deep_research.services.llm.types import ModelEndpoint, ModelRole, ModelTier
-
+from deep_research.services.llm.types import (
+    ModelEndpoint,
+    ModelRole,
+    SelectionStrategy,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -29,9 +34,20 @@ def _make_endpoint(endpoint_id: str, identifier: str) -> ModelEndpoint:
     )
 
 
-def _make_role(name: str, endpoint_ids: list[str]) -> ModelRole:
+def _make_role(
+    name: str,
+    endpoint_ids: list[str],
+    *,
+    fallback_on_429: bool = True,
+    rotation_strategy: SelectionStrategy = SelectionStrategy.PRIORITY,
+) -> ModelRole:
     """Create a minimal ModelRole for testing."""
-    return ModelRole(name=name, endpoints=endpoint_ids)
+    return ModelRole(
+        name=name,
+        endpoints=endpoint_ids,
+        fallback_on_429=fallback_on_429,
+        rotation_strategy=rotation_strategy,
+    )
 
 
 def _make_mock_config(
@@ -108,8 +124,8 @@ class TestBuildModelMapping:
         assert mapping["analytical"] == "databricks-llama-70b"
         assert mapping["complex"] == "databricks-o3-mini"
 
-    def test_uses_primary_endpoint_only(self) -> None:
-        """When a role has multiple endpoints, the first is used."""
+    def test_multi_endpoint_produces_model_tier_config(self) -> None:
+        """When a role has multiple endpoints, a ModelTierConfig is produced."""
         from deep_research.agent.adapters.llm_adapter import _build_model_mapping
 
         ep1 = _make_endpoint("ep-primary", "model-primary")
@@ -121,7 +137,72 @@ class TestBuildModelMapping:
 
         mapping = _build_model_mapping(llm)
 
-        assert mapping["analytical"] == "model-primary"
+        cfg = mapping["analytical"]
+        assert isinstance(cfg, ModelTierConfig)
+        assert cfg.endpoints == ["model-primary", "model-fallback"]
+        assert cfg.rotation_strategy == "PRIORITY"
+
+    def test_single_endpoint_remains_string(self) -> None:
+        """A single-endpoint role produces a plain string (backward compat)."""
+        from deep_research.agent.adapters.llm_adapter import _build_model_mapping
+
+        ep = _make_endpoint("ep-a", "model-a")
+        roles = {"analytical": _make_role("analytical", ["ep-a"])}
+        endpoints = {"ep-a": ep}
+        config = _make_mock_config(roles, endpoints)
+        llm = _make_mock_llm_client(config)
+
+        mapping = _build_model_mapping(llm)
+
+        assert mapping["analytical"] == "model-a"
+        assert isinstance(mapping["analytical"], str)
+
+    def test_complex_tier_produces_model_tier_config(self) -> None:
+        """Complex tier with 3 endpoints → ModelTierConfig with correct fields."""
+        from deep_research.agent.adapters.llm_adapter import _build_model_mapping
+
+        ep1 = _make_endpoint("opus", "opus-id")
+        ep2 = _make_endpoint("sonnet", "sonnet-id")
+        ep3 = _make_endpoint("gpt5", "gpt5-id")
+        roles = {
+            "analytical": _make_role("analytical", ["ep-a"]),
+            "complex": _make_role(
+                "complex",
+                ["opus", "sonnet", "gpt5"],
+                fallback_on_429=True,
+                rotation_strategy=SelectionStrategy.PRIORITY,
+            ),
+        }
+        ep_a = _make_endpoint("ep-a", "model-a")
+        endpoints = {"ep-a": ep_a, "opus": ep1, "sonnet": ep2, "gpt5": ep3}
+        config = _make_mock_config(roles, endpoints)
+        llm = _make_mock_llm_client(config)
+
+        mapping = _build_model_mapping(llm)
+
+        cfg = mapping["complex"]
+        assert isinstance(cfg, ModelTierConfig)
+        assert len(cfg.endpoints) == 3
+        assert cfg.endpoints == ["opus-id", "sonnet-id", "gpt5-id"]
+        assert cfg.rotation_strategy == "PRIORITY"
+
+    def test_partial_endpoint_resolution(self) -> None:
+        """3 endpoints configured, 1 fails → ModelTierConfig with 2 endpoints."""
+        from deep_research.agent.adapters.llm_adapter import _build_model_mapping
+
+        ep1 = _make_endpoint("ep-a", "model-a")
+        ep3 = _make_endpoint("ep-c", "model-c")
+        # ep-b is missing from endpoints → will fail resolution
+        roles = {"analytical": _make_role("analytical", ["ep-a", "ep-b", "ep-c"])}
+        endpoints = {"ep-a": ep1, "ep-c": ep3}
+        config = _make_mock_config(roles, endpoints)
+        llm = _make_mock_llm_client(config)
+
+        mapping = _build_model_mapping(llm)
+
+        cfg = mapping["analytical"]
+        assert isinstance(cfg, ModelTierConfig)
+        assert cfg.endpoints == ["model-a", "model-c"]
 
     def test_overrides_applied(self) -> None:
         """Model overrides replace the config-derived mapping."""
@@ -168,6 +249,21 @@ class TestBuildModelMapping:
 
         assert mapping["complex"] == "databricks-llama-70b"
 
+    def test_complex_fallback_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """When complex resolution fails, a WARNING is logged."""
+        from deep_research.agent.adapters.llm_adapter import _build_model_mapping
+
+        ep = _make_endpoint("ep-analytical", "databricks-llama-70b")
+        roles = {"analytical": _make_role("analytical", ["ep-analytical"])}
+        endpoints = {"ep-analytical": ep}
+        config = _make_mock_config(roles, endpoints)
+        llm = _make_mock_llm_client(config)
+
+        with caplog.at_level(logging.WARNING, logger="deep_research.agent.adapters.llm_adapter"):
+            _build_model_mapping(llm)
+
+        assert any("COMPLEX_TIER_FALLBACK_TO_ANALYTICAL" in rec.message for rec in caplog.records)
+
     def test_fallback_when_analytical_missing_uses_any(self) -> None:
         """When 'analytical' is missing, all three core tiers fall back to any available."""
         from deep_research.agent.adapters.llm_adapter import _build_model_mapping
@@ -190,7 +286,7 @@ class TestBuildModelMapping:
 
         roles = {"simple": _make_role("simple", [])}
         config = _make_mock_config(roles, {})
-        # get_role succeeds but endpoints is empty → IndexError caught
+        # get_role succeeds but endpoints is empty → skipped
         llm = _make_mock_llm_client(config)
 
         # With no valid endpoints at all, _build_model_mapping now raises

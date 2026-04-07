@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 def _build_request_id(tool_name: str, arguments: dict[str, Any], scope: str) -> str:
     raw = json.dumps({"tool": tool_name, "args": arguments, "scope": scope}, sort_keys=True)
-    return hashlib.md5(raw.encode()).hexdigest()
+    return hashlib.sha256(raw.encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ class ToolCallCache:
 
     def _make_key(self, tool_name: str, arguments: dict[str, Any], scope: str = "") -> str:
         raw = json.dumps({"tool": tool_name, "args": arguments, "scope": scope}, sort_keys=True)
-        return hashlib.md5(raw.encode()).hexdigest()
+        return hashlib.sha256(raw.encode()).hexdigest()
 
     def get(
         self,
@@ -97,6 +97,80 @@ class ReactResult:
 
 
 # ---------------------------------------------------------------------------
+# Compaction helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_structural_line(line: str) -> bool:
+    """Identify lines providing structural context for data interpretation.
+
+    These lines help the LLM understand *what* the numbers represent even
+    though they may not contain data values themselves (e.g., table titles,
+    document metadata, section headings).
+    """
+    lower = line.lower()
+    # Document/file metadata
+    if lower.startswith(("document:", "file:", "bulletin date:", "source:")):
+        return True
+    # Table/section titles
+    if lower.startswith(("table ", "section ", "part ", "exhibit ")):
+        return True
+    # Key-value metadata from tool formatting
+    if "chunk_type=" in lower or "page_info=" in lower or "file_name=" in lower:
+        return True
+    # Markdown table alignment row (keeps column structure interpretable)
+    if line.startswith("| ---") or line.startswith("|---"):
+        return True
+    return False
+
+
+_UNIT_INDICATORS = ("million", "thousand", "billion", "in percent")
+
+
+def _summarize_tool_result(content: str, max_chars: int = 800) -> str:
+    """Preserve key data points when compacting a tool result.
+
+    Keeps lines that contain pipe characters (markdown table rows),
+    numeric digits (data values), metadata markers (``[...]`` headers),
+    structural context (table titles, document metadata, section
+    headings), or unit indicators (e.g. "In millions of dollars").
+    Discards narrative text and whitespace to fit within *max_chars*.
+    """
+    lines = content.split("\n")
+    kept: list[str] = []
+    char_count = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or len(stripped) < 3:
+            continue
+
+        has_pipe = "|" in stripped
+        has_number = any(c.isdigit() for c in stripped)
+        is_metadata = stripped.startswith("[") and "]" in stripped
+        is_structural = _is_structural_line(stripped)
+        is_unit_line = any(u in stripped.lower() for u in _UNIT_INDICATORS)
+
+        if has_pipe or has_number or is_metadata or is_structural or is_unit_line:
+            # Cap structural-only lines to avoid long footnotes bloating output
+            if is_structural and not has_pipe and not has_number and not is_unit_line:
+                stripped = stripped[:120]
+            kept.append(stripped)
+            char_count += len(stripped) + 1
+            if char_count >= max_chars:
+                kept.append("...[additional data truncated]")
+                break
+
+    if not kept:
+        return f"[Prior results — {len(content)} chars, no tabular data]"
+
+    return (
+        f"[Compacted from {len(content)} chars — key data preserved:]\n"
+        + "\n".join(kept)
+    )
+
+
+# ---------------------------------------------------------------------------
 # ReAct loop
 # ---------------------------------------------------------------------------
 
@@ -123,6 +197,12 @@ class ReactLoop:
         stream: bool = False,
         subtype: str = "",
         max_result_chars: int = 4000,
+        compaction_strategy: str = "truncate",
+        keep_intact_iterations: int = 3,
+        dedup_jaccard_threshold: float = 0.8,
+        force_convergence: bool = False,
+        convergence_rounds: int = 4,
+        per_tool_limits: dict[str, int] | None = None,
     ) -> None:
         self._llm = llm_client
         self._ctx = tool_context or ToolContext()
@@ -138,6 +218,7 @@ class ReactLoop:
         self._stream = stream
         self._subtype = subtype
         self._max_result_chars = max_result_chars
+        self._compaction_strategy = compaction_strategy
         self._fallback_tools: dict[str, ResearchTool] = {}
         self._fallback_enabled = False
         self._fallback_retry_used = False
@@ -146,11 +227,183 @@ class ReactLoop:
         self._step_query_signatures: set[str] = set()
         self._tool_outcome_history: dict[str, list[dict[str, Any]]] = {}
         self._vs_optimizer = VectorQueryOptimizer(llm_client)
+        self._seen_source_urls: set[str] = set()
+        self._consecutive_zero_novel_rounds: int = 0
+        self._same_tool_consecutive_rounds: int = 0
+        self._last_round_tool: str = ""
+        self._budget_warned: bool = False
+        self._force_convergence = force_convergence
+        self._convergence_rounds = convergence_rounds
+        self._active_tool_names: set[str] | None = None  # None = all tools allowed
+        self._compact_after_rounds: int = max(2, max_tool_calls * 2 // 5)
+        self._keep_intact: int = keep_intact_iterations
+        self._jaccard_threshold = dedup_jaccard_threshold
+        self._per_tool_limits: dict[str, int] = dict(per_tool_limits) if per_tool_limits else {}
+        self._per_tool_counts: dict[str, int] = {}
+        # Pre-compute set for O(1) lookup — budget-free tools don't count
+        # against max_tool_calls budget.
+        self._budget_free_tools: frozenset[str] = frozenset(
+            t.definition.name for t in tools
+            if t.definition.metadata.get("budget_free", False)
+        )
 
+    # -- Budget-aware guidance -----------------------------------------------
+
+    def _inject_budget_guidance(
+        self,
+        messages: list[dict[str, Any]],
+        remaining: int,
+    ) -> list[dict[str, Any]] | None:
+        """Inject budget awareness; return restricted tool_defs or None.
+
+        Forced convergence when stuck in circular search loops (≥4 zero-novel rounds).
+        At ≤25% budget remaining (once): warn to start writing findings.
+        At ≤2 calls remaining: critical message + restrict to compute-only.
+        """
+        if remaining <= 0:
+            return None
+
+        # Forced convergence: agent stuck in circular search loops.
+        # Only fires when force_convergence is enabled (discovery-style nodes).
+        # Phase 1 (round 4): restrict to compute-only for final calculations.
+        # Phase 2 (round 5+): no tools — execution gate rejects all calls.
+        if self._force_convergence and self._consecutive_zero_novel_rounds >= self._convergence_rounds:
+            compute_tool = self._all_tools.get("compute")
+            has_stored_values = (
+                compute_tool is not None
+                and hasattr(compute_tool, "_namespace")
+                and bool(getattr(compute_tool, "_namespace", None))
+            )
+            if has_stored_values:
+                if self._consecutive_zero_novel_rounds == self._convergence_rounds:
+                    # Phase 1: compute-only for final calculations
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"FORCED CONVERGENCE: {self._convergence_rounds} consecutive tool-call rounds returned no "
+                            "new data. You have stored values in compute. Perform any final "
+                            "calculations now, then output your COMPLETE FINDINGS."
+                        ),
+                    })
+                    logger.info(
+                        "REACT_FORCED_CONVERGENCE node=%s zero_novel_rounds=%d threshold=%d phase=compute_only",
+                        self._node_id, self._consecutive_zero_novel_rounds, self._convergence_rounds,
+                    )
+                    compute_defs = [
+                        td for td in self._tool_defs
+                        if td["function"]["name"] == "compute"
+                        or td["function"]["name"] in self._budget_free_tools
+                    ]
+                    return compute_defs if compute_defs else []
+                else:
+                    # Phase 2+: no tools — execution gate rejects all calls
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "FINAL WARNING: You must output your COMPLETE FINDINGS now. "
+                            "No more tool calls are available. Write your full output."
+                        ),
+                    })
+                    logger.info(
+                        "REACT_FORCED_CONVERGENCE node=%s zero_novel_rounds=%d threshold=%d phase=text_only",
+                        self._node_id, self._consecutive_zero_novel_rounds, self._convergence_rounds,
+                    )
+                    return []  # Empty → _active_tool_names = set() → gate rejects all
+
+        if remaining <= 2:
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"CRITICAL: Only {remaining} tool call(s) remaining. "
+                    "Include your COMPLETE FINAL OUTPUT text in this response. "
+                    "Write your full findings/answer alongside any last tool call. "
+                    "If you stored values via compute, reference them in your output."
+                ),
+            })
+            logger.info(
+                "REACT_BUDGET_CRITICAL node=%s remaining=%d",
+                self._node_id, remaining,
+            )
+            compute_defs = [
+                td for td in self._tool_defs
+                if td["function"]["name"] == "compute"
+                or td["function"]["name"] in self._budget_free_tools
+            ]
+            return compute_defs if compute_defs else None
+
+        remaining_pct = remaining / self._max_tool_calls if self._max_tool_calls > 0 else 1.0
+        if remaining_pct <= 0.25 and not self._budget_warned:
+            self._budget_warned = True
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"BUDGET: {remaining} tool calls remaining out of "
+                    f"{self._max_tool_calls}. Start writing your findings. "
+                    "Store any remaining values in compute."
+                ),
+            })
+            logger.info(
+                "REACT_BUDGET_WARNING node=%s remaining=%d",
+                self._node_id, remaining,
+            )
+
+        return None
 
     def _normalize_query_signature(self, tool_name: str, rewritten_query: str) -> str:
         normalized = " ".join(str(rewritten_query).lower().split())
         return f"{tool_name}:{normalized}"
+
+    def _canonical_dedup_signature(self, tool_name: str, args: dict[str, Any]) -> str:
+        """Build a stable, argument-aware canonical signature for dedup.
+
+        Separate from rendered_query_text (which serves prompt/logging).
+        Deterministic: sorted keys, lowercased, empty values omitted.
+
+        For tools with a ``query`` or ``question`` key, uses the normalized
+        query text (backward-compatible with existing VS dedup).  For all
+        other tools, includes every non-empty argument value.
+        """
+        query = args.get("query") or args.get("question")
+        if query:
+            normalized = " ".join(str(query).lower().split())
+            return f"{tool_name}:{normalized}"
+
+        # Non-query tools: canonical signature from sorted, non-empty args
+        # TODO: use json.dumps(v, sort_keys=True) for dict/list values
+        parts: list[str] = []
+        for k in sorted(args.keys()):
+            v = args[k]
+            if v is None or v == "":
+                continue
+            v_str = " ".join(str(v).lower().split())
+            parts.append(f"{k}={v_str}")
+        return f"{tool_name}:{' '.join(parts)}"
+
+    def _is_known_duplicate_sig(self, canonical_sig: str, tool_name: str) -> bool:
+        """Check-only (no registration) — is this signature already known?
+
+        Returns True if ``canonical_sig`` matches an existing entry in
+        ``_step_query_signatures`` by exact match or Jaccard near-duplicate.
+        Does **not** register the signature.
+        """
+        if canonical_sig in self._step_query_signatures:
+            return True
+        sig_body = canonical_sig.split(":", 1)[1] if ":" in canonical_sig else ""
+        sig_words = set(sig_body.split())
+        if len(sig_words) < 2:
+            return False
+        for prev_sig in self._step_query_signatures:
+            if not prev_sig.startswith(f"{tool_name}:"):
+                continue
+            prev_body = prev_sig.split(":", 1)[1]
+            prev_words = set(prev_body.split())
+            if not prev_words:
+                continue
+            intersection = len(sig_words & prev_words)
+            union = len(sig_words | prev_words)
+            if union > 0 and intersection / union > self._jaccard_threshold:
+                return True
+        return False
 
     def _record_tool_outcome(self, tool_name: str, meta: dict[str, Any], rewritten_query: str) -> None:
         history = self._tool_outcome_history.setdefault(tool_name, [])
@@ -158,15 +411,71 @@ class ReactLoop:
         if len(history) > 6:
             del history[0]
 
+    # Default Jaccard dedup threshold; overridden by self._jaccard_threshold
+    _JACCARD_DEDUP_THRESHOLD = 0.8
+
     def _is_low_yield_duplicate(self, tool_name: str, rewritten_query: str) -> bool:
+        """Return True if this query is a (near-)duplicate of a previous one for this tool."""
         signature = self._normalize_query_signature(tool_name, rewritten_query)
-        if signature not in self._step_query_signatures:
+
+        # Exact match on normalized query — unconditionally skip
+        if signature in self._step_query_signatures:
+            logger.info(
+                "REACT_EXACT_DEDUP_SKIP node=%s tool=%s query=%r",
+                self._node_id, tool_name, rewritten_query[:200],
+            )
+            return True
+
+        # Near-duplicate: Jaccard overlap on word sets for the same tool
+        query_words = set(rewritten_query.lower().split())
+        if len(query_words) < 2:
             return False
-        history = self._tool_outcome_history.get(tool_name, [])
-        if not history:
-            return False
-        latest = history[-1]
-        return int(latest.get("accepted_substantive_count", 0) or 0) == 0
+
+        for prev_sig in self._step_query_signatures:
+            if not prev_sig.startswith(f"{tool_name}:"):
+                continue
+            prev_words = set(prev_sig.split(":", 1)[1].split())
+            if not prev_words:
+                continue
+            intersection = len(query_words & prev_words)
+            union = len(query_words | prev_words)
+            if union > 0 and intersection / union > self._jaccard_threshold:
+                logger.info(
+                    "REACT_JACCARD_DEDUP_SKIP node=%s tool=%s jaccard=%.2f query=%r prev=%r",
+                    self._node_id, tool_name, intersection / union,
+                    rewritten_query[:200], prev_sig.split(":", 1)[1][:200],
+                )
+                return True
+
+        return False
+
+    def _dedup_check_and_register(
+        self, tool_name: str, query: str,
+    ) -> dict[str, Any] | None:
+        """Check if query is a near-duplicate; if not, register it for future checks.
+
+        Returns a skip-meta dict if duplicate (caller should return early),
+        or None if the query is novel (caller should proceed with execution).
+        """
+        if self._is_low_yield_duplicate(tool_name, query):
+            logger.info(
+                "REACT_DEDUP_SKIP node=%s tool=%s query=%r",
+                self._node_id, tool_name, query[:200],
+            )
+            return {
+                "tool_success": True, "tool_error": "",
+                "raw_source_count": 0, "accepted_source_count": 0,
+                "accepted_substantive_count": 0,
+                "accepted_low_value_count": 0,
+                "rejected_source_count": 0,
+                "evidence_quality": "empty",
+                "failure_mode": "duplicate_low_yield",
+                "needs_adaptation": True,
+            }
+        self._step_query_signatures.add(
+            self._normalize_query_signature(tool_name, query)
+        )
+        return None
 
     # -- Public interface ---------------------------------------------------
 
@@ -204,6 +513,23 @@ class ReactLoop:
                 if call_count > 0:
                     self._compact_old_tool_results(messages)
 
+                # Budget-aware guidance + optional tool restriction
+                remaining = self._max_tool_calls - call_count
+                restricted_tools = self._inject_budget_guidance(messages, remaining)
+                active_tool_defs = (
+                    restricted_tools
+                    if restricted_tools is not None
+                    else (self._tool_defs if self._tools else None)
+                )
+
+                # Derive allowed tool names for execution gate
+                if active_tool_defs is not None:
+                    self._active_tool_names = {
+                        td["function"]["name"] for td in active_tool_defs
+                    }
+                else:
+                    self._active_tool_names = None  # None = all tools allowed
+
                 # LLM call
                 if self._stream and call_count == 0 and not first_turn_retried:
                     response, stream_events = await self._stream_call(messages)
@@ -214,7 +540,7 @@ class ReactLoop:
                         self._model_tier,
                         temperature=self._temperature,
                         max_tokens=self._max_tokens,
-                        tools=self._tool_defs if self._tools else None,
+                        tools=active_tool_defs,
                     )
 
                 # Track usage
@@ -277,6 +603,36 @@ class ReactLoop:
                         "no_tool_calls" if not response.tool_calls
                         else "max_calls_reached"
                     )
+
+                    # ── Compute namespace fallback ─────────────────────
+                    # When max_calls is hit with empty content, dump any
+                    # values the agent stored in the compute tool's
+                    # namespace.  Zero-cost (no extra LLM call).
+                    if (
+                        exit_reason == "max_calls_reached"
+                        and not response.content.strip()
+                    ):
+                        compute_tool = self._all_tools.get("compute")
+                        if compute_tool and hasattr(compute_tool, "_namespace"):
+                            user_vars = {
+                                k: repr(v)
+                                for k, v in compute_tool._namespace.items()
+                                if isinstance(v, (int, float, str, list, dict, tuple, bool))
+                            }
+                            if user_vars:
+                                parts = [f"{k} = {v}" for k, v in user_vars.items()]
+                                response = LLMResponse(
+                                    content="Extracted data:\n" + "\n".join(parts),
+                                    tool_calls=[],
+                                    model=response.model,
+                                    usage=response.usage,
+                                )
+                                exit_reason = "namespace_fallback"
+                                logger.info(
+                                    "REACT_NAMESPACE_FALLBACK node=%s vars=%d",
+                                    self._node_id, len(user_vars),
+                                )
+
                     logger.info(
                         "REACT_DONE node=%s calls=%d content_len=%d sources=%d "
                         "exit_reason=%s",
@@ -308,16 +664,30 @@ class ReactLoop:
                 to_execute: list[tuple[ToolCall, dict[str, Any]]] = []
                 sources_before_round = len(sources)
 
+                budget_exhausted = False
                 for tc in response.tool_calls:
-                    if call_count >= self._max_tool_calls:
-                        break
-                    call_count += 1
+                    is_free = tc.function_name in self._budget_free_tools
+
+                    if not is_free:
+                        if budget_exhausted or call_count >= self._max_tool_calls:
+                            budget_exhausted = True
+                            responded_tc_ids.add(tc.id)
+                            messages.append(self._tool_msg(
+                                tc.id, "Error: tool call budget exhausted",
+                            ))
+                            continue
+                        call_count += 1
+
                     try:
                         args = json.loads(tc.arguments) if tc.arguments else {}
                     except json.JSONDecodeError:
                         args = {}
 
+                    # Step-scoped cache (same step, same query)
                     cached = self._cache.get(tc.function_name, args, scope=self._cache_scope)
+                    if cached is None:
+                        # Global cross-step cache (any step, same tool + args)
+                        cached = self._cache.get(tc.function_name, args, scope="")
                     if cached is not None:
                         content, cached_sources = cached
                         cached_results[tc.id] = (content, cached_sources)
@@ -376,6 +746,14 @@ class ReactLoop:
                             tool_srcs,
                             scope=self._cache_scope,
                         )
+                        # Global cross-step cache
+                        self._cache.put(
+                            tc.function_name,
+                            exec_args,
+                            result_content,
+                            tool_srcs,
+                            scope="",
+                        )
                         messages.append(self._tool_msg(tc.id, result_content))
                         responded_tc_ids.add(tc.id)
                         events.append(ToolResultEvent(
@@ -390,16 +768,101 @@ class ReactLoop:
                             tool_error=str(tool_result_meta.get("tool_error", "") or ""),
                         ))
 
-                    if call_count >= self._max_tool_calls:
-                        break
-
                 # Ensure ALL tool_calls have tool_result messages (prevents
                 # "tool_use without tool_result" errors from Anthropic API)
                 for tc in response.tool_calls:
                     if tc.id not in responded_tc_ids:
-                        messages.append(self._tool_msg(
-                            tc.id, "Skipped: tool call budget exhausted"
-                        ))
+                        messages.append(self._tool_msg(tc.id, ""))
+
+                # Track novel sources for diminishing-returns detection.
+                # Restricted calls (gate-blocked) and builtin tool calls
+                # (compute) are excluded — they don't represent retrieval
+                # attempts and shouldn't accelerate convergence.
+                novel_urls_this_round: set[str] = set()
+                any_unrestricted = False
+                for tc in response.tool_calls:
+                    if tc.id in exec_results:
+                        _, tool_srcs, tool_meta = exec_results[tc.id]
+                        if str(tool_meta.get("tool_error", "")).startswith(
+                            "tool_restricted:"
+                        ):
+                            continue
+                        # Builtin tools (compute, compute_namespace) process
+                        # data, not retrieve sources — exclude from
+                        # convergence tracking.
+                        if tool_meta.get("evidence_quality") == "builtin":
+                            continue
+                        any_unrestricted = True
+                        for src in tool_srcs:
+                            url = str(src.get("url", "") if isinstance(src, dict) else getattr(src, "url", ""))
+                            url = url.rstrip("/").lower()
+                            if url and url not in self._seen_source_urls:
+                                novel_urls_this_round.add(url)
+                    elif tc.id in cached_results:
+                        # Exclude cached builtin tools from convergence
+                        tool = self._all_tools.get(tc.function_name)
+                        if tool and tool_source_kind(tool.definition) == "builtin":
+                            continue
+                        any_unrestricted = True
+                self._seen_source_urls.update(novel_urls_this_round)
+
+                if len(novel_urls_this_round) == 0 and responded_tc_ids and any_unrestricted:
+                    self._consecutive_zero_novel_rounds += 1
+                elif any_unrestricted:
+                    self._consecutive_zero_novel_rounds = 0
+                # When all calls were restricted or builtin: counter unchanged
+
+                if self._force_convergence and self._consecutive_zero_novel_rounds >= 2:
+                    logger.info(
+                        "REACT_EARLY_STOP_NUDGE node=%s rounds=%d seen_urls=%d",
+                        self._node_id, self._consecutive_zero_novel_rounds,
+                        len(self._seen_source_urls),
+                    )
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "The last 2 rounds of tool calls returned no new unique sources. "
+                            "You likely have sufficient evidence. Synthesize your findings "
+                            "and provide your observation now."
+                        ),
+                    })
+
+                # Track tool diversity — nudge LLM when it hammers a single tool
+                round_tool_names: set[str] = set()
+                for tc in response.tool_calls:
+                    if tc.id in responded_tc_ids:
+                        round_tool_names.add(tc.function_name)
+
+                if len(round_tool_names) == 1 and len(self._tools) > 1:
+                    only_tool = next(iter(round_tool_names))
+                    if only_tool == self._last_round_tool:
+                        self._same_tool_consecutive_rounds += 1
+                    else:
+                        self._same_tool_consecutive_rounds = 1
+                    self._last_round_tool = only_tool
+                else:
+                    self._same_tool_consecutive_rounds = 0
+                    self._last_round_tool = ""
+
+                if self._force_convergence and self._same_tool_consecutive_rounds >= 3 and len(self._tools) > 1:
+                    other_tools = [n for n in self._tools if n != self._last_round_tool]
+                    logger.info(
+                        "REACT_TOOL_DIVERSITY_NUDGE node=%s repeated_tool=%s "
+                        "rounds=%d other_tools=%s",
+                        self._node_id, self._last_round_tool,
+                        self._same_tool_consecutive_rounds, other_tools,
+                    )
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"You have used only '{self._last_round_tool}' for the last "
+                            f"{self._same_tool_consecutive_rounds} rounds. "
+                            f"Other tools are available: {', '.join(other_tools)}. "
+                            "For cross-validation and broader coverage, try querying "
+                            "a different tool before concluding this step."
+                        ),
+                    })
+                    self._same_tool_consecutive_rounds = 0
 
                 if (
                     self._fallback_tools
@@ -416,6 +879,28 @@ class ReactLoop:
     ) -> tuple[str, str, list[Any], dict[str, Any]]:
         """Execute one tool call. Returns (tc_id, content, sources, diagnostics)."""
         tool_name = tc.function_name
+
+        # Enforce tool restriction from budget guidance / forced convergence
+        if (
+            self._active_tool_names is not None
+            and tool_name not in self._active_tool_names
+        ):
+            logger.info(
+                "REACT_TOOL_RESTRICTED node=%s tool=%s allowed=%s",
+                self._node_id, tool_name, sorted(self._active_tool_names),
+            )
+            return tc.id, (
+                f"Tool '{tool_name}' is not available in the current phase. "
+                f"Allowed: {sorted(self._active_tool_names) or 'none — output text only'}. "
+                "Write your findings as text."
+            ), [], {
+                "tool_success": False,
+                "tool_error": f"tool_restricted:{tool_name}",
+                "raw_source_count": 0,
+                "accepted_source_count": 0,
+                "rejected_source_count": 0,
+            }
+
         tool = self._tools.get(tool_name)
         if tool is None:
             return tc.id, f"Error: Unknown tool '{tool_name}'", [], {
@@ -438,13 +923,98 @@ class ReactLoop:
             {k: str(v)[:200] for k, v in log_args.items()},
         )
 
+        # ── Per-tool call limits ────────────────────────────
+        if tool_name in self._per_tool_limits:
+            limit = self._per_tool_limits[tool_name]
+            count = self._per_tool_counts.get(tool_name, 0)
+            self._per_tool_counts[tool_name] = count + 1  # always count attempt
+            if count >= limit:
+                logger.info(
+                    "REACT_TOOL_BUDGET_EXHAUSTED node=%s tool=%s used=%d limit=%d",
+                    self._node_id, tool_name, count, limit,
+                )
+                return tc.id, (
+                    f"Tool '{tool_name}' budget exhausted ({count}/{limit} calls used). "
+                    f"Use a different tool or write your findings."
+                ), [], {
+                    "tool_success": False,
+                    "tool_error": f"tool_budget_exhausted:{tool_name}",
+                    "raw_source_count": 0,
+                    "accepted_source_count": 0,
+                    "rejected_source_count": 0,
+                }
+
         try:
             # Check for VS query optimization (LLM or passthrough mode)
             source_kind = tool_source_kind(tool.definition)
             query_policy = (tool.definition.metadata or {}).get("query_policy", "")
 
             if source_kind == "vector_index" and query_policy in ("llm", "passthrough"):
-                return await self._execute_vs_optimized(tc, tool, args, query_policy)
+                # Dedup: exact + Jaccard check against step query signatures
+                original_query = str(args.get("query", "")).strip()
+                skip_meta = self._dedup_check_and_register(tool_name, original_query)
+                if skip_meta is not None:
+                    logger.info(
+                        "REACT_DEDUP_SKIP node=%s tool=%s query=%r",
+                        self._node_id, tool_name, original_query[:120],
+                    )
+                    return tc.id, "", [], skip_meta
+
+                # Global cache check with original (pre-optimizer) args
+                vs_cached = self._cache.get(tc.function_name, args, scope="")
+                if vs_cached is not None:
+                    cached_content, cached_sources = vs_cached
+                    logger.info(
+                        "VS_GLOBAL_CACHE_HIT node=%s tool=%s query=%r",
+                        self._node_id, tool_name, str(args.get("query", ""))[:200],
+                    )
+                    return tc.id, cached_content, cached_sources, {
+                        "tool_success": True,
+                        "tool_error": "",
+                        "raw_source_count": len(cached_sources),
+                        "accepted_source_count": len(cached_sources),
+                        "accepted_substantive_count": len(cached_sources),
+                        "accepted_low_value_count": 0,
+                        "rejected_source_count": 0,
+                        "evidence_quality": "cached",
+                        "failure_mode": "",
+                        "needs_adaptation": False,
+                    }
+                result = await self._execute_vs_optimized(tc, tool, args, query_policy)
+                _tc_id, vs_content, vs_sources, vs_meta = result
+                if vs_meta.get("tool_success", False) and vs_sources:
+                    self._cache.put(tc.function_name, args, vs_content, vs_sources, scope="")
+                return result
+
+            # ── Builtin deterministic tools (compute) ────────────────────
+            # Compute results are mathematical outputs, not retrieval sources.
+            # Routing through admission creates a synthetic source, scores it
+            # on keyword overlap (always ≈0 for numbers), and rejects it —
+            # replacing the actual computation with "No relevant results
+            # accepted."  Bypass the entire admission pipeline.
+            if tool_source_kind(tool.definition) == "builtin":
+                tool_result = await tool.execute(
+                    tool.validate_arguments(args), self._ctx
+                )
+                logger.info(
+                    "BUILTIN_TOOL_RESULT node=%s tool=%s success=%s content_len=%d",
+                    self._node_id,
+                    tool_name,
+                    tool_result.success,
+                    len(tool_result.content),
+                )
+                return tc.id, tool_result.content, [], {
+                    "tool_success": tool_result.success,
+                    "tool_error": tool_result.error or "",
+                    "raw_source_count": 0,
+                    "accepted_source_count": 0,
+                    "accepted_substantive_count": 0,
+                    "accepted_low_value_count": 0,
+                    "rejected_source_count": 0,
+                    "evidence_quality": "builtin",
+                    "failure_mode": "" if tool_result.success else "tool_error",
+                    "needs_adaptation": not tool_result.success,
+                }
 
             planned = plan_tool_arguments(
                 tool.definition,
@@ -474,36 +1044,58 @@ class ReactLoop:
                     [query[:200] for query in planned.alternate_queries],
                 )
 
-            if self._is_low_yield_duplicate(tool_name, planned.rewritten_query):
+            # For delta tools (file_name + pattern), include all retrieval-
+            # shaping args in the dedup key so different patterns on the same
+            # file are not falsely deduplicated.
+            if source_kind in ("delta_table",):
+                dedup_parts = []
+                for k in sorted(planned.arguments.keys()):
+                    v = planned.arguments[k]
+                    if v is not None and v != "" and k != "_alternate_queries":
+                        dedup_parts.append(f"{k}={str(v).lower().strip()}")
+                dedup_query = " ".join(dedup_parts)
+            else:
+                dedup_query = planned.rewritten_query
+
+            skip_meta = self._dedup_check_and_register(tool_name, dedup_query)
+            if skip_meta is not None:
+                return tc.id, f"Skipped duplicate {tool_name} query", [], skip_meta
+
+            # Post-rewrite cache: catches different raw queries → same rewrite
+            rewritten_cache_args = {k: v for k, v in planned.arguments.items() if k != "_alternate_queries"}
+            post_cached = self._cache.get(tc.function_name, rewritten_cache_args, scope=self._cache_scope)
+            if post_cached is None:
+                post_cached = self._cache.get(tc.function_name, rewritten_cache_args, scope="")
+            if post_cached is not None:
                 logger.info(
-                    "REACT_DUPLICATE_LOW_YIELD_SKIP node=%s tool=%s strategy=%s query=%r",
-                    self._node_id, tool_name, planned.strategy, planned.rewritten_query[:200],
+                    "POST_REWRITE_CACHE_HIT node=%s tool=%s query=%r",
+                    self._node_id, tool_name, planned.rewritten_query[:200],
                 )
-                return tc.id, f"Skipped duplicate low-yield {tool_name} query", [], {
-                    "tool_success": True,
-                    "tool_error": "",
-                    "raw_source_count": 0,
-                    "accepted_source_count": 0,
-                    "accepted_substantive_count": 0,
+                content, cached_sources = post_cached
+                return tc.id, content, cached_sources, {
+                    "tool_success": True, "tool_error": "",
+                    "raw_source_count": len(cached_sources),
+                    "accepted_source_count": len(cached_sources),
+                    "accepted_substantive_count": len(cached_sources),
                     "accepted_low_value_count": 0,
                     "rejected_source_count": 0,
-                    "evidence_quality": "empty",
-                    "failure_mode": "duplicate_low_yield",
-                    "needs_adaptation": True,
+                    "evidence_quality": "cached", "failure_mode": "",
+                    "needs_adaptation": False,
                 }
-            self._step_query_signatures.add(self._normalize_query_signature(tool_name, planned.rewritten_query))
+
             validated_args = tool.validate_arguments(planned.arguments)
             async with trace_span(
                 f"tool.{tool_name}", span_type="TOOL",
                 attributes={
                     "tool.name": tool_name,
                     "tool.args": str({k: str(v)[:100] for k, v in planned.arguments.items()}),
+                    "tool.query": str(planned.rewritten_query)[:500],
                 },
             ) as tool_span:
-                result = await tool.execute(validated_args, self._ctx)
+                tool_result = await tool.execute(validated_args, self._ctx)
                 admitted = admit_tool_result(
                     tool.definition,
-                    result,
+                    tool_result,
                     current_step=self._ctx.current_step,
                     root_query=self._ctx.query,
                 )
@@ -547,8 +1139,8 @@ class ReactLoop:
                 if tool_span:
                     tool_span.set_attributes({
                         "tool.result_len": len(admitted.content),
-                        "tool.success": result.success,
-                        "tool.error": result.error or "",
+                        "tool.success": tool_result.success,
+                        "tool.error": tool_result.error or "",
                         "tool.source_count": admitted.accepted_count,
                         "tool.raw_source_count": len(admitted.raw_sources),
                         "tool.accepted_source_count": admitted.accepted_count,
@@ -561,15 +1153,15 @@ class ReactLoop:
                         "tool.evidence_quality": admitted.evidence_quality,
                         "tool.failure_mode": admitted.failure_mode,
                         "tool.needs_adaptation": admitted.needs_adaptation,
-                        "tool.failure_class": str(result.data.get("failure_class", "")),
+                        "tool.failure_class": str(tool_result.data.get("failure_class", "")),
                         "tool.suppressed_by_failure_cache": bool(
-                            result.data.get("suppressed_by_failure_cache", False)
+                            tool_result.data.get("suppressed_by_failure_cache", False)
                         ),
-                        "tool.suppression_scope": str(result.data.get("suppression_scope", "")),
+                        "tool.suppression_scope": str(tool_result.data.get("suppression_scope", "")),
                     })
                 meta = {
-                    "tool_success": result.success,
-                    "tool_error": result.error or "",
+                    "tool_success": tool_result.success,
+                    "tool_error": tool_result.error or "",
                     "raw_source_count": len(admitted.raw_sources),
                     "accepted_source_count": admitted.accepted_count,
                     "accepted_substantive_count": admitted.accepted_substantive_count,
@@ -578,12 +1170,16 @@ class ReactLoop:
                     "evidence_quality": admitted.evidence_quality,
                     "failure_mode": admitted.failure_mode,
                     "needs_adaptation": admitted.needs_adaptation,
-                    "failure_class": str(result.data.get("failure_class", "")),
+                    "failure_class": str(tool_result.data.get("failure_class", "")),
                     "suppressed_by_failure_cache": bool(
-                        result.data.get("suppressed_by_failure_cache", False)
+                        tool_result.data.get("suppressed_by_failure_cache", False)
                     ),
-                    "suppression_scope": str(result.data.get("suppression_scope", "")),
+                    "suppression_scope": str(tool_result.data.get("suppression_scope", "")),
                 }
+                # Cache with rewritten args too (so post-rewrite lookup hits next time)
+                rewritten_put_args = {k: v for k, v in planned.arguments.items() if k != "_alternate_queries"}
+                self._cache.put(tc.function_name, rewritten_put_args, admitted.content, admitted.accepted_sources, scope="")
+
                 self._record_tool_outcome(tool_name, meta, planned.rewritten_query)
                 return tc.id, admitted.content, admitted.accepted_sources, meta
         except Exception as exc:
@@ -620,6 +1216,7 @@ class ReactLoop:
                 "tool.name": tool_name,
                 "tool.query_policy": query_policy,
                 "tool.original_query": original_query[:500],
+                "tool.query": original_query[:500],
             },
         ) as tool_span:
             if query_policy == "passthrough":
@@ -747,6 +1344,9 @@ class ReactLoop:
         if self._fallback_enabled or not self._fallback_tools:
             return
         self._fallback_enabled = True
+        self._consecutive_zero_novel_rounds = 0
+        self._same_tool_consecutive_rounds = 0
+        self._last_round_tool = ""
         self._tools.update(self._fallback_tools)
         self._tool_defs = [self._to_openai_tool(tool) for tool in self._tools.values()]
         logger.info(
@@ -785,31 +1385,53 @@ class ReactLoop:
     # -- Message compaction -------------------------------------------------
 
     def _compact_old_tool_results(self, messages: list[dict[str, Any]]) -> None:
-        """Truncate tool results from prior iterations to limit prompt growth.
+        """Compact tool results from prior iterations to limit prompt growth.
 
-        Only truncates tool results BEFORE the most recent tool-calling iteration.
-        Current iteration's results are always preserved intact.
+        Supports two strategies:
+        - ``truncate`` (default): hard-truncate old tool results to ``max_result_chars``.
+        - ``mask``: replace old tool results with one-line placeholders, keeping
+          the last 2 tool-calling iterations fully intact.
         """
         if self._max_result_chars <= 0:
             return
 
-        # Find the latest assistant message that triggered tool calls
-        last_tc_idx = -1
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") == "assistant" and messages[i].get("tool_calls"):
-                last_tc_idx = i
-                break
+        # Indices of assistant messages that triggered tool calls
+        tc_indices = [
+            i for i, m in enumerate(messages)
+            if m.get("role") == "assistant" and m.get("tool_calls")
+        ]
 
-        if last_tc_idx <= 0:
-            return  # first iteration or no tool calls — nothing to truncate
+        if not tc_indices:
+            return
 
-        for i in range(last_tc_idx):
-            msg = messages[i]
-            content = msg.get("content", "")
-            if msg.get("role") == "tool" and isinstance(content, str) and len(content) > self._max_result_chars:
-                msg["content"] = content[:self._max_result_chars] + (
-                    f"\n...[truncated from {len(content)} chars]"
-                )
+        if self._compaction_strategy == "mask":
+            # Delay compaction until ~40% of budget is used
+            if len(tc_indices) < self._compact_after_rounds:
+                return
+            # Keep last N iterations intact for data retention (configurable)
+            n = min(self._keep_intact, len(tc_indices))
+            keep_from = tc_indices[-n] if n > 0 else 0
+            for i in range(keep_from):
+                msg = messages[i]
+                if msg.get("role") == "tool":
+                    content = msg.get("content", "")
+                    if isinstance(content, str) and len(content) > self._max_result_chars:
+                        msg["content"] = _summarize_tool_result(
+                            content, max_chars=self._max_result_chars,
+                        )
+        else:
+            # Original truncation behavior (backward compat)
+            last_tc_idx = tc_indices[-1]
+            if last_tc_idx <= 0:
+                return
+            for i in range(last_tc_idx):
+                msg = messages[i]
+                content = msg.get("content", "")
+                if (msg.get("role") == "tool" and isinstance(content, str)
+                        and len(content) > self._max_result_chars):
+                    msg["content"] = content[:self._max_result_chars] + (
+                        f"\n...[truncated from {len(content)} chars]"
+                    )
 
     # -- Streaming -----------------------------------------------------------
 

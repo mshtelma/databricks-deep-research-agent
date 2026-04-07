@@ -1,5 +1,6 @@
 """Agent endpoint (Databricks-compatible)."""
 
+from collections.abc import AsyncGenerator
 from uuid import uuid4
 
 from fastapi import APIRouter, Header
@@ -26,7 +27,7 @@ async def query_agent(
     # Check if streaming is requested
     if accept and "text/event-stream" in accept:
         # Return SSE stream
-        async def generate():
+        async def generate() -> AsyncGenerator[str, None]:
             # TODO: Implement streaming with run_research()
             yield "data: {'event_type': 'agent_started', 'agent': 'coordinator'}\n\n"
             yield "data: [DONE]\n\n"

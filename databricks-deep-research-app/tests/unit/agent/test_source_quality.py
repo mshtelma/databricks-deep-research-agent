@@ -6,8 +6,8 @@ _format_source_quality() helper.
 
 import pytest
 
-from deep_research.agent.state import ResearchState
 from deep_research.agent.nodes.reflector import _format_source_quality
+from deep_research.agent.state import ResearchState
 
 
 class TestRecordSourceQuality:

@@ -1,7 +1,7 @@
 """MessageFeedback SQLAlchemy model."""
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from deep_research.models.message import Message
 
 
-class FeedbackRating(str, Enum):
+class FeedbackRating(StrEnum):
     """Feedback rating values."""
 
     NEGATIVE = "negative"

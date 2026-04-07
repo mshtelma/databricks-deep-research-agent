@@ -77,7 +77,7 @@ async def grant_to_app(
         True if permissions were granted, False on error
     """
     try:
-        import asyncpg
+        import asyncpg  # type: ignore[import-untyped]
 
         if workspace_client is None:
             from databricks.sdk import WorkspaceClient

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -84,12 +85,28 @@ _MISSING = object()
 def resolve_dot_path(obj: Any, path: str) -> Any:
     """Resolve a dot-separated path like ``'a.b.c'`` on dicts or objects.
 
+    When a segment is a JSON-encoded string (common for agent outputs stored
+    in workflow state), the function transparently parses it so that
+    ``resolve_dot_path({"reflection": '{"decision":"complete"}'}, "reflection.decision")``
+    returns ``"complete"``.
+
     Returns ``_MISSING`` sentinel (module-private) when any segment is absent.
     """
     current = obj
     for segment in path.split("."):
         if isinstance(current, dict):
             current = current.get(segment, _MISSING)
+        elif isinstance(current, str):
+            # Agent outputs are stored as raw JSON strings in state.
+            # Try to parse so dot-path navigation works.
+            try:
+                parsed = json.loads(current)
+                if isinstance(parsed, dict):
+                    current = parsed.get(segment, _MISSING)
+                else:
+                    current = _MISSING
+            except (json.JSONDecodeError, TypeError):
+                current = getattr(current, segment, _MISSING)
         else:
             current = getattr(current, segment, _MISSING)
         if current is _MISSING:

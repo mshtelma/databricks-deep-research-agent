@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from databricks_deep_research.pools.pool_state import PoolState
-from databricks_deep_research.workflow.state import WorkflowState
 from databricks_deep_research.workflow.runtime_core.selectors import select_discovered_sources
+from databricks_deep_research.workflow.state import WorkflowState
 
 
 def coerce_discovered_sources(state: WorkflowState) -> list[dict[str, Any]]:

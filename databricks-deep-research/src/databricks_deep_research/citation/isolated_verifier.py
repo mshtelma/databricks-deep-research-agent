@@ -6,7 +6,7 @@ pattern.
 
 Token-optimisation features:
 - Batch verification: process up to 10 claim/evidence pairs per LLM call
-- MD5-based verification cache to skip duplicate claim+evidence pairs
+- SHA-256-based verification cache to skip duplicate claim+evidence pairs
 - Model tier escalation: quick path for high-confidence, full path otherwise
 - Structured output with JSON fallback parsing
 
@@ -29,6 +29,7 @@ from databricks_deep_research.citation.types import (
     VerificationResult,
     VerificationVerdict,
 )
+from databricks_deep_research.citation.utils import truncate as _truncate
 from databricks_deep_research.llm.client import FrameworkLLMClient, ModelTier
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,9 @@ The claim is FULLY entailed by the evidence:
 - All facts in the claim are present in the evidence
 - Numbers match exactly (or are correctly rounded)
 - No extrapolation beyond what the evidence states
+- Paraphrasing, rewording, or summarizing the evidence is acceptable
+- A claim that rephrases the evidence in different words is SUPPORTED, not PARTIAL
+- However, if the claim adds specific numbers, dates, or entities NOT in the evidence, it is PARTIAL
 
 ### PARTIAL
 The claim is PARTIALLY supported:
@@ -113,7 +117,7 @@ Quickly verify if this claim matches the evidence.
 "{evidence_quote}"
 
 ## Quick Check
-1. Is the core fact in the claim present in the evidence? (Y/N)
+1. Does the evidence SUPPORT the meaning of this claim? A paraphrase or rewording counts as supported. (Y/Partial/N)
 2. Do any numbers match exactly? (Y/N/NA)
 3. Is there any contradiction? (Y/N)
 
@@ -139,7 +143,7 @@ For EACH claim above:
 3. Include the claim_index in your response
 
 ## Verdict Categories
-- SUPPORTED: Evidence fully entails the claim (all facts present, numbers match)
+- SUPPORTED: Evidence fully entails the claim (all facts present, numbers match). Paraphrasing is acceptable — rephrased meaning counts as supported.
 - PARTIAL: Evidence partially supports (some aspects not mentioned). Use PARTIAL when the core fact is confirmed but the claim also contains editorial interpretation or commentary beyond the evidence
 - UNSUPPORTED: Evidence doesn't address the PRIMARY factual assertion in the claim. Do NOT use if the main fact is confirmed but editorial commentary isn't
 - CONTRADICTED: Evidence directly opposes the claim
@@ -207,7 +211,7 @@ class IsolatedVerifier:
 
     - **Single-claim**: Full or quick verification of one claim at a time.
     - **Batch**: Groups multiple claims into a single LLM call (up to
-      ``DEFAULT_BATCH_SIZE`` pairs) with an MD5-based cache to skip
+      ``DEFAULT_BATCH_SIZE`` pairs) with a SHA-256-based cache to skip
       previously-verified claim+evidence pairs.
     """
 
@@ -300,7 +304,7 @@ class IsolatedVerifier:
             claims: List of ``(claim_text, evidence)`` tuples.
             batch_size: Number of claims per batch (default 10).
             use_quick_verification: Use faster, simpler verification.
-            verification_cache: Optional dict keyed by MD5 fingerprint
+            verification_cache: Optional dict keyed by SHA-256 fingerprint
                 for result re-use across invocations.
 
         Returns:
@@ -438,17 +442,17 @@ class IsolatedVerifier:
         """Create normalised fingerprint for claim caching.
 
         Normalisation: lowercase, remove punctuation, sort words, then
-        MD5-hash to a 16-character hex digest.
+        SHA-256-hash to a 16-character hex digest.
 
         Args:
             claim_text: The claim text to fingerprint.
 
         Returns:
-            16-character MD5 hex digest.
+            16-character SHA-256 hex digest.
         """
         normalised = re.sub(r"[^\w\s]", "", claim_text.lower())
         words = sorted(normalised.split())
-        return hashlib.md5(" ".join(words).encode()).hexdigest()[:16]
+        return hashlib.sha256(" ".join(words).encode()).hexdigest()[:16]
 
     @staticmethod
     def fingerprint_pair(claim_text: str, evidence_text: str) -> str:
@@ -462,12 +466,12 @@ class IsolatedVerifier:
             evidence_text: The evidence quote text.
 
         Returns:
-            16-character MD5 hex digest.
+            16-character SHA-256 hex digest.
         """
         claim_norm = re.sub(r"[^\w\s]", "", claim_text.lower())
         evidence_norm = re.sub(r"[^\w\s]", "", evidence_text.lower())
         combined = f"{sorted(claim_norm.split())}|{sorted(evidence_norm.split())}"
-        return hashlib.md5(combined.encode()).hexdigest()[:16]
+        return hashlib.sha256(combined.encode()).hexdigest()[:16]
 
     # -- verdict parsing ---------------------------------------------------
 
@@ -505,6 +509,55 @@ class IsolatedVerifier:
         evidence: RankedEvidence,
     ) -> VerificationResult:
         """Full verification with detailed reasoning."""
+        try:
+            return await self._do_full_verification(claim_text, evidence)
+        except Exception as exc:
+            exc_str = str(exc).lower()
+            if any(kw in exc_str for kw in ("context_length", "too long", "max_tokens", "400")):
+                logger.warning(
+                    "VERIFIER_TRUNCATION_RETRY claim=%s evidence_len=%d",
+                    _truncate(claim_text, 40), len(evidence.quote_text),
+                )
+                truncated = RankedEvidence(
+                    source_url=evidence.source_url,
+                    quote_text=evidence.quote_text[:1500],
+                    relevance_score=evidence.relevance_score,
+                    canonical_source_url=evidence.canonical_source_url,
+                    source_title=evidence.source_title,
+                    source_id=evidence.source_id,
+                    start_offset=evidence.start_offset,
+                    end_offset=evidence.end_offset,
+                    section_heading=evidence.section_heading,
+                    has_numeric_content=evidence.has_numeric_content,
+                    source_pool_index=evidence.source_pool_index,
+                    evidence_pool_index=evidence.evidence_pool_index,
+                    is_snippet_based=evidence.is_snippet_based,
+                )
+                try:
+                    return await self._do_full_verification(claim_text, truncated)
+                except Exception as retry_exc:
+                    logger.error(
+                        "VERIFIER_RETRY_FAILED claim=%s error=%s",
+                        _truncate(claim_text, 40), retry_exc,
+                    )
+            else:
+                logger.error(
+                    "VERIFIER_FAILED claim=%s type=%s error=%s",
+                    _truncate(claim_text, 40), type(exc).__name__, str(exc)[:200],
+                )
+            return VerificationResult(
+                verdict=VerificationVerdict.UNSUPPORTED,
+                reasoning=f"Verification failed: {exc}",
+                confidence=0.0,
+                abstained=True,
+            )
+
+    async def _do_full_verification(
+        self,
+        claim_text: str,
+        evidence: RankedEvidence,
+    ) -> VerificationResult:
+        """Execute the full verification LLM call."""
         prompt = ISOLATED_VERIFICATION_PROMPT.format(
             claim_text=claim_text,
             source_title=evidence.source_title or "Unknown",
@@ -514,39 +567,29 @@ class IsolatedVerifier:
 
         tier = self._resolve_tier(self._config.verification_model_tier)
 
-        try:
-            response = await self._llm.complete(
-                messages=[{"role": "user", "content": prompt}],
-                tier=tier,
-                structured_output=VerificationOutput,
-            )
+        response = await self._llm.complete(
+            messages=[{"role": "user", "content": prompt}],
+            tier=tier,
+            structured_output=VerificationOutput,
+        )
 
-            if response.structured:
-                output: VerificationOutput = response.structured
-                verdict = self.parse_verdict(output.verdict)
-                return VerificationResult(
-                    verdict=verdict,
-                    reasoning=output.reasoning,
-                    key_match=output.key_match,
-                    issues=output.issues,
-                    confidence=(
-                        output.verification_confidence
-                        if output.verification_confidence is not None
-                        else self._default_confidence(verdict)
-                    ),
-                )
-
-            # Fallback: parse from raw content.
-            return self._parse_verification_response(response.content)
-
-        except Exception as exc:
-            logger.error("Full verification failed: %s", exc)
+        if response.structured:
+            output: VerificationOutput = response.structured
+            verdict = self.parse_verdict(output.verdict)
             return VerificationResult(
-                verdict=VerificationVerdict.UNSUPPORTED,
-                reasoning=f"Verification failed: {exc}",
-                confidence=0.0,
-                abstained=True,
+                verdict=verdict,
+                reasoning=output.reasoning,
+                key_match=output.key_match,
+                issues=output.issues,
+                confidence=(
+                    output.verification_confidence
+                    if output.verification_confidence is not None
+                    else self._default_confidence(verdict)
+                ),
             )
+
+        # Fallback: parse from raw content.
+        return self._parse_verification_response(response.content)
 
     async def _quick_verify(
         self,

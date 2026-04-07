@@ -1,14 +1,12 @@
 """Unit tests for WebSearchTool class."""
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
-from deep_research.agent.tools.base import ResearchContext, ResearchTool, ToolDefinition
+from deep_research.agent.tools.base import ResearchContext, ResearchTool
 from deep_research.agent.tools.web_search import (
-    WebSearchOutput,
     WebSearchResult,
     WebSearchTool,
 )

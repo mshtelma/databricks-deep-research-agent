@@ -28,11 +28,11 @@ class LLMCredentialProvider:
     LLMCredentialProvider with profile-based initialization.
     """
 
-    def __init__(self, profile: str | None = None) -> None:
+    def __init__(self, _profile: str | None = None) -> None:
         """Initialize credential provider.
 
         Args:
-            profile: IGNORED - uses centralized DatabricksAuth settings.
+            _profile: IGNORED - uses centralized DatabricksAuth settings.
         """
         # Profile is ignored - centralized auth determines auth mode from settings
         self._auth = get_databricks_auth()

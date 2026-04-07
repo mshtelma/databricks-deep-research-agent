@@ -1,16 +1,16 @@
 """Unit tests for WebCrawlTool class."""
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
 from deep_research.agent.tools.base import ResearchContext, ResearchTool
 from deep_research.agent.tools.web_crawler import (
+    MAX_CONTENT_LENGTH,
     CrawlOutput,
     CrawlResult,
-    MAX_CONTENT_LENGTH,
     WebCrawler,
     WebCrawlTool,
 )

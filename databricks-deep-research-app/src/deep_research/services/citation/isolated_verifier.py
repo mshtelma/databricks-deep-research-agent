@@ -11,10 +11,9 @@ Token Optimization Features:
 
 import hashlib
 import json
-import logging
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -26,11 +25,12 @@ from deep_research.agent.prompts.citation.verification import (
     QUICK_VERIFICATION_PROMPT,
 )
 from deep_research.core.app_config import get_app_config
+from deep_research.core.logging_utils import get_logger
 from deep_research.services.citation.evidence_selector import RankedEvidence
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.types import ModelTier
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # Default batch size for verification (balances token efficiency vs. reliability)
@@ -78,7 +78,7 @@ class BatchVerificationOutput(BaseModel):
     )
 
 
-class Verdict(str, Enum):
+class Verdict(StrEnum):
     """Four-tier verification verdict."""
 
     SUPPORTED = "supported"
@@ -362,12 +362,12 @@ class IsolatedVerifier:
             claim_text: The claim text to fingerprint.
 
         Returns:
-            16-character MD5 hash of normalized claim.
+            16-character SHA-256 hash of normalized claim.
         """
         # Normalize: lowercase, remove punctuation, sort words
         normalized = re.sub(r"[^\w\s]", "", claim_text.lower())
         words = sorted(normalized.split())
-        return hashlib.md5(" ".join(words).encode()).hexdigest()[:16]
+        return hashlib.sha256(" ".join(words).encode()).hexdigest()[:16]
 
     def _format_claims_for_batch(
         self,

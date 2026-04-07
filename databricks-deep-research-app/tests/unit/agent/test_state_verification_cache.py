@@ -3,7 +3,6 @@
 Tests the TOKEN OPTIMIZATION verification cache functionality.
 """
 
-import pytest
 
 from deep_research.agent.state import ResearchState
 

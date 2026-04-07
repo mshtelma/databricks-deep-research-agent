@@ -1,13 +1,14 @@
 """Unit tests for ResearchState."""
 
+from datetime import datetime
+
 import pytest
-from datetime import UTC, datetime
 
 from deep_research.agent.state import (
-    ResearchState,
-    StepStatus,
     Plan,
     PlanStep,
+    ResearchState,
+    StepStatus,
     StepType,
 )
 

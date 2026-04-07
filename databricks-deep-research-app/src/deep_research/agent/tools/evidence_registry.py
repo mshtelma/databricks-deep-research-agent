@@ -228,7 +228,7 @@ class HybridSearchIndex:
 
             # Reconstruct full score array (bm25.retrieve returns sorted results)
             bm25_scores = np.zeros(self._n_docs, dtype=np.float32)
-            for idx, score in zip(indices, scores):
+            for idx, score in zip(indices, scores, strict=True):
                 bm25_scores[int(idx)] = float(score)
 
             # Normalize to 0-1 range

@@ -10,10 +10,10 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from deep_research.schemas.query_config import (
+    MAX_IN_CLAUSE_IDS,
     FilterExpression,
     FilterOperator,
     FilterSyntax,
-    MAX_IN_CLAUSE_IDS,
     QueryConfigValidationResult,
     QueryType,
     UpdateQueryConfigRequest,

@@ -1,8 +1,8 @@
 """ResearchSession SQLAlchemy model."""
 
 from datetime import UTC, datetime
-from enum import Enum
-from typing import TYPE_CHECKING
+from enum import StrEnum
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from deep_research.models.source import Source
 
 
-class ResearchDepth(str, Enum):
+class ResearchDepth(StrEnum):
     """Research depth levels."""
 
     AUTO = "auto"
@@ -28,7 +28,7 @@ class ResearchDepth(str, Enum):
     EXTENDED = "extended"  # 6-10 search iterations
 
 
-class ResearchStatus(str, Enum):
+class ResearchStatus(StrEnum):
     """Research session status.
 
     Lifecycle states:
@@ -57,7 +57,7 @@ class ResearchStatus(str, Enum):
     SYNTHESIZING = "synthesizing"
 
 
-class ResearchSessionStatus(str, Enum):
+class ResearchSessionStatus(StrEnum):
     """Research session status (for service layer)."""
 
     IN_PROGRESS = "in_progress"
@@ -90,13 +90,13 @@ class ResearchSession(BaseModel):
     )
 
     # Observations from research steps
-    observations: Mapped[list | None] = mapped_column(
+    observations: Mapped[list[Any] | None] = mapped_column(
         JSONB,
         nullable=True,
     )
 
     # Query classification (stored as JSONB)
-    query_classification: Mapped[dict | None] = mapped_column(
+    query_classification: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB,
         nullable=True,
     )
@@ -109,14 +109,14 @@ class ResearchSession(BaseModel):
     )
 
     # Reasoning steps (stored as JSONB array)
-    reasoning_steps: Mapped[list] = mapped_column(
+    reasoning_steps: Mapped[list[Any]] = mapped_column(
         JSONB,
         default=list,
         nullable=False,
     )
 
     # Research plan (stored as JSONB)
-    plan: Mapped[dict | None] = mapped_column(
+    plan: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB,
         nullable=True,
     )
@@ -185,7 +185,7 @@ class ResearchSession(BaseModel):
     )
 
     # Serialized ResearchState for job resumption
-    execution_state: Mapped[dict | None] = mapped_column(
+    execution_state: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB,
         nullable=True,
     )
@@ -216,7 +216,7 @@ class ResearchSession(BaseModel):
     # JSONB blob containing claims and verification summary
     # Replaces normalized tables: claims, evidence_spans, citations,
     # numeric_claims, citation_corrections, verification_summaries
-    verification_data: Mapped[dict | None] = mapped_column(
+    verification_data: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB,
         nullable=True,
         doc="JSONB blob containing claims and verification summary",
@@ -229,6 +229,7 @@ class ResearchSession(BaseModel):
     message: Mapped["Message"] = relationship(
         "Message",
         back_populates="research_session",
+        foreign_keys=[message_id],
     )
     sources: Mapped[list["Source"]] = relationship(
         "Source",

@@ -1,6 +1,8 @@
 """Shared test fixtures for the framework test suite."""
 from __future__ import annotations
 
+import databricks_deep_research._fips_compat  # noqa: F401  # FIPS md5 patch
+
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any, TypeVar
@@ -9,10 +11,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from dotenv import load_dotenv
 
-from databricks_deep_research.llm.client import FrameworkLLMClient, LLMResponse
 from databricks_deep_research.events.types import StreamEvent
+from databricks_deep_research.llm.client import FrameworkLLMClient, LLMResponse
 from databricks_deep_research.tools.protocol import (
-    ResearchTool,
     SourceInfo,
     ToolContext,
     ToolDefinition,

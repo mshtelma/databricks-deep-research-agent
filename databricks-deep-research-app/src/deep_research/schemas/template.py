@@ -9,7 +9,7 @@ Part of US5 - Custom Prompt Template Library (T069).
 """
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from deep_research.schemas.common import BaseSchema
 
 
-class TemplateType(str, Enum):
+class TemplateType(StrEnum):
     """Types of prompt templates.
 
     Each type serves a different purpose in the research pipeline:
@@ -34,14 +34,14 @@ class TemplateType(str, Enum):
     QUERY = "query"
 
 
-class TemplateVisibility(str, Enum):
+class TemplateVisibility(StrEnum):
     """Visibility levels for prompt templates."""
 
     PRIVATE = "private"
     WORKSPACE = "workspace"
 
 
-class VariableType(str, Enum):
+class VariableType(StrEnum):
     """Types of template variables for validation."""
 
     STRING = "string"

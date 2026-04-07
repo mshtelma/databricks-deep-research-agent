@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import Enum
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -18,14 +18,14 @@ if TYPE_CHECKING:
     from deep_research.schemas.source_scope import SourceScopeConfig
 
 
-class StepType(str, Enum):
+class StepType(StrEnum):
     """Type of research plan step."""
 
     RESEARCH = "research"  # Web search/crawl - executed by Researcher
     ANALYSIS = "analysis"  # Pure reasoning - executed by Synthesizer
 
 
-class StepStatus(str, Enum):
+class StepStatus(StrEnum):
     """Execution status of a plan step."""
 
     PENDING = "pending"
@@ -34,7 +34,7 @@ class StepStatus(str, Enum):
     SKIPPED = "skipped"
 
 
-class ReflectionDecision(str, Enum):
+class ReflectionDecision(StrEnum):
     """Decision made by Reflector agent."""
 
     CONTINUE = "continue"  # Proceed to next step
@@ -295,7 +295,7 @@ class VerificationSummaryInfo:
         }
 
 
-class ResearchDepth(str, Enum):
+class ResearchDepth(StrEnum):
     """Research depth levels controlling thoroughness."""
 
     AUTO = "auto"  # Automatically determined based on query complexity
@@ -304,7 +304,7 @@ class ResearchDepth(str, Enum):
     EXTENDED = "extended"  # 6-10 search iterations, thorough analysis
 
 
-class WorkflowMode(str, Enum):
+class WorkflowMode(StrEnum):
     """Workflow mode controlling how research steps are determined.
 
     Part of 007-enterprise-data-sources feature (T051).
@@ -456,7 +456,7 @@ class ResearchState:
     # Maps claim fingerprint -> VerificationResult to avoid redundant verification
     # of identical/near-identical claims within the same research session.
     # The cache is NOT persisted - it's cleared when a new research session starts.
-    # Key: 16-char MD5 hash of normalized claim text
+    # Key: 16-char SHA-256 hash of normalized claim text
     # Value: VerificationResult from isolated_verifier
     _verification_cache: dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -890,7 +890,7 @@ class ResearchState:
         """Get a cached verification result by claim fingerprint.
 
         Args:
-            claim_fingerprint: 16-char MD5 hash of normalized claim.
+            claim_fingerprint: 16-char SHA-256 hash of normalized claim.
 
         Returns:
             Cached VerificationResult or None if not cached.
@@ -904,7 +904,7 @@ class ResearchState:
         Use cache_verification_async() for parallel tool execution.
 
         Args:
-            claim_fingerprint: 16-char MD5 hash of normalized claim.
+            claim_fingerprint: 16-char SHA-256 hash of normalized claim.
             result: VerificationResult to cache.
         """
         self._verification_cache[claim_fingerprint] = result
@@ -913,7 +913,7 @@ class ResearchState:
         """Cache a verification result for future reuse (async-safe).
 
         Args:
-            claim_fingerprint: 16-char MD5 hash of normalized claim.
+            claim_fingerprint: 16-char SHA-256 hash of normalized claim.
             result: VerificationResult to cache.
         """
         async with self._cache_lock:
@@ -999,7 +999,7 @@ class ResearchState:
             self.source_query_counts[source_name] = current + count
 
     def add_source_result(
-        self, source_name: str, result: "SourceInfo"
+        self, source_name: str, result: SourceInfo
     ) -> None:
         """Add a result from a specific source (sync version).
 
@@ -1017,7 +1017,7 @@ class ResearchState:
         self.add_source(result)
 
     async def add_source_result_async(
-        self, source_name: str, result: "SourceInfo"
+        self, source_name: str, result: SourceInfo
     ) -> None:
         """Add a result from a specific source (async-safe).
 
@@ -1033,7 +1033,7 @@ class ResearchState:
             if not any(s.url == result.url for s in self.sources):
                 self.sources.append(result)
 
-    def get_source_results(self, source_name: str) -> list["SourceInfo"]:
+    def get_source_results(self, source_name: str) -> list[SourceInfo]:
         """Get all results from a specific source.
 
         Args:

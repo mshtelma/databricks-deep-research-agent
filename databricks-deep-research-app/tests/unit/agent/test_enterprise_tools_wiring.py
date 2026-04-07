@@ -7,13 +7,18 @@ Tests the flow:
 4. GenieTool two-step query result retrieval
 """
 
-import pytest
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from __future__ import annotations
 
-from deep_research.agent.state import ResearchState, SourceInfo
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from deep_research.agent.orchestrator import OrchestrationConfig
+from deep_research.agent.state import ResearchState, SourceInfo
+
+if TYPE_CHECKING:
+    from deep_research.agent.tools.genie import GenieTool
 
 
 class TestOrchestratorWiring:
@@ -162,7 +167,7 @@ class TestEnterpriseToolsExecution:
     @pytest.mark.asyncio
     async def test_classic_researcher_enterprise_tool_success(self) -> None:
         """Classic researcher should execute enterprise tools when web blocked."""
-        from deep_research.agent.tools.base import ToolResult, ToolDefinition, ResearchContext
+        from deep_research.agent.tools.base import ToolDefinition, ToolResult
         from deep_research.schemas.source_scope import SourceScope, SourceScopeConfig
 
         # Set up state with enterprise_only scope
@@ -267,7 +272,7 @@ class TestEnterpriseSourceTracking:
 class TestGenieToolDataExtraction:
     """Test GenieTool two-step query result retrieval."""
 
-    def _make_genie_tool(self) -> "GenieTool":
+    def _make_genie_tool(self) -> GenieTool:
         """Create a GenieTool with mocked OBO client."""
         from deep_research.agent.tools.genie import GenieTool
 
@@ -654,8 +659,8 @@ class TestVectorSearchWorkspaceClientAuth:
     @pytest.mark.asyncio
     async def test_obo_client_provides_workspace_client(self) -> None:
         """UserVectorSearchTool should get WorkspaceClient from OBO client."""
-        from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
         from deep_research.agent.tools.base import ResearchContext
+        from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
 
         obo_client = MagicMock()
         data_source = MagicMock()
@@ -679,7 +684,7 @@ class TestVectorSearchWorkspaceClientAuth:
         context = MagicMock(spec=ResearchContext)
         context.user_token = "user-token-123"
 
-        result = await tool.execute({"query": "test query"}, context)
+        _ = await tool.execute({"query": "test query"}, context)
 
         # OBO client should have been called with user token
         obo_client.get_client.assert_called_once_with("user-token-123")
@@ -687,8 +692,8 @@ class TestVectorSearchWorkspaceClientAuth:
     @pytest.mark.asyncio
     async def test_no_user_token_still_gets_client(self) -> None:
         """Without user_token, OBO client still returns SP client."""
-        from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
         from deep_research.agent.tools.base import ResearchContext
+        from deep_research.agent.tools.user_vector_search import UserVectorSearchTool
 
         obo_client = MagicMock()
         data_source = MagicMock()
@@ -711,7 +716,7 @@ class TestVectorSearchWorkspaceClientAuth:
         context = MagicMock(spec=ResearchContext)
         context.user_token = None
 
-        result = await tool.execute({"query": "test query"}, context)
+        _ = await tool.execute({"query": "test query"}, context)
 
         # OBO client called with None → returns SP client
         obo_client.get_client.assert_called_once_with(None)
@@ -723,7 +728,7 @@ class TestClassicResearcherArgumentMapping:
     @pytest.mark.asyncio
     async def test_vector_search_tool_receives_query_key(self) -> None:
         """Vector Search tool (required: ['query']) should receive {'query': ...}."""
-        from deep_research.agent.tools.base import ToolResult, ToolDefinition, ResearchContext
+        from deep_research.agent.tools.base import ToolDefinition, ToolResult
         from deep_research.schemas.source_scope import SourceScope, SourceScopeConfig
 
         state = ResearchState(query="What is AAPL revenue?")
@@ -812,8 +817,8 @@ class TestReActEnterpriseContentLinking:
     @pytest.mark.asyncio
     async def test_content_key_matches_source_url(self) -> None:
         """crawled_content key should use actual source URL, not synthetic enterprise:// URL."""
-        from deep_research.agent.tools.base import ToolResult, ToolDefinition, ResearchContext
         from deep_research.agent.nodes.react_researcher import ReactResearchState
+        from deep_research.agent.tools.base import ToolResult
 
         react_state = ReactResearchState()
         state = ResearchState(query="test")
@@ -867,8 +872,8 @@ class TestReActEnterpriseContentLinking:
     @pytest.mark.asyncio
     async def test_no_sources_creates_generic_entry(self) -> None:
         """Tool returning no sources should create a generic entry in state.sources."""
-        from deep_research.agent.tools.base import ToolResult
         from deep_research.agent.nodes.react_researcher import ReactResearchState
+        from deep_research.agent.tools.base import ToolResult
 
         react_state = ReactResearchState()
         state = ResearchState(query="test")
@@ -911,9 +916,9 @@ class TestArgumentValidation:
     @pytest.mark.asyncio
     async def test_validation_prevents_invalid_execution(self) -> None:
         """When validate_arguments returns errors, execute() should NOT be called."""
-        from deep_research.agent.tools.base import ToolResult, ToolDefinition, ResearchContext
-        from deep_research.schemas.source_scope import SourceScope, SourceScopeConfig
         from deep_research.agent.state import PlanStep, StepType
+        from deep_research.agent.tools.base import ToolDefinition
+        from deep_research.schemas.source_scope import SourceScope, SourceScopeConfig
 
         state = ResearchState(query="test")
         state.source_scope_config = SourceScopeConfig(scope=SourceScope.ENTERPRISE_ONLY)
@@ -954,7 +959,7 @@ class TestArgumentValidation:
     @pytest.mark.asyncio
     async def test_validation_passes_allows_execution(self) -> None:
         """When validate_arguments returns no errors, execute() should be called."""
-        from deep_research.agent.tools.base import ToolResult, ToolDefinition, ResearchContext
+        from deep_research.agent.tools.base import ToolDefinition, ToolResult
 
         mock_tool = MagicMock()
         mock_tool.definition = ToolDefinition(

@@ -43,7 +43,6 @@ except ImportError:
 
 from tests.integration.conftest import requires_all_credentials
 
-
 # ---------------------------------------------------------------------------
 # Utility Functions
 # ---------------------------------------------------------------------------
@@ -231,7 +230,7 @@ class TestGreyReferenceDetection:
                 for c in grey_claims
             ]
             pytest.fail(
-                f"Claims without evidence found (not abstained):\n" + "\n".join(details)
+                "Claims without evidence found (not abstained):\n" + "\n".join(details)
             )
 
     @requires_all_credentials

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Pool-related configs
@@ -85,12 +85,29 @@ class AgentNodeConfig(BaseModel):
     pool_writes: list[PoolWriteConfig] = Field(default_factory=list)
     pool_tools: list[str] = Field(default_factory=list)
     max_tool_calls: int | None = None
+    per_tool_limits: dict[str, int] | None = None
     max_retries: int = 2
     max_result_chars: int = 4000  # 0=unlimited; >0 truncates old tool results
+    compaction_strategy: Literal["truncate", "mask"] = "truncate"
+    keep_intact_iterations: int = 3  # Recent tool-calling iterations to keep uncompacted
+    dedup_jaccard_threshold: float = 0.8  # Jaccard word overlap threshold for near-dedup (0.0-1.0)
+    force_convergence: bool = False  # Gate novelty/anti-loop heuristics (convergence, nudges)
+    convergence_rounds: int = 4  # Zero-novel rounds before forced convergence (requires force_convergence=True)
     conversation_budget: int | None = None
     pool_inject: list[PoolInjectConfig] = Field(default_factory=list)
     synthesis_context: SynthesisContextConfig | None = None
     output_model: Any = None  # Pydantic model class for structured output
+
+    @field_validator("per_tool_limits")
+    @classmethod
+    def _validate_per_tool_limits(cls, v: dict[str, int] | None) -> dict[str, int] | None:
+        if v is not None:
+            for name, limit in v.items():
+                if not isinstance(limit, int) or limit < 0:
+                    raise ValueError(
+                        f"per_tool_limits values must be non-negative integers, got {name}={limit!r}"
+                    )
+        return v
 
 
 # ---------------------------------------------------------------------------

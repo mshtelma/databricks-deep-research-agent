@@ -3,7 +3,7 @@
 import contextlib
 import json
 import logging
-from collections.abc import AsyncGenerator, Callable, Generator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Generator, Sequence
 from functools import wraps
 from typing import Any, ParamSpec, TypeVar
 
@@ -14,6 +14,25 @@ from mlflow.entities import SpanEvent, SpanType
 from deep_research.core.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+class _ConcreteSpanEvent(SpanEvent):
+    """Concrete subclass to satisfy mypy abstract-class check on SpanEvent."""
+
+    @classmethod
+    def from_proto(cls, proto: Any) -> "_ConcreteSpanEvent":
+        raise NotImplementedError
+
+def _create_span_event(
+    name: str,
+    attributes: dict[
+        str,
+        str | bool | int | float
+        | Sequence[str] | Sequence[bool] | Sequence[int] | Sequence[float],
+    ],
+) -> SpanEvent:
+    """Create a SpanEvent without triggering mypy abstract-class errors."""
+    return _ConcreteSpanEvent(name=name, attributes=attributes)
+
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -48,7 +67,11 @@ def log_trace_event(
     if span:
         # Convert attributes to MLflow-compatible types (str, int, float, bool only)
         # Lists/tuples are serialized as JSON strings since protobuf can't handle Python lists
-        safe_attrs: dict[str, str | bool | int | float] = {}
+        safe_attrs: dict[
+            str,
+            str | bool | int | float
+            | Sequence[str] | Sequence[bool] | Sequence[int] | Sequence[float],
+        ] = {}
         for k, v in (attributes or {}).items():
             if isinstance(v, str | bool | int | float):
                 safe_attrs[k] = v
@@ -57,8 +80,7 @@ def log_trace_event(
                 safe_attrs[k] = json.dumps([str(item) for item in v])
             else:
                 safe_attrs[k] = str(v)
-        # SpanEvent works at runtime despite mypy's abstract class complaint
-        event = SpanEvent(name=event_name, attributes=safe_attrs)  # type: ignore[abstract]
+        event = _create_span_event(name=event_name, attributes=safe_attrs)
         span.add_event(event)
 
 
@@ -93,48 +115,19 @@ def setup_tracing() -> None:
         _tracing_enabled = False
         return
 
-    # Step 1: async logging
-    try:
-        mlflow.config.enable_async_logging(True)  # type: ignore[no-untyped-call]
-    except Exception as e:
-        logger.warning("MLflow async logging setup failed: %s", e)
+    from databricks_deep_research.tracing import setup_mlflow_tracing
 
-    # Step 2: tracking URI
-    try:
-        mlflow.set_tracking_uri(settings.mlflow_tracking_uri)
-    except Exception as e:
-        logger.warning("MLflow tracking URI setup failed: %s", e)
-
-    # Step 3: experiment (prefer ID from Databricks Apps resource, fall back to name)
-    experiment_ok = False
-    try:
-        if settings.mlflow_experiment_id:
-            mlflow.set_experiment(experiment_id=settings.mlflow_experiment_id)
-        else:
-            mlflow.set_experiment(settings.mlflow_experiment_name)
-        experiment_ok = True
-    except Exception as e:
-        logger.warning("MLflow set_experiment failed: %s", e)
-
-    # Step 4: tracing
-    try:
-        mlflow.tracing.enable()
-    except Exception as e:
-        logger.warning("MLflow tracing.enable() failed: %s", e)
-
-    # Step 5: OpenAI autolog
-    try:
-        mlflow.openai.autolog()
-    except Exception as e:
-        logger.warning("MLflow OpenAI autolog failed: %s", e)
+    ok = setup_mlflow_tracing(
+        tracking_uri=settings.mlflow_tracking_uri,
+        experiment_name=settings.mlflow_experiment_name,
+        experiment_id=settings.mlflow_experiment_id or None,
+    )
 
     _tracing_enabled = True
     logger.info(
-        "MLflow tracing setup complete: tracking_uri=%s, experiment_id=%s, experiment_name=%s, experiment_ok=%s",
+        "MLflow tracing setup complete: tracking_uri=%s, experiment_ok=%s",
         settings.mlflow_tracking_uri,
-        settings.mlflow_experiment_id,
-        settings.mlflow_experiment_name,
-        experiment_ok,
+        ok,
     )
 
 
@@ -146,11 +139,10 @@ def shutdown_tracing() -> None:
     """
     if not _tracing_enabled:
         return
-    try:
-        mlflow.flush_trace_async_logging(terminate=True)
-        logger.info("MLflow traces flushed")
-    except Exception as e:
-        logger.warning("MLflow trace flush failed: %s", e)
+    from databricks_deep_research.tracing import shutdown_mlflow_tracing
+
+    shutdown_mlflow_tracing()
+    logger.info("MLflow traces flushed")
 
 
 @contextlib.contextmanager
@@ -185,16 +177,14 @@ def safe_update_trace(metadata: dict[str, str]) -> None:
     """Update current trace metadata. No-op when tracing is disabled."""
     if not _tracing_enabled:
         return
-    try:
+    with contextlib.suppress(Exception):
         mlflow.update_current_trace(metadata=metadata)
-    except Exception:
-        pass  # Non-fatal: tracing metadata is purely observational
 
 
 def trace_agent(
     name: str,
     tier: str | None = None,
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Coroutine[Any, Any, R]]]:
     """Decorator to trace agent execution.
 
     Args:
@@ -205,7 +195,7 @@ def trace_agent(
         Decorated function with tracing.
     """
 
-    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+    def decorator(func: Callable[P, Awaitable[R]]) -> Callable[P, Coroutine[Any, Any, R]]:
         @wraps(func)
         @mlflow.trace(name=name, span_type=SpanType.AGENT)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -225,7 +215,7 @@ def trace_agent(
     return decorator
 
 
-def trace_tool(name: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
+def trace_tool(name: str) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Coroutine[Any, Any, R]]]:
     """Decorator to trace tool execution.
 
     Args:
@@ -235,7 +225,7 @@ def trace_tool(name: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
         Decorated function with tracing.
     """
 
-    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+    def decorator(func: Callable[P, Awaitable[R]]) -> Callable[P, Coroutine[Any, Any, R]]:
         @wraps(func)
         @mlflow.trace(name=name, span_type=SpanType.TOOL)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -249,7 +239,7 @@ def trace_tool(name: str) -> Callable[[Callable[P, R]], Callable[P, R]]:
 def trace_llm(
     name: str,
     tier: str,
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
+) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Coroutine[Any, Any, R]]]:
     """Decorator to trace LLM calls.
 
     Args:
@@ -260,7 +250,7 @@ def trace_llm(
         Decorated function with tracing.
     """
 
-    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+    def decorator(func: Callable[P, Awaitable[R]]) -> Callable[P, Coroutine[Any, Any, R]]:
         @wraps(func)
         @mlflow.trace(name=name, span_type=SpanType.CHAT_MODEL)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -349,7 +339,7 @@ def log_feedback(
 @contextlib.asynccontextmanager
 async def safe_tool_span(
     name: str,
-    span_type: SpanType = SpanType.TOOL,
+    span_type: str = SpanType.TOOL,
     attributes: dict[str, Any] | None = None,
 ) -> AsyncGenerator[Any, None]:
     """Async context manager for MLflow spans that handles context issues.

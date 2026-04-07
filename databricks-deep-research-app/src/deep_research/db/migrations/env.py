@@ -18,7 +18,7 @@ from deep_research.db.session import get_database_url
 logger = logging.getLogger(__name__)
 
 # Import all models to ensure they're registered with Base.metadata
-from deep_research.models import (  # noqa: F401  # noqa: F401
+from deep_research.models import (  # noqa: E402, F401
     audit_log,
     chat,
     message,

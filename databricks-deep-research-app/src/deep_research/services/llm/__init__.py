@@ -1,13 +1,13 @@
 """LLM service package."""
 
 from deep_research.services.llm.auth import (
-    # Legacy exports (backwards compatibility)
-    LLMCredential,
-    LLMCredentialProvider,
     TOKEN_LIFETIME,
     TOKEN_REFRESH_BUFFER,
     # New centralized auth exports
     DatabricksAuth,
+    # Legacy exports (backwards compatibility)
+    LLMCredential,
+    LLMCredentialProvider,
     OAuthCredential,
     get_databricks_auth,
 )

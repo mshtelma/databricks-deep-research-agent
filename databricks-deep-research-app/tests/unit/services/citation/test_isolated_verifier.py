@@ -1,7 +1,6 @@
 """Unit tests for IsolatedVerifier service."""
 
 import json
-from unittest.mock import AsyncMock, patch
 
 import pytest
 

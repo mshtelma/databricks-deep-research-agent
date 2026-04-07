@@ -206,10 +206,7 @@ class SafeTemplateRenderer:
         )
         for m in item_dot_pattern.finditer(result):
             key = m.group(1)
-            if isinstance(item_val, dict):
-                replacement = str(item_val.get(key, ""))
-            else:
-                replacement = ""
+            replacement = str(item_val.get(key, "")) if isinstance(item_val, dict) else ""
             result = result.replace(m.group(0), replacement)
         # Replace {{item}} itself
         result = re.sub(
@@ -239,10 +236,7 @@ class SafeTemplateRenderer:
             end = end_match.end()
 
             value = context.get(var_name)
-            if value and value != [] and value != {} and value != "":
-                replacement = body
-            else:
-                replacement = ""
+            replacement = body if value and value != [] and value != {} and value != "" else ""
             template = template[:start] + replacement + template[end:]
         return template
 
@@ -260,7 +254,7 @@ class SafeTemplateRenderer:
                 if filter_name != "length":
                     return match.group(0)  # Unknown filter, leave as-is
                 value = context.get(var_name)
-                if hasattr(value, "__len__"):
+                if value is not None and hasattr(value, "__len__"):
                     return str(len(value))
                 return "0"
             # Handle dot-path (for non-loop contexts, e.g., extraction.company)

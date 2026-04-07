@@ -293,7 +293,7 @@ def get_query_rewrite_config(source_type: str) -> QueryRewriteConfig | None:
 if TYPE_CHECKING:
     from deep_research.agent.state import ResearchState
     from deep_research.agent.tools.query_rewriter import QueryRewriteConfig
-    from deep_research.services.llm.config import ModelTier
+    from deep_research.services.llm.types import ModelTier
 
 
 def get_endpoint_override(state: ResearchState, tier: ModelTier) -> str | None:

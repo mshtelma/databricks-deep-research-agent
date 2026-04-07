@@ -3,9 +3,15 @@ from __future__ import annotations
 from typing import Any
 
 from databricks_deep_research.workflow.runtime.planner_contracts import (
-    NormalizedPlanContract,
+    NormalizedPlanContract as NormalizedPlanContract,
+)
+from databricks_deep_research.workflow.runtime.planner_contracts import (
     extract_raw_plan_contract as _extract_raw_plan_contract_impl,
+)
+from databricks_deep_research.workflow.runtime.planner_contracts import (
     finalize_plan_contract as _finalize_plan_contract_impl,
+)
+from databricks_deep_research.workflow.runtime.planner_contracts import (
     normalize_executable_plan_contract as _normalize_executable_plan_contract_impl,
 )
 

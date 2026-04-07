@@ -2,8 +2,6 @@
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from deep_research.db.credential_factory import (
     create_credential_provider,
     detect_lakebase_backend,

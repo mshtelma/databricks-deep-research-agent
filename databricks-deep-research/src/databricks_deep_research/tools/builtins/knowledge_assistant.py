@@ -10,7 +10,6 @@ import logging
 from typing import Any
 
 from databricks_deep_research.tools.protocol import (
-    ResearchTool,
     SourceInfo,
     SourceKind,
     ToolContext,
@@ -145,8 +144,8 @@ def _extract_answer(response: Any) -> str:
         if choices:
             first = choices[0]
             if hasattr(first, "text"):
-                return first.text
+                return str(first.text)
             if hasattr(first, "message") and hasattr(first.message, "content"):
-                return first.message.content
+                return str(first.message.content)
 
     return str(response)

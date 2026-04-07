@@ -5,8 +5,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src" / "databricks_deep_research"
 
-from databricks_deep_research.workflow import executor as executor_module
-from databricks_deep_research.workflow.executor import (
+from databricks_deep_research.workflow import executor as executor_module  # noqa: E402
+from databricks_deep_research.workflow.executor import (  # noqa: E402
     PlanCycleContext,
     _build_available_source_catalog,
     _build_evaluator_runtime_context,
@@ -50,8 +50,8 @@ def test_exec_plan_and_execute_delegates_to_runner() -> None:
 
 
 def test_workflow_state_exposes_typed_runtime_surface() -> None:
-    from databricks_deep_research.workflow.state import WorkflowState
     from databricks_deep_research.workflow.runtime_core import TypedRuntimeStateStore
+    from databricks_deep_research.workflow.state import WorkflowState
 
     state = WorkflowState(query="hello")
     state.runtime_store = TypedRuntimeStateStore(query="hello", workflow_id="wf", workflow_name="WF")
@@ -96,7 +96,10 @@ def test_typed_runtime_store_tracks_artifact_envelopes_and_planning_state() -> N
 
 def test_typed_runtime_store_ingests_evidence_with_dedup_metrics() -> None:
     from databricks_deep_research.workflow.runtime_core import TypedRuntimeStateStore
-    from databricks_deep_research.workflow.runtime_core.models import ObservationRecord, SourceRecord
+    from databricks_deep_research.workflow.runtime_core.models import (
+        ObservationRecord,
+        SourceRecord,
+    )
 
     store = TypedRuntimeStateStore(query="q", workflow_id="wf", workflow_name="WF")
     delta1 = store.ingest_evidence(
@@ -163,7 +166,10 @@ def test_typed_runtime_store_tracks_retrieval_requests_and_results() -> None:
 
 def test_typed_runtime_store_builds_synthesis_input_and_report_artifact() -> None:
     from databricks_deep_research.workflow.runtime_core import TypedRuntimeStateStore
-    from databricks_deep_research.workflow.runtime_core.models import ObservationRecord, SourceRecord
+    from databricks_deep_research.workflow.runtime_core.models import (
+        ObservationRecord,
+        SourceRecord,
+    )
 
     store = TypedRuntimeStateStore(query="q", workflow_id="wf", workflow_name="WF")
     store.ingest_evidence(
@@ -253,7 +259,10 @@ def test_runtime_selector_preserves_full_verification_summary() -> None:
 
 def test_runtime_selectors_prefer_typed_state_over_legacy_state() -> None:
     from databricks_deep_research.workflow.runtime_core import TypedRuntimeStateStore
-    from databricks_deep_research.workflow.runtime_core.models import ObservationRecord, SourceRecord
+    from databricks_deep_research.workflow.runtime_core.models import (
+        ObservationRecord,
+        SourceRecord,
+    )
     from databricks_deep_research.workflow.runtime_core.selectors import (
         select_all_observations_text,
         select_latest_observation_text,

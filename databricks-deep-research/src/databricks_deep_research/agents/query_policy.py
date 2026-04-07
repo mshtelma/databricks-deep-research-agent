@@ -108,11 +108,11 @@ class QueryPolicy(Protocol):
 
 
 class DefaultQueryPolicy:
-    def build_query_plan(self, definition: ToolDefinition, need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
+    def build_query_plan(self, _definition: ToolDefinition, _need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
         query_text = str(raw_arguments.get("query") or raw_arguments.get("question") or "")
         return QueryPlan(arguments=dict(raw_arguments), rendered_query_text=query_text, query_strategy="unchanged")
 
-    def assess_result(self, definition: ToolDefinition, result: ToolResult, need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
+    def assess_result(self, _definition: ToolDefinition, result: ToolResult, _need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
         accepted = list(raw_sources) if result.success else []
         quality = EvidenceQuality.empty if not accepted else EvidenceQuality.full_text
         return RetrievalOutcome(
@@ -142,7 +142,7 @@ class WebSearchQueryPolicy(DefaultQueryPolicy):
     the query optimizer.
     """
 
-    def build_query_plan(self, definition: ToolDefinition, need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
+    def build_query_plan(self, _definition: ToolDefinition, need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
         key = "query" if "query" in raw_arguments else "question"
         raw_query = str(raw_arguments.get(key, "")).strip()
 
@@ -163,7 +163,7 @@ class WebSearchQueryPolicy(DefaultQueryPolicy):
             rendered_query_text=query,
         )
 
-    def assess_result(self, definition: ToolDefinition, result: ToolResult, need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
+    def assess_result(self, _definition: ToolDefinition, result: ToolResult, _need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
         """Classify web search results by content quality, not just URL validity."""
         substantive, low_value, rejected = [], [], []
 
@@ -212,32 +212,46 @@ class WebSearchQueryPolicy(DefaultQueryPolicy):
 
 
 class VectorIndexQueryPolicy(DefaultQueryPolicy):
-    def build_query_plan(self, definition: ToolDefinition, need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
+    """Pass-through policy for VS tools: trust the react-loop LLM's queries.
+
+    The react-loop LLM has full research context (step title, description,
+    root query, previous observations). Its queries are informed and varied.
+    This policy passes them through with word-count capping for embedding
+    model compatibility.
+    """
+
+    _MAX_QUERY_WORDS = 40  # Embedding models handle ~512 tokens; cap conservatively
+
+    def build_query_plan(self, _definition: ToolDefinition, need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
         key = "query" if "query" in raw_arguments else "question"
-        artifact = str((definition.metadata or {}).get("artifact_type") or "")
-        metadata = definition.metadata or {}
-        signature = f"{definition.name} {definition.description} {metadata.get('index_name', '')}".lower()
-        if not artifact:
-            if "earnings" in signature:
-                artifact = "quarterly earnings release"
-            elif "transcript" in signature:
-                artifact = "earnings call transcript"
-            elif "policy" in signature:
-                artifact = "policy document"
-            elif "runbook" in signature or "knowledge" in signature or "manual" in signature:
-                artifact = "runbook manual"
-        base = " ".join(part for part in [" ".join(need.entities[:3]), artifact, " ".join(need.focus_terms[:6])] if part).strip()
-        query = base or str(raw_arguments.get(key, ""))
+        raw_query = str(raw_arguments.get(key, "")).strip()
+
+        # Trust the LLM's query — fall back to step context only if empty
+        query = raw_query or need.step_text or need.root_query
+
+        # Word-count cap for embedding model compatibility
+        words = query.split()
+        if len(words) > self._MAX_QUERY_WORDS:
+            query = " ".join(words[: self._MAX_QUERY_WORDS])
+
         updated = dict(raw_arguments)
         updated[key] = query
-        alternates = []
-        if need.phrases:
-            alternates.append({**updated, key: " ".join(need.entities[:2] + need.phrases[:1]).strip()})
-        if artifact:
-            alternates.append({**updated, key: " ".join(need.entities[:2] + [artifact]).strip()})
-        return QueryPlan(arguments=updated, alternate_argument_sets=alternates[:2], query_strategy="vector_entity_artifact", rendered_query_text=query)
 
-    def assess_result(self, definition: ToolDefinition, result: ToolResult, need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
+        # Build alternates from step context for optional diversity
+        alternates: list[dict[str, Any]] = []
+        if need.entities and need.phrases:
+            alt = " ".join(need.entities[:2] + need.phrases[:2]).strip()
+            if alt and alt.lower() != query.lower():
+                alternates.append({**updated, key: alt})
+
+        return QueryPlan(
+            arguments=updated,
+            alternate_argument_sets=alternates[:2],
+            query_strategy="vector_passthrough",
+            rendered_query_text=query,
+        )
+
+    def assess_result(self, _definition: ToolDefinition, result: ToolResult, need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
         accepted_substantive, accepted_low, rejected = [], [], []
         for src in raw_sources:
             content = str(src.get("content") or "").strip()
@@ -279,7 +293,7 @@ class VectorIndexQueryPolicy(DefaultQueryPolicy):
 
 
 class SqlAnalyticsQueryPolicy(DefaultQueryPolicy):
-    def build_query_plan(self, definition: ToolDefinition, need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
+    def build_query_plan(self, _definition: ToolDefinition, need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
         key = "question" if "question" in raw_arguments else "query"
         measures = [term for term in need.focus_terms if term in {"revenue", "growth", "sales", "eps", "margin", "profit"}]
         subject = " ".join(need.entities[:3]) or need.root_query
@@ -291,7 +305,7 @@ class SqlAnalyticsQueryPolicy(DefaultQueryPolicy):
         alternates = [{**updated, key: f"Break down {', '.join(measures) if measures else 'metrics'} by period for {subject}".strip()}]
         return QueryPlan(arguments=updated, alternate_argument_sets=alternates, query_strategy="genie_metric_slice", rendered_query_text=query)
 
-    def assess_result(self, definition: ToolDefinition, result: ToolResult, need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
+    def assess_result(self, _definition: ToolDefinition, result: ToolResult, _need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
         content = result.content.lower()
         availability_only = "data exists" in content or "accepted" in content or "available" in content
         has_numbers = any(ch.isdigit() for ch in result.content)
@@ -318,7 +332,7 @@ class SqlAnalyticsQueryPolicy(DefaultQueryPolicy):
 
 
 class QaAssistantQueryPolicy(DefaultQueryPolicy):
-    def build_query_plan(self, definition: ToolDefinition, need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
+    def build_query_plan(self, _definition: ToolDefinition, need: RetrievalNeed, raw_arguments: dict[str, Any]) -> QueryPlan:
         key = "question" if "question" in raw_arguments else "query"
         query = str(raw_arguments.get(key) or need.step_text or need.root_query).strip().rstrip("?")
         if need.intent == RetrievalIntent.explanatory_qa:
@@ -327,7 +341,7 @@ class QaAssistantQueryPolicy(DefaultQueryPolicy):
         updated[key] = query
         return QueryPlan(arguments=updated, query_strategy="assistant_explanatory_followup", rendered_query_text=query)
 
-    def assess_result(self, definition: ToolDefinition, result: ToolResult, need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
+    def assess_result(self, _definition: ToolDefinition, result: ToolResult, _need: RetrievalNeed, raw_sources: list[dict[str, Any]]) -> RetrievalOutcome:
         accepted = list(raw_sources) if raw_sources else []
         quality = EvidenceQuality.full_text if accepted else EvidenceQuality.empty
         return RetrievalOutcome(

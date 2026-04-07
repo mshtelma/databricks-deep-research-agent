@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re as _re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -34,7 +35,10 @@ from databricks_deep_research.citation.confidence_classifier import (
 )
 from databricks_deep_research.citation.config import (
     CitationConfig,
+    ClaimDispositionConfig,
     IsolatedVerificationConfig,
+    ReactSynthesisConfig,
+    SynthesisMode,
     VerificationRetrievalConfig,
 )
 from databricks_deep_research.citation.config import (
@@ -45,6 +49,9 @@ from databricks_deep_research.citation.evidence_selector import (
     EvidenceSelector,
 )
 from databricks_deep_research.citation.isolated_verifier import IsolatedVerifier
+from databricks_deep_research.citation.numeric_verifier import (
+    AnswerComparisonMethod as VerifierAnswerComparisonMethod,
+)
 from databricks_deep_research.citation.numeric_verifier import (
     NumericVerifier,
     NumericVerifierConfig,
@@ -66,15 +73,13 @@ from databricks_deep_research.events.types import (
     SynthesisStartedEvent,
     VerificationSummaryEvent,
 )
-from databricks_deep_research.workflow.state import WorkflowState
 from databricks_deep_research.workflow.runtime_core.selectors import (
     select_analysis_summary,
     select_claims,
     select_verification_payload,
     select_verification_summary,
 )
-
-import re as _re
+from databricks_deep_research.workflow.state import WorkflowState
 
 _PLACEHOLDER_TITLES = frozenset({
     "untitled", "unknown", "source", "n/a", "na", "none", "null", "",
@@ -102,8 +107,8 @@ DEFAULT_MAX_TOOL_CALLS = 10
 
 # Reclaim-mode specific constants
 _RECLAIM_MAX_TOOL_CALLS = 5
-_RECLAIM_TARGET_WORD_COUNT = 600
-_RECLAIM_MAX_TOKENS = 2000
+_RECLAIM_TARGET_WORD_COUNT = 1500
+_RECLAIM_MAX_TOKENS = 8000
 
 
 class _EvidenceSelectorAdapter:
@@ -158,19 +163,45 @@ def _build_citation_config(config: AgentNodeConfig) -> CitationConfig:
         )
         generation_mode = CitationGenerationMode.STRICT
 
+    schema = config.output_schema or {}
+
+    synthesis_mode_raw = str(schema.get("synthesis_mode", "interleaved")).lower()
+    try:
+        synthesis_mode = SynthesisMode(synthesis_mode_raw)
+    except ValueError:
+        logger.warning(
+            "SYNTHESIZER_INVALID_SYNTHESIS_MODE mode=%s fallback=interleaved",
+            synthesis_mode_raw,
+        )
+        synthesis_mode = SynthesisMode.INTERLEAVED
+
+    react_synthesis = ReactSynthesisConfig(
+        max_tool_calls=schema.get("react_max_tool_calls", 40),
+    )
+
+    # Stage 8 claim disposition
+    disposition_raw = schema.get("claim_disposition", {})
+    claim_disposition = ClaimDispositionConfig(
+        **{k: v for k, v in disposition_raw.items() if k in ClaimDispositionConfig.model_fields}
+    ) if disposition_raw else ClaimDispositionConfig()
+
     return CitationConfig(
         generation_mode=generation_mode,
+        synthesis_mode=synthesis_mode,
+        react_synthesis=react_synthesis,
         enable_verification_retrieval=bool(reclaim_cfg["enable_are_retrieval"]),
         isolated_verification=IsolatedVerificationConfig(
-            verification_model_tier="analytical",
-            quick_verification_tier="simple",
+            verification_model_tier="bulk_analysis",
+            quick_verification_tier="fast",
+            max_concurrent_verifications=schema.get("max_concurrent_verifications", 10),
         ),
         verification_retrieval=VerificationRetrievalConfig(
-            decomposition_tier="analytical",
-            entailment_tier="analytical",
+            decomposition_tier="simple",
+            entailment_tier="bulk_analysis",
             reconstruction_tier="analytical",
-            softening_tier="simple",
+            softening_tier="fast",
         ),
+        claim_disposition=claim_disposition,
     )
 
 
@@ -389,6 +420,7 @@ def _build_reclaim_pipeline(
                     chunk_size=evidence_cfg.chunk_size,
                     chunk_overlap=evidence_cfg.chunk_overlap,
                     max_chunks_per_source=evidence_cfg.max_chunks_per_source,
+                    max_sources=evidence_cfg.max_sources,
                 ),
             )
         ),
@@ -423,7 +455,7 @@ def _build_reclaim_pipeline(
             llm_client,
             NumericVerifierConfig(
                 rounding_tolerance=numeric_cfg.rounding_tolerance,
-                answer_comparison_method=numeric_cfg.answer_comparison_method.value,
+                answer_comparison_method=VerifierAnswerComparisonMethod(numeric_cfg.answer_comparison_method.value),
                 require_unit_match=numeric_cfg.require_unit_match,
                 require_entity_match=numeric_cfg.require_entity_match,
             ),
@@ -505,6 +537,7 @@ def _build_key_to_numeric_index_map(
             continue
         evidence = evidence_pool[evidence_index]
         source_pool_index = getattr(evidence, "source_pool_index", None)
+        numeric_index: str | None
         if isinstance(source_pool_index, int):
             numeric_index = str(source_pool_index)
         else:
@@ -546,6 +579,7 @@ def _claim_to_state_dict(
     for evidence in evidences:
         if evidence is None:
             continue
+        numeric_index: str | None
         if isinstance(evidence.source_pool_index, int):
             numeric_index = str(evidence.source_pool_index)
         else:
@@ -562,11 +596,11 @@ def _claim_to_state_dict(
         ]
 
     if not citation_keys and claim.evidence and claim.evidence.source_url:
-        numeric_index = url_to_index.get(
+        numeric_index_opt: str | None = url_to_index.get(
             claim.evidence.canonical_source_url or claim.evidence.source_url
         )
-        if numeric_index is not None:
-            citation_keys = [numeric_index]
+        if numeric_index_opt is not None:
+            citation_keys = [numeric_index_opt]
 
     return {
         "claim_text": claim.claim_text,

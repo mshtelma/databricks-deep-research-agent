@@ -3,7 +3,6 @@
 Tests the citation key extraction fallback for the grey references bug fix.
 """
 
-import pytest
 
 from deep_research.agent.persistence import (
     CITATION_KEY_PATTERN,

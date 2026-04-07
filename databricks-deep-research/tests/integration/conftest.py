@@ -17,19 +17,16 @@ from __future__ import annotations
 import asyncio
 import os
 from pathlib import Path
-
-import httpx
-from openai import APITimeoutError
 from typing import Any
 
+import httpx
 import pytest
-from openai import AsyncOpenAI
+from openai import APITimeoutError, AsyncOpenAI
 
 from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.tools.builtins.genie import DatabricksGenieTool
 from databricks_deep_research.tools.builtins.web_crawl import WebCrawlTool
 from databricks_deep_research.tools.builtins.web_search import (
-    SearchResult,
     WebSearchTool,
 )
 from databricks_deep_research.tools.protocol import (
@@ -133,7 +130,7 @@ async def llm_client() -> FrameworkLLMClient:
 # ---------------------------------------------------------------------------
 
 
-from databricks_deep_research.tools.builtins.brave_search import BraveSearchAdapter
+from databricks_deep_research.tools.builtins.brave_search import BraveSearchAdapter  # noqa: E402
 
 
 @pytest.fixture

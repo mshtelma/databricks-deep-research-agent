@@ -667,9 +667,10 @@ class LLMClient:
                         from json_repair import repair_json
 
                         repaired = repair_json(content)
+                        repaired_str = str(repaired) if not isinstance(repaired, str) else repaired
                         try:
                             structured = structured_output.model_validate(
-                                json.loads(repaired)
+                                json.loads(repaired_str)
                             )
                             logger.info(
                                 "LLM_STRUCTURED_OUTPUT_PARSE",
@@ -1504,7 +1505,8 @@ class LLMClient:
 
                                     try:
                                         repaired = repair_json(tcc.arguments_json)
-                                        args = json.loads(repaired)
+                                        repaired_str = str(repaired) if not isinstance(repaired, str) else repaired
+                                        args = json.loads(repaired_str)
                                     except Exception:
                                         args = {}
                                         logger.warning(

@@ -2,13 +2,24 @@ from __future__ import annotations
 
 from typing import Any
 
+from databricks_deep_research.agents.config import (
+    AgentNodeConfig,
+    PlanAndExecuteNodeConfig,
+    ToolNodeConfig,
+)
 from databricks_deep_research.events.types import StreamEvent, ToolResultEvent
 from databricks_deep_research.tools.protocol import tool_kind_to_source_kind
 from databricks_deep_research.tools.resolver import ToolResolver
-from databricks_deep_research.workflow.definition import WorkflowDefinition, WorkflowNode, NodeType
-from databricks_deep_research.agents.config import AgentNodeConfig, PlanAndExecuteNodeConfig, ToolNodeConfig
-from databricks_deep_research.workflow.runtime.plan_execute_formatting import extract_step_title, obs_to_text
-from databricks_deep_research.workflow.runtime.plan_execute_types import AvailableSourceDescriptor, PlanCycleContext, ReplanFeedbackEntry
+from databricks_deep_research.workflow.definition import NodeType, WorkflowDefinition, WorkflowNode
+from databricks_deep_research.workflow.runtime.plan_execute_formatting import (
+    extract_step_title,
+    obs_to_text,
+)
+from databricks_deep_research.workflow.runtime.plan_execute_types import (
+    AvailableSourceDescriptor,
+    PlanCycleContext,
+    ReplanFeedbackEntry,
+)
 from databricks_deep_research.workflow.state import WorkflowState
 
 _TOOL_KIND_ENDPOINT_KEY: dict[str, str] = {
@@ -51,7 +62,7 @@ def extract_evidence_sufficiency(eval_output: Any) -> str | None:
         value = eval_output.get("evidence_sufficiency")
         return str(value) if value else None
     if hasattr(eval_output, "evidence_sufficiency"):
-        value = getattr(eval_output, "evidence_sufficiency")
+        value = eval_output.evidence_sufficiency
         return str(value) if value else None
     return None
 
@@ -61,7 +72,7 @@ def extract_failure_mode(eval_output: Any) -> str | None:
         value = eval_output.get("failure_mode")
         return str(value) if value else None
     if hasattr(eval_output, "failure_mode"):
-        value = getattr(eval_output, "failure_mode")
+        value = eval_output.failure_mode
         return str(value) if value else None
     return None
 

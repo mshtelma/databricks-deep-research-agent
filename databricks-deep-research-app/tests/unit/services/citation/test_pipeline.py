@@ -15,25 +15,22 @@ import json
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
 
 import pytest
 
 from deep_research.agent.state import ClaimInfo, EvidenceInfo, SourceInfo
-from deep_research.services.citation.claim_generator import InterleavedClaim, InterleavedGenerator
+from deep_research.services.citation.claim_generator import InterleavedClaim
 from deep_research.services.citation.confidence_classifier import (
     ConfidenceClassifier,
     ConfidenceLevel,
 )
-from deep_research.services.citation.evidence_selector import EvidencePreSelector, RankedEvidence
-from deep_research.services.citation.isolated_verifier import IsolatedVerifier
+from deep_research.services.citation.evidence_selector import RankedEvidence
 from deep_research.services.citation.numeric_verifier import NumericVerifier
 from deep_research.services.citation.pipeline import (
     CitationVerificationPipeline,
     VerificationEvent,
 )
 from deep_research.services.llm.client import LLMClient
-
 
 # ---------------------------------------------------------------------------
 # Test Fixtures
@@ -745,7 +742,7 @@ class TestFullPipelineIntegration:
 
         # Stage 2-3: Generate with interleaving (includes confidence classification)
         generated_claims: list[InterleavedClaim] = []
-        async for content, claim in pipeline.generate_with_interleaving(
+        async for _content, claim in pipeline.generate_with_interleaving(
             evidence_pool=evidence if evidence else [],
             observations=[],
             query="What is the AI market size in 2024?",
@@ -837,7 +834,7 @@ class TestFullPipelineIntegration:
         assert len(events) >= 2
 
         # Check that numeric claim triggered numeric detection
-        numeric_events = [e for e in events if e.event_type == "numeric_claim_detected"]
+        _ = [e for e in events if e.event_type == "numeric_claim_detected"]
         # May or may not have numeric events depending on detection
 
     @pytest.mark.asyncio

@@ -15,12 +15,12 @@ from deep_research.agent.prompts.synthesizer import (
 )
 from deep_research.agent.prompts.utils import build_system_prompt
 from deep_research.agent.state import ResearchState
-from deep_research.core.logging_utils import get_logger, truncate
+from deep_research.core.logging_utils import get_logger
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.types import ModelTier
 
 if TYPE_CHECKING:
-    from deep_research.services.citation import CitationVerificationPipeline, VerificationEvent
+    pass
 
 logger = get_logger(__name__)
 

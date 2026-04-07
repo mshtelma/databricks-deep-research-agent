@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from openai import BadRequestError, InternalServerError, PermissionDeniedError
+from openai import BadRequestError, InternalServerError, PermissionDeniedError, RateLimitError
 
 from databricks_deep_research.llm.client import FrameworkLLMClient
 
@@ -298,6 +298,91 @@ async def test_structured_validation_fallback_json_supported() -> None:
     assert result.content == '{"steps": [{"id": "s1"}]}'
     # Only one create call needed (json_object succeeded)
     assert mock_openai.chat.completions.create.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit retry tests
+# ---------------------------------------------------------------------------
+
+
+def _make_rate_limit_error(retry_after: str | None = None) -> RateLimitError:
+    """Create a RateLimitError with optional Retry-After header."""
+    headers = {"retry-after": retry_after} if retry_after else {}
+    response = httpx.Response(
+        status_code=429,
+        headers=headers,
+        request=httpx.Request("POST", "https://api.example.com/chat/completions"),
+        json={"error": {"message": "rate limited", "type": "rate_limit_error"}},
+    )
+    return RateLimitError(
+        message="rate limited",
+        response=response,
+        body={"error": {"message": "rate limited"}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_retried_when_retry_rate_limit_true() -> None:
+    """429 with retry_rate_limit=True: first attempt fails, second succeeds."""
+    client, mock_openai = _make_client()
+
+    call_count = 0
+
+    async def mock_func() -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise _make_rate_limit_error()
+        return "success"
+
+    with patch("databricks_deep_research.llm.client.asyncio.sleep", new_callable=AsyncMock):
+        result = await client._retry_with_backoff(mock_func, retry_rate_limit=True)
+
+    assert result == "success"
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_not_retried_when_retry_rate_limit_false() -> None:
+    """429 with retry_rate_limit=False: raises immediately (backward compat)."""
+    client, mock_openai = _make_client()
+
+    call_count = 0
+
+    async def mock_func() -> str:
+        nonlocal call_count
+        call_count += 1
+        raise _make_rate_limit_error()
+
+    with pytest.raises(RateLimitError):
+        await client._retry_with_backoff(mock_func, retry_rate_limit=False)
+
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_respects_retry_after_header() -> None:
+    """429 with Retry-After: 2 header → verify sleep called with capped value."""
+    client, mock_openai = _make_client()
+
+    call_count = 0
+
+    async def mock_func() -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise _make_rate_limit_error(retry_after="2")
+        return "success"
+
+    with patch("databricks_deep_research.llm.client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await client._retry_with_backoff(mock_func, retry_rate_limit=True)
+
+    assert result == "success"
+    assert call_count == 2
+    # Sleep should have been called once with the retry-after value (2.0)
+    mock_sleep.assert_awaited_once()
+    actual_backoff = mock_sleep.call_args[0][0]
+    assert actual_backoff == 2.0
 
 
 @pytest.mark.asyncio

@@ -13,7 +13,6 @@ from deep_research.agent.pipeline.executor import (
     create_executor_for_pipeline,
 )
 from deep_research.agent.pipeline.protocols import (
-    CustomPhase,
     PhaseInsertion,
     PipelineCustomization,
 )

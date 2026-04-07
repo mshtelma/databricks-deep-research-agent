@@ -123,7 +123,7 @@ research_types:
     report_limits:
       min_words: 300
       max_words: 600
-      max_tokens: 1200
+      max_tokens: 2000
     researcher:
       mode: react
       max_search_queries: 2
@@ -132,6 +132,7 @@ research_types:
     citation_verification:
       generation_mode: natural
       enable_numeric_qa_verification: false
+      max_concurrent_verifications: 5
 
   medium:
     steps:
@@ -140,8 +141,8 @@ research_types:
       prompt_guidance: "Balanced research, 2-3 steps."
     report_limits:
       min_words: 500
-      max_words: 1000
-      max_tokens: 2000
+      max_words: 1200
+      max_tokens: 4000
     researcher:
       mode: react
       max_search_queries: 3
@@ -149,6 +150,7 @@ research_types:
       max_tool_calls: 8
     citation_verification:
       generation_mode: natural
+      max_concurrent_verifications: 5
 
   extended:
     steps:
@@ -157,8 +159,8 @@ research_types:
       prompt_guidance: "Thorough research for testing."
     report_limits:
       min_words: 800
-      max_words: 1500
-      max_tokens: 3000
+      max_words: 2000
+      max_tokens: 6000
     researcher:
       mode: react
       max_search_queries: 4
@@ -167,6 +169,7 @@ research_types:
     citation_verification:
       generation_mode: natural
       enable_numeric_qa_verification: false
+      max_concurrent_verifications: 5
 
 # Search configuration
 search:
@@ -274,3 +277,14 @@ citation_verification:
     search_timeout_seconds: 2
 
   unsupported_claim_warning_threshold: 0.20
+
+  # Stage 8: Post-verification claim disposition
+  # Maps each verdict to an action: keep, remove, or soften
+  claim_disposition:
+    supported: keep
+    partial: keep
+    unsupported: remove
+    contradicted: remove
+    abstained: keep
+    analysis_partial: keep
+    analysis_unsupported: remove

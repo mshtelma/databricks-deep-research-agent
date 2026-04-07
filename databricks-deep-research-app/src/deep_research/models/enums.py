@@ -9,10 +9,10 @@ This module defines all enums used across the application:
 - DerivationType: How numeric values were obtained
 """
 
-from enum import Enum
+from enum import StrEnum
 
 
-class QueryMode(str, Enum):
+class QueryMode(StrEnum):
     """Query mode determining processing pipeline.
 
     - SIMPLE: LLM-only response, no web search, no research session
@@ -25,14 +25,14 @@ class QueryMode(str, Enum):
     DEEP_RESEARCH = "deep_research"
 
 
-class ClaimType(str, Enum):
+class ClaimType(StrEnum):
     """Type of claim for specialized handling."""
 
     GENERAL = "general"  # Standard factual claim
     NUMERIC = "numeric"  # Claim containing numeric values requiring QA verification
 
 
-class VerificationVerdict(str, Enum):
+class VerificationVerdict(StrEnum):
     """Four-tier verification verdict for claims.
 
     Based on research showing the need to distinguish between:
@@ -48,7 +48,7 @@ class VerificationVerdict(str, Enum):
     CONTRADICTED = "contradicted"  # Evidence DIRECTLY opposes claim
 
 
-class ConfidenceLevel(str, Enum):
+class ConfidenceLevel(StrEnum):
     """HaluGate-style confidence level for verification routing.
 
     Used to route claims to appropriate verification paths:
@@ -62,7 +62,7 @@ class ConfidenceLevel(str, Enum):
     LOW = "low"  # <0.50 - hedged, comparative, synthetic
 
 
-class CorrectionType(str, Enum):
+class CorrectionType(StrEnum):
     """Type of citation correction applied during post-processing.
 
     From CiteFix research:
@@ -78,7 +78,7 @@ class CorrectionType(str, Enum):
     ADD_ALTERNATE = "add_alternate"  # Multiple valid citations, added alternate
 
 
-class DerivationType(str, Enum):
+class DerivationType(StrEnum):
     """How a numeric value was obtained.
 
     Important for provenance tracking:
@@ -90,7 +90,7 @@ class DerivationType(str, Enum):
     COMPUTED = "computed"  # Calculated from source values
 
 
-class SourceType(str, Enum):
+class SourceType(StrEnum):
     """Type of source for citation attribution.
 
     Supports multi-source citation tracking from different retrieval tools:

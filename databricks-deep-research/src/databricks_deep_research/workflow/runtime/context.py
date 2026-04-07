@@ -5,13 +5,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from databricks_deep_research.agents.isolation import AgentOutput
+from databricks_deep_research.events.types import StreamEvent
 from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.pools.pool_state import PoolState
 from databricks_deep_research.tools.resolver import ToolResolver
 from databricks_deep_research.workflow.context import ExecutionContext
 from databricks_deep_research.workflow.definition import WorkflowDefinition, WorkflowNode
 from databricks_deep_research.workflow.state import WorkflowState
-from databricks_deep_research.events.types import StreamEvent
 
 
 @dataclass

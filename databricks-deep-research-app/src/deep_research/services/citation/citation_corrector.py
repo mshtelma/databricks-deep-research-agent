@@ -313,8 +313,10 @@ class CitationCorrector:
             CorrectionResult with correction type and new evidence.
         """
         # If already supported and entails, keep it
-        if current_evidence and current_verdict == "supported":
-            if self.citation_entails(claim, current_evidence.quote_text):
+        if (
+            current_evidence and current_verdict == "supported"
+            and self.citation_entails(claim, current_evidence.quote_text)
+        ):
                 return CorrectionResult(
                     claim_text=claim,
                     correction_type=CorrectionType.KEEP,

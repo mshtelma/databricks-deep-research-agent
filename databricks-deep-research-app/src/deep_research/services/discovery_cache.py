@@ -22,9 +22,9 @@ Cache Key Priority:
 
 import asyncio
 import hashlib
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Callable, Coroutine
 
 from deep_research.core.logging_utils import get_logger
 from deep_research.schemas.data_source import DataSourceType
@@ -316,7 +316,6 @@ class DiscoveryCache:
             Dict with cache stats (total entries, expired, by type).
         """
         async with self._lock:
-            now = datetime.now(UTC)
             total = len(self._cache)
             expired = sum(1 for e in self._cache.values() if e.is_expired)
             by_type: dict[str, int] = {}

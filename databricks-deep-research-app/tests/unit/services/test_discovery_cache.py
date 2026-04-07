@@ -10,7 +10,6 @@ Tests for:
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
 
 import pytest
 
@@ -18,9 +17,7 @@ from deep_research.schemas.data_source import DataSourceType
 from deep_research.schemas.discovery import DiscoveredSource, DiscoveryStatus
 from deep_research.services.discovery_cache import (
     CacheEntry,
-    DEFAULT_CACHE_TTL,
     DiscoveryCache,
-    REFRESH_BUFFER,
     get_discovery_cache,
     reset_discovery_cache,
 )

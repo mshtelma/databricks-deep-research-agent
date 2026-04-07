@@ -15,6 +15,7 @@ handling) are handled here.  The framework handles workflow execution.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -28,11 +29,19 @@ from databricks_deep_research.events.types import (
     CoordinatorClassifiedEvent,
     ItemCompletedEvent,
     ReplanTriggeredEvent,
+)
+from databricks_deep_research.events.types import (
     WorkflowCompletedEvent as FwkWorkflowCompletedEvent,
 )
-from databricks_deep_research.workflow.context import ExecutionContext
-from databricks_deep_research.workflow.definition import WorkflowDefinition
-from databricks_deep_research.workflow.executor import WorkflowExecutor
+from databricks_deep_research.workflow.context import (
+    ExecutionContext,
+)
+from databricks_deep_research.workflow.definition import (
+    WorkflowDefinition,
+)
+from databricks_deep_research.workflow.executor import (
+    WorkflowExecutor,
+)
 from databricks_deep_research.workflow.state import WorkflowState
 
 from deep_research.agent.adapters.config_translator import translate
@@ -55,6 +64,7 @@ from deep_research.schemas.streaming import (
     SynthesisStartedEvent,
 )
 from deep_research.services.llm.client import LLMClient
+from deep_research.services.llm.embedder import DEFAULT_EMBEDDING_ENDPOINT
 from deep_research.services.research_event_buffer import EventBuffer
 from deep_research.services.search.brave import BraveSearchClient
 
@@ -100,7 +110,9 @@ def _resolve_workflow(
         return translate(config, available_tools=tool_names)
 
     from databricks_deep_research import load_workflow_from_string
-    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+    from databricks_deep_research.workflow.loader import (
+        load_workflow_from_dict,
+    )
 
     from deep_research.plugins.base import WorkflowProviderPlugin
 
@@ -210,15 +222,15 @@ async def stream_research_via_framework(
     query: str,
     llm: LLMClient,
     brave_client: BraveSearchClient,
-    crawler: "WebCrawler",
+    crawler: WebCrawler,
     conversation_history: list[dict[str, str]] | None = None,
     session_id: UUID | None = None,
     user_id: str | None = None,
     chat_id: str | None = None,
-    config: "OrchestrationConfig | None" = None,
-    db: "AsyncSession | None" = None,
-    plugin_manager: "PluginManager | None" = None,
-    plugin_data: dict[str, Any] | None = None,
+    config: OrchestrationConfig | None = None,
+    db: AsyncSession | None = None,
+    plugin_manager: PluginManager | None = None,
+    plugin_data: dict[str, Any] | None = None,  # noqa: ARG001
 ) -> AsyncGenerator[StreamEvent | str, None]:
     """Stream research via the multi-agent framework.
 
@@ -253,7 +265,7 @@ async def stream_research_via_framework(
     steps_skipped = 0
     plan_iterations = 0
     final_report: str | None = None
-    structured_output: dict | None = None
+    structured_output: dict[str, Any] | None = None
     simple_response: str | None = None
     _synthesis_chunks: list[str] = []
     wf_state: WorkflowState | None = None
@@ -319,7 +331,7 @@ async def stream_research_via_framework(
         with safe_mlflow_run(run_label):
             async with safe_tool_span(
                 "framework_orchestration",
-                _SpanType.CHAIN if _SpanType else None,
+                _SpanType.CHAIN if _SpanType is not None else None,
                 {"research.query": query[:200], "research.use_framework": True},
             ):
                 # Trace metadata for MLflow correlation
@@ -335,6 +347,7 @@ async def stream_research_via_framework(
                 # -- 2. Build framework execution context --
                 framework_llm = create_framework_llm_client(
                     llm,
+                    embedding_model=DEFAULT_EMBEDDING_ENDPOINT,
                     model_overrides=config.model_overrides,
                 )
 
@@ -384,7 +397,7 @@ async def stream_research_via_framework(
                         try:
                             for _tool in _plugin.get_tools(_tool_ctx):
                                 if _tool.definition.name not in _existing:
-                                    framework_tools.append(_tool)
+                                    framework_tools.append(_tool)  # type: ignore[arg-type]
                                     _existing.add(_tool.definition.name)
                                     logger.info(
                                         "PLUGIN_TOOL_MERGED tool=%s plugin=%s",
@@ -431,13 +444,17 @@ async def stream_research_via_framework(
                 # Build ToolResolver with YAML declarations + factories so
                 # declared tools (vector_search, genie, etc.) can be created
                 # on-demand by the factory chain.
-                from databricks_deep_research.tools.resolver import ToolResolver
-                from databricks_deep_research.tools.factory import ToolFactoryContext
                 from databricks_deep_research.tools.factories.builtin import (
                     BuiltinToolFactory,
                 )
                 from databricks_deep_research.tools.factories.databricks import (
                     DatabricksToolFactory,
+                )
+                from databricks_deep_research.tools.factory import (
+                    ToolFactoryContext,
+                )
+                from databricks_deep_research.tools.resolver import (
+                    ToolResolver,
                 )
 
                 _ws_client = None
@@ -719,10 +736,8 @@ async def stream_research_via_framework(
             and config.research_session_id is not None
             and config.message_id is not None
         ):
-            try:
+            with contextlib.suppress(Exception):
                 await event_buffer.flush()
-            except Exception:
-                pass
             try:
                 from deep_research.agent.persistence import (
                     persist_research_session_failed_independent,
@@ -940,14 +955,12 @@ async def _buffer_event(
 ) -> None:
     """Add event to buffer for persistence, handling None gracefully."""
     if event and buffer:
-        try:
+        with contextlib.suppress(Exception):
             await buffer.add_event(event)
-        except Exception:
-            pass
 
 
 async def _load_file_search_tool(
-    config: "OrchestrationConfig",
+    config: OrchestrationConfig,
     db: Any,
     user_id: str | None,
     chat_id: str | None,
@@ -1103,10 +1116,10 @@ def _source_id_from_user_source(source: Any) -> str | None:
 
 
 async def _load_enterprise_tools(
-    config: "OrchestrationConfig",
+    config: OrchestrationConfig,
     db: Any,
     user_id: str | None,
-    chat_id: str | None,
+    chat_id: str | None,  # noqa: ARG001
 ) -> list[Any]:
     """Load enterprise tools from the app's tool factory.
 
@@ -1189,24 +1202,24 @@ async def _load_enterprise_tools(
             cached_sources = await cache.get(user_id=user_id)
 
             if cached_sources:
-                matched_sources = [
+                discovery_matched = [
                     source for source in cached_sources
                     if source.source_id in set(remaining_source_ids)
                 ]
-                if matched_sources:
+                if discovery_matched:
                     discovery_tools = await create_tools_from_discovered_sources(
-                        matched_sources
+                        discovery_matched
                     )
                     _append_unique_tools(tools, discovery_tools)
-                    if len(discovery_tools) == len(matched_sources):
-                        matched_ids = {source.source_id for source in matched_sources}
+                    if len(discovery_tools) == len(discovery_matched):
+                        matched_ids = {source.source_id for source in discovery_matched}
                         remaining_source_ids = [
                             source_id for source_id in remaining_source_ids
                             if source_id not in matched_ids
                         ]
                     logger.info(
                         "FWK_ENTERPRISE_TOOLS_FROM_DISCOVERY matched=%d loaded=%d remaining=%d",
-                        len(matched_sources),
+                        len(discovery_matched),
                         len(discovery_tools),
                         len(remaining_source_ids),
                     )
@@ -1253,13 +1266,13 @@ async def _load_enterprise_tools(
 
 
 async def _persist_simple_response(
-    config: "OrchestrationConfig",
+    config: OrchestrationConfig,
     db: Any,
     chat_id: str | None,
     user_id: str | None,
     query: str,
     response: str,
-    event_buffer: EventBuffer | None,
+    _event_buffer: EventBuffer | None,
 ) -> None:
     """Persist a simple query response (no research session)."""
     if (
@@ -1312,10 +1325,10 @@ async def _persist_simple_response(
 
 async def _persist_delta(
     delta: Any,
-    config: "OrchestrationConfig",
-    db: Any,
-    chat_id: str | None,
-    user_id: str | None,
+    config: OrchestrationConfig,  # noqa: ARG001
+    db: Any,  # noqa: ARG001
+    chat_id: str | None,  # noqa: ARG001
+    user_id: str | None,  # noqa: ARG001
 ) -> None:
     """Persist incremental state changes from DomainContextTracker.
 
@@ -1338,7 +1351,7 @@ async def _persist_delta(
 
 
 async def _persist_completion(
-    config: "OrchestrationConfig",
+    config: OrchestrationConfig,
     chat_id_uuid: UUID,
     user_id: str,
     query: str,
@@ -1366,6 +1379,8 @@ async def _persist_completion(
                 claims=claims, verification_summary=verification_summary,
             )
 
+            assert config.research_session_id is not None
+            assert config.message_id is not None
             counts = await asyncio.shield(
                 persist_research_session_complete_update_independent(
                     chat_id=chat_id_uuid,
@@ -1392,6 +1407,8 @@ async def _persist_completion(
                 claims=claims, verification_summary=verification_summary,
             )
 
+            assert config.message_id is not None
+            assert config.research_session_id is not None
             counts = await asyncio.shield(
                 persist_complete_research_independent(
                     chat_id=chat_id_uuid,
@@ -1627,7 +1644,7 @@ def _extract_verification_from_report(
             continue
 
         # Map marker indices to sources
-        cited_indices = sorted(set(int(m) for m in markers))
+        cited_indices = sorted({int(m) for m in markers})
 
         # Build evidence from the first valid cited source
         evidence: EvidenceInfo | None = None
@@ -1701,7 +1718,7 @@ def _extract_verification_from_report(
 
 
 def _build_state_proxy(
-    config: "OrchestrationConfig",
+    config: OrchestrationConfig,
     final_report: str,
     wf_state: WorkflowState | None = None,
     *,

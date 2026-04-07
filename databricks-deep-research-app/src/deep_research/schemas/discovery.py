@@ -13,7 +13,7 @@ API Contract: /specs/007-enterprise-data-sources/contracts/discovery.yaml
 """
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from deep_research.schemas.data_source import DataSourceType
 
 
-class DiscoveryStatus(str, Enum):
+class DiscoveryStatus(StrEnum):
     """Status of a discovered data source."""
 
     READY = "ready"
@@ -37,7 +37,7 @@ class DiscoveryStatus(str, Enum):
     """Source encountered an error during discovery."""
 
 
-class QueryType(str, Enum):
+class QueryType(StrEnum):
     """Supported query types for Vector Search."""
 
     ANN = "ANN"

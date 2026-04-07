@@ -283,8 +283,9 @@ class JobManager:
                 )
             except Exception as e:
                 logger.warning(
-                    "LIFECYCLE_HOOK_EMISSION_FAILED hook=on_job_submitted error=%s",
-                    str(e)[:200],
+                    "LIFECYCLE_HOOK_EMISSION_FAILED",
+                    hook="on_job_submitted",
+                    error=str(e)[:200],
                 )
 
         # Start background task
@@ -729,8 +730,9 @@ class JobManager:
                             )
                         except Exception as e:
                             logger.warning(
-                                "LIFECYCLE_HOOK_EMISSION_FAILED hook=on_job_completed error=%s",
-                                str(e)[:200],
+                                "LIFECYCLE_HOOK_EMISSION_FAILED",
+                                hook="on_job_completed",
+                                error=str(e)[:200],
                             )
 
         except asyncio.CancelledError:
@@ -796,8 +798,9 @@ class JobManager:
                             )
                         except Exception as hook_error:
                             logger.warning(
-                                "LIFECYCLE_HOOK_EMISSION_FAILED hook=on_job_failed error=%s",
-                                str(hook_error)[:200],
+                                "LIFECYCLE_HOOK_EMISSION_FAILED",
+                                hook="on_job_failed",
+                                error=str(hook_error)[:200],
                             )
 
         finally:

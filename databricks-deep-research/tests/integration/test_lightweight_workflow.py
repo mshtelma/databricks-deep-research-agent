@@ -29,10 +29,8 @@ from databricks_deep_research.events.types import (
     ItemCompletedEvent,
     ItemStartedEvent,
     PlanCreatedEvent,
-    StreamEvent,
     ToolCallEvent,
     WorkflowCompletedEvent,
-    WorkflowStartedEvent,
 )
 from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.tools.registry import ToolRegistry
@@ -117,7 +115,7 @@ class TestLightweightWorkflow:
 
         # -- Print diagnostics --
         counts = event_summary(events)
-        print(f"\n=== search_and_summarize_fast ===")
+        print("\n=== search_and_summarize_fast ===")
         print(f"Elapsed: {elapsed:.1f}s")
         print(f"Report length: {len(report_str)} chars")
         print(f"Tool calls: {len(tool_calls)} (web_search: {len(search_calls)})")
@@ -188,7 +186,7 @@ class TestLightweightWorkflow:
             })
 
         # -- Print classification results --
-        print(f"\n=== single_agent_coordinator_classifies ===")
+        print("\n=== single_agent_coordinator_classifies ===")
         for r in results:
             print(
                 f"  [{r['expected_band']:>8s}] "
@@ -290,7 +288,7 @@ class TestLightweightWorkflow:
 
         # -- Print full diagnostics --
         counts = event_summary(events)
-        print(f"\n=== simple_research_pipeline_full_lifecycle ===")
+        print("\n=== simple_research_pipeline_full_lifecycle ===")
         print(f"Elapsed: {elapsed:.1f}s")
         print(f"Report length: {len(report_str)} chars")
         print(f"Plan steps: {len(plan.steps)}")

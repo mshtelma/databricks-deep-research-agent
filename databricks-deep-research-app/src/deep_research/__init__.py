@@ -88,7 +88,7 @@ Conversation:
 __version__ = "0.1.0"
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> object:
     """Lazy loading of exports to avoid circular imports."""
     # Core orchestrator
     if name == "run_research":

@@ -13,8 +13,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from typing import TYPE_CHECKING, Any
 
 from deep_research.agent.pipeline.protocols import (
     CustomPhase,
@@ -126,10 +127,10 @@ class PhaseExecutor:
 
     async def execute_all(
         self,
-        context: "ResearchContext",
-        state: "ResearchState",
+        context: ResearchContext,
+        state: ResearchState,
         config: dict[str, Any] | None = None,
-    ) -> AsyncIterator[tuple[PhaseEvent, "ResearchState"]]:
+    ) -> AsyncIterator[tuple[PhaseEvent, ResearchState]]:
         """Execute all phases in dependency order.
 
         Yields:
@@ -189,8 +190,8 @@ class PhaseExecutor:
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             # Process results
-            for (phase_name, _), result in zip(phases_to_run, results):
-                if isinstance(result, Exception):
+            for (phase_name, _), result in zip(phases_to_run, results, strict=True):
+                if isinstance(result, BaseException):
                     logger.error("Phase '%s' failed: %s", phase_name, result)
                     yield (
                         PhaseEvent(
@@ -217,10 +218,10 @@ class PhaseExecutor:
     async def _execute_phase(
         self,
         phase: CustomPhase,
-        context: "ResearchContext",
-        state: "ResearchState",
+        context: ResearchContext,
+        state: ResearchState,
         config: dict[str, Any],
-    ) -> tuple["ResearchState", float, int]:
+    ) -> tuple[ResearchState, float, int]:
         """Execute a single phase.
 
         Returns:
@@ -252,10 +253,10 @@ class PhaseExecutor:
 
     def _merge_state(
         self,
-        current: "ResearchState",
-        phase_result: "ResearchState",
+        current: ResearchState,
+        phase_result: ResearchState,
         phase_name: str,
-    ) -> "ResearchState":
+    ) -> ResearchState:
         """Merge phase result into current state.
 
         Merges:
@@ -286,7 +287,7 @@ class PhaseExecutor:
                 PhaseResult(
                     output=phase_result.last_observation or "",
                     sources=[
-                        s.__dict__ if hasattr(s, "__dict__") else s
+                        s.__dict__
                         for s in phase_result.sources
                     ],
                     success=True,

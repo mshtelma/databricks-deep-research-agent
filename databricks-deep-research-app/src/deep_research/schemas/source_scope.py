@@ -6,13 +6,14 @@ are available for research (enterprise only, web only, or all).
 Part of 007-enterprise-data-sources feature (T028).
 """
 
-from enum import Enum
+from collections.abc import Callable
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class SourceScope(str, Enum):
+class SourceScope(StrEnum):
     """Scope of data sources to use during research.
 
     Users can restrict research to specific source categories:
@@ -118,8 +119,8 @@ class SourceScopeConfig(BaseModel):
     def filter_sources(
         self,
         sources: list[Any],
-        name_getter: callable = lambda x: x.name,
-        type_getter: callable = lambda x: x.type,
+        name_getter: Callable[[Any], str] = lambda x: x.name,
+        type_getter: Callable[[Any], str] = lambda x: x.type,
     ) -> list[Any]:
         """Filter a list of sources based on scope configuration.
 

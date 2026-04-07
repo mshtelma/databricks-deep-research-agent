@@ -19,6 +19,9 @@ from uuid import uuid4
 
 import pytest
 
+# Import markers from conftest.py
+from tests.integration.conftest import requires_all_credentials
+
 from deep_research.agent.orchestrator import (
     OrchestrationConfig,
     run_research,
@@ -31,10 +34,6 @@ from deep_research.schemas.streaming import (
 )
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.search.brave import BraveSearchClient
-
-# Import markers from conftest.py
-from tests.integration.conftest import requires_all_credentials
-
 
 # ---------------------------------------------------------------------------
 # Test Cases
@@ -144,7 +143,7 @@ async def test_deep_research_initial_query(
     print(f"   - Steps executed: {result.steps_executed}")
     print(f"   - Sources found: {len(result.state.sources)}")
     print(f"   - Report length: {len(result.state.final_report)} chars")
-    print(f"\n📊 Citation Verification Results:")
+    print("\n📊 Citation Verification Results:")
     print(f"   - Claims extracted: {summary.total_claims}")
     print(f"   - Supported: {summary.supported_count}")
     print(f"   - Partial: {summary.partial_count}")
@@ -153,7 +152,7 @@ async def test_deep_research_initial_query(
     print(f"   - Abstained: {summary.abstained_count}")
     print(f"   - Evidence spans: {len(result.state.evidence_pool)}")
     if summary.warning:
-        print(f"   ⚠️  Warning: High unsupported/contradicted rate")
+        print("   ⚠️  Warning: High unsupported/contradicted rate")
 
 
 @requires_all_credentials

@@ -101,11 +101,7 @@ async def run_coordinator(state: ResearchState, llm: LLMClient) -> ResearchState
                 structured_output=CoordinatorOutput,
             )
 
-            if response.structured:
-                output = response.structured
-            else:
-                # Parse JSON manually
-                output = CoordinatorOutput.model_validate_json(response.content)
+            output = response.structured or CoordinatorOutput.model_validate_json(response.content)
 
             # Update state
             state.query_classification = QueryClassification(

@@ -119,9 +119,9 @@ def test_plan_tool_arguments_builds_vector_search_alternates() -> None:
         recent_observations=[],
     )
 
-    assert planned.rewritten_query.startswith("Kroger")
-    assert "quarterly earnings release" in planned.rewritten_query
-    assert len(planned.alternate_queries) >= 2
+    # Passthrough mode preserves the LLM's raw query
+    assert planned.rewritten_query == "Kroger Q3 2025 earnings report revenue net income EPS"
+    assert planned.strategy == "vector_passthrough"
     assert planned.arguments["_alternate_queries"] == planned.alternate_queries
 
 
@@ -144,9 +144,9 @@ def test_plan_tool_arguments_strips_question_leadins_from_subject() -> None:
         recent_observations=[],
     )
 
-    assert not planned.rewritten_query.startswith("What ")
-    assert not planned.rewritten_query.startswith("How ")
-    assert planned.rewritten_query.startswith("Kroger")
+    # Passthrough mode preserves the LLM's raw query (including question form)
+    assert planned.rewritten_query == "What did Kroger management say about guidance?"
+    assert planned.strategy == "vector_passthrough"
 
 
 def test_admit_tool_result_rejects_irrelevant_vector_hits() -> None:
@@ -440,3 +440,194 @@ def test_source_kind_is_str_compatible() -> None:
     kinds = frozenset({"vector_index", "sql_analytics"})
     assert SourceKind.vector_index in kinds
     assert SourceKind.web not in kinds
+
+
+# ---------------------------------------------------------------------------
+# VS admission threshold + tiered enterprise boost tests
+# ---------------------------------------------------------------------------
+
+
+def test_vs_source_low_relevance_rejected() -> None:
+    """VS source with relevance_score=0.15 and no keyword overlap is rejected."""
+    step = {"title": "Analyze cloud architecture", "description": "Review deployment docs."}
+    definition = ToolDefinition(
+        name="search_docs_vs_index",
+        description="Search internal documents.",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        source_type="vector_search",
+    )
+    result = ToolResult(
+        content="raw results",
+        sources=[{
+            "url": "https://example.com/low",
+            "title": "Office Cafeteria Menu Spring 2025",
+            "snippet": "Weekly lunch specials and catering options.",
+            "source_type": "vector_search",
+            "relevance_score": 0.15,
+        }],
+    )
+    admitted = admit_tool_result(
+        definition,
+        result,
+        current_step=step,
+        root_query="How is the cloud deployment pipeline configured?",
+    )
+    assert admitted.accepted_count == 0
+    assert admitted.rejected_count == 1
+
+
+def test_vs_source_moderate_relevance_with_keyword_accepted() -> None:
+    """VS source with relevance_score=0.35 + 1 keyword match is accepted.
+
+    Tiered boost: 0.35 >= 0.3 gives enterprise_boost=1.
+    1 keyword match gives +1.  Total score = 2 which meets threshold.
+    """
+    step = {"title": "Review deployment pipeline", "description": "Check infrastructure docs."}
+    definition = ToolDefinition(
+        name="search_docs_vs_index",
+        description="Search internal documents.",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        source_type="vector_search",
+    )
+    result = ToolResult(
+        content="raw results",
+        sources=[{
+            "url": "https://example.com/moderate",
+            "title": "Infrastructure Deployment Guide",
+            "snippet": "Pipeline configuration for deployment automation.",
+            "source_type": "vector_search",
+            "relevance_score": 0.35,
+        }],
+    )
+    admitted = admit_tool_result(
+        definition,
+        result,
+        current_step=step,
+        root_query="How is the deployment pipeline configured?",
+    )
+    assert admitted.accepted_count == 1
+    assert admitted.rejected_count == 0
+
+
+def test_vs_source_moderate_relevance_no_keyword_fallback() -> None:
+    """VS source with relevance_score=0.35 and zero keyword overlap is accepted
+    via the fallback threshold (0.35 >= 0.3)."""
+    step = {"title": "Analyze quarterly results", "description": "Review earnings data."}
+    definition = ToolDefinition(
+        name="search_docs_vs_index",
+        description="Search internal documents.",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        source_type="vector_search",
+    )
+    result = ToolResult(
+        content="raw results",
+        sources=[{
+            "url": "https://example.com/moderate-nokey",
+            "title": "Unrelated Topic With No Keyword Overlap",
+            "snippet": "Content that shares no terms with the query profile.",
+            "source_type": "vector_search",
+            "relevance_score": 0.35,
+        }],
+    )
+    admitted = admit_tool_result(
+        definition,
+        result,
+        current_step=step,
+        root_query="How is the deployment pipeline configured?",
+    )
+    assert admitted.accepted_count == 1
+    assert admitted.rejected_count == 0
+
+
+def test_vs_source_strong_relevance_always_accepted() -> None:
+    """VS source with relevance_score=0.7 is accepted regardless of keywords.
+
+    Tiered boost: 0.7 >= 0.5 gives enterprise_boost=2.
+    Score = 0 (no keywords) + 2 (boost) = 2, which meets threshold.
+    """
+    step = {"title": "Analyze quarterly results", "description": "Check financial data."}
+    definition = ToolDefinition(
+        name="search_docs_vs_index",
+        description="Search internal documents.",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        source_type="vector_search",
+    )
+    result = ToolResult(
+        content="raw results",
+        sources=[{
+            "url": "https://example.com/strong",
+            "title": "Completely Unrelated Title No Keywords",
+            "snippet": "Zero overlap with any profile terms whatsoever.",
+            "source_type": "vector_search",
+            "relevance_score": 0.7,
+        }],
+    )
+    admitted = admit_tool_result(
+        definition,
+        result,
+        current_step=step,
+        root_query="How is the deployment pipeline configured?",
+    )
+    assert admitted.accepted_count == 1
+    assert admitted.rejected_count == 0
+    # Score should be exactly 2 from enterprise boost alone
+    assert admitted.accepted_sources[0]["admission_score"] == 2
+
+
+def test_empty_profile_enterprise_falls_through_to_scoring() -> None:
+    """Empty profile + VS source with relevance_score=0.1 is rejected,
+    not blindly accepted as before the fix."""
+    # Use a step/query that produces an empty profile (no extractable terms)
+    step = {"title": "", "description": ""}
+    definition = ToolDefinition(
+        name="search_docs_vs_index",
+        description="Search internal documents.",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        source_type="vector_search",
+    )
+    result = ToolResult(
+        content="raw results",
+        sources=[{
+            "url": "https://example.com/low-enterprise",
+            "title": "Random Noise Document",
+            "snippet": "Completely irrelevant content.",
+            "source_type": "vector_search",
+            "relevance_score": 0.1,
+        }],
+    )
+    admitted = admit_tool_result(
+        definition,
+        result,
+        current_step=step,
+        root_query="",
+    )
+    assert admitted.accepted_count == 0
+    assert admitted.rejected_count == 1
+
+
+def test_empty_profile_web_source_still_accepted() -> None:
+    """Empty profile + web source is still accepted (backward compat)."""
+    step = {"title": "", "description": ""}
+    definition = ToolDefinition(
+        name="web_search",
+        description="Search the web.",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+        source_type="web",
+    )
+    result = ToolResult(
+        content="raw results",
+        sources=[{
+            "url": "https://example.com/web-page",
+            "title": "Some Web Page",
+            "snippet": "Some web content.",
+            "source_type": "web",
+        }],
+    )
+    admitted = admit_tool_result(
+        definition,
+        result,
+        current_step=step,
+        root_query="",
+    )
+    assert admitted.accepted_count == 1
+    assert admitted.rejected_count == 0

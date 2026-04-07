@@ -7,7 +7,7 @@ claims to full analytical verification.
 
 import re
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from deep_research.core.app_config import get_app_config
 from deep_research.core.logging_utils import get_logger
@@ -15,7 +15,7 @@ from deep_research.core.logging_utils import get_logger
 logger = get_logger(__name__)
 
 
-class ConfidenceLevel(str, Enum):
+class ConfidenceLevel(StrEnum):
     """HaluGate-style confidence levels for routing."""
 
     HIGH = "high"

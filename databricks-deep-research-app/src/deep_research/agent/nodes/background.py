@@ -18,15 +18,14 @@ from mlflow.entities import SpanType
 from pydantic import BaseModel, Field
 
 from deep_research.agent.config import get_background_config
+from deep_research.agent.nodes.react_researcher import ReactResearchEvent
 from deep_research.agent.prompts.background import (
     BACKGROUND_SEARCH_PROMPT,
     BACKGROUND_SYSTEM_PROMPT,
     BACKGROUND_USER_PROMPT,
 )
-from deep_research.agent.nodes.react_researcher import ReactResearchEvent
 from deep_research.agent.state import ResearchState, SourceInfo
 from deep_research.agent.tools.web_search import web_search
-from deep_research.services.search.domain_filter import DomainFilter
 from deep_research.core.app_config import get_app_config
 from deep_research.core.logging_utils import get_logger, log_tool_call, truncate
 from deep_research.core.tracing import safe_tool_span
@@ -36,6 +35,7 @@ from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.types import ModelTier
 from deep_research.services.obo_client import OBODatabricksClient
 from deep_research.services.search.brave import BraveSearchClient
+from deep_research.services.search.domain_filter import DomainFilter
 
 logger = get_logger(__name__)
 

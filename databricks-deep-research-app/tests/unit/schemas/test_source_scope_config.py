@@ -5,10 +5,7 @@ Pure unit tests testing the scope filtering logic — no mocks needed.
 
 from dataclasses import dataclass
 
-import pytest
-
 from deep_research.schemas.source_scope import SourceScope, SourceScopeConfig
-
 
 # =========================================================================
 # TestIsTypeEnabled

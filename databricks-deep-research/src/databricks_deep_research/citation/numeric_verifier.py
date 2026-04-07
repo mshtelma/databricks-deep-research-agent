@@ -29,6 +29,7 @@ from databricks_deep_research.citation.types import (
     QAVerificationResult,
     RankedEvidence,
 )
+from databricks_deep_research.citation.utils import truncate as _truncate
 from databricks_deep_research.llm.client import FrameworkLLMClient, ModelTier
 
 logger = logging.getLogger(__name__)
@@ -66,15 +67,6 @@ _DEFAULT_CONFIG = NumericVerifierConfig()
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _truncate(text: str | None, max_length: int = 100) -> str:
-    """Truncate text for logging."""
-    if text is None:
-        return "<none>"
-    if len(text) <= max_length:
-        return text
-    return text[:max_length] + "..."
 
 
 def is_exact_numeric_match(claim: str, evidence: str) -> bool:

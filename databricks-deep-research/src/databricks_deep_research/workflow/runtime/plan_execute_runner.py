@@ -34,9 +34,9 @@ from databricks_deep_research.workflow.runtime.plan_execute_execution import (
     append_replan_feedback,
     build_available_source_catalog,
     extract_decision,
-    extract_reasoning,
     extract_evidence_sufficiency,
     extract_failure_mode,
+    extract_reasoning,
     normalize_evaluation_decision,
     populate_synthesis_state,
     summarize_item_health,
@@ -257,7 +257,8 @@ async def run_plan_execute(
             )
 
             item_events: list[StreamEvent] = []
-            sources_before = pools.get("sources").count() if "sources" in pools else 0
+            sources_pool = pools.get("sources")
+            sources_before = sources_pool.count() if sources_pool is not None else 0
             async with trace_span(
                 f"item_{idx}",
                 span_type="CHAIN",
@@ -268,7 +269,8 @@ async def run_plan_execute(
                     async for event in deps.exec_node(body_node, state):
                         item_events.append(event)
                         yield event
-            sources_after = pools.get("sources").count() if "sources" in pools else 0
+            sources_pool_after = pools.get("sources")
+            sources_after = sources_pool_after.count() if sources_pool_after is not None else 0
             item_health = summarize_item_health(
                 item,
                 item_events,

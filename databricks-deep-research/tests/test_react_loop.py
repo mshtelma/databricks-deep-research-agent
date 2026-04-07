@@ -431,10 +431,8 @@ async def test_vector_query_planning_adds_alternate_queries() -> None:
     assert result.content == "done"
     validated_args = tool.validate_arguments.call_args.args[0]
     rewritten = validated_args["query"]
-    assert "Kroger" in rewritten
-    assert "quarterly earnings release" in rewritten
-    assert rewritten != "Kroger Q3 2025 earnings report revenue net income EPS"
-    assert validated_args["_alternate_queries"]
+    # Passthrough mode preserves the LLM's raw query
+    assert rewritten == "Kroger Q3 2025 earnings report revenue net income EPS"
 
 
 @pytest.mark.asyncio

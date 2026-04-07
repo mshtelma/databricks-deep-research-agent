@@ -88,7 +88,7 @@ def _ensure_citation_key(claim: ClaimInfo) -> dict[str, Any]:
 
 async def persist_research_data(
     state: ResearchState,
-    message_id: UUID,
+    message_id: UUID,  # noqa: ARG001
     research_session_id: UUID,
     db: AsyncSession,
     chat_id: UUID | None = None,
@@ -101,7 +101,7 @@ async def persist_research_data(
 
     Args:
         state: Research state containing sources, evidence, and claims.
-        message_id: ID of the agent message (unused - kept for backwards compat).
+        _message_id: ID of the agent message (unused - kept for backwards compat).
         research_session_id: ID of the research session for sources.
         db: Database session.
         chat_id: Optional chat ID for chat-level source pool queries.

@@ -2,8 +2,6 @@
 
 from typing import Any
 
-import pytest
-
 from deep_research.conversation.handler import ConversationHandler, DefaultConversationHandler
 from deep_research.conversation.intent import DefaultIntentClassifier, IntentClassifier
 from deep_research.conversation.protocol import ConversationProvider, DefaultConversationProvider

@@ -9,7 +9,7 @@ is now read from JSONB and transformed to API response schemas.
 """
 
 from typing import Any
-from uuid import UUID, uuid5, NAMESPACE_DNS
+from uuid import NAMESPACE_DNS, UUID, uuid5
 
 from deep_research.schemas.citation import (
     CitationResponse,
@@ -21,7 +21,6 @@ from deep_research.schemas.citation import (
     VerificationSummary,
     VerificationVerdictEnum,
 )
-
 
 # Namespace for deterministic claim UUIDs
 CLAIM_UUID_NAMESPACE = NAMESPACE_DNS

@@ -12,11 +12,11 @@ This module defines:
 """
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 
-class IntentType(str, Enum):
+class IntentType(StrEnum):
     """Types of user intents in a conversation.
 
     Attributes:
@@ -221,7 +221,7 @@ class DefaultIntentClassifier:
         self,
         message: str,
         history: list[dict[str, str]] | None = None,
-        previous_state: Any | None = None,
+        _previous_state: Any | None = None,
     ) -> ConversationIntent:
         """Classify intent using rule-based heuristics."""
         message_lower = message.lower().strip()

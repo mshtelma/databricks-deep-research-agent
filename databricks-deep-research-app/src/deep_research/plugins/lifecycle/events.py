@@ -7,10 +7,9 @@ or output type.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
-
 
 # ============================================================================
 # Job Lifecycle Events
@@ -157,7 +156,7 @@ class ValidationErrorEvent:
     error_message: str
 
     # Pydantic-specific details (if ValidationError)
-    validation_errors: list[dict] | None = None  # Raw Pydantic errors
+    validation_errors: list[dict[str, Any]] | None = None  # Raw Pydantic errors
     failed_fields: list[dict[str, str]] | None = None  # Simplified field list
     error_count: int | None = None
 
@@ -239,7 +238,6 @@ def create_synthesis_config_event(
     Returns:
         SynthesisConfigEvent with schema details if available
     """
-    from datetime import timezone
 
     schema_name = None
     schema_fields = None
@@ -271,7 +269,7 @@ def create_synthesis_config_event(
         schema_required_fields=schema_required,
         verify_sources=getattr(research_config, "verify_sources", False),
         enable_post_verification=getattr(research_config, "enable_post_verification", False),
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -370,29 +368,29 @@ def create_validation_error_event(
     Returns:
         ValidationErrorEvent with unpacked field details if ValidationError
     """
-    from datetime import timezone
 
-    validation_errors = None
-    failed_fields = None
-    error_count = None
+    validation_errors: list[dict[str, Any]] | None = None
+    failed_fields: list[dict[str, str]] | None = None
+    error_count: int | None = None
 
     # Try to unpack ValidationError
     try:
         from pydantic import ValidationError
 
         if isinstance(error, ValidationError):
-            # Get raw error list
-            validation_errors = error.errors()
+            # Get raw error list - cast ErrorDetails (TypedDict) to dict[str, Any]
+            raw_errors = error.errors()
+            validation_errors = [{str(k): v for k, v in err.items()} for err in raw_errors]
             error_count = len(validation_errors)
 
             # Unpack to simplified field list
             failed_fields = []
-            for err in validation_errors:
+            for err in raw_errors:
                 field_path = ".".join(str(loc) for loc in err.get("loc", []))
                 failed_fields.append({
                     "path": field_path,
                     "type": err.get("type", "unknown"),
-                    "message": err.get("msg", "")[:200],
+                    "message": str(err.get("msg", ""))[:200],
                 })
 
     except ImportError:
@@ -413,5 +411,5 @@ def create_validation_error_event(
         raw_output_preview=raw_output[:500] if raw_output else None,
         attempt_number=attempt_number,
         max_attempts=max_attempts,
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )

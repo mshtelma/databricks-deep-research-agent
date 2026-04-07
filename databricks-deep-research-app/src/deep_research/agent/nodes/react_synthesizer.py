@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import mlflow
 import numpy as np
-from mlflow.entities import SpanType
 
 from deep_research.agent.config import get_report_limits
 from deep_research.agent.prompts.utils import build_system_prompt
@@ -37,7 +36,6 @@ from deep_research.agent.tools.synthesis_tools import (
     format_snippet,
 )
 from deep_research.core.logging_utils import get_logger, truncate
-from deep_research.core.tracing_constants import PHASE_SYNTHESIS, research_span_name
 from deep_research.services.citation.evidence_selector import RankedEvidence
 from deep_research.services.llm.types import ModelTier, ToolCall
 
@@ -45,7 +43,7 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from deep_research.services.llm.client import LLMClient
-    from deep_research.services.llm.embedder import GteEmbedder
+    from deep_research.services.llm.embedder import Embedder
 
 logger = get_logger(__name__)
 
@@ -324,14 +322,11 @@ def _is_markdown_structural(text: str) -> bool:
         return True
 
     # Extended horizontal rule patterns (3+ of same char)
-    if (
+    return (
         len(stripped) >= 3
         and all(c == stripped[0] for c in stripped)
         and stripped[0] in "-*_"
-    ):
-        return True
-
-    return False
+    )
 
 
 def parse_tagged_content(raw_content: str) -> tuple[str, list[ParsedContent]]:
@@ -591,12 +586,12 @@ def deduplicate_report(content: str) -> str:
 @mlflow.trace(name="research.synthesis.react_synthesizer", span_type="AGENT")
 async def run_react_synthesis(
     state: ResearchState,
-    llm: "LLMClient",
+    llm: LLMClient,
     evidence_pool: list[RankedEvidence],
     max_tool_calls: int = 40,
     retrieval_window_size: int = 3,
     embeddings: NDArray[np.float32] | None = None,
-    embedder: GteEmbedder | None = None,
+    embedder: Embedder | None = None,
     hybrid_alpha: float = 0.6,
     enable_post_processing: bool = False,
 ) -> AsyncGenerator[ReactSynthesisEvent, None]:
@@ -618,7 +613,7 @@ async def run_react_synthesis(
         max_tool_calls: Maximum tool calls before stopping.
         retrieval_window_size: Size of sliding window for grounding inference.
         embeddings: Pre-computed evidence embeddings for hybrid search.
-        embedder: GTE embedder for computing query embeddings (optional).
+        embedder: Embedder for computing query embeddings (optional).
         hybrid_alpha: Weight for vector vs BM25 (0.6 = 60% vector).
         enable_post_processing: Run LLM polish pass for coherence (default False).
 
@@ -973,7 +968,7 @@ Remember: search_evidence → read_snippet → write claim with citation.
 async def _execute_synthesis_tool(
     tc: ToolCall,
     registry: EvidenceRegistry,
-    embedder: GteEmbedder | None = None,
+    embedder: Embedder | None = None,
 ) -> str:
     """Execute a synthesis tool call.
 
@@ -1033,12 +1028,12 @@ async def _execute_synthesis_tool(
 
 async def run_react_synthesis_sectioned(
     state: ResearchState,
-    llm: "LLMClient",
+    llm: LLMClient,
     evidence_pool: list[RankedEvidence],
     tool_budget_per_section: int = 10,
     retrieval_window_size: int = 3,
     embeddings: NDArray[np.float32] | None = None,
-    embedder: GteEmbedder | None = None,
+    embedder: Embedder | None = None,
     hybrid_alpha: float = 0.6,
     enable_post_processing: bool = False,
 ) -> AsyncGenerator[ReactSynthesisEvent, None]:
@@ -1056,7 +1051,7 @@ async def run_react_synthesis_sectioned(
         tool_budget_per_section: Tool calls allowed per section.
         retrieval_window_size: Window size for grounding.
         embeddings: Pre-computed evidence embeddings for hybrid search.
-        embedder: GTE embedder for computing query embeddings.
+        embedder: Embedder for computing query embeddings.
         hybrid_alpha: Weight for vector vs BM25 (0.6 = 60% vector).
         enable_post_processing: Run LLM polish pass for coherence (default False).
 
@@ -1104,10 +1099,12 @@ async def run_react_synthesis_sectioned(
 
         # Get observations for this step
         step_observation = ""
-        if step.status and hasattr(step.status, 'value') and step.status.value == "completed":
-            # Find observation for this step index if available
-            if step_idx < len(state.all_observations):
-                step_observation = state.all_observations[step_idx]
+        if (
+            step.status and hasattr(step.status, 'value')
+            and step.status.value == "completed"
+            and step_idx < len(state.all_observations)
+        ):
+            step_observation = state.all_observations[step_idx]
 
         # Build section prompt with context
         messages: list[dict[str, Any]] = [
@@ -1152,7 +1149,7 @@ Do not repeat content from previous sections.
                     messages=messages,
                     tools=SYNTHESIS_TOOLS,
                     tier=ModelTier.COMPLEX,
-                    max_tokens=min(limits.max_tokens, 4000),  # Fixed budget per section
+                    max_tokens=limits.max_tokens,
                 ):
                     if chunk.content:
                         accumulated_content += chunk.content
@@ -1348,7 +1345,7 @@ Do not repeat content from previous sections.
 async def _post_process_report(
     content: str,
     query: str,
-    llm: "LLMClient",
+    llm: LLMClient,
     limits: Any,
 ) -> str:
     """Post-process report for coherence and polish.

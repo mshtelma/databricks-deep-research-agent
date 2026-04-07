@@ -14,15 +14,12 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any
 
 import pytest
 
 from databricks_deep_research.events.types import (
     BranchSelectedEvent,
     ItemStartedEvent,
-    NodeStartedEvent,
-    StreamEvent,
     ToolCallEvent,
     WorkflowCompletedEvent,
 )

@@ -16,8 +16,8 @@ from deep_research.schemas.config import (
     EndpointCatalogResponse,
     EndpointInfo,
     ModelCategoryInfo,
-    ServingEndpointSummary,
     ServingEndpointsResponse,
+    ServingEndpointSummary,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ _SERVING_CACHE_TTL = 120.0  # 2 minutes
 @router.get("/serving-endpoints", response_model=ServingEndpointsResponse)
 async def get_serving_endpoints(
     request: Request,
-    user: CurrentUser,
+    _user: CurrentUser,
 ) -> ServingEndpointsResponse:
     """List workspace serving endpoints for model override autocomplete.
 
