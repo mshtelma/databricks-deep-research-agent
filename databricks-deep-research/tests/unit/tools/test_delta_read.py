@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -9,11 +10,11 @@ import pytest
 
 from databricks_deep_research.tools.builtins.delta_read import (
     DeltaContextTool,
-    DeltaReadTool,
     DeltaGrepTool,
+    DeltaReadTool,
+    DeltaTableReadTool,
 )
 from databricks_deep_research.tools.protocol import ToolContext, UrlRegistry
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -425,3 +426,260 @@ class TestDeltaContextTool:
         start, end = DeltaContextTool._compute_range("prefix_c00005", 2)
         assert start == "prefix_c00003"
         assert end == "prefix_c00007"
+
+
+# ---------------------------------------------------------------------------
+# exclude_chunk_types — DeltaReadTool
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaReadToolExcludeChunkTypes:
+    """Tests for the exclude_chunk_types config on DeltaReadTool."""
+
+    @pytest.mark.asyncio
+    async def test_exclude_adds_not_in_to_sql(self) -> None:
+        ws = _make_ws_mock([], _COL_NAMES)
+        tool = DeltaReadTool(
+            **_tool_kwargs(), workspace_client=ws,
+            exclude_chunk_types=["table"],
+        )
+        ctx = ToolContext(query="test")
+        await tool.execute({"file_name": "test.txt"}, ctx)
+
+        call_args = ws.statement_execution.execute_statement.call_args
+        sql = call_args.kwargs.get("statement", call_args[1].get("statement", ""))
+        params = call_args.kwargs.get("parameters", call_args[1].get("parameters", []))
+        assert "NOT IN" in sql
+        assert any(p.name == "excl_ct_0" and p.value == "table" for p in params)
+
+    def test_schema_removes_excluded_from_enum(self) -> None:
+        tool = DeltaReadTool(
+            **_tool_kwargs(), workspace_client=_make_ws_empty(),
+            exclude_chunk_types=["table"],
+        )
+        defn = tool.definition
+        ct_prop = defn.parameters["properties"].get("chunk_type")
+        assert ct_prop is not None
+        assert "table" not in ct_prop["enum"]
+        assert "section" in ct_prop["enum"]
+        assert "text" in ct_prop["enum"]
+
+    def test_schema_removes_param_when_all_excluded(self) -> None:
+        tool = DeltaReadTool(
+            **_tool_kwargs(), workspace_client=_make_ws_empty(),
+            exclude_chunk_types=["table", "section", "text"],
+        )
+        defn = tool.definition
+        assert "chunk_type" not in defn.parameters["properties"]
+
+    @pytest.mark.asyncio
+    async def test_empty_exclusion_no_not_in(self) -> None:
+        ws = _make_ws_mock([], _COL_NAMES)
+        tool = DeltaReadTool(
+            **_tool_kwargs(), workspace_client=ws,
+            exclude_chunk_types=[],
+        )
+        ctx = ToolContext(query="test")
+        await tool.execute({"file_name": "test.txt"}, ctx)
+
+        call_args = ws.statement_execution.execute_statement.call_args
+        sql = call_args.kwargs.get("statement", call_args[1].get("statement", ""))
+        assert "NOT IN" not in sql
+
+
+# ---------------------------------------------------------------------------
+# exclude_chunk_types — DeltaGrepTool
+# ---------------------------------------------------------------------------
+
+
+class TestDeltaGrepToolExcludeChunkTypes:
+    """Tests for the exclude_chunk_types config on DeltaGrepTool."""
+
+    @pytest.mark.asyncio
+    async def test_exclude_adds_not_in_to_sql(self) -> None:
+        ws = _make_ws_mock([], _COL_NAMES)
+        tool = DeltaGrepTool(
+            **{**_tool_kwargs(), "name": "test_grep"}, workspace_client=ws,
+            exclude_chunk_types=["table"],
+        )
+        ctx = ToolContext(query="test")
+        await tool.execute({"file_name": "test.txt", "pattern": "something"}, ctx)
+
+        call_args = ws.statement_execution.execute_statement.call_args
+        sql = call_args.kwargs.get("statement", call_args[1].get("statement", ""))
+        params = call_args.kwargs.get("parameters", call_args[1].get("parameters", []))
+        assert "NOT IN" in sql
+        assert any(p.name == "excl_ct_0" and p.value == "table" for p in params)
+
+    def test_schema_removes_excluded_from_enum(self) -> None:
+        tool = DeltaGrepTool(
+            **{**_tool_kwargs(), "name": "test_grep"}, workspace_client=_make_ws_empty(),
+            exclude_chunk_types=["table"],
+        )
+        defn = tool.definition
+        ct_prop = defn.parameters["properties"].get("chunk_type")
+        assert ct_prop is not None
+        assert "table" not in ct_prop["enum"]
+        assert "section" in ct_prop["enum"]
+
+    @pytest.mark.asyncio
+    async def test_multiple_exclusions(self) -> None:
+        ws = _make_ws_mock([], _COL_NAMES)
+        tool = DeltaGrepTool(
+            **{**_tool_kwargs(), "name": "test_grep"}, workspace_client=ws,
+            exclude_chunk_types=["table", "section"],
+        )
+        ctx = ToolContext(query="test")
+        await tool.execute({"file_name": "test.txt", "pattern": "x"}, ctx)
+
+        call_args = ws.statement_execution.execute_statement.call_args
+        sql = call_args.kwargs.get("statement", call_args[1].get("statement", ""))
+        params = call_args.kwargs.get("parameters", call_args[1].get("parameters", []))
+        assert "NOT IN" in sql
+        assert any(p.name == "excl_ct_0" and p.value == "table" for p in params)
+        assert any(p.name == "excl_ct_1" and p.value == "section" for p in params)
+
+
+# ---------------------------------------------------------------------------
+# DeltaTableReadTool — Table injection
+# ---------------------------------------------------------------------------
+
+_TABLE_JSON = {
+    "headers": [
+        {"name": "col_1", "parent": ""},
+        {"name": "col_2", "parent": ""},
+    ],
+    "rows": [
+        {"label": "Row A", "cells": {"col_1": "100", "col_2": "200"}},
+        {"label": "Row B", "cells": {"col_1": "300", "col_2": "400"}},
+    ],
+}
+
+_TABLE_READ_COL_NAMES = [
+    "chunk_id", "file_name", "bulletin_date", "page_info",
+    "table_title", "annotation", "content", "table_json",
+    "row_count", "col_count",
+]
+
+_TABLE_READ_ROW = [
+    "c0001", "test_file.txt", "2024-01", "Page 1",
+    "Test Table", "Some annotation", "raw content",
+    json.dumps(_TABLE_JSON),
+    "2", "2",
+]
+
+
+def _table_read_tool_kwargs(
+    compute_mock: MagicMock | None = None,
+    structural_analysis: bool = True,
+) -> dict:
+    ws = _make_ws_mock([_TABLE_READ_ROW], _TABLE_READ_COL_NAMES)
+    resolver = (lambda: compute_mock) if compute_mock else None
+    return dict(
+        name="test_table_read",
+        description="Test table read",
+        table_name="main.test.tables",
+        columns=_TABLE_READ_COL_NAMES,
+        workspace_client=ws,
+        warehouse_id="wh-123",
+        content_column="table_json",
+        pk_column="chunk_id",
+        store_in_compute="table",
+        compute_resolver=resolver,
+        structural_analysis=structural_analysis,
+    )
+
+
+class TestDeltaTableReadTableInjection:
+    """Tests for Table wrapping and injection in DeltaTableReadTool."""
+
+    @pytest.mark.asyncio
+    async def test_table_injected_when_json_has_headers_and_rows(self) -> None:
+        """Table instance should be injected when JSON has headers+rows."""
+        from databricks_deep_research.tools.builtins.table_api import Table
+
+        compute_mock = MagicMock()
+        compute_mock.inject_variable = MagicMock()
+        tool = DeltaTableReadTool(**_table_read_tool_kwargs(compute_mock))
+        ctx = ToolContext(query="test", url_registry=UrlRegistry())
+
+        result = await tool.execute({"chunk_id": "c0001"}, ctx)
+
+        assert result.success
+        compute_mock.inject_variable.assert_called_once()
+        _name, injected = compute_mock.inject_variable.call_args[0]
+        assert _name == "table"
+        assert isinstance(injected, Table)
+        # Verify Table methods work
+        assert injected.cell("Row A", "col_1") == "100"
+        assert injected.columns == ["col_1", "col_2"]
+
+    @pytest.mark.asyncio
+    async def test_dict_fallback_when_table_wrap_fails(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Raw dict injected + ERROR logged when Table() construction fails."""
+        import logging
+
+        import databricks_deep_research.tools.builtins.table_api as _mod
+
+        compute_mock = MagicMock()
+        compute_mock.inject_variable = MagicMock()
+        tool = DeltaTableReadTool(**_table_read_tool_kwargs(compute_mock))
+        ctx = ToolContext(query="test", url_registry=UrlRegistry())
+
+        def _boom(*a: object, **kw: object) -> None:
+            raise RuntimeError("Simulated Table failure")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(_mod, "Table", _boom)
+            with caplog.at_level(logging.ERROR, logger="databricks_deep_research.tools.builtins.delta_read"):
+                result = await tool.execute({"chunk_id": "c0001"}, ctx)
+
+        assert result.success
+        compute_mock.inject_variable.assert_called_once()
+        _name, injected = compute_mock.inject_variable.call_args[0]
+        assert _name == "table"
+        assert isinstance(injected, dict)  # raw dict, not Table
+        assert "DELTA_TABLE_READ_TABLE_WRAP_FAIL" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_analysis_includes_table_methods_when_wrapped(self) -> None:
+        """Structural analysis should show Table API methods when wrapping succeeds."""
+        compute_mock = MagicMock()
+        tool = DeltaTableReadTool(**_table_read_tool_kwargs(compute_mock))
+        ctx = ToolContext(query="test", url_registry=UrlRegistry())
+
+        result = await tool.execute({"chunk_id": "c0001"}, ctx)
+
+        assert result.success
+        assert "table.cell(" in result.content
+        assert "table.series(" in result.content
+        assert "table.find_rows(" in result.content
+        assert "table.find_columns(" in result.content
+        assert "table.to_dataframe()" in result.content
+        # Should NOT have raw dict hints
+        assert "table['rows']" not in result.content
+
+    @pytest.mark.asyncio
+    async def test_analysis_excludes_table_methods_when_not_wrapped(self) -> None:
+        """Structural analysis should show dict access when Table wrapping failed."""
+        import databricks_deep_research.tools.builtins.table_api as _mod
+
+        compute_mock = MagicMock()
+        tool = DeltaTableReadTool(**_table_read_tool_kwargs(compute_mock))
+        ctx = ToolContext(query="test", url_registry=UrlRegistry())
+
+        def _boom(*a: object, **kw: object) -> None:
+            raise RuntimeError("Simulated Table failure")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(_mod, "Table", _boom)
+            result = await tool.execute({"chunk_id": "c0001"}, ctx)
+
+        assert result.success
+        # Should have raw dict hints
+        assert "table['rows']" in result.content
+        assert "table['headers']" in result.content
+        assert "row['cells']" in result.content
+        # Should NOT have Table API methods
+        assert "table.cell(" not in result.content
+        assert "table.series(" not in result.content

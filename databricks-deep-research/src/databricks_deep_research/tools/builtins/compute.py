@@ -477,6 +477,22 @@ class PythonComputeTool:
             result = "\n".join(truncated)
         return result
 
+    def inject_variable(self, name: str, value: Any) -> None:
+        """Inject a variable into the compute namespace from an external tool.
+
+        Used by tools like ``DeltaTableReadTool`` to make structured data
+        directly available for agent ``compute()`` calls without requiring
+        the LLM to paste large strings into code.
+
+        Thread-safe — acquires the namespace lock.
+        """
+        with self._lock:
+            self._namespace[name] = value
+            # Evict oldest if over limit (same logic as post-execute)
+            while len(self._namespace) > _MAX_NAMESPACE_ENTRIES:
+                oldest = next(iter(self._namespace))
+                del self._namespace[oldest]
+
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         code = arguments.get("code", "")
         if not isinstance(code, str) or not code.strip():

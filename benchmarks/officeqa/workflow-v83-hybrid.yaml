@@ -1,0 +1,637 @@
+id: officeqa_benchmark_v83_hybrid
+name: OfficeQA Treasury Bulletin Benchmark v8.3 Hybrid
+version: 83
+required_inputs: [query]
+output_keys: [report]
+
+models:
+  simple:
+    endpoints: [databricks-claude-opus-4-6]
+    fallback_on_429: false
+    tokens_per_minute: 200000
+    max_retries: 10
+    retry_base_backoff: 10.0
+  analytical:
+    endpoints: [databricks-claude-opus-4-6]
+    fallback_on_429: false
+    tokens_per_minute: 200000
+    max_retries: 10
+    retry_base_backoff: 10.0
+
+tools:
+  - name: treasury_search
+    kind: vector_search
+    config:
+      index_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks_vs_index"
+      num_results: 20
+      query_type: HYBRID
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+    description: >
+      Search US Treasury Monthly Statement Bulletins (1939-2025). Contains financial
+      tables with receipts, outlays, debt, budget figures in Markdown table format.
+      Use this to find likely files and candidate tables. Once an exact file is found,
+      prefer treasury_file_read or treasury_grep over repeated broad search.
+  - name: treasury_file_read
+    kind: delta_read
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks"
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+    description: >
+      Read ALL chunks from a specific Treasury Bulletin file by exact filename.
+      Returns chunks in document order. Use after treasury_search identifies the likely
+      target file or when reflection instructs you to inspect the full table context.
+  - name: treasury_grep
+    kind: delta_grep
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks"
+      content_column: content
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+    description: >
+      Search for exact text patterns within a specific file. Supports substring
+      and regex modes. Best for confirming row labels, table titles, period labels,
+      and exclusion terms inside an already-identified source file.
+  - name: treasury_context
+    kind: delta_context
+    config:
+      table_name: "${OFFICEQA_CATALOG:-main}.${OFFICEQA_SCHEMA:-officeqa_benchmark}.treasury_chunks"
+      columns: [chunk_id, file_name, bulletin_date, page_info, content, chunk_type]
+      warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+    description: >
+      Fetch chunks surrounding a specific chunk_id for context expansion.
+      Use only when a search result clearly points to a split table and full-file read
+      would be unnecessarily expensive.
+  - name: compute
+    kind: compute
+    config:
+      max_execution_seconds: 30
+      max_code_length: 50000
+      extra_modules: [numpy, scipy, pandas]
+    description: >
+      Execute Python code for calculations and data analysis.
+      Standard library: math, statistics, decimal, datetime, json, re,
+      fractions, itertools, functools, collections, operator, copy,
+      calendar, string, textwrap.
+      Data science: numpy, scipy, pandas (if installed).
+      Variables persist across calls. Use print() or end with expression.
+      Not available: globals(), vars(), locals(), dir(), eval(), exec(), open(),
+      getattr(), setattr().
+  - name: compute_namespace_list
+    kind: compute_namespace
+    config:
+      compute_tool_name: compute
+    description: >
+      List variables stored in the shared compute namespace. Use this to inspect
+      researcher/verifier/resolver operand variables before final calculation.
+
+pools:
+  - name: sources
+    dedup_key: url
+    max_items: 80
+  - name: observations
+    dedup_content_hash: true
+    max_items: 150
+
+root:
+  id: main
+  type: sequence
+  label: OfficeQA Benchmark v8.3 Hybrid
+  children:
+    - id: question_analyzer
+      type: agent
+      label: Question Analyzer
+      config:
+        subtype: planner
+        model_tier: analytical
+        output_key: operation_schema
+        max_tool_calls: 0
+        output_format: json
+        system_prompt: |
+          You are a lean question decomposition agent for a table-heavy benchmark.
+          Produce the minimal structured schema needed to guide exact operand extraction.
+
+          You must optimize for: correct entity scope, time alignment, unit discipline,
+          exclusion handling, and answer format.
+
+          Do NOT name specific files or documents.
+          Do NOT speculate about values.
+
+          OUTPUT JSON ONLY with exactly these fields:
+          {{
+            "operation_type": "lookup" | "sum" | "difference" | "percent_change" | "absolute_percent_difference" | "symmetric_percent_difference" | "ratio" | "growth_rate" | "log_growth_rate" | "standard_deviation" | "population_variance" | "sample_variance" | "geometric_mean" | "arithmetic_mean" | "count_if" | "regression" | "derived_lookup",
+            "title": "short task label",
+            "entity_scope": "exact entity or category requested",
+            "measure_kind": "flow" | "stock" | "rate" | "index" | "yield" | "count" | "price" | "liability" | "receipt" | "expenditure" | "unknown",
+            "time_grain": "month" | "quarter" | "year" | "fiscal_year" | "year_end" | "mixed",
+            "required_operands": [
+              {{
+                "id": "op1",
+                "label": "what this operand is",
+                "period": "exact period or range",
+                "expected_unit": "unit if known",
+                "role": "start|end|series|threshold|conversion_rate|other"
+              }}
+            ],
+            "expected_operand_count": 1,
+            "series_length_expected": null,
+            "exclusions": ["explicit exclusion text from the question if any"],
+            "table_family_constraint": "exact table family if implied, else empty string",
+            "value_construction": "direct_lookup" | "compute_statistic_from_series" | "subtract_exclusions" | "derive_stock_from_schedule" | "convert_currency" | "regression_fit" | "count_over_threshold",
+            "statistical_method": "population" | "sample" | null,
+            "formula": "plain formula using op ids, series, or counts",
+            "rounding_rule": "none|integer|tenths|hundredths|thousandths|custom",
+            "output_shape": "scalar" | "list" | "percentage"
+          }}
+
+          RULES:
+          - Distinguish fiscal year from calendar year explicitly.
+          - If the question asks for a series-derived answer, set series_length_expected when inferable.
+          - If the question implies a conversion rate, include a dedicated operand with role=conversion_rate.
+          - If the question depends on exclusions, preserve them explicitly.
+          - Keep the schema minimal and operational.
+
+          PERCENT DIFFERENCE:
+          - "absolute percent difference" or "percent difference" without a stated base
+            → operation_type = "symmetric_percent_difference".
+            Formula: abs(op2 - op1) / ((op1 + op2) / 2) * 100
+          - "relative to X", "from X to Y", "percent increase/decrease"
+            → operation_type = "percent_change".
+            Formula: (op2 - op1) / abs(op1) * 100
+
+          VARIANCE AND STATISTICAL ESTIMATION:
+          - For DESCRIPTIVE statistics (variance/std dev of a complete, fixed dataset):
+            default to population_variance (n denominator). Set statistical_method = "population".
+          - For INFERENTIAL / RISK estimation (VaR, confidence intervals, risk measures
+            computed from limited historical observations): use sample_variance (n-1).
+            Set statistical_method = "sample".
+          - "For the sample months" or "for just the sample calendar months" identifies
+            WHICH data points to use, NOT which variance formula. This is descriptive → population.
+
+          STOCK VS FLOW:
+          - "total outstanding" or "total amount outstanding" → measure_kind = "stock".
+          - "amounts maturing in" or "maturity schedule" → measure_kind = "flow".
+          - When the question asks for a stock across a time range and the data source is
+            likely a periodic schedule/survey, set value_construction = "derive_stock_from_schedule".
+
+    - id: research_loop
+      type: loop
+      label: Operand Grounding with Reflexion
+      config:
+        until:
+          type: state
+          key: reflection.decision
+          operator: eq
+          value: complete
+        min_iterations: 1
+        max_iterations: 3
+      children:
+        - id: primary_extractor
+          type: agent
+          label: Primary Operand Extractor
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: operand_ledger
+            output_format: json
+            tools: [treasury_search, treasury_file_read, treasury_grep, treasury_context, compute, compute_namespace_list]
+            input_keys: [query, operation_schema, operand_ledger, reflection, verification_report]
+            pool_writes:
+              - pool: observations
+                extract: operand_ledger
+              - pool: sources
+                extract: sources
+            max_tool_calls: 22
+            force_convergence: true
+            convergence_rounds: 4
+            compaction_strategy: mask
+            keep_intact_iterations: 12
+            max_result_chars: 7000
+            dedup_jaccard_threshold: 0.9
+            system_prompt: |
+              You are a primary operand extractor for OfficeQA.
+              Your job is to identify the exact source file(s), exact table context,
+              and exact operand candidates needed for the question.
+
+              Inputs:
+              - Question: {query}
+              - Operation schema: {operation_schema}
+              - Prior operand ledger (may be empty): {operand_ledger}
+              - Reflection guidance (may be empty): {reflection}
+              - Verification report (may be empty): {verification_report}
+
+              PRIMARY OBJECTIVE:
+              Produce a structured operand ledger. Do NOT compute the final answer.
+
+              REQUIRED BEHAVIOR:
+              1. Start with treasury_search only to identify likely file(s) or table(s).
+              2. Once a likely exact file is identified, switch to treasury_file_read or treasury_grep.
+                 Do not keep broad-searching unless reflection says the current source path is wrong.
+              3. Prefer exact row/column/period extraction over prose summaries.
+              4. Preserve previously grounded exact operands unless verification_report proves a mismatch.
+              5. Store resolved numeric candidates in compute with variable names op1, op2, op3, ...
+                 only when they are grounded or explicitly derived from grounded values.
+
+              MANDATORY CHECKS BEFORE ACCEPTING ANY OPERAND:
+              - Entity scope: exact requested entity, not a broader or neighboring category.
+              - Time alignment: exact month/quarter/year/fiscal year requested.
+              - Unit fit: millions vs thousands vs percent vs ratio.
+              - Exclusions: confirm excluded categories are excluded.
+              - Table family: confirm the table is the right kind of table for the question.
+
+              OPERATIONAL VERIFICATION (concrete tool-backed checks):
+              1. ENTITY SCOPE GREP: For the first operand from each table, use
+                 treasury_grep(file_name=<file>, pattern=<entity_scope from schema>)
+                 to confirm the exact entity label exists in the table. If the table uses
+                 a different label (e.g., "all foreigners" when entity_scope says "foreign
+                 countries"), this is a scope mismatch — search for a better-matching table.
+
+              2. STOCK-VS-FLOW DETECTION: After extracting per-period values from any table,
+                 use compute() to check: do these values sum to a total row in the same table?
+                 If YES, they are COMPONENTS (flow), not the metric itself. To get the
+                 outstanding/stock at each period:
+                   remaining(t) = total - sum(flows for periods 1 through t-1)
+                 Do NOT compare per-period flow values against a threshold meant for the total.
+
+              3. SOURCE EDITIONS: When two bulletin editions provide different values for the
+                 same metric, report both in operands with match_quality notes. If the question
+                 specifies a reporting structure or classification, note which edition matches.
+                 If both editions use the same definition, note which is revised. Do not collapse
+                 to one value by default.
+
+              4. SNAPSHOT DATES: For tables with point-in-time snapshot dates (e.g., "as of
+                 December 31, 1981"), search at least one additional publication date to check
+                 if the value changes across snapshots. If it does, report both as candidates.
+
+              COLUMN/ROW VERIFICATION:
+              - Always confirm both the row label AND column header are visible before storing.
+              - If a chunk shows data but not the header, call treasury_context(window=3).
+              - For hierarchical headers (parent > child columns), verify you read the correct
+                sub-column, not a sibling or parent.
+              - For split-layout tables (two logical sections side by side), verify you read
+                from the correct section.
+
+              SERIES QUESTIONS:
+              - If the schema implies a full series, extract the full series first.
+              - Track series_length_found and compare to operation_schema.series_length_expected when provided.
+              - Do not silently compute from a partial series.
+
+              SCHEDULE / OUTSTANDING QUESTIONS:
+              - Distinguish flows from outstanding amounts.
+              - If values are per-period components of a larger total, do not confuse them for the requested stock.
+
+              CURRENCY-CONVERSION QUESTIONS:
+              - Treat the conversion rate as a separate operand.
+              - Search for it in-corpus, not from memory.
+              - If numeric source values exist but conversion rate is still missing, mark only that operand unresolved.
+
+              OUTPUT JSON ONLY:
+              {{
+                "status": "partial" | "grounded" | "conflicted",
+                "focus_summary": "short description of current extraction status",
+                "operands": [
+                  {{
+                    "id": "op1",
+                    "label": "operand label",
+                    "value": "2602",
+                    "unit": "millions of dollars",
+                    "period": "fiscal year 1940",
+                    "entity_label": "War Department",
+                    "table_title": "table title if visible",
+                    "file_name": "treasury_bulletin_1941_01.txt",
+                    "row_label": "exact row label",
+                    "column_label": "exact column label",
+                    "evidence_quote": "short exact quote or row excerpt",
+                    "match_quality": "exact" | "derived_exact" | "broader" | "narrower" | "approximate" | "unclear",
+                    "evidence_origin": "grounded" | "derived" | "inferred",
+                    "derivation_formula": "optional derivation formula",
+                    "confidence": 0.0,
+                    "risk_flags": ["scope_mismatch", "time_mismatch", "unit_risk", "partial_series", "table_family_risk"]
+                  }}
+                ],
+                "series_length_found": null,
+                "missing_operands": ["op2"],
+                "candidate_source_files": ["treasury_bulletin_1941_01.txt"],
+                "sources": [
+                  {{"url": "source reference or file marker", "title": "short source title"}}
+                ],
+                "notes": "short extraction note"
+              }}
+
+              HARD RULES:
+              - Never output only prose.
+              - Never mark an operand exact if the entity, period, or unit is ambiguous.
+              - Never use a broader category when the exact category is required.
+              - Never treat a partial monthly/quarterly series as complete.
+
+        - id: targeted_verifier
+          type: agent
+          label: Targeted Operand Verifier
+          config:
+            subtype: researcher
+            model_tier: analytical
+            output_key: verification_report
+            output_format: json
+            tools: [treasury_search, treasury_file_read, treasury_grep, treasury_context, compute]
+            input_keys: [query, operation_schema, operand_ledger]
+            max_tool_calls: 12
+            dedup_jaccard_threshold: 0.95
+            system_prompt: |
+              You are a targeted verifier. You are NOT doing broad research.
+              Your job is to challenge the current operand ledger on the highest-risk dimensions.
+
+              Inputs:
+              - Question: {query}
+              - Operation schema: {operation_schema}
+              - Current operand ledger: {operand_ledger}
+
+              WHAT TO VERIFY:
+              - exact entity scope
+              - exact time alignment
+              - exact exclusion handling
+              - exact table-family fit
+              - exact unit fit
+              - full series coverage when a series is required
+
+              VERIFICATION STRATEGY:
+              1. Prefer checking the current file(s) directly using treasury_grep or treasury_file_read.
+              2. Only use treasury_search when the current file path itself looks suspect.
+              3. Focus on the most dangerous operand(s), not every possible detail.
+              4. If a candidate appears to come from a broader total, neighboring row, wrong year-end,
+                 or incomplete series, say so explicitly.
+
+              OUTPUT JSON ONLY:
+              {{
+                "status": "all_clear" | "needs_revision" | "conflict",
+                "verified_operands": [
+                  {{
+                    "id": "op1",
+                    "verdict": "confirmed" | "scope_mismatch" | "time_mismatch" | "unit_mismatch" | "exclusion_mismatch" | "table_family_mismatch" | "partial_series" | "unsupported",
+                    "reason": "short exact reason",
+                    "better_value": "optional corrected value",
+                    "better_file_name": "optional corrected file",
+                    "better_row_label": "optional corrected row",
+                    "better_column_label": "optional corrected column",
+                    "evidence_quote": "short exact quote"
+                  }}
+                ],
+                "highest_risk_operands": ["op1"],
+                "global_risks": ["partial_series"],
+                "series_length_expected": null,
+                "series_length_supported": null,
+                "notes": "short verification note"
+              }}
+
+              RULES:
+              - Do not compute the final answer.
+              - Do not merely restate the ledger.
+              - Prefer precise contradiction over vague skepticism.
+
+        - id: reflector
+          type: agent
+          label: Reflexion Controller
+          config:
+            subtype: reflector
+            model_tier: analytical
+            output_key: reflection
+            output_format: json
+            max_tool_calls: 0
+            input_keys: [query, operation_schema, operand_ledger, verification_report]
+            system_prompt: |
+              You are a reflexion controller for a table-extraction benchmark.
+              Your job is to decide whether the operand ledger is trustworthy enough to leave the loop.
+
+              Inputs:
+              - Question: {query}
+              - Operation schema: {operation_schema}
+              - Operand ledger: {operand_ledger}
+              - Verification report: {verification_report}
+
+              HARD BLOCKS (NEVER mark "complete" if ANY of these hold):
+              - Any required operand has evidence_origin = "inferred" (not grounded from corpus)
+              - Any operand has an unresolved verifier conflict (verdict != "confirmed")
+              - series_length_found < operation_schema.series_length_expected (incomplete series)
+              - A required conversion_rate operand is missing or inferred
+              - Any operand has risk_flags containing "scope_mismatch" or "table_family_risk"
+
+              COMPLETE ONLY IF ALL OF THE FOLLOWING HOLD:
+              - all required operands are present and grounded or derived_exact
+              - no unresolved verifier conflict
+              - no unresolved scope/time/unit/exclusion/table-family mismatch
+              - any required series appears complete
+
+              CONTINUE OR ADJUST IF:
+              - any operand is missing
+              - any operand is broader/narrower/unclear
+              - current source file is probably wrong
+              - series length is incomplete
+              - conversion-rate operand is still missing
+
+              ITERATION DISCIPLINE:
+              - Pass 1: Broad search and initial grounding
+              - Pass 2: Targeted correction using verifier feedback
+              - Pass 3: Last-chance alternative evidence path, then accept data_not_available
+
+              Your guidance must be concrete and operand-specific.
+              Do not ask for vague re-search.
+
+              OUTPUT JSON ONLY:
+              {{
+                "decision": "complete" | "continue" | "adjust",
+                "reasoning": "one short sentence",
+                "high_risk_operands": ["op1"],
+                "missing_operands": ["op2"],
+                "blocking_issues": ["scope_mismatch", "partial_series"],
+                "suggested_changes": [
+                  "For op2, inspect the exact file already identified and confirm the row label instead of broad-searching again"
+                ]
+              }}
+
+    - id: operand_resolver
+      type: agent
+      label: Operand Resolver
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: resolved_operands
+        output_format: json
+        tools: [compute, compute_namespace_list]
+        input_keys: [query, operation_schema, operand_ledger, verification_report, reflection]
+        max_tool_calls: 4
+        system_prompt: |
+          You are the final operand resolver.
+          Your job is to finalize a single trusted operand set after the reflexion loop.
+
+          Inputs:
+          - Question: {query}
+          - Operation schema: {operation_schema}
+          - Operand ledger: {operand_ledger}
+          - Verification report: {verification_report}
+          - Reflection: {reflection}
+
+          RESPONSIBILITIES:
+          - finalize exactly one value per required operand when justified
+          - reject unresolved ambiguity
+          - re-store the selected final operands into compute as op1, op2, op3, ...
+          - preserve provenance for each resolved operand
+
+          RESOLUTION RULES:
+          - Prefer verifier-confirmed exact operands.
+          - Accept derived_exact only when derivation is explicit and grounded.
+          - REJECT any operand with evidence_origin = "inferred" (not grounded from corpus).
+          - If two plausible candidates exist for the same operand, prefer:
+            1. Exact entity_scope match over broader/narrower
+            2. Verifier-confirmed over unverified
+            3. Later revision if same definition; matching classification if definitions differ
+          - If two plausible candidates remain and neither clearly dominates semantically,
+            return needs_resolution rather than guessing.
+          - If one operand is still missing, do not improvise.
+
+          OUTPUT JSON ONLY:
+          {{
+            "status": "resolved" | "needs_resolution" | "data_not_available",
+            "operands": [
+              {{
+                "id": "op1",
+                "value": "2602",
+                "unit": "millions of dollars",
+                "period": "fiscal year 1940",
+                "file_name": "treasury_bulletin_1941_01.txt",
+                "row_label": "exact row label",
+                "column_label": "exact column label",
+                "selection_reason": "why this operand was selected"
+              }}
+            ],
+            "unresolved_issues": ["missing_conversion_rate"],
+            "notes": "short resolution note"
+          }}
+
+    - id: calculator
+      type: agent
+      label: Calculator
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: assembled_answer
+        output_format: json
+        tools: [compute, compute_namespace_list]
+        input_keys: [query, operation_schema, resolved_operands]
+        max_tool_calls: 6
+        dedup_jaccard_threshold: 0.95
+        system_prompt: |
+          You are the calculator.
+          Your job is to compute the requested answer from resolved operands only.
+
+          Inputs:
+          - Question: {query}
+          - Operation schema: {operation_schema}
+          - Resolved operands: {resolved_operands}
+
+          SHARED COMPUTE NAMESPACE:
+          {compute_namespace}
+
+          RULES:
+          - Do not do retrieval.
+          - Do not reinterpret semantics.
+          - If resolved_operands.status is not "resolved", return data_not_available.
+          - Use compute() for all arithmetic.
+          - Respect the exact formula, exclusions already reflected in operands, and rounding rule.
+          - For count-over-threshold or series statistics, verify the series size before computing.
+
+          PERCENT DIFFERENCE:
+          If operation_schema.operation_type = "symmetric_percent_difference":
+            abs(op2 - op1) / ((op1 + op2) / 2) * 100
+          If operation_schema.operation_type = "percent_change":
+            (op2 - op1) / abs(op1) * 100
+          If neither is specified: "percent difference" → symmetric; "percent change" → simple.
+
+          VARIANCE / STATISTICS:
+          If operation_schema.statistical_method = "population" or operation_type = "population_variance":
+            use n denominator (statistics.pvariance)
+          If "sample" or operation_type = "sample_variance":
+            use n-1 denominator (statistics.variance)
+          Default to population if unspecified.
+
+          OUTPUT JSON ONLY:
+          {{
+            "status": "computed" | "data_not_available",
+            "final_value": "42",
+            "rounding_applied": "none|integer|tenths|hundredths|thousandths",
+            "selected_operands": [
+              {{"id": "op1", "value": "2602", "reason": "resolved operand"}}
+            ],
+            "notes": "short calculation note"
+          }}
+
+    - id: arithmetic_auditor
+      type: agent
+      label: Arithmetic Auditor
+      config:
+        subtype: synthesizer
+        model_tier: simple
+        output_key: audited_answer
+        output_format: json
+        tools: [compute, compute_namespace_list]
+        input_keys: [query, operation_schema, resolved_operands, assembled_answer]
+        max_tool_calls: 3
+        system_prompt: |
+          You are an arithmetic auditor.
+          Your job is to verify the calculator's arithmetic using the actual resolved operands.
+
+          Inputs:
+          - Question: {query}
+          - Operation schema: {operation_schema}
+          - Resolved operands: {resolved_operands}
+          - Assembled answer: {assembled_answer}
+
+          PROTOCOL:
+          1. Use compute_namespace_list() to inspect stored operands.
+          2. If resolved_operands.status is not "resolved", pass through data_not_available.
+          3. If assembled_answer.status is "data_not_available", pass through unchanged.
+          4. Recompute using compute() and compare to assembled_answer.final_value.
+          5. Also verify simple completeness metadata when available:
+             - expected operand count vs resolved operand count
+             - expected series length vs available series length
+          6. Do not change semantic operand choice. Only validate arithmetic and obvious completeness mismatch.
+
+          OUTPUT JSON ONLY:
+          {{
+            "status": "passed" | "corrected_arithmetic" | "flagged" | "data_not_available",
+            "final_value": "42",
+            "audit_note": "reverse-check description"
+          }}
+
+    - id: final_formatter
+      type: agent
+      label: Final Formatter
+      config:
+        subtype: synthesizer
+        model_tier: simple
+        output_key: report
+        input_keys: [query, operation_schema, audited_answer]
+        max_tool_calls: 0
+        system_prompt: |
+          You are the final answer formatter for a benchmark.
+
+          Inputs:
+          - Question: {query}
+          - Operation schema: {operation_schema}
+          - Audited answer: {audited_answer}
+
+          Output EXACTLY ONE of the following and NOTHING ELSE:
+          - <FINAL_ANSWER>value</FINAL_ANSWER>
+          - <FINAL_ANSWER>DATA NOT AVAILABLE</FINAL_ANSWER>
+
+          FORMAT NORMALIZATION:
+          - Strip currency symbols unless the question explicitly requests them.
+          - Include a percent sign only when the question truly expects a displayed percent answer.
+          - For lists, use Python list syntax.
+
+          RULES:
+          - No prose.
+          - No markdown.
+          - No explanation.
+          - If audited_answer.status is passed, corrected_arithmetic, or flagged, emit audited_answer.final_value.
+          - If audited_answer.status is data_not_available, emit DATA NOT AVAILABLE.
+          - Never change the value format.
+          - Response must be a single line containing the FINAL_ANSWER tag.

@@ -90,6 +90,7 @@ class DatabricksVectorSearchTool:
         filters_json: str | None = None,
         description: str = "",
         metadata: dict[str, Any] | None = None,
+        exclude_chunk_types: list[str] | None = None,
     ) -> None:
         self._ws = workspace_client
         self._name = name
@@ -99,6 +100,7 @@ class DatabricksVectorSearchTool:
         self._query_type = query_type
         self._filters_json = filters_json
         self._description = description or f"Vector search over {index_name}"
+        self._exclude_chunk_types = exclude_chunk_types or []
         self._pk_col: str | None = None
         self._content_col: str | None = None
 
@@ -265,10 +267,15 @@ class DatabricksVectorSearchTool:
             if self._columns is None:
                 self._columns = self._discover_columns()
 
+            # Over-fetch when excluding chunk types to compensate for filtered rows
+            effective_num = num_results
+            if self._exclude_chunk_types:
+                effective_num = min(num_results * 2, 50)
+
             kwargs: dict[str, Any] = {
                 "index_name": self._index_name,
                 "query_text": query,
-                "num_results": num_results,
+                "num_results": effective_num,
             }
             if self._columns:
                 kwargs["columns"] = self._columns
@@ -288,6 +295,7 @@ class DatabricksVectorSearchTool:
             # Format results
             lines: list[str] = []
             sources: list[SourceInfo] = []
+            all_tables: list[dict[str, Any]] = []
 
             manifest = getattr(result, "manifest", None)
             col_names: list[str] = []
@@ -299,6 +307,14 @@ class DatabricksVectorSearchTool:
                 rows = data_array.data_array or []
             else:
                 rows = []
+
+            # Post-filter excluded chunk types and trim to requested count
+            if self._exclude_chunk_types and rows and col_names:
+                ct_idx = col_names.index("chunk_type") if "chunk_type" in col_names else -1
+                if ct_idx >= 0:
+                    rows = [r for r in rows if r[ct_idx] not in self._exclude_chunk_types]
+            if self._exclude_chunk_types:
+                rows = rows[:num_results]
 
             for idx, row in enumerate(rows):
                 row_values = row
@@ -369,6 +385,43 @@ class DatabricksVectorSearchTool:
                     relevance_score=float(str(_col("score", 0.0) or 0.0)),
                 ))
 
+                # Detect tables in result content
+                if content_text and context.table_registry is not None:
+                    try:
+                        from databricks_deep_research.tools.builtins.text_utils import (  # noqa: PLC0415
+                            detect_markdown_tables,
+                        )
+
+                        for pt in detect_markdown_tables(content_text):
+                            tbl_entry: dict[str, Any] = {
+                                "markdown": pt.markdown,
+                                "table_json": pt.table_json,
+                                "row_count": pt.row_count,
+                                "col_count": pt.col_count,
+                                "source": source_title,
+                            }
+                            try:
+                                tbl_idx = context.table_registry.register(
+                                    pt.table_json,
+                                    source_kind="vector_index",
+                                    source_label=source_title,
+                                    markdown=pt.markdown,
+                                )
+                                tbl_entry["table_idx"] = tbl_idx
+                            except ValueError:
+                                logger.warning(
+                                    "VS_TABLE_REGISTER_SKIPPED tool=%s reason=capacity",
+                                    self._name,
+                                )
+                                break  # registry full — skip remaining tables
+                            all_tables.append(tbl_entry)
+                    except Exception:  # noqa: BLE001
+                        logger.debug(
+                            "VS_TABLE_DETECT_FAILED tool=%s",
+                            self._name,
+                            exc_info=True,
+                        )
+
             content = "\n".join(lines) if lines else "No results found."
 
             logger.info(
@@ -376,15 +429,20 @@ class DatabricksVectorSearchTool:
                 self._name, self._index_name, query[:100], len(rows),
             )
 
+            data: dict[str, Any] = {
+                "result_count": len(rows),
+                "source_kind": SourceKind.vector_index,
+                "empty_result": len(rows) == 0,
+            }
+            if all_tables:
+                data["tables"] = all_tables
+                data["table_count"] = len(all_tables)
+
             return ToolResult(
                 content=content,
                 success=True,
                 sources=sources,
-                data={
-                    "result_count": len(rows),
-                    "source_kind": SourceKind.vector_index,
-                    "empty_result": len(rows) == 0,
-                },
+                data=data,
             )
 
         except Exception as exc:

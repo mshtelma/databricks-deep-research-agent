@@ -449,6 +449,157 @@ async def validate_index(
             logger.warning("INDEX_VALIDATE_FAIL query=%s error=%s", query[:50], exc)
 
 
+# ---------------------------------------------------------------------------
+# Structured table records (v9+ — optional, gated on config)
+# ---------------------------------------------------------------------------
+
+
+def extract_parsed_tables(repo_path: Path) -> dict[str, list[Any]]:
+    """Extract structured ``ParsedTable`` objects from JSON source files.
+
+    Iterates the same JSON elements as ``transform_json_files`` but calls
+    ``parse_html_tables_structured`` to capture both Markdown and structured
+    JSON.  Keyed by file stem (e.g., ``"treasury_bulletin_1941_01"``).
+    """
+    import json as _json
+
+    from benchmarks.officeqa.html_table_parser import parse_html_tables_structured
+
+    json_files = _discover_json_files(repo_path)
+    result: dict[str, list[Any]] = {}
+
+    for json_path in json_files:
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+        except Exception:
+            continue
+
+        doc = data.get("document") or {}
+        elements = doc.get("elements")
+        if not isinstance(elements, list):
+            continue
+
+        file_tables: list[Any] = []
+        for el in elements:
+            content = el.get("content") if isinstance(el, dict) else None
+            if not isinstance(content, str) or not content.strip():
+                continue
+            if "<table" in content.lower():
+                parsed = parse_html_tables_structured(content)
+                file_tables.extend(parsed)
+
+        if file_tables:
+            result[json_path.stem] = file_tables
+
+    logger.info("EXTRACT_PARSED_TABLES files=%d", len(result))
+    return result
+
+
+async def write_tables_delta_table(
+    ws_client: Any,
+    table_records: list[Any],
+    catalog: str,
+    schema: str,
+    table_name: str,
+) -> str:
+    """Write table records to a ``treasury_tables`` Delta table."""
+    from dataclasses import asdict
+
+    table_fqn = f"{catalog}.{schema}.{table_name}"
+    volume_fqn = f"{catalog}.{schema}.benchmark_staging"
+
+    logger.info("TABLES_DELTA_WRITE table=%s records=%d", table_fqn, len(table_records))
+
+    df = pd.DataFrame([asdict(r) for r in table_records])
+    df["row_count"] = df["row_count"].astype("int32")
+    df["col_count"] = df["col_count"].astype("int32")
+    df["char_count"] = df["char_count"].astype("int32")
+
+    local_path = Path(tempfile.mktemp(suffix=".parquet"))
+    df.to_parquet(local_path)
+    logger.info(
+        "TABLES_PARQUET_WRITTEN path=%s size_mb=%.1f",
+        local_path, local_path.stat().st_size / 1e6,
+    )
+
+    volume_path = f"/Volumes/{catalog}/{schema}/benchmark_staging/table_records.parquet"
+    with open(local_path, "rb") as f:
+        ws_client.files.upload(volume_path, f, overwrite=True)
+    local_path.unlink(missing_ok=True)
+
+    await _execute_sql(
+        ws_client,
+        f"""
+        CREATE TABLE IF NOT EXISTS {table_fqn} (
+            chunk_id STRING,
+            file_name STRING,
+            bulletin_date STRING,
+            page_info STRING,
+            table_title STRING,
+            annotation STRING,
+            content STRING,
+            table_json STRING,
+            row_count INT,
+            col_count INT,
+            chunk_type STRING,
+            char_count INT
+        )
+        TBLPROPERTIES (delta.enableChangeDataFeed = true)
+        """,
+    )
+    await _execute_sql(
+        ws_client,
+        f"ALTER TABLE {table_fqn} SET TBLPROPERTIES (delta.enableChangeDataFeed = true)",
+    )
+    await _execute_sql(ws_client, f"TRUNCATE TABLE {table_fqn}")
+    await _execute_sql(
+        ws_client,
+        f"""
+        COPY INTO {table_fqn}
+        FROM '{volume_path}'
+        FILEFORMAT = PARQUET
+        COPY_OPTIONS ('force' = 'true')
+        """,
+    )
+
+    resp = await _execute_sql(ws_client, f"SELECT COUNT(*) FROM {table_fqn}")
+    if resp.result and resp.result.data_array:
+        count = resp.result.data_array[0][0]
+        logger.info("TABLES_DELTA_VERIFY table=%s row_count=%s", table_fqn, count)
+
+    return table_fqn
+
+
+async def validate_table_records(
+    ws_client: Any, catalog: str, schema: str,
+    chunks_table: str, tables_table: str,
+) -> None:
+    """Validate that all treasury_tables chunk_ids exist in treasury_chunks."""
+    fqn_chunks = f"{catalog}.{schema}.{chunks_table}"
+    fqn_tables = f"{catalog}.{schema}.{tables_table}"
+    try:
+        resp = await _execute_sql(
+            ws_client,
+            f"""
+            SELECT COUNT(*) FROM {fqn_tables} t
+            LEFT JOIN {fqn_chunks} c ON t.chunk_id = c.chunk_id
+            WHERE c.chunk_id IS NULL
+            """,
+        )
+        if resp.result and resp.result.data_array:
+            orphans = int(resp.result.data_array[0][0])
+            if orphans > 0:
+                logger.warning(
+                    "TABLE_RECORDS_ORPHANS count=%d — chunk_ids in %s not found in %s",
+                    orphans, fqn_tables, fqn_chunks,
+                )
+            else:
+                logger.info("TABLE_RECORDS_VALIDATED all_chunk_ids_found=True")
+    except Exception as exc:
+        logger.warning("TABLE_RECORDS_VALIDATION_FAILED error=%s", exc)
+
+
 async def run_ingestion(config: dict[str, Any], force_recreate: bool = False) -> str:
     """Full ingestion pipeline: clone → chunk → upload → index.
 
@@ -475,11 +626,8 @@ async def run_ingestion(config: dict[str, Any], force_recreate: bool = False) ->
         branch=config["repo"].get("branch", "main"),
     )
 
-    # 2. Transform JSON → clean .txt (our own HTML parser, not upstream's pd.read_html)
-    output_dir = Path(__file__).resolve().parent / "transformed"
-    files = transform_json_files(repo_path, output_dir)
-
-    # 3. Chunk all files
+    # 2. Transform JSON → clean .txt  +  3. Chunk all files
+    #    Use a temp dir — files are only needed until chunking finishes.
     chunking_cfg = config.get("chunking", {})
     chunk_config = ChunkConfig(
         chunk_max_chars=chunking_cfg.get("chunk_max_chars", 2000),
@@ -487,7 +635,9 @@ async def run_ingestion(config: dict[str, Any], force_recreate: bool = False) ->
         table_max_chars=chunking_cfg.get("table_max_chars", 4000),
         section_max_chars=chunking_cfg.get("section_max_chars", 8000),
     )
-    all_chunks = chunk_all_files(files, chunk_config)
+    with tempfile.TemporaryDirectory(prefix="officeqa_transformed_") as tmp:
+        files = transform_json_files(repo_path, Path(tmp))
+        all_chunks = chunk_all_files(files, chunk_config)
 
     # 4. Write Delta table
     catalog = config["catalog"]
@@ -511,6 +661,27 @@ async def run_ingestion(config: dict[str, Any], force_recreate: bool = False) ->
 
     # 6. Validate
     await validate_index(ws_client, index_fqn)
+
+    # 7. Optional: Build treasury_tables for v9+ workflows
+    tables_table_name = config.get("tables_delta_table")
+    if tables_table_name:
+        from benchmarks.officeqa.chunker import build_table_records
+
+        logger.info("TABLES_PIPELINE_START building structured table records")
+        parsed_tables_by_file = extract_parsed_tables(repo_path)
+        table_records = build_table_records(all_chunks, parsed_tables_by_file)
+        if table_records:
+            tables_fqn = await write_tables_delta_table(
+                ws_client, table_records, catalog, schema, tables_table_name,
+            )
+            await validate_table_records(
+                ws_client, catalog, schema,
+                config["delta_table"], tables_table_name,
+            )
+            logger.info("TABLES_PIPELINE_COMPLETE table=%s records=%d",
+                        tables_fqn, len(table_records))
+        else:
+            logger.warning("TABLES_PIPELINE_EMPTY no table records built")
 
     logger.info("INGESTION_COMPLETE index=%s", index_fqn)
     return index_fqn

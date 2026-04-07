@@ -39,7 +39,7 @@ def _load_dotenv() -> None:
     except ImportError:
         return
     root = BENCHMARKS_DIR.parent
-    for name in (".env.officeqa", ".env.ais", ".env", ".env.test"):
+    for name in (".env.officeqa", ".env", ".env.test"):
         candidate = root / name
         if candidate.exists():
             load_dotenv(candidate, override=False)
@@ -56,6 +56,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", type=str, default=None, help="Override model endpoint")
     parser.add_argument("--workflow", type=str, default=None, help="Workflow YAML filename")
     parser.add_argument("--limit", type=int, default=None, help="Max questions to run")
+    parser.add_argument(
+        "--uids", type=str, default=None,
+        help="Comma-separated UID substrings to filter questions (e.g., 0029,0030,0057)",
+    )
     parser.add_argument("--no-resume", action="store_true", help="Start fresh, ignore prior results")
     parser.add_argument(
         "--retry-status", type=str, default=None,
@@ -70,6 +74,8 @@ def parse_args() -> argparse.Namespace:
 
 
 async def run_officeqa(args: argparse.Namespace) -> None:
+    import os
+
     import yaml
 
     from databricks_deep_research import FrameworkLLMClient, WorkflowRunner, load_workflow_from_dict
@@ -78,6 +84,7 @@ async def run_officeqa(args: argparse.Namespace) -> None:
     from benchmarks.core.config_loader import _interpolate_recursive, load_config
     from benchmarks.core.runner import BenchmarkRunner
     from benchmarks.core.types import RunConfig
+    from benchmarks.core.workspace_pool import WorkspacePool
     from benchmarks.officeqa.dataset import OfficeQADataset
 
     # Load config
@@ -102,16 +109,6 @@ async def run_officeqa(args: argparse.Namespace) -> None:
     if args.retry_status and args.no_resume:
         logger.warning("--retry-status has no effect with --no-resume (all questions run fresh)")
 
-    # Build RunConfig with CLI overrides
-    run_cfg = config.get("run", {})
-    run_config = RunConfig(
-        concurrency=args.concurrency or run_cfg.get("concurrency", 3),
-        timeout_per_question=args.timeout or run_cfg.get("timeout_per_question", 300),
-        results_dir=args.results_dir or run_cfg.get("results_dir", "results/officeqa"),
-        resume=not args.no_resume,
-        retry_statuses=retry_statuses,
-    )
-
     # Load workflow (with env var interpolation for ${VAR:-default} patterns)
     workflow_file = args.workflow or "workflow.yaml"
     workflow_path = BENCHMARKS_DIR / "officeqa" / workflow_file
@@ -119,51 +116,61 @@ async def run_officeqa(args: argparse.Namespace) -> None:
         _interpolate_recursive(yaml.safe_load(workflow_path.read_text()))
     )
 
-    # Create LLM client
+    # Resolve model endpoint
     model = args.model or config.get("model", "databricks-claude-opus-4-6")
-    llm_client = FrameworkLLMClient.from_databricks(model=model)
 
-    # Create tool factory
+    # Workspace pool: distribute LLM calls across multiple workspaces.
+    # Primary source: config.yaml (direct value or ${VAR} interpolation).
+    profiles_str = config.get("workspace_profiles", "")
+    profiles = [p.strip() for p in profiles_str.split(",") if p.strip()]
+
+    if profiles:
+        pool = WorkspacePool.from_profiles(profiles, model=model)
+    else:
+        llm_client = FrameworkLLMClient.from_databricks(model=model)
+        pool = WorkspacePool.single(llm_client)
+
+    # Create tool factory (after pool creation so restored env vars are visible)
     factory = ToolFactoryContext.from_defaults()
 
-    # Load dataset
-    repo_path = Path(config["repo"]["local_path"])
-    if not repo_path.exists():
-        logger.error("OfficeQA repo not found at %s. Run: uv run benchmarks/ingest.py officeqa", repo_path)
-        sys.exit(1)
+    # Build RunConfig — auto-adjust concurrency to profile count when not
+    # explicitly set via --concurrency.
+    run_cfg = config.get("run", {})
+    if profiles and args.concurrency is None:
+        effective_concurrency = len(profiles)
+    else:
+        effective_concurrency = args.concurrency or run_cfg.get("concurrency", 3)
 
-    dataset = OfficeQADataset(repo_path)
+    run_config = RunConfig(
+        concurrency=effective_concurrency,
+        timeout_per_question=args.timeout or run_cfg.get("timeout_per_question", 300),
+        results_dir=args.results_dir or run_cfg.get("results_dir", "results/officeqa"),
+        resume=not args.no_resume,
+        retry_statuses=retry_statuses,
+    )
+
+    # Load dataset (uses bundled CSV by default)
+    dataset = OfficeQADataset()
     questions = dataset.load_questions()
     extractor = dataset.answer_extractor()
+
+    if args.uids:
+        from benchmarks.core.uid_filter import filter_by_uid_fragments, parse_uid_fragments
+
+        fragments = parse_uid_fragments(args.uids)
+        questions = filter_by_uid_fragments(questions, fragments, lambda q: q.uid)
+        logger.info("FILTERED to %d questions by UID substring match", len(questions))
 
     if args.limit:
         questions = questions[: args.limit]
         logger.info("LIMITED to first %d questions", args.limit)
 
-    # Per-run directory
-    results_dir = Path(run_config.results_dir)
-    results_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    run_dir = results_dir / f"run-{timestamp}"
+    # Per-run directory (with resume)
+    from benchmarks.core.run_dir import setup_run_dir
 
-    # If resuming, find latest existing run directory (or legacy flat file)
-    if run_config.resume:
-        existing_dirs = sorted(results_dir.glob("run-*/results.jsonl"))
-        existing_flat = sorted(results_dir.glob("run-*.jsonl"))
-        if existing_dirs:
-            results_path = existing_dirs[-1]
-            run_dir = results_path.parent
-            logger.info("RESUME from %s", results_path)
-        elif existing_flat:
-            results_path = existing_flat[-1]
-            run_dir = results_path.parent  # stays in results_dir
-            logger.info("RESUME from legacy %s", results_path)
-        else:
-            run_dir.mkdir(parents=True, exist_ok=True)
-            results_path = run_dir / "results.jsonl"
-    else:
-        run_dir.mkdir(parents=True, exist_ok=True)
-        results_path = run_dir / "results.jsonl"
+    run_dir, results_path = setup_run_dir(
+        run_config.results_dir, resume=run_config.resume
+    )
 
     logger.info(
         "BENCHMARK_START benchmark=officeqa questions=%d concurrency=%d timeout=%d model=%s results=%s",
@@ -173,6 +180,16 @@ async def run_officeqa(args: argparse.Namespace) -> None:
         model,
         results_path,
     )
+    if profiles:
+        logger.info(
+            "WORKSPACE_MODE=multi profiles=%s count=%d",
+            ",".join(profiles),
+            len(profiles),
+        )
+    else:
+        logger.info(
+            "WORKSPACE_MODE=single (set OFFICEQA_WORKSPACE_PROFILES in .env.officeqa to enable multi-workspace)",
+        )
     if retry_statuses:
         logger.info("BENCHMARK_RETRY_STATUSES statuses=%s", ",".join(sorted(retry_statuses)))
 
@@ -194,27 +211,101 @@ async def run_officeqa(args: argparse.Namespace) -> None:
         except ImportError:
             logger.warning("TraceCollector not found — trace collection disabled")
 
-    # Run
-    runner = BenchmarkRunner(llm_client, factory, run_config)
-    t0 = time.monotonic()
-    results = await runner.run(questions, workflow_def, extractor, results_path)
-    elapsed = time.monotonic() - t0
+    # Enable MLflow tracing so framework trace_span calls are recorded.
+    from databricks_deep_research.tracing import setup_mlflow_tracing, shutdown_mlflow_tracing
 
-    await llm_client.aclose()
+    tracing_ok = setup_mlflow_tracing()
+    if tracing_ok:
+        logger.info("MLFLOW_TRACING enabled")
+    else:
+        logger.warning("MLFLOW_TRACING disabled (spans will not be recorded)")
 
-    # Summary
-    success = sum(1 for r in results if r.status == "success")
-    errors = sum(1 for r in results if r.status == "error")
-    timeouts = sum(1 for r in results if r.status == "timeout")
-    no_answer = sum(1 for r in results if r.status == "no_answer")
+    # Run — wrapped in an MLflow run so traces, params, metrics, and artifacts
+    # are all associated with a single run.
+    from benchmarks.core.mlflow_utils import benchmark_mlflow_run
 
-    print(f"\n{'=' * 50}")
-    print(f"Benchmark complete in {elapsed:.0f}s")
-    print(f"Results: {results_path}")
-    print(f"Success: {success} | No Answer: {no_answer} | Error: {errors} | Timeout: {timeouts}")
+    run_name = f"officeqa-{workflow_file.replace('.yaml', '')}-{model}"
+    with benchmark_mlflow_run(
+        run_name=run_name,
+        params={
+            "model": model,
+            "workflow": workflow_file,
+            "workflow_id": workflow_def.id,
+            "workflow_version": getattr(workflow_def, "version", ""),
+            "workflow_name": workflow_def.name,
+            "tool_count": len(workflow_def.tools),
+            "concurrency": run_config.concurrency,
+            "timeout": run_config.timeout_per_question,
+            "limit": str(args.limit or "all"),
+            "uids": args.uids or "all",
+            "total_questions": len(questions),
+            "resume": not args.no_resume,
+            "workspace_profiles": ",".join(profiles) if profiles else "single",
+            "workspace_count": pool.size,
+        },
+        artifact_paths=[workflow_path],
+    ):
+        runner = BenchmarkRunner(pool, factory, run_config)
+        t0 = time.monotonic()
+        results = await runner.run(questions, workflow_def, extractor, results_path)
+        elapsed = time.monotonic() - t0
+
+        await pool.aclose()
+
+        # Summary
+        success = sum(1 for r in results if r.status == "success")
+        errors = sum(1 for r in results if r.status == "error")
+        timeouts = sum(1 for r in results if r.status == "timeout")
+        no_answer = sum(1 for r in results if r.status == "no_answer")
+
+        print(f"\n{'=' * 50}")
+        print(f"Benchmark complete in {elapsed:.0f}s")
+        print(f"Results: {results_path}")
+        print(f"Success: {success} | No Answer: {no_answer} | Error: {errors} | Timeout: {timeouts}")
+
+        # Log raw results immediately — survives evaluation failures
+        try:
+            import mlflow
+
+            if mlflow.active_run():
+                mlflow.log_artifact(str(results_path))
+        except Exception:
+            pass
+
+        # Evaluate + log metrics to the SAME run
+        try:
+            from benchmarks.core.mlflow_utils import (
+                log_evaluation_to_mlflow,
+                write_evaluation_artifacts,
+            )
+            from benchmarks.officeqa.evaluator import OfficeQAEvaluator
+
+            evaluator = OfficeQAEvaluator()
+            report = evaluator.evaluate(
+                results, tolerances=[0.0, 0.01, 0.05], model=model,
+            )
+
+            eval_json, eval_txt = write_evaluation_artifacts(
+                report, results_path.parent,
+            )
+            log_evaluation_to_mlflow(
+                report,
+                elapsed_seconds=elapsed,
+                artifact_paths=[eval_json, eval_txt],
+            )
+
+            print(report.format_report())
+            if mlflow.active_run():
+                print(f"\nMLflow run: {mlflow.active_run().info.run_id}")
+        except Exception as exc:
+            logger.warning("BENCHMARK_EVAL_LOG_FAILED error=%s", exc)
+
+    # Flush tracing (after MLflow run ends so all spans are associated)
+    shutdown_mlflow_tracing()
+
     print(f"\nRun evaluation: uv run benchmarks/evaluate.py officeqa --results {run_dir}")
 
-    # Collect traces
+    # Collect traces (after run ends — collector searches by experiment + timestamp)
     if collector:
         report = collector.collect()
         if report:

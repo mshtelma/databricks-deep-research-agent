@@ -7,15 +7,20 @@ import pytest
 from benchmarks.officeqa.chunker import (
     Chunk,
     ChunkConfig,
+    TableRecord,
+    _build_table_summary,
     _chunk_table,
     _chunk_text,
+    _extract_annotation,
     _extract_date,
     _is_table_line,
     _merge_into_sections,
     _prepend_context,
     _split_into_blocks,
+    build_table_records,
     chunk_file,
 )
+from benchmarks.officeqa.html_table_parser import ParsedTable
 
 
 class TestTableLineDetection:
@@ -283,3 +288,280 @@ Source: Daily Treasury Statements.
         for c in chunks:
             assert "Document: treasury_bulletin_2023_06.txt" in c.content
             assert "Bulletin date: 2023-06" in c.content
+
+
+# ---------------------------------------------------------------------------
+# TableRecord / build_table_records tests (v9+)
+# ---------------------------------------------------------------------------
+
+
+_SAMPLE_TABLE_JSON = (
+    '{"headers": [{"name": "Category", "parent": null, "index": 0}, '
+    '{"name": "Amount", "parent": null, "index": 1}], '
+    '"rows": [{"label": "Revenue", "cells": {"Amount": "1,234"}, '
+    '"is_group_header": false, "is_total": false}], '
+    '"row_count": 1, "data_row_count": 1}'
+)
+
+
+class TestExtractAnnotation:
+    def test_millions_of_dollars(self) -> None:
+        text = "Table 1\n(In millions of dollars)\n| A | B |"
+        assert _extract_annotation(text) == "(In millions of dollars)"
+
+    def test_percent(self) -> None:
+        assert _extract_annotation("(In percent per annum)") == "(In percent per annum)"
+
+    def test_basis_points(self) -> None:
+        assert _extract_annotation("(In basis points)") == "(In basis points)"
+
+    def test_no_annotation(self) -> None:
+        assert _extract_annotation("Just plain text") == ""
+
+    def test_case_insensitive(self) -> None:
+        assert _extract_annotation("(in thousands of units)") == "(in thousands of units)"
+
+
+class TestBuildTableRecords:
+    def test_basic_matching(self) -> None:
+        """One file with one text chunk and one table chunk."""
+        chunks = [
+            Chunk(chunk_id="test_c0000", file_name="test.txt", bulletin_date="2024-01",
+                  page_info="Summary", content="Some text", chunk_type="text"),
+            Chunk(chunk_id="test_c0001", file_name="test.txt", bulletin_date="2024-01",
+                  page_info="Summary", content="| A | B |\n|---|---|\n| 1 | 2 |",
+                  chunk_type="table"),
+        ]
+        parsed = {"test": [ParsedTable(markdown="...", table_json=_SAMPLE_TABLE_JSON)]}
+
+        records = build_table_records(chunks, parsed)
+        assert len(records) == 1
+        assert records[0].chunk_id == "test_c0001"
+        assert records[0].file_name == "test.txt"
+        assert records[0].table_json == _SAMPLE_TABLE_JSON
+
+    def test_multiple_tables_in_file(self) -> None:
+        chunks = [
+            Chunk(chunk_id="f_c0000", file_name="f.txt", page_info="A",
+                  content="| X |\n|---|\n| 1 |", chunk_type="table"),
+            Chunk(chunk_id="f_c0001", file_name="f.txt", page_info="B",
+                  content="| Y |\n|---|\n| 2 |", chunk_type="table"),
+        ]
+        pt1 = ParsedTable(markdown="...", table_json='{"headers":[], "rows":[], "row_count":0, "data_row_count":0}')
+        pt2 = ParsedTable(markdown="...", table_json='{"headers":[{"name":"Y","parent":null,"index":0}], "rows":[], "row_count":0, "data_row_count":0}')
+        parsed = {"f": [pt1, pt2]}
+
+        records = build_table_records(chunks, parsed)
+        assert len(records) == 2
+        assert records[0].chunk_id == "f_c0000"
+        assert records[1].chunk_id == "f_c0001"
+
+    def test_split_table_all_chunks_get_same_json(self) -> None:
+        """A table split into 3 consecutive chunks should produce 3 records with same JSON."""
+        chunks = [
+            Chunk(chunk_id="f_c0000", file_name="f.txt", page_info="Debt",
+                  content="| A | B |\n|---|---|\n| 1 | 2 |", chunk_type="table"),
+            Chunk(chunk_id="f_c0001", file_name="f.txt", page_info="Debt",
+                  content="| A | B |\n|---|---|\n| 3 | 4 |", chunk_type="table"),
+            Chunk(chunk_id="f_c0002", file_name="f.txt", page_info="Debt",
+                  content="| A | B |\n|---|---|\n| 5 | 6 |", chunk_type="table"),
+        ]
+        parsed = {"f": [ParsedTable(markdown="...", table_json=_SAMPLE_TABLE_JSON)]}
+
+        records = build_table_records(chunks, parsed)
+        assert len(records) == 3
+        assert records[0].chunk_id == "f_c0000"
+        assert records[1].chunk_id == "f_c0001"
+        assert records[2].chunk_id == "f_c0002"
+        # All have the same JSON
+        assert records[0].table_json == records[1].table_json == records[2].table_json
+
+    def test_section_with_embedded_table(self) -> None:
+        """Section chunks that contain a table should be matched."""
+        chunks = [
+            Chunk(chunk_id="f_c0000", file_name="f.txt", page_info="Summary",
+                  content="Title text\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\nFootnote.",
+                  chunk_type="section"),
+        ]
+        parsed = {"f": [ParsedTable(markdown="...", table_json=_SAMPLE_TABLE_JSON)]}
+
+        records = build_table_records(chunks, parsed)
+        assert len(records) == 1
+        assert records[0].chunk_id == "f_c0000"
+
+    def test_no_parsed_tables_for_file(self) -> None:
+        """If no ParsedTables exist for a file, no records are created."""
+        chunks = [
+            Chunk(chunk_id="f_c0000", file_name="f.txt", page_info="X",
+                  content="| A |\n|---|\n| 1 |", chunk_type="table"),
+        ]
+        records = build_table_records(chunks, {})
+        assert len(records) == 0
+
+    def test_mismatch_more_chunks_than_tables(self) -> None:
+        """More table chunks than ParsedTables — extra chunks are skipped with warning."""
+        chunks = [
+            Chunk(chunk_id="f_c0000", file_name="f.txt", page_info="A",
+                  content="| X |\n|---|\n| 1 |", chunk_type="table"),
+            Chunk(chunk_id="f_c0001", file_name="f.txt", page_info="B",
+                  content="| Y |\n|---|\n| 2 |", chunk_type="table"),
+        ]
+        parsed = {"f": [ParsedTable(markdown="...", table_json=_SAMPLE_TABLE_JSON)]}
+
+        records = build_table_records(chunks, parsed)
+        assert len(records) == 1  # only first matches
+
+    def test_text_chunks_ignored(self) -> None:
+        """Text-only chunks are skipped."""
+        chunks = [
+            Chunk(chunk_id="f_c0000", file_name="f.txt", content="Just text",
+                  chunk_type="text"),
+        ]
+        parsed = {"f": [ParsedTable(markdown="...", table_json=_SAMPLE_TABLE_JSON)]}
+        records = build_table_records(chunks, parsed)
+        assert len(records) == 0
+
+    def test_annotation_extracted_from_content(self) -> None:
+        """Annotation is extracted from the chunk content."""
+        chunks = [
+            Chunk(chunk_id="f_c0000", file_name="f.txt", page_info="Budget",
+                  content="(In millions of dollars)\n| A | B |\n|---|---|\n| 1 | 2 |",
+                  chunk_type="table"),
+        ]
+        parsed = {"f": [ParsedTable(markdown="...", table_json=_SAMPLE_TABLE_JSON)]}
+        records = build_table_records(chunks, parsed)
+        assert records[0].annotation == "(In millions of dollars)"
+
+    def test_chunk_id_in_content(self) -> None:
+        """Each record's content starts with its own chunk_id."""
+        chunks = [
+            Chunk(chunk_id="f_c0000", file_name="f.txt", page_info="X",
+                  content="| A | B |\n|---|---|\n| 1 | 2 |", chunk_type="table"),
+        ]
+        parsed = {"f": [ParsedTable(markdown="...", table_json=_SAMPLE_TABLE_JSON)]}
+        records = build_table_records(chunks, parsed)
+        assert records[0].content.startswith("chunk_id: f_c0000\n")
+
+    def test_split_table_different_chunk_ids_in_content(self) -> None:
+        """Split table records have DIFFERENT chunk_id lines in content."""
+        chunks = [
+            Chunk(chunk_id="f_c0000", file_name="f.txt", page_info="D",
+                  content="| A | B |\n|---|---|\n| 1 | 2 |", chunk_type="table"),
+            Chunk(chunk_id="f_c0001", file_name="f.txt", page_info="D",
+                  content="| A | B |\n|---|---|\n| 3 | 4 |", chunk_type="table"),
+        ]
+        parsed = {"f": [ParsedTable(markdown="...", table_json=_SAMPLE_TABLE_JSON)]}
+        records = build_table_records(chunks, parsed)
+        assert records[0].content.startswith("chunk_id: f_c0000\n")
+        assert records[1].content.startswith("chunk_id: f_c0001\n")
+        # Same base summary (everything after chunk_id line)
+        body0 = records[0].content.split("\n", 1)[1]
+        body1 = records[1].content.split("\n", 1)[1]
+        assert body0 == body1
+
+
+# ---------------------------------------------------------------------------
+# _build_table_summary tests
+# ---------------------------------------------------------------------------
+
+_RICH_TABLE_DATA: dict = {
+    "headers": [
+        {"name": "Period", "parent": "Budget receipts and expenditures", "index": 0},
+        {"name": "Net receipts", "parent": "Budget receipts and expenditures", "index": 1},
+        {"name": "Expenditures", "parent": None, "index": 2},
+    ],
+    "rows": [
+        {"label": "Fiscal years:", "cells": {}, "is_group_header": True, "is_total": False},
+        {"label": "1942", "cells": {"Net receipts": "12,696", "Expenditures": "34,187"}, "is_group_header": False, "is_total": False},
+        {"label": "1943", "cells": {"Net receipts": "22,208", "Expenditures": "79,622"}, "is_group_header": False, "is_total": False},
+        {"label": "Total", "cells": {"Net receipts": "34,904", "Expenditures": "113,809"}, "is_group_header": False, "is_total": True},
+    ],
+    "row_count": 4,
+    "data_row_count": 3,
+}
+
+
+class TestBuildTableSummary:
+    def test_contains_document_context(self) -> None:
+        s = _build_table_summary(_RICH_TABLE_DATA, "bulletin_1942.txt", "1942-01", "Budget", "Fiscal Ops", "")
+        assert "Document: bulletin_1942.txt" in s
+        assert "Bulletin date: 1942-01" in s
+        assert "Section: Budget" in s
+
+    def test_contains_table_title(self) -> None:
+        s = _build_table_summary(_RICH_TABLE_DATA, "", "", "", "Fiscal Operations", "")
+        assert "TABLE: Fiscal Operations" in s
+
+    def test_contains_annotation(self) -> None:
+        s = _build_table_summary(_RICH_TABLE_DATA, "", "", "", "", "(In millions of dollars)")
+        assert "(In millions of dollars)" in s
+
+    def test_contains_header_parents(self) -> None:
+        s = _build_table_summary(_RICH_TABLE_DATA, "", "", "", "", "")
+        assert "Header context:" in s
+        assert "Budget receipts and expenditures" in s
+
+    def test_no_header_context_when_no_parents(self) -> None:
+        data = {"headers": [{"name": "A", "parent": None, "index": 0}], "rows": [], "row_count": 0}
+        s = _build_table_summary(data, "", "", "", "", "")
+        assert "Header context:" not in s
+
+    def test_contains_column_names(self) -> None:
+        s = _build_table_summary(_RICH_TABLE_DATA, "", "", "", "", "")
+        assert "Columns: Period | Net receipts | Expenditures" in s
+
+    def test_contains_period_range(self) -> None:
+        s = _build_table_summary(_RICH_TABLE_DATA, "", "", "", "", "")
+        assert "Period range: 1942 — 1943" in s
+
+    def test_single_row_period(self) -> None:
+        data = {"headers": [{"name": "X", "parent": None, "index": 0}],
+                "rows": [{"label": "2020", "cells": {}, "is_group_header": False, "is_total": False}],
+                "row_count": 1}
+        s = _build_table_summary(data, "", "", "", "", "")
+        assert "Period: 2020" in s
+
+    def test_contains_total_rows(self) -> None:
+        s = _build_table_summary(_RICH_TABLE_DATA, "", "", "", "", "")
+        assert "Total rows: Total" in s
+
+    def test_contains_entity_labels(self) -> None:
+        s = _build_table_summary(_RICH_TABLE_DATA, "", "", "", "", "")
+        assert "Entities: 1942, 1943" in s
+
+    def test_group_headers_excluded_from_entities(self) -> None:
+        s = _build_table_summary(_RICH_TABLE_DATA, "", "", "", "", "")
+        # "Fiscal years:" is a group header — should NOT appear in Entities
+        assert "Fiscal years:" not in s.split("Entities:")[-1] if "Entities:" in s else True
+
+    def test_total_rows_excluded_from_entities(self) -> None:
+        s = _build_table_summary(_RICH_TABLE_DATA, "", "", "", "", "")
+        entities_line = [l for l in s.split("\n") if l.startswith("Entities:")]
+        if entities_line:
+            assert "Total" not in entities_line[0].replace("Total rows:", "")
+
+    def test_entity_cap_at_30(self) -> None:
+        """Tables with >30 rows get first 15 + ... + last 15."""
+        rows = [{"label": f"Row_{i:03d}", "cells": {}, "is_group_header": False, "is_total": False}
+                for i in range(50)]
+        data = {"headers": [{"name": "X", "parent": None, "index": 0}],
+                "rows": rows, "row_count": 50}
+        s = _build_table_summary(data, "", "", "", "", "")
+        assert "Row_000" in s  # first
+        assert "Row_049" in s  # last
+        assert "..." in s      # truncation indicator
+        assert "Row_025" not in s  # middle excluded
+
+    def test_header_context_deduplicates_exact_matches_only(self) -> None:
+        """Identical parent chains collapsed; different chains in column order."""
+        data = {
+            "headers": [
+                {"name": "A", "parent": "Group X", "index": 0},
+                {"name": "B", "parent": "Group Y", "index": 1},
+                {"name": "C", "parent": "Group X", "index": 2},
+            ],
+            "rows": [], "row_count": 0,
+        }
+        s = _build_table_summary(data, "", "", "", "", "")
+        ctx = [line for line in s.split("\n") if line.startswith("Header context:")][0]
+        assert ctx == "Header context: Group X; Group Y"

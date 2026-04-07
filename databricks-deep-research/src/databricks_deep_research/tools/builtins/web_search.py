@@ -46,12 +46,17 @@ _MAX_RESULT_COUNT = 20
 
 @dataclass(frozen=True)
 class SearchResult:
-    """A single result returned by a :class:`SearchClient`."""
+    """A single result returned by a :class:`SearchClient`.
+
+    The *content* field carries full page text when the search provider
+    returns it (e.g. Jina).  Snippet-only providers leave it ``None``.
+    """
 
     url: str
     title: str
     snippet: str
     relevance_score: float = 0.5
+    content: str | None = None
 
 
 @runtime_checkable
@@ -142,10 +147,14 @@ class WebSearchTool:
         *,
         domain_filter: list[str] | None = None,
         max_results: int = 5,
+        max_content_per_result: int = 5000,
+        extract_tables: bool = True,
     ) -> None:
         self._client = search_client
         self._domain_filter = domain_filter or []
         self._max_results = min(max(max_results, 1), _MAX_RESULT_COUNT)
+        self._max_content_per_result = max_content_per_result
+        self._extract_tables = extract_tables
 
         self._definition = ToolDefinition(
             name="web_search",
@@ -287,6 +296,7 @@ class WebSearchTool:
             # Build formatted output and source list.
             sources: list[SourceInfo] = []
             formatted_lines: list[str] = []
+            all_tables: list[dict[str, Any]] = []
             registry = context.url_registry
 
             for result in results:
@@ -296,18 +306,91 @@ class WebSearchTool:
                 else:
                     idx = len(formatted_lines)
 
+                # Truncate content when present.
+                source_content: str | None = None
+                if result.content:
+                    source_content = result.content[: self._max_content_per_result]
+
+                # Detect tables in full content (fires for Jina; no-op for Brave)
+                result_table_count = 0
+                if source_content and self._extract_tables:
+                    try:
+                        from databricks_deep_research.tools.builtins.text_utils import (
+                            detect_markdown_tables,
+                        )
+
+                        for pt in detect_markdown_tables(source_content):
+                            tbl_entry: dict[str, Any] = {
+                                "markdown": pt.markdown,
+                                "table_json": pt.table_json,
+                                "row_count": pt.row_count,
+                                "col_count": pt.col_count,
+                                "source_url": result.url,
+                            }
+                            # Register in shared TableRegistry
+                            if context.table_registry is not None:
+                                try:
+                                    tbl_idx = context.table_registry.register(
+                                        pt.table_json,
+                                        source_kind="web",
+                                        source_label=result.url,
+                                        markdown=pt.markdown,
+                                    )
+                                    tbl_entry["table_idx"] = tbl_idx
+                                except ValueError:
+                                    logger.warning(
+                                        "WEB_SEARCH_TABLE_REGISTER_SKIPPED url=%s reason=capacity",
+                                        result.url[:80],
+                                    )
+                            all_tables.append(tbl_entry)
+                            result_table_count += 1
+                    except Exception:
+                        logger.debug(
+                            "WEB_SEARCH_TABLE_DETECT_FAILED url=%s",
+                            result.url[:80],
+                            exc_info=True,
+                        )
+
                 sources.append(
                     SourceInfo(
                         url=result.url,
                         title=result.title,
                         snippet=result.snippet,
+                        content=source_content,
                         source_type="web",
                     )
                 )
+
                 # LLM sees indices only — never raw URLs.
-                formatted_lines.append(
-                    f"[{idx}] **{result.title}**\n    {result.snippet}"
-                )
+                if source_content:
+                    # Build table annotation with registry indices when available
+                    if result_table_count > 0:
+                        result_tbl_indices = [
+                            t["table_idx"]
+                            for t in all_tables[-result_table_count:]
+                            if "table_idx" in t
+                        ]
+                        if result_tbl_indices:
+                            idx_str = ", ".join(
+                                f"table_idx={i}" for i in result_tbl_indices
+                            )
+                            table_note = (
+                                f"\n    [contains {result_table_count} table(s): "
+                                f"{idx_str}]"
+                            )
+                        else:
+                            table_note = (
+                                f"\n    [contains {result_table_count} table(s)]"
+                            )
+                    else:
+                        table_note = ""
+                    formatted_lines.append(
+                        f"[{idx}] **{result.title}**{table_note}\n{source_content}"
+                    )
+                else:
+                    formatted_lines.append(
+                        f"[{idx}] **{result.title}**\n    {result.snippet}"
+                    )
 
             if not formatted_lines:
                 content = "No search results found. Try a different query."
@@ -315,20 +398,26 @@ class WebSearchTool:
                 content = "\n\n".join(formatted_lines)
 
             logger.info(
-                "WEB_SEARCH_COMPLETE query=%s results=%d",
+                "WEB_SEARCH_COMPLETE query=%s results=%d tables=%d",
                 query[:80],
                 len(results),
+                len(all_tables),
             )
+
+            data: dict[str, Any] = {
+                "query": query,
+                "total_results": len(results),
+                "count": count,
+            }
+            if all_tables:
+                data["tables"] = all_tables
+                data["table_count"] = len(all_tables)
 
             return ToolResult(
                 content=content,
                 success=True,
                 sources=sources,
-                data={
-                    "query": query,
-                    "total_results": len(results),
-                    "count": count,
-                },
+                data=data,
             )
 
         except Exception as e:

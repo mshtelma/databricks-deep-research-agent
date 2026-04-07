@@ -364,6 +364,16 @@ async def test_parallel_execution_preserves_source_order() -> None:
     """Sources from parallel calls are reassembled in original order."""
     async def make_tool_with_source(name: str, source_url: str) -> MagicMock:
         tool = _make_tool(name)
+        # source_kind="web" so the tool goes through the normal admission path
+        # (default "builtin" triggers a fast-path that discards sources).
+        type(tool).definition = PropertyMock(
+            return_value=ToolDefinition(
+                name=name,
+                description=f"Mock {name}",
+                parameters={"type": "object", "properties": {"query": {"type": "string"}}},
+                source_kind="web",
+            )
+        )
         tool.execute = AsyncMock(
             return_value=ToolResult(
                 content=f"result from {name}",

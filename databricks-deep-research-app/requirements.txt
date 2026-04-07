@@ -23,7 +23,9 @@ babel==2.17.0
 blinker==1.9.0
     # via flask
 bm25s==0.2.14
-    # via databricks-deep-research-app (pyproject.toml)
+    # via
+    #   databricks-deep-research-app (pyproject.toml)
+    #   databricks-deep-research
 cachetools==6.2.4
     # via
     #   mlflow-skinny
@@ -59,6 +61,7 @@ cycler==0.12.1
 databricks-sdk==0.96.0
     # via
     #   databricks-deep-research-app (pyproject.toml)
+    #   databricks-deep-research
     #   mlflow-skinny
     #   mlflow-tracing
 databricks-vectorsearch==0.64
@@ -116,6 +119,7 @@ httptools==0.7.1
 httpx==0.28.1
     # via
     #   databricks-deep-research-app (pyproject.toml)
+    #   databricks-deep-research
     #   openai
 huey==2.6.0
     # via mlflow
@@ -137,7 +141,9 @@ jiter==0.12.0
 joblib==1.5.3
     # via scikit-learn
 json-repair==0.55.0
-    # via databricks-deep-research-app (pyproject.toml)
+    # via
+    #   databricks-deep-research-app (pyproject.toml)
+    #   databricks-deep-research
 justext==3.0.2
     # via trafilatura
 kiwisolver==1.4.9
@@ -161,7 +167,9 @@ markupsafe==3.0.3
 matplotlib==3.10.8
     # via mlflow
 mlflow==3.8.1
-    # via databricks-deep-research-app (pyproject.toml)
+    # via
+    #   databricks-deep-research-app (pyproject.toml)
+    #   databricks-deep-research
 mlflow-skinny==3.8.1
     # via
     #   databricks-vectorsearch
@@ -173,6 +181,7 @@ numpy==2.4.1
     #   databricks-deep-research-app (pyproject.toml)
     #   bm25s
     #   contourpy
+    #   databricks-deep-research
     #   matplotlib
     #   mlflow
     #   pandas
@@ -310,7 +319,9 @@ tld==0.13.1
 tqdm==4.67.1
     # via openai
 trafilatura==2.0.0
-    # via databricks-deep-research-app (pyproject.toml)
+    # via
+    #   databricks-deep-research-app (pyproject.toml)
+    #   databricks-deep-research
 typing-extensions==4.15.0
     # via
     #   alembic
@@ -365,5 +376,5 @@ zipp==3.23.0
 wheels/databricks_deep_research-0.2.0-py3-none-any.whl
 
 # Install the app wheel (pre-built — no hatchling/build-isolation on platform)
-# Build timestamp: 20260320100607
+# Build timestamp: 20260328205450
 wheels/databricks_deep_research_app-0.1.0-py3-none-any.whl

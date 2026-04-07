@@ -116,16 +116,24 @@ class WorkflowRunner:
         *,
         model: str = "databricks-claude-haiku-4-5",
         model_mapping: dict[str, str | ModelTierConfig] | None = None,
+        profile: str | None = None,
     ) -> WorkflowRunner:
         """Create a runner with Databricks auth.
 
         Same auth chain as ``FrameworkLLMClient.from_databricks()``:
         direct token (``DATABRICKS_HOST`` + ``DATABRICKS_TOKEN``), then
         SDK auto-detect (profiles, Azure MSI, etc.).
+
+        Parameters
+        ----------
+        profile:
+            Databricks CLI profile name from ``~/.databrickscfg``.
+            Forwarded to ``FrameworkLLMClient.from_databricks()``.
         """
         client = FrameworkLLMClient.from_databricks(
             model=model,
             model_mapping=model_mapping,
+            profile=profile,
         )
         return cls(llm_client=client)
 

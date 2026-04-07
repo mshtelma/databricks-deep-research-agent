@@ -10,12 +10,10 @@ import pytest
 from databricks_deep_research.agents.config import AgentNodeConfig
 from databricks_deep_research.agents.react_loop import (
     ReactLoop,
-    ReactResult,
     _summarize_tool_result,
 )
 from databricks_deep_research.llm.client import LLMResponse, ToolCall
 from databricks_deep_research.tools.protocol import (
-    ToolContext,
     ToolDefinition,
     ToolResult,
 )

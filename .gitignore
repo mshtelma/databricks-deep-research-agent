@@ -118,6 +118,9 @@ test.py
 # Benchmarks — external data and run results
 benchmarks/data/
 benchmarks/results/
+benchmarks/officeqa/transformed/
 
 # UV workspace
 uv.lock
+
+*.zip

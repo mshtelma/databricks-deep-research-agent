@@ -416,7 +416,13 @@ def admit_tool_result(
 
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
-    profile = _build_query_profile(current_step, root_query)
+    # Extract the tool's own query (if present) to augment the admission
+    # profile.  For web_search the ToolResult.data carries the search query,
+    # which is the best signal for what results should be relevant.
+    tool_query: str | None = None
+    if result.data and isinstance(result.data, dict):
+        tool_query = result.data.get("query")
+    profile = _build_query_profile(current_step, root_query, tool_query=tool_query)
     logger.info(
         "ADMISSION_PROFILE tool=%s source_kind=%s step_title=%r root_query=%r "
         "profile_terms=%s profile_phrases=%s raw_source_count=%d",
@@ -845,15 +851,24 @@ def _build_synthetic_source(definition: ToolDefinition, content: str) -> dict[st
     }
 
 
-def _build_query_profile(current_step: Any | None, root_query: str) -> dict[str, Any]:
+def _build_query_profile(
+    current_step: Any | None,
+    root_query: str,
+    *,
+    tool_query: str | None = None,
+) -> dict[str, Any]:
     step_text = _step_text(current_step)
     hint_queries = [
         hint.query_hint for hint in _normalize_source_hints(current_step)
         if hint.query_hint
     ]
-    terms = _focus_terms(root_query, step_text, *hint_queries)
+    # When the tool carries its own query (e.g. web_search), include it so
+    # results for auxiliary data lookups (external reference values) match
+    # even when current_step is empty (loop-only workflows without a planner).
+    extra = [tool_query] if tool_query else []
+    terms = _focus_terms(root_query, step_text, *hint_queries, *extra)
     phrases: list[str] = []
-    for text in [root_query, step_text, *hint_queries]:
+    for text in [root_query, step_text, *hint_queries, *extra]:
         phrases.extend(_extract_phrases(text))
     return {
         "terms": terms[:12],

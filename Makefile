@@ -34,7 +34,8 @@
         db-provision db-cleanup db-migrate db-status db-reset db-migrate-remote db-local db-local-stop clean_db clean-e2e \
         e2e e2e-fast e2e-medium e2e-slow e2e-super-slow e2e-all e2e-ui e2e-debug e2e-custom-agents \
         clean clean-all quickstart deploy requirements bundle-validate bundle-summary logs \
-        run-example
+        run-example \
+        worktree worktree-list worktree-remove worktree-link
 
 # Sub-project directories (relative to repo root)
 APP_DIR     := databricks-deep-research-app
@@ -274,3 +275,29 @@ ifdef QUERY
 else
 	cd $(FRAMEWORK_DIR) && uv run examples/run_workflow.py $(WORKFLOW)
 endif
+
+# =============================================================================
+# Git Worktrees
+# =============================================================================
+# Create isolated worktrees with shared .env files for parallel development.
+# Worktrees live in ../.worktrees/<branch>/. All gitignored .env* files are
+# auto-symlinked from the main worktree. BASE defaults to current branch.
+
+## Create a worktree: make worktree BRANCH=feature-xyz [BASE=current] [INSTALL=1]
+worktree:
+	@if [ -z "$(BRANCH)" ]; then echo "Usage: make worktree BRANCH=<name> [BASE=<ref>] [INSTALL=1]" && exit 1; fi
+	@bash scripts/worktree.sh create "$(BRANCH)" $(if $(BASE),"$(BASE)") $(if $(INSTALL),--install)
+
+## List all worktrees
+worktree-list:
+	@bash scripts/worktree.sh list
+
+## Remove a worktree: make worktree-remove BRANCH=feature-xyz [DELETE_BRANCH=1]
+worktree-remove:
+	@if [ -z "$(BRANCH)" ]; then echo "Usage: make worktree-remove BRANCH=<name> [DELETE_BRANCH=1]" && exit 1; fi
+	@bash scripts/worktree.sh remove "$(BRANCH)" $(if $(DELETE_BRANCH),--delete-branch)
+
+## Re-link env files: make worktree-link BRANCH=feature-xyz
+worktree-link:
+	@if [ -z "$(BRANCH)" ]; then echo "Usage: make worktree-link BRANCH=<name>" && exit 1; fi
+	@bash scripts/worktree.sh link-env "$(BRANCH)"

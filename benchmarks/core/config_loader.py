@@ -4,33 +4,35 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 
-def _interpolate_env(value: str) -> str:
-    """Replace ${VAR} and ${VAR:-default} with environment variable values."""
+def _interpolate_env(value: str, variables: Mapping[str, str] | None = None) -> str:
+    """Replace ${VAR} and ${VAR:-default} with values from *variables* or ``os.environ``."""
+    source = variables if variables is not None else os.environ
 
     def _replace(match: re.Match[str]) -> str:
         var_expr = match.group(1)
         if ":-" in var_expr:
             var_name, default = var_expr.split(":-", 1)
-            return os.environ.get(var_name, default)
-        return os.environ.get(var_expr, match.group(0))
+            return source.get(var_name, default)
+        return source.get(var_expr, match.group(0))
 
     return re.sub(r"\$\{([^}]+)}", _replace, value)
 
 
-def _interpolate_recursive(obj: Any) -> Any:
+def _interpolate_recursive(obj: Any, *, variables: Mapping[str, str] | None = None) -> Any:
     """Walk a nested dict/list and interpolate all string values."""
     if isinstance(obj, str):
-        return _interpolate_env(obj)
+        return _interpolate_env(obj, variables)
     if isinstance(obj, dict):
-        return {k: _interpolate_recursive(v) for k, v in obj.items()}
+        return {k: _interpolate_recursive(v, variables=variables) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_interpolate_recursive(item) for item in obj]
+        return [_interpolate_recursive(item, variables=variables) for item in obj]
     return obj
 
 

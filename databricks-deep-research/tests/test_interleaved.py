@@ -22,11 +22,11 @@ from databricks_deep_research.citation.claim_generator import (
     InterleavedGenerator,
     _parse_interleaved_content,
 )
-from databricks_deep_research.citation.utils import has_numeric_content
 from databricks_deep_research.citation.types import (
     InterleavedClaim,
     RankedEvidence,
 )
+from databricks_deep_research.citation.utils import has_numeric_content
 from databricks_deep_research.llm.client import LLMResponse
 
 # ---------------------------------------------------------------------------

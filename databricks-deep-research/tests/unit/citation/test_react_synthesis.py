@@ -14,7 +14,6 @@ from databricks_deep_research.citation.react_generator import (
     _parse_react_content,
     _post_process_react_content,
 )
-from databricks_deep_research.citation.utils import has_numeric_content
 from databricks_deep_research.citation.synthesis_tools import (
     SYNTHESIS_TOOLS,
     EvidenceSearchIndex,
@@ -23,6 +22,7 @@ from databricks_deep_research.citation.synthesis_tools import (
     build_evidence_source_index,
 )
 from databricks_deep_research.citation.types import ClaimRole, InterleavedClaim, RankedEvidence
+from databricks_deep_research.citation.utils import has_numeric_content
 from databricks_deep_research.llm.client import LLMResponse, ToolCall
 
 # ---------------------------------------------------------------------------

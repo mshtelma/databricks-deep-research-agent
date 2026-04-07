@@ -137,6 +137,28 @@ async def _default_crawl(
     # Extract readable text -------------------------------------------------
     text, title = _extract_with_trafilatura(html, url)
 
+    # Layer 1: Rescue tables from HTML BEFORE trafilatura destroys them.
+    # Embed clean markdown tables into the text so Layer 2 (in execute())
+    # can detect them regardless of crawler type.
+    try:
+        from databricks_deep_research.tools.builtins.html_tables import (
+            extract_tables_from_html,
+            truncate_markdown_table,
+        )
+
+        parsed_tables = extract_tables_from_html(html)
+        if parsed_tables:
+            table_section = "\n\n---\n\n## Tables Found on Page\n\n"
+            for i, pt in enumerate(parsed_tables):
+                md = truncate_markdown_table(pt.markdown, max_rows=30)
+                table_section += (
+                    f"### Table {i + 1} ({pt.row_count}\u00d7{pt.col_count})\n\n"
+                    f"{md}\n\n"
+                )
+            text += table_section
+    except Exception:
+        logger.debug("WEB_CRAWL_TABLE_EXTRACTION_FAILED url=%s", url[:80], exc_info=True)
+
     if len(text) > max_content_length:
         text = text[:max_content_length] + "..."
 
@@ -201,10 +223,12 @@ class WebCrawlTool:
         *,
         timeout: float = 30.0,
         max_content_length: int = 50_000,
+        extract_tables: bool = True,
     ) -> None:
         self._crawler = crawler
         self._timeout = timeout
         self._max_content_length = max_content_length
+        self._extract_tables = extract_tables
 
         self._definition = ToolDefinition(
             name="web_crawl",
@@ -398,6 +422,26 @@ class WebCrawlTool:
 
         registry.clear_failure(url)
 
+        # -- Layer 2: detect markdown tables in text (ALL crawler types) -----
+        detected_tables: list[dict[str, Any]] = []
+        if self._extract_tables:
+            try:
+                from databricks_deep_research.tools.builtins.text_utils import (
+                    detect_markdown_tables,
+                )
+
+                for pt in detect_markdown_tables(text):
+                    detected_tables.append({
+                        "markdown": pt.markdown,
+                        "table_json": pt.table_json,
+                        "row_count": pt.row_count,
+                        "col_count": pt.col_count,
+                    })
+            except Exception:
+                logger.debug(
+                    "WEB_CRAWL_TABLE_DETECT_FAILED url=%s", url[:80], exc_info=True,
+                )
+
         # -- build result ----------------------------------------------------
         title_display = title or "Web Page"
         formatted = f"# {title_display}\n\nURL: {url}\n\n{text}"
@@ -411,16 +455,49 @@ class WebCrawlTool:
             ),
         ]
 
+        data: dict[str, Any] = {
+            "url": url,
+            "title": title,
+            "content_length": len(text),
+            "url_index": url_index,
+            "suppressed_by_failure_cache": False,
+            "failure_class": "",
+        }
+        if detected_tables:
+            # Register tables in shared TableRegistry for structured access
+            if context.table_registry is not None:
+                for tbl in detected_tables:
+                    try:
+                        tbl_idx = context.table_registry.register(
+                            tbl["table_json"],
+                            source_kind="web",
+                            source_label=url,
+                            markdown=tbl["markdown"],
+                        )
+                        tbl["table_idx"] = tbl_idx
+                    except ValueError:
+                        logger.warning(
+                            "WEB_CRAWL_TABLE_REGISTER_SKIPPED url=%s reason=capacity",
+                            url[:80],
+                        )
+                        break  # registry full — skip remaining tables
+                # Annotate formatted output with table indices
+                table_lines = [
+                    f"  Table {i + 1} [table_idx={t['table_idx']}] "
+                    f"({t['row_count']}x{t['col_count']})"
+                    for i, t in enumerate(detected_tables)
+                    if "table_idx" in t
+                ]
+                if table_lines:
+                    formatted += (
+                        "\n\n---\nDetected tables:\n" + "\n".join(table_lines)
+                    )
+            data["tables"] = detected_tables
+            data["table_count"] = len(detected_tables)
+
         return ToolResult(
             content=formatted,
             success=True,
             sources=sources,
-            data={
-                "url": url,
-                "title": title,
-                "content_length": len(text),
-                "url_index": url_index,
-                "suppressed_by_failure_cache": False,
-                "failure_class": "",
-            },
+            data=data,
         )

@@ -10,7 +10,9 @@ Public API:
 
 from __future__ import annotations
 
+import json as _json
 import re
+from dataclasses import dataclass
 from html import unescape
 from html.parser import HTMLParser
 from typing import Any
@@ -155,6 +157,139 @@ class _HTMLTableParser(HTMLParser):
 
 
 # ---------------------------------------------------------------------------
+# Parsed table dataclass
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ParsedTable:
+    """A parsed HTML table with both Markdown and structured JSON representations."""
+
+    markdown: str
+    table_json: str  # JSON string of the structured representation; empty if parse failed
+
+
+# ---------------------------------------------------------------------------
+# Shared header builder (used by both Markdown and JSON paths)
+# ---------------------------------------------------------------------------
+
+
+def _build_typed_headers(
+    grid: list[list[str]], header_rows: int, num_cols: int,
+) -> tuple[list[str], list[dict[str, Any]], int]:
+    """Build header names and typed metadata from a 2D grid.
+
+    Encapsulates multi-row flattening, OCR corrections, deduplication,
+    "Category" heuristic, and unique-name enforcement — used by both
+    ``_grid_to_markdown`` and ``grid_to_table_json``.
+
+    Returns
+    -------
+    tuple of:
+        flat_names: list[str]
+            Unique, OCR-corrected header name strings (for markdown output).
+        typed_headers: list[dict]
+            ``{"name": str, "parent": str | None, "index": int}`` per column.
+            ``name`` is the leaf header, ``parent`` is the ancestor chain
+            (joined with `` > ``) or ``None`` for single-row headers.
+        data_start_row: int
+            Grid row index where data rows begin.
+    """
+    raw_names: list[str] = []
+    parents: list[str | None] = []
+
+    if header_rows == 0:
+        # No <th> found — generate positional headers
+        raw_names = ["Category"] + [f"col_{i + 1}" for i in range(1, num_cols)]
+        parents = [None] * num_cols
+        data_start = 0
+    elif header_rows == 1:
+        raw_names = [grid[0][i] if i < len(grid[0]) else "" for i in range(num_cols)]
+        parents = [None] * num_cols
+        data_start = 1
+    else:
+        # Multi-row headers: flatten by column (for markdown-compatible names).
+        # NOTE: We do NOT deduplicate consecutive values.  The HTML parser
+        # fills rowspan-spanned positions with "" (line 119), so true rowspan
+        # repetitions never appear as consecutive duplicates — they appear as
+        # empty strings and are skipped by the ``if val:`` check.  Deduplicating
+        # consecutive values would silently destroy data when the parser
+        # mis-classifies data rows as header rows (e.g., two months both
+        # having value "73").
+        for col_idx in range(num_cols):
+            parts: list[str] = []
+            for row_idx in range(header_rows):
+                val = grid[row_idx][col_idx] if col_idx < len(grid[row_idx]) else ""
+                if val:
+                    parts.append(val)
+            raw_names.append(" > ".join(parts) if parts else "")
+
+        # Build parents separately with colspan-aware propagation.
+        # In the grid, colspan fills spanned cells with "" — we recover the
+        # spanning parent by looking left for the nearest non-empty cell in
+        # each ancestor header row.  No consecutive-duplicate dropping here
+        # either — see comment above for reasoning.
+        for col_idx in range(num_cols):
+            parent_parts: list[str] = []
+            for row_idx in range(header_rows - 1):  # ancestor rows only (not leaf)
+                val = grid[row_idx][col_idx] if col_idx < len(grid[row_idx]) else ""
+                if not val:
+                    # Colspan span — look left for the spanning cell's value
+                    for left in range(col_idx - 1, -1, -1):
+                        left_val = grid[row_idx][left] if left < len(grid[row_idx]) else ""
+                        if left_val:
+                            val = left_val
+                            break
+                if val:
+                    parent_parts.append(val)
+            parents.append(" > ".join(parent_parts) if parent_parts else None)
+        data_start = header_rows
+
+    # --- Clean headers ---
+    raw_names = [_apply_ocr_corrections(h) for h in raw_names]
+
+    # First-column heuristic: if empty, label as "Category"
+    if raw_names and not raw_names[0]:
+        raw_names[0] = "Category"
+
+    # Ensure unique, non-empty header names
+    flat_names: list[str] = []
+    seen: dict[str, int] = {}
+    for i, h in enumerate(raw_names):
+        name = h if h else f"col_{i + 1}"
+        if name in seen:
+            seen[name] += 1
+            name = f"{name}_{seen[name]}"
+        else:
+            seen[name] = 1
+        flat_names.append(name)
+
+    # Build typed headers (leaf name from flat_names, parent from parents list)
+    typed: list[dict[str, Any]] = []
+    for i in range(num_cols):
+        leaf = flat_names[i]
+        # For multi-row headers, extract the leaf (last part) from the flat name
+        if parents[i] and " > " in leaf:
+            leaf = leaf.split(" > ")[-1].strip()
+        typed.append({"name": leaf, "parent": parents[i], "index": i})
+
+    # Ensure leaf names are unique — prevent cells dict key collision in
+    # grid_to_table_json when two columns share the same leaf after
+    # parent-prefix extraction (e.g., "FY1986 > Oct" and "FY1987 > Oct"
+    # both extract leaf "Oct").  Mirrors the flat_names pattern above.
+    leaf_seen: dict[str, int] = {}
+    for th in typed:
+        name = th["name"]
+        if name in leaf_seen:
+            leaf_seen[name] += 1
+            th["name"] = f"{name}_{leaf_seen[name]}"
+        else:
+            leaf_seen[name] = 1
+
+    return flat_names, typed, data_start
+
+
+# ---------------------------------------------------------------------------
 # Grid → Markdown conversion
 # ---------------------------------------------------------------------------
 
@@ -171,60 +306,110 @@ def _grid_to_markdown(grid: list[list[str]], header_rows: int) -> str:
         while len(row) < num_cols:
             row.append("")
 
-    # --- Build headers ---
-    if header_rows == 0:
-        # No <th> found — generate positional headers
-        headers = ["Category"] + [f"col_{i + 1}" for i in range(1, num_cols)]
-        data_rows = grid
-    elif header_rows == 1:
-        headers = list(grid[0])
-        data_rows = grid[1:]
-    else:
-        # Multi-row headers: flatten by column
-        headers = []
-        for col_idx in range(num_cols):
-            parts: list[str] = []
-            for row_idx in range(header_rows):
-                val = grid[row_idx][col_idx] if col_idx < len(grid[row_idx]) else ""
-                # Deduplicate consecutive identical values (e.g., Year > Year → Year)
-                if val and (not parts or parts[-1] != val):
-                    parts.append(val)
-            headers.append(" > ".join(parts) if parts else "")
-        data_rows = grid[header_rows:]
+    flat_names, _, data_start = _build_typed_headers(grid, header_rows, num_cols)
 
-    # --- Clean headers ---
-    headers = [_apply_ocr_corrections(h) for h in headers]
-
-    # First-column heuristic: if empty, label as "Category"
-    if headers and not headers[0]:
-        headers[0] = "Category"
-
-    # Ensure unique, non-empty header names
-    seen: dict[str, int] = {}
-    for i, h in enumerate(headers):
-        name = h if h else f"col_{i + 1}"
-        if name in seen:
-            seen[name] += 1
-            name = f"{name}_{seen[name]}"
-        else:
-            seen[name] = 1
-        headers[i] = name
+    data_rows = grid[data_start:]
 
     # --- Build Markdown ---
     lines: list[str] = []
-    lines.append("| " + " | ".join(_escape_md_cell(h) for h in headers) + " |")
-    lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+    lines.append("| " + " | ".join(_escape_md_cell(h) for h in flat_names) + " |")
+    lines.append("| " + " | ".join(["---"] * len(flat_names)) + " |")
 
     for row in data_rows:
-        cells = [_escape_md_cell(row[i] if i < len(row) else "") for i in range(len(headers))]
+        cells = [_escape_md_cell(row[i] if i < len(row) else "") for i in range(len(flat_names))]
         lines.append("| " + " | ".join(cells) + " |")
 
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
+# Grid → Structured JSON conversion
+# ---------------------------------------------------------------------------
+
+_TOTAL_PATTERN = re.compile(r"^\s*(grand\s+)?total\b", re.IGNORECASE)
+
+
+def grid_to_table_json(grid: list[list[str]], header_rows: int) -> str:
+    """Convert a 2D grid into a structured JSON string.
+
+    Uses the same header-building logic as ``_grid_to_markdown`` (via the
+    shared ``_build_typed_headers`` helper) to ensure consistency.
+
+    Returns
+    -------
+    str
+        JSON string with ``headers``, ``rows``, ``row_count``, ``data_row_count``.
+    """
+    if not grid:
+        return "{}"
+
+    num_cols = max(len(row) for row in grid)
+
+    # Pad rows to uniform column count (idempotent if already padded)
+    for row in grid:
+        while len(row) < num_cols:
+            row.append("")
+
+    flat_names, typed_headers, data_start = _build_typed_headers(
+        grid, header_rows, num_cols,
+    )
+
+    data_rows_grid = grid[data_start:]
+    rows: list[dict[str, Any]] = []
+    data_row_count = 0
+
+    for row in data_rows_grid:
+        label = row[0] if row else ""
+        # Build cells dict keyed by header name (skip first column = label)
+        cells: dict[str, str] = {}
+        for col_idx in range(1, num_cols):
+            header_name = typed_headers[col_idx]["name"]
+            cells[header_name] = row[col_idx] if col_idx < len(row) else ""
+
+        # Classify row
+        non_empty_data = sum(1 for v in cells.values() if v.strip())
+        is_group_header = non_empty_data == 0 and bool(label.strip())
+        is_total = bool(_TOTAL_PATTERN.match(label.strip())) if label else False
+
+        rows.append({
+            "label": label,
+            "cells": cells,
+            "is_group_header": is_group_header,
+            "is_total": is_total,
+        })
+        if not is_group_header:
+            data_row_count += 1
+
+    result = {
+        "headers": typed_headers,
+        "rows": rows,
+        "row_count": len(rows),
+        "data_row_count": data_row_count,
+    }
+    return _json.dumps(result, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+
+def _feed_and_flush(html: str) -> tuple[_HTMLTableParser, bool]:
+    """Feed HTML to parser, flush in-progress tables.  Returns (parser, ok)."""
+    parser = _HTMLTableParser()
+    try:
+        parser.feed(html)
+    except Exception:
+        return parser, False
+
+    # Flush any in-progress table — handles truncated HTML missing </table>.
+    if parser._in_table and parser._occupied:
+        grid = parser._build_grid()
+        if grid:
+            parser.tables.append((grid, parser._header_rows))
+        parser._in_table = False
+
+    return parser, True
 
 
 def parse_html_tables(html: str) -> list[str]:
@@ -244,21 +429,44 @@ def parse_html_tables(html: str) -> list[str]:
         One Markdown table string per ``<table>`` found.  If parsing fails,
         returns the HTML wrapped in a code fence as fallback.
     """
-    parser = _HTMLTableParser()
-    try:
-        parser.feed(html)
-    except Exception:
-        return ["```html\n" + html.strip() + "\n```"]
+    parser, ok = _feed_and_flush(html)
 
-    # Flush any in-progress table — handles truncated HTML missing </table>.
-    # Many upstream JSON elements have HTML that ends mid-row without closing.
-    if parser._in_table and parser._occupied:
-        grid = parser._build_grid()
-        if grid:
-            parser.tables.append((grid, parser._header_rows))
-        parser._in_table = False
-
-    if not parser.tables:
+    if not ok or not parser.tables:
         return ["```html\n" + html.strip() + "\n```"]
 
     return [_grid_to_markdown(grid, hrows) for grid, hrows in parser.tables]
+
+
+def parse_html_tables_structured(html: str) -> list[ParsedTable]:
+    """Parse HTML tables into both Markdown and structured JSON representations.
+
+    Same parsing as :func:`parse_html_tables` but returns :class:`ParsedTable`
+    objects carrying both the Markdown string and a structured JSON string.
+    The JSON captures header hierarchy, row classification (group header / total),
+    and cell-to-header mapping for downstream programmatic access.
+
+    Parameters
+    ----------
+    html:
+        HTML string potentially containing one or more ``<table>`` blocks.
+
+    Returns
+    -------
+    list[ParsedTable]:
+        One ``ParsedTable`` per ``<table>`` found.
+    """
+    parser, ok = _feed_and_flush(html)
+
+    if not ok or not parser.tables:
+        return [ParsedTable(
+            markdown="```html\n" + html.strip() + "\n```",
+            table_json="",
+        )]
+
+    return [
+        ParsedTable(
+            markdown=_grid_to_markdown(grid, hrows),
+            table_json=grid_to_table_json(grid, hrows),
+        )
+        for grid, hrows in parser.tables
+    ]

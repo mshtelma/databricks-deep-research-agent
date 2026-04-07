@@ -505,6 +505,7 @@ class ReactLoop:
             events: list[StreamEvent] = []
             sources: list[Any] = []
             total_usage: dict[str, int] = {}
+            per_call_usage: list[dict[str, int]] = []
             call_count = 0
             first_turn_retried = False
 
@@ -545,6 +546,11 @@ class ReactLoop:
 
                 # Track usage
                 _merge_usage(total_usage, response.usage)
+                per_call_usage.append({
+                    "prompt_tokens": response.usage.get("prompt_tokens", 0),
+                    "completion_tokens": response.usage.get("completion_tokens", 0),
+                    "total_tokens": response.usage.get("total_tokens", 0),
+                })
                 logger.info(
                     "REACT_LLM_USAGE node=%s call=%d prompt_tokens=%d "
                     "completion_tokens=%d total_tokens=%d",
@@ -643,6 +649,9 @@ class ReactLoop:
                         span_attrs: dict[str, Any] = {
                             "react.total_calls": call_count,
                             "react.total_sources": len(sources),
+                            "react.exit_reason": exit_reason,
+                            "react.content_len": len(response.content),
+                            "react.per_call_usage": json.dumps(per_call_usage),
                         }
                         for k, v in total_usage.items():
                             span_attrs[f"react.{k}"] = v
@@ -993,9 +1002,22 @@ class ReactLoop:
             # replacing the actual computation with "No relevant results
             # accepted."  Bypass the entire admission pipeline.
             if tool_source_kind(tool.definition) == "builtin":
-                tool_result = await tool.execute(
-                    tool.validate_arguments(args), self._ctx
-                )
+                async with trace_span(
+                    f"tool.{tool_name}", span_type="TOOL",
+                    attributes={
+                        "tool.name": tool_name,
+                        "tool.args": str({k: str(v)[:2000] for k, v in args.items()}),
+                    },
+                ) as _builtin_span:
+                    tool_result = await tool.execute(
+                        tool.validate_arguments(args), self._ctx
+                    )
+                    if _builtin_span:
+                        _builtin_span.set_attributes({
+                            "tool.result_len": len(tool_result.content),
+                            "tool.success": tool_result.success,
+                            "tool.error": tool_result.error or "",
+                        })
                 logger.info(
                     "BUILTIN_TOOL_RESULT node=%s tool=%s success=%s content_len=%d",
                     self._node_id,
@@ -1088,7 +1110,7 @@ class ReactLoop:
                 f"tool.{tool_name}", span_type="TOOL",
                 attributes={
                     "tool.name": tool_name,
-                    "tool.args": str({k: str(v)[:100] for k, v in planned.arguments.items()}),
+                    "tool.args": str({k: str(v)[:2000] for k, v in planned.arguments.items()}),
                     "tool.query": str(planned.rewritten_query)[:500],
                 },
             ) as tool_span:

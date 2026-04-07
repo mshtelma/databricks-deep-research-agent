@@ -37,6 +37,7 @@ class ToolFactoryContext:
     crawler: Any | None = None  # ContentCrawler protocol (web_crawl)
     file_index: Any | None = None  # FileIndex for file_search
     extras: dict[str, Any] = field(default_factory=dict)  # app-specific deps
+    api_keys: dict[str, str] = field(default_factory=dict)  # provider API keys
 
     @classmethod
     def from_defaults(
@@ -90,12 +91,21 @@ class ToolFactoryContext:
                     "TOOL_FACTORY_CONTEXT BraveSearchAdapter creation failed"
                 )
 
+        # -- api_keys for factory-driven provider resolution --------------------
+        api_keys: dict[str, str] = {}
+        if api_key:
+            api_keys["brave"] = api_key
+        jina_key = os.environ.get("JINA_API_KEY")
+        if jina_key:
+            api_keys["jina"] = jina_key
+
         return cls(
             workspace_client=ws,
             user_token=user_token,
             search_client=search_client,
             crawler=None,
             extras=extras or {},
+            api_keys=api_keys,
         )
 
 

@@ -306,6 +306,18 @@ class TestFromDatabricks:
         runner = WorkflowRunner.from_databricks(model="test-model")
 
         mock_factory.assert_called_once_with(
-            model="test-model", model_mapping=None
+            model="test-model", model_mapping=None, profile=None
         )
         assert runner._client is mock_client
+
+    @patch(
+        "databricks_deep_research.runner.FrameworkLLMClient.from_databricks"
+    )
+    def test_passes_profile_through(self, mock_factory: MagicMock) -> None:
+        mock_factory.return_value = _make_mock_client()
+
+        WorkflowRunner.from_databricks(model="m", profile="my-prof")
+
+        mock_factory.assert_called_once_with(
+            model="m", model_mapping=None, profile="my-prof"
+        )
