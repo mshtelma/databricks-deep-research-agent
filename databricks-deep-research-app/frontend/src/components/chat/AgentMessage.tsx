@@ -230,7 +230,7 @@ export function AgentMessage({
   );
 
   return (
-    <div data-testid="agent-response" className={cn('flex justify-start', className)}>
+    <div data-testid="agent-response" data-claims-loaded={claims.length > 0 ? 'true' : undefined} className={cn('flex justify-start', className)}>
       <Card className="max-w-[90%] bg-muted">
         <CardContent className="p-4">
           {/* Export menu in top-right corner - only show when not streaming and has valid ID */}
