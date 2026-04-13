@@ -19,6 +19,7 @@ from deep_research.services.llm.truncation import (
     truncate_text,
 )
 from deep_research.services.llm.types import (
+    CLAUDE_THINKING_BUDGETS,
     EndpointHealth,
     LLMRequest,
     LLMResponse,
@@ -34,6 +35,7 @@ __all__ = [
     "LLMClient",
     "ModelConfig",
     # Types
+    "CLAUDE_THINKING_BUDGETS",
     "ModelTier",
     "ModelRole",
     "ModelEndpoint",

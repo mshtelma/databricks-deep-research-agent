@@ -322,6 +322,25 @@ export class CitationsPage {
     return this.page.getByTestId(`verification-badge-${verdict}`).isVisible();
   }
 
+  // ==================== Mode-Agnostic Marker Methods ====================
+
+  /**
+   * Click the first available citation marker (mode-agnostic).
+   * After claims load, marker keys may change from numeric ("1") to
+   * human-readable ("Arxiv"). This method finds any marker by prefix.
+   */
+  async clickFirstCitationMarker(): Promise<void> {
+    await this.citationMarkers.first().click();
+  }
+
+  /**
+   * Focus the first available citation marker and press a key.
+   */
+  async pressKeyOnFirstCitationMarker(key: string): Promise<void> {
+    await this.citationMarkers.first().focus();
+    await this.page.keyboard.press(key);
+  }
+
   // ==================== Keyboard Navigation Methods ====================
 
   /**

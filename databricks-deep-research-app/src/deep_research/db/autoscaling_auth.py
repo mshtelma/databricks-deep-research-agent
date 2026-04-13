@@ -87,10 +87,10 @@ class AutoscalingCredentialProvider(BaseLakebaseCredentialProvider):
 
         logger.info(
             "AUTOSCALING_CREDENTIAL_GENERATED calculated_expires_at=%s "
-            "now_utc=%s token_preview=%s",
+            "now_utc=%s token_length=%s",
             expires_at.isoformat(),
             now_utc.isoformat(),
-            cred_response.token[:20] + "..." if cred_response.token else None,
+            f"len={len(cred_response.token)}" if cred_response.token else None,
         )
 
         username = self._extract_username(cred_response.token)

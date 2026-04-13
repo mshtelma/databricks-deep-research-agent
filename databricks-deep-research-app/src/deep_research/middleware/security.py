@@ -20,12 +20,14 @@ class SecurityHeadersMiddleware:
         app: ASGIApp,
         csp_policy: str | None = None,
         report_only: bool = False,
+        enable_hsts: bool = False,
     ) -> None:
         self.app = app
         self.csp_policy = csp_policy
         self._csp_header_name = (
             "Content-Security-Policy-Report-Only" if report_only else "Content-Security-Policy"
         )
+        self._enable_hsts = enable_hsts
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -41,6 +43,11 @@ class SecurityHeadersMiddleware:
                 headers.append("Referrer-Policy", "strict-origin-when-cross-origin")
                 if self.csp_policy:
                     headers.append(self._csp_header_name, self.csp_policy)
+                if self._enable_hsts:
+                    headers.append(
+                        "Strict-Transport-Security",
+                        "max-age=31536000; includeSubDomains",
+                    )
             await send(message)
 
         await self.app(scope, receive, send_wrapper)

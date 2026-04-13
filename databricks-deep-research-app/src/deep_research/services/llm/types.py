@@ -21,9 +21,21 @@ class ModelTier(StrEnum):
 class ReasoningEffort(StrEnum):
     """Reasoning effort levels."""
 
+    NONE = "none"
+    MINIMAL = "minimal"
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    MAX = "max"
+
+
+# Default thinking budget_tokens per effort level for Claude endpoints.
+# Overridden by endpoint.reasoning_budget or role.reasoning_budget when set.
+CLAUDE_THINKING_BUDGETS: dict[str, int] = {
+    "low": 1024,
+    "medium": 4096,
+    "high": 10240,
+}
 
 
 class SelectionStrategy(StrEnum):
@@ -52,6 +64,7 @@ class ModelEndpoint:
     supports_temperature: bool = True
     # Claude models support prompt caching via cache_control parameter
     supports_prompt_caching: bool = False
+    supports_reasoning: bool = True
 
 
 @dataclass

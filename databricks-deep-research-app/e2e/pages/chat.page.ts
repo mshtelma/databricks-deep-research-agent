@@ -272,7 +272,8 @@ export class ChatPage {
           `streaming-indicator is visible, error=${errorVisible} — research may need more time.`
       );
     }
-    await expect(this.page.getByTestId('agent-response').first()).toBeVisible({ timeout: 5000 });
+    const remainingTime = Math.max(timeout - (Date.now() - startTime), 5000);
+    await expect(this.page.getByTestId('agent-response').first()).toBeVisible({ timeout: remainingTime });
   }
 
   /**

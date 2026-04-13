@@ -82,7 +82,7 @@ class RequestLoggingMiddleware:
             return
 
         # Generate request ID for tracing
-        request_id = str(uuid.uuid4())[:8]
+        request_id = uuid.uuid4().hex
 
         # Initialize state dict if not present and add request_id
         # FastAPI's Request object uses scope["state"] internally,

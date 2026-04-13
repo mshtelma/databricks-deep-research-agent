@@ -182,3 +182,24 @@ export async function waitForClaimsList(page: Page, timeout: number = 10000): Pr
   const claimsList = page.getByTestId('claims-list');
   await expect(claimsList).toBeVisible({ timeout });
 }
+
+/**
+ * Wait for citation claims to be loaded for the agent response.
+ * Claims load asynchronously after the response renders via the useCitations hook.
+ * The data-claims-loaded attribute is set by AgentMessage when claims.length > 0.
+ *
+ * @param page The Playwright page object
+ * @param timeout Maximum wait time in milliseconds
+ * @returns true if claims loaded within timeout, false otherwise
+ */
+export async function waitForClaimsLoaded(page: Page, timeout: number = 60000): Promise<boolean> {
+  try {
+    await page
+      .locator('[data-testid="agent-response"][data-claims-loaded="true"]')
+      .first()
+      .waitFor({ state: 'visible', timeout });
+    return true;
+  } catch {
+    return false;
+  }
+}

@@ -3,13 +3,30 @@
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from deep_research.core.config import Settings, get_settings
 from deep_research.middleware.auth import CurrentUser
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/debug", tags=["Debug"])
+
+def _require_non_production(
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Block debug endpoints in production at request time.
+
+    Defense-in-depth: the router is already excluded at import time,
+    but this guard catches settings drift or misconfiguration.
+    """
+    if settings.is_production:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found",
+        )
+
+
+router = APIRouter(prefix="/debug", tags=["Debug"], dependencies=[Depends(_require_non_production)])
 
 
 @router.get("/me")
@@ -55,12 +72,9 @@ async def get_request_headers(request: Request, user: CurrentUser) -> dict[str, 
     for name in auth_header_names:
         value = headers.get(name)
         if value:
-            # Mask sensitive token values (show first/last 8 chars)
+            # Mask sensitive token values — log presence and length only
             if "token" in name.lower() or "authorization" in name.lower():
-                if len(value) > 20:
-                    auth_headers[name] = f"{value[:8]}...{value[-8:]}"
-                else:
-                    auth_headers[name] = "***masked***"
+                auth_headers[name] = f"present (length={len(value)})"
             else:
                 auth_headers[name] = value
         else:

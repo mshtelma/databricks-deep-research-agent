@@ -25,7 +25,7 @@ import type {
 
 // Max retries for polling empty claims (prevents infinite polling).
 // Keep this low to avoid request storms when historical messages have no claims.
-const MAX_CLAIM_POLL_RETRIES = 3;
+const MAX_CLAIM_POLL_RETRIES = 10;
 // Polling interval in milliseconds
 const CLAIM_POLL_INTERVAL_MS = 3000;
 

@@ -151,7 +151,8 @@ class ChatService(BaseRepository[Chat]):
             conditions.append(Chat.status == status)
 
         if search:
-            conditions.append(Chat.title.ilike(f"%{search}%"))
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            conditions.append(Chat.title.ilike(f"%{escaped}%", escape="\\"))
 
         # Get total count
         count_query = select(func.count(Chat.id)).where(and_(*conditions))

@@ -1,7 +1,5 @@
 """FastAPI application entry point."""
 
-import databricks_deep_research._fips_compat  # noqa: F401  # FIPS md5 patch
-
 import asyncio
 import contextlib
 import logging
@@ -9,6 +7,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
+import databricks_deep_research._fips_compat  # noqa: F401  # FIPS md5 patch
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -153,6 +152,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.cleanup_task = cleanup_task
     logger.info("Session cleanup task started (runs every %d seconds)", SESSION_CLEANUP_INTERVAL_SECONDS)
 
+    if settings.is_databricks_app and not settings.is_production:
+        logger.warning(
+            "DEBUG_ENDPOINTS_EXPOSED: Databricks App with APP_ENV=%s. "
+            "Set APP_ENV=production for production deployments.",
+            settings.app_env,
+        )
+
     logger.info(
         "Application started: env=%s, is_databricks_app=%s, port=%s",
         settings.app_env,
@@ -217,7 +223,10 @@ def create_app() -> FastAPI:
         "img-src 'self' data: https:; "
         "font-src 'self'; "
         "connect-src 'self'; "
-        "frame-ancestors 'none'"
+        "frame-ancestors 'none'; "
+        "object-src 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
     )
 
     # Middleware is added in reverse execution order
@@ -259,6 +268,7 @@ def create_app() -> FastAPI:
         SecurityHeadersMiddleware,
         csp_policy=csp_policy,
         report_only=settings.csp_report_only,
+        enable_hsts=settings.is_production,
     )
 
     # Register exception handlers

@@ -175,36 +175,40 @@ async def grant_permissions_to_app(
                     e,
                 )
 
-        # Grant permissions on existing tables
-        logger.info(f"Granting ALL on all tables to {sp_username}...")
-        await conn.execute(
-            f'GRANT ALL ON ALL TABLES IN SCHEMA public TO "{sp_username}"'
-        )
-        logger.info("Granted ALL on all tables")
+        # SECURITY INVARIANT: DDL statements below use f-string interpolation with
+        # double-quoted identifiers. Safe ONLY because _validate_sql_identifier()
+        # restricts input to [a-zA-Z0-9_\-\.]. If regex is widened, re-audit for injection.
 
-        # Grant permissions on existing sequences
-        logger.info(f"Granting ALL on all sequences to {sp_username}...")
+        # Grant permissions on existing tables (least privilege: no TRUNCATE/TRIGGER)
+        logger.info(f"Granting SELECT/INSERT/UPDATE/DELETE on all tables to {sp_username}...")
         await conn.execute(
-            f'GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO "{sp_username}"'
+            f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO "{sp_username}"'
         )
-        logger.info("Granted ALL on all sequences")
+        logger.info("Granted SELECT/INSERT/UPDATE/DELETE on all tables")
+
+        # Grant permissions on existing sequences (least privilege: USAGE/SELECT/UPDATE only)
+        logger.info(f"Granting USAGE, SELECT, UPDATE on all sequences to {sp_username}...")
+        await conn.execute(
+            f'GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO "{sp_username}"'
+        )
+        logger.info("Granted USAGE, SELECT, UPDATE on all sequences")
 
         # Set default privileges for future tables created by current user
         logger.info("Setting default privileges for future tables...")
         await conn.execute(
             f'''
             ALTER DEFAULT PRIVILEGES IN SCHEMA public
-            GRANT ALL ON TABLES TO "{sp_username}"
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{sp_username}"
             '''
         )
         logger.info("Set default privileges for tables")
 
-        # Set default privileges for future sequences
+        # Set default privileges for future sequences (least privilege)
         logger.info("Setting default privileges for future sequences...")
         await conn.execute(
             f'''
             ALTER DEFAULT PRIVILEGES IN SCHEMA public
-            GRANT ALL ON SEQUENCES TO "{sp_username}"
+            GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO "{sp_username}"
             '''
         )
         logger.info("Set default privileges for sequences")

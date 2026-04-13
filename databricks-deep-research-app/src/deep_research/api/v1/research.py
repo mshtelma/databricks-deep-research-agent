@@ -196,13 +196,13 @@ async def get_research_events(
     # Verify chat ownership via message
     message = await db.get(Message, session.message_id)
     if not message or message.chat_id != chat_id:
-        raise AuthorizationError(f"Access denied to session {session_id}")
+        raise NotFoundError("ResearchSession", str(session_id))
 
     # Verify user has access to this chat
     chat_service = ChatService(db)
     chat = await chat_service.get_by_id(chat_id)
     if chat and chat.user_id != user.user_id:
-        raise AuthorizationError(f"Access denied to chat {chat_id}")
+        raise NotFoundError("Chat", str(chat_id))
 
     # Fetch events since sequence number
     event_service = ResearchEventService(db)
@@ -261,13 +261,13 @@ async def get_research_state(
     # Get agent message content
     message = await db.get(Message, session.message_id)
     if not message or message.chat_id != chat_id:
-        raise AuthorizationError(f"Access denied to session {session_id}")
+        raise NotFoundError("ResearchSession", str(session_id))
 
     # Verify user has access to this chat
     chat_service = ChatService(db)
     chat = await chat_service.get_by_id(chat_id)
     if chat and chat.user_id != user.user_id:
-        raise AuthorizationError(f"Access denied to chat {chat_id}")
+        raise NotFoundError("Chat", str(chat_id))
 
     # Handle status as either enum or string
     status_str = session.status.value if hasattr(session.status, "value") else session.status

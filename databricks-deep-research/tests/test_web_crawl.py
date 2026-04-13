@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+import socket
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from databricks_deep_research.tools.builtins.web_crawl import WebCrawlTool
+from databricks_deep_research.tools.builtins.web_crawl import (
+    WebCrawlTool,
+    _check_redirect_ssrf,
+    _resolve_and_validate_ip,
+)
 from databricks_deep_research.tools.protocol import TableRegistry, ToolContext, UrlRegistry
+
+
+@pytest.fixture(autouse=True)
+def _mock_dns_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Decouple tests from real DNS. Fail-closed DNS makes this load-bearing."""
+    monkeypatch.setattr(
+        "databricks_deep_research.tools.builtins.web_crawl._resolve_and_validate_ip",
+        lambda hostname: (True, "93.184.216.34"),
+    )
 
 
 def _make_context(
@@ -205,3 +219,206 @@ async def test_table_registry_capacity_overflow() -> None:
 
     assert result.success
     assert len(reg) == 0  # nothing registered
+
+
+# ---------------------------------------------------------------------------
+# DNS resolution and validation (_resolve_and_validate_ip)
+# ---------------------------------------------------------------------------
+
+
+class TestResolveAndValidateIp:
+    """Unit tests for the fail-closed DNS resolver."""
+
+    def test_empty_hostname(self) -> None:
+        is_safe, ip = _resolve_and_validate_ip("")
+        assert is_safe is False
+        assert ip is None
+
+    def test_blocked_hostname(self) -> None:
+        is_safe, ip = _resolve_and_validate_ip("metadata.google.internal")
+        assert is_safe is False
+        assert ip is None
+
+    @patch("socket.getaddrinfo")
+    def test_public_ipv4(self, mock_getaddrinfo: MagicMock) -> None:
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
+        ]
+        is_safe, ip = _resolve_and_validate_ip("example.com")
+        assert is_safe is True
+        assert ip == "93.184.216.34"
+
+    @patch("socket.getaddrinfo")
+    def test_private_ipv4(self, mock_getaddrinfo: MagicMock) -> None:
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.1", 0)),
+        ]
+        is_safe, ip = _resolve_and_validate_ip("evil.internal")
+        assert is_safe is False
+        assert ip is None
+
+    @patch("socket.getaddrinfo")
+    def test_loopback(self, mock_getaddrinfo: MagicMock) -> None:
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0)),
+        ]
+        is_safe, ip = _resolve_and_validate_ip("localhost")
+        assert is_safe is False
+        assert ip is None
+
+    @patch("socket.getaddrinfo")
+    def test_link_local(self, mock_getaddrinfo: MagicMock) -> None:
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 0)),
+        ]
+        is_safe, ip = _resolve_and_validate_ip("metadata.cloud")
+        assert is_safe is False
+        assert ip is None
+
+    @patch("socket.getaddrinfo")
+    def test_dns_failure_fail_closed(self, mock_getaddrinfo: MagicMock) -> None:
+        mock_getaddrinfo.side_effect = socket.gaierror("Name resolution failed")
+        is_safe, ip = _resolve_and_validate_ip("nonexistent.example")
+        assert is_safe is False
+        assert ip is None
+
+    @patch("socket.getaddrinfo")
+    def test_mixed_public_private(self, mock_getaddrinfo: MagicMock) -> None:
+        mock_getaddrinfo.return_value = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.1", 0)),
+        ]
+        is_safe, ip = _resolve_and_validate_ip("dual-homed.example")
+        assert is_safe is False
+        assert ip is None
+
+
+# ---------------------------------------------------------------------------
+# SSRF protection integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestSSRFProtection:
+    """Integration tests for SSRF protection through execute()."""
+
+    @pytest.mark.asyncio
+    async def test_private_ip_blocked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """URLs resolving to private IPs are blocked before crawling."""
+        monkeypatch.setattr(
+            "databricks_deep_research.tools.builtins.web_crawl._resolve_and_validate_ip",
+            lambda hostname: (False, None),
+        )
+        crawler = _mock_crawler("should not be called", "Nope")
+        tool = WebCrawlTool(crawler=crawler)
+        ctx = _make_context(["https://example.com"])
+
+        result = await tool.execute({"url_index": 0}, ctx)
+
+        assert not result.success
+        assert "private/internal" in result.content
+        crawler.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resolved_ip_passed_to_default_crawl(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The resolved IP is forwarded to _default_crawl."""
+        monkeypatch.setattr(
+            "databricks_deep_research.tools.builtins.web_crawl._resolve_and_validate_ip",
+            lambda hostname: (True, "93.184.216.34"),
+        )
+        mock_crawl = AsyncMock(return_value=("Some content " * 20, "Title"))
+        monkeypatch.setattr(
+            "databricks_deep_research.tools.builtins.web_crawl._default_crawl",
+            mock_crawl,
+        )
+        tool = WebCrawlTool()  # no custom crawler → uses _default_crawl
+        ctx = _make_context(["https://example.com"])
+
+        await tool.execute({"url_index": 0}, ctx)
+
+        mock_crawl.assert_awaited_once()
+        call_kwargs = mock_crawl.call_args
+        assert call_kwargs.kwargs.get("resolved_ip") == "93.184.216.34"
+
+    @pytest.mark.asyncio
+    async def test_custom_crawler_gets_original_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Custom crawlers receive the original URL, not an IP-pinned one."""
+        monkeypatch.setattr(
+            "databricks_deep_research.tools.builtins.web_crawl._resolve_and_validate_ip",
+            lambda hostname: (True, "93.184.216.34"),
+        )
+        crawler = _mock_crawler("Real content for testing. " * 10, "Page")
+        tool = WebCrawlTool(crawler=crawler)
+        ctx = _make_context(["https://example.com/page"])
+
+        await tool.execute({"url_index": 0}, ctx)
+
+        crawler.assert_awaited_once_with("https://example.com/page")
+
+
+# ---------------------------------------------------------------------------
+# Redirect SSRF tests
+# ---------------------------------------------------------------------------
+
+
+class TestRedirectSSRF:
+    """Unit tests for _check_redirect_ssrf."""
+
+    @pytest.mark.asyncio
+    async def test_file_scheme_blocked(self) -> None:
+        """Redirects to file:// scheme are blocked."""
+        response = MagicMock()
+        response.is_redirect = True
+        response.headers = {"location": "file:///etc/passwd"}
+        response.request = httpx.Request("GET", "https://evil.com")
+
+        with pytest.raises(httpx.TooManyRedirects, match="disallowed scheme"):
+            await _check_redirect_ssrf(response)
+
+    @pytest.mark.asyncio
+    async def test_gopher_scheme_blocked(self) -> None:
+        """Redirects to gopher:// scheme are blocked."""
+        response = MagicMock()
+        response.is_redirect = True
+        response.headers = {"location": "gopher://evil:25/"}
+        response.request = httpx.Request("GET", "https://evil.com")
+
+        with pytest.raises(httpx.TooManyRedirects, match="disallowed scheme"):
+            await _check_redirect_ssrf(response)
+
+    @pytest.mark.asyncio
+    async def test_https_redirect_allowed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Redirects to https:// with public IPs are allowed."""
+        monkeypatch.setattr(
+            "databricks_deep_research.tools.builtins.web_crawl._is_private_url",
+            lambda hostname: False,
+        )
+        response = MagicMock()
+        response.is_redirect = True
+        response.headers = {"location": "https://safe.example.com/"}
+        response.request = httpx.Request("GET", "https://origin.com")
+
+        # Should not raise
+        await _check_redirect_ssrf(response)
+
+    @pytest.mark.asyncio
+    async def test_redirect_to_private_ip_blocked(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Redirects to hosts resolving to private IPs are blocked."""
+        monkeypatch.setattr(
+            "databricks_deep_research.tools.builtins.web_crawl._is_private_url",
+            lambda hostname: True,
+        )
+        response = MagicMock()
+        response.is_redirect = True
+        response.headers = {"location": "http://evil.com/"}
+        response.request = httpx.Request("GET", "https://origin.com")
+
+        with pytest.raises(httpx.TooManyRedirects, match="private IP"):
+            await _check_redirect_ssrf(response)

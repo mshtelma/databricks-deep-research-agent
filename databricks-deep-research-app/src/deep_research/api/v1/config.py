@@ -26,7 +26,7 @@ router = APIRouter(prefix="/config", tags=["Config"])
 
 
 @router.get("/model-catalog", response_model=EndpointCatalogResponse)
-async def get_model_catalog() -> EndpointCatalogResponse:
+async def get_model_catalog(_user: CurrentUser) -> EndpointCatalogResponse:
     """Get the model endpoint catalog.
 
     Returns all available model tiers (categories) and their endpoints.

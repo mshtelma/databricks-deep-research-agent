@@ -23,9 +23,12 @@ async def _custom_header_app(scope: Scope, receive: Receive, send: Send) -> None
 def _make_client(
     csp_policy: str | None = "default-src 'self'",
     report_only: bool = False,
+    enable_hsts: bool = False,
     inner_app: ASGIApp = _ok_app,
 ) -> AsyncClient:
-    app: ASGIApp = SecurityHeadersMiddleware(inner_app, csp_policy=csp_policy, report_only=report_only)
+    app: ASGIApp = SecurityHeadersMiddleware(
+        inner_app, csp_policy=csp_policy, report_only=report_only, enable_hsts=enable_hsts,
+    )
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver")
 
 
@@ -86,3 +89,64 @@ async def test_non_http_passthrough() -> None:
     middleware = SecurityHeadersMiddleware(inner, csp_policy="default-src 'self'")
     await middleware({"type": "lifespan"}, None, None)  # type: ignore[arg-type]
     assert calls == ["lifespan"]
+
+
+# ── HSTS ──
+
+
+@pytest.mark.asyncio
+async def test_hsts_header_present_when_enabled() -> None:
+    async with _make_client(enable_hsts=True) as client:
+        resp = await client.get("/any")
+    assert resp.status_code == 200
+    assert resp.headers["Strict-Transport-Security"] == "max-age=31536000; includeSubDomains"
+
+
+@pytest.mark.asyncio
+async def test_hsts_header_absent_when_disabled() -> None:
+    async with _make_client(enable_hsts=False) as client:
+        resp = await client.get("/any")
+    assert "Strict-Transport-Security" not in resp.headers
+
+
+@pytest.mark.asyncio
+async def test_hsts_default_is_disabled() -> None:
+    """Default factory (no enable_hsts kwarg) must not inject HSTS."""
+    async with _make_client() as client:
+        resp = await client.get("/any")
+    assert "Strict-Transport-Security" not in resp.headers
+
+
+# ── Production CSP directive coverage ──
+
+_PRODUCTION_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: https:; "
+    "font-src 'self'; "
+    "connect-src 'self'; "
+    "frame-ancestors 'none'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+
+_REQUIRED_DIRECTIVES = [
+    "default-src 'self'",
+    "script-src 'self'",
+    "frame-ancestors 'none'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+]
+
+
+@pytest.mark.asyncio
+async def test_production_csp_contains_all_hardened_directives() -> None:
+    """Regression guard: all security-critical directives must be present."""
+    async with _make_client(csp_policy=_PRODUCTION_CSP) as client:
+        resp = await client.get("/any")
+    csp = resp.headers["Content-Security-Policy"]
+    for directive in _REQUIRED_DIRECTIVES:
+        assert directive in csp, f"Missing CSP directive: {directive}"

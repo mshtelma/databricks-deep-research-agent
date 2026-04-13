@@ -22,9 +22,12 @@ DEFAULT_CONFIG_PATH = _project_root / "config" / "app.yaml"
 class ReasoningEffort(StrEnum):
     """Reasoning effort levels for LLM calls."""
 
+    NONE = "none"
+    MINIMAL = "minimal"
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+    MAX = "max"
 
 
 class SelectionStrategy(StrEnum):
@@ -166,6 +169,7 @@ class EndpointConfig(BaseModel):
     supports_temperature: bool = True
     # Claude models support prompt caching via cache_control parameter
     supports_prompt_caching: bool = False
+    supports_reasoning: bool = True
 
     model_config = {"frozen": True}
 

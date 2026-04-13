@@ -26,8 +26,13 @@ class CSRFMiddleware:
 
     Algorithm:
     1. Non-HTTP scopes and safe methods pass through unconditionally.
-    2. If the Origin header is absent, empty, or ``"null"`` the request is
-       treated as same-origin (or a non-browser client) and allowed.
+    2. If the Origin header is absent, empty, or ``"null"``:
+       - Production (*enforce_https=True*): reject with 403.  In Databricks
+         Apps the proxy preserves the browser Origin header, so a missing
+         header on a state-changing request may indicate a CSRF attempt
+         via sandboxed iframe.
+       - Development (*enforce_https=False*): allow, so testing tools
+         (curl, Postman) work without extra configuration.
     3. Otherwise the origin is normalised (lowercase, trailing-slash stripped)
        and checked against the allow-set.  HTTP origins are rejected when
        *enforce_https* is ``True``, except for localhost addresses.
@@ -55,8 +60,21 @@ class CSRFMiddleware:
 
         origin: str | None = Headers(scope=scope).get("origin")
 
-        # No Origin header → same-origin request or non-browser client
+        # Missing / null Origin
         if not origin or origin == "null":
+            if self._enforce_https:
+                # Production: reject. In Databricks Apps the proxy preserves the
+                # browser's Origin header.  Legitimate same-origin fetch/XHR always
+                # sends Origin.  Missing Origin on a state-changing request may
+                # indicate a CSRF attempt via sandboxed iframe.
+                logger.warning(
+                    "CSRF_REJECT_MISSING_ORIGIN method=%s path=%s",
+                    method,
+                    scope.get("path", ""),
+                )
+                await _send_403(scope, receive, send, "Origin header required")
+                return
+            # Development: allow for testing tools (curl, Postman)
             await self.app(scope, receive, send)
             return
 

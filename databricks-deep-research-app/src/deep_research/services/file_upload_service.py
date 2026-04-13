@@ -261,8 +261,15 @@ class FileUploadService(BaseRepository[UploadedFile]):
         storage_dir = Path(self._storage_path) / "uploads" / owner_id
         storage_dir.mkdir(parents=True, exist_ok=True)
 
-        # Use file ID to prevent name collisions
-        safe_filename = f"{file_id}_{filename}"
+        # Sanitize filename: strip directory components, allow only safe characters
+        import re
+        from pathlib import PurePosixPath
+
+        base_name = PurePosixPath(filename).name
+        sanitized = re.sub(r'[^\w.\-]', '_', base_name)[:200]
+        if not sanitized or sanitized.startswith('.'):
+            sanitized = f"upload{sanitized}"
+        safe_filename = f"{file_id}_{sanitized}"
         storage_path = storage_dir / safe_filename
 
         # Write file to storage
