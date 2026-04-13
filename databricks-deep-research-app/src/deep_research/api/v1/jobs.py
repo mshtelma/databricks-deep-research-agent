@@ -28,6 +28,7 @@ from deep_research.middleware.auth import CurrentUser
 from deep_research.models.research_session import ResearchSession, ResearchStatus
 from deep_research.schemas.common import BaseSchema
 from deep_research.schemas.source_scope import SourceScope
+from deep_research.api.v1.utils import verify_chat_access
 from deep_research.services.job_manager import get_job_manager
 from deep_research.services.research_event_service import ResearchEventService
 
@@ -182,6 +183,9 @@ async def submit_job(
     crawler = request.app.state.web_crawler
     # Get PluginManager for custom phase mode (may be None if not available)
     plugin_manager = getattr(request.app.state, "plugin_manager", None)
+
+    # Verify user owns the chat (or it's a new draft)
+    await verify_chat_access(body.chat_id, user.user_id, db)
 
     # Get conversation history from database
     conversation_history: list[dict[str, str]] = []

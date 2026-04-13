@@ -73,7 +73,7 @@ async def list_message_claims(
     """
     # Try to verify ownership - return empty claims if message doesn't exist yet
     try:
-        await verify_message_ownership(message_id, user.user_id, db)
+        await verify_message_ownership(message_id, user.user_id, db, allow_dev_anonymous=True)
     except NotFoundError:
         # Message not persisted yet - return empty claims to allow frontend polling
         return MessageClaimsResponse(
@@ -145,7 +145,7 @@ async def get_claim(
         raise NotFoundError("Claim", str(claim_id))
 
     # Verify ownership
-    await verify_message_ownership(message_id, user.user_id, db)
+    await verify_message_ownership(message_id, user.user_id, db, allow_dev_anonymous=True)
 
     # Get research session with verification_data
     result = await db.execute(
@@ -189,7 +189,7 @@ async def get_claim_evidence(
         raise NotFoundError("Claim", str(claim_id))
 
     # Verify ownership
-    await verify_message_ownership(message_id, user.user_id, db)
+    await verify_message_ownership(message_id, user.user_id, db, allow_dev_anonymous=True)
 
     # Get research session with verification_data
     result = await db.execute(
@@ -274,7 +274,7 @@ async def get_verification_summary(
     JSONB Migration: Summary is now read from verification_data JSONB.
     """
     # Verify ownership
-    await verify_message_ownership(message_id, user.user_id, db)
+    await verify_message_ownership(message_id, user.user_id, db, allow_dev_anonymous=True)
 
     # Get research session with verification_data
     result = await db.execute(
@@ -377,7 +377,7 @@ async def export_provenance(
     from datetime import datetime
 
     # Verify ownership
-    await verify_message_ownership(message_id, user.user_id, db)
+    await verify_message_ownership(message_id, user.user_id, db, allow_dev_anonymous=True)
 
     # Get research session with verification_data
     result = await db.execute(

@@ -132,9 +132,7 @@ def extract_obo_token(headers: dict[str, str]) -> str | None:
 
     token = headers.get("x-forwarded-access-token")
     if token:
-        # Log token presence (masked for security)
-        token_preview = f"{token[:8]}...{token[-8:]}" if len(token) > 20 else "***"
-        logger.info(f"OBO token found: {token_preview} (length={len(token)})")
+        logger.info("OBO_TOKEN_FOUND length=%d", len(token))
     else:
         logger.debug("OBO token not found in headers - x-forwarded-access-token header absent")
 

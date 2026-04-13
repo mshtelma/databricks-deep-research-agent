@@ -16,8 +16,10 @@ dependencies; a clear error is raised at execution time if they are missing.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import random
+import socket
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
@@ -43,6 +45,87 @@ _USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
     "(KHTML, like Gecko) Version/17.2 Safari/605.1.15",
 ]
+
+_BLOCKED_HOSTNAMES = frozenset({"metadata.google.internal", "metadata.goog"})
+
+
+def _resolve_and_validate_ip(hostname: str) -> tuple[bool, str | None]:
+    """Resolve *hostname* via DNS and validate that all IPs are public.
+
+    Returns ``(is_safe, first_public_ip)`` where *is_safe* is ``True`` only
+    when **every** resolved address is a public, routable IP.  The function
+    is **fail-closed**: DNS failures, empty results, and mixed public/private
+    resolution all return ``(False, None)``.
+    """
+    if not hostname:
+        return False, None
+    if hostname in _BLOCKED_HOSTNAMES:
+        return False, None
+    try:
+        addrinfos = socket.getaddrinfo(hostname, None)
+        if not addrinfos:
+            return False, None
+        first_public: str | None = None
+        for _family, _type, _proto, _canonname, sockaddr in addrinfos:
+            ip = ipaddress.ip_address(sockaddr[0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False, None
+            if first_public is None:
+                first_public = str(ip)
+        return True, first_public
+    except (socket.gaierror, ValueError, OSError):
+        return False, None  # Fail-closed: unresolvable → blocked
+
+
+def _is_private_url(hostname: str) -> bool:
+    """Check if hostname resolves to a private/internal IP (SSRF protection)."""
+    is_safe, _ = _resolve_and_validate_ip(hostname)
+    return not is_safe
+
+
+def _pin_url_to_ip(url: str, resolved_ip: str) -> tuple[str, str]:
+    """Rewrite *url* netloc to *resolved_ip*, returning ``(pinned_url, original_host)``.
+
+    Strips userinfo from the netloc for safety (no credential leakage).
+    IPv6 addresses are wrapped in brackets per RFC 2732.
+    """
+    parsed = urlparse(url)
+    original_host = parsed.hostname or ""
+    port = parsed.port
+
+    ip_host = f"[{resolved_ip}]" if ":" in resolved_ip else resolved_ip
+    new_netloc = f"{ip_host}:{port}" if port else ip_host
+
+    pinned = parsed._replace(netloc=new_netloc).geturl()
+    return pinned, original_host
+
+
+_ALLOWED_REDIRECT_SCHEMES = frozenset({"http", "https"})
+
+
+async def _check_redirect_ssrf(response: Any) -> None:
+    """Block HTTP redirects to private/internal IPs and disallowed schemes."""
+    if response.is_redirect:
+        location = response.headers.get("location", "")
+        parsed_loc = urlparse(location)
+
+        # Block non-HTTP(S) schemes (e.g. file://, gopher://)
+        if parsed_loc.scheme and parsed_loc.scheme not in _ALLOWED_REDIRECT_SCHEMES:
+            import httpx as _httpx
+
+            raise _httpx.TooManyRedirects(
+                f"Redirect to disallowed scheme blocked: {parsed_loc.scheme}",
+                request=response.request,
+            )
+
+        if parsed_loc.hostname and _is_private_url(parsed_loc.hostname):
+            import httpx as _httpx
+
+            raise _httpx.TooManyRedirects(
+                f"Redirect to private IP blocked: {parsed_loc.hostname}",
+                request=response.request,
+            )
+
 
 _NON_RETRYABLE_FAILURES = {
     "http_403",
@@ -103,8 +186,13 @@ async def _default_crawl(
     *,
     timeout: float = 30.0,
     max_content_length: int = 50_000,
+    resolved_ip: str | None = None,
 ) -> tuple[str, str | None]:
     """Fetch *url* with httpx, extract text with trafilatura.
+
+    When *resolved_ip* is provided and the URL scheme is ``http``, the
+    request is pinned to the pre-resolved IP to prevent DNS rebinding
+    between validation and fetch.
 
     Raises:
         ImportError: If ``httpx`` or ``trafilatura`` are not installed.
@@ -120,12 +208,18 @@ async def _default_crawl(
         ) from exc
 
     user_agent = random.choice(_USER_AGENTS)  # noqa: S311
+    headers: dict[str, str] = {"User-Agent": user_agent}
+    fetch_url = url
+    if resolved_ip and urlparse(url).scheme == "http":
+        fetch_url, original_host = _pin_url_to_ip(url, resolved_ip)
+        headers["Host"] = original_host
 
     async with httpx.AsyncClient(
         timeout=timeout,
         follow_redirects=True,
+        event_hooks={"response": [_check_redirect_ssrf]},
     ) as client:
-        response = await client.get(url, headers={"User-Agent": user_agent})
+        response = await client.get(fetch_url, headers=headers)
         response.raise_for_status()
 
         content_type = response.headers.get("content-type", "")
@@ -337,6 +431,15 @@ class WebCrawlTool:
                 error="Invalid URL scheme",
             )
 
+        # SSRF protection: resolve DNS once, validate, pin HTTP connections
+        is_safe, resolved_ip = _resolve_and_validate_ip(parsed.hostname or "")
+        if not is_safe:
+            return ToolResult(
+                content="URL resolves to a private/internal address and cannot be accessed.",
+                success=False,
+                error="SSRF blocked: private IP",
+            )
+
         suppressed_failure = registry.get_failure(url)
         if suppressed_failure is not None:
             scope = suppressed_failure["scope"]
@@ -372,6 +475,7 @@ class WebCrawlTool:
                     url,
                     timeout=self._timeout,
                     max_content_length=self._max_content_length,
+                    resolved_ip=resolved_ip,
                 )
         except Exception as exc:
             failure_class = _classify_crawl_exception(exc)

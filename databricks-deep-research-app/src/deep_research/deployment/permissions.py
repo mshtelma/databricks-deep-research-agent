@@ -10,6 +10,7 @@ import asyncio
 import logging
 from typing import Any
 
+from deep_research.db.grant_permissions import _validate_sql_identifier
 from deep_research.deployment.lakebase_connection import (
     get_lakebase_connection_info,
 )
@@ -90,6 +91,9 @@ async def grant_to_app(
             logger.error("Could not get service principal for app '%s'", app_name)
             return False
 
+        # Validate SP name to prevent SQL injection in DDL statements
+        _validate_sql_identifier(sp_name, "service principal name")
+
         logger.info(
             "Granting permissions to service principal '%s' on '%s.%s'",
             sp_name,
@@ -123,7 +127,8 @@ async def grant_to_app(
                 try:
                     await conn.execute("CREATE EXTENSION IF NOT EXISTS databricks_auth")
                     await conn.execute(
-                        f"SELECT databricks_create_role('{sp_name}', 'SERVICE_PRINCIPAL')"
+                        "SELECT databricks_create_role($1, 'SERVICE_PRINCIPAL')",
+                        sp_name,
                     )
                     logger.debug("Created Autoscaling role for %s", sp_name)
                 except Exception as e:
@@ -138,35 +143,42 @@ async def grant_to_app(
                 # PostgreSQL requires roles to exist before GRANT can target them
                 # Lakebase creates app roles on first connection, but deployment
                 # runs before the app starts, so we need to create the role ourselves
+                # SECURITY INVARIANT: DDL statements below use f-string interpolation with
+                # double-quoted identifiers. Safe ONLY because _validate_sql_identifier()
+                # restricts input to [a-zA-Z0-9_\-\.]. If regex is widened, re-audit for injection.
                 try:
                     await conn.execute(f"CREATE ROLE {quoted_sp} WITH LOGIN")
                     logger.debug("Created role %s", sp_name)
                 except asyncpg.exceptions.DuplicateObjectError:
                     logger.debug("Role %s already exists", sp_name)
 
-            # Grant on existing tables
-            await conn.execute(
-                f"GRANT ALL ON ALL TABLES IN SCHEMA public TO {quoted_sp}"
-            )
-            logger.debug("Granted ALL on tables")
+            # SECURITY INVARIANT: DDL statements below use f-string interpolation with
+            # double-quoted identifiers. Safe ONLY because _validate_sql_identifier()
+            # restricts input to [a-zA-Z0-9_\-\.]. If regex is widened, re-audit for injection.
 
-            # Grant on existing sequences
+            # Grant on existing tables (least privilege: no TRUNCATE/TRIGGER)
             await conn.execute(
-                f"GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO {quoted_sp}"
+                f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO {quoted_sp}"
             )
-            logger.debug("Granted ALL on sequences")
+            logger.debug("Granted SELECT/INSERT/UPDATE/DELETE on tables")
 
-            # Set default privileges for future tables
+            # Grant on existing sequences (least privilege: USAGE/SELECT/UPDATE only)
+            await conn.execute(
+                f"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {quoted_sp}"
+            )
+            logger.debug("Granted USAGE, SELECT, UPDATE on sequences")
+
+            # Set default privileges for future tables (least privilege)
             await conn.execute(
                 f"ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-                f"GRANT ALL ON TABLES TO {quoted_sp}"
+                f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {quoted_sp}"
             )
             logger.debug("Set default privileges for tables")
 
-            # Set default privileges for future sequences
+            # Set default privileges for future sequences (least privilege)
             await conn.execute(
                 f"ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-                f"GRANT ALL ON SEQUENCES TO {quoted_sp}"
+                f"GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {quoted_sp}"
             )
             logger.debug("Set default privileges for sequences")
 

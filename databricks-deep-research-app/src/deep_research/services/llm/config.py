@@ -43,6 +43,7 @@ class ModelConfig:
                 supports_structured_output=ep_config.supports_structured_output,
                 supports_temperature=ep_config.supports_temperature,
                 supports_prompt_caching=ep_config.supports_prompt_caching,
+                supports_reasoning=ep_config.supports_reasoning,
             )
 
         # Convert role configs to ModelRole
@@ -104,6 +105,7 @@ class ModelConfig:
             supports_structured_output=False,
             supports_temperature=True,
             supports_prompt_caching=False,
+            supports_reasoning=False,
         )
 
     def get_endpoints_for_role(self, role_name: str) -> list[ModelEndpoint]:

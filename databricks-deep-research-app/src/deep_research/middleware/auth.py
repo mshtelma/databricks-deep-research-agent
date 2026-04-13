@@ -3,6 +3,7 @@
 import logging
 from typing import Annotated
 
+from databricks.sdk.errors import DatabricksError
 from fastapi import Depends, HTTPException, Request, status
 
 from deep_research.core.auth import (
@@ -59,7 +60,7 @@ async def get_current_user_identity(
             logger.info(f"OBO auth successful: user={user.email}, id={user.user_id}")
             return user
 
-        except Exception as e:
+        except (ConnectionError, TimeoutError, ValueError, RuntimeError, DatabricksError) as e:
             logger.warning(f"OBO auth failed, falling back to SP: {e}")
 
     # Priority 2: Service principal auth (existing logic)
@@ -73,14 +74,17 @@ async def get_current_user_identity(
         logger.debug(f"Service principal auth successful: user={user.email}")
         return user
 
-    except Exception as e:
+    except (ConnectionError, TimeoutError, ValueError, RuntimeError, DatabricksError) as e:
         logger.warning(f"Service principal auth failed: {e}")
 
     # Priority 3: Anonymous (development mode only)
     if not settings.is_production:
         user = UserIdentity.anonymous()
         request.state.user = user
-        logger.debug("Using anonymous user (development mode)")
+        logger.warning(
+            "AUTH_ANONYMOUS_FALLBACK: Development mode anonymous user active. "
+            "Ensure APP_ENV=production in deployment."
+        )
         return user
 
     # All methods failed in production

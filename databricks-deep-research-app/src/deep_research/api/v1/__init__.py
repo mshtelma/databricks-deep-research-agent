@@ -35,8 +35,11 @@ router.include_router(preferences.router, prefix="/preferences", tags=["Preferen
 router.include_router(citations.router, tags=["Citations"])
 # Background job management routes
 router.include_router(jobs.router, tags=["Jobs"])
-# Debug endpoints for troubleshooting auth
-router.include_router(debug.router, tags=["Debug"])
+# Debug endpoints for troubleshooting auth (non-production only)
+from deep_research.core.config import get_settings as _get_settings  # noqa: E402
+
+if not _get_settings().is_production:
+    router.include_router(debug.router, tags=["Debug"])
 # User profile routes
 router.include_router(user.router, tags=["User"])
 # Data source management routes (007-enterprise-data-sources)

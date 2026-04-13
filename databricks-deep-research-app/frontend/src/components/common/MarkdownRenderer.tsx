@@ -136,13 +136,19 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
           return <span {...props}>{children}</span>;
         }
 
-        // Skip anchor and javascript links
-        if (href.startsWith('#') || href.startsWith('javascript:')) {
+        // Allow anchor links
+        if (href.startsWith('#')) {
           return (
             <a href={href} {...props}>
               {children}
             </a>
           );
+        }
+
+        // Block dangerous URI schemes — render as inert text
+        const lowerHref = href.toLowerCase();
+        if (lowerHref.startsWith('javascript:') || lowerHref.startsWith('data:') || lowerHref.startsWith('vbscript:')) {
+          return <span {...props}>{children}</span>;
         }
 
         // Get citation index for this URL

@@ -28,17 +28,24 @@ from deep_research.core.logging_utils import (
 from deep_research.core.tracing import safe_tool_span
 from deep_research.services.llm.config import ModelConfig
 from deep_research.services.llm.types import (
+    CLAUDE_THINKING_BUDGETS,
     EndpointHealth,
     LLMResponse,
     ModelEndpoint,
     ModelRole,
     ModelTier,
+    ReasoningEffort,
     StreamWithToolsChunk,
     ToolCall,
     ToolCallChunk,
 )
 
 logger = get_logger(__name__)
+
+
+def _is_claude_endpoint(endpoint: ModelEndpoint) -> bool:
+    """Check if an endpoint serves a Claude model (uses thinking, not reasoning_effort)."""
+    return "claude" in endpoint.endpoint_identifier.lower()
 
 
 def _normalize_content(raw_content: str | list[Any] | None) -> str:
@@ -336,6 +343,42 @@ class LLMClient:
         # Only include temperature if the endpoint supports it
         if endpoint.supports_temperature:
             config["temperature"] = temperature or endpoint.temperature or role.temperature
+
+        # --- Reasoning / thinking ---
+        if not endpoint.supports_reasoning:
+            return config
+
+        # Endpoint-level effort takes precedence over role-level
+        effective_effort = (
+            endpoint.reasoning_effort
+            if endpoint.reasoning_effort is not None
+            else role.reasoning_effort
+        )
+
+        if _is_claude_endpoint(endpoint):
+            # Claude: NONE/MINIMAL → no thinking (too small to be useful)
+            if effective_effort in (ReasoningEffort.NONE, ReasoningEffort.MINIMAL):
+                return config
+
+            # Resolve budget: explicit override → tier default
+            resolved_max_tokens = config["max_tokens"]
+            if effective_effort == ReasoningEffort.MAX:
+                budget = max(1024, resolved_max_tokens - 1024)
+            else:
+                budget = (
+                    endpoint.reasoning_budget
+                    or role.reasoning_budget
+                    or CLAUDE_THINKING_BUDGETS[effective_effort.value]
+                )
+
+            config["extra_body"] = {
+                "thinking": {"type": "enabled", "budget_tokens": budget}
+            }
+            # Claude thinking requires temperature=1
+            config["temperature"] = 1
+        else:
+            # GPT / Gemini: pass reasoning_effort directly
+            config["reasoning_effort"] = effective_effort.value
 
         return config
 

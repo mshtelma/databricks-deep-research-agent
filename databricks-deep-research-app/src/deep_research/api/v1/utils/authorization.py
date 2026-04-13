@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from deep_research.core.config import get_settings
-from deep_research.core.exceptions import AuthorizationError, NotFoundError
+from deep_research.core.exceptions import NotFoundError
 from deep_research.models.chat import Chat
 from deep_research.models.message import Message
 from deep_research.services.chat_service import ChatService
@@ -77,14 +77,15 @@ async def verify_chat_access(
     chat = await chat_service.get_by_id(chat_id)
 
     if chat is None:
-        logger.info(f"Chat {chat_id} is a draft (not in DB), allowing access")
+        logger.info("Chat %s is a draft (not in DB), allowing access", chat_id)
         return True, None
 
     if chat.user_id != user_id:
         logger.warning(
-            f"User {user_id} attempted to access chat {chat_id} owned by {chat.user_id}"
+            "User %s attempted to access chat %s owned by %s",
+            user_id, chat_id, chat.user_id,
         )
-        raise AuthorizationError(f"Access denied to chat {chat_id}")
+        raise NotFoundError("Chat", str(chat_id))
 
     return False, chat
 
@@ -94,7 +95,7 @@ async def verify_message_ownership(
     user_id: str,
     db: AsyncSession,
     *,
-    allow_dev_anonymous: bool = True,
+    allow_dev_anonymous: bool = False,
 ) -> Message:
     """Verify user owns the message's chat.
 
@@ -103,7 +104,7 @@ async def verify_message_ownership(
         user_id: Current user's ID.
         db: Database session.
         allow_dev_anonymous: If True, allows anonymous access in dev mode.
-            Default is True for backward compatibility.
+            Default is False (opt-in) to enforce least privilege.
 
     Returns:
         The Message if authorized.

@@ -129,7 +129,7 @@ class OBODatabricksClient:
             logger.debug(
                 "OBO_CLIENT_GET",
                 mode="user_token",
-                token_prefix=user_token[:8] if len(user_token) > 8 else "***",
+                token_length=len(user_token),
             )
             return get_user_workspace_client(user_token)
 

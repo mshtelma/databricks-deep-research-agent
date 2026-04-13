@@ -72,7 +72,6 @@ class UploadedFileResponse(UploadedFileBase, TimestampMixin):
     owner_id: str
     session_id: UUID | None = None
     file_size: int
-    storage_path: str
     processing_status: FileProcessingStatus
     chunk_count: int = 0
     expires_at: datetime | None = None

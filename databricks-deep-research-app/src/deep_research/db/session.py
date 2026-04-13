@@ -153,9 +153,9 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
 
         _engine = create_async_engine(
             database_url,
-            echo=settings.debug,
-            pool_size=10,
-            max_overflow=20,
+            echo=settings.debug and not settings.is_production,
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
             pool_pre_ping=True,
             # For Lakebase: recycle connections at 45 min (2700s) to ensure they're
             # refreshed BEFORE the 5-minute token expiry buffer kicks in at 55 min.

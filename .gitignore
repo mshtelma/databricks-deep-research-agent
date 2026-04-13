@@ -104,6 +104,7 @@ secrets.yaml
 # MLflow
 mlruns/
 mlartifacts/
+traces_output/
 
 # Alembic
 alembic.ini.local

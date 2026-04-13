@@ -54,26 +54,51 @@ async def test_options_passes_with_evil_origin() -> None:
     assert resp.status_code == 200
 
 
-# ── No Origin / empty / null → pass through ──
+# ── No Origin / empty / null ──
+# Production (enforce_https=True): reject — missing Origin on state-changing
+# requests may indicate CSRF via sandboxed iframe.
+# Development (enforce_https=False): allow for testing tools (curl, Postman).
 
 
 @pytest.mark.asyncio
-async def test_post_no_origin_passes() -> None:
-    async with _make_client() as client:
+async def test_post_no_origin_rejected_in_prod() -> None:
+    async with _make_client(enforce_https=True) as client:
+        resp = await client.post("/any")
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Origin header required"
+
+
+@pytest.mark.asyncio
+async def test_post_empty_origin_rejected_in_prod() -> None:
+    async with _make_client(enforce_https=True) as client:
+        resp = await client.post("/any", headers={"Origin": ""})
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_post_null_origin_rejected_in_prod() -> None:
+    async with _make_client(enforce_https=True) as client:
+        resp = await client.post("/any", headers={"Origin": "null"})
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_post_no_origin_passes_in_dev() -> None:
+    async with _make_client(enforce_https=False) as client:
         resp = await client.post("/any")
     assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_post_empty_origin_passes() -> None:
-    async with _make_client() as client:
+async def test_post_empty_origin_passes_in_dev() -> None:
+    async with _make_client(enforce_https=False) as client:
         resp = await client.post("/any", headers={"Origin": ""})
     assert resp.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_post_null_origin_passes() -> None:
-    async with _make_client() as client:
+async def test_post_null_origin_passes_in_dev() -> None:
+    async with _make_client(enforce_https=False) as client:
         resp = await client.post("/any", headers={"Origin": "null"})
     assert resp.status_code == 200
 

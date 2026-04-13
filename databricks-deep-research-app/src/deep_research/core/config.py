@@ -1,12 +1,15 @@
 """Application configuration using Pydantic Settings."""
 
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, PostgresDsn, field_validator
+from pydantic import Field, PostgresDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_config_logger = logging.getLogger(__name__)
 
 # Find .env in project root (parent of backend/)
 # Path: backend/src/core/config.py -> backend/src/core -> backend/src -> backend -> project root
@@ -65,6 +68,20 @@ class Settings(BaseSettings):
     brave_api_key: str | None = None
     # SSL Verification (disable behind corporate proxies with SSL inspection)
     brave_verify_ssl: bool = True
+
+    # Database pool sizing
+    db_pool_size: int = 10
+    db_max_overflow: int = 20
+
+    @model_validator(mode="after")
+    def _enforce_ssl_in_production(self) -> "Settings":
+        """Force SSL verification in production regardless of config."""
+        if not self.brave_verify_ssl and self.app_env == "production":
+            _config_logger.warning(
+                "SSL_VERIFY_FORCED: brave_verify_ssl forced to True in production"
+            )
+            self.brave_verify_ssl = True
+        return self
 
     # MLflow
     mlflow_enabled: bool = True

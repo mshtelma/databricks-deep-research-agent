@@ -279,7 +279,7 @@ class ExportService:
         from deep_research.api.v1.utils.authorization import verify_message_ownership
 
         try:
-            return await verify_message_ownership(message_id, user_id, self._session)
+            return await verify_message_ownership(message_id, user_id, self._session, allow_dev_anonymous=True)
         except NotFoundError as e:
             raise ValueError(str(e)) from e
 

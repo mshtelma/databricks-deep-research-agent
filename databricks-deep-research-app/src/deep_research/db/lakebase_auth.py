@@ -211,11 +211,11 @@ class LakebaseCredentialProvider(BaseLakebaseCredentialProvider):
 
         logger.info(
             "LAKEBASE_CREDENTIAL_GENERATED sdk_expiration_raw=%r calculated_expires_at=%s "
-            "now_utc=%s strategy=calculated_lifetime_workaround token_preview=%s username=%s",
+            "now_utc=%s strategy=calculated_lifetime_workaround token_length=%s username=%s",
             cred_response.expiration_time,
             expires_at.isoformat(),
             now_utc.isoformat(),
-            cred_response.token[:20] + "..." if cred_response.token else None,
+            f"len={len(cred_response.token)}" if cred_response.token else None,
             "pending",  # username extracted below
         )
 

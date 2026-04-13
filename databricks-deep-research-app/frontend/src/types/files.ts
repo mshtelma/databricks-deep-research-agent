@@ -22,7 +22,6 @@ export interface UploadedFile {
   filename: string;
   fileType: FileType;
   fileSize: number;
-  storagePath: string;
   processingStatus: ProcessingStatus;
   chunkCount: number;
   expiresAt: string | null;
