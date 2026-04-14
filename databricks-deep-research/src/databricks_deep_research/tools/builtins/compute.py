@@ -561,6 +561,7 @@ class PythonComputeTool:
         # Detect and capture the last expression's value.
         if tree.body and isinstance(tree.body[-1], ast.Expr):
             last_node = tree.body.pop()
+            assert isinstance(last_node, ast.Expr)
             assign = ast.Assign(
                 targets=[ast.Name(id="__result__", ctx=ast.Store())],
                 value=last_node.value,

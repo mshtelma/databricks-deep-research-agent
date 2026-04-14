@@ -55,7 +55,7 @@ def setup_mlflow_tracing(
     # Step 1: async logging (non-critical — only affects delivery mode)
     if async_logging:
         try:
-            mlflow.config.enable_async_logging(True)
+            mlflow.config.enable_async_logging(True)  # type: ignore[no-untyped-call]
             _mlflow_async_enabled = True
         except Exception as e:
             logger.warning("MLflow async logging setup failed: %s", e)

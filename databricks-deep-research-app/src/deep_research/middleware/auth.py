@@ -1,9 +1,11 @@
 """Databricks authentication middleware."""
 
+import asyncio
 import logging
+import time
 from typing import Annotated
 
-from databricks.sdk.errors import DatabricksError
+from databricks.sdk.errors import DatabricksError  # type: ignore[attr-defined]
 from fastapi import Depends, HTTPException, Request, status
 
 from deep_research.core.auth import (
@@ -14,6 +16,48 @@ from deep_research.core.auth import (
 from deep_research.core.config import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+# Process-level cache: skip DB upsert if user was seen recently
+_user_sync_cache: dict[str, float] = {}
+_USER_SYNC_TTL = 300  # 5 minutes
+_USER_SYNC_MAX_CACHE = 1024
+_USER_SYNC_TIMEOUT = 3.0  # seconds
+
+
+async def _sync_user_record(user: UserIdentity) -> None:
+    """Upsert user identity to the users table (non-fatal).
+
+    Uses its own session — the auth dependency runs before get_db,
+    so the request session doesn't exist yet.
+    """
+    if user.user_id == "anonymous":
+        return
+
+    now = time.monotonic()
+    if _user_sync_cache.get(user.user_id, 0) > now:
+        return  # Recently synced
+
+    try:
+        from deep_research.db.session import get_session_maker
+        from deep_research.services.user_service import UserService
+
+        session_maker = get_session_maker()
+        async with session_maker() as session:
+            svc = UserService(session)
+            await asyncio.wait_for(
+                svc.upsert(
+                    user_id=user.user_id,
+                    email=user.email,
+                    display_name=user.display_name,
+                ),
+                timeout=_USER_SYNC_TIMEOUT,
+            )
+            await asyncio.wait_for(session.commit(), timeout=_USER_SYNC_TIMEOUT)
+        if len(_user_sync_cache) > _USER_SYNC_MAX_CACHE:
+            _user_sync_cache.clear()
+        _user_sync_cache[user.user_id] = now + _USER_SYNC_TTL
+    except Exception:
+        logger.warning("USER_SYNC_FAILED user_id=%s", user.user_id, exc_info=True)
 
 
 async def get_current_user_identity(
@@ -58,6 +102,7 @@ async def get_current_user_identity(
             request.state.user_workspace_client = user_client
 
             logger.info(f"OBO auth successful: user={user.email}, id={user.user_id}")
+            await _sync_user_record(user)
             return user
 
         except (ConnectionError, TimeoutError, ValueError, RuntimeError, DatabricksError) as e:
@@ -72,6 +117,7 @@ async def get_current_user_identity(
         request.state.workspace_client = client
 
         logger.debug(f"Service principal auth successful: user={user.email}")
+        await _sync_user_record(user)
         return user
 
     except (ConnectionError, TimeoutError, ValueError, RuntimeError, DatabricksError) as e:
@@ -85,6 +131,7 @@ async def get_current_user_identity(
             "AUTH_ANONYMOUS_FALLBACK: Development mode anonymous user active. "
             "Ensure APP_ENV=production in deployment."
         )
+        await _sync_user_record(user)
         return user
 
     # All methods failed in production

@@ -729,8 +729,8 @@ class FrameworkLLMClient:
             result = await self._retry_with_backoff(
                 lambda _m=model_name: _do_call(_m),
                 retry_rate_limit=should_retry_rl,
-                max_retries=cfg.max_retries if is_tier_config else 3,
-                retry_base_backoff=cfg.retry_base_backoff if is_tier_config else 2.0,
+                max_retries=cfg.max_retries if isinstance(cfg, ModelTierConfig) else 3,
+                retry_base_backoff=cfg.retry_base_backoff if isinstance(cfg, ModelTierConfig) else 2.0,
             )
             if is_tier_config:
                 health = self._get_health(model_name)
@@ -764,8 +764,8 @@ class FrameworkLLMClient:
                         result = await self._retry_with_backoff(
                             lambda _m=fallback: _do_call(_m),
                             retry_rate_limit=True,
-                            max_retries=cfg.max_retries if is_tier_config else 3,
-                            retry_base_backoff=cfg.retry_base_backoff if is_tier_config else 2.0,
+                            max_retries=cfg.max_retries if isinstance(cfg, ModelTierConfig) else 3,
+                            retry_base_backoff=cfg.retry_base_backoff if isinstance(cfg, ModelTierConfig) else 2.0,
                         )
                         fb_health = self._get_health(fallback)
                         fb_health.mark_success()
@@ -837,8 +837,8 @@ class FrameworkLLMClient:
             response_stream = await self._retry_with_backoff(
                 lambda _m=model_name: _open_stream(_m),
                 retry_rate_limit=should_retry_rl,
-                max_retries=cfg.max_retries if is_tier_config else 3,
-                retry_base_backoff=cfg.retry_base_backoff if is_tier_config else 2.0,
+                max_retries=cfg.max_retries if isinstance(cfg, ModelTierConfig) else 3,
+                retry_base_backoff=cfg.retry_base_backoff if isinstance(cfg, ModelTierConfig) else 2.0,
             )
         except RateLimitError:
             if is_tier_config:

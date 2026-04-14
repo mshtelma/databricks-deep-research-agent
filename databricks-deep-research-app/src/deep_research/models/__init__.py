@@ -54,6 +54,7 @@ from deep_research.models.uploaded_file import (
     FileType,
     UploadedFile,
 )
+from deep_research.models.user import User
 from deep_research.models.user_preferences import UserPreferences
 
 __all__ = [
@@ -84,6 +85,8 @@ __all__ = [
     "FileChunk",
     "FileType",
     "FileProcessingStatus",
+    # User
+    "User",
     # User Preferences
     "UserPreferences",
     # Feedback

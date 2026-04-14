@@ -1026,7 +1026,7 @@ class DeltaTableReadTool:
 
         table_wrapped = False
         if self._store_as and self._resolve_compute:
-            compute_tool = self._resolve_compute()  # type: ignore[misc]
+            compute_tool = self._resolve_compute()
             if compute_tool is not None:
                 injectable: Any = parsed
                 # Wrap in Table class when the parsed dict has table structure.
@@ -1058,7 +1058,7 @@ class DeltaTableReadTool:
                             pk_value,
                             exc_info=True,
                         )
-                compute_tool.inject_variable(self._store_as, injectable)  # type: ignore[union-attr]
+                compute_tool.inject_variable(self._store_as, injectable)
                 logger.info(
                     "DELTA_TABLE_READ_INJECTED tool=%s var=%s type=%s keys=%s",
                     self._name,

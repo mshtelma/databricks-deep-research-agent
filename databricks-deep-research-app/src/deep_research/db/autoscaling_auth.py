@@ -46,6 +46,7 @@ class AutoscalingCredentialProvider(BaseLakebaseCredentialProvider):
                 "ENDPOINT_NAME is required for Lakebase Autoscaling. "
                 "Format: projects/<id>/branches/<id>/endpoints/<id>"
             )
+        self._resolved_host: str | None = None
 
     def _get_workspace_client(self) -> "object":
         """Get WorkspaceClient from centralized auth."""
@@ -125,16 +126,54 @@ class AutoscalingCredentialProvider(BaseLakebaseCredentialProvider):
     def get_host(self) -> str:
         """Get the hostname for the Autoscaling endpoint.
 
-        Unlike Provisioned, Autoscaling requires PGHOST to be set explicitly
-        (no API lookup for host from instance name).
+        Priority:
+        1. Cached host (from prior resolution)
+        2. PGHOST env var (Databricks Apps platform or .env.{target} file)
+        3. SDK lookup via endpoint status (for CLI tools like db-reset)
+
+        The resolved host is cached for the lifetime of this provider instance
+        (same pattern as LakebaseCredentialProvider._get_instance_host).
         """
+        if self._resolved_host is not None:
+            return self._resolved_host
+
+        # Priority 1: PGHOST env var
         host = os.environ.get("PGHOST")
-        if not host:
-            raise ValueError(
-                "PGHOST is required for Lakebase Autoscaling. "
-                "Set it via environment or databricks.yml config."
+        if host:
+            self._resolved_host = host
+            logger.info("AUTOSCALING_HOST_FROM_ENV host=%s", host)
+            return host
+
+        # Priority 2: SDK fallback — resolve from endpoint metadata
+        try:
+            client = self._get_workspace_client()
+            ep = client.postgres.get_endpoint(  # type: ignore[attr-defined]
+                name=self._endpoint_name,
             )
-        return host
+            if ep.status and ep.status.hosts:
+                resolved = str(ep.status.hosts.host)
+                if resolved:
+                    self._resolved_host = resolved
+                    logger.info(
+                        "AUTOSCALING_HOST_FROM_SDK host=%s endpoint=%s",
+                        resolved, self._endpoint_name,
+                    )
+                    return resolved
+            logger.warning(
+                "AUTOSCALING_HOST_NO_STATUS endpoint=%s", self._endpoint_name
+            )
+        except Exception:
+            logger.warning(
+                "AUTOSCALING_HOST_RESOLVE_FAILED endpoint=%s",
+                self._endpoint_name,
+                exc_info=True,
+            )
+
+        raise ValueError(
+            f"PGHOST not set and SDK lookup failed for endpoint "
+            f"'{self._endpoint_name}'. Either set PGHOST in environment "
+            f"or run 'make db-provision' to generate .env file."
+        )
 
     def get_port(self) -> int:
         """Get the port for the Autoscaling endpoint."""

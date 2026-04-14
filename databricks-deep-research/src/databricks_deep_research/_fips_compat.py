@@ -19,4 +19,4 @@ def _fips_md5(*args: Any, **kwargs: Any) -> "hashlib._Hash":
     return _original_md5(*args, **kwargs)
 
 
-hashlib.md5 = _fips_md5  # type: ignore[assignment]
+hashlib.md5 = _fips_md5

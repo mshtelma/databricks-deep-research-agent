@@ -113,11 +113,11 @@ class Table:
 
     @property
     def row_count(self) -> int:
-        return self._data.get("row_count", len(self._rows))
+        return int(self._data.get("row_count", len(self._rows)))
 
     @property
     def data_row_count(self) -> int:
-        return self._data.get("data_row_count", len(self.entity_labels))
+        return int(self._data.get("data_row_count", len(self.entity_labels)))
 
     # ------------------------------------------------------------------
     # Cell access
@@ -254,7 +254,7 @@ class Table:
 
     def to_dataframe(self, *, include_totals: bool = True) -> Any:
         """Convert to a ``pandas.DataFrame``.  Pandas is imported lazily."""
-        import pandas as pd  # noqa: PLC0415
+        import pandas as pd  # type: ignore[import-untyped]  # noqa: PLC0415
 
         records: list[dict[str, Any]] = []
         for r in self._rows:

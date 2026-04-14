@@ -344,13 +344,19 @@ db-reset:
 			"from deep_research.deployment import discover_autoscaling_endpoint; print(discover_autoscaling_endpoint('$$PROJECT_ID'))" 2>/dev/null); \
 		if [ -n "$$ENDPOINT_NAME" ]; then \
 			echo "Backend: Autoscaling (ENDPOINT_NAME=$$ENDPOINT_NAME)"; \
+			echo "  Resolving PGHOST..."; \
+			PGHOST=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
+				"from databricks.sdk import WorkspaceClient; w=WorkspaceClient(); ep=w.postgres.get_endpoint(name='$$ENDPOINT_NAME'); print(ep.status.hosts.host if ep.status and ep.status.hosts else '')" 2>/dev/null || echo ""); \
+			echo "  PGHOST: $$PGHOST"; \
 			DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
 			ENDPOINT_NAME="$$ENDPOINT_NAME" \
+			PGHOST="$$PGHOST" \
 			LAKEBASE_INSTANCE_NAME="" \
 			LAKEBASE_DATABASE="deep_research" \
 			uv run python -c "import asyncio; from deep_research.db.bootstrap import drop_all_tables; asyncio.run(drop_all_tables())" && \
 			DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
 			ENDPOINT_NAME="$$ENDPOINT_NAME" \
+			PGHOST="$$PGHOST" \
 			LAKEBASE_INSTANCE_NAME="" \
 			LAKEBASE_DATABASE="deep_research" \
 			uv run alembic upgrade head; \

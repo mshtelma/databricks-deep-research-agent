@@ -25,6 +25,7 @@ from deep_research.models import (  # noqa: E402, F401
     message_feedback,
     research_session,
     source,
+    user,
     user_preferences,
 )
 

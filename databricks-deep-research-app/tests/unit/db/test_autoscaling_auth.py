@@ -73,10 +73,14 @@ class TestAutoscalingCredentialProviderMethods:
         assert host == "ep-abc.database.us-west-2.cloud.databricks.com"
 
     def test_get_host_missing_raises(self) -> None:
-        """Raises ValueError when PGHOST is not set."""
+        """Raises ValueError when PGHOST is not set and SDK fallback fails."""
         provider = self._make_provider()
 
-        with patch.dict("os.environ", {}, clear=True), pytest.raises(ValueError, match="PGHOST is required"):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch.object(provider, "_get_workspace_client", side_effect=RuntimeError("no client")),
+            pytest.raises(ValueError, match="PGHOST not set and SDK lookup failed"),
+        ):
             provider.get_host()
 
     def test_get_port_default(self) -> None:
