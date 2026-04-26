@@ -10,6 +10,11 @@ The enum types (ClaimType, VerificationVerdict, etc.) are kept for use in schema
 
 from deep_research.models.audit_log import AuditAction, AuditLog
 from deep_research.models.chat import Chat, ChatStatus, ChatType
+from deep_research.models.chat_memory_coverage import ChatMemoryCoverage
+from deep_research.models.chat_memory_entity import ChatMemoryEntity
+from deep_research.models.chat_memory_file import ChatMemoryFile
+from deep_research.models.chat_memory_finding import ChatMemoryFinding
+from deep_research.models.chat_memory_plugin_ext import ChatMemoryPluginExt
 from deep_research.models.custom_agent import (
     AgentOutputFormat,
     AgentPresetStep,
@@ -27,9 +32,14 @@ from deep_research.models.data_source import (
 )
 from deep_research.models.enums import (
     ClaimType,
+    Confidence,
     ConfidenceLevel,
     CorrectionType,
+    CoverageDepth,
+    CoverageStatus,
     DerivationType,
+    EntityType,
+    FindingOrigin,
     VerificationVerdict,
 )
 from deep_research.models.incognito_session import IncognitoSession
@@ -113,4 +123,15 @@ __all__ = [
     "AgentWorkflowMode",
     "AgentOutputFormat",
     "AgentResearchDepth",
+    # Chat Memory (attached-files + trajectory findings)
+    "ChatMemoryFinding",
+    "ChatMemoryEntity",
+    "ChatMemoryCoverage",
+    "ChatMemoryFile",
+    "ChatMemoryPluginExt",
+    "FindingOrigin",
+    "Confidence",
+    "EntityType",
+    "CoverageStatus",
+    "CoverageDepth",
 ]

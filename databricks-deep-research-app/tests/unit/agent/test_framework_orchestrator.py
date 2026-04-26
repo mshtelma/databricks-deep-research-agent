@@ -325,14 +325,13 @@ class TestFileSearchLoading:
         mock_service = AsyncMock()
         mock_service.get_session_files = AsyncMock(return_value=([mock_file], None))
 
-        mock_service_cls = MagicMock(return_value=mock_service)
         mock_tool = MagicMock()
 
         with (
             patch(
-                "deep_research.services.file_upload_service.FileUploadService",
-                mock_service_cls,
-            ),
+                "deep_research.agent.framework_orchestrator.make_file_upload_service",
+                return_value=mock_service,
+            ) as mock_factory,
             patch(
                 "deep_research.agent.tools.file_search.create_file_search_tool",
                 return_value=mock_tool,
@@ -343,7 +342,7 @@ class TestFileSearchLoading:
             )
 
         assert result is mock_tool
-        mock_service_cls.assert_called_once_with(mock_db)
+        assert mock_factory.call_count == 1
         mock_create.assert_called_once_with(
             session=mock_db,
             owner_id="user-123",
@@ -361,19 +360,23 @@ class TestExistingSourcesLoading:
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_db(self) -> None:
-        """db=None -> returns []."""
-        result = await _load_existing_sources(db=None, chat_id="some-id")
+        """Both storage_stack=None and db=None -> returns []."""
+        result = await _load_existing_sources(
+            storage_stack=None, db=None, chat_id="some-id",
+        )
         assert result == []
 
     @pytest.mark.asyncio
     async def test_returns_empty_when_no_chat_id(self) -> None:
         """chat_id=None -> returns []."""
-        result = await _load_existing_sources(db=MagicMock(), chat_id=None)
+        result = await _load_existing_sources(
+            storage_stack=None, db=MagicMock(), chat_id=None,
+        )
         assert result == []
 
     @pytest.mark.asyncio
     async def test_loads_sources_from_service(self) -> None:
-        """Mock db.execute -> returns list of source dicts."""
+        """Legacy ORM path: mock db.execute -> returns list of source dicts."""
         chat_id = str(uuid4())
 
         # Create mock source objects
@@ -397,7 +400,9 @@ class TestExistingSourcesLoading:
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        result = await _load_existing_sources(db=mock_db, chat_id=chat_id)
+        result = await _load_existing_sources(
+            storage_stack=None, db=mock_db, chat_id=chat_id,
+        )
 
         assert len(result) == 2
         assert result[0]["url"] == "https://example.com/1"
@@ -408,6 +413,45 @@ class TestExistingSourcesLoading:
         assert result[1]["title"] == "Source 2"
         assert result[1]["snippet"] is None
         assert result[1]["content"] is None
+
+    @pytest.mark.asyncio
+    async def test_loads_sources_from_cached_stack(self) -> None:
+        """F-SOURCES: cached path reads doc.state.sources from storage_stack."""
+        chat_id = str(uuid4())
+        mock_source_high = SimpleNamespace(
+            url="https://example.com/high",
+            title="High",
+            metadata={
+                "snippet": "hs",
+                "content": "hc",
+                "relevance_score": 0.9,
+            },
+        )
+        mock_source_low = SimpleNamespace(
+            url="https://example.com/low",
+            title="Low",
+            metadata={
+                "snippet": "ls",
+                "content": "lc",
+                "relevance_score": 0.1,
+            },
+        )
+        mock_state = SimpleNamespace(sources=[mock_source_low, mock_source_high])
+        mock_doc = SimpleNamespace(state=mock_state)
+        mock_cache = MagicMock()
+        mock_cache.get = AsyncMock(return_value=mock_doc)
+        mock_stack = SimpleNamespace(cache=mock_cache)
+
+        result = await _load_existing_sources(
+            storage_stack=mock_stack, db=None, chat_id=chat_id,
+        )
+
+        assert len(result) == 2
+        # High relevance_score first.
+        assert result[0]["url"] == "https://example.com/high"
+        assert result[0]["snippet"] == "hs"
+        assert result[0]["content"] == "hc"
+        assert result[1]["url"] == "https://example.com/low"
 
 
 # ---------------------------------------------------------------------------

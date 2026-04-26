@@ -66,9 +66,9 @@ export function ActiveJobsIndicator({
     return null
   }
 
-  const handleCancel = (e: React.MouseEvent, sessionId: string) => {
+  const handleCancel = (e: React.MouseEvent, job: Job) => {
     e.stopPropagation()
-    cancelMutation.mutate(sessionId)
+    cancelMutation.mutate({ chatId: job.chatId, sessionId: job.sessionId })
   }
 
   const handleJobClick = (job: Job) => {
@@ -126,8 +126,8 @@ export function ActiveJobsIndicator({
                 key={job.sessionId}
                 job={job}
                 onClick={() => handleJobClick(job)}
-                onCancel={(e) => handleCancel(e, job.sessionId)}
-                isCancelling={cancelMutation.isPending && cancelMutation.variables === job.sessionId}
+                onCancel={(e) => handleCancel(e, job)}
+                isCancelling={cancelMutation.isPending && cancelMutation.variables?.sessionId === job.sessionId}
               />
             ))}
           </div>

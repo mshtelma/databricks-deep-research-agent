@@ -72,6 +72,8 @@ async def extract_query_context(
     query: str,
     llm: Any,
     plugin_manager: Any | None = None,
+    *,
+    entity_candidates: list[str] | None = None,
 ) -> dict[str, Any]:
     """Extract structured context from query using LLM.
 
@@ -82,6 +84,12 @@ async def extract_query_context(
         query: User's research query.
         llm: LLM client for extraction.
         plugin_manager: Optional - to get plugin extraction config.
+        entity_candidates: Optional list of canonical entity names known
+            from attached-file preprocessing (e.g., ``["Sagacity Corp"]``).
+            When provided, prepended to the system prompt so the extraction
+            LLM can resolve ambiguous query references ("Sagacity") to
+            their canonical form ("Sagacity Corp"). Directly fixes the
+            Sagacity-class disambiguation bug.
 
     Returns:
         Dict with extracted context for plugin_data.
@@ -113,10 +121,27 @@ async def extract_query_context(
         logger.info("EXTRACTION_CONFIG_DEFAULT model=%s", config.extraction_model.__name__)
 
     # 3. Execute extraction with LLM (generic logic, plugin config)
+    system_prompt = config.system_prompt
+    if entity_candidates:
+        # Prepend a "known candidates" block so the extraction LLM picks
+        # the canonical form when the query mentions an alias.
+        candidate_list = "\n".join(f"- {name}" for name in entity_candidates[:20])
+        system_prompt = (
+            f"Known entity candidates from attached user-provided context:\n"
+            f"{candidate_list}\n\n"
+            f"When the query mentions any of these or an obvious alias, "
+            f"prefer the canonical form above in your extraction output.\n\n"
+            f"---\n\n{config.system_prompt}"
+        )
+        logger.info(
+            "EXTRACTION_ENTITY_CANDIDATES_APPLIED count=%d sample=%s",
+            len(entity_candidates), entity_candidates[:3],
+        )
+
     try:
         response = await llm.complete(
             messages=[
-                {"role": "system", "content": config.system_prompt},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query},
             ],
             tier=ModelTier.BULK_ANALYSIS,

@@ -11,14 +11,13 @@ Part of 007-enterprise-data-sources feature (T090).
 """
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 
+from deep_research.core.deps import get_file_upload_service
 from deep_research.core.exceptions import NotFoundError
-from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.uploaded_file import FileProcessingStatus
 from deep_research.schemas.file_upload import (
@@ -32,18 +31,18 @@ from deep_research.schemas.file_upload import (
 from deep_research.schemas.file_upload import (
     FileType as FileTypeSchema,
 )
-from deep_research.services.file_upload_service import FileUploadService
+from deep_research.services._protocols import IFileUploadService
 
 if TYPE_CHECKING:
-    from deep_research.models.uploaded_file import UploadedFile
+    pass
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/files")
 
 
-def _file_to_response(file: "UploadedFile") -> UploadedFileResponse:
-    """Convert UploadedFile model to response schema."""
+def _file_to_response(file: Any) -> UploadedFileResponse:
+    """Convert UploadedFile model or view to response schema."""
 
     return UploadedFileResponse(
         id=file.id,
@@ -69,10 +68,11 @@ def _file_to_response(file: "UploadedFile") -> UploadedFileResponse:
 
 @router.post("/upload", response_model=list[UploadedFileResponse], status_code=201)
 async def upload_files(
+    request: Request,
     user: CurrentUser,
     files: list[UploadFile] = File(..., description="File(s) to upload"),
     session_id: UUID | None = Query(None, description="Optional session ID for session-scoped files"),
-    db: AsyncSession = Depends(get_db),
+    service: IFileUploadService = Depends(get_file_upload_service),
 ) -> list[UploadedFileResponse]:
     """Upload one or more files.
 
@@ -81,7 +81,6 @@ async def upload_files(
 
     Files are automatically processed (chunked) for search after upload.
     """
-    service = FileUploadService(db)
     uploaded_files: list[UploadedFileResponse] = []
     errors: list[str] = []
 
@@ -119,8 +118,6 @@ async def upload_files(
             if uploaded_file:
                 uploaded_files.append(_file_to_response(uploaded_file))
 
-    await db.commit()
-
     # If all uploads failed, raise error
     if not uploaded_files and errors:
         raise HTTPException(
@@ -143,18 +140,18 @@ async def upload_files(
 
 @router.get("", response_model=UploadedFileListResponse)
 async def list_files(
+    request: Request,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
     session_id: UUID | None = Query(None, description="Filter by session ID"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    service: IFileUploadService = Depends(get_file_upload_service),
 ) -> UploadedFileListResponse:
     """List uploaded files.
 
     Returns paginated list of user's uploaded files.
     Optionally filter by session ID for session-scoped files.
     """
-    service = FileUploadService(db)
     files, total = await service.get_session_files(
         owner_id=user.user_id,
         session_id=session_id,
@@ -177,12 +174,12 @@ async def list_files(
 
 @router.get("/{file_id}", response_model=UploadedFileResponse)
 async def get_file(
+    request: Request,
     file_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    service: IFileUploadService = Depends(get_file_upload_service),
 ) -> UploadedFileResponse:
     """Get file details by ID."""
-    service = FileUploadService(db)
     uploaded_file = await service.get_for_user(file_id, user.user_id)
 
     if not uploaded_file:
@@ -198,15 +195,15 @@ async def get_file(
 
 @router.get("/{file_id}/preview", response_model=FilePreviewResponse)
 async def preview_file(
+    request: Request,
     file_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    service: IFileUploadService = Depends(get_file_upload_service),
 ) -> FilePreviewResponse:
     """Preview file content (first chunk).
 
     Returns file metadata and first chunk content for quick preview.
     """
-    service = FileUploadService(db)
     uploaded_file = await service.get_for_user(file_id, user.user_id)
 
     if not uploaded_file:
@@ -245,18 +242,16 @@ async def preview_file(
 
 @router.delete("/{file_id}", status_code=204)
 async def delete_file(
+    request: Request,
     file_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    service: IFileUploadService = Depends(get_file_upload_service),
 ) -> None:
     """Delete an uploaded file.
 
     Removes the file from storage and database.
     """
-    service = FileUploadService(db)
     deleted = await service.delete_file(file_id, user.user_id)
 
     if not deleted:
         raise NotFoundError("File", str(file_id))
-
-    await db.commit()

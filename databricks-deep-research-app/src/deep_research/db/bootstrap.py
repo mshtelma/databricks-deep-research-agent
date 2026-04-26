@@ -7,6 +7,11 @@ from urllib.parse import urlparse
 import asyncpg  # type: ignore[import-untyped]
 
 from deep_research.core.config import Settings, get_settings
+from deep_research.db.asyncpg_config import (
+    lakebase_asyncpg_connect_args,
+    lakebase_engine_kwargs,
+    lakebase_raw_asyncpg_kwargs,
+)
 from deep_research.db.grant_permissions import _validate_sql_identifier
 from deep_research.db.session import get_credential_provider
 
@@ -62,6 +67,7 @@ async def _ensure_lakebase_database(settings: Settings, target_database: str) ->
         password=cred.token,
         database=bootstrap_db,
         ssl="require",
+        **lakebase_raw_asyncpg_kwargs(),
     )
 
     try:
@@ -132,11 +138,13 @@ async def drop_all_tables(settings: Settings | None = None) -> None:
 
     from deep_research.db.session import get_database_url
 
-    connect_args = {"ssl": True} if settings.use_lakebase else {}
+    connect_args = lakebase_asyncpg_connect_args(settings)
+    engine_kwargs = lakebase_engine_kwargs(settings)
     engine = create_async_engine(
         get_database_url(settings),
         poolclass=pool.NullPool,
         connect_args=connect_args,
+        **engine_kwargs,
     )
 
     async with engine.begin() as conn:

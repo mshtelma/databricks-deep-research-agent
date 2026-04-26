@@ -5,7 +5,8 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Annotated
 
-from fastapi import Depends
+import sqlalchemy.exc
+from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -14,14 +15,52 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from deep_research.core.config import Settings, get_settings
+from deep_research.db.asyncpg_config import (
+    lakebase_asyncpg_connect_args,
+    lakebase_engine_kwargs,
+)
 from deep_research.db.credential_provider import BaseLakebaseCredentialProvider
 
 logger = logging.getLogger(__name__)
+
+
+_STALE_CONNECTION_MARKERS = (
+    "connection is closed",
+    "connection was closed",
+    "connection is not open",
+    "connection is lost",
+    "another operation is in progress",
+)
+
+
+def _is_stale_connection_error(exc: BaseException) -> bool:
+    """Detect that the DB connection underlying ``exc`` is no longer usable.
+
+    Long-running requests (SSE streams) hold the request-scoped session idle
+    for minutes. PgBouncer/Lakebase will close the idle connection; when the
+    request finally completes and FastAPI runs the ``get_db`` cleanup,
+    ``session.commit()`` / ``rollback()`` / ``close()`` then raise
+    ``InterfaceError: ... the underlying connection is closed``. At that
+    point the writes the caller expected to persist are already lost —
+    re-raising only turns a successful request into a 500 for the user and
+    obscures real errors. We detect this narrow condition by exception
+    type + message substring.
+    """
+    if not isinstance(exc, (sqlalchemy.exc.InterfaceError, sqlalchemy.exc.OperationalError)):
+        return False
+    message = str(exc).lower()
+    return any(marker in message for marker in _STALE_CONNECTION_MARKERS)
 
 # Module-level state
 _engine: AsyncEngine | None = None
 _async_session_maker: async_sessionmaker[AsyncSession] | None = None
 _credential_provider: BaseLakebaseCredentialProvider | None = None
+# Tracks fire-and-forget engine-disposal tasks spawned during proactive
+# token refresh so ``close_db()`` can await them before the event loop
+# tears down. Without this set, a token-expiry storm could leak partially
+# disposed engines and emit "Task was destroyed but it is pending!" on
+# shutdown.
+_pending_disposals: set[asyncio.Task[None]] = set()
 
 
 async def _dispose_engine_async(engine: AsyncEngine) -> None:
@@ -134,8 +173,12 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
                 # - _dispose_engine_async() has try/except for safe disposal
                 try:
                     loop = asyncio.get_running_loop()
-                    # Fire-and-forget: schedule in same loop, don't block
-                    loop.create_task(_dispose_engine_async(engine_to_dispose))
+                    # Fire-and-forget: schedule in same loop, don't block.
+                    # Tracked in ``_pending_disposals`` so ``close_db()`` can
+                    # drain pending disposals before the loop tears down.
+                    task = loop.create_task(_dispose_engine_async(engine_to_dispose))
+                    _pending_disposals.add(task)
+                    task.add_done_callback(_pending_disposals.discard)
                     logger.info("LAKEBASE_ENGINE_DISPOSED scheduled=True")
                 except RuntimeError:
                     # No running loop - extremely rare since get_engine() is always
@@ -146,10 +189,18 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
     if _engine is None:
         database_url = get_database_url(settings)
 
-        logger.info(f"Creating database engine (lakebase={settings.use_lakebase})")
+        # PgBouncer-safe connection options (see db/asyncpg_config.py for why).
+        connect_args = lakebase_asyncpg_connect_args(settings)
+        engine_kwargs = lakebase_engine_kwargs(settings)
 
-        # For Lakebase: use SSL (asyncpg doesn't accept sslmode URL param)
-        connect_args = {"ssl": True} if settings.use_lakebase else {}
+        logger.info(
+            "DB_ENGINE_CREATED lakebase=%s statement_cache_size=%s "
+            "prepared_statement_cache_size=%s command_timeout=%s",
+            settings.use_lakebase,
+            connect_args.get("statement_cache_size"),
+            engine_kwargs.get("prepared_statement_cache_size"),
+            connect_args.get("command_timeout"),
+        )
 
         _engine = create_async_engine(
             database_url,
@@ -162,6 +213,7 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
             # This prevents pooled connections from holding stale tokens.
             pool_recycle=2700 if settings.use_lakebase else 3600,
             connect_args=connect_args,
+            **engine_kwargs,
         )
 
     return _engine
@@ -234,14 +286,63 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     Note:
         If a database authentication error occurs (expired Lakebase token),
         this will trigger a credential refresh for the next request.
+
+        If the underlying connection is closed mid-request (typically on
+        long-running SSE streams whose request-scoped connection sits idle
+        and is reaped by PgBouncer/Lakebase):
+
+        * If the session had no pending writes (read-only or already
+          committed via the service-level ``commit()``), the cleanup
+          stale-connection error is swallowed — the request succeeded.
+        * If the session had pending writes (the endpoint relied on the
+          implicit cleanup commit and never called ``service.commit()``),
+          a stale-connection error means data was lost. We raise 503
+          rather than return a misleading success.
     """
     session_maker = get_session_maker()
     async with session_maker() as session:
         try:
             yield session
-            await session.commit()
+            # Snapshot pending writes BEFORE the commit attempt; a failed
+            # commit puts the session into an aborted state where these
+            # collections are unreliable.
+            had_pending_writes = (
+                bool(session.new) or bool(session.dirty) or bool(session.deleted)
+            )
+            try:
+                await session.commit()
+            except Exception as commit_err:
+                if _is_stale_connection_error(commit_err):
+                    if had_pending_writes:
+                        logger.error(
+                            "DB_COMMIT_STALE_CONNECTION_WITH_PENDING_WRITES: "
+                            "request had uncommitted writes when the underlying "
+                            "connection died — data was lost. error=%s",
+                            str(commit_err)[:200],
+                        )
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail=(
+                                "Database connection lost mid-request. "
+                                "Pending writes were not persisted; please retry."
+                            ),
+                        ) from commit_err
+                    logger.warning(
+                        "DB_COMMIT_STALE_CONNECTION (no pending writes, benign): "
+                        "session was already empty when cleanup commit fired "
+                        "(likely idle during SSE stream). error=%s",
+                        str(commit_err)[:200],
+                    )
+                else:
+                    raise
         except Exception as e:
-            await session.rollback()
+            try:
+                await session.rollback()
+            except Exception as rollback_err:
+                if not _is_stale_connection_error(rollback_err):
+                    logger.warning(
+                        "DB_ROLLBACK_FAILED: %s", str(rollback_err)[:200]
+                    )
             # Check if this is an auth error that might be fixed by credential refresh
             error_str = str(e).lower()
             if "invalid" in error_str and (
@@ -250,9 +351,28 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
                 logger.warning(f"Database auth failed: {e}")
                 logger.info("Triggering credential refresh for next request...")
                 await refresh_engine_credentials()
+            # Stale-connection on the yield itself (extremely rare) is still
+            # not useful to propagate — the request already finished on the
+            # caller side; turning it into a 500 helps no one.
+            if _is_stale_connection_error(e):
+                logger.warning(
+                    "DB_YIELD_STALE_CONNECTION: %s", str(e)[:200]
+                )
+                return
             raise
         finally:
-            await session.close()
+            try:
+                await session.close()
+            except Exception as close_err:
+                if _is_stale_connection_error(close_err):
+                    logger.debug(
+                        "DB_CLOSE_STALE_CONNECTION (benign): %s",
+                        str(close_err)[:200],
+                    )
+                else:
+                    logger.warning(
+                        "DB_CLOSE_FAILED: %s", str(close_err)[:200]
+                    )
 
 
 # Type alias for dependency injection
@@ -260,8 +380,16 @@ DbSession = Annotated[AsyncSession, Depends(get_db)]
 
 
 async def close_db() -> None:
-    """Close database connections (call on app shutdown)."""
+    """Close database connections (call on app shutdown).
+
+    Drains any pending engine-disposal tasks first so we don't leak them
+    when the event loop tears down.
+    """
     global _engine, _async_session_maker
+    if _pending_disposals:
+        # Snapshot so the discard callback can mutate the set safely.
+        in_flight = list(_pending_disposals)
+        await asyncio.gather(*in_flight, return_exceptions=True)
     if _engine is not None:
         await _engine.dispose()
         _engine = None

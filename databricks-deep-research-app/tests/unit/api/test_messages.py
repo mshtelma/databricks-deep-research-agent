@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from deep_research.core.auth import UserIdentity
+from deep_research.core.deps import get_chat_service
 from deep_research.core.exceptions import NotFoundError
 from deep_research.db.session import get_db
 from deep_research.main import app
@@ -57,7 +58,15 @@ def mock_agent_message() -> Message:
 
 
 @pytest.fixture
-def client(mock_user: UserIdentity) -> TestClient:
+def mock_chat_service() -> MagicMock:
+    """Create a reusable mock chat service."""
+    svc = MagicMock()
+    svc.update_title_from_message = AsyncMock(return_value=None)
+    return svc
+
+
+@pytest.fixture
+def client(mock_user: UserIdentity, mock_chat_service: MagicMock) -> TestClient:
     """Create a test client with mocked dependencies."""
 
     async def override_get_db():
@@ -71,6 +80,7 @@ def client(mock_user: UserIdentity) -> TestClient:
     app.dependency_overrides[get_current_user_identity] = (
         override_get_current_user_identity
     )
+    app.dependency_overrides[get_chat_service] = lambda: mock_chat_service
 
     yield TestClient(app)
 
@@ -162,22 +172,17 @@ class TestSendMessage:
         self,
         client: TestClient,
         mock_message: Message,
+        mock_chat_service: MagicMock,
         mock_verify_chat_ownership: AsyncMock,
     ):
         """Test sending a message successfully."""
         chat_id = mock_message.chat_id
+        mock_chat_service.update_title_from_message = AsyncMock(return_value=None)
 
-        with (
-            patch("deep_research.api.v1.messages.MessageService") as MockMessageService,
-            patch("deep_research.api.v1.messages.ChatService") as MockChatService,
-        ):
+        with patch("deep_research.api.v1.messages.MessageService") as MockMessageService:
             mock_message_service = MagicMock()
             mock_message_service.create = AsyncMock(return_value=mock_message)
             MockMessageService.return_value = mock_message_service
-
-            mock_chat_service = MagicMock()
-            mock_chat_service.update_title_from_message = AsyncMock(return_value=None)
-            MockChatService.return_value = mock_chat_service
 
             response = client.post(
                 f"/api/v1/chats/{chat_id}/messages",
@@ -432,10 +437,6 @@ class TestSubmitFeedback:
         chat_id = mock_agent_message.chat_id
         message_id = mock_agent_message.id
 
-        # Create mock chat for ownership verification
-        mock_chat = MagicMock()
-        mock_chat.id = chat_id
-
         # Create mock feedback
         mock_feedback = MagicMock(spec=MessageFeedback)
         mock_feedback.id = uuid4()
@@ -447,7 +448,6 @@ class TestSubmitFeedback:
 
         with (
             patch("deep_research.api.v1.messages.MessageService") as MockMessageService,
-            patch("deep_research.api.v1.messages.ChatService") as MockChatService,
             patch("deep_research.api.v1.messages.FeedbackService") as MockFeedbackService,
         ):
             mock_message_service = MagicMock()
@@ -455,10 +455,6 @@ class TestSubmitFeedback:
                 return_value=mock_agent_message
             )
             MockMessageService.return_value = mock_message_service
-
-            mock_chat_service = MagicMock()
-            mock_chat_service.get = AsyncMock(return_value=mock_chat)
-            MockChatService.return_value = mock_chat_service
 
             mock_feedback_service = MagicMock()
             mock_feedback_service.create_feedback = AsyncMock(return_value=mock_feedback)
@@ -485,10 +481,6 @@ class TestSubmitFeedback:
         chat_id = mock_agent_message.chat_id
         message_id = mock_agent_message.id
 
-        # Create mock chat for ownership verification
-        mock_chat = MagicMock()
-        mock_chat.id = chat_id
-
         # Create mock feedback
         mock_feedback = MagicMock(spec=MessageFeedback)
         mock_feedback.id = uuid4()
@@ -500,7 +492,6 @@ class TestSubmitFeedback:
 
         with (
             patch("deep_research.api.v1.messages.MessageService") as MockMessageService,
-            patch("deep_research.api.v1.messages.ChatService") as MockChatService,
             patch("deep_research.api.v1.messages.FeedbackService") as MockFeedbackService,
         ):
             mock_message_service = MagicMock()
@@ -508,10 +499,6 @@ class TestSubmitFeedback:
                 return_value=mock_agent_message
             )
             MockMessageService.return_value = mock_message_service
-
-            mock_chat_service = MagicMock()
-            mock_chat_service.get = AsyncMock(return_value=mock_chat)
-            MockChatService.return_value = mock_chat_service
 
             mock_feedback_service = MagicMock()
             mock_feedback_service.create_feedback = AsyncMock(return_value=mock_feedback)
@@ -535,21 +522,12 @@ class TestSubmitFeedback:
         chat_id = uuid4()
         message_id = uuid4()
 
-        # Create mock chat for ownership verification
-        mock_chat = MagicMock()
-        mock_chat.id = chat_id
-
         with (
             patch("deep_research.api.v1.messages.MessageService") as MockMessageService,
-            patch("deep_research.api.v1.messages.ChatService") as MockChatService,
         ):
             mock_message_service = MagicMock()
             mock_message_service.get_with_chat = AsyncMock(return_value=None)
             MockMessageService.return_value = mock_message_service
-
-            mock_chat_service = MagicMock()
-            mock_chat_service.get = AsyncMock(return_value=mock_chat)
-            MockChatService.return_value = mock_chat_service
 
             response = client.post(
                 f"/api/v1/chats/{chat_id}/messages/{message_id}/feedback",

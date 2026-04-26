@@ -425,6 +425,51 @@ class FileProcessorProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class ContextEnricher(Protocol):
+    """Protocol for plugins that enrich chat memory with domain-specific context.
+
+    Called **once per turn**, inside ``framework_orchestrator.stream_research_via_framework``,
+    **after** ``ChatMemoryService.hydrate`` and ``preprocess_new_files`` complete and
+    **before** the workflow starts executing. Receives a live ``ChatMemoryService``
+    handle so the plugin can produce domain-shaped derivations (e.g.,
+    sapresalesbot's ``AccountBrief`` from file-derived entities).
+
+    Lifecycle contract:
+
+    - **Execution order**: plugin registration order (deterministic).
+    - **Visibility**: each enricher sees the memory state built so far — by
+      preprocessing and by prior enrichers. This is intentional; downstream
+      plugins may refine earlier plugins' output.
+    - **Writes**: plugins must write only under their own namespace via
+      ``memory.enrich_scope(plugin_name)`` (enforced at the service layer).
+    - **Failure mode**: exceptions are caught and logged as
+      ``CONTEXT_ENRICHER_FAILED``; the workflow continues without this
+      plugin's enrichment (fail-open).
+    - **Timing budget**: soft cap of 5 seconds; exceeding it logs
+      ``CONTEXT_ENRICHER_TIMEOUT`` and skips the enricher.
+
+    The ``memory`` parameter is typed as ``Any`` to avoid a hard dependency
+    on the framework memory module from the plugin protocol layer; plugins
+    should import
+    ``deep_research.services.chat_memory_service.ChatMemoryService`` for
+    type hints in their own implementation.
+    """
+
+    async def enrich_research_memory(
+        self,
+        memory: Any,  # ChatMemoryService — typed as Any to avoid import cycle
+        context: ResearchContext,
+    ) -> None:
+        """Write plugin-specific context into ``memory.plugin_extensions``.
+
+        Implementations must be idempotent: on a follow-up turn where the
+        plugin's derivation has not changed, the write should produce the
+        same row (upsert-by-``plugin_name``).
+        """
+        ...
+
+
 # Combined plugin type for plugins implementing multiple protocols
 class FullPlugin(ResearchPlugin, ToolProvider, PromptProvider, Protocol):
     """

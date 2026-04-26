@@ -11,10 +11,9 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from deep_research.core.deps import get_data_source_service
 from deep_research.core.exceptions import NotFoundError, PermissionDeniedError, ValidationError
-from deep_research.db.session import get_db
 from deep_research.middleware.auth import AuthenticatedUser, CurrentUser
 from deep_research.models.data_source import (
     DataSourceType,
@@ -44,7 +43,7 @@ from deep_research.schemas.query_config import (
     VectorSearchQueryConfig,
     validate_query_config,
 )
-from deep_research.services.data_source_service import DataSourceService
+from deep_research.services._protocols import IDataSourceService
 from deep_research.services.obo_client import OBODatabricksClient
 
 router = APIRouter(prefix="/data-sources", tags=["Data Sources"])
@@ -90,10 +89,10 @@ def _infer_capabilities(source_type: DataSourceType) -> list[DataSourceCapabilit
 
 
 def _source_to_response(source: Any) -> DataSourceResponse:
-    """Convert UserDataSource model to response schema.
+    """Convert UserDataSource model or view to response schema.
 
     Args:
-        source: UserDataSource model instance.
+        source: UserDataSource model or _DataSourceView instance.
 
     Returns:
         DataSourceResponse schema.
@@ -137,18 +136,18 @@ def _source_to_response(source: Any) -> DataSourceResponse:
 
 @router.get("", response_model=DataSourceListResponse)
 async def list_data_sources(
+    request: Request,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
     source_type: DataSourceType | None = Query(None, description="Filter by source type"),
     only_valid: bool = Query(True, description="Only return sources with valid OBO access"),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
+    service: IDataSourceService = Depends(get_data_source_service),
 ) -> DataSourceListResponse:
     """List data sources accessible to the current user.
 
     Returns both user-owned sources and workspace-visible sources with valid access.
     """
-    service = DataSourceService(db)
     sources, total = await service.get_accessible_sources(
         user_id=user.user_id,
         source_type=source_type,
@@ -171,15 +170,15 @@ async def list_data_sources(
 
 @router.get("/{source_id}", response_model=DataSourceResponse)
 async def get_data_source(
+    request: Request,
     source_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    service: IDataSourceService = Depends(get_data_source_service),
 ) -> DataSourceResponse:
     """Get details of a specific data source.
 
     Returns the source if owned by user or workspace-visible with valid access.
     """
-    service = DataSourceService(db)
     source = await service.get_accessible(source_id, user.user_id)
 
     if not source:
@@ -198,7 +197,7 @@ async def create_vector_search_source(
     request_body: CreateVectorSearchSourceRequest,
     request: Request,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: IDataSourceService = Depends(get_data_source_service),
 ) -> DataSourceResponse:
     """Create a new Vector Search data source.
 
@@ -211,7 +210,6 @@ async def create_vector_search_source(
             "OBO authentication required. Please sign in through Databricks Apps."
         )
 
-    service = DataSourceService(db, OBODatabricksClient())
     source, error = await service.create_vector_search_source(
         owner_id=user.user_id,
         user_token=obo_token,
@@ -228,7 +226,6 @@ async def create_vector_search_source(
     if error:
         raise ValidationError(error)
 
-    await db.commit()
     return _source_to_response(source)
 
 
@@ -237,7 +234,7 @@ async def create_genie_source(
     request_body: CreateGenieSourceRequest,
     request: Request,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: IDataSourceService = Depends(get_data_source_service),
 ) -> DataSourceResponse:
     """Create a new Genie data source.
 
@@ -250,7 +247,6 @@ async def create_genie_source(
             "OBO authentication required. Please sign in through Databricks Apps."
         )
 
-    service = DataSourceService(db, OBODatabricksClient())
     source, error = await service.create_genie_source(
         owner_id=user.user_id,
         user_token=obo_token,
@@ -264,7 +260,6 @@ async def create_genie_source(
     if error:
         raise ValidationError(error)
 
-    await db.commit()
     return _source_to_response(source)
 
 
@@ -273,7 +268,7 @@ async def create_knowledge_assistant_source(
     request_body: CreateKnowledgeAssistantSourceRequest,
     request: Request,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: IDataSourceService = Depends(get_data_source_service),
 ) -> DataSourceResponse:
     """Create a new Knowledge Assistant data source.
 
@@ -286,7 +281,6 @@ async def create_knowledge_assistant_source(
             "OBO authentication required. Please sign in through Databricks Apps."
         )
 
-    service = DataSourceService(db, OBODatabricksClient())
     source, error = await service.create_assistant_source(
         owner_id=user.user_id,
         user_token=obo_token,
@@ -300,7 +294,6 @@ async def create_knowledge_assistant_source(
     if error:
         raise ValidationError(error)
 
-    await db.commit()
     return _source_to_response(source)
 
 
@@ -311,17 +304,17 @@ async def create_knowledge_assistant_source(
 
 @router.patch("/{source_id}", response_model=DataSourceResponse)
 async def update_data_source(
+    request: Request,
     source_id: UUID,
     request_body: UpdateDataSourceRequest,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: IDataSourceService = Depends(get_data_source_service),
 ) -> DataSourceResponse:
     """Update a data source.
 
     Only the source owner can update. Updates name, description, visibility,
     and type-specific configuration.
     """
-    service = DataSourceService(db)
     source = await service.get_for_user(source_id, user.user_id)
 
     if not source:
@@ -360,29 +353,27 @@ async def update_data_source(
     source.updated_at = datetime.now(UTC)
 
     await service.update(source)
-    await db.commit()
 
     return _source_to_response(source)
 
 
 @router.delete("/{source_id}", status_code=204)
 async def delete_data_source(
+    request: Request,
     source_id: UUID,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: IDataSourceService = Depends(get_data_source_service),
 ) -> None:
     """Delete a data source.
 
     Only the source owner can delete.
     """
-    service = DataSourceService(db)
     source = await service.get_for_user(source_id, user.user_id)
 
     if not source:
         raise NotFoundError("Data source", str(source_id))
 
     await service.delete(source)
-    await db.commit()
 
 
 # =============================================================================
@@ -392,10 +383,10 @@ async def delete_data_source(
 
 @router.post("/{source_id}/validate", response_model=DataSourceValidationResponse)
 async def validate_data_source(
-    source_id: UUID,
     request: Request,
+    source_id: UUID,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: IDataSourceService = Depends(get_data_source_service),
 ) -> DataSourceValidationResponse:
     """Re-validate OBO access for a data source.
 
@@ -408,14 +399,12 @@ async def validate_data_source(
             "OBO authentication required. Please sign in through Databricks Apps."
         )
 
-    service = DataSourceService(db, OBODatabricksClient())
     source = await service.get_for_user(source_id, user.user_id)
 
     if not source:
         raise NotFoundError("Data source", str(source_id))
 
     has_access, error = await service.revalidate_source(source, obo_token)
-    await db.commit()
 
     return DataSourceValidationResponse(
         source_id=source.id,
@@ -436,7 +425,6 @@ async def validate_connection(
     endpoint_name: str | None = Query(None, description="Vector Search endpoint or assistant endpoint"),
     index_name: str | None = Query(None, description="Vector Search index name"),
     space_id: str | None = Query(None, description="Genie space ID"),
-    db: AsyncSession = Depends(get_db),  # noqa: ARG001 - Required for session
 ) -> DataSourceValidationResponse:
     """Validate connection to an enterprise resource before creating a source.
 
@@ -505,10 +493,11 @@ async def validate_connection(
 
 @router.get("/{source_id}/query-config", response_model=QueryConfigResponse)
 async def get_query_config(
+    request: Request,
     source_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
     validate: bool = Query(False, description="Validate config against source capabilities"),
+    service: IDataSourceService = Depends(get_data_source_service),
 ) -> QueryConfigResponse:
     """Get query configuration for a Vector Search data source.
 
@@ -517,7 +506,6 @@ async def get_query_config(
 
     Only applicable to Vector Search sources.
     """
-    service = DataSourceService(db)
     source = await service.get_accessible(source_id, user.user_id)
 
     if not source:
@@ -579,11 +567,12 @@ async def get_query_config(
 
 @router.put("/{source_id}/query-config", response_model=QueryConfigResponse)
 async def update_query_config(
+    request: Request,
     source_id: UUID,
     request_body: UpdateQueryConfigRequest,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
     validate: bool = Query(True, description="Validate config before saving"),
+    service: IDataSourceService = Depends(get_data_source_service),
 ) -> QueryConfigResponse:
     """Update query configuration for a Vector Search data source.
 
@@ -592,7 +581,6 @@ async def update_query_config(
 
     Only applicable to Vector Search sources.
     """
-    service = DataSourceService(db)
     source = await service.get_for_user(source_id, user.user_id)
 
     if not source:
@@ -673,7 +661,6 @@ async def update_query_config(
     source.updated_at = datetime.now(UTC)
 
     await service.update(source)
-    await db.commit()
 
     return QueryConfigResponse(
         source_id=str(source_id),

@@ -1,4 +1,4 @@
-"""Research event buffer for batch-persisting SSE events to Lakebase.
+"""Research event buffer for batch-persisting SSE events.
 
 This module provides buffered event persistence to reduce database round-trips
 during research streaming. Events are batched and flushed periodically or
@@ -9,28 +9,36 @@ Key Design:
 - Thread-safe with asyncio.Lock
 - Configurable buffer size (default 10 events)
 - Best-effort persistence (failures logged but don't stop research)
+- F-RE: routes writes through `make_research_event_service` so the cached
+  impl is used when configured (Lakebase today, SQL Warehouse for logfood).
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from deep_research.schemas.streaming import StreamEvent
+
+if TYPE_CHECKING:
+    from deep_research.core.config import Settings
+    from deep_research.storage.factory import StorageStack
 
 logger = logging.getLogger(__name__)
 
 
 class EventBuffer:
-    """Buffer SSE events and batch-persist to Lakebase.
+    """Buffer SSE events and batch-persist.
 
     Reduces DB round-trips by batching events. Flushes automatically
     when buffer is full or explicitly via flush(). Uses independent
     DB session to survive request cancellation.
 
     Usage:
-        buffer = EventBuffer(research_session_id)
+        buffer = EventBuffer(research_session_id, settings=settings, stack=stack)
         async for event in orchestrate_research(...):
             yield event
             await buffer.add_event(event)
@@ -39,14 +47,28 @@ class EventBuffer:
     Args:
         research_session_id: UUID of the research session (FK in research_events).
         buffer_size: Number of events to buffer before auto-flushing. Default 10.
+        settings: Framework settings. If omitted, resolved via `get_settings()`
+                  at flush time.
+        stack: Optional `StorageStack`. When present and
+               `settings.storage_service_impl == "cached"`, flush writes via
+               the cached service without opening a legacy session.
     """
 
-    def __init__(self, research_session_id: UUID, buffer_size: int = 10) -> None:
+    def __init__(
+        self,
+        research_session_id: UUID,
+        buffer_size: int = 10,
+        *,
+        settings: "Settings | None" = None,
+        stack: "StorageStack | None" = None,
+    ) -> None:
         """Initialize event buffer.
 
         Args:
             research_session_id: FK to research_sessions table.
             buffer_size: Auto-flush when buffer reaches this size.
+            settings: Optional resolved `Settings`.
+            stack: Optional `StorageStack` for cached-path writes.
         """
         self._session_id = research_session_id
         self._buffer: list[dict[str, Any]] = []
@@ -56,6 +78,8 @@ class EventBuffer:
         self._sequence = 1
         self._lock = asyncio.Lock()
         self._total_flushed = 0
+        self._settings = settings
+        self._stack = stack
 
     async def add_event(self, event: StreamEvent) -> None:
         """Add event to buffer, flush if buffer is full.
@@ -96,14 +120,30 @@ class EventBuffer:
 
         try:
             # Import here to avoid circular imports
-            from deep_research.db.session import get_session_maker
-            from deep_research.services.research_event_service import ResearchEventService
+            from deep_research.core.config import get_settings
+            from deep_research.services._impl_factory import (
+                make_research_event_service,
+            )
 
-            session_maker = get_session_maker()
-            async with session_maker() as db:
-                service = ResearchEventService(db)
+            settings = self._settings or get_settings()
+            if settings.storage_service_impl == "cached" and self._stack is not None:
+                # Cached path: no legacy session needed; WriteQueue handles flush.
+                service = make_research_event_service(settings, self._stack)
                 _ = await service.save_events_batch(self._session_id, self._buffer)
-                await db.commit()
+            else:
+                # Legacy path: open an independent session. Full migration of
+                # this wrapper is F-PERSISTENCE scope.
+                from deep_research.db.session import get_session_maker
+
+                session_maker = get_session_maker()
+                async with session_maker() as db:
+                    service = make_research_event_service(
+                        settings, self._stack, session=db
+                    )
+                    _ = await service.save_events_batch(
+                        self._session_id, self._buffer
+                    )
+                    await db.commit()
 
             self._total_flushed += len(self._buffer)
             logger.debug(

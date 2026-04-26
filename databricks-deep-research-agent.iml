@@ -17,6 +17,7 @@
       <excludeFolder url="file://$MODULE_DIR$/frontend/test-results" />
       <excludeFolder url="file://$MODULE_DIR$/htmlcov" />
       <excludeFolder url="file://$MODULE_DIR$/static" />
+      <excludeFolder url="file://$MODULE_DIR$/databricks-deep-research/.venv" />
     </content>
     <orderEntry type="jdk" jdkName="uv (databricks-deep-research-agent)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

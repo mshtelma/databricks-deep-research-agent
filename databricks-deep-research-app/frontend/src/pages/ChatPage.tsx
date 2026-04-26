@@ -309,14 +309,16 @@ export default function ChatPage() {
     // NOW refetch since persistence is complete — chatFull includes claims inline
     queryClient.invalidateQueries({ queryKey: ['messages', event.chatId] });
     queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, event.chatId] });
+    // Invalidate sidebar list unconditionally so derived title (from backend)
+    // becomes visible on non-draft chats without a page reload. Without this,
+    // post-research renames silently fail to repaint the sidebar.
+    queryClient.invalidateQueries({ queryKey: ['chats'] });
 
     if (event.wasDraft) {
       // Remove from local draft storage
       removeDraft(event.chatId);
       // Navigate to real URL (remove ?draft=1)
       navigate(`/chat/${event.chatId}`, { replace: true });
-      // Invalidate chats list to fetch the new chat from API
-      queryClient.invalidateQueries({ queryKey: ['chats'] });
     }
   }, [removeDraft, navigate, queryClient]);
 
@@ -352,6 +354,9 @@ export default function ChatPage() {
     const timer = setTimeout(() => {
       queryClient.invalidateQueries({ queryKey: ['messages', chatId] });
       queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, chatId] });
+      // Also invalidate sidebar list so post-research title shows even when
+      // persistence_completed was lost to SSE race (see block comment above).
+      queryClient.invalidateQueries({ queryKey: ['chats'] });
     }, 1200);
 
     return () => clearTimeout(timer);

@@ -8,6 +8,7 @@ import { ActiveJobsIndicator } from '@/components/jobs/ActiveJobsIndicator';
 import { UserProfile } from '@/components/user';
 import { IncognitoSection } from '@/components/incognito';
 import { useIncognitoSessionStatus, useCreateIncognitoChat } from '@/hooks';
+import { ComponentRegistry } from '@/core/plugins';
 
 type StatusFilter = 'active' | 'archived' | 'all';
 type ChatListEntry = Chat & { isDraft?: boolean };
@@ -289,33 +290,45 @@ export function ChatSidebar({
  */
 function SidebarNavLinks() {
   const navigate = useNavigate();
+  const sidebarConfig = ComponentRegistry.getSidebarConfig();
+
+  const showAgents = sidebarConfig?.showAgentsLink !== false;
+  const showTemplates = sidebarConfig?.showTemplatesLink !== false;
+
+  if (!showAgents && !showTemplates) {
+    return null;
+  }
 
   return (
     <div className="px-2 pb-2 border-t pt-2 space-y-0.5">
-      <button
-        type="button"
-        onClick={() => navigate('/agents')}
-        className={cn(
-          'w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm',
-          'text-muted-foreground hover:text-foreground hover:bg-accent',
-          'transition-colors'
-        )}
-      >
-        <AgentIcon className="h-4 w-4" />
-        Agents
-      </button>
-      <button
-        type="button"
-        onClick={() => navigate('/templates')}
-        className={cn(
-          'w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm',
-          'text-muted-foreground hover:text-foreground hover:bg-accent',
-          'transition-colors'
-        )}
-      >
-        <TemplateIcon className="h-4 w-4" />
-        Templates
-      </button>
+      {showAgents && (
+        <button
+          type="button"
+          onClick={() => navigate('/agents')}
+          className={cn(
+            'w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm',
+            'text-muted-foreground hover:text-foreground hover:bg-accent',
+            'transition-colors'
+          )}
+        >
+          <AgentIcon className="h-4 w-4" />
+          Agents
+        </button>
+      )}
+      {showTemplates && (
+        <button
+          type="button"
+          onClick={() => navigate('/templates')}
+          className={cn(
+            'w-full flex items-center gap-2 px-3 py-2 rounded-md text-sm',
+            'text-muted-foreground hover:text-foreground hover:bg-accent',
+            'transition-colors'
+          )}
+        >
+          <TemplateIcon className="h-4 w-4" />
+          Templates
+        </button>
+      )}
     </div>
   );
 }

@@ -104,3 +104,54 @@ class SourceType(StrEnum):
     VECTOR_SEARCH = "vector_search"  # Databricks Vector Search
     KNOWLEDGE_ASSISTANT = "knowledge_assistant"  # Knowledge Assistant endpoint
     CUSTOM = "custom"  # Plugin-provided source type
+
+
+class FindingOrigin(StrEnum):
+    """Origin of a ChatMemoryFinding — where the knowledge came from.
+
+    Unifies file-derived and research-derived knowledge under one schema.
+    source_step=0 + origin=FILE means file preprocessing produced it; later
+    steps + origin in {WEB, ENTERPRISE, COMPUTE, PLUGIN} come from research.
+    """
+
+    FILE = "file"
+    WEB = "web"
+    ENTERPRISE = "enterprise"
+    COMPUTE = "compute"
+    PLUGIN = "plugin"
+
+
+class Confidence(StrEnum):
+    """Confidence level assigned to a finding during consolidation."""
+
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+
+
+class EntityType(StrEnum):
+    """Type of entity tracked in chat_memory_entities."""
+
+    ACCOUNT = "account"
+    PERSON = "person"
+    PRODUCT = "product"
+    DATE = "date"
+    COMPETITOR = "competitor"
+    LOCATION = "location"
+    OTHER = "other"
+
+
+class CoverageStatus(StrEnum):
+    """Coverage status for a research topic in chat memory."""
+
+    COVERED = "covered"
+    PARTIAL = "partial"
+    GAP = "gap"
+
+
+class CoverageDepth(StrEnum):
+    """How deeply a topic has been explored."""
+
+    SURFACE = "surface"
+    MODERATE = "moderate"
+    DEEP = "deep"

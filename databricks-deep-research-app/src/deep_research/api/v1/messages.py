@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.api.v1.utils import verify_chat_ownership
+from deep_research.core.deps import get_storage_optional
 from deep_research.core.exceptions import NotFoundError
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
@@ -23,7 +24,8 @@ from deep_research.schemas.message import (
     SendMessageResponse,
 )
 from deep_research.schemas.research import ResearchSession as ResearchSessionSchema
-from deep_research.services.chat_service import ChatService
+from deep_research.core.deps import get_chat_service
+from deep_research.services._protocols import IChatService
 from deep_research.services.feedback_service import FeedbackService
 from deep_research.services.message_service import MessageService
 
@@ -71,12 +73,13 @@ async def list_messages(
     chat_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    stack: Any = Depends(get_storage_optional),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> MessageListResponse:
     """List messages in a chat."""
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
 
     service = MessageService(db)
     messages, total = await service.list_messages(
@@ -99,6 +102,8 @@ async def send_message(
     request: SendMessageRequest,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    stack: Any = Depends(get_storage_optional),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> SendMessageResponse:
     """Send a message and get agent response.
 
@@ -106,10 +111,9 @@ async def send_message(
     with message IDs. Use SSE endpoint to stream the agent response.
     """
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
 
     message_service = MessageService(db)
-    chat_service = ChatService(db)
 
     # Create user message
     user_message = await message_service.create(
@@ -139,11 +143,12 @@ async def get_message(
     message_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    stack: Any = Depends(get_storage_optional),
     include_research_session: bool = Query(False),
 ) -> MessageResponse:
     """Get message details."""
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
 
     service = MessageService(db)
     message = await service.get_with_chat(message_id, chat_id)
@@ -159,6 +164,7 @@ async def edit_message(
     request: EditMessageRequest,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    stack: Any = Depends(get_storage_optional),
 ) -> EditMessageResponse:
     """Edit a user message.
 
@@ -166,7 +172,7 @@ async def edit_message(
     messages in the conversation thread.
     """
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
 
     service = MessageService(db)
 
@@ -212,6 +218,7 @@ async def regenerate_message(
     message_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    stack: Any = Depends(get_storage_optional),
 ) -> RegenerateResponse:
     """Regenerate agent response.
 
@@ -219,7 +226,7 @@ async def regenerate_message(
     Creates a new agent message with fresh research results.
     """
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
 
     service = MessageService(db)
 
@@ -254,10 +261,11 @@ async def submit_feedback(
     request: FeedbackRequest,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    stack: Any = Depends(get_storage_optional),
 ) -> FeedbackResponse:
     """Submit feedback on agent message."""
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
 
     message_service = MessageService(db)
 
@@ -297,13 +305,14 @@ async def get_message_content(
     message_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    stack: Any = Depends(get_storage_optional),
 ) -> dict[str, Any]:
     """Get message content for clipboard.
 
     Returns plain text content suitable for copying to clipboard.
     """
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db)
+    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
 
     service = MessageService(db)
     message = await service.get_with_chat(message_id, chat_id)

@@ -217,6 +217,31 @@ test-complex:
 test-all-python:
 	uv run pytest tests -v --tb=short
 
+# Storage substrate unit + contract tests (fast, no credentials required)
+test-storage:
+	uv run pytest tests/unit/storage tests/contract/storage tests/services \
+		tests/integration/storage/test_migration_cache_race.py \
+		tests/unit/test_enricher_ordering.py tests/unit/test_lifespan_wiring.py \
+		-v --tb=short
+
+# AIS Lakebase integration test. Requires `../.env.ais` with DATABRICKS_CONFIG_PROFILE,
+# PGHOST, LAKEBASE_DATABASE. Provisions a disposable temp schema per run.
+#
+# Run with:  make test-storage-ais-lakebase
+test-storage-ais-lakebase:
+	@test -f ../.env.ais || (echo "ERROR: ../.env.ais not found — see docs/storage/ais_setup.md"; exit 1)
+	set -a && . ../.env.ais && set +a && \
+		STORAGE_TEST_LAKEBASE=1 STORAGE_SERVICE_IMPL=cached STORAGE_BACKEND=lakebase \
+		uv run pytest tests/integration/storage/test_lakebase_roundtrip.py -v --tb=short
+
+# AIS SQL Warehouse integration test. Requires DATABRICKS_CONFIG_PROFILE +
+# STORAGE_WAREHOUSE_ID + STORAGE_CATALOG in the loaded env.
+test-storage-ais-warehouse:
+	@test -f ../.env.ais || (echo "ERROR: ../.env.ais not found — see docs/storage/ais_setup.md"; exit 1)
+	set -a && . ../.env.ais && set +a && \
+		STORAGE_TEST_WAREHOUSE=1 STORAGE_SERVICE_IMPL=cached STORAGE_BACKEND=sql_warehouse \
+		uv run pytest tests/integration/storage/test_warehouse_roundtrip.py -v --tb=short
+
 # Frontend tests
 test-frontend:
 	cd frontend && npx vitest run --passWithNoTests
@@ -342,11 +367,20 @@ db-reset:
 		PROJECT_ID="deep-research-$$RESOURCE_SUFFIX"; \
 		ENDPOINT_NAME=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
 			"from deep_research.deployment import discover_autoscaling_endpoint; print(discover_autoscaling_endpoint('$$PROJECT_ID'))" 2>/dev/null); \
+		if [ -z "$$ENDPOINT_NAME" ] && [ -f $(ROOT_DIR)/.env.$(TARGET) ]; then \
+			echo "  (falling back to $(ROOT_DIR)/.env.$(TARGET) for ENDPOINT_NAME + PGHOST)"; \
+			ENDPOINT_NAME=$$(grep -E '^ENDPOINT_NAME=' $(ROOT_DIR)/.env.$(TARGET) | cut -d= -f2- | tr -d '"'); \
+			ENV_PGHOST=$$(grep -E '^PGHOST=' $(ROOT_DIR)/.env.$(TARGET) | cut -d= -f2- | tr -d '"'); \
+		fi; \
 		if [ -n "$$ENDPOINT_NAME" ]; then \
 			echo "Backend: Autoscaling (ENDPOINT_NAME=$$ENDPOINT_NAME)"; \
 			echo "  Resolving PGHOST..."; \
 			PGHOST=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
 				"from databricks.sdk import WorkspaceClient; w=WorkspaceClient(); ep=w.postgres.get_endpoint(name='$$ENDPOINT_NAME'); print(ep.status.hosts.host if ep.status and ep.status.hosts else '')" 2>/dev/null || echo ""); \
+			if [ -z "$$PGHOST" ] && [ -n "$$ENV_PGHOST" ]; then \
+				PGHOST="$$ENV_PGHOST"; \
+				echo "  (PGHOST from .env.$(TARGET))"; \
+			fi; \
 			echo "  PGHOST: $$PGHOST"; \
 			DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
 			ENDPOINT_NAME="$$ENDPOINT_NAME" \
@@ -374,6 +408,11 @@ db-reset:
 		fi; \
 	fi
 	@echo "Database schema reset complete!"
+	@echo "Note: storage schema (deep_research_state) is created by the app"
+	@echo "      service principal at lifespan via LakebaseBackend.migrate()."
+	@echo "      Do NOT pre-create it from here — the developer cannot transfer"
+	@echo "      ownership cross-principal on Lakebase, and a developer-owned"
+	@echo "      schema causes 'must be owner of table' at app startup."
 
 # Run migrations on deployed Lakebase instance (auto-detects Provisioned vs Autoscaling)
 # Usage: make db-migrate-remote TARGET=dev
@@ -410,6 +449,8 @@ db-migrate-remote:
 	fi
 	@echo ""
 	@echo "Migrations complete!"
+	@echo "Note: storage schema (deep_research_state) is created by the app"
+	@echo "      service principal at lifespan, not by this target."
 
 # =============================================================================
 # E2E Testing with Playwright

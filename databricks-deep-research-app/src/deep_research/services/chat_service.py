@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import and_, delete, func, select
 from sqlalchemy.orm import selectinload
 
+from deep_research.agent.chat_title import derive_chat_title_from_query
 from deep_research.models.chat import Chat, ChatStatus, ChatType
 from deep_research.models.message import Message
 from deep_research.models.research_session import ResearchSession
@@ -262,6 +263,10 @@ class ChatService(BaseRepository[Chat]):
     ) -> None:
         """Update chat title from first message if not set.
 
+        Uses the canonical derive_chat_title_from_query helper so every title
+        writer produces identical output for the same input (byte-parity with
+        framework_orchestrator's PersistenceCompletedEvent.chat_title).
+
         Args:
             chat_id: Chat ID.
             message_content: Message content to use for title.
@@ -269,10 +274,9 @@ class ChatService(BaseRepository[Chat]):
         result = await self._session.execute(select(Chat).where(Chat.id == chat_id))
         chat = result.scalar_one_or_none()
         if chat and not chat.title:
-            # Truncate to reasonable title length
-            title = message_content[:100].strip()
-            if len(message_content) > 100:
-                title = title.rsplit(" ", 1)[0] + "..."
+            title = derive_chat_title_from_query(message_content)
+            if not title:
+                return
             chat.title = title
             chat.updated_at = datetime.now(UTC)
             await self._session.flush()

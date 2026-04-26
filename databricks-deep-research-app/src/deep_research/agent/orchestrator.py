@@ -55,6 +55,7 @@ async def stream_research(
     db: Any | None = None,
     plugin_manager: Any | None = None,
     plugin_data: dict[str, Any] | None = None,
+    storage_stack: Any | None = None,
 ) -> AsyncGenerator[StreamEvent | str, None]:
     """Stream the research workflow with real-time events.
 
@@ -82,6 +83,7 @@ async def stream_research(
         db=db,
         plugin_manager=plugin_manager,
         plugin_data=plugin_data,
+        storage_stack=storage_stack,
     ):
         yield event
 

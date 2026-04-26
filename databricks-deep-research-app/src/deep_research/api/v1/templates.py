@@ -10,10 +10,9 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.ext.asyncio import AsyncSession
 
+from deep_research.core.deps import get_template_service
 from deep_research.core.exceptions import NotFoundError, ValidationError
-from deep_research.db.session import get_db
 from deep_research.middleware.auth import AuthenticatedUser, CurrentUser
 from deep_research.models.prompt_template import (
     TemplateType as ModelTemplateType,
@@ -32,7 +31,7 @@ from deep_research.schemas.template import (
     TemplateVisibility,
     UpdateTemplateRequest,
 )
-from deep_research.services.template_service import TemplateService
+from deep_research.services._protocols import ITemplateService
 
 router = APIRouter(prefix="/templates", tags=["Templates"])
 
@@ -84,7 +83,7 @@ def _template_to_response(template: object) -> TemplateResponse:
 @router.get("", response_model=TemplateListResponse)
 async def list_templates(
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    service: ITemplateService = Depends(get_template_service),
     template_type: TemplateType | None = Query(None, description="Filter by template type"),
     tags: list[str] | None = Query(None, description="Filter by tags (any match)"),
     limit: int = Query(100, ge=1, le=500),
@@ -94,8 +93,6 @@ async def list_templates(
 
     Returns both user-owned templates and workspace-visible templates.
     """
-    service = TemplateService(db)
-
     # Convert schema enum to model enum if provided
     model_type = ModelTemplateType(template_type.value) if template_type else None
 
@@ -108,7 +105,7 @@ async def list_templates(
     )
 
     # Count user vs workspace templates
-    user_templates = sum(1 for t in templates if t.owner_id == user.user_id)
+    user_templates = sum(1 for t in templates if getattr(t, "owner_id", None) == user.user_id)
     workspace_templates = len(templates) - user_templates
 
     return TemplateListResponse(
@@ -123,13 +120,12 @@ async def list_templates(
 async def get_template(
     template_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    service: ITemplateService = Depends(get_template_service),
 ) -> TemplateResponse:
     """Get details of a specific prompt template.
 
     Returns the template if owned by user or workspace-visible.
     """
-    service = TemplateService(db)
     template = await service.get_accessible(template_id, user.user_id)
 
     if not template:
@@ -147,15 +143,13 @@ async def get_template(
 async def create_template(
     request_body: CreateTemplateRequest,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: ITemplateService = Depends(get_template_service),
 ) -> TemplateResponse:
     """Create a new prompt template.
 
     Variables are automatically extracted from {{placeholder}} syntax in content
     if not explicitly provided.
     """
-    service = TemplateService(db)
-
     # Check for duplicate name
     existing = await service.get_by_name(user.user_id, request_body.name)
     if existing:
@@ -180,7 +174,8 @@ async def create_template(
         is_default=request_body.is_default,
     )
 
-    await db.commit()
+    # Commit only on legacy path (cached path has no session to commit)
+    await service.commit()
     return _template_to_response(template)
 
 
@@ -194,13 +189,12 @@ async def update_template(
     template_id: UUID,
     request_body: UpdateTemplateRequest,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: ITemplateService = Depends(get_template_service),
 ) -> TemplateResponse:
     """Update a prompt template.
 
     Only the template owner can update.
     """
-    service = TemplateService(db)
     template = await service.get_for_user(template_id, user.user_id)
 
     if not template:
@@ -225,15 +219,26 @@ async def update_template(
         template.tags = request_body.tags
     if request_body.visibility is not None:
         template.visibility = request_body.visibility.value
-    if request_body.is_default is not None:
-        if request_body.is_default:
-            # Unset other defaults first
-            await service._unset_defaults(user.user_id, ModelTemplateType(template.type))
+    type_changed_to_default = (
+        request_body.is_default is True and not getattr(template, "is_default", False)
+    )
+    if request_body.is_default is not None and not type_changed_to_default:
+        # Demoting from default or no change: just update the flag in-place.
         template.is_default = request_body.is_default
 
     template.updated_at = datetime.now(UTC)
     await service.update(template)
-    await db.commit()
+
+    if type_changed_to_default:
+        # Atomic flip: promote this template and demote any prior default for
+        # the same (owner_id, type) in a single race-free statement.
+        await service.set_as_default(
+            template_id=template.id,
+            owner_id=user.user_id,
+            type_=ModelTemplateType(template.type),
+        )
+
+    await service.commit()
 
     return _template_to_response(template)
 
@@ -247,20 +252,19 @@ async def update_template(
 async def delete_template(
     template_id: UUID,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: ITemplateService = Depends(get_template_service),
 ) -> None:
     """Delete a prompt template.
 
     Only the template owner can delete.
     """
-    service = TemplateService(db)
     template = await service.get_for_user(template_id, user.user_id)
 
     if not template:
         raise NotFoundError("Template", str(template_id))
 
     await service.delete(template)
-    await db.commit()
+    await service.commit()
 
 
 # =============================================================================
@@ -273,14 +277,13 @@ async def render_template(
     template_id: UUID,
     request_body: RenderTemplateRequest,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    service: ITemplateService = Depends(get_template_service),
 ) -> RenderTemplateResponse:
     """Render a template with variable substitution.
 
     Returns the rendered content along with any missing required variables
     and variables that used default values.
     """
-    service = TemplateService(db)
     template = await service.get_accessible(template_id, user.user_id)
 
     if not template:
@@ -306,13 +309,12 @@ async def render_template(
 async def get_default_template(
     template_type: TemplateType,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    service: ITemplateService = Depends(get_template_service),
 ) -> TemplateResponse | None:
     """Get the default template for a given type.
 
     First checks user's own defaults, then workspace defaults.
     """
-    service = TemplateService(db)
     model_type = ModelTemplateType(template_type.value)
     template = await service.get_default_template(user.user_id, model_type)
 
@@ -326,17 +328,16 @@ async def get_default_template(
 async def set_default_template(
     template_id: UUID,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: ITemplateService = Depends(get_template_service),
 ) -> TemplateResponse:
     """Set a template as the default for its type.
 
     Only the template owner can set their templates as default.
     """
-    service = TemplateService(db)
     template = await service.set_default_template(template_id, user.user_id)
 
     if not template:
         raise NotFoundError("Template", str(template_id))
 
-    await db.commit()
+    await service.commit()
     return _template_to_response(template)

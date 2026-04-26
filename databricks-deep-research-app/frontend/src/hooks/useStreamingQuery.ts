@@ -25,7 +25,7 @@ import type {
   ConfidenceLevel,
 } from '../types/citation';
 import { parseStreamEvent } from '../schemas/streamEvents';
-import { jobsApi } from '../api/client';
+import { ApiError, jobsApi } from '../api/client';
 import {
   saveStreamingState,
   getStreamingState,
@@ -314,11 +314,11 @@ export function useStreamingQuery(
     disconnectStream();
     setAgentStatus('idle');
 
-    if (!sessionId) {
+    if (!sessionId || !chatId) {
       return;
     }
 
-    void jobsApi.cancel(sessionId)
+    void jobsApi.cancel(chatId, sessionId)
       .then(() => {
         queryClient.invalidateQueries({ queryKey: ['jobs'] });
       })
@@ -326,7 +326,7 @@ export function useStreamingQuery(
         // If job already completed/cancelled, keep local UI stopped.
         console.warn('[useStreamingQuery] Failed to cancel job:', err);
       });
-  }, [activeSessionId, disconnectStream, queryClient]);
+  }, [activeSessionId, chatId, disconnectStream, queryClient]);
 
   /**
    * Hydrate state from a persisted research session (for page reload).
@@ -805,7 +805,7 @@ export function useStreamingQuery(
 
         if (stopRequestedRef.current) {
           blockedReconnectSessionIdsRef.current.add(sessionId);
-          void jobsApi.cancel(sessionId)
+          void jobsApi.cancel(chatId, sessionId)
             .then(() => {
               queryClient.invalidateQueries({ queryKey: ['jobs'] });
             })
@@ -819,13 +819,17 @@ export function useStreamingQuery(
       } catch (err) {
         console.error('[useStreamingQuery] Job submission failed:', err);
         const errorMessage = err instanceof Error ? err.message : 'Failed to submit research job';
-        // Handle specific error types
+        // Classify by HTTP status / error code from the API client, never by
+        // substring-matching the message body — a research query mentioning
+        // "429" or "concurrent" would otherwise misclassify.
         let submissionError: Error;
         let errorCode: string;
-        if (errorMessage.includes('429') || errorMessage.includes('concurrent')) {
+        const apiStatus = err instanceof ApiError ? err.status : undefined;
+        const apiCode = err instanceof ApiError ? err.code : undefined;
+        if (apiStatus === 429 || apiCode === 'MAX_CONCURRENT_JOBS') {
           submissionError = new Error('Maximum concurrent jobs reached. Please wait for a running job to complete.');
           errorCode = 'MAX_CONCURRENT_JOBS';
-        } else if (errorMessage.includes('409') || errorMessage.includes('research_in_progress')) {
+        } else if (apiStatus === 409 || apiCode === 'RESEARCH_IN_PROGRESS') {
           submissionError = new Error('Research is already in progress for this chat. Please wait for it to complete or cancel it.');
           errorCode = 'RESEARCH_IN_PROGRESS';
         } else {
@@ -850,7 +854,7 @@ export function useStreamingQuery(
       }
 
       // Connect to job event stream (with sinceSequence=0 for new job)
-      const streamUrl = jobsApi.streamUrl(sessionId, 0);
+      const streamUrl = jobsApi.streamUrl(chatId, sessionId, 0);
 
       const eventSource = new EventSource(streamUrl);
       eventSourceRef.current = eventSource;
@@ -874,13 +878,16 @@ export function useStreamingQuery(
       if (blockedReconnectSessionIdsRef.current.has(sessionId)) {
         return;
       }
+      if (!chatId) {
+        return;
+      }
 
       // Close any existing connection
       disconnectStream();
 
       // Fetch job to verify it's still in progress
       try {
-        const job = await jobsApi.get(sessionId);
+        const job = await jobsApi.get(chatId, sessionId);
         if (job.status !== 'in_progress') {
           return;
         }
@@ -906,7 +913,7 @@ export function useStreamingQuery(
       lastSequenceRef.current = 0;
 
       // Connect to job event stream (from beginning to replay all events)
-      const streamUrl = jobsApi.streamUrl(sessionId, 0);
+      const streamUrl = jobsApi.streamUrl(chatId, sessionId, 0);
 
       const eventSource = new EventSource(streamUrl);
       eventSourceRef.current = eventSource;

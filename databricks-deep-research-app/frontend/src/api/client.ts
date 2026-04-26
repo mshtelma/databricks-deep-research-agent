@@ -363,28 +363,31 @@ export const jobsApi = {
   list: (params?: { status?: string; limit?: number }) =>
     request<JobListResponse>('/research/jobs', { params }),
 
-  // Get a specific job
-  get: (sessionId: string) => request<Job>(`/research/jobs/${sessionId}`),
+  // Get a specific job. chat_id is part of the URL so the backend can
+  // hydrate the ChatDocument via the unified cache in a single round-trip.
+  get: (chatId: string, sessionId: string) =>
+    request<Job>(`/research/jobs/${chatId}/${sessionId}`),
 
-  // Cancel a running job
-  cancel: (sessionId: string) =>
-    request<{ sessionId: string; status: string }>(`/research/jobs/${sessionId}`, {
-      method: 'DELETE',
-    }),
+  // Cancel a running job.
+  cancel: (chatId: string, sessionId: string) =>
+    request<{ sessionId: string; status: string }>(
+      `/research/jobs/${chatId}/${sessionId}`,
+      { method: 'DELETE' },
+    ),
 
-  // Get job events (polling)
-  getEvents: (sessionId: string, sinceSequence = 0, limit = 100) =>
-    request<JobEventsResponse>(`/research/jobs/${sessionId}/events`, {
+  // Get job events (polling).
+  getEvents: (chatId: string, sessionId: string, sinceSequence = 0, limit = 100) =>
+    request<JobEventsResponse>(`/research/jobs/${chatId}/${sessionId}/events`, {
       params: { sinceSequence, limit },
     }),
 
-  // Get active job for a chat
+  // Get active job for a chat.
   getChatActiveJob: (chatId: string) =>
     request<Job | null>(`/research/jobs/chat/${chatId}/active`),
 
-  // Get SSE stream URL for a job
-  streamUrl: (sessionId: string, sinceSequence = 0) =>
-    `${API_BASE_URL}/research/jobs/${sessionId}/stream?sinceSequence=${sinceSequence}`,
+  // Get SSE stream URL for a job.
+  streamUrl: (chatId: string, sessionId: string, sinceSequence = 0) =>
+    `${API_BASE_URL}/research/jobs/${chatId}/${sessionId}/stream?sinceSequence=${sinceSequence}`,
 }
 
 // Preferences API

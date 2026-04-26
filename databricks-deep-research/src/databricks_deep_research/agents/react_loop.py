@@ -203,6 +203,7 @@ class ReactLoop:
         force_convergence: bool = False,
         convergence_rounds: int = 4,
         per_tool_limits: dict[str, int] | None = None,
+        hint_queries: list[str] | None = None,
     ) -> None:
         self._llm = llm_client
         self._ctx = tool_context or ToolContext()
@@ -217,6 +218,7 @@ class ReactLoop:
         self._max_tokens = max_tokens
         self._stream = stream
         self._subtype = subtype
+        self._hint_queries: list[str] = list(hint_queries or [])
         self._max_result_chars = max_result_chars
         self._compaction_strategy = compaction_strategy
         self._fallback_tools: dict[str, ResearchTool] = {}
@@ -1120,6 +1122,7 @@ class ReactLoop:
                     tool_result,
                     current_step=self._ctx.current_step,
                     root_query=self._ctx.query,
+                    node_hint_queries=self._hint_queries,
                 )
                 logger.info(
                     "ENTERPRISE_RESULTS_RETRIEVED node=%s tool=%s source_type=%s raw=%d "
@@ -1290,6 +1293,7 @@ class ReactLoop:
                 result,
                 current_step=self._ctx.current_step,
                 root_query=self._ctx.query,
+                node_hint_queries=self._hint_queries,
             )
 
             logger.info(

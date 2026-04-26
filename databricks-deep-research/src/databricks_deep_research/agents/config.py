@@ -44,12 +44,36 @@ class PoolInjectConfig(BaseModel):
 
 
 class SynthesisContextFieldConfig(BaseModel):
-    """Controls how one synthesizer context field is populated."""
+    """Controls how one synthesizer context field is populated.
+
+    The compilation pipeline applies a three-tier preservation policy driven by
+    the fields below:
+
+    1. The first ``keep_full_top_k`` items are always passed through verbatim
+       (bounded only by ``per_item_hard_cap`` if set).
+    2. Items past ``keep_full_top_k`` are kept in full as long as the running
+       total character count stays within ``total_budget_chars``.
+    3. Items that would overflow the budget are handled per
+       ``truncation_policy``: ``soft_tail`` trims only the overflowing tail
+       item, ``compact`` runs an LLM summariser on overflow items (when an
+       LLM is available), and ``hard_clip`` reverts to legacy
+       per-item ``max_item_chars`` truncation.
+    """
 
     model_config = ConfigDict(extra="forbid")
     max_items: int = 20
     max_item_chars: int = 0
     compaction: PromptCompactionConfig | None = None
+    # Budget-based preservation controls (see class docstring).
+    keep_full_top_k: int = 0
+    total_budget_chars: int = 0
+    truncation_policy: Literal["soft_tail", "compact", "hard_clip"] = "soft_tail"
+    per_item_hard_cap: int = 0
+    # Sources-only rendering knobs; harmless for observations.
+    include_snippet: bool = True
+    include_content: bool = True
+    max_content_chars_top_k: int = 5000
+    max_content_chars_other: int = 1500
 
 
 class SynthesisContextConfig(BaseModel):
@@ -82,6 +106,15 @@ class AgentNodeConfig(BaseModel):
     output_schema: dict[str, Any] | None = None
     grounding_mode: Literal["none", "classical_lite", "reclaim"] | None = None
     tools: list[str | dict[str, Any]] = Field(default_factory=list)
+    # Static vocabulary hints merged into the source-admission query
+    # profile. Intended for researcher-subtype nodes that drive tool
+    # selection from their own system prompt rather than a planner step;
+    # the terms should be capability-level vocabulary (e.g. "competitor
+    # battle card", "vendor comparison"), not customer or competitor
+    # names. Consumed by
+    # databricks_deep_research.agents.source_aware.admit_tool_result
+    # when the ``ADMISSION_ENFORCE_NODE_HINTS`` flag is set.
+    hint_queries: list[str] = Field(default_factory=list)
     pool_writes: list[PoolWriteConfig] = Field(default_factory=list)
     pool_tools: list[str] = Field(default_factory=list)
     max_tool_calls: int | None = None

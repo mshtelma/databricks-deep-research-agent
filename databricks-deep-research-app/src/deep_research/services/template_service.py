@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 
 from deep_research.models.prompt_template import (
     PromptTemplate,
@@ -289,15 +289,47 @@ class TemplateService(BaseRepository[PromptTemplate]):
         if not template:
             return None
 
-        # Unset other defaults
-        await self._unset_defaults(owner_id, TemplateType(template.type))
+        # Atomic flip: single UPDATE sets is_default=True for this template
+        # and is_default=False for every other template of the same
+        # (owner_id, type). Race-free against concurrent flips.
+        await self.set_as_default(
+            template_id=template.id,
+            owner_id=owner_id,
+            type_=TemplateType(template.type),
+        )
 
-        # Set this one as default
-        template.is_default = True
-        template.updated_at = datetime.now(UTC)
-        await self.update(template)
+        # Reload so the caller sees fresh state.
+        return await self.get_for_user(template_id, owner_id)
 
-        return template
+    async def set_as_default(
+        self,
+        template_id: UUID,
+        owner_id: str,
+        type_: Any,
+    ) -> None:
+        """Atomically flip the default flag for ``(owner_id, type)``.
+
+        Issues a single SQL ``UPDATE`` that sets ``is_default = (id =
+        :template_id)`` for every row matching ``owner_id`` + ``type``,
+        which simultaneously promotes the chosen template and demotes
+        the previous default. Race-free against concurrent invocations
+        because PostgreSQL serializes the update on the matching rows.
+        """
+        type_val = type_.value if hasattr(type_, "value") else str(type_)
+        await self._session.execute(
+            update(PromptTemplate)
+            .where(
+                and_(
+                    PromptTemplate.owner_id == owner_id,
+                    PromptTemplate.type == type_val,
+                )
+            )
+            .values(
+                is_default=(PromptTemplate.id == template_id),
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await self._session.flush()
 
     # =========================================================================
     # Query Methods

@@ -10,17 +10,16 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.core.app_config import get_app_config
+from deep_research.core.deps import get_custom_agent_service
 from deep_research.core.exceptions import ConflictError, NotFoundError, ValidationError
-from deep_research.db.session import get_db
 from deep_research.middleware.auth import AuthenticatedUser, CurrentUser
 from deep_research.models.custom_agent import (
     AgentVisibility as ModelAgentVisibility,
 )
-from deep_research.models.custom_agent import CustomAgent
 from deep_research.schemas.custom_agent import (
     AgentOutputFormat,
     AgentResearchDepth,
@@ -36,20 +35,13 @@ from deep_research.schemas.custom_agent import (
     UpdateCustomAgentRequest,
     UpdatePresetStepRequest,
 )
-from deep_research.services.custom_agent_service import CustomAgentService
+from deep_research.services._protocols import ICustomAgentService
 
 router = APIRouter(prefix="/custom-agents", tags=["Custom Agents"])
 
 
-def _agent_to_response(agent: CustomAgent) -> CustomAgentResponse:
-    """Convert CustomAgent model to response schema.
-
-    Args:
-        agent: CustomAgent model instance.
-
-    Returns:
-        CustomAgentResponse schema.
-    """
+def _agent_to_response(agent: Any) -> CustomAgentResponse:
+    """Convert agent view / ORM object to response schema."""
     preset_steps = [
         PresetStepResponse(
             id=step.id,
@@ -107,15 +99,8 @@ def _agent_to_response(agent: CustomAgent) -> CustomAgentResponse:
     )
 
 
-def _agent_to_summary(agent: CustomAgent) -> CustomAgentSummary:
-    """Convert CustomAgent model to summary schema.
-
-    Args:
-        agent: CustomAgent model instance.
-
-    Returns:
-        CustomAgentSummary schema.
-    """
+def _agent_to_summary(agent: Any) -> CustomAgentSummary:
+    """Convert agent view / ORM object to summary schema."""
     has_source_config = (
         (agent.source_scope and agent.source_scope != "all")
         or bool(agent.enabled_sources)
@@ -160,8 +145,9 @@ def _agent_to_summary(agent: CustomAgent) -> CustomAgentSummary:
 
 @router.get("", response_model=CustomAgentListResponse)
 async def list_custom_agents(
+    request: Request,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    service: ICustomAgentService = Depends(get_custom_agent_service),
     visibility: AgentVisibility | None = Query(None, description="Filter by visibility"),
     source_scope: AgentSourceScope | None = Query(None, description="Filter by source scope"),
     limit: int = Query(100, ge=1, le=500),
@@ -171,8 +157,6 @@ async def list_custom_agents(
 
     Returns user-owned agents, workspace-visible agents, and system agents.
     """
-    service = CustomAgentService(db)
-
     # Convert schema enums to model enum values if provided
     vis_value = visibility.value if visibility else None
     scope_value = source_scope.value if source_scope else None
@@ -205,14 +189,14 @@ async def list_custom_agents(
 @router.get("/{agent_id}", response_model=CustomAgentResponse)
 async def get_custom_agent(
     agent_id: UUID,
+    request: Request,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    service: ICustomAgentService = Depends(get_custom_agent_service),
 ) -> CustomAgentResponse:
     """Get details of a specific custom agent.
 
     Returns the agent if owned by user, workspace-visible, or system.
     """
-    service = CustomAgentService(db)
     agent = await service.get_accessible(agent_id, user.user_id)
 
     if not agent:
@@ -228,16 +212,15 @@ async def get_custom_agent(
 
 @router.post("", response_model=CustomAgentResponse, status_code=201)
 async def create_custom_agent(
+    request: Request,
     request_body: CreateCustomAgentRequest,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: ICustomAgentService = Depends(get_custom_agent_service),
 ) -> CustomAgentResponse:
     """Create a new custom agent.
 
     Optionally create preset steps inline with the agent.
     """
-    service = CustomAgentService(db)
-
     # Check for duplicate name
     existing = await service.get_by_name(user.user_id, request_body.name)
     if existing:
@@ -293,7 +276,6 @@ async def create_custom_agent(
         exclude_domains=request_body.exclude_domains,
     )
 
-    await db.commit()
     return _agent_to_response(agent)
 
 
@@ -305,15 +287,15 @@ async def create_custom_agent(
 @router.patch("/{agent_id}", response_model=CustomAgentResponse)
 async def update_custom_agent(
     agent_id: UUID,
+    request: Request,
     request_body: UpdateCustomAgentRequest,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: ICustomAgentService = Depends(get_custom_agent_service),
 ) -> CustomAgentResponse:
     """Update a custom agent.
 
     Only the agent owner can update. System agents cannot be modified.
     """
-    service = CustomAgentService(db)
     agent = await service.get_for_user(agent_id, user.user_id)
 
     if not agent:
@@ -381,10 +363,9 @@ async def update_custom_agent(
         agent.exclude_domains = request_body.exclude_domains
 
     agent.updated_at = datetime.now(UTC)
-    await service.update(agent)
-    await db.commit()
+    updated = await service.update(agent)
 
-    return _agent_to_response(agent)
+    return _agent_to_response(updated)
 
 
 # =============================================================================
@@ -395,15 +376,15 @@ async def update_custom_agent(
 @router.delete("/{agent_id}", status_code=204)
 async def delete_custom_agent(
     agent_id: UUID,
+    request: Request,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: ICustomAgentService = Depends(get_custom_agent_service),
 ) -> None:
     """Delete a custom agent.
 
     Only the agent owner can delete. System agents cannot be deleted.
     Preset steps are automatically deleted via cascade.
     """
-    service = CustomAgentService(db)
     agent = await service.get_for_user(agent_id, user.user_id)
 
     if not agent:
@@ -414,7 +395,6 @@ async def delete_custom_agent(
         raise ValidationError("System agents cannot be deleted")
 
     await service.delete(agent)
-    await db.commit()
 
 
 # =============================================================================
@@ -425,15 +405,14 @@ async def delete_custom_agent(
 @router.get("/{agent_id}/steps", response_model=list[PresetStepResponse])
 async def list_preset_steps(
     agent_id: UUID,
+    request: Request,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    service: ICustomAgentService = Depends(get_custom_agent_service),
 ) -> list[PresetStepResponse]:
     """List preset steps for a custom agent.
 
     Returns steps ordered by execution order.
     """
-    service = CustomAgentService(db)
-
     # Verify agent exists and is accessible
     agent = await service.get_accessible(agent_id, user.user_id)
     if not agent:
@@ -461,16 +440,15 @@ async def list_preset_steps(
 @router.post("/{agent_id}/steps", response_model=PresetStepResponse, status_code=201)
 async def create_preset_step(
     agent_id: UUID,
+    request: Request,
     request_body: CreatePresetStepRequest,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: ICustomAgentService = Depends(get_custom_agent_service),
 ) -> PresetStepResponse:
     """Create a preset step for a custom agent.
 
     Only the agent owner can add steps. System agents cannot be modified.
     """
-    service = CustomAgentService(db)
-
     # Verify agent exists and is owned by user
     agent = await service.get_for_user(agent_id, user.user_id)
     if not agent:
@@ -495,8 +473,6 @@ async def create_preset_step(
         source_scope=request_body.source_scope.value if request_body.source_scope else None,
     )
 
-    await db.commit()
-
     return PresetStepResponse(
         id=step.id,
         agent_id=step.agent_id,
@@ -515,16 +491,15 @@ async def create_preset_step(
 async def update_preset_step(
     agent_id: UUID,
     step_id: UUID,
+    request: Request,
     request_body: UpdatePresetStepRequest,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: ICustomAgentService = Depends(get_custom_agent_service),
 ) -> PresetStepResponse:
     """Update a preset step.
 
     Only the agent owner can update steps. System agents cannot be modified.
     """
-    service = CustomAgentService(db)
-
     # Verify agent exists and is owned by user
     agent = await service.get_for_user(agent_id, user.user_id)
     if not agent:
@@ -553,20 +528,19 @@ async def update_preset_step(
     if request_body.source_scope is not None:
         step.source_scope = request_body.source_scope.value
 
-    await service.update_preset_step(step)
-    await db.commit()
+    updated_step = await service.update_preset_step(step)
 
     return PresetStepResponse(
-        id=step.id,
-        agent_id=step.agent_id,
-        title=step.title,
-        description=step.description,
-        order=step.order,
-        is_required=step.is_required,
-        source_hints=step.source_hints,
-        source_scope=AgentSourceScope(step.source_scope) if step.source_scope else None,
-        created_at=step.created_at,
-        updated_at=step.updated_at,
+        id=updated_step.id,
+        agent_id=updated_step.agent_id,
+        title=updated_step.title,
+        description=updated_step.description,
+        order=updated_step.order,
+        is_required=updated_step.is_required,
+        source_hints=updated_step.source_hints,
+        source_scope=AgentSourceScope(updated_step.source_scope) if updated_step.source_scope else None,
+        created_at=updated_step.created_at,
+        updated_at=updated_step.updated_at,
     )
 
 
@@ -574,15 +548,14 @@ async def update_preset_step(
 async def delete_preset_step(
     agent_id: UUID,
     step_id: UUID,
+    request: Request,
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: ICustomAgentService = Depends(get_custom_agent_service),
 ) -> None:
     """Delete a preset step.
 
     Only the agent owner can delete steps. System agents cannot be modified.
     """
-    service = CustomAgentService(db)
-
     # Verify agent exists and is owned by user
     agent = await service.get_for_user(agent_id, user.user_id)
     if not agent:
@@ -598,23 +571,21 @@ async def delete_preset_step(
         raise NotFoundError("AgentPresetStep", str(step_id))
 
     await service.delete_preset_step(step)
-    await db.commit()
 
 
 @router.post("/{agent_id}/steps/reorder", response_model=list[PresetStepResponse])
 async def reorder_preset_steps(
     agent_id: UUID,
+    request: Request,
     step_order: list[UUID],
     user: AuthenticatedUser,
-    db: AsyncSession = Depends(get_db),
+    service: ICustomAgentService = Depends(get_custom_agent_service),
 ) -> list[PresetStepResponse]:
     """Reorder preset steps for a custom agent.
 
     Pass a list of step IDs in the desired order.
     Only the agent owner can reorder steps.
     """
-    service = CustomAgentService(db)
-
     # Verify agent exists and is owned by user
     agent = await service.get_for_user(agent_id, user.user_id)
     if not agent:
@@ -625,7 +596,6 @@ async def reorder_preset_steps(
         raise ValidationError("Cannot reorder steps of system agents")
 
     steps = await service.reorder_preset_steps(agent_id, step_order)
-    await db.commit()
 
     return [
         PresetStepResponse(

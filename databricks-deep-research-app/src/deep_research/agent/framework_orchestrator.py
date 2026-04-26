@@ -33,6 +33,7 @@ from databricks_deep_research.events.types import (
 from databricks_deep_research.events.types import (
     WorkflowCompletedEvent as FwkWorkflowCompletedEvent,
 )
+from databricks_deep_research.memory import CHAT_MEMORY_APPENDIX_STATE_KEY
 from databricks_deep_research.workflow.context import (
     ExecutionContext,
 )
@@ -45,12 +46,21 @@ from databricks_deep_research.workflow.executor import (
 from databricks_deep_research.workflow.state import WorkflowState
 
 from deep_research.agent.adapters.config_translator import translate
+from deep_research.agent.chat_title import derive_chat_title_from_query
 from deep_research.agent.adapters.domain_context import (
     AppSSEEvent,
     DomainContextTracker,
 )
 from deep_research.agent.adapters.llm_adapter import create_framework_llm_client
 from deep_research.agent.adapters.tool_adapter import create_framework_tools
+from deep_research.agent.tools.file_entities import GetFileEntitiesTool
+from deep_research.agent.tools.list_files import ListAttachedFilesTool
+from deep_research.agent.tools.read_file import ReadAttachedFileTool
+from deep_research.plugins.base import ContextEnricher
+from deep_research.services._impl_factory import make_chat_memory_service, make_file_upload_service
+from deep_research.services._protocols import IChatMemoryService
+from deep_research.services.chat_memory_service import ChatMemoryService
+from deep_research.services.file_upload_service import FileUploadService
 from deep_research.core.tracing import safe_mlflow_run, safe_tool_span, safe_update_trace
 from deep_research.schemas.streaming import (
     AgentCompletedEvent,
@@ -231,6 +241,7 @@ async def stream_research_via_framework(
     db: AsyncSession | None = None,
     plugin_manager: PluginManager | None = None,
     plugin_data: dict[str, Any] | None = None,  # noqa: ARG001
+    storage_stack: Any = None,
 ) -> AsyncGenerator[StreamEvent | str, None]:
     """Stream research via the multi-agent framework.
 
@@ -275,7 +286,7 @@ async def stream_research_via_framework(
     # ------------------------------------------------------------------
     try:
         if (
-            db is not None
+            (db is not None or storage_stack is not None)
             and config.research_session_id is not None
             and config.message_id is not None
             and chat_id is not None
@@ -297,8 +308,12 @@ async def stream_research_via_framework(
                     research_session_id=config.research_session_id,
                     research_depth=config.research_depth,
                     query_mode=config.query_mode,
+                    storage_stack=storage_stack,
                 )
-                event_buffer = EventBuffer(config.research_session_id)
+                event_buffer = EventBuffer(
+                    config.research_session_id,
+                    stack=storage_stack,
+                )
                 logger.info(
                     "FWK_SESSION_CREATED session_id=%s",
                     str(config.research_session_id)[:8],
@@ -309,7 +324,10 @@ async def stream_research_via_framework(
                     str(e)[:200],
                 )
         elif config.session_pre_created and config.research_session_id is not None:
-            event_buffer = EventBuffer(config.research_session_id)
+            event_buffer = EventBuffer(
+                    config.research_session_id,
+                    stack=storage_stack,
+                )
 
         # Emit research_started
         if config.message_id:
@@ -353,8 +371,84 @@ async def stream_research_via_framework(
 
                 # Load file search tool (Step 3a)
                 file_search_tool = await _load_file_search_tool(
-                    config, db, user_id, chat_id,
+                    config, db, user_id, chat_id, storage_stack=storage_stack,
                 )
+
+                # -- 2b. Hydrate chat-scoped memory + preprocess any new files --
+                # Memory is durable state tied to the conversation, parallel
+                # to ChatSourcePool. File chunks are the authoritative file
+                # representation (raw storage is ephemeral tempdir). Any new
+                # file is fed through a universal LLM extractor (no regex,
+                # no per-format profile) — one cheap-tier call classifies the
+                # file and produces typed entities + structured facts that
+                # become step-0 KnowledgeFindings.
+                chat_memory: IChatMemoryService | None = None
+                if chat_id is not None and (db is not None or storage_stack is not None):
+                    from deep_research.core.config import get_settings
+
+                    _settings = get_settings()
+                    chat_memory = make_chat_memory_service(
+                        _settings,
+                        storage_stack,
+                        session=db,
+                        llm=framework_llm,
+                    )
+                    await chat_memory.hydrate(chat_id, user_id=user_id)  # type: ignore[arg-type]
+                    uploaded_file_ids = await _resolve_uploaded_file_ids(
+                        config, db, user_id, chat_id, storage_stack=storage_stack,
+                    )
+                    if uploaded_file_ids:
+                        from deep_research.core.config import get_settings as _gs
+                        _fus = make_file_upload_service(_gs(), storage_stack, session=db)
+                        file_service = _fus
+                        await chat_memory.preprocess_new_files(
+                            chat_id,
+                            uploaded_file_ids,
+                            file_service=file_service,
+                            research_session_id=(
+                                config.research_session_id
+                                if hasattr(config, "research_session_id")
+                                else None
+                            ),
+                        )
+                    # Run ContextEnricher plugins (Architect lifecycle spec).
+                    if plugin_manager:
+                        from deep_research.agent.tools.base import (
+                            ResearchContext as _EnricherCtx,
+                        )
+
+                        enricher_ctx = _EnricherCtx(
+                            chat_id=chat_id,
+                            user_id=user_id or "system",
+                            research_type=config.research_depth or "medium",
+                        )
+                        for _plugin in plugin_manager.get_plugins():
+                            if not isinstance(_plugin, ContextEnricher):
+                                continue
+                            plugin_label = getattr(
+                                _plugin, "name", type(_plugin).__name__
+                            )
+                            try:
+                                await asyncio.wait_for(
+                                    _plugin.enrich_research_memory(
+                                        chat_memory, enricher_ctx
+                                    ),
+                                    timeout=5.0,
+                                )
+                                logger.info(
+                                    "CONTEXT_ENRICHER_DONE plugin=%s",
+                                    plugin_label,
+                                )
+                            except asyncio.TimeoutError:
+                                logger.warning(
+                                    "CONTEXT_ENRICHER_TIMEOUT plugin=%s",
+                                    plugin_label,
+                                )
+                            except Exception:
+                                logger.exception(
+                                    "CONTEXT_ENRICHER_FAILED plugin=%s",
+                                    plugin_label,
+                                )
 
                 logger.info(
                     "FWK_TOOL_CREATION domain_filter=%s domain_filter_type=%s",
@@ -367,13 +461,37 @@ async def stream_research_via_framework(
                     crawler=crawler,
                     domain_filter_config=config.domain_filter,
                     enterprise_tools=await _load_enterprise_tools(
-                        config, db, user_id, chat_id
+                        config, db, user_id, chat_id, storage_stack,
                     ),
                     user_token=config.user_token,
                     file_search_tool=file_search_tool,
                     chat_id=chat_id,
                     user_id=user_id,
                 )
+
+                # Register chat-memory tools when memory has any content.
+                # Silent no-op when nothing is attached — preserves baseline
+                # tool list for workflows without files.
+                if chat_memory is not None and not chat_memory.snapshot().empty:
+                    _existing_tool_names = {t.definition.name for t in framework_tools}
+                    _chat_mem_tools: list[Any] = [
+                        ListAttachedFilesTool(chat_memory),
+                        GetFileEntitiesTool(chat_memory),
+                    ]
+                    if db is not None or storage_stack is not None:
+                        from deep_research.core.config import get_settings as _gs2
+                        _rfus = make_file_upload_service(_gs2(), storage_stack, session=db)
+                        _chat_mem_tools.append(
+                            ReadAttachedFileTool(chat_memory, _rfus)
+                        )
+                    for _cmt in _chat_mem_tools:
+                        if _cmt.definition.name not in _existing_tool_names:
+                            framework_tools.append(_cmt)
+                            _existing_tool_names.add(_cmt.definition.name)
+                            logger.info(
+                                "CHAT_MEMORY_TOOL_REGISTERED tool=%s",
+                                _cmt.definition.name,
+                            )
 
                 # Merge plugin-provided tools so YAML workflows can reference
                 # them.  Plugin tools (e.g., sfdc_context) aren't created by
@@ -508,9 +626,29 @@ async def stream_research_via_framework(
                     wf_state.append("init", "conversation_history", conversation_history)
 
                 # Load existing sources for follow-up queries (Step 4)
-                existing_sources = await _load_existing_sources(db, chat_id)
+                existing_sources = await _load_existing_sources(
+                    storage_stack, db, chat_id,
+                )
                 if existing_sources:
                     wf_state.append("init", "existing_sources", existing_sources)
+
+                # Seed chat-memory appendix for universal system-prompt
+                # injection (reserved key consumed by harness._build_input).
+                # Empty when memory is empty → no-op, backward-compat
+                # preserved (golden-file regression test covers this).
+                if chat_memory is not None:
+                    _appendix = chat_memory.render_appendix_block(agent_type="coordinator")
+                    if _appendix:
+                        wf_state.append(
+                            "init",
+                            CHAT_MEMORY_APPENDIX_STATE_KEY,
+                            _appendix,
+                        )
+                        logger.info(
+                            "CHAT_MEMORY_APPENDIX_SEEDED chat_id=%s chars=%d",
+                            chat_id,
+                            len(_appendix),
+                        )
 
                 research_timeout = config.research_timeout_seconds
 
@@ -622,13 +760,14 @@ async def stream_research_via_framework(
                 await _persist_simple_response(
                     config, db, chat_id, user_id, query, simple_response,
                     event_buffer,
+                    storage_stack=storage_stack,
                 )
                 # Yield persistence event for simple mode
                 if (
                     config.message_id is not None
                     and chat_id is not None
                 ):
-                    chat_title = query[:47] + "..." if len(query) > 50 else query
+                    chat_title = derive_chat_title_from_query(query)
                     yield PersistenceCompletedEvent(
                         chat_id=str(chat_id),
                         message_id=str(config.message_id),
@@ -645,9 +784,16 @@ async def stream_research_via_framework(
                     except Exception as e:
                         logger.warning("FWK_EVENT_BUFFER_FLUSH_FAILED error=%s", str(e)[:200])
 
+                # F-PERSIST-GUARDS: `db is not None` was a proxy for
+                # "persistence is wired up", but the independent-session
+                # helpers called by `_persist_completion` open their own
+                # sessions via `get_session_maker()` internally. Dropping the
+                # check lets SQL-Warehouse-only deploys (where the request
+                # `db` is None) still persist research results instead of
+                # silently logging `FWK_PERSISTENCE_GUARD_FAILED` and losing
+                # the chat.
                 if (
-                    db is not None
-                    and config.message_id is not None
+                    config.message_id is not None
                     and config.research_session_id is not None
                     and final_report
                     and chat_id is not None
@@ -690,9 +836,10 @@ async def stream_research_via_framework(
                         wf_state,
                         claims=extracted_claims,
                         verification_summary=effective_summary,
+                        storage_stack=storage_stack,
                     )
                     if counts:
-                        chat_title = query[:47] + "..." if len(query) > 50 else query
+                        chat_title = derive_chat_title_from_query(query)
                         yield PersistenceCompletedEvent(
                             chat_id=str(chat_id_uuid),
                             message_id=str(config.message_id),
@@ -742,10 +889,13 @@ async def stream_research_via_framework(
                 from deep_research.agent.persistence import (
                     persist_research_session_failed_independent,
                 )
+                _chat_id_for_fail = _to_uuid(chat_id) if chat_id is not None else None
                 await persist_research_session_failed_independent(
                     research_session_id=config.research_session_id,
                     agent_message_id=config.message_id,
                     error_message=str(e)[:500],
+                    storage_stack=storage_stack,
+                    chat_id=_chat_id_for_fail,
                 )
             except Exception:
                 pass
@@ -959,17 +1109,62 @@ async def _buffer_event(
             await buffer.add_event(event)
 
 
+async def _resolve_uploaded_file_ids(
+    config: OrchestrationConfig,
+    db: Any,
+    user_id: str | None,
+    chat_id: UUID | str | None,
+    *,
+    storage_stack: Any = None,
+) -> list[UUID]:
+    """Resolve the set of UploadedFile UUIDs visible to this turn.
+
+    Mirrors the dual-path logic of ``_load_file_search_tool`` (explicit
+    ``config.file_ids`` wins; otherwise auto-discover by chat session),
+    but returns the raw UUID list instead of a constructed tool — so
+    ``ChatMemoryService.preprocess_new_files`` can iterate over them.
+    Returns [] if no files.
+    """
+    if config.file_ids:
+        out: list[UUID] = []
+        for raw in config.file_ids:
+            try:
+                out.append(UUID(str(raw)))
+            except (TypeError, ValueError):
+                logger.warning("FILE_ID_INVALID raw=%r", raw)
+        return out
+
+    if (db is None and storage_stack is None) or not user_id or not chat_id:
+        return []
+
+    try:
+        from deep_research.core.config import get_settings as _gs3
+        service = make_file_upload_service(_gs3(), storage_stack, session=db)
+        session_uuid = chat_id if isinstance(chat_id, UUID) else UUID(str(chat_id))
+        chat_files, _ = await service.get_session_files(
+            user_id, session_uuid, limit=20,
+        )
+        return [f.id for f in chat_files if f.is_ready]
+    except Exception as e:
+        logger.warning(
+            "FILE_IDS_AUTO_DISCOVERY_FAILED error=%s", str(e)[:200],
+        )
+        return []
+
+
 async def _load_file_search_tool(
     config: OrchestrationConfig,
     db: Any,
     user_id: str | None,
     chat_id: str | None,
+    *,
+    storage_stack: Any = None,
 ) -> Any | None:
     """Load file search tool from explicit file_ids or auto-discovery.
 
     Returns an app-level FileSearchTool instance, or None.
     """
-    if config.file_ids and db is not None and user_id:
+    if config.file_ids and (db is not None or storage_stack is not None) and user_id:
         try:
             from deep_research.agent.tools.file_search import create_file_search_tool
 
@@ -986,13 +1181,13 @@ async def _load_file_search_tool(
             return None
 
     # Auto-discover files for the chat
-    if db is not None and user_id and chat_id:
+    if (db is not None or storage_stack is not None) and user_id and chat_id:
         try:
             from uuid import UUID as _UUID
 
-            from deep_research.services.file_upload_service import FileUploadService
+            from deep_research.core.config import get_settings as _gs4
 
-            service = FileUploadService(db)
+            service = make_file_upload_service(_gs4(), storage_stack, session=db)
             chat_files, _ = await service.get_session_files(
                 user_id, _UUID(chat_id), limit=20,
             )
@@ -1021,15 +1216,72 @@ async def _load_file_search_tool(
 
 
 async def _load_existing_sources(
+    storage_stack: Any,
     db: Any,
     chat_id: str | None,
 ) -> list[dict[str, Any]]:
     """Load existing sources from prior messages for follow-up queries.
 
+    F-SOURCES: prefer `storage_stack.cache` (ChatDocument.state.sources) when
+    available — no DB round-trip, survives Lakebase-off deployments. Falls
+    back to the legacy ORM when only `db` is provided.
+
     Returns a list of source dicts suitable for seeding into the framework's
-    initial_state.
+    initial_state. Shape preserved from the legacy path:
+    ``{"url", "title", "snippet", "content"}``.
     """
-    if db is None or not chat_id:
+    if not chat_id:
+        return []
+
+    # Cached path: read from the hydrated ChatDocument.
+    if storage_stack is not None:
+        try:
+            chat_id_uuid = _to_uuid(chat_id)
+            doc = await storage_stack.cache.get(chat_id_uuid)
+            items = list(doc.state.sources)
+            if not items:
+                return []
+
+            # Sort by relevance_score desc (nulls last), matching the legacy
+            # order_by. The new engine stores relevance_score / snippet /
+            # content inside `Source.metadata`.
+            def _score(src: Any) -> tuple[int, float]:
+                meta = getattr(src, "metadata", None) or {}
+                score = meta.get("relevance_score")
+                if score is None:
+                    return (1, 0.0)  # nulls last
+                try:
+                    return (0, -float(score))
+                except (TypeError, ValueError):
+                    return (1, 0.0)
+
+            items.sort(key=_score)
+            items = items[:100]
+
+            result_list = []
+            for src in items:
+                meta = getattr(src, "metadata", None) or {}
+                result_list.append({
+                    "url": getattr(src, "url", None),
+                    "title": getattr(src, "title", None),
+                    "snippet": meta.get("snippet"),
+                    "content": meta.get("content"),
+                })
+
+            logger.info(
+                "FWK_EXISTING_SOURCES_LOADED chat_id=%s count=%d path=cached",
+                str(chat_id_uuid)[:8], len(result_list),
+            )
+            return result_list
+        except Exception as e:
+            logger.warning(
+                "FWK_EXISTING_SOURCES_CACHE_LOAD_FAILED error=%s",
+                str(e)[:200],
+            )
+            # Fall through to legacy path if db is available.
+
+    # Legacy path: ORM on public.sources.
+    if db is None:
         return []
 
     try:
@@ -1050,9 +1302,9 @@ async def _load_existing_sources(
         if not sources:
             return []
 
-        result = []
+        out = []
         for src in sources:
-            result.append({
+            out.append({
                 "url": src.url,
                 "title": src.title,
                 "snippet": getattr(src, "snippet", None),
@@ -1060,10 +1312,10 @@ async def _load_existing_sources(
             })
 
         logger.info(
-            "FWK_EXISTING_SOURCES_LOADED chat_id=%s count=%d",
-            str(chat_id_uuid)[:8], len(result),
+            "FWK_EXISTING_SOURCES_LOADED chat_id=%s count=%d path=legacy",
+            str(chat_id_uuid)[:8], len(out),
         )
-        return result
+        return out
     except Exception as e:
         logger.warning(
             "FWK_EXISTING_SOURCES_LOAD_FAILED error=%s",
@@ -1120,6 +1372,7 @@ async def _load_enterprise_tools(
     db: Any,
     user_id: str | None,
     chat_id: str | None,  # noqa: ARG001
+    storage_stack: Any | None = None,
 ) -> list[Any]:
     """Load enterprise tools from the app's tool factory.
 
@@ -1140,12 +1393,15 @@ async def _load_enterprise_tools(
     remaining_source_ids = list(selected_source_ids)
 
     try:
-        if db is not None and user_id:
+        if (db is not None or storage_stack is not None) and user_id:
             if selected_source_ids:
                 from deep_research.agent.tools.factory import create_tools_from_user_sources
-                from deep_research.services.data_source_service import DataSourceService
+                from deep_research.core.config import get_settings
+                from deep_research.services._impl_factory import make_data_source_service
 
-                service = DataSourceService(db)
+                service = make_data_source_service(
+                    get_settings(), storage_stack, session=db,
+                )
                 sources, _ = await service.get_accessible_sources(user_id, only_valid=True)
                 matched_sources = [
                     source for source in sources
@@ -1273,11 +1529,18 @@ async def _persist_simple_response(
     query: str,
     response: str,
     _event_buffer: EventBuffer | None,
+    *,
+    storage_stack: Any = None,
 ) -> None:
-    """Persist a simple query response (no research session)."""
+    """Persist a simple query response (no research session).
+
+    F-PERSIST-GUARDS: the `db is None` check was a proxy for "persistence is
+    wired up", but the `persist_simple_message_*_independent` helpers open
+    their own sessions via `get_session_maker()` — no `db` needed.
+    When storage_stack is provided and impl==cached, skips session_maker.
+    """
     if (
-        db is None
-        or config.message_id is None
+        config.message_id is None
         or chat_id is None
         or user_id is None
     ):
@@ -1297,6 +1560,8 @@ async def _persist_simple_response(
                 persist_simple_message_update_independent(
                     message_id=config.message_id,
                     content=response,
+                    storage_stack=storage_stack,
+                    chat_id=chat_id_uuid,
                 )
             )
         else:
@@ -1307,6 +1572,7 @@ async def _persist_simple_response(
                     user_query=query,
                     message_id=config.message_id,
                     content=response,
+                    storage_stack=storage_stack,
                 )
             )
 
@@ -1361,10 +1627,13 @@ async def _persist_completion(
     *,
     claims: list[Any] | None = None,
     verification_summary: Any | None = None,
+    storage_stack: Any = None,
 ) -> dict[str, int] | None:
     """Persist final research session completion.
 
     Uses asyncio.shield to survive client disconnection.
+    When storage_stack is provided and impl==cached, persistence helpers
+    skip session_maker entirely.
     """
     try:
         if event_buffer is not None:
@@ -1387,6 +1656,7 @@ async def _persist_completion(
                     research_session_id=config.research_session_id,
                     agent_message_id=config.message_id,
                     state=state_proxy,
+                    storage_stack=storage_stack,
                 )
             )
             logger.info(
@@ -1418,6 +1688,7 @@ async def _persist_completion(
                     research_session_id=config.research_session_id,
                     research_depth=config.research_depth,
                     state=state_proxy,
+                    storage_stack=storage_stack,
                 )
             )
             return counts
@@ -1436,6 +1707,8 @@ async def _persist_completion(
                     research_session_id=config.research_session_id,
                     agent_message_id=config.message_id,
                     error_message=str(e)[:500],
+                    storage_stack=storage_stack,
+                    chat_id=chat_id_uuid,
                 )
             except Exception:
                 pass

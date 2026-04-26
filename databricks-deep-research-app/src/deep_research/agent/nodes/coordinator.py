@@ -30,7 +30,13 @@ from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.types import ModelTier
 
 if TYPE_CHECKING:
-    from deep_research.services.chat_source_pool_service import ChatSourcePoolService
+    # Use the Protocol rather than the legacy concrete class so the coordinator
+    # compiles without a DB session dependency. The caller (framework_orchestrator
+    # or tests) may pass any object satisfying IChatSourcePoolService, including
+    # the legacy ChatSourcePoolService (which is structurally compatible).
+    # F-OTHER.3: full cached impl deferred until orchestrator wires cached source
+    # list into this call site.
+    from deep_research.services._protocols import IChatSourcePoolService as ChatSourcePoolService
 
 logger = get_logger(__name__)
 

@@ -57,11 +57,27 @@ def select_latest_observation_text(state: Any) -> str:
 
 
 def select_all_observations_text(state: Any) -> str:
+    """Render all observations as bulleted text for prompt injection.
+
+    Uses the framework's default synthesis-context budget (preserves the first
+    10 observations verbatim, then soft-tail-trims only on overflow past 200 KB
+    total). Previous behaviour was a hard ``obs.text[:300]`` cap per item which
+    silently discarded ~97% of researcher output and primed the synthesiser to
+    hallucinate.
+    """
     runtime = get_runtime(state)
     evidence = getattr(runtime.capabilities, "evidence", None) if runtime else None
-    if evidence is not None:
-        return "\n".join(f"- {obs.text[:300]}" for obs in evidence.observations[:30])
-    return ""
+    if evidence is None:
+        return ""
+    from databricks_deep_research.agents.prompt_context import (
+        _render_observations_with_budget,
+        default_synthesis_context,
+    )
+
+    cfg = default_synthesis_context().observations
+    assert cfg is not None
+    text, _stats = _render_observations_with_budget(list(evidence.observations), cfg)
+    return text
 
 
 def select_sources_count(state: Any, pools: dict[str, Any]) -> int:
@@ -160,16 +176,26 @@ def select_plan_iterations(state: Any) -> int:
 
 
 def select_sources_list(state: Any) -> str:
+    """Render the evidence source list with snippet (and content when present).
+
+    Uses the framework's default synthesis-context source budget. Previous
+    behaviour emitted only ``- [title](url)`` bullets, which starved the
+    synthesiser of real page text and encouraged confabulation of "what this
+    URL probably says".
+    """
     runtime = get_runtime(state)
     evidence = getattr(runtime.capabilities, "evidence", None) if runtime else None
     if evidence is None or not getattr(evidence, "sources", None):
         return ""
-    lines = []
-    for item in evidence.sources[:50]:
-        title = getattr(item, "title", "Source") or "Source"
-        url = getattr(item, "url", "") or ""
-        lines.append(f"- [{title}]({url})")
-    return "\n".join(lines)
+    from databricks_deep_research.agents.prompt_context import (
+        _render_sources_with_budget,
+        default_synthesis_context,
+    )
+
+    cfg = default_synthesis_context().sources
+    assert cfg is not None
+    text, _stats = _render_sources_with_budget(list(evidence.sources), cfg)
+    return text
 
 
 

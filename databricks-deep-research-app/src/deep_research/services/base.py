@@ -158,3 +158,12 @@ class BaseRepository(Generic[ModelT]):
             return False
         await self.delete(entity)
         return True
+
+    async def commit(self) -> None:
+        """Commit the underlying SQLAlchemy session.
+
+        Used by API endpoints to durably persist pending writes at the
+        end of a request. Errors propagate — callers must not silently
+        swallow commit failures.
+        """
+        await self._session.commit()

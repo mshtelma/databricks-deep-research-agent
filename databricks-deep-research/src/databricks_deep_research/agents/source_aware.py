@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -404,8 +405,17 @@ def admit_tool_result(
     *,
     current_step: Any | None,
     root_query: str,
+    node_hint_queries: list[str] | None = None,
 ) -> AdmittedToolResult:
-    """Keep only step-relevant sources and sanitize tool content for the LLM."""
+    """Keep only step-relevant sources and sanitize tool content for the LLM.
+
+    Args:
+        node_hint_queries: Optional capability-level vocabulary hints
+            declared on the agent node's config. Merged into the query
+            profile alongside planner-derived hints and the tool's own
+            query. Gated on ``ADMISSION_ENFORCE_NODE_HINTS`` env var
+            (default on).
+    """
     _maybe_sources = [_normalize_source(source, definition) for source in result.sources]
     raw_sources: list[dict[str, Any]] = [source for source in _maybe_sources if source is not None]
 
@@ -422,7 +432,12 @@ def admit_tool_result(
     tool_query: str | None = None
     if result.data and isinstance(result.data, dict):
         tool_query = result.data.get("query")
-    profile = _build_query_profile(current_step, root_query, tool_query=tool_query)
+    profile = _build_query_profile(
+        current_step,
+        root_query,
+        tool_query=tool_query,
+        node_hint_queries=node_hint_queries,
+    )
     logger.info(
         "ADMISSION_PROFILE tool=%s source_kind=%s step_title=%r root_query=%r "
         "profile_terms=%s profile_phrases=%s raw_source_count=%d",
@@ -851,27 +866,126 @@ def _build_synthetic_source(definition: ToolDefinition, content: str) -> dict[st
     }
 
 
+_PROFILE_TERM_BUDGET = 12
+
+# Per-source token reservations used by :func:`_reserve_slots`. Sum MUST
+# equal :data:`_PROFILE_TERM_BUDGET` — the module-load-time assertion
+# below pins the invariant.
+_PROFILE_SLOT_RESERVATIONS: dict[str, int] = {
+    "root_query": 5,
+    "step_text":  2,
+    "hints":      2,
+    "tool_query": 3,
+}
+assert sum(_PROFILE_SLOT_RESERVATIONS.values()) == _PROFILE_TERM_BUDGET, (
+    "_PROFILE_SLOT_RESERVATIONS must sum to _PROFILE_TERM_BUDGET"
+)
+
+_ADMISSION_ENFORCE_NODE_HINTS_ENV = "ADMISSION_ENFORCE_NODE_HINTS"
+_ADMISSION_USE_SLOT_RESERVATIONS_ENV = "ADMISSION_USE_SLOT_RESERVATIONS"
+
+
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _reserve_slots(
+    root_tokens: list[str],
+    step_tokens: list[str],
+    hint_tokens: list[str],
+    tool_tokens: list[str],
+) -> list[str]:
+    """Merge tokens from four sources honoring per-source reservations.
+
+    Guarantees:
+
+    * Total length ≤ :data:`_PROFILE_TERM_BUDGET`.
+    * Order-preserving dedup — a token that appears first in an earlier
+      source wins and is not repeated later.
+    * When a source supplies fewer tokens than its reservation, the
+      unused slots are reclaimed by ``root_query`` at the end so
+      the overall budget is never wasted.
+    * No source can be fully crowded out by another verbose source.
+
+    The fixed ordering (root → step → hints → tool) reflects intent
+    hierarchy, not priority: later sources still enter the profile at
+    their reserved share regardless of how many root tokens exist.
+    """
+    out: list[str] = []
+
+    def _take(src: list[str], reservation: int) -> None:
+        if reservation <= 0:
+            return
+        added = 0
+        for token in src:
+            if added >= reservation:
+                return
+            if token in out:
+                continue
+            out.append(token)
+            added += 1
+
+    _take(root_tokens, _PROFILE_SLOT_RESERVATIONS["root_query"])
+    _take(step_tokens, _PROFILE_SLOT_RESERVATIONS["step_text"])
+    _take(hint_tokens, _PROFILE_SLOT_RESERVATIONS["hints"])
+    _take(tool_tokens, _PROFILE_SLOT_RESERVATIONS["tool_query"])
+
+    # Fill any leftover budget from root_query (the query the user actually
+    # typed carries the most context, so it's the natural overflow source).
+    for token in root_tokens:
+        if len(out) >= _PROFILE_TERM_BUDGET:
+            break
+        if token not in out:
+            out.append(token)
+
+    return out[:_PROFILE_TERM_BUDGET]
+
+
 def _build_query_profile(
     current_step: Any | None,
     root_query: str,
     *,
     tool_query: str | None = None,
+    node_hint_queries: list[str] | None = None,
 ) -> dict[str, Any]:
     step_text = _step_text(current_step)
-    hint_queries = [
+    step_hints = [
         hint.query_hint for hint in _normalize_source_hints(current_step)
         if hint.query_hint
     ]
+    # Node-level hints are config-driven and feature-gated. When the
+    # flag is off we fall back to the legacy behavior (planner-step
+    # hints only), so ops can revert without a code change.
+    if _env_flag(_ADMISSION_ENFORCE_NODE_HINTS_ENV, default=False):
+        node_hints = list(node_hint_queries or [])
+    else:
+        node_hints = []
     # When the tool carries its own query (e.g. web_search), include it so
     # results for auxiliary data lookups (external reference values) match
     # even when current_step is empty (loop-only workflows without a planner).
     extra = [tool_query] if tool_query else []
-    terms = _focus_terms(root_query, step_text, *hint_queries, *extra)
+
+    if _env_flag(_ADMISSION_USE_SLOT_RESERVATIONS_ENV, default=False):
+        terms = _reserve_slots(
+            _extract_tokens(root_query),
+            _extract_tokens(step_text),
+            _extract_tokens(" ".join(step_hints + node_hints)),
+            _extract_tokens(" ".join(extra)),
+        )
+    else:
+        # Legacy path: straight concat + truncate.
+        terms = _focus_terms(
+            root_query, step_text, *step_hints, *node_hints, *extra,
+        )[:_PROFILE_TERM_BUDGET]
+
     phrases: list[str] = []
-    for text in [root_query, step_text, *hint_queries, *extra]:
+    for text in [root_query, step_text, *step_hints, *node_hints, *extra]:
         phrases.extend(_extract_phrases(text))
     return {
-        "terms": terms[:12],
+        "terms": terms,
         "phrases": phrases[:8],
     }
 

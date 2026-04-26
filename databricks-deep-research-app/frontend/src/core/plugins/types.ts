@@ -143,6 +143,17 @@ export interface InputConfig {
 }
 
 /**
+ * Configuration for sidebar navigation links.
+ * Plugins can hide framework-provided nav links that aren't relevant.
+ */
+export interface SidebarConfig {
+  /** Show "Agents" navigation link in sidebar. Default: true */
+  showAgentsLink?: boolean;
+  /** Show "Templates" navigation link in sidebar. Default: true */
+  showTemplatesLink?: boolean;
+}
+
+/**
  * Plugin registration interface
  */
 export interface FrontendPlugin {
@@ -162,6 +173,8 @@ export interface FrontendPlugin {
   sourceBadgeConfigs?: SourceBadgeConfig[];
   /** Configuration for message input component */
   inputConfig?: InputConfig;
+  /** Configuration for sidebar navigation links */
+  sidebarConfig?: SidebarConfig;
   /** Initialization callback */
   initialize?: (context: RenderContext) => void | Promise<void>;
   /** Cleanup callback */

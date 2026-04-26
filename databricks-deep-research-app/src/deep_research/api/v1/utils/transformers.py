@@ -8,6 +8,7 @@ Legacy model-based transformers have been removed. All citation/claim data
 is now read from JSONB and transformed to API response schemas.
 """
 
+from enum import Enum
 from typing import Any
 from uuid import NAMESPACE_DNS, UUID, uuid5
 
@@ -24,6 +25,21 @@ from deep_research.schemas.citation import (
 
 # Namespace for deterministic claim UUIDs
 CLAIM_UUID_NAMESPACE = NAMESPACE_DNS
+
+
+def status_str(value: Any) -> str:
+    """Normalize a status value (Enum or str) to its string representation.
+
+    Centralizes the legacy/cached split — the SQLAlchemy ORM returns
+    Enum objects, while the cached view dataclasses store the underlying
+    string. Use this at the API boundary so endpoint code never branches
+    on type. ``None`` is normalized to the empty string.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, Enum):
+        return str(value.value)
+    return str(value)
 
 
 def build_empty_verification_summary() -> VerificationSummary:

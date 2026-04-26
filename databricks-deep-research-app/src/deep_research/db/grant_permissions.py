@@ -7,6 +7,21 @@ after migrations have created tables. This is necessary because:
 2. App's service principal has CAN_CONNECT_AND_CREATE on database
 3. CAN_CONNECT_AND_CREATE doesn't grant SELECT/INSERT/UPDATE/DELETE on tables
 4. Explicit GRANT statements are needed for the app to access tables
+
+Scope notes:
+
+* This module intentionally touches ONLY the ``public`` schema (legacy ORM
+  tables created by alembic at deploy-time as the developer).
+* The chat-document storage schema (``settings.storage_schema``, default
+  ``deep_research_state``) is created and owned by the app SP itself at
+  lifespan via ``LakebaseBackend.migrate()``. The developer cannot transfer
+  ownership cross-principal on Lakebase — Postgres requires ``SET ROLE``
+  on the new owner, which Lakebase does not grant between the developer
+  and the app SP. Doing any CREATE SCHEMA / ALTER OWNER / ALTER TABLE
+  OWNER on ``deep_research_state`` from here would leave the schema
+  developer-owned and the app would hit "must be owner of table …" at
+  startup. ``drop_storage_schema()`` below is the one-time recovery for
+  a historically poisoned state.
 """
 
 import asyncio
@@ -141,43 +156,90 @@ async def grant_permissions_to_app(
     )
 
     try:
-        # Autoscaling requires explicit role creation via databricks_auth extension
+        # Autoscaling requires explicit role creation via databricks_auth extension.
         if provider.get_backend_type() == "autoscaling":
             try:
                 await conn.execute("CREATE EXTENSION IF NOT EXISTS databricks_auth")
-                # Check existence first — pg_roles is readable by all Postgres users
-                try:
-                    role_exists = await conn.fetchval(
+            except Exception as e:
+                logger.warning(
+                    "Could not ensure databricks_auth extension: %s", e,
+                )
+
+            # Three-state role-existence guard. The naive path defaults to
+            # role_exists=False on a pg_roles check failure and then calls
+            # databricks_create_role. On Lakebase autoscaling that can
+            # drop-and-recreate an already-existing role with a fresh OID,
+            # orphaning every schema/table the prior OID owned and later
+            # producing "permission denied for schema …" at app startup.
+            # Three-state (True/False/None):
+            #   True  → role exists; skip create (idempotent).
+            #   False → role missing; create it.
+            #   None  → verification failed; do NOT create (avoid accidental
+            #           recreate). Operator can create the role manually via
+            #           the Lakebase SQL Editor if this is a fresh deploy.
+            role_exists: bool | None
+            try:
+                role_exists = bool(
+                    await conn.fetchval(
                         "SELECT 1 FROM pg_roles WHERE rolname = $1", sp_username
                     )
-                except Exception as check_err:
-                    logger.debug(
-                        "pg_roles existence check failed for %s: %s — will attempt creation",
-                        sp_username,
-                        check_err,
-                    )
-                    role_exists = False
+                )
+            except Exception as check_err:
+                logger.warning(
+                    "pg_roles check failed for %s: %s — SKIPPING "
+                    "databricks_create_role to avoid accidental role "
+                    "recreation. If this is a fresh deploy, create the role "
+                    "manually via the Lakebase SQL Editor.",
+                    sp_username,
+                    check_err,
+                )
+                role_exists = None
 
-                if not role_exists:
+            if role_exists is False:
+                try:
                     await conn.execute(
                         "SELECT databricks_create_role($1, 'SERVICE_PRINCIPAL')",
                         sp_username,
                     )
                     logger.info(f"Created Autoscaling role for {sp_username}")
-                else:
-                    logger.info(f"Autoscaling role already exists for {sp_username}, skipping")
-            except Exception as e:
-                logger.warning(
-                    "Autoscaling role creation failed for %s: %s. "
-                    "This may require project-owner privileges. "
-                    "Try creating the role manually in the Lakebase SQL Editor.",
-                    sp_username,
-                    e,
+                except Exception as e:
+                    logger.warning(
+                        "Autoscaling role creation failed for %s: %s. "
+                        "This may require project-owner privileges. "
+                        "Try creating the role manually in the Lakebase SQL Editor.",
+                        sp_username,
+                        e,
+                    )
+            elif role_exists is True:
+                logger.info(
+                    f"Autoscaling role already exists for {sp_username}, skipping"
                 )
+            # role_exists is None → verification failed; skip create entirely
+            # (already logged above).
 
         # SECURITY INVARIANT: DDL statements below use f-string interpolation with
         # double-quoted identifiers. Safe ONLY because _validate_sql_identifier()
         # restricts input to [a-zA-Z0-9_\-\.]. If regex is widened, re-audit for injection.
+
+        # Grant database-level CREATE so the app SP can create its own storage
+        # schema (``settings.storage_schema``, default ``deep_research_state``)
+        # at lifespan via ``LakebaseBackend.migrate()``. Without this grant,
+        # ``CREATE SCHEMA IF NOT EXISTS`` fails at app startup with
+        # ``InsufficientPrivilegeError: permission denied for database <db>`` —
+        # even though the SP has Databricks ``CAN_CONNECT_AND_CREATE`` (which
+        # maps only to Postgres ``CONNECT`` on Lakebase Autoscaling, not
+        # ``CREATE``). CONNECT is included for idempotent self-documentation.
+        # GRANT is idempotent in Postgres; safe to re-run.
+        _validate_sql_identifier(settings.lakebase_database, "lakebase database")
+        logger.info(
+            "Granting CREATE, CONNECT on database %r to %s...",
+            settings.lakebase_database, sp_username,
+        )
+        await conn.execute(
+            f'GRANT CREATE, CONNECT ON DATABASE "{settings.lakebase_database}" '
+            f'TO "{sp_username}"'
+        )
+        logger.info("Granted CREATE, CONNECT on database")
 
         # Grant permissions on existing tables (least privilege: no TRUNCATE/TRIGGER)
         logger.info(f"Granting SELECT/INSERT/UPDATE/DELETE on all tables to {sp_username}...")
@@ -219,6 +281,74 @@ async def grant_permissions_to_app(
     logger.info(
         f"All permissions granted to service principal for app '{matched_app_name}'"
     )
+
+
+async def drop_storage_schema(settings: Settings | None = None) -> None:
+    """DESTRUCTIVE: drop ``settings.storage_schema`` as the current user.
+
+    One-time recovery for the historical poisoned-schema state: when a
+    previous deploy (or a local dev run of the app with developer creds)
+    created ``deep_research_state`` owned by the developer, Postgres on
+    Lakebase gives no way to transfer ownership to the app SP (``SET ROLE``
+    cross-principal is denied). The only path forward is to DROP the
+    schema as the current owner (developer) so the next app lifespan can
+    recreate it under the SP.
+
+    After this function runs successfully, run ``make deploy`` — the app's
+    ``LakebaseBackend.migrate()`` at lifespan will recreate the schema and
+    all tables owned by the SP.
+
+    WARNING: Destroys every table in the storage schema
+    (chat / user / prep_job / custom_agent / prompt_template / feedback /
+    audit_log / uploaded_files / etc.). This is irreversible. Only run
+    when you have confirmed the data is expendable, or when the current
+    deploy is already broken and unrecoverable without it.
+
+    Raises:
+        RuntimeError: If Lakebase is not configured, the credential provider
+            is unavailable, or the DROP SCHEMA is refused (e.g. the current
+            user is not the owner of the schema).
+    """
+    if settings is None:
+        settings = get_settings()
+    if not settings.use_lakebase:
+        raise RuntimeError("Not using Lakebase — nothing to reset.")
+
+    provider = get_credential_provider(settings)
+    if not provider:
+        raise RuntimeError("Lakebase credential provider not available")
+
+    cred = provider.get_credential()
+    host = provider.get_host()
+    port = provider.get_port()
+    storage_schema = settings.storage_schema or "deep_research_state"
+    _validate_sql_identifier(storage_schema, "storage schema")
+
+    logger.warning(
+        "DESTRUCTIVE: about to DROP SCHEMA %r CASCADE on database %r. "
+        "All data in the schema will be permanently lost.",
+        storage_schema, settings.lakebase_database,
+    )
+
+    conn = await asyncpg.connect(
+        host=host,
+        port=port,
+        user=cred.username,
+        password=cred.token,
+        database=settings.lakebase_database,
+        ssl="require",
+    )
+    try:
+        await conn.execute(
+            f'DROP SCHEMA IF EXISTS "{storage_schema}" CASCADE'
+        )
+        logger.info(
+            "Dropped schema %r. Run `make deploy` to let the app SP "
+            "recreate it owned by the SP.",
+            storage_schema,
+        )
+    finally:
+        await conn.close()
 
 
 if __name__ == "__main__":

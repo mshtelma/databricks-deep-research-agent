@@ -19,9 +19,16 @@ def _mock_request(headers=None):
 
 
 def _mock_settings(is_production=False):
-    """Create mock Settings."""
+    """Create mock Settings.
+
+    User-sync is disabled here because these tests target OBO/SP/anon
+    auth resolution, not the synchronous user-sync path that runs after
+    a successful resolve. With user_sync_enabled=False the new
+    ``_ensure_user_synced`` short-circuits before touching any backend.
+    """
     settings = MagicMock()
     settings.is_production = is_production
+    settings.user_sync_enabled = False
     return settings
 
 

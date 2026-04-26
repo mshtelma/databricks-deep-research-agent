@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator
+from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import Any
 from uuid import UUID
 
@@ -22,18 +23,126 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deep_research.api.v1.utils import verify_chat_access
+from deep_research.api.v1.utils.transformers import status_str
+from deep_research.core.config import Settings, get_settings
+from deep_research.core.deps import (
+    get_research_event_service,
+    get_storage_optional,
+)
 from deep_research.core.logging_utils import get_logger
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.research_session import ResearchSession, ResearchStatus
 from deep_research.schemas.common import BaseSchema
 from deep_research.schemas.source_scope import SourceScope
-from deep_research.api.v1.utils import verify_chat_access
+from deep_research.services._impl_factory import (
+    make_message_service,
+    make_preferences_service,
+    make_research_event_service,
+)
+from deep_research.services._protocols import IResearchEventService
 from deep_research.services.job_manager import get_job_manager
-from deep_research.services.research_event_service import ResearchEventService
 
 router = APIRouter(prefix="/research/jobs", tags=["Jobs"])
 logger = get_logger(__name__)
+
+
+# =============================================================================
+# Tolerant sub-read helpers
+# =============================================================================
+#
+# `submit_job` reads conversation history and user preferences before queueing
+# the job. Both reads are *tolerant*: if they fail the job must still submit.
+# Previously these blocks caught every exception without rolling back the
+# shared `AsyncSession`, so an INSERT failure inside `PreferencesService.
+# get_preferences` (e.g., FK violation on `user_preferences.user_id -> users`
+# for a fresh cached-mode user) poisoned the transaction and the downstream
+# `_count_user_active_jobs` SELECT failed with
+# `InFailedSQLTransactionError: current transaction is aborted`.
+#
+# Fix:
+#  - Route through `make_message_service` / `make_preferences_service` so
+#    cached deployments never hit the SQL tables from this path.
+#  - In the legacy SQL branch, wrap each read in SAVEPOINT so a failure
+#    rolls back only the savepoint and the outer request transaction stays
+#    usable.
+
+
+def _tolerant_tx_guard(
+    db: AsyncSession, settings: Settings
+) -> AbstractAsyncContextManager[Any]:
+    """Return a savepoint context on the legacy SQL branch, else a no-op."""
+    if settings.storage_service_impl == "sqlalchemy_legacy":
+        return db.begin_nested()
+    return nullcontext()
+
+
+async def _load_conversation_history(
+    db: AsyncSession,
+    settings: Settings,
+    storage_stack: Any,
+    chat_id: UUID,
+    is_draft: bool,
+) -> list[dict[str, str]]:
+    """Tolerantly load the last 10 messages for prompt context.
+
+    Returns `[]` on any failure or when the chat is a brand-new draft
+    (the cached backend has not hydrated a document for it yet, and a
+    request would log a misleading `chat does not exist` warning).
+    """
+    if is_draft:
+        return []
+
+    try:
+        async with _tolerant_tx_guard(db, settings):
+            message_service = make_message_service(
+                settings, storage_stack, session=db
+            )
+            history = await message_service.get_conversation_history(
+                chat_id, limit=10
+            )
+            logger.info(
+                "JOB_CONVERSATION_HISTORY_LOADED",
+                chat_id=str(chat_id),
+                message_count=len(history),
+            )
+            return history
+    except Exception as e:
+        orig = getattr(e, "orig", None)
+        logger.warning(
+            "JOB_CONVERSATION_HISTORY_FAILED",
+            chat_id=str(chat_id),
+            error=str(e),
+            error_type=type(e).__name__,
+            sqlstate=getattr(orig, "sqlstate", None),
+        )
+        return []
+
+
+async def _load_system_instructions(
+    db: AsyncSession,
+    settings: Settings,
+    storage_stack: Any,
+    user_id: str,
+) -> str | None:
+    """Tolerantly load the user's system-instruction preference."""
+    try:
+        async with _tolerant_tx_guard(db, settings):
+            preferences_service = make_preferences_service(
+                settings, storage_stack, session=db
+            )
+            return await preferences_service.get_system_instructions(user_id)
+    except Exception as e:
+        orig = getattr(e, "orig", None)
+        logger.warning(
+            "JOB_PREFERENCES_LOAD_FAILED",
+            user_id=user_id,
+            error=str(e),
+            error_type=type(e).__name__,
+            sqlstate=getattr(orig, "sqlstate", None),
+        )
+        return None
 
 
 # =============================================================================
@@ -185,56 +294,37 @@ async def submit_job(
     plugin_manager = getattr(request.app.state, "plugin_manager", None)
 
     # Verify user owns the chat (or it's a new draft)
-    await verify_chat_access(body.chat_id, user.user_id, db)
+    is_draft, _ = await verify_chat_access(
+        body.chat_id, user.user_id, db, request=request
+    )
 
-    # Get conversation history from database
-    conversation_history: list[dict[str, str]] = []
-    try:
-        from deep_research.services.message_service import MessageService
+    # Load tolerant sub-reads via the service factory (cached mode skips SQL).
+    settings = get_settings()
+    storage_stack = get_storage_optional(request)
 
-        message_service = MessageService(db)
-        conversation_history = await message_service.get_conversation_history(
-            body.chat_id, limit=10
-        )
-        logger.info(
-            "JOB_CONVERSATION_HISTORY_LOADED",
-            chat_id=str(body.chat_id),
-            message_count=len(conversation_history),
-        )
-    except Exception as e:
-        logger.warning(
-            "JOB_CONVERSATION_HISTORY_FAILED",
-            error=str(e),
-        )
-
-    # Get user's system instructions from preferences
-    system_instructions: str | None = None
-    try:
-        from deep_research.services.preferences_service import PreferencesService
-
-        preferences_service = PreferencesService(db)
-        system_instructions = await preferences_service.get_system_instructions(
-            user.user_id
-        )
-    except Exception as e:
-        logger.warning(
-            "JOB_PREFERENCES_LOAD_FAILED",
-            error=str(e),
-        )
+    conversation_history = await _load_conversation_history(
+        db, settings, storage_stack, body.chat_id, is_draft=is_draft
+    )
+    system_instructions = await _load_system_instructions(
+        db, settings, storage_stack, user.user_id
+    )
 
     # Get OBO token for enterprise data source authentication (007-enterprise Phase 2)
     user_token = getattr(request.state, "obo_token", None)
 
     # Validate agent_id if provided (009-custom-agent-config)
     if body.agent_id:
-        from deep_research.services.custom_agent_service import CustomAgentService
+        from deep_research.core.config import get_settings as _get_settings
+        from deep_research.services._impl_factory import make_custom_agent_service
 
         try:
             agent_uuid = UUID(body.agent_id)
         except ValueError as e:
             raise HTTPException(status_code=404, detail="Invalid agent ID format") from e
 
-        agent_service = CustomAgentService(db)
+        _settings = _get_settings()
+        _stack = get_storage_optional(request)
+        agent_service = make_custom_agent_service(_settings, _stack, session=db)
         agent = await agent_service.get_accessible(agent_uuid, user.user_id)
         if not agent:
             raise HTTPException(
@@ -296,10 +386,7 @@ async def list_jobs(
 
     # Count active jobs
     active_count = sum(
-        1
-        for j in jobs
-        if (j.status.value if hasattr(j.status, "value") else j.status)
-        == ResearchStatus.IN_PROGRESS.value
+        1 for j in jobs if status_str(j.status) == ResearchStatus.IN_PROGRESS.value
     )
 
     from deep_research.services.job_manager import get_max_concurrent_jobs
@@ -313,26 +400,66 @@ async def list_jobs(
     )
 
 
-@router.get("/{session_id}", response_model=JobResponse)
-async def get_job(
-    session_id: UUID,
+@router.get("/chat/{chat_id}/active", response_model=JobResponse | None)
+async def get_chat_active_job(
+    chat_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
-) -> JobResponse:
-    """Get details for a specific job.
+) -> JobResponse | None:
+    """Get the active job for a specific chat.
 
-    Returns current status, progress, and metadata.
+    Returns the in-progress job if one exists, otherwise None.
+    Used by frontend to detect if research is already running for this chat.
+
+    IMPORTANT: this route MUST be declared before any `/jobs/{chat_id}/...`
+    route that takes two UUID path params. FastAPI resolves routes in
+    declaration order, and the literal prefix ``/chat/`` must take priority
+    over UUID-typed ``{chat_id}`` binding that would otherwise 422-fail.
     """
-    session = await db.get(ResearchSession, session_id)
+    job_manager = get_job_manager()
+    session = await job_manager.get_chat_active_job(chat_id, user.user_id, db)
 
-    if not session or session.user_id != user.user_id:
-        raise HTTPException(status_code=404, detail="Job not found")
+    if not session:
+        return None
 
     return _session_to_response(session)
 
 
-@router.delete("/{session_id}", response_model=CancelJobResponse)
+@router.get("/{chat_id}/{session_id}", response_model=JobResponse)
+async def get_job(
+    chat_id: UUID,
+    session_id: UUID,
+    request: Request,
+    user: CurrentUser,
+    settings: Settings = Depends(get_settings),
+    db: AsyncSession = Depends(get_db),
+) -> JobResponse:
+    """Get details for a specific job.
+
+    Returns current status, progress, and metadata. ``chat_id`` is part of
+    the URL so the server can hydrate the ChatDocument (cached mode) or
+    verify ownership (legacy mode) with a single round-trip.
+    """
+    from deep_research.agent.session_lookup import load_session_control_view
+
+    stack = get_storage_optional(request)
+    view = await load_session_control_view(
+        chat_id,
+        session_id,
+        user.user_id,
+        settings=settings,
+        storage_stack=stack,
+        db=db,
+    )
+    if view is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    return _view_to_response(view)
+
+
+@router.delete("/{chat_id}/{session_id}", response_model=CancelJobResponse)
 async def cancel_job(
+    chat_id: UUID,
     session_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
@@ -342,7 +469,7 @@ async def cancel_job(
     Stops the research operation. Partial results are preserved in the database.
     """
     job_manager = get_job_manager()
-    success = await job_manager.cancel_job(session_id, user.user_id, db)
+    success = await job_manager.cancel_job(chat_id, session_id, user.user_id, db)
 
     if not success:
         raise HTTPException(status_code=404, detail="Job not found or access denied")
@@ -350,6 +477,7 @@ async def cancel_job(
     logger.info(
         "JOB_CANCELLED_API",
         session_id=str(session_id),
+        chat_id=str(chat_id),
         user_id=user.user_id,
     )
 
@@ -359,8 +487,10 @@ async def cancel_job(
     )
 
 
-@router.get("/{session_id}/stream")
+@router.get("/{chat_id}/{session_id}/stream")
 async def stream_job_events(
+    request: Request,
+    chat_id: UUID,
     session_id: UUID,
     user: CurrentUser,
     since_sequence: int = Query(
@@ -369,7 +499,7 @@ async def stream_job_events(
         ge=0,
         description="Resume from this sequence number",
     ),
-    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
 ) -> StreamingResponse:
     """Stream events for a job via Server-Sent Events.
 
@@ -387,21 +517,42 @@ async def stream_job_events(
     ```
 
     Note:
-        The generator uses an independent session (not the request-scoped `db`)
-        to prevent asyncpg connection pool corruption when clients disconnect
-        during streaming.
+        Validation uses a short-lived session that is released before the
+        SSE stream starts — holding the request-scoped ``Depends(get_db)``
+        open for minutes caused ``InterfaceError: connection is closed`` at
+        cleanup commit when PgBouncer/Lakebase reaped the idle connection.
+        The generator uses its own independent session for the streaming
+        lifetime.
     """
-    # Validate ownership with request-scoped session (fast path)
-    session = await db.get(ResearchSession, session_id)
-    if not session or session.user_id != user.user_id:
-        raise HTTPException(status_code=404, detail="Job not found")
+    from deep_research.agent.session_lookup import load_session_control_view
+    from deep_research.db.session import get_session_maker
 
-    # Capture validated values for closure (don't capture db!)
+    # Retrieve the storage stack once so validation + polling share the same
+    # instance. In cached mode the helper reads the ChatDocument through it;
+    # in legacy mode the helper falls back to db.get and the stack is unused.
+    stack = get_storage_optional(request)
+
+    session_maker = get_session_maker()
+    async with session_maker() as validation_db:
+        view = await load_session_control_view(
+            chat_id,
+            session_id,
+            user.user_id,
+            settings=settings,
+            storage_stack=stack,
+            db=validation_db,
+        )
+        if view is None:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+    # Capture validated values for closure (validation_db is released above)
     validated_session_id = session_id
+    validated_chat_id = chat_id
 
     logger.info(
         "JOB_STREAM_STARTED",
         session_id=str(session_id),
+        chat_id=str(chat_id),
         since_sequence=since_sequence,
     )
 
@@ -419,10 +570,16 @@ async def stream_job_events(
         poll_interval = 0.5  # seconds
 
         # Single session for entire generator - properly cleaned up by context manager
+        # F-RE: route event reads through the factory so cached impl is used when
+        # STORAGE_SERVICE_IMPL=cached. Session status is resolved through
+        # load_session_control_view which handles both cached (index →
+        # ChatDocument) and legacy (db.get) modes.
         async with session_maker() as independent_db:
             try:
                 while True:
-                    event_service = ResearchEventService(independent_db)
+                    event_service = make_research_event_service(
+                        settings, stack, session=independent_db
+                    )
                     events = await event_service.get_events_since_sequence(
                         research_session_id=validated_session_id,
                         since_sequence=last_seq,
@@ -436,22 +593,19 @@ async def stream_job_events(
                         if event.sequence_number:
                             last_seq = event.sequence_number
 
-                    # Get fresh session status (use get() to avoid caching issues)
-                    current_session = await independent_db.get(
-                        ResearchSession, validated_session_id
+                    current_view = await load_session_control_view(
+                        validated_chat_id,
+                        validated_session_id,
+                        user.user_id,
+                        settings=settings,
+                        storage_stack=stack,
+                        db=independent_db,
                     )
-                    if not current_session:
+                    if current_view is None:
                         # Session deleted - client will need to reload
                         break
 
-                    # Force refresh to get latest status from DB
-                    await independent_db.refresh(current_session)
-
-                    status_val = (
-                        current_session.status.value
-                        if hasattr(current_session.status, "value")
-                        else current_session.status
-                    )
+                    status_val = current_view.status.value
 
                     if status_val != ResearchStatus.IN_PROGRESS.value:
                         # Emit final status event and close
@@ -500,9 +654,11 @@ async def stream_job_events(
     )
 
 
-@router.get("/{session_id}/events", response_model=JobEventsResponse)
+@router.get("/{chat_id}/{session_id}/events", response_model=JobEventsResponse)
 async def get_job_events(
+    chat_id: UUID,
     session_id: UUID,
+    request: Request,
     user: CurrentUser,
     since_sequence: int = Query(
         0,
@@ -511,7 +667,9 @@ async def get_job_events(
         description="Return events after this sequence number",
     ),
     limit: int = Query(100, ge=1, le=500, description="Max events to return"),
+    settings: Settings = Depends(get_settings),
     db: AsyncSession = Depends(get_db),
+    event_service: IResearchEventService = Depends(get_research_event_service),
 ) -> JobEventsResponse:
     """Get events for a job (polling endpoint).
 
@@ -520,13 +678,22 @@ async def get_job_events(
 
     Returns has_more=True if job is still in progress.
     """
-    # Verify ownership
-    session = await db.get(ResearchSession, session_id)
-    if not session or session.user_id != user.user_id:
+    from deep_research.agent.session_lookup import load_session_control_view
+
+    # Verify ownership via the unified session lookup (no legacy ORM fetch).
+    stack = get_storage_optional(request)
+    view = await load_session_control_view(
+        chat_id,
+        session_id,
+        user.user_id,
+        settings=settings,
+        storage_stack=stack,
+        db=db,
+    )
+    if view is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    # Get events
-    event_service = ResearchEventService(db)
+    # Get events (F-RE: routed through factory)
     events = await event_service.get_events_since_sequence(
         research_session_id=session_id,
         since_sequence=since_sequence,
@@ -545,35 +712,13 @@ async def get_job_events(
         for e in events
     ]
 
-    status_val = (
-        session.status.value if hasattr(session.status, "value") else session.status
-    )
+    status_val = view.status.value
 
     return JobEventsResponse(
         events=event_responses,
         session_status=status_val,
         has_more=status_val == ResearchStatus.IN_PROGRESS.value,
     )
-
-
-@router.get("/chat/{chat_id}/active", response_model=JobResponse | None)
-async def get_chat_active_job(
-    chat_id: UUID,
-    user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-) -> JobResponse | None:
-    """Get the active job for a specific chat.
-
-    Returns the in-progress job if one exists, otherwise None.
-    Used by frontend to detect if research is already running for this chat.
-    """
-    job_manager = get_job_manager()
-    session = await job_manager.get_chat_active_job(chat_id, user.user_id, db)
-
-    if not session:
-        return None
-
-    return _session_to_response(session)
 
 
 # =============================================================================
@@ -593,10 +738,7 @@ def _session_to_response(session: ResearchSession) -> JobResponse:
     plan = session.plan or {}
     steps = plan.get("steps", [])
 
-    # Handle status as either enum or string
-    status_val = (
-        session.status.value if hasattr(session.status, "value") else session.status
-    )
+    status_val = status_str(session.status)
 
     return JobResponse(
         session_id=session.id,
@@ -609,4 +751,24 @@ def _session_to_response(session: ResearchSession) -> JobResponse:
         current_step=session.current_step_index,
         total_steps=len(steps) if steps else None,
         error_message=session.error_message,
+    )
+
+
+def _view_to_response(view: Any) -> JobResponse:
+    """Convert a SessionControlView to API response.
+
+    Used by the `GET /jobs/{chat_id}/{session_id}` endpoint after the
+    unified session lookup — no second ChatDocument walk required.
+    """
+    return JobResponse(
+        session_id=view.id,
+        status=view.status.value,
+        query=view.query,
+        query_mode=view.query_mode,
+        chat_id=view.chat_id,
+        started_at=view.started_at.isoformat() if view.started_at else None,
+        completed_at=view.completed_at.isoformat() if view.completed_at else None,
+        current_step=view.current_step,
+        total_steps=view.total_steps,
+        error_message=view.error_message,
     )

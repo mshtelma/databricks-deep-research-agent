@@ -57,12 +57,16 @@ export function useJobs(params?: { status?: string; limit?: number }) {
 
 /**
  * Hook to get a specific job by ID.
+ *
+ * ``chatId`` is required so the backend can resolve the session in a single
+ * round-trip through the unified StorageStack cache.
  */
-export function useJob(sessionId: string | null) {
+export function useJob(chatId: string | null, sessionId: string | null) {
   return useQuery({
-    queryKey: [...JOBS_KEY, sessionId],
-    queryFn: () => (sessionId ? jobsApi.get(sessionId) : null),
-    enabled: !!sessionId,
+    queryKey: [...JOBS_KEY, chatId, sessionId],
+    queryFn: () =>
+      chatId && sessionId ? jobsApi.get(chatId, sessionId) : null,
+    enabled: !!chatId && !!sessionId,
     staleTime: 1000,
   })
 }
@@ -97,16 +101,20 @@ export function useSubmitJob() {
 
 /**
  * Hook to cancel a running job.
+ *
+ * Caller passes both ``chatId`` and ``sessionId`` so the backend can resolve
+ * ownership without an additional index-table lookup.
  */
 export function useCancelJob() {
   const queryClient = useQueryClient()
 
   return useMutation({
-    mutationFn: (sessionId: string) => jobsApi.cancel(sessionId),
-    onSuccess: (_, sessionId) => {
+    mutationFn: (vars: { chatId: string; sessionId: string }) =>
+      jobsApi.cancel(vars.chatId, vars.sessionId),
+    onSuccess: (_, vars) => {
       // Invalidate specific job and all lists
       queryClient.invalidateQueries({ queryKey: JOBS_KEY })
-      queryClient.invalidateQueries({ queryKey: [...JOBS_KEY, sessionId] })
+      queryClient.invalidateQueries({ queryKey: [...JOBS_KEY, vars.chatId, vars.sessionId] })
     },
   })
 }
@@ -144,6 +152,7 @@ export type JobEventHandler = (event: JobEvent | { eventType: 'job_completed'; s
  * @returns Connection state
  */
 export function useJobEventStream(
+  chatId: string | null,
   sessionId: string | null,
   onEvent: JobEventHandler
 ) {
@@ -161,13 +170,13 @@ export function useJobEventStream(
 
   // Connect to event stream
   useEffect(() => {
-    if (!sessionId) {
+    if (!chatId || !sessionId) {
       setIsConnected(false)
       return
     }
 
     const connect = () => {
-      const url = jobsApi.streamUrl(sessionId, lastSequenceRef.current)
+      const url = jobsApi.streamUrl(chatId, sessionId, lastSequenceRef.current)
       const eventSource = new EventSource(url)
       eventSourceRef.current = eventSource
 
@@ -223,7 +232,7 @@ export function useJobEventStream(
       }
       setIsConnected(false)
     }
-  }, [sessionId, queryClient])
+  }, [chatId, sessionId, queryClient])
 
   return {
     isConnected,
@@ -240,6 +249,7 @@ export function useJobEventStream(
  * @param pollInterval - Polling interval in ms (default 1000)
  */
 export function useJobEventPolling(
+  chatId: string | null,
   sessionId: string | null,
   enabled: boolean = true,
   pollInterval: number = 1000
@@ -249,9 +259,10 @@ export function useJobEventPolling(
   const queryClient = useQueryClient()
 
   const { data, isLoading, error } = useQuery({
-    queryKey: [...JOBS_KEY, sessionId, 'events', lastSequence],
-    queryFn: () => (sessionId ? jobsApi.getEvents(sessionId, lastSequence) : null),
-    enabled: enabled && !!sessionId,
+    queryKey: [...JOBS_KEY, chatId, sessionId, 'events', lastSequence],
+    queryFn: () =>
+      chatId && sessionId ? jobsApi.getEvents(chatId, sessionId, lastSequence) : null,
+    enabled: enabled && !!chatId && !!sessionId,
     refetchInterval: (query) => {
       // Stop polling when job is no longer in progress
       const data = query.state.data
@@ -325,7 +336,7 @@ export function useResearchJob(chatId: string) {
   }, [queryClient])
 
   // Connect to event stream when job is active
-  const { isConnected } = useJobEventStream(activeSessionId, handleEvent)
+  const { isConnected } = useJobEventStream(chatId, activeSessionId, handleEvent)
 
   // Submit new job
   const submitJob = useCallback(
@@ -356,11 +367,11 @@ export function useResearchJob(chatId: string) {
   // Cancel active job
   const cancel = useCallback(async () => {
     if (activeSessionId) {
-      await cancelMutation.mutateAsync(activeSessionId)
+      await cancelMutation.mutateAsync({ chatId, sessionId: activeSessionId })
       setStatus('cancelled')
       setActiveSessionId(null)
     }
-  }, [activeSessionId, cancelMutation])
+  }, [activeSessionId, cancelMutation, chatId])
 
   // Reset state
   const reset = useCallback(() => {

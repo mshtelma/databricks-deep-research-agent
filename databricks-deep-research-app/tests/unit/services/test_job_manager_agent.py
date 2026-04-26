@@ -33,7 +33,8 @@ class TestAgentResolutionInRunJob:
         # Verify the conditional agent resolution block
         assert "if agent_id:" in source
         assert "apply_custom_agent_to_config" in source
-        assert "CustomAgentService" in source
+        # Agent resolution now routes through the factory (dual-backend support)
+        assert "make_custom_agent_service" in source
         assert "get_accessible" in source
 
         # Verify the function exists and is callable
@@ -56,7 +57,8 @@ class TestAgentResolutionInRunJob:
 
         source = inspect.getsource(JobManager)
         assert "apply_custom_agent_to_config" in source
-        assert "CustomAgentService" in source
+        # Agent resolution now routes through the factory (dual-backend support)
+        assert "make_custom_agent_service" in source
         assert "JOB_AGENT_CONFIG_APPLIED" in source
         assert "JOB_AGENT_NOT_FOUND" in source
 

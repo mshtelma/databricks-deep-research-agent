@@ -4,7 +4,7 @@ import json as json_module
 from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Cookie, Depends, Query, Response
+from fastapi import APIRouter, Cookie, Depends, Query, Request, Response
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,6 +13,12 @@ from deep_research.api.v1.utils.transformers import (
     jsonb_summary_to_response,
 )
 from deep_research.core.config import get_settings
+from deep_research.core.deps import (
+    get_chat_service,
+    get_export_service,
+    get_session_service,
+    get_storage_optional,
+)
 from deep_research.core.exceptions import NotFoundError, ValidationError
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
@@ -29,9 +35,7 @@ from deep_research.schemas.chat import (
     ResearchSessionInline,
 )
 from deep_research.schemas.session import IncognitoChatListResponse, IncognitoSessionStatus
-from deep_research.services.chat_service import ChatService
-from deep_research.services.export_service import ExportService
-from deep_research.services.session_service import SessionService
+from deep_research.services._protocols import IChatService, IExportService, ISessionService
 
 router = APIRouter()
 
@@ -39,8 +43,8 @@ router = APIRouter()
 INCOGNITO_SESSION_COOKIE = "incognito_session"
 
 
-def _chat_to_response(chat: "Chat") -> ChatResponse:
-    """Convert Chat model to ChatResponse schema."""
+def _chat_to_response(chat: "object") -> ChatResponse:
+    """Convert Chat model or ChatView to ChatResponse schema."""
     return ChatResponse(
         id=chat.id,
         title=chat.title,
@@ -59,8 +63,9 @@ def _chat_to_response(chat: "Chat") -> ChatResponse:
 
 @router.get("", response_model=ChatListResponse)
 async def list_chats(
+    request: Request,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
     status: ChatStatus | None = Query(None, description="Filter by status. If not provided, returns all non-deleted chats."),
     search: str | None = Query(None),
     limit: int = Query(20, ge=1, le=100),
@@ -71,14 +76,22 @@ async def list_chats(
     Returns paginated list of user's chats, sorted by most recent activity.
     Supports filtering by status and full-text search.
     """
-    service = ChatService(db)
-    chats, total = await service.list(
+    chats, total = await chat_service.list(
         user_id=user.user_id,
         status=status,
         limit=limit,
         offset=offset,
         search=search,
     )
+
+    # Storage-side prefetch: hydrate the user's top-3 recent chats in the
+    # background so the next `GET /chats/{id}` or `POST /research` hits a
+    # warm cache. Fire-and-forget; never blocks the response.
+    stack = get_storage_optional(request)
+    if stack is not None:
+        import asyncio
+
+        asyncio.create_task(stack.hydrator.prefetch(user.user_id, top_n=3))
 
     return ChatListResponse(
         items=[_chat_to_response(chat) for chat in chats],
@@ -92,15 +105,15 @@ async def list_chats(
 async def create_chat(
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
     request: ChatCreate | None = None,
 ) -> ChatResponse:
     """Create a new chat."""
-    service = ChatService(db)
-    chat = await service.create(
+    chat = await chat_service.create(
         user_id=user.user_id,
         title=request.title if request else None,
     )
-    await db.commit()
+    await chat_service.commit()
     return _chat_to_response(chat)
 
 
@@ -114,6 +127,8 @@ async def create_incognito_chat(
     response: Response,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
+    session_service: ISessionService = Depends(get_session_service),
     request: ChatCreate | None = None,
     incognito_session: str | None = Cookie(None, alias=INCOGNITO_SESSION_COOKIE),
 ) -> ChatResponse:
@@ -127,8 +142,6 @@ async def create_incognito_chat(
 
     Sets a session cookie if one doesn't exist.
     """
-    session_service = SessionService(db)
-    chat_service = ChatService(db)
 
     # Get or create session
     session, token, is_new = await session_service.get_or_create_session(
@@ -152,7 +165,7 @@ async def create_incognito_chat(
         incognito_session_id=session.id,
     )
     chat = await chat_service.add(chat)
-    await db.commit()
+    await chat_service.commit()
 
     # Set session cookie if new
     if is_new:
@@ -177,6 +190,8 @@ async def create_incognito_chat(
 async def list_incognito_chats(
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
+    session_service: ISessionService = Depends(get_session_service),
     incognito_session: str | None = Cookie(None, alias=INCOGNITO_SESSION_COOKIE),
 ) -> IncognitoChatListResponse:
     """List incognito chats for the current browser session.
@@ -190,7 +205,6 @@ async def list_incognito_chats(
             session_expires_at=None,
         )
 
-    session_service = SessionService(db)
     # Use secure method that verifies user ownership
     session = await session_service.get_by_token_for_user(incognito_session, user.user_id)
 
@@ -206,7 +220,6 @@ async def list_incognito_chats(
     await session_service.update(session)
 
     # Get incognito chats for this session
-    chat_service = ChatService(db)
     chats = await chat_service.list_incognito_for_session(session.id)
 
     return IncognitoChatListResponse(
@@ -220,13 +233,13 @@ async def list_incognito_chats(
 async def get_incognito_session_status(
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    session_service: ISessionService = Depends(get_session_service),
     incognito_session: str | None = Cookie(None, alias=INCOGNITO_SESSION_COOKIE),
 ) -> IncognitoSessionStatus:
     """Get incognito session status and quota information.
 
     Returns whether a session exists, current chat count, and expiry time.
     """
-    session_service = SessionService(db)
     # Pass user_id for ownership verification
     status = await session_service.get_session_status(incognito_session, user.user_id)
 
@@ -247,7 +260,7 @@ async def get_incognito_session_status(
 async def get_chat_full(
     chat_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> ChatFullResponse:
     """Load complete chat with all messages, research sessions, sources, and claims.
 
@@ -255,19 +268,21 @@ async def get_chat_full(
     - GET /chats/{id}/messages
     - GET /messages/{id}/claims
     """
-    service = ChatService(db)
-    chat = await service.get_full(chat_id, user.user_id)
+    chat = await chat_service.get_full(chat_id, user.user_id)
     if not chat:
         raise NotFoundError("Chat", str(chat_id))
 
     messages: list[MessageInline] = []
-    for msg in sorted(chat.messages, key=lambda m: m.created_at):
+    # Support both legacy ORM Chat (chat.messages) and ChatFullViewCached (chat.messages)
+    chat_messages = getattr(chat, "messages", [])
+    for msg in sorted(chat_messages, key=lambda m: m.created_at):
         session_schema = None
         claims = []
         verification_summary = None
 
-        if msg.research_session:
-            rs = msg.research_session
+        rs_obj = getattr(msg, "research_session", None)
+        if rs_obj:
+            rs = rs_obj
             sources = [
                 SourceResponse(
                     id=s.id,
@@ -297,18 +312,22 @@ async def get_chat_full(
             )
 
             # Pre-parse claims using existing JSONB transformers
-            if rs.verification_data:
+            verification_data = getattr(rs, "verification_data", None)
+            if verification_data:
                 claims = [
                     jsonb_claim_to_response(c, msg.id)
-                    for c in rs.verification_data.get("claims", [])
+                    for c in verification_data.get("claims", [])
                 ]
-                raw_summary = rs.verification_data.get("summary")
+                raw_summary = verification_data.get("summary")
                 if raw_summary:
                     verification_summary = jsonb_summary_to_response(raw_summary)
 
+        # chat_id may be None on cached path — derive from the chat itself
+        msg_chat_id = getattr(msg, "chat_id", None) or chat_id
+
         messages.append(MessageInline(
             id=msg.id,
-            chat_id=msg.chat_id,
+            chat_id=msg_chat_id,
             role=msg.role,
             content=msg.content or "",
             created_at=msg.created_at,
@@ -318,6 +337,7 @@ async def get_chat_full(
             verification_summary=verification_summary,
         ))
 
+    # Support both legacy Chat.id and ChatFullViewCached.id
     return ChatFullResponse(
         id=chat.id,
         title=chat.title,
@@ -333,15 +353,22 @@ async def get_chat_full(
 @router.get("/{chat_id}", response_model=ChatResponse)
 async def get_chat(
     chat_id: UUID,
+    request: Request,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
     include_messages: bool = Query(True),
 ) -> ChatResponse:
     """Get chat details with optional messages."""
-    service = ChatService(db)
-    chat = await service.get_for_user(chat_id, user.user_id)
+    chat = await chat_service.get_for_user(chat_id, user.user_id)
     if not chat:
         raise NotFoundError("Chat", str(chat_id))
+
+    # Storage-side hydration start: kick off the background hydration so
+    # the next research turn on this chat reads from a warm cache.
+    stack = get_storage_optional(request)
+    if stack is not None:
+        stack.hydrator.start(chat_id, user_id=user.user_id)
+
     return _chat_to_response(chat)
 
 
@@ -351,10 +378,10 @@ async def update_chat(
     request: ChatUpdate,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> ChatResponse:
     """Update chat (rename, archive)."""
-    service = ChatService(db)
-    chat = await service.update_chat(
+    chat = await chat_service.update_chat(
         chat_id=chat_id,
         user_id=user.user_id,
         title=request.title,
@@ -362,7 +389,7 @@ async def update_chat(
     )
     if not chat:
         raise NotFoundError("Chat", str(chat_id))
-    await db.commit()
+    await chat_service.commit()
     return _chat_to_response(chat)
 
 
@@ -371,16 +398,16 @@ async def delete_chat(
     chat_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> None:
     """Delete chat (soft delete).
 
     Soft deletes the chat. Recoverable for 30 days.
     """
-    service = ChatService(db)
-    deleted = await service.soft_delete(chat_id, user.user_id)
+    deleted = await chat_service.soft_delete(chat_id, user.user_id)
     if not deleted:
         raise NotFoundError("Chat", str(chat_id))
-    await db.commit()
+    await chat_service.commit()
 
 
 @router.post("/{chat_id}/restore", response_model=ChatResponse)
@@ -388,16 +415,16 @@ async def restore_chat(
     chat_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> ChatResponse:
     """Restore deleted chat.
 
     Restores a soft-deleted chat within the 30-day recovery window.
     """
-    service = ChatService(db)
-    chat = await service.restore(chat_id, user.user_id)
+    chat = await chat_service.restore(chat_id, user.user_id)
     if not chat:
         raise NotFoundError("Chat", str(chat_id))
-    await db.commit()
+    await chat_service.commit()
     return _chat_to_response(chat)
 
 
@@ -405,8 +432,8 @@ async def restore_chat(
 async def export_chat(
     chat_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
     format: str = Query(..., pattern="^(markdown|json)$"),
+    export_service: IExportService = Depends(get_export_service),
 ) -> PlainTextResponse:
     """Export chat as Markdown or JSON.
 
@@ -419,8 +446,6 @@ async def export_chat(
     Returns:
         PlainTextResponse with exported content.
     """
-    export_service = ExportService(db)
-
     try:
         if format == "markdown":
             content = await export_service.export_markdown(
@@ -456,6 +481,8 @@ async def convert_incognito_to_regular(
     chat_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
+    session_service: ISessionService = Depends(get_session_service),
     incognito_session: str | None = Cookie(None, alias=INCOGNITO_SESSION_COOKIE),
 ) -> ChatResponse:
     """Convert an incognito chat to a regular (permanent) chat.
@@ -463,9 +490,6 @@ async def convert_incognito_to_regular(
     Preserves the chat ID and all content. The chat will no longer
     be deleted when the session expires.
     """
-    chat_service = ChatService(db)
-    session_service = SessionService(db)
-
     # Get the chat
     chat = await chat_service.get_for_user(chat_id, user.user_id)
     if not chat:
@@ -481,9 +505,24 @@ async def convert_incognito_to_regular(
         if session and chat.incognito_session_id != session.id:
             raise NotFoundError("Chat", str(chat_id))
 
-    # Convert to regular
-    chat.convert_to_regular()
-    await chat_service.update(chat)
-    await db.commit()
+    # Convert to regular — update via service
+    # Build a mutable proxy for convert_to_regular
+    class _ChatProxy:
+        def __init__(self, c: object) -> None:
+            self._c = c
+            # Copy mutable attrs
+            self.id = c.id
+            self.user_id = c.user_id
+            self.title = c.title
+            self.status = c.status
+            self.chat_type = ChatType.REGULAR  # converted
+            self.incognito_session_id = None   # cleared
+            self.created_at = c.created_at
+            self.updated_at = c.updated_at
+            self.deleted_at = c.deleted_at
 
-    return _chat_to_response(chat)
+    proxy = _ChatProxy(chat)
+    result = await chat_service.update(proxy)
+    await chat_service.commit()
+
+    return _chat_to_response(result)

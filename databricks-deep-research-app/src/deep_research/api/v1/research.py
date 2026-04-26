@@ -15,16 +15,18 @@ import logging
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.api.v1.utils import verify_chat_access
+from deep_research.api.v1.utils.transformers import status_str
+from deep_research.core.deps import get_chat_service, get_research_event_service
 from deep_research.core.exceptions import AuthorizationError, NotFoundError
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.schemas.research import CancelResearchResponse
-from deep_research.services.chat_service import ChatService
+from deep_research.services._protocols import IChatService, IResearchEventService
 from deep_research.services.research_session_service import ResearchSessionService
 
 router = APIRouter()
@@ -36,6 +38,7 @@ async def cancel_research(
     session_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> CancelResearchResponse:
     """Cancel in-progress research.
 
@@ -53,7 +56,6 @@ async def cancel_research(
     if not message:
         raise NotFoundError("ResearchSession", str(session_id))
 
-    chat_service = ChatService(db)
     chat = await chat_service.get_by_id(message.chat_id)
     if not chat or chat.user_id != user.user_id:
         # Return 404 to prevent information leakage (don't reveal session exists)
@@ -105,6 +107,7 @@ class ActiveResearchResponse(BaseModel):
 
 @router.get("/{chat_id}/research/active")
 async def get_active_research(
+    request: Request,
     chat_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
@@ -122,7 +125,7 @@ async def get_active_research(
 
     # Verify user has access to this chat
     try:
-        await verify_chat_access(chat_id, user.user_id, db)
+        await verify_chat_access(chat_id, user.user_id, db, request=request)
     except AuthorizationError:
         return ActiveResearchResponse(has_active_research=False)
 
@@ -147,8 +150,7 @@ async def get_active_research(
         )
     )
 
-    # Handle status as either enum or string (DB may return string directly)
-    status_value = session.status.value if hasattr(session.status, "value") else session.status
+    status_value = status_str(session.status)
     is_in_progress = status_value == ResearchStatus.IN_PROGRESS.value
 
     return ActiveResearchResponse(
@@ -178,6 +180,8 @@ async def get_research_events(
     since_sequence: int = Query(0, alias="sinceSequence"),
     limit: int = Query(100),
     db: AsyncSession = Depends(get_db),
+    event_service: IResearchEventService = Depends(get_research_event_service),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> ResearchEventsResponse:
     """Get events for reconnection.
 
@@ -186,7 +190,6 @@ async def get_research_events(
     """
     from deep_research.models.message import Message
     from deep_research.models.research_session import ResearchSession, ResearchStatus
-    from deep_research.services.research_event_service import ResearchEventService
 
     # Verify session belongs to this chat (security)
     session = await db.get(ResearchSession, session_id)
@@ -199,13 +202,11 @@ async def get_research_events(
         raise NotFoundError("ResearchSession", str(session_id))
 
     # Verify user has access to this chat
-    chat_service = ChatService(db)
     chat = await chat_service.get_by_id(chat_id)
     if chat and chat.user_id != user.user_id:
         raise NotFoundError("Chat", str(chat_id))
 
-    # Fetch events since sequence number
-    event_service = ResearchEventService(db)
+    # Fetch events since sequence number (F-RE: routed through factory)
     events = await event_service.get_events_since_sequence(
         research_session_id=session_id,
         since_sequence=since_sequence,
@@ -215,8 +216,7 @@ async def get_research_events(
     # Convert to frontend format
     events_data = event_service.events_to_list(events)
 
-    # Handle status as either enum or string
-    status_val = session.status.value if hasattr(session.status, "value") else session.status
+    status_val = status_str(session.status)
 
     return ResearchEventsResponse(
         events=events_data,
@@ -245,6 +245,7 @@ async def get_research_state(
     session_id: UUID,
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> ResearchStateResponse:
     """Get final research state for completed session.
 
@@ -264,17 +265,15 @@ async def get_research_state(
         raise NotFoundError("ResearchSession", str(session_id))
 
     # Verify user has access to this chat
-    chat_service = ChatService(db)
     chat = await chat_service.get_by_id(chat_id)
     if chat and chat.user_id != user.user_id:
         raise NotFoundError("Chat", str(chat_id))
 
-    # Handle status as either enum or string
-    status_str = session.status.value if hasattr(session.status, "value") else session.status
+    status_value = status_str(session.status)
 
     return ResearchStateResponse(
         session_id=session.id,
-        status=status_str,
+        status=status_value,
         query=session.query,
         plan=session.plan,
         observations=session.observations,

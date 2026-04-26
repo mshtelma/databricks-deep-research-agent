@@ -31,24 +31,47 @@ logger = logging.getLogger(__name__)
 SESSION_CLEANUP_INTERVAL_SECONDS = 300
 
 
-async def cleanup_expired_sessions_task(session_maker: Any) -> None:
+async def cleanup_expired_sessions_task(
+    session_maker: Any,
+    storage_stack: Any | None = None,
+) -> None:
     """Background task to clean up expired incognito sessions periodically.
 
     Runs every 5 minutes to delete expired sessions and their associated chats.
     This prevents storage leaks and ensures privacy by removing incognito data
     after session expiry.
+
+    F-OTHER.2: when `storage_stack` is provided and `storage_service_impl=cached`,
+    routes through the cached `ISessionService` (no legacy session_maker needed).
+    Legacy path stays as fallback.
     """
-    from deep_research.services.session_service import SessionService
+    from deep_research.core.config import get_settings
+    from deep_research.services._impl_factory import make_session_service
+
+    settings = get_settings()
 
     while True:
         try:
             await asyncio.sleep(SESSION_CLEANUP_INTERVAL_SECONDS)
-            async with session_maker() as db:
-                service = SessionService(db)
+            if (
+                settings.storage_service_impl == "cached"
+                and storage_stack is not None
+            ):
+                service = make_session_service(settings, storage_stack)
                 count = await service.cleanup_expired()
                 if count > 0:
-                    await db.commit()
-                    logger.info(f"Cleaned up {count} expired incognito sessions")
+                    logger.info(
+                        f"Cleaned up {count} expired incognito sessions (cached)"
+                    )
+            else:
+                async with session_maker() as db:
+                    service = make_session_service(settings, None, session=db)
+                    count = await service.cleanup_expired()
+                    if count > 0:
+                        await db.commit()
+                        logger.info(
+                            f"Cleaned up {count} expired incognito sessions"
+                        )
         except asyncio.CancelledError:
             logger.info("Session cleanup task cancelled")
             raise
@@ -134,12 +157,41 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("PluginManager initialization failed: %s", e)
         app.state.plugin_manager = None
 
+    # User-sync is now synchronous on cache miss (see middleware/auth.py
+    # ``_ensure_user_synced``); no background task pool to drain.
+
+    # Initialize the storage stack when the cached service layer is active.
+    # Plan §Wave-6: under STORAGE_SERVICE_IMPL=cached the app runs on the
+    # chat-document cache + WriteQueue. For the legacy impl (default) this
+    # block is a no-op so the existing SQLAlchemy path is unaffected.
+    app.state.storage_stack = None
+    if settings.storage_service_impl == "cached":
+        from deep_research.storage.factory import create_storage_stack
+
+        try:
+            storage_stack = create_storage_stack(settings)
+            await storage_stack.start()
+            storage_stack.install_signal_handlers()
+            app.state.storage_stack = storage_stack
+            logger.info(
+                "StorageStack started: backend=%s, flush_interval=%ss",
+                settings.storage_backend,
+                settings.storage_flush_interval_sec,
+            )
+        except Exception as exc:
+            logger.critical("StorageStack startup failed: %s", exc)
+            raise
+
     # Initialize background job manager
     from deep_research.db.session import get_session_maker
     from deep_research.services.job_manager import initialize_job_manager
 
     job_manager = initialize_job_manager()
     session_maker = get_session_maker(settings)
+    if app.state.storage_stack is not None:
+        # Cached storage mode: hand the stack to JobManager so background
+        # research jobs can thread it into `stream_research(...)`.
+        job_manager.set_storage_stack(app.state.storage_stack)
     await job_manager.start(session_maker)
     app.state.job_manager = job_manager
     logger.info(
@@ -148,7 +200,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     )
 
     # Start session cleanup background task
-    cleanup_task = asyncio.create_task(cleanup_expired_sessions_task(session_maker))
+    cleanup_task = asyncio.create_task(
+        cleanup_expired_sessions_task(session_maker, app.state.storage_stack)
+    )
     app.state.cleanup_task = cleanup_task
     logger.info("Session cleanup task started (runs every %d seconds)", SESSION_CLEANUP_INTERVAL_SECONDS)
 
@@ -182,6 +236,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if hasattr(app.state, "job_manager") and app.state.job_manager:
         await app.state.job_manager.stop()
         logger.info("Job manager stopped")
+
+    # User-sync is synchronous on cache miss now — nothing to drain here.
+
+    # Drain the storage stack (if running). 15 s cap matches the Databricks
+    # Apps shutdown budget; queue drops any remaining writes beyond that and
+    # emits `storage_queue_backlog_at_shutdown`.
+    if getattr(app.state, "storage_stack", None):
+        try:
+            await app.state.storage_stack.stop(timeout=15.0)
+            logger.info("StorageStack stopped")
+        except Exception as exc:
+            logger.warning("StorageStack shutdown failed: %s", exc)
 
     # Flush MLflow traces before closing connections
     try:

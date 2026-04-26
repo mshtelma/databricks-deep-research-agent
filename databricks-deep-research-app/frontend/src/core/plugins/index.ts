@@ -39,6 +39,7 @@ export type {
   SourceBadgeConfig,
   RenderContext,
   InputConfig,
+  SidebarConfig,
 } from './types';
 
 // Default output renderers

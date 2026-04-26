@@ -267,6 +267,24 @@ class DatabricksVectorSearchTool:
             if self._columns is None:
                 self._columns = self._discover_columns()
 
+            # The Databricks SDK now requires ``columns`` on query_index
+            # (previously optional). If we couldn't discover any columns
+            # from index metadata — e.g. the user lacks read access, or
+            # the index has no primary key / delta-sync source columns —
+            # fail the call cleanly rather than propagating an opaque
+            # TypeError from the SDK.
+            if not self._columns:
+                error_msg = (
+                    f"vector_search: no columns available for index "
+                    f"{self._index_name!r}. Discovery via get_index "
+                    f"returned no primary_key or delta-sync source "
+                    f"columns (likely missing read permission on the "
+                    f"index, or an unsupported index type). Set "
+                    f"``columns`` explicitly in the tool config."
+                )
+                logger.error(error_msg)
+                return ToolResult(content=error_msg, success=False, error=error_msg)
+
             # Over-fetch when excluding chunk types to compensate for filtered rows
             effective_num = num_results
             if self._exclude_chunk_types:
@@ -276,9 +294,10 @@ class DatabricksVectorSearchTool:
                 "index_name": self._index_name,
                 "query_text": query,
                 "num_results": effective_num,
+                # ``columns`` is now a required positional arg on the
+                # SDK. Pass it unconditionally.
+                "columns": self._columns,
             }
-            if self._columns:
-                kwargs["columns"] = self._columns
             if self._query_type:
                 kwargs["query_type"] = self._query_type
 

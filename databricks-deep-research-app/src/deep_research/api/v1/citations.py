@@ -28,9 +28,11 @@ from deep_research.api.v1.utils import (
     jsonb_summary_to_response,
     verify_message_ownership,
 )
+from deep_research.core.deps import get_export_service
 from deep_research.core.exceptions import NotFoundError
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
+from deep_research.services._protocols import IExportService
 from deep_research.models.research_session import ResearchSession
 from deep_research.schemas.citation import (
     CitationResponse,
@@ -293,7 +295,7 @@ async def get_verification_summary(
 async def export_report(
     message_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    export_service: IExportService = Depends(get_export_service),
 ) -> PlainTextResponse:
     """Export research report as standalone markdown.
 
@@ -302,10 +304,7 @@ async def export_report(
     """
     import logging
 
-    from deep_research.services.export_service import ExportService
-
     logger = logging.getLogger(__name__)
-    export_service = ExportService(db)
 
     try:
         content = await export_service.export_report_markdown(
@@ -333,6 +332,7 @@ async def export_provenance(
     user: CurrentUser,
     db: AsyncSession = Depends(get_db),
     format: str = Query("json", pattern="^(json|markdown)$"),
+    export_service: IExportService = Depends(get_export_service),
 ) -> ProvenanceExport | PlainTextResponse:
     """Export provenance data for a message.
 
@@ -349,10 +349,7 @@ async def export_provenance(
     if format == "markdown":
         import logging
 
-        from deep_research.services.export_service import ExportService
-
         logger = logging.getLogger(__name__)
-        export_service = ExportService(db)
 
         try:
             content = await export_service.export_provenance_markdown(

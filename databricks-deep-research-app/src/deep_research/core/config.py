@@ -73,6 +73,97 @@ class Settings(BaseSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 20
 
+    # Per-connection asyncpg command timeout (seconds). Prevents indefinite
+    # wire-protocol hangs. Set to None to disable. 60s is large enough for
+    # every query this app currently issues and small enough to surface
+    # infrastructure stalls.
+    db_command_timeout: float | None = 60.0
+
+    # --- Storage backend (chat-document architecture) -----------------
+    # Axes are orthogonal:
+    #   * storage_backend chooses the wire (lakebase / sql_warehouse / fake).
+    #   * storage_service_impl chooses the service facade (sqlalchemy_legacy
+    #     keeps the pre-2026-04 per-row ORM path; cached routes through the
+    #     chat-document cache + queue).
+    storage_backend: Literal["lakebase", "sql_warehouse", "fake"] = "lakebase"
+    storage_service_impl: Literal["sqlalchemy_legacy", "cached"] = "cached"
+
+    # SQL Warehouse parameters (required when storage_backend=sql_warehouse).
+    storage_warehouse_id: str | None = None
+    storage_catalog: str = "main"
+    storage_schema: str = "deep_research_state"
+    storage_statement_timeout_sec: float = 30.0
+
+    # Runtime tuning for the async storage stack.
+    storage_flush_interval_sec: float = 3.0
+    storage_flush_size: int = 200
+    storage_cache_idle_ttl_min: int = 30
+    storage_cold_cache_ttl_sec: float = 60.0
+    storage_cold_cache_max_entries: int = 1000
+    storage_max_concurrent_hydrations: int = 5
+    storage_event_buffer_cap: int = 10_000
+
+    # Cleanup of soft-deleted chats and orphaned file_chunks.
+    storage_cleanup_enabled: bool = True
+    storage_cleanup_interval_sec: float = 3600.0
+    storage_chat_retention_days: int = 7
+
+    # Migration window flag — prevents `migrate_lakebase.py` from being run
+    # against a live database without an explicit opt-in.
+    storage_migration_mode: bool = False
+
+    # --- Auth user-sync tuning (see middleware/auth.py) ---------------
+    # The auth middleware upserts the current user's identity to
+    # `user_documents` on every request, throttled by a process-level
+    # cache. These knobs let prod tune latency / retry behavior without
+    # a code change.
+    user_sync_enabled: bool = True
+    # None → use the backend-appropriate default from
+    # `effective_user_sync_timeout`.
+    user_sync_timeout_sec: float | None = None
+    user_sync_failure_ttl_sec: int = 30
+    user_sync_success_ttl_sec: int = 300
+    user_sync_max_cache: int = 1024
+    user_sync_lock_ttl_sec: int = 60
+
+    @property
+    def effective_user_sync_timeout(self) -> float:
+        """Per-backend default timeout unless overridden.
+
+        Lakebase cold-path covers TLS + OAuth + `PREPARE` plus the single
+        `INSERT … ON CONFLICT` statement. 30 s leaves enough headroom for
+        laptop-to-Lakebase-autoscaling cold-starts; earlier 15 s was too
+        tight and produced `TimeoutError` traces in practice.
+        SQL Warehouse statement execution has a multi-second floor with
+        larger cold-start tails, so it keeps the wider 45 s budget.
+        Override via `USER_SYNC_TIMEOUT_SEC` when prod tuning demands it.
+        """
+        if self.user_sync_timeout_sec is not None:
+            return self.user_sync_timeout_sec
+        return 45.0 if self.storage_backend == "sql_warehouse" else 30.0
+
+    @model_validator(mode="after")
+    def _validate_storage_backend(self) -> "Settings":
+        """Enforce per-backend required fields at startup.
+
+        Failure here surfaces a clear error before any request reaches the
+        backend rather than 500'ing mid-flight. Only fires when the cached
+        service impl is in use (the legacy impl bypasses the storage stack).
+        """
+        if self.storage_service_impl != "cached":
+            return self
+        if self.storage_backend == "sql_warehouse" and not self.storage_warehouse_id:
+            raise ValueError(
+                "STORAGE_BACKEND=sql_warehouse requires STORAGE_WAREHOUSE_ID "
+                "to be set."
+            )
+        if self.storage_backend == "lakebase" and self.database_url is None and not self.use_lakebase:
+            raise ValueError(
+                "STORAGE_BACKEND=lakebase requires either LAKEBASE_INSTANCE_NAME "
+                "(+ ENDPOINT_NAME for autoscaling) or DATABASE_URL."
+            )
+        return self
+
     @model_validator(mode="after")
     def _enforce_ssl_in_production(self) -> "Settings":
         """Force SSL verification in production regardless of config."""

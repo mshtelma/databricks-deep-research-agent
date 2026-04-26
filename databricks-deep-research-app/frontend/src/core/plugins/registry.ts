@@ -14,6 +14,7 @@ import type {
   RenderContext,
   PanelSlot,
   InputConfig,
+  SidebarConfig,
 } from './types';
 
 /**
@@ -287,6 +288,23 @@ export class ComponentRegistry {
     for (const plugin of this.plugins.values()) {
       if (plugin.inputConfig) {
         mergedConfig = { ...mergedConfig, ...plugin.inputConfig };
+      }
+    }
+
+    return mergedConfig;
+  }
+
+  /**
+   * Get merged sidebar configuration from all plugins.
+   * Later-registered plugins override earlier ones.
+   * Returns undefined if no plugin provides sidebarConfig.
+   */
+  static getSidebarConfig(): SidebarConfig | undefined {
+    let mergedConfig: SidebarConfig | undefined;
+
+    for (const plugin of this.plugins.values()) {
+      if (plugin.sidebarConfig) {
+        mergedConfig = { ...mergedConfig, ...plugin.sidebarConfig };
       }
     }
 

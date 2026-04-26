@@ -12,6 +12,10 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from deep_research.core.config import get_settings
+from deep_research.db.asyncpg_config import (
+    lakebase_asyncpg_connect_args,
+    lakebase_engine_kwargs,
+)
 from deep_research.db.base import Base
 from deep_research.db.session import get_database_url
 
@@ -140,13 +144,15 @@ async def run_async_migrations() -> None:
 
     await ensure_database_exists(settings)
 
-    # For Lakebase: use SSL (asyncpg doesn't accept sslmode URL param)
-    connect_args = {"ssl": True} if settings.use_lakebase else {}
+    # PgBouncer-safe connect args (see db/asyncpg_config.py).
+    connect_args = lakebase_asyncpg_connect_args(settings)
+    engine_kwargs = lakebase_engine_kwargs(settings)
 
     connectable = create_async_engine(
         database_url,
         poolclass=pool.NullPool,
         connect_args=connect_args,
+        **engine_kwargs,
     )
 
     async with connectable.connect() as connection:

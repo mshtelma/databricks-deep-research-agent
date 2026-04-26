@@ -77,6 +77,14 @@ class JobManager:
         self._worker_id = f"{os.getpid()}-{uuid4().hex[:8]}"
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._running = False
+        # Optional; populated in `main.py` lifespan when cached storage is on.
+        # Threaded into `stream_research(..., storage_stack=...)` per job so
+        # cached-impl services can talk to the in-memory StorageStack.
+        self._storage_stack: Any = None
+
+    def set_storage_stack(self, stack: Any) -> None:
+        """Attach the process-singleton `StorageStack` (cached storage mode)."""
+        self._storage_stack = stack
 
     @property
     def worker_id(self) -> str:
@@ -208,6 +216,26 @@ class JobManager:
         """
         from fastapi import HTTPException
 
+        # Fail fast: in cached storage mode every persistence call-site must
+        # route through the same in-process StorageStack the framework reads
+        # from. If the stack isn't attached yet, the legacy SQL fallback in
+        # persist_research_session_start_independent would silently write the
+        # Chat row to Lakebase, bypassing the cache — the framework would then
+        # fail to hydrate the chat at run start *and* fail to persist at run
+        # end, leaving ResearchSession.status stuck at IN_PROGRESS. Better to
+        # 500 one request than silently corrupt every run.
+        from deep_research.core.config import get_settings
+
+        if (
+            get_settings().storage_service_impl == "cached"
+            and self._storage_stack is None
+        ):
+            raise RuntimeError(
+                "JobManager.submit_job called in cached storage mode without "
+                "a StorageStack attached; wire set_storage_stack() in app "
+                "lifespan before accepting jobs."
+            )
+
         # Check concurrency limit
         max_jobs = _get_max_concurrent_jobs()
         count = await self._count_user_active_jobs(user_id, db)
@@ -229,7 +257,14 @@ class JobManager:
         user_message_id = uuid4()  # User message ID
 
         # Use the persistence function to create chat, messages, and session
-        # in the correct order (satisfying FK constraints)
+        # in the correct order (satisfying FK constraints).
+        #
+        # IMPORTANT: pass storage_stack so cached mode takes the
+        # _persist_session_start_cached branch, which creates the
+        # ChatDocument in the same in-process cache that stream_research
+        # later reads from. Without this, the chat is written to Lakebase
+        # directly and the framework's cache-backed reads see it as missing
+        # (FWK_EXISTING_SOURCES_CACHE_LOAD_FAILED + FWK_PERSISTENCE_FAILED).
         from deep_research.agent.persistence import persist_research_session_start_independent
 
         await persist_research_session_start_independent(
@@ -245,14 +280,34 @@ class JobManager:
             worker_id=self._worker_id,
             last_heartbeat=datetime.now(UTC),
             verify_sources=verify_sources,
+            storage_stack=self._storage_stack,
         )
 
-        # Refresh the passed-in db session and fetch the created session
-        # (persist_research_session_start_independent uses independent session)
-        await db.commit()  # Ensure any prior changes are committed
-        session = await db.get(ResearchSession, session_id)
-        if not session:
-            raise RuntimeError(f"Failed to fetch created session {session_id}")
+        # Build the response model from values we just persisted. We can't
+        # round-trip through SQLAlchemy here: in cached storage mode
+        # persist_research_session_start_independent routes through
+        # _persist_session_start_cached, which stores the session inside the
+        # StorageStack ChatDocument (a JSONB blob) rather than as a row in
+        # research_sessions. db.get(ResearchSession, session_id) would then
+        # return None even though the write succeeded, blowing up every
+        # submit in cached mode. Every field _session_to_response reads is
+        # either a param we just handed to the persistence call or a value
+        # we just generated, so construct the instance directly.
+        started_at = datetime.now(UTC)
+        session = ResearchSession(
+            id=session_id,
+            message_id=message_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            query=query,
+            research_depth=research_depth,
+            query_mode=query_mode,
+            status=ResearchStatus.IN_PROGRESS,
+            started_at=started_at,
+            worker_id=self._worker_id,
+            last_heartbeat=started_at,
+            verify_sources=verify_sources,
+        )
 
         logger.info(
             "JOB_SUBMITTED",
@@ -321,6 +376,7 @@ class JobManager:
 
     async def cancel_job(
         self,
+        chat_id: UUID,
         session_id: UUID,
         user_id: str,
         db: AsyncSession,
@@ -328,11 +384,12 @@ class JobManager:
         """Cancel a running job.
 
         This method:
-        1. Verifies the user owns the job
+        1. Verifies the user owns the job (via chat_id + session_id from the URL)
         2. Cancels the in-memory task (if this worker owns it)
         3. Updates the database status (works across instances)
 
         Args:
+            chat_id: Chat owning the session (from URL path param).
             session_id: Job/session ID to cancel.
             user_id: User requesting cancellation (for ownership check).
             db: Database session.
@@ -340,12 +397,30 @@ class JobManager:
         Returns:
             True if job was cancelled, False if not found or not owned.
         """
-        # Verify ownership
-        session = await db.get(ResearchSession, session_id)
-        if not session or session.user_id != user_id:
+        from deep_research.agent.persistence import (
+            persist_research_session_cancelled_independent,
+        )
+        from deep_research.agent.session_lookup import load_session_control_view
+        from deep_research.core.config import get_settings
+
+        settings = get_settings()
+
+        # Verify ownership via the unified session lookup — chat_id from the
+        # URL is matched against the chat's owner in the ChatDocument (cached
+        # mode) or the research_sessions row (legacy mode).
+        view = await load_session_control_view(
+            chat_id,
+            session_id,
+            user_id,
+            settings=settings,
+            storage_stack=self._storage_stack,
+            db=db,
+        )
+        if view is None:
             logger.warning(
                 "JOB_CANCEL_DENIED",
                 session_id=str(session_id),
+                chat_id=str(chat_id),
                 user_id=user_id,
             )
             return False
@@ -358,14 +433,17 @@ class JobManager:
             )
             self._active_tasks[session_id].cancel()
 
-        # Update status in DB (works even if different worker owns it)
-        session.status = ResearchStatus.CANCELLED
-        session.completed_at = datetime.now(UTC)
-        await db.commit()
+        # Update status (routes through cached path when enabled, else SQL).
+        await persist_research_session_cancelled_independent(
+            research_session_id=session_id,
+            storage_stack=self._storage_stack,
+            chat_id=chat_id,
+        )
 
         logger.info(
             "JOB_CANCELLED",
             session_id=str(session_id),
+            chat_id=str(chat_id),
             user_id=user_id,
         )
         return True
@@ -613,37 +691,41 @@ class JobManager:
                         except Exception:
                             pass
 
-            # Agent resolution — separate DB session (009-custom-agent-config)
+            # Agent resolution — use factory to support both storage backends (009-custom-agent-config)
             if agent_id:
                 try:
                     from deep_research.agent.orchestrator import apply_custom_agent_to_config
-                    from deep_research.services.custom_agent_service import CustomAgentService
+                    from deep_research.core.config import get_settings as _get_settings
+                    from deep_research.services._impl_factory import make_custom_agent_service
 
-                    agent_session_maker = get_session_maker()
-                    async with agent_session_maker() as agent_db:
-                        agent_service = CustomAgentService(agent_db)
-                        agent = await agent_service.get_accessible(
-                            UUID(agent_id), user_id
+                    _ca_settings = _get_settings()
+                    if _ca_settings.storage_service_impl == "cached" and self._storage_stack is not None:
+                        agent_service = make_custom_agent_service(_ca_settings, self._storage_stack)
+                        agent = await agent_service.get_accessible(UUID(agent_id), user_id)
+                    else:
+                        agent_session_maker = get_session_maker()
+                        async with agent_session_maker() as agent_db:
+                            agent_service = make_custom_agent_service(_ca_settings, None, session=agent_db)
+                            agent = await agent_service.get_accessible(UUID(agent_id), user_id)
+                    if agent:
+                        config = apply_custom_agent_to_config(config, agent)
+                        logger.info(
+                            "JOB_AGENT_CONFIG_APPLIED",
+                            extra={
+                                "session_id": str(session_id),
+                                "agent_id": agent_id,
+                                "agent_name": agent.name,
+                            },
                         )
-                        if agent:
-                            config = apply_custom_agent_to_config(config, agent)
-                            logger.info(
-                                "JOB_AGENT_CONFIG_APPLIED",
-                                extra={
-                                    "session_id": str(session_id),
-                                    "agent_id": agent_id,
-                                    "agent_name": agent.name,
-                                },
-                            )
-                        else:
-                            logger.warning(
-                                "JOB_AGENT_NOT_FOUND",
-                                extra={
-                                    "session_id": str(session_id),
-                                    "agent_id": agent_id,
-                                    "user_id": user_id,
-                                },
-                            )
+                    else:
+                        logger.warning(
+                            "JOB_AGENT_NOT_FOUND",
+                            extra={
+                                "session_id": str(session_id),
+                                "agent_id": agent_id,
+                                "user_id": user_id,
+                            },
+                        )
                 except Exception as e:
                     logger.warning(
                         "JOB_AGENT_RESOLUTION_FAILED",
@@ -654,11 +736,18 @@ class JobManager:
                         },
                     )
 
-            # Use fresh session maker to trigger token refresh check
-            session_maker = get_session_maker()
+            async def _consume_research_stream(
+                research_db: AsyncSession | None,
+            ) -> None:
+                """Consume the research stream to completion.
 
-            async def _consume_research_stream(research_db: AsyncSession) -> None:
-                """Consume the research stream to completion."""
+                ``research_db`` is deliberately nullable: F-JOB-B moved every
+                reader/persister inside the stream onto either the cached
+                StorageStack path or self-opening independent sessions via
+                ``get_session_maker()``. Passing ``None`` avoids holding a
+                request-scoped session across the long stream (see comment
+                below the call site).
+                """
                 async for _event in stream_research(
                     query=query,
                     llm=llm,
@@ -670,26 +759,32 @@ class JobManager:
                     config=config,
                     db=research_db,
                     plugin_manager=plugin_manager,
+                    storage_stack=self._storage_stack,
                 ):
                     # Events are persisted by the orchestrator
                     # We just iterate to completion
                     pass
 
-            # The orchestrator uses independent DB sessions for all writes
-            # (EventBuffer, persist_research_session_complete_update_independent,
-            # etc.), so the connection held by this `async with` block may go
-            # stale during long research runs.  All post-stream DB operations
-            # therefore use fresh sessions obtained via get_session_maker().
+            # F-JOB-B: All readers and persisters inside the stream now run on
+            # the cached StorageStack path (no session_maker needed) or open
+            # their own independent sessions via get_session_maker() internally.
+            # Passing db=None is safe:
+            #   - _load_existing_sources: guarded by `if db is None: return []`
+            #   - FileUploadService / DataSourceService: guarded by
+            #     `if db is None and storage_stack is None`
+            #   - _load_enterprise_tools: guarded by `if db is not None and user_id`
+            #   - All persistence helpers: route through factories on cached path.
+            # The F-JOB-A InterfaceError swallow is no longer needed because no
+            # session is held for the duration of the stream.
             timed_out = False
-            async with session_maker() as db:
-                timeout = config.research_timeout_seconds
-                try:
-                    await asyncio.wait_for(
-                        _consume_research_stream(db),
-                        timeout=timeout,
-                    )
-                except TimeoutError:
-                    timed_out = True
+            timeout = config.research_timeout_seconds
+            try:
+                await asyncio.wait_for(
+                    _consume_research_stream(None),
+                    timeout=timeout,
+                )
+            except TimeoutError:
+                timed_out = True
 
             # -- Post-stream handling with fresh sessions --
 
@@ -700,18 +795,17 @@ class JobManager:
                     timeout_seconds=timeout,
                 )
                 try:
-                    timeout_sm = get_session_maker()
-                    async with timeout_sm() as timeout_db:
-                        session = await timeout_db.get(
-                            ResearchSession, session_id,
-                        )
-                        if session and session.status == ResearchStatus.IN_PROGRESS:
-                            session.status = ResearchStatus.FAILED
-                            session.error_message = (
-                                f"Research timed out after {timeout} seconds"
-                            )
-                            session.completed_at = datetime.now(UTC)
-                            await timeout_db.commit()
+                    from deep_research.agent.persistence import (
+                        persist_research_session_failed_independent,
+                    )
+
+                    await persist_research_session_failed_independent(
+                        research_session_id=session_id,
+                        agent_message_id=message_id,
+                        error_message=f"Research timed out after {timeout} seconds",
+                        storage_stack=self._storage_stack,
+                        chat_id=chat_id,
+                    )
                 except Exception as timeout_persist_err:
                     logger.warning(
                         "TIMEOUT_PERSIST_FAILED",
@@ -724,15 +818,26 @@ class JobManager:
             # (persist_research_session_complete_update_independent).
             # Read with a fresh session for logging + lifecycle hook only.
             try:
+                from deep_research.agent.session_lookup import (
+                    load_session_control_view,
+                )
+                from deep_research.core.config import get_settings
+
+                settings = get_settings()
                 completion_sm = get_session_maker()
                 async with completion_sm() as completion_db:
-                    session = await completion_db.get(
-                        ResearchSession, session_id,
+                    view = await load_session_control_view(
+                        chat_id,
+                        session_id,
+                        user_id,
+                        settings=settings,
+                        storage_stack=self._storage_stack,
+                        db=completion_db,
                     )
-                    if session and session.status == ResearchStatus.COMPLETED:
+                    if view is not None and view.status == ResearchStatus.COMPLETED:
                         duration_seconds = (
-                            (datetime.now(UTC) - session.created_at).total_seconds()
-                            if session.created_at
+                            (datetime.now(UTC) - view.started_at).total_seconds()
+                            if view.started_at
                             else 0.0
                         )
                         logger.info(
@@ -759,12 +864,48 @@ class JobManager:
                                     hook="on_job_completed",
                                     error=str(e)[:200],
                                 )
-                    elif session:
+                    elif view is not None:
+                        # The research stream drained but the orchestrator
+                        # never transitioned the session to COMPLETED/FAILED
+                        # (e.g. end-of-run persistence failed). Force-FAIL
+                        # through the cached-aware helper so the ChatDocument
+                        # and Lakebase agree, the UI stops polling, and the
+                        # heartbeat loop stops updating this row. This repairs
+                        # the historical "stuck at in_progress forever" bug
+                        # observed in prod when storage_stack was not threaded
+                        # into submit_job.
                         logger.warning(
                             "JOB_COMPLETION_STATUS_UNEXPECTED",
                             session_id=str(session_id),
-                            actual_status=str(session.status),
+                            actual_status=str(view.status),
                         )
+                        try:
+                            from deep_research.agent.persistence import (
+                                persist_research_session_failed_independent,
+                            )
+
+                            await persist_research_session_failed_independent(
+                                research_session_id=session_id,
+                                agent_message_id=message_id,
+                                error_message="persistence_transition_missing",
+                                storage_stack=self._storage_stack,
+                                chat_id=chat_id,
+                            )
+                            logger.error(
+                                "JOB_COMPLETION_FORCED_FAIL",
+                                session_id=str(session_id),
+                                previous_status=str(view.status),
+                            )
+                        except Exception as force_fail_err:
+                            # Double fault: the repair path itself failed.
+                            # Log + continue — _run_job's finally block still
+                            # pops _active_tasks so the heartbeat loop stops
+                            # touching this session on the next tick.
+                            logger.error(
+                                "JOB_COMPLETION_FORCED_FAIL_FAILED",
+                                session_id=str(session_id),
+                                error=str(force_fail_err)[:200],
+                            )
             except Exception as completion_err:
                 logger.warning(
                     "JOB_COMPLETION_CHECK_FAILED",
@@ -777,14 +918,25 @@ class JobManager:
                 "JOB_CANCELLED_BY_TASK",
                 session_id=str(session_id),
             )
-            # Use fresh session maker to trigger token refresh check
-            cancel_session_maker = get_session_maker()
-            async with cancel_session_maker() as db:
-                session = await db.get(ResearchSession, session_id)
-                if session and session.status == ResearchStatus.IN_PROGRESS:
-                    session.status = ResearchStatus.CANCELLED
-                    session.completed_at = datetime.now(UTC)
-                    await db.commit()
+            from deep_research.agent.persistence import (
+                persist_research_session_cancelled_independent,
+            )
+
+            # Routes through cached path when enabled; the underlying SQL
+            # UPDATE is gated on status == IN_PROGRESS so it no-ops when the
+            # session has already transitioned.
+            try:
+                await persist_research_session_cancelled_independent(
+                    research_session_id=session_id,
+                    storage_stack=self._storage_stack,
+                    chat_id=chat_id,
+                )
+            except Exception as cancel_persist_err:
+                logger.warning(
+                    "CANCEL_PERSIST_FAILED",
+                    session_id=str(session_id),
+                    error=str(cancel_persist_err)[:200],
+                )
             raise
 
         except Exception as e:
@@ -793,15 +945,40 @@ class JobManager:
                 session_id=str(session_id),
                 error=str(e),
             )
-            # Use fresh session maker to trigger token refresh check
+            from deep_research.agent.persistence import (
+                persist_research_session_failed_independent,
+            )
+            from deep_research.agent.session_lookup import (
+                load_session_control_view,
+            )
+            from deep_research.core.config import get_settings
+
+            settings = get_settings()
             error_session_maker = get_session_maker()
             async with error_session_maker() as db:
-                session = await db.get(ResearchSession, session_id)
-                if session and session.status == ResearchStatus.IN_PROGRESS:
-                    session.status = ResearchStatus.FAILED
-                    session.error_message = str(e)[:500]  # Truncate error message
-                    session.completed_at = datetime.now(UTC)
-                    await db.commit()
+                view = await load_session_control_view(
+                    chat_id,
+                    session_id,
+                    user_id,
+                    settings=settings,
+                    storage_stack=self._storage_stack,
+                    db=db,
+                )
+                if view is not None and view.status == ResearchStatus.IN_PROGRESS:
+                    try:
+                        await persist_research_session_failed_independent(
+                            research_session_id=session_id,
+                            agent_message_id=message_id,
+                            error_message=str(e)[:500],
+                            storage_stack=self._storage_stack,
+                            chat_id=chat_id,
+                        )
+                    except Exception as fail_persist_err:
+                        logger.warning(
+                            "ERROR_PERSIST_FAILED",
+                            session_id=str(session_id),
+                            error=str(fail_persist_err)[:200],
+                        )
 
                     # Emit lifecycle hook: job_failed
                     if plugin_manager:
@@ -839,11 +1016,11 @@ class JobManager:
                                 hook="on_job_failed",
                                 error=str(hook_error)[:200],
                             )
-                elif session:
+                elif view is not None:
                     logger.info(
                         "JOB_ERROR_SKIPPED_TERMINAL_STATUS",
                         session_id=str(session_id),
-                        current_status=str(session.status),
+                        current_status=str(view.status),
                         error=str(e)[:200],
                     )
 

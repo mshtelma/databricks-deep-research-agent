@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -53,6 +54,7 @@ from databricks_deep_research.agents.prompt_context import (
     compile_pool_section,
     compile_synthesis_context,
     compile_typed_synthesis_context,
+    default_synthesis_context,
     merge_token_usage,
 )
 from databricks_deep_research.agents.react_loop import ReactLoop
@@ -63,6 +65,10 @@ from databricks_deep_research.events.types import (
     StreamEvent,
 )
 from databricks_deep_research.llm.client import FrameworkLLMClient
+from databricks_deep_research.memory import (
+    CHAT_MEMORY_APPENDIX_STATE_KEY,
+    inject_attached_context_block,
+)
 from databricks_deep_research.pools.pool_state import PoolState
 from databricks_deep_research.templates.renderer import SafeTemplateRenderer
 from databricks_deep_research.tools.protocol import (
@@ -83,6 +89,85 @@ logger = logging.getLogger(__name__)
 
 class _UnparsedJSONOutput(str):
     """Marker for JSON-configured agent output that could not be parsed."""
+
+
+# ---------------------------------------------------------------------------
+# json_repair sanity checks
+# ---------------------------------------------------------------------------
+
+# When json_repair produces output that is drastically smaller than the
+# input and the input carried substantive text, treat the parse as a false
+# success and fall through to raw preservation. Observed prod failure
+# mode: 19 858 chars of researcher reasoning collapsed to a 59-char list.
+_JSON_REPAIR_MIN_SIZE_RATIO = 0.1
+
+# Kill-switch. When set to a falsy value the resilient repair check is
+# skipped and the previous (narrower) behavior is restored exactly.
+_RESILIENT_JSON_REPAIR_ENV = "HARNESS_RESILIENT_JSON_REPAIR"
+
+
+def _env_flag(name: str, default: bool = True) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_suspicious_repair(
+    parsed: Any,
+    content: str,
+    *,
+    subtype: str | None = None,
+) -> str | None:
+    """Return a short reason string when a json_repair result looks like a
+    false success. Return ``None`` when the parse is considered healthy.
+
+    The caller raises on non-None so the catch-all ``except`` falls
+    through to :class:`_UnparsedJSONOutput` — preserving the raw content
+    instead of shipping a tiny hallucination.
+
+    Policy:
+
+    * Empty scalars (``""``/``None``) from any non-whitespace content
+      are always suspicious — matches the pre-existing behavior so
+      "malformed but short" payloads still fall through to
+      :class:`_UnparsedJSONOutput` as callers expect.
+    * Empty containers (``[]``/``{}``) are suspicious only for
+      ``researcher``-subtype agents with substantive input — other
+      subtypes legitimately emit empty structured results.
+    * Size collapse (parsed stringified length < 10% of input length)
+      is suspicious when the input is non-trivial (≥500 chars).
+    """
+    # 1. Empty scalar from any non-whitespace content — preserve the
+    # pre-existing aggressive behavior for compat with tests and
+    # callers that rely on WorkflowError being raised for "empty" parses.
+    if parsed in ("", None) and content.strip():
+        return "empty scalar from non-empty content"
+
+    # 2. Remaining checks require substantive text to avoid false
+    # positives on intentionally-short agent outputs.
+    if not _has_substantive_text(content, min_length=20):
+        return None
+
+    content_len = len(content)
+
+    if isinstance(parsed, (list, dict)) and not parsed:
+        if subtype == "researcher":
+            return f"empty {type(parsed).__name__} from substantive text"
+        return None
+
+    parsed_len = len(str(parsed))
+    if (
+        content_len >= 500
+        and parsed_len / max(content_len, 1) < _JSON_REPAIR_MIN_SIZE_RATIO
+    ):
+        ratio = parsed_len / content_len
+        return (
+            f"size collapse: content_len={content_len} "
+            f"parsed_len={parsed_len} ratio={ratio:.3f}"
+        )
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +345,10 @@ async def execute_agent(
         synthesis_context_stats: dict[str, Any] = {}
         synthesis_source_records: list[dict[str, Any]] = []
         if config.subtype == "synthesizer":
-            typed_context = compile_typed_synthesis_context(state.runtime_state())
+            typed_context = compile_typed_synthesis_context(
+                state.runtime_state(),
+                config=config.synthesis_context,
+            )
             if typed_context is not None:
                 synthesis_context = typed_context
             else:
@@ -301,8 +389,25 @@ async def execute_agent(
                 # SAME data source (pool) to guarantee index alignment.
                 # The prompt source #N and synthesis_source_records[N-1] will
                 # always refer to the same URL.
+                #
+                # Each bullet carries the URL-derived title, the URL, any
+                # snippet, and a bounded slice of page content (when the tool
+                # actually captured it). Previous behaviour was title+URL only
+                # which starved the synthesiser of the page text it was told
+                # to cite — a documented cause of fabricated tool/feature
+                # names (see plan at come-with-a-very-rustling-sundae.md).
                 numbered_lines: list[str] = []
                 sources_pool = pools.get("sources")
+                resolved_src_cfg = (
+                    (config.synthesis_context.sources
+                     if config.synthesis_context and config.synthesis_context.sources
+                     else None)
+                    or default_synthesis_context().sources
+                )
+                assert resolved_src_cfg is not None
+                top_k = max(0, resolved_src_cfg.keep_full_top_k)
+                cap_top = resolved_src_cfg.max_content_chars_top_k
+                cap_tail = resolved_src_cfg.max_content_chars_other
                 if sources_pool is not None:
                     seen_urls: set[str] = set()
                     for item in sources_pool.snapshot():
@@ -327,9 +432,22 @@ async def execute_agent(
                         if url:
                             # Truncate URL to prevent prompt bloat from tracking params
                             display_url = url[:150]
-                            numbered_lines.append(f"{idx}. {label} — {display_url}")
+                            head_line = f"{idx}. {label} — {display_url}"
                         else:
-                            numbered_lines.append(f"{idx}. {label}")
+                            head_line = f"{idx}. {label}"
+
+                        entry_lines = [head_line]
+                        snippet_raw = str(item.get("snippet", "") or "").strip()
+                        content_raw = str(item.get("content", "") or "").strip()
+                        if resolved_src_cfg.include_snippet and snippet_raw:
+                            entry_lines.append(f"    Snippet: {snippet_raw}")
+                        if resolved_src_cfg.include_content and content_raw:
+                            cap = cap_top if (idx - 1) < top_k else cap_tail
+                            body = content_raw
+                            if cap > 0 and len(body) > cap:
+                                body = body[:cap].rstrip() + "…"
+                            entry_lines.append(f"    Content: {body}")
+                        numbered_lines.append("\n".join(entry_lines))
                         synthesis_source_records.append({
                             "index": str(idx),
                             "url": url,
@@ -411,6 +529,7 @@ async def execute_agent(
                 force_convergence=config.force_convergence,
                 convergence_rounds=config.convergence_rounds,
                 per_tool_limits=config.per_tool_limits,
+                hint_queries=config.hint_queries,
             )
             result = await loop.execute(messages)
             content = result.content
@@ -701,6 +820,22 @@ async def _build_input(
             continue
         context[key] = value
 
+    # Extract the reserved chat-memory appendix before template rendering.
+    # The double-underscore prefix signals a reserved state key that must NOT
+    # become a template variable — it is appended to the rendered system
+    # prompt as an untrusted <attached_context> block via
+    # inject_attached_context_block. Seeded by the orchestrator at turn start
+    # (see deep_research.agent.framework_orchestrator). When memory is empty
+    # or disabled the appendix is an empty string and injection is a no-op,
+    # preserving byte-identical backward compatibility.
+    chat_memory_appendix: str = ""
+    state_appendix = state.get(CHAT_MEMORY_APPENDIX_STATE_KEY)
+    if isinstance(state_appendix, str):
+        chat_memory_appendix = state_appendix
+    context_appendix = context.pop(CHAT_MEMORY_APPENDIX_STATE_KEY, None)
+    if isinstance(context_appendix, str) and context_appendix:
+        chat_memory_appendix = context_appendix
+
     # Auto-inject compute namespace summary for downstream agents.
     # Enables prompts to reference {compute_namespace} without discovery calls.
     ns_summary = "(compute tool not available)"
@@ -761,11 +896,17 @@ async def _build_input(
     system_prompt = renderer.render(config.system_prompt, template_vars)
     user_prompt = renderer.render(config.user_prompt_template, template_vars)
 
+    # Append the chat-memory <attached_context> block to the system prompt.
+    # No-op when chat_memory_appendix is empty; preserves byte-identical
+    # prompts for workflows without memory. See injection.py for the helper.
+    system_prompt = inject_attached_context_block(system_prompt, chat_memory_appendix)
+
     logger.info(
         "AGENT_PROMPTS node=%s system_len=%d user_len=%d "
-        "system_preview=%s user_preview=%s",
+        "system_preview=%s user_preview=%s chat_memory_appendix_len=%d",
         _node_id, len(system_prompt), len(user_prompt),
         system_prompt[:150], user_prompt[:300],
+        len(chat_memory_appendix),
     )
 
     # Pool injection (small pools injected directly into prompt)
@@ -1042,23 +1183,36 @@ def _parse_output(content: Any, config: AgentNodeConfig) -> Any:
             try:
                 import json_repair
                 parsed = json_repair.loads(content)
-                if parsed in ("", None) and content.strip():
-                    raise ValueError("json_repair produced empty output")
-                if (
-                    config.subtype == "researcher"
-                    and isinstance(parsed, dict)
-                    and not parsed
-                    and _has_substantive_text(content, min_length=20)
-                ):
-                    raise ValueError("json_repair produced empty dict from substantive text")
+                if _env_flag(_RESILIENT_JSON_REPAIR_ENV, default=True):
+                    suspicion = _is_suspicious_repair(
+                        parsed, content, subtype=config.subtype
+                    )
+                    if suspicion is not None:
+                        raise ValueError(f"json_repair suspicious: {suspicion}")
+                else:
+                    # Legacy behavior — narrower checks, kept for rollback.
+                    if parsed in ("", None) and content.strip():
+                        raise ValueError("json_repair produced empty output")
+                    if (
+                        config.subtype == "researcher"
+                        and isinstance(parsed, dict)
+                        and not parsed
+                        and _has_substantive_text(content, min_length=20)
+                    ):
+                        raise ValueError(
+                            "json_repair produced empty dict from substantive text"
+                        )
                 logger.info(
                     "AGENT_OUTPUT_PARSE format=json_repaired input_type=str "
-                    "output_type=%s output_len=%d",
-                    type(parsed).__name__, len(str(parsed)),
+                    "output_type=%s output_len=%d content_len=%d",
+                    type(parsed).__name__, len(str(parsed)), len(content),
                 )
                 return parsed
-            except (ImportError, Exception):
-                logger.warning("JSON_PARSE_FAILURE content=%s", content[:200])
+            except (ImportError, Exception) as exc:
+                logger.warning(
+                    "JSON_PARSE_FAILURE reason=%s content_preview=%s",
+                    str(exc)[:100], content[:200],
+                )
                 return _UnparsedJSONOutput(content)
 
     # text or markdown — return as-is

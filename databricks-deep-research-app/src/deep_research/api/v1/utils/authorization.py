@@ -8,8 +8,10 @@ This module consolidates authorization logic previously duplicated across:
 """
 
 import logging
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -18,30 +20,58 @@ from deep_research.core.config import get_settings
 from deep_research.core.exceptions import NotFoundError
 from deep_research.models.chat import Chat
 from deep_research.models.message import Message
-from deep_research.services.chat_service import ChatService
+from deep_research.services._impl_factory import make_chat_service
+
+if TYPE_CHECKING:
+    from deep_research.storage.factory import StorageStack
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_stack(
+    request: Request | None,
+    storage_stack: Any | None,
+) -> "StorageStack | None":
+    """Return the process-singleton `StorageStack` for a call site.
+
+    Prefers an explicit `storage_stack` kwarg; otherwise reads from the
+    `Request.app.state` when available. Returns None for legacy-only call
+    sites — the factory will fall back to `session=db`.
+    """
+    if storage_stack is not None:
+        return storage_stack
+    if request is not None:
+        return getattr(request.app.state, "storage_stack", None)
+    return None
 
 
 async def verify_chat_ownership(
     chat_id: UUID,
     user_id: str,
     db: AsyncSession,
-) -> Chat:
+    *,
+    request: Request | None = None,
+    storage_stack: Any | None = None,
+) -> object:
     """Verify user owns the chat.
 
     Args:
         chat_id: Chat UUID to check.
         user_id: Current user's ID.
         db: Database session.
+        request: Optional FastAPI Request, used to resolve the process-level
+            ``StorageStack`` when running under ``storage_service_impl=cached``.
+        storage_stack: Optional explicit stack (e.g., background task context).
 
     Returns:
-        The Chat if owned by user.
+        The Chat (or ChatView) if owned by user.
 
     Raises:
         NotFoundError: If chat not found or not owned by user.
     """
-    chat_service = ChatService(db)
+    settings = get_settings()
+    stack = _resolve_stack(request, storage_stack)
+    chat_service = make_chat_service(settings, stack=stack, session=db)
     chat = await chat_service.get_for_user(chat_id, user_id)
     if not chat:
         raise NotFoundError("Chat", str(chat_id))
@@ -52,7 +82,10 @@ async def verify_chat_access(
     chat_id: UUID,
     user_id: str,
     db: AsyncSession,
-) -> tuple[bool, Chat | None]:
+    *,
+    request: Request | None = None,
+    storage_stack: Any | None = None,
+) -> tuple[bool, object | None]:
     """Verify user can access chat with draft support.
 
     Authorization logic for draft chat flow:
@@ -64,6 +97,9 @@ async def verify_chat_access(
         chat_id: Chat UUID to check.
         user_id: Current user's ID.
         db: Database session.
+        request: Optional FastAPI Request, used to resolve the process-level
+            ``StorageStack`` when running under ``storage_service_impl=cached``.
+        storage_stack: Optional explicit stack (e.g., background task context).
 
     Returns:
         Tuple of (is_draft, chat).
@@ -73,7 +109,9 @@ async def verify_chat_access(
     Raises:
         AuthorizationError: If chat exists but belongs to another user.
     """
-    chat_service = ChatService(db)
+    settings = get_settings()
+    stack = _resolve_stack(request, storage_stack)
+    chat_service = make_chat_service(settings, stack=stack, session=db)
     chat = await chat_service.get_by_id(chat_id)
 
     if chat is None:
