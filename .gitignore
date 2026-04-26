@@ -125,3 +125,4 @@ benchmarks/officeqa/transformed/
 uv.lock
 
 *.zip
+*.omc
