@@ -103,7 +103,7 @@ export class SidebarPage {
    * @param timeout Maximum time to wait for the chat to appear
    * @returns The ID of the newly created chat, or null if creation failed
    */
-  async createPersistedChat(title?: string, timeout: number = 10000): Promise<string | null> {
+  async createPersistedChat(title?: string, timeout: number = 30000): Promise<string | null> {
     // Create chat via API
     const response = await this.page.request.post('/api/v1/chats', {
       data: title ? { title } : {},

@@ -13,6 +13,7 @@ from deep_research.api.v1 import (
     discovery,
     files,
     health,
+    hitl,
     jobs,
     messages,
     preferences,
@@ -54,3 +55,5 @@ router.include_router(custom_agents.router, tags=["Custom Agents"])
 router.include_router(files.router, tags=["Files"])
 # Configuration catalog routes (009-custom-agent-config)
 router.include_router(config.router, tags=["Config"])
+# HITL approval routes (Phase 2)
+router.include_router(hitl.router, tags=["HITL"])

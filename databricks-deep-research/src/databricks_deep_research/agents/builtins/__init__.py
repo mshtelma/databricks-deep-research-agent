@@ -8,6 +8,7 @@ import databricks_deep_research.agents.builtins.background  # noqa: F401
 
 # Import each builtin module to trigger registration
 import databricks_deep_research.agents.builtins.coordinator  # noqa: F401
+import databricks_deep_research.agents.builtins.custom  # noqa: F401
 import databricks_deep_research.agents.builtins.planner  # noqa: F401
 import databricks_deep_research.agents.builtins.reflector  # noqa: F401
 import databricks_deep_research.agents.builtins.researcher  # noqa: F401

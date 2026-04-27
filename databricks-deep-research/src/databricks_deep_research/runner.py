@@ -109,6 +109,31 @@ class WorkflowRunner:
         self._client = llm_client
         self._factory = factory_context or ToolFactoryContext.from_defaults()
         self._last_result: WorkflowResult | None = None
+        self._registered_tools: list[Any] = []
+
+    def register_tools(self, *tools: Any) -> None:
+        """Register Python ``@tool``-decorated callables (or any
+        :class:`ResearchTool`) so that workflows referencing them by name
+        resolve correctly without needing an explicit ``decorated`` factory
+        import.
+
+        The registered tools are appended to ``state.enterprise_tools`` for
+        every subsequent ``run()`` / ``stream()`` call on this runner. Pass
+        already-resolved :class:`ResearchTool` instances or plain callables
+        — callables are auto-wrapped via :func:`tool`.
+        """
+        from databricks_deep_research.api.compile import coerce_tools
+
+        coerced = coerce_tools(list(tools))
+        existing_names = {
+            getattr(t, "definition", None) and t.definition.name
+            for t in self._registered_tools
+        }
+        for t in coerced:
+            if t.definition.name in existing_names:
+                continue
+            self._registered_tools.append(t)
+            existing_names.add(t.definition.name)
 
     @classmethod
     def from_databricks(
@@ -161,6 +186,7 @@ class WorkflowRunner:
         definition = self._resolve(workflow)
         effective_client = self._resolve_client(definition)
         run_state = state if state is not None else WorkflowState(query=query)
+        self._inject_registered_tools(run_state)
         executor = WorkflowExecutor(definition, effective_client, factory_context=self._factory)
         events = [event async for event in executor.execute(run_state)]
         result = WorkflowResult(
@@ -170,6 +196,21 @@ class WorkflowRunner:
         )
         self._last_result = result
         return result
+
+    def _inject_registered_tools(self, state: WorkflowState) -> None:
+        """Append registered Python tools to the state's enterprise_tools."""
+        if not self._registered_tools:
+            return
+        existing = list(state.enterprise_tools or [])
+        existing_names = {
+            t.definition.name for t in existing if hasattr(t, "definition")
+        }
+        for t in self._registered_tools:
+            if t.definition.name in existing_names:
+                continue
+            existing.append(t)
+            existing_names.add(t.definition.name)
+        state.enterprise_tools = existing
 
     async def stream(
         self,
@@ -185,6 +226,7 @@ class WorkflowRunner:
         definition = self._resolve(workflow)
         effective_client = self._resolve_client(definition)
         run_state = state if state is not None else WorkflowState(query=query)
+        self._inject_registered_tools(run_state)
         executor = WorkflowExecutor(definition, effective_client, factory_context=self._factory)
         events: list[StreamEvent] = []
         try:

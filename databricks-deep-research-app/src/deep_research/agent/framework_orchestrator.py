@@ -535,6 +535,8 @@ async def stream_research_via_framework(
                     enterprise_tools=framework_tools,
                     model_overrides=config.model_overrides or {},
                     user_token=config.user_token,
+                    user_id=user_id,
+                    approval_broker=config.approval_broker,
                 )
 
                 # -- 3. Translate config to workflow definition --
@@ -898,7 +900,13 @@ async def stream_research_via_framework(
                     chat_id=_chat_id_for_fail,
                 )
             except Exception:
-                pass
+                # PR4 CRITICAL fix: do not silently drop the failure-marker.
+                # Without this, the DB session row stays in 'running' forever
+                # while the user sees a frontend error (silent data loss).
+                logger.exception(
+                    "FWK_FAILURE_PERSISTENCE_FAILED research_session_id=%s",
+                    str(config.research_session_id)[:8],
+                )
 
     # ------------------------------------------------------------------
     # 6. Final completion event (always emitted)
@@ -1711,7 +1719,13 @@ async def _persist_completion(
                     chat_id=chat_id_uuid,
                 )
             except Exception:
-                pass
+                # PR4 CRITICAL fix: do not silently drop the failure-marker.
+                # Without this, the DB row stays in 'running' forever after
+                # the completion-persist failure (silent data loss).
+                logger.exception(
+                    "FWK_FAILURE_PERSISTENCE_FAILED research_session_id=%s",
+                    str(config.research_session_id)[:8],
+                )
         return None
 
 
@@ -1729,265 +1743,108 @@ def _get_pool_sources(wf_state: WorkflowState | None) -> list[Any]:
     return list(sources_pool.get_recent(sources_pool.count()))
 
 
+def _adapt_framework_evidence(fw_evidence: Any) -> Any:
+    """Convert framework :class:`Evidence` into the app's :class:`EvidenceInfo`."""
+    from deep_research.agent.state import EvidenceInfo
+
+    if fw_evidence is None:
+        return None
+    return EvidenceInfo(
+        source_url=fw_evidence.source_url,
+        quote_text=fw_evidence.quote_text,
+        start_offset=fw_evidence.start_offset,
+        end_offset=fw_evidence.end_offset,
+        section_heading=fw_evidence.section_heading,
+        relevance_score=fw_evidence.relevance_score,
+        has_numeric_content=fw_evidence.has_numeric_content,
+    )
+
+
+def _adapt_framework_claim(fw_claim: Any) -> Any:
+    """Convert framework :class:`Claim` into the app's :class:`ClaimInfo`."""
+    from deep_research.agent.state import ClaimInfo
+
+    return ClaimInfo(
+        claim_text=fw_claim.claim_text,
+        claim_type=fw_claim.claim_type,
+        position_start=fw_claim.position_start,
+        position_end=fw_claim.position_end,
+        evidence=_adapt_framework_evidence(fw_claim.evidence),
+        confidence_level=fw_claim.confidence_level,
+        verification_verdict=fw_claim.verification_verdict,
+        verification_reasoning=fw_claim.verification_reasoning,
+        abstained=fw_claim.abstained,
+        citation_key=fw_claim.citation_key,
+        citation_keys=fw_claim.citation_keys,
+        from_free_block=fw_claim.from_free_block,
+    )
+
+
+def _adapt_framework_summary(fw_summary: Any) -> Any:
+    """Convert framework :class:`SummaryInfo` into app's :class:`VerificationSummaryInfo`."""
+    from deep_research.agent.state import VerificationSummaryInfo
+
+    if fw_summary is None:
+        return None
+    return VerificationSummaryInfo(
+        total_claims=fw_summary.total_claims,
+        supported_count=fw_summary.supported_count,
+        partial_count=fw_summary.partial_count,
+        unsupported_count=fw_summary.unsupported_count,
+        contradicted_count=fw_summary.contradicted_count,
+        abstained_count=fw_summary.abstained_count,
+        unsupported_rate=fw_summary.unsupported_rate,
+        contradicted_rate=fw_summary.contradicted_rate,
+        warning=fw_summary.warning,
+        citation_corrections=fw_summary.citation_corrections,
+        claim_revisions=fw_summary.claim_revisions,
+        atomic_facts_total=fw_summary.atomic_facts_total,
+        atomic_facts_verified=fw_summary.atomic_facts_verified,
+        atomic_facts_softened=fw_summary.atomic_facts_softened,
+        claims_fully_verified=fw_summary.claims_fully_verified,
+        claims_partially_softened=fw_summary.claims_partially_softened,
+        claims_fully_softened=fw_summary.claims_fully_softened,
+        external_searches=fw_summary.external_searches,
+        new_sources_added=fw_summary.new_sources_added,
+    )
+
+
 def _extract_verification_from_framework_state(
     wf_state: WorkflowState | None,
     sources: list[Any],
 ) -> tuple[list[Any], Any]:
-    """Prefer framework-native claims/summary over markdown re-parsing."""
-    from deep_research.agent.state import ClaimInfo, EvidenceInfo, VerificationSummaryInfo
+    """Backward-compat shim — delegates to the framework's extraction utility.
 
-    if wf_state is None:
-        return [], None
-
-    raw_claims = wf_state.get("claims") if hasattr(wf_state, "get") else None
-    raw_summary = (
-        wf_state.get("verification_summary") if hasattr(wf_state, "get") else None
+    Original ~116-LoC implementation relocated to
+    :mod:`databricks_deep_research.citation.extraction`. Field names match
+    1:1; we only adapt the wrapper types back to the app's dataclasses.
+    """
+    from databricks_deep_research.citation.extraction import (
+        extract_verification as _fw_extract,
     )
 
-    if not raw_claims and not raw_summary:
-        return [], None
-
-    claims: list[ClaimInfo] = []
-    if isinstance(raw_claims, list):
-        for raw_claim in raw_claims:
-            if not isinstance(raw_claim, dict):
-                continue
-
-            evidence_raw = raw_claim.get("evidence")
-            evidence: EvidenceInfo | None = None
-            if isinstance(evidence_raw, dict) and evidence_raw.get("source_url"):
-                evidence = EvidenceInfo(
-                    source_url=str(evidence_raw.get("source_url", "") or ""),
-                    quote_text=str(evidence_raw.get("quote_text", "") or ""),
-                    start_offset=evidence_raw.get("start_offset"),
-                    end_offset=evidence_raw.get("end_offset"),
-                    section_heading=evidence_raw.get("section_heading"),
-                    relevance_score=evidence_raw.get("relevance_score"),
-                    has_numeric_content=bool(
-                        evidence_raw.get("has_numeric_content", False)
-                    ),
-                )
-            else:
-                citation_keys = raw_claim.get("citation_keys") or []
-                citation_key = (
-                    raw_claim.get("citation_key")
-                    or (citation_keys[0] if citation_keys else None)
-                )
-                if isinstance(citation_key, str) and citation_key.isdigit():
-                    source_index = int(citation_key)
-                    if 0 <= source_index < len(sources):
-                        source = sources[source_index]
-                        if isinstance(source, dict):
-                            evidence = EvidenceInfo(
-                                source_url=str(source.get("url", "") or ""),
-                                quote_text=str(source.get("snippet", "") or ""),
-                            )
-                        else:
-                            evidence = EvidenceInfo(
-                                source_url=str(getattr(source, "url", "") or ""),
-                                quote_text=str(getattr(source, "snippet", "") or ""),
-                            )
-
-            claims.append(
-                ClaimInfo(
-                    claim_text=str(raw_claim.get("claim_text", "") or ""),
-                    claim_type=str(raw_claim.get("claim_type", "general") or "general"),
-                    position_start=int(raw_claim.get("position_start", 0) or 0),
-                    position_end=int(raw_claim.get("position_end", 0) or 0),
-                    evidence=evidence,
-                    confidence_level=raw_claim.get("confidence_level"),
-                    verification_verdict=raw_claim.get("verification_verdict"),
-                    verification_reasoning=raw_claim.get("verification_reasoning"),
-                    abstained=bool(raw_claim.get("abstained", False)),
-                    citation_key=raw_claim.get("citation_key"),
-                    citation_keys=raw_claim.get("citation_keys"),
-                    from_free_block=bool(raw_claim.get("from_free_block", False)),
-                )
-            )
-
-    summary = None
-    if isinstance(raw_summary, dict):
-        summary = VerificationSummaryInfo(
-            total_claims=int(raw_summary.get("total_claims", 0) or 0),
-            supported_count=int(
-                raw_summary.get(
-                    "verified_claims",
-                    raw_summary.get("supported_count", 0),
-                )
-                or 0
-            ),
-            partial_count=int(raw_summary.get("partial_count", 0) or 0),
-            unsupported_count=int(
-                raw_summary.get(
-                    "softened_claims",
-                    raw_summary.get("unsupported_count", 0),
-                )
-                or 0
-            ),
-            contradicted_count=int(
-                raw_summary.get(
-                    "removed_claims",
-                    raw_summary.get("contradicted_count", 0),
-                )
-                or 0
-            ),
-            abstained_count=int(raw_summary.get("abstained_count", 0) or 0),
-            unsupported_rate=float(raw_summary.get("unsupported_rate", 0.0) or 0.0),
-            contradicted_rate=float(raw_summary.get("contradicted_rate", 0.0) or 0.0),
-            warning=bool(raw_summary.get("warning", False)),
-            citation_corrections=int(
-                raw_summary.get(
-                    "corrected_citations",
-                    raw_summary.get("citation_corrections", 0),
-                )
-                or 0
-            ),
-        )
-
-    return claims, summary
+    summary = _fw_extract(wf_state, sources)
+    claims = [_adapt_framework_claim(c) for c in summary.claims]
+    return claims, _adapt_framework_summary(summary.summary)
 
 
 def _extract_verification_from_report(
     final_report: str,
     sources: list[Any],
 ) -> tuple[list[Any], Any]:
-    """Extract claims and verification summary from a report with [N] markers.
+    """Backward-compat shim — delegates to the framework's report extractor.
 
-    Parses the final report for ``[N]`` numeric citation markers produced by
-    the framework synthesizer.  Each sentence containing markers becomes a
-    claim linked to the corresponding source(s) in the pool.
-
-    Args:
-        final_report: The synthesizer's final report text.
-        sources: Ordered list of source objects (AppSourceInfo) from the pool.
-
-    Returns:
-        Tuple of (claims_list, verification_summary) where claims are
-        ``ClaimInfo`` objects and summary is ``VerificationSummaryInfo``.
+    Original ~136-LoC implementation relocated to
+    :mod:`databricks_deep_research.citation.extraction`. Field names match
+    1:1; we only adapt the wrapper types back to the app's dataclasses.
     """
-    from deep_research.agent.state import ClaimInfo, EvidenceInfo, VerificationSummaryInfo
-
-    if not final_report or not sources:
-        return [], None
-
-    # Split into sentences (rough but sufficient for claim extraction).
-    # We split on sentence-ending punctuation followed by whitespace,
-    # preserving markdown structure.
-    import re
-
-    # Split on ". ", "! ", "? " or newlines, keeping delimiters with the sentence
-    sentences = re.split(r"(?<=[.!?])\s+|\n+", final_report)
-
-    # Pre-scan: detect indexing convention.
-    # If any [0] marker exists → 0-indexed (evidence pool style).
-    # If smallest marker is >= 1 → 1-indexed (synthesizer prompt style).
-    all_marker_indices: set[int] = set()
-    for s in sentences:
-        s = s.strip()
-        if s:
-            all_marker_indices.update(int(m) for m in _NUMERIC_CITATION_RE.findall(s))
-    index_offset = 0 if 0 in all_marker_indices else 1
-
-    logger.info(
-        "FWK_VERIFICATION_INDEX_DETECT markers=%s offset=%d sources=%d",
-        sorted(all_marker_indices)[:10],
-        index_offset,
-        len(sources),
+    from databricks_deep_research.citation.extraction import (
+        extract_verification_from_report as _fw_extract_report,
     )
 
-    claims: list[ClaimInfo] = []
-    position = 0
-
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            position += 1
-            continue
-
-        # Find all [N] markers in this sentence
-        markers = _NUMERIC_CITATION_RE.findall(sentence)
-        if not markers:
-            position += len(sentence) + 1
-            continue
-
-        # Clean the sentence text (remove [N] markers for claim_text)
-        claim_text = _NUMERIC_CITATION_RE.sub("", sentence).strip()
-        if len(claim_text) < 10:  # Skip trivially short "claims"
-            position += len(sentence) + 1
-            continue
-
-        # Map marker indices to sources
-        cited_indices = sorted({int(m) for m in markers})
-
-        # Build evidence from the first valid cited source
-        evidence: EvidenceInfo | None = None
-        # Citation keys MUST be the numeric index strings ("1", "2", etc.)
-        # because the frontend markdown parser extracts [N] and uses
-        # the number as the citationKey for lookup in citationData map.
-        citation_keys: list[str] = [str(idx) for idx in cited_indices]
-        for idx in cited_indices:
-            pool_idx = idx - index_offset
-            if 0 <= pool_idx < len(sources):
-                source = sources[pool_idx]
-                # Pool items can be dicts or objects (AppSourceInfo)
-                if isinstance(source, dict):
-                    source_url = source.get("url", "") or ""
-                    source_snippet = source.get("snippet", "") or ""
-                else:
-                    source_url = getattr(source, "url", "") or ""
-                    source_snippet = getattr(source, "snippet", "") or ""
-                if evidence is None and source_url:
-                    evidence = EvidenceInfo(
-                        source_url=source_url,
-                        quote_text=source_snippet[:300] if source_snippet else "",
-                    )
-                logger.debug(
-                    "FWK_CLAIM_EXTRACTED key=%s pool_idx=%d evidence_url=%s",
-                    str(idx),
-                    pool_idx,
-                    source_url[:60] if source_url else "none",
-                )
-
-        # Detect numeric claims (contains numbers like $35.1B, 1.2%, etc.)
-        has_numbers = bool(re.search(r"\$[\d,.]+|\d+\.\d+%|\d{2,}", claim_text))
-
-        claim = ClaimInfo(
-            claim_text=claim_text,
-            claim_type="numeric" if has_numbers else "general",
-            position_start=position,
-            position_end=position + len(sentence),
-            evidence=evidence,
-            confidence_level="high",
-            verification_verdict="supported",
-            verification_reasoning="Cited by synthesizer with source reference",
-            abstained=False,
-            citation_key=citation_keys[0] if citation_keys else None,
-            citation_keys=citation_keys if len(citation_keys) > 1 else None,
-        )
-        claims.append(claim)
-        position += len(sentence) + 1
-
-    # Build verification summary
-    summary = VerificationSummaryInfo(
-        total_claims=len(claims),
-        supported_count=len(claims),
-        partial_count=0,
-        unsupported_count=0,
-        contradicted_count=0,
-        abstained_count=0,
-        unsupported_rate=0.0,
-        contradicted_rate=0.0,
-        warning=False,
-        citation_corrections=0,
-    )
-
-    logger.info(
-        "FWK_VERIFICATION_EXTRACTED claims=%d sources_cited=%d",
-        len(claims),
-        len({c.evidence.source_url for c in claims if c.evidence}),
-    )
-
-    return claims, summary if claims else None
+    summary = _fw_extract_report(final_report, sources)
+    claims = [_adapt_framework_claim(c) for c in summary.claims]
+    return claims, _adapt_framework_summary(summary.summary)
 
 
 def _build_state_proxy(

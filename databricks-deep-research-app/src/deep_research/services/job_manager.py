@@ -176,6 +176,7 @@ class JobManager:
         file_ids: list[str] | None = None,
         agent_id: str | None = None,
         enable_plan_review: bool = False,
+        approval_broker: Any | None = None,
     ) -> ResearchSession:
         """Submit a new research job.
 
@@ -368,6 +369,7 @@ class JobManager:
                 file_ids=file_ids,
                 agent_id=agent_id,
                 enable_plan_review=enable_plan_review,
+                approval_broker=approval_broker,
             )
         )
         self._active_tasks[session_id] = task
@@ -526,6 +528,7 @@ class JobManager:
         file_ids: list[str] | None = None,
         agent_id: str | None = None,
         enable_plan_review: bool = False,
+        approval_broker: Any | None = None,
     ) -> None:
         """Execute research job in background.
 
@@ -665,6 +668,7 @@ class JobManager:
                 file_ids=file_ids,
                 agent_id=agent_id,
                 enable_plan_review=enable_plan_review,
+                approval_broker=approval_broker,
             )
 
             # Auto-resolve workflow_ref from output_type when a plugin provides

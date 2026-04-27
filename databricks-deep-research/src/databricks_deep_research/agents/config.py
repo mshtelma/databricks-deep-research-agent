@@ -130,6 +130,12 @@ class AgentNodeConfig(BaseModel):
     pool_inject: list[PoolInjectConfig] = Field(default_factory=list)
     synthesis_context: SynthesisContextConfig | None = None
     output_model: Any = None  # Pydantic model class for structured output
+    # Reserved-prefix namespace for framework-attached runtime capabilities
+    # (approval broker, virtual filesystem, todos store, checkpointer, thread_id).
+    # Keys prefixed with ``_framework_`` are reserved for framework use; user-chosen
+    # keys MUST NOT use this prefix. Pydantic ``extra="forbid"`` is preserved at the
+    # model level — only this explicitly declared field accepts the dict.
+    extras: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("per_tool_limits")
     @classmethod

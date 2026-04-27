@@ -312,6 +312,12 @@ async def submit_job(
     # Get OBO token for enterprise data source authentication (007-enterprise Phase 2)
     user_token = getattr(request.state, "obo_token", None)
 
+    # PR3a: forward the in-process HITL broker through to OrchestrationConfig.
+    # ``app.state.approval_broker`` is set in main.py lifespan when HITL is
+    # configured; absent on entry points without FastAPI app state (e.g.
+    # agent_server CLI) where HITL gating is disabled by design.
+    approval_broker = getattr(request.app.state, "approval_broker", None)
+
     # Validate agent_id if provided (009-custom-agent-config)
     if body.agent_id:
         from deep_research.core.config import get_settings as _get_settings
@@ -354,6 +360,7 @@ async def submit_job(
         file_ids=body.file_ids,
         agent_id=body.agent_id,
         enable_plan_review=body.enable_plan_review,
+        approval_broker=approval_broker,
     )
 
     logger.info(

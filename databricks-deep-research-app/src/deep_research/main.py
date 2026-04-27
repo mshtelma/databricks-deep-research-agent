@@ -206,6 +206,32 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.cleanup_task = cleanup_task
     logger.info("Session cleanup task started (runs every %d seconds)", SESSION_CLEANUP_INTERVAL_SECONDS)
 
+    # Initialize HITL approval broker + periodic cleanup task (PR1/PR2 fix C3).
+    # The broker is process-local; no cross-replica state. Cleanup reclaims
+    # entries past the broker's grace window so long-running deployments do
+    # not leak memory under sustained approval traffic.
+    from databricks_deep_research.api.approval import InProcessApprovalBroker
+
+    approval_broker = InProcessApprovalBroker()
+    app.state.approval_broker = approval_broker
+    APPROVAL_CLEANUP_INTERVAL_SECONDS = 60
+
+    async def _approval_cleanup_loop() -> None:
+        # CancelledError (BaseException) propagates through `except Exception`
+        # and exits the loop on shutdown; non-cancel exceptions are logged.
+        while True:
+            try:
+                await asyncio.sleep(APPROVAL_CLEANUP_INTERVAL_SECONDS)
+                approval_broker.cleanup()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Approval broker cleanup tick failed: %s", exc)
+
+    app.state.approval_cleanup_task = asyncio.create_task(_approval_cleanup_loop())
+    logger.info(
+        "HITL approval broker initialized; cleanup runs every %d seconds",
+        APPROVAL_CLEANUP_INTERVAL_SECONDS,
+    )
+
     if settings.is_databricks_app and not settings.is_production:
         logger.warning(
             "DEBUG_ENDPOINTS_EXPOSED: Databricks App with APP_ENV=%s. "
@@ -231,6 +257,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         with contextlib.suppress(asyncio.CancelledError):
             await app.state.cleanup_task
         logger.info("Session cleanup task stopped")
+
+    # Cancel HITL approval broker cleanup task
+    if (
+        hasattr(app.state, "approval_cleanup_task")
+        and app.state.approval_cleanup_task
+    ):
+        app.state.approval_cleanup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await app.state.approval_cleanup_task
+        logger.info("Approval broker cleanup task stopped")
 
     # Stop job manager first (cancels running jobs)
     if hasattr(app.state, "job_manager") and app.state.job_manager:

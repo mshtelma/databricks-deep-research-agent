@@ -2349,3 +2349,123 @@ class TestResearchProgressForwarding:
         )
         result = _to_sse_event(app_evt)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Tests — PR4 inline fix: failure-persistence logging (lines 902, 1715)
+# ---------------------------------------------------------------------------
+
+
+class TestFailurePersistenceLogging:
+    """Regression tests for PR4 inline fix.
+
+    Before PR4, lines 902 and 1715 contained ``except Exception: pass`` which
+    silently dropped failures of ``persist_research_session_failed_independent``.
+    DB rows would stay in 'running' forever after a primary error, with NO log
+    line emitted (silent data loss).
+
+    PR4 replaced both ``pass`` statements with ``logger.exception(...)`` so the
+    failure path is observable. These tests assert the structured log line is
+    emitted when the failure-persist call itself raises.
+    """
+
+    @pytest.mark.asyncio
+    async def test_persist_completion_inner_failure_emits_log(
+        self, caplog: Any
+    ) -> None:
+        """When persist_research_session_complete_update_independent AND the
+        inner persist_research_session_failed_independent both raise, the
+        outer except logs ``FWK_PERSISTENCE_FAILED`` (existing) AND the inner
+        recovery emits ``FWK_FAILURE_PERSISTENCE_FAILED`` (PR4 fix at line 1715).
+        """
+        from deep_research.agent.framework_orchestrator import _persist_completion
+
+        config = _mock_config()
+        chat_id_uuid = uuid4()
+        event_buffer = MagicMock()  # truthy → two-phase path
+
+        async def _raise_complete(**_kwargs: Any) -> None:
+            raise RuntimeError("boom-complete")
+
+        async def _raise_failed(**_kwargs: Any) -> None:
+            raise RuntimeError("boom-failed")
+
+        import logging
+
+        with patch(
+            "deep_research.agent.persistence.persist_research_session_complete_update_independent",
+            side_effect=_raise_complete,
+        ), patch(
+            "deep_research.agent.persistence.persist_research_session_failed_independent",
+            side_effect=_raise_failed,
+        ), caplog.at_level(
+            logging.WARNING, logger="deep_research.agent.framework_orchestrator"
+        ):
+            result = await _persist_completion(
+                config,
+                chat_id_uuid,
+                user_id="alice",
+                query="q",
+                final_report="report",
+                event_buffer=event_buffer,
+                wf_state=None,
+                claims=None,
+                verification_summary=None,
+                storage_stack=None,
+            )
+
+        # Returns None on persistence failure (existing contract).
+        assert result is None
+        # Outer except line 1701 — pre-existing log line.
+        assert "FWK_PERSISTENCE_FAILED" in caplog.text
+        # PR4 fix: inner except line 1715 now also logs instead of silent pass.
+        assert "FWK_FAILURE_PERSISTENCE_FAILED" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_persist_completion_inner_succeeds_no_failure_log(
+        self, caplog: Any
+    ) -> None:
+        """If persist_research_session_failed_independent succeeds, the inner
+        except is never entered and FWK_FAILURE_PERSISTENCE_FAILED is NOT
+        emitted (no false-positive log noise on the happy failure path).
+        """
+        from deep_research.agent.framework_orchestrator import _persist_completion
+
+        config = _mock_config()
+        chat_id_uuid = uuid4()
+        event_buffer = MagicMock()
+
+        async def _raise_complete(**_kwargs: Any) -> None:
+            raise RuntimeError("boom-complete")
+
+        async def _ok_failed(**_kwargs: Any) -> None:
+            return None
+
+        import logging
+
+        with patch(
+            "deep_research.agent.persistence.persist_research_session_complete_update_independent",
+            side_effect=_raise_complete,
+        ), patch(
+            "deep_research.agent.persistence.persist_research_session_failed_independent",
+            side_effect=_ok_failed,
+        ), caplog.at_level(
+            logging.WARNING, logger="deep_research.agent.framework_orchestrator"
+        ):
+            await _persist_completion(
+                config,
+                chat_id_uuid,
+                user_id="alice",
+                query="q",
+                final_report="report",
+                event_buffer=event_buffer,
+                wf_state=None,
+                claims=None,
+                verification_summary=None,
+                storage_stack=None,
+            )
+
+        # Outer except still fires (the primary failure).
+        assert "FWK_PERSISTENCE_FAILED" in caplog.text
+        # Inner except is NOT entered → PR4 log line is absent.
+        assert "FWK_FAILURE_PERSISTENCE_FAILED" not in caplog.text

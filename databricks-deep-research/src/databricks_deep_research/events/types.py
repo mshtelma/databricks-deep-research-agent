@@ -521,9 +521,13 @@ class VerificationSummaryEvent(StreamEvent):
     routing_summary: dict[str, Any] = Field(default_factory=dict)
 
 
-# --- Gate (HITL) events (deferred beyond P0) ---
-# GateWaitingEvent, GateResumedEvent, GateTimeoutEvent
-# Will be added when HITL gate support is implemented.
+# --- Gate (HITL) events (Phase 2) ---
+from databricks_deep_research.events.hitl import (  # noqa: E402
+    GateDeniedEvent,
+    GateResumedEvent,
+    GateTimeoutEvent,
+    GateWaitingEvent,
+)
 
 
 # --- Discriminated union type ---
@@ -577,6 +581,11 @@ FrameworkEvent = Annotated[
     | ClaimVerifiedEvent
     | CitationCorrectedEvent
     | NumericClaimDetectedEvent
-    | VerificationSummaryEvent,
+    | VerificationSummaryEvent
+    # HITL gate (Phase 2)
+    | GateWaitingEvent
+    | GateResumedEvent
+    | GateDeniedEvent
+    | GateTimeoutEvent,
     Field(discriminator="event_type"),
 ]

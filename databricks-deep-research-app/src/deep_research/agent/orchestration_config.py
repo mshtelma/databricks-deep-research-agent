@@ -113,6 +113,9 @@ class OrchestrationConfig:
     user_token: str | None = None
     """User OAuth token for OBO authentication with enterprise data sources."""
 
+    approval_broker: Any | None = None
+    """HITL approval broker instance. Set from app.state.approval_broker in FastAPI handlers."""
+
     # =========================================================================
     # File Upload and Custom Agent Support
     # =========================================================================

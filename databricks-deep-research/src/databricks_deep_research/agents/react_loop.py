@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -248,6 +249,42 @@ class ReactLoop:
             t.definition.name for t in tools
             if t.definition.metadata.get("budget_free", False)
         )
+
+    # -- ReactLoopHook Protocol surface --------------------------------------
+    # Read-only views of private attrs so external collaborators (the HITL
+    # gate, tests) can depend on a typed Protocol instead of reaching into
+    # privates. ReactLoop satisfies ``ReactLoopHook`` structurally; no
+    # explicit base class is required.
+
+    @property
+    def node_id(self) -> str:
+        return self._node_id
+
+    @property
+    def extras(self) -> Mapping[str, Any]:
+        return self._ctx.extras
+
+    def emit_event(self, event: Any) -> None:
+        """Best-effort HITL event emission.
+
+        Always emits a structured log line. The ``hasattr``/``isinstance``
+        checks below are NOT a Constitution #4 violation per the
+        ``ReactLoopHook`` carve-out: they exist solely for the test
+        backward-compat surface during the migration window. The Protocol
+        contract is satisfied by the structured log line alone.
+        """
+        event_type = getattr(event, "event_type", "")
+        logger.info(
+            "REACT_HITL_EVENT node_id=%s event_type=%s",
+            self._node_id,
+            event_type,
+        )
+        # TODO(PR3b-followup): remove _pending_events back-compat after
+        # migration window — kept for tests that still inject a pending
+        # queue via the legacy attribute.
+        pending = getattr(self, "_pending_events", None)
+        if isinstance(pending, list):
+            pending.append(event)
 
     # -- Budget-aware guidance -----------------------------------------------
 
@@ -933,6 +970,18 @@ class ReactLoop:
             self._node_id, tool_name,
             {k: str(v)[:200] for k, v in log_args.items()},
         )
+
+        # ── HITL approval gate (Phase 2; opt-in, dead code for default subtypes) ──
+        if (
+            (tool.definition.metadata or {}).get("requires_confirmation")
+            and self._ctx.extras.get("_framework_approval_broker") is not None
+        ):
+            from databricks_deep_research.agents.react_loop_hitl import (
+                run_hitl_gate,
+            )
+            denied_meta = await run_hitl_gate(self, tool, args)
+            if denied_meta is not None:
+                return tc.id, denied_meta["content"], [], denied_meta["meta"]
 
         # ── Per-tool call limits ────────────────────────────
         if tool_name in self._per_tool_limits:

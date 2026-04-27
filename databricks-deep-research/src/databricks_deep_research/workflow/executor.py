@@ -56,6 +56,7 @@ from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.pools.pool_state import PoolConfig, PoolState
 from databricks_deep_research.tools.factories.builtin import BuiltinToolFactory
 from databricks_deep_research.tools.factories.databricks import DatabricksToolFactory
+from databricks_deep_research.tools.factories.decorated import DecoratedToolFactory
 from databricks_deep_research.tools.factory import ToolFactory, ToolFactoryContext
 from databricks_deep_research.tools.protocol import (
     ResearchTool,
@@ -327,7 +328,10 @@ class WorkflowExecutor:
         self._workflow_total_steps_executed = 0
 
         registry = tool_registry or ToolRegistry()
-        resolved_factories: list[ToolFactory] = list(tool_factories or [BuiltinToolFactory(), DatabricksToolFactory()])
+        resolved_factories: list[ToolFactory] = list(
+            tool_factories
+            or [BuiltinToolFactory(), DatabricksToolFactory(), DecoratedToolFactory()]
+        )
         resolved_factory_context = factory_context or ToolFactoryContext()
 
         # Build resolver: prefer explicit resolver, else wrap registry
@@ -771,6 +775,7 @@ class WorkflowExecutor:
             url_registry=self._url_registry,
             table_registry=self._table_registry,
             tool_call_cache=self._context.tool_call_cache if self._context else None,
+            execution_context=self._context,
         )
 
         # Track token usage

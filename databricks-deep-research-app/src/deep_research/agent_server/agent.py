@@ -174,6 +174,11 @@ def stream(
     asyncio.set_event_loop(loop)
 
     try:
+        # Non-FastAPI entrypoint (Databricks agent serving): no
+        # ``app.state.approval_broker`` exists, so OrchestrationConfig
+        # is constructed without one and ``approval_broker`` stays None.
+        # HITL gating is intentionally disabled on this path; CLI/serving
+        # callers cannot resolve approval requests anyway.
         agen = stream_research(
             query=query,
             llm=llm,

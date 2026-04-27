@@ -379,6 +379,12 @@ class ToolContext:
     background_summary: str = ""
     recent_observations: list[str] = field(default_factory=list)
     discovered_sources: list[Any] = field(default_factory=list)
+    # Runtime-capability attachment point. ``frozen=True`` prevents rebinding the
+    # ``extras`` reference, but the contained dict is mutable — standard Python
+    # idiom shared with :class:`ToolFactoryContext.extras`. Keys prefixed with
+    # ``_framework_`` are reserved for framework use (approval broker, VFS,
+    # todos store, etc.); user-chosen keys MUST NOT use this prefix.
+    extras: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

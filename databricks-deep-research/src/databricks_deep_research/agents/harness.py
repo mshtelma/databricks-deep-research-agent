@@ -78,6 +78,7 @@ from databricks_deep_research.tools.protocol import (
     UrlRegistry,
 )
 from databricks_deep_research.tracing import trace_span
+from databricks_deep_research.workflow.context import ExecutionContext
 from databricks_deep_research.workflow.runtime_core.selectors import (
     resolve_input_key,
     select_background_summary,
@@ -275,6 +276,7 @@ async def execute_agent(
     stream: bool = False,
     tool_call_cache: Any | None = None,
     runtime_context: Mapping[str, Any] | None = None,
+    execution_context: ExecutionContext | None = None,
 ) -> AgentOutput:
     """Execute a single agent node.
 
@@ -480,6 +482,27 @@ async def execute_agent(
         )
         delegated_to_react = False
 
+        # Populate ToolContext.extras with reserved-prefix keys.
+        # Precedence (later wins): Agent API path (state-stashed
+        # ``_framework_extras``) -> orchestrator path
+        # (``execution_context.user_id`` / ``approval_broker``). The
+        # orchestrator-supplied values take priority on conflict so the
+        # request-scoped identity wins over Agent dataclass defaults.
+        tool_extras: dict[str, Any] = {}
+        stashed_extras = state.get("_framework_extras")
+        if isinstance(stashed_extras, dict):
+            tool_extras.update(stashed_extras)
+        if execution_context is not None:
+            if execution_context.user_id is not None:
+                tool_extras["_framework_user_id"] = execution_context.user_id
+            if execution_context.approval_broker is not None:
+                tool_extras["_framework_approval_broker"] = execution_context.approval_broker
+        logger.info(
+            "HARNESS_EXTRAS_POPULATED node=%s user_id_set=%s broker_set=%s",
+            node_id,
+            "_framework_user_id" in tool_extras,
+            "_framework_approval_broker" in tool_extras,
+        )
         tool_ctx = ToolContext(
             query=state.query,
             url_registry=url_registry,
@@ -488,6 +511,7 @@ async def execute_agent(
             background_summary=_resolve_background_summary(state),
             recent_observations=summarize_recent_observations(state.get_all("findings")),
             discovered_sources=_get_pool_items(pools, "discovery_sources", 10),
+            extras=tool_extras,
         )
 
         builtin_result: AgentOutput | None = None
