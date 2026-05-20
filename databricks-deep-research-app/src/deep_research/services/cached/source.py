@@ -89,7 +89,7 @@ def _parse_ts(value: Any) -> datetime | None:
 class CachedSourceService(_CachedServiceBase, ISourceService):
     """`ISourceService` via `ChatState.sources[]`."""
 
-    def __init__(self, stack: "StorageStack") -> None:
+    def __init__(self, stack: StorageStack) -> None:
         super().__init__(stack)
 
     async def create(

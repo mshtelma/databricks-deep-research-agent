@@ -376,5 +376,5 @@ zipp==3.23.0
 wheels/databricks_deep_research-0.2.0-py3-none-any.whl
 
 # Install the app wheel (pre-built — no hatchling/build-isolation on platform)
-# Build timestamp: 20260425213443
+# Build timestamp: 20260520151341
 wheels/databricks_deep_research_app-0.1.0-py3-none-any.whl

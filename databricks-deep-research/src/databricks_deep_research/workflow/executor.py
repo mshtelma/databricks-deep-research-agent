@@ -22,6 +22,9 @@ from databricks_deep_research.agents.config import (
     PlanAndExecuteNodeConfig,
     ToolNodeConfig,
 )
+from databricks_deep_research.agents.execution.output_normalizer import (
+    source_is_substantive,
+)
 from databricks_deep_research.agents.harness import execute_agent
 from databricks_deep_research.errors import (
     NodeBudgetExceededError,
@@ -68,6 +71,7 @@ from databricks_deep_research.tools.registry import ToolRegistry
 from databricks_deep_research.tools.resolver import ToolResolver
 from databricks_deep_research.tracing import get_current_span, trace_span
 from databricks_deep_research.workflow.conditions import (
+    ConditionBranch,
     StateCondition,
     evaluate_state_condition,
 )
@@ -438,9 +442,10 @@ class WorkflowExecutor:
                 raise
 
             elapsed_ms = (time.monotonic() - start) * 1000
-            total_sources = self._pools.get(
-                "sources", PoolState(PoolConfig(name="_"))
-            ).count()
+            sources_pool = self._pools.get("sources", PoolState(PoolConfig(name="_")))
+            total_sources = sum(
+                1 for source in sources_pool.snapshot() if source_is_substantive(source)
+            )
 
             if wf_span:
                 wf_span.set_attributes({
@@ -686,9 +691,16 @@ class WorkflowExecutor:
         eval_dict = _state_to_eval_dict(state)
         for i, cond_dict in enumerate(config.conditions):
             try:
-                cond = _deserialize_condition(cond_dict)
+                child_index = i
+                branch_condition: Any = cond_dict
+                if isinstance(cond_dict, dict) and "condition" in cond_dict:
+                    branch = ConditionBranch(**cond_dict)
+                    branch_condition = branch.condition
+                    child_index = branch.child_index
+
+                cond = _deserialize_condition(branch_condition)
                 if evaluate_state_condition(cond, eval_dict):
-                    selected_idx = i
+                    selected_idx = child_index
                     break
             except Exception:
                 continue
@@ -834,6 +846,20 @@ class WorkflowExecutor:
             if tool_span:
                 tool_span.set_attributes({"tool.result_len": len(result.content)})
 
+        # DR_LEAK_TRACE state_write: capture tool-node state writes too.
+        try:
+            _content_str = result.content if isinstance(result.content, str) else str(result.content)
+            logger.info(
+                "DR_LEAK_TRACE phase=state_write origin=tool "
+                "node=%s tool=%s output_key=%s value_len=%d value_head=%r",
+                node.id,
+                ref.name,
+                config.output_key,
+                len(_content_str),
+                _content_str[:300].replace("\n", "\\n"),
+            )
+        except Exception as _exc:  # pragma: no cover — diagnostic only
+            logger.debug("DR_LEAK_TRACE state_write (tool) skipped: %s", _exc)
         state.append(node.id, config.output_key, result.content)
         return
         yield  # pragma: no cover — make this an async generator

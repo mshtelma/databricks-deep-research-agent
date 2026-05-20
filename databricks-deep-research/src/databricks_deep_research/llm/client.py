@@ -14,12 +14,14 @@ import os
 import random
 import time
 from collections.abc import AsyncGenerator, Callable
+from datetime import UTC, datetime
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
 
 from openai import APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
 
+from databricks_deep_research.events.types import ModelCallEvent, StreamEvent
 from databricks_deep_research.tracing import get_current_span
 
 logger = logging.getLogger(__name__)
@@ -624,6 +626,27 @@ class FrameworkLLMClient:
         self, kwargs: dict[str, Any]
     ) -> LLMResponse:
         """Execute a single standard chat completion and wrap the response."""
+        # Diagnostic: log the EXACT shape that reaches openai.create() — roles
+        # only, plus the count + presence of tools/tool_choice/response_format.
+        # The body content is intentionally NOT logged (PII / size). This lets
+        # us debug "assistant message prefill" rejections from Databricks
+        # Sonnet 4.6 without trawling logs for the wrong cause.
+        try:
+            _msgs = kwargs.get("messages") or []
+            _roles = [str(m.get("role", "?")) for m in _msgs if isinstance(m, dict)]
+            _last = _roles[-1] if _roles else "<empty>"
+            logger.info(
+                "LLM_API_CALL model=%s n_msgs=%d last_role=%s roles=%s has_tools=%s tool_choice=%s response_format=%s",
+                kwargs.get("model", "?"),
+                len(_msgs),
+                _last,
+                _roles,
+                bool(kwargs.get("tools")),
+                kwargs.get("tool_choice", "<none>"),
+                bool(kwargs.get("response_format")),
+            )
+        except Exception:  # pragma: no cover - defensive; logging must not break the call
+            pass
         resp = await self._get_client().chat.completions.create(**kwargs)
         choice = resp.choices[0]
         return LLMResponse(
@@ -646,6 +669,8 @@ class FrameworkLLMClient:
         tools: list[dict[str, Any]] | None = None,
         response_format: Any | None = None,
         structured_output: type | None = None,
+        event_sink: Callable[[StreamEvent], None] | None = None,
+        node_id: str = "",
     ) -> LLMResponse:
         """Send messages to the LLM and return an LLMResponse.
 
@@ -671,10 +696,23 @@ class FrameworkLLMClient:
             structured_output is not None,
         )
 
+        if event_sink is not None:
+            event_sink(ModelCallEvent(
+                node_id=node_id,
+                timestamp=datetime.now(tz=UTC).isoformat(),
+                tier=tier_str,
+                model=model_name,
+            ))
+
         async def _do_call(model: str) -> LLMResponse:
+            # Multi-model conversation-shape compat: GPT-family endpoints
+            # reject conversations ending with an assistant turn. Claude
+            # tolerates it. Apply per-call so the correct shape is used
+            # even when a 429-fallback switches us from Claude → GPT.
+            api_messages = _ensure_user_suffix_for_gpt(messages, model)
             kwargs: dict[str, Any] = {
                 "model": model,
-                "messages": messages,
+                "messages": api_messages,
             }
             if temperature is not None:
                 kwargs["temperature"] = temperature
@@ -816,9 +854,11 @@ class FrameworkLLMClient:
         )
 
         async def _open_stream(model: str) -> Any:
+            # Same GPT-compat treatment as complete(); see helper docstring.
+            api_messages = _ensure_user_suffix_for_gpt(messages, model)
             kwargs: dict[str, Any] = {
                 "model": model,
-                "messages": messages,
+                "messages": api_messages,
                 "stream": True,
             }
             if temperature is not None:
@@ -909,6 +949,47 @@ class FrameworkLLMClient:
 # ---------------------------------------------------------------------------
 # Helpers (module-private)
 # ---------------------------------------------------------------------------
+
+
+def _is_gpt_endpoint(model: str) -> bool:
+    """True when the resolved model name looks like a GPT-family endpoint.
+
+    Heuristic: lowercase substring "gpt" matches Databricks identifiers like
+    ``databricks-gpt-5-4``, ``databricks-gpt-5-mini``, ``databricks-gpt-5-nano``.
+    Does NOT match Claude, Gemini, Llama. A hypothetical hybrid name
+    containing "gpt" would false-positive, but the consequence is a harmless
+    no-op `Continue.` user message — not a correctness issue.
+    """
+    return "gpt" in (model or "").lower()
+
+
+def _ensure_user_suffix_for_gpt(
+    messages: list[dict[str, Any]],
+    model: str,
+) -> list[dict[str, Any]]:
+    """Ensure messages end with a user-role turn when targeting a GPT model.
+
+    GPT-family endpoints (e.g. ``databricks-gpt-5-4``) reject conversations
+    that end with an ``assistant`` role:
+
+        BadRequestError: This model does not support assistant message
+        prefill. The conversation must end with a user message.
+
+    Claude tolerates the assistant suffix (used for prefill prompting).
+    To keep both providers callable from the same harness path, this helper
+    is invoked at the LLM call site immediately before
+    ``chat.completions.create``: when the resolved model is GPT-family AND
+    the final message is from the assistant, append a no-op
+    ``{"role": "user", "content": "Continue."}`` so the API accepts it.
+
+    Returns the (possibly augmented) message list. Pure function, never
+    mutates the input.
+    """
+    if not messages or messages[-1].get("role") != "assistant":
+        return messages
+    if not _is_gpt_endpoint(model):
+        return messages
+    return [*messages, {"role": "user", "content": "Continue."}]
 
 
 def _extract_usage(response: Any) -> dict[str, int]:

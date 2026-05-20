@@ -74,3 +74,20 @@ class ServingEndpointsResponse(BaseSchema):
 
     config_endpoint_names: list[str] = Field(default_factory=list)
     """Endpoint identifiers that are also configured in YAML (for dedup)."""
+
+
+class DeploymentDefaultsResponse(BaseSchema):
+    """Default values for the Agent Designer deployment wizards.
+
+    Currently exposes only the framework Git ref used by Mode-2 (shell-app)
+    deploys. Resolved server-side so generated shell apps share the same
+    default pin.
+    """
+
+    framework_git_tag: str = Field(
+        ...,
+        description=(
+            "Default Git ref (for example, 'main' or 'v0.2.0') for the "
+            "shell-app pyproject pin."
+        ),
+    )

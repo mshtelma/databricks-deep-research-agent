@@ -20,7 +20,7 @@ import asyncio
 import contextlib
 import logging
 from dataclasses import dataclass
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from deep_research.storage.backend import StorageBackend
 from deep_research.storage.observability import get_sink

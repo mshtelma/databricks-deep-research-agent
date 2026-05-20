@@ -131,7 +131,7 @@ export function useCitations(
     },
   });
 
-  const claims = data?.claims ?? [];
+  const claims = useMemo(() => data?.claims ?? [], [data?.claims]);
   const verificationSummary = data?.verificationSummary ?? null;
   const correctionMetrics = data?.correctionMetrics ?? null;
 

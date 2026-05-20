@@ -172,6 +172,7 @@ class ClaimGenerator(Protocol):
         previous_content: str = ...,
         target_word_count: int = ...,
         max_tokens: int = ...,
+        generation_instructions: str = ...,
     ) -> AsyncGenerator[tuple[str, InterleavedClaim | None], None]: ...
 
 
@@ -514,6 +515,7 @@ class CitationVerificationPipeline:
         query: str,
         target_word_count: int = 600,
         max_tokens: int = 2000,
+        generation_instructions: str = "",
     ) -> AsyncGenerator[tuple[str, InterleavedClaim | None], None]:
         """Stage 2: Generate synthesis with interleaved claim/evidence pairs.
 
@@ -539,6 +541,7 @@ class CitationVerificationPipeline:
             previous_content=previous_content,
             target_word_count=target_word_count,
             max_tokens=max_tokens,
+            generation_instructions=generation_instructions,
         ):
             if content:
                 yield content, None
@@ -1616,9 +1619,35 @@ class CitationVerificationPipeline:
         """
         modifications: list[tuple[str, ClaimInfo]] = []
 
+        # Confidence threshold for promoting abstained-but-confident NLI
+        # rejections from KEEP → REMOVE. See GroundingValidationConfig.
+        _abstained_threshold = getattr(
+            self.config.grounding_validation,
+            "abstained_unsupported_remove_threshold",
+            0.5,
+        )
+
         for claim in claims:
             # Determine verdict key for disposition lookup
-            if claim.abstained:
+            _claim_confidence = getattr(claim, "verification_confidence", None) or 0.0
+            if (
+                claim.abstained
+                and claim.verification_verdict in ("unsupported", "contradicted")
+                and _claim_confidence < _abstained_threshold
+            ):
+                # NLI judged unsupported and abstention reflects insufficient
+                # evidence rather than principled uncertainty — promote to
+                # REMOVE so it doesn't leak through the report uncited.
+                verdict_key = claim.verification_verdict
+                logger.info(
+                    "DR_LEAK_TRACE phase=abstained_promoted_to_remove "
+                    "verdict=%s confidence=%.2f threshold=%.2f claim_head=%r",
+                    claim.verification_verdict,
+                    _claim_confidence,
+                    _abstained_threshold,
+                    _truncate(claim.claim_text, 80),
+                )
+            elif claim.abstained:
                 verdict_key = "abstained"
             elif claim.claim_role == ClaimRole.ANALYSIS.value:
                 if claim.verification_verdict == "partial":
@@ -1705,6 +1734,18 @@ class CitationVerificationPipeline:
                 )
             else:
                 rewritten_text = claim.verification_text or claim.claim_text
+                if not _is_well_formed_claim_rewrite(rewritten_text):
+                    logger.info(
+                        "CLAIM_REWRITE_SKIPPED_MALFORMED claim=%s rewrite=%s",
+                        _truncate(claim.claim_text, 50),
+                        _truncate(rewritten_text, 50),
+                    )
+                    continue
+                rewritten_text = _format_claim_rewrite_text(
+                    claim,
+                    rewritten_text,
+                    context,
+                )
                 content = _replace_claim_span(content, claim, rewritten_text)
                 claim.claim_text = rewritten_text
                 rewritten_count += 1
@@ -1739,6 +1780,7 @@ class CitationVerificationPipeline:
         target_word_count: int = 600,
         max_tokens: int = 2000,
         draft_content: str | None = None,
+        generation_instructions: str = "",
     ) -> AsyncGenerator[VerificationEvent | str, None]:
         """Run the complete 7-stage citation verification pipeline.
 
@@ -1763,6 +1805,9 @@ class CitationVerificationPipeline:
             max_tokens: Maximum tokens to generate.
             draft_content: Existing report content to verify instead of running
                 interleaved generation. Used by classical-lite grounding.
+            generation_instructions: Workflow-specific report shape and quality
+                contract for Stage 2 generation. This does not affect evidence
+                pre-selection, which continues to use ``query`` only.
 
         Yields:
             ``str`` content chunks and ``VerificationEvent`` objects.
@@ -1879,7 +1924,14 @@ class CitationVerificationPipeline:
                         target_word_count=target_word_count,
                         max_tokens=max_tokens,
                         max_tool_calls=self.config.react_synthesis.max_tool_calls,
-                        section_descriptions="\n".join(observations) if observations else "",
+                        section_descriptions="\n".join(
+                            part
+                            for part in [
+                                generation_instructions,
+                                "\n".join(observations) if observations else "",
+                            ]
+                            if part
+                        ),
                     ):
                         if react_content:
                             full_content = react_content
@@ -1895,6 +1947,7 @@ class CitationVerificationPipeline:
                         query=query,
                         target_word_count=target_word_count,
                         max_tokens=max_tokens,
+                        generation_instructions=generation_instructions,
                     ):
                         if interleaved_content:
                             full_content = interleaved_content
@@ -2183,6 +2236,10 @@ class CitationVerificationPipeline:
                     )
 
             full_content = _strip_reclaim_block_tags(full_content)
+            # Normalize markdown header whitespace BEFORE recalc so subsequent
+            # claim-position consumers see positions valid against the final
+            # text the user will see.
+            full_content = _ensure_header_breaks(full_content)
             _recalculate_claim_positions(full_content, generated_claims)
 
             # ------------------------------------------------------------------
@@ -2212,6 +2269,23 @@ class CitationVerificationPipeline:
             self.last_verification_summary = summary
             self.last_final_content = full_content
             self.last_routing_summary = dict(summary.routing_summary)
+            # DR_LEAK_TRACE citation_final: capture the final processed report
+            # content. Compare to state_write (synthesizer) — if planning text
+            # is present here that wasn't present in the synthesizer's output,
+            # citation pipeline introduced it.
+            try:
+                _head = (full_content or "")[:300].replace("\n", "\\n")
+                _tail = (full_content or "")[-300:].replace("\n", "\\n")
+                logger.info(
+                    "DR_LEAK_TRACE phase=citation_final "
+                    "content_len=%d claims=%d head=%r tail=%r",
+                    len(full_content or ""),
+                    len(generated_claims),
+                    _head,
+                    _tail,
+                )
+            except Exception as _exc:  # pragma: no cover — diagnostic only
+                logger.debug("DR_LEAK_TRACE citation_final skipped: %s", _exc)
 
             yield VerificationEvent(
                 event_type="verification_summary",
@@ -2444,6 +2518,66 @@ def _replace_claim_span(content: str, claim: ClaimInfo, replacement: str) -> str
     return before + replacement + after
 
 
+_TERMINAL_CITATION_RE = re.compile(
+    r"(?:\s*\[[A-Za-z0-9-]+\])+\s*[.!?]?\s*$"
+)
+
+_CLAIM_TERMINAL_RE = re.compile(r"[.!?]\s*$")
+
+_DANGLING_REWRITE_TAIL_RE = re.compile(
+    r"(?:,|;|:|\b(?:and|or|but|still|with|including|while|although|though|as|"
+    r"at|to|from|of|for|by|in|on|than|versus|against|between))\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_well_formed_claim_rewrite(text: str) -> bool:
+    """Return True when *text* is safe to splice in as a standalone claim."""
+    clean_text = text.strip()
+    if not clean_text:
+        return False
+    return _DANGLING_REWRITE_TAIL_RE.search(clean_text) is None
+
+
+def _claim_citation_suffix(claim: ClaimInfo) -> str:
+    """Return existing claim citation keys as adjacent markdown markers."""
+    keys: list[str] = []
+    claim_keys = (
+        claim.citation_keys
+        or ([] if claim.citation_key is None else [claim.citation_key])
+    )
+    for key in claim_keys:
+        normalized = str(key).strip()
+        if normalized and normalized not in keys:
+            keys.append(normalized)
+    return "".join(f"[{key}]" for key in keys)
+
+
+def _ensure_terminal_punctuation(text: str) -> str:
+    """End prose replacements with sentence punctuation."""
+    clean_text = text.strip()
+    if not clean_text or _CLAIM_TERMINAL_RE.search(clean_text):
+        return clean_text
+    return f"{clean_text}."
+
+
+def _format_claim_rewrite_text(
+    claim: ClaimInfo,
+    replacement: str,
+    context: str | None,
+) -> str:
+    """Format a fact rewrite so it remains a cited, sentence-safe replacement."""
+    clean_text = replacement.strip()
+    if context == "table":
+        return clean_text
+
+    citation_suffix = _claim_citation_suffix(claim)
+    if citation_suffix and not _TERMINAL_CITATION_RE.search(clean_text):
+        clean_text = clean_text.rstrip(".!?;:, ")
+        clean_text = f"{clean_text} {citation_suffix}"
+    return _ensure_terminal_punctuation(clean_text)
+
+
 def _strip_citation_markers(text: str) -> str:
     return re.sub(
         r"\s*\[[A-Za-z0-9-]+\]\s*",
@@ -2502,6 +2636,33 @@ def _needs_hedging(text: str) -> bool:
     ]
     lower = text.lower()
     return not any(h in lower for h in existing)
+
+
+_HEADER_FIX_RE = re.compile(r"([^\s#])([ \t]*)(#{1,6}\s)")
+
+
+def _ensure_header_breaks(text: str) -> str:
+    """Insert '\\n\\n' before any '#' header that isn't already on its own line.
+
+    Skips fenced code blocks so ``# inside`` is preserved verbatim. This
+    addresses synthesizer output where ``... margin of 8% [0]. ## Market``
+    leaves the header inline and the markdown renderer treats it as prose.
+    """
+    parts = re.split(r"(```[\s\S]*?```)", text)
+    fixups = 0
+    for i in range(0, len(parts), 2):  # Even indices are non-code
+        before = parts[i]
+        parts[i] = _HEADER_FIX_RE.sub(
+            lambda m: f"{m.group(1)}\n\n{m.group(3)}", before
+        )
+        if parts[i] != before:
+            fixups += 1
+    if fixups:
+        logger.info(
+            "DR_LEAK_TRACE phase=header_fix segments_fixed=%d total_len=%d",
+            fixups, len(text),
+        )
+    return "".join(parts)
 
 
 def _clean_empty_sections(content: str) -> str:

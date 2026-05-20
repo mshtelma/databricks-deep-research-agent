@@ -276,31 +276,85 @@ class BraveSearchConfig(BaseModel):
     requests_per_second: float = Field(default=1.0, gt=0, le=10)
     default_result_count: int = Field(default=10, ge=1, le=50)
     freshness: str = Field(default="pm", pattern=r"^(pd|pw|pm|py)$")
+    # Process-wide concurrency cap for the framework's BraveSearchAdapter.
+    # Default lowered from 4 → 2 after the NVDA-trace 429 cascade: 7 lanes
+    # firing ~5 queries each = ~35 in-flight competing for permits, then
+    # bursting when permits free up and tripping Brave's API-side rate
+    # limiter. With 2, bursts are throttled at the source.
+    max_concurrency: int = Field(default=2, ge=1, le=32)
+    # Number of attempts on 429 responses (with exponential backoff + jitter).
+    max_retries: int = Field(default=3, ge=1, le=10)
+    # Additional intra-permit sleep (uniform random in
+    # [0, inter_call_jitter_seconds)) before each request fires. Smooths
+    # bursts so consecutive calls inside the semaphore don't hit Brave
+    # back-to-back. Set to 0 to disable.
+    inter_call_jitter_seconds: float = Field(default=0.15, ge=0.0, le=2.0)
 
     model_config = {"frozen": True}
 
 
 class DomainFilterConfig(BaseModel):
-    """Configuration for domain whitelist/blacklist filtering.
+    """Configuration for per-agent domain handling.
 
-    Supports wildcard patterns:
-    - "*.gov" - matches any .gov domain (cdc.gov, www.nasa.gov)
-    - "*.edu" - matches any .edu domain
-    - "news.*" - matches news.com, news.org, etc.
-    - "exact.com" - exact match only
+    Combines two orthogonal mechanisms:
 
-    Filter modes:
-    - include: Only domains matching include_domains are allowed
-    - exclude: Domains matching exclude_domains are blocked
-    - both: Must match include_domains AND not match exclude_domains
+    1. **Binary filter** — ``mode`` + ``include_domains`` / ``exclude_domains``
+       run at web-search result time. A URL matching ``exclude_domains`` is
+       dropped before admission; in INCLUDE/BOTH mode, URLs must additionally
+       match ``include_domains``.
+
+    2. **Reputation ranking** — ``preferred_domains`` / ``deprecated_domains``
+       feed the framework's source-admission scorer with signed deltas
+       (boost / penalty). They do NOT filter; they only re-rank survivors of
+       step (1). A source matching both nets to the sum of deltas.
+
+    All four lists accept the same wildcard syntax (``*.gov``, ``news.*``,
+    ``exact.com``). Precedence: exclude → include → reputation.
+
+    Filter modes (binary, unchanged from prior versions):
+      * ``include``: Only domains matching include_domains are allowed.
+      * ``exclude``: Domains matching exclude_domains are blocked.
+      * ``both``: Must match include_domains AND not match exclude_domains.
+
+    All lists default to empty so legacy callers that pre-date the
+    reputation fields construct successfully without behaviour change.
     """
 
     mode: DomainFilterMode = DomainFilterMode.EXCLUDE
     include_domains: list[str] = Field(default_factory=list)
     exclude_domains: list[str] = Field(default_factory=list)
+    # Soft reputation ranking signals — never hard-filter; only adjust
+    # source admission scores. See databricks_deep_research.agents
+    # .source_reputation.SourceReputationScorer for the application logic.
+    preferred_domains: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Wildcard domain patterns whose sources receive a positive "
+            "admission-score delta. Used for ranking only — does not "
+            "filter. Editable per-agent via the designer UI / chat."
+        ),
+    )
+    deprecated_domains: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Wildcard domain patterns whose sources receive a negative "
+            "admission-score delta. Used for ranking only — does not "
+            "filter. Editable per-agent via the designer UI / chat."
+        ),
+    )
     log_filtered: bool = False
 
     model_config = {"frozen": True}
+
+    @property
+    def has_reputation_signal(self) -> bool:
+        """True if either reputation list contains at least one pattern.
+
+        Callers use this to decide whether to construct a
+        ``SourceReputationScorer`` at all — saves an allocation on the
+        per-source hot path when no agent has populated reputation.
+        """
+        return bool(self.preferred_domains) or bool(self.deprecated_domains)
 
 
 class SearchConfig(BaseModel):
@@ -1522,18 +1576,25 @@ def get_default_config() -> AppConfig:
                 supports_prompt_caching=True,
             ),
             "sonnet": EndpointConfig(
-                endpoint_identifier="databricks-claude-sonnet-4-5",
+                endpoint_identifier="databricks-claude-sonnet-4-6",
                 max_context_window=128000,
                 tokens_per_minute=50000,
                 supports_structured_output=True,
                 supports_prompt_caching=True,
             ),
             "opus": EndpointConfig(
-                endpoint_identifier="databricks-claude-opus-4-5",
+                endpoint_identifier="databricks-claude-opus-4-7",
                 max_context_window=128000,
                 tokens_per_minute=200000,
                 supports_structured_output=True,
                 supports_prompt_caching=True,
+            ),
+            "gpt5": EndpointConfig(
+                endpoint_identifier="databricks-gpt-5-5",
+                max_context_window=128000,
+                tokens_per_minute=200000,
+                supports_structured_output=True,
+                supports_temperature=False,
             ),
             "gpt5mini": EndpointConfig(
                 endpoint_identifier="databricks-gpt-5-mini",
@@ -1557,7 +1618,7 @@ def get_default_config() -> AppConfig:
                 reasoning_effort=ReasoningEffort.MEDIUM,
             ),
             "complex": ModelRoleConfig(
-                endpoints=["opus", "sonnet"],
+                endpoints=["opus", "sonnet", "gpt5"],
                 temperature=0.7,
                 max_tokens=16000,
                 reasoning_effort=ReasoningEffort.HIGH,

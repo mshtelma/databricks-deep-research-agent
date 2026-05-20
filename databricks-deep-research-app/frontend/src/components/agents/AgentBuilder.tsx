@@ -147,6 +147,13 @@ export function AgentBuilder({
   const [excludeDomains, setExcludeDomains] = React.useState<string[] | null>(
     agent?.excludeDomains ?? null
   );
+  // Soft reputation lists — re-rank without filtering. Independent of mode.
+  const [preferredDomains, setPreferredDomains] = React.useState<string[] | null>(
+    (agent as unknown as { preferredDomains?: string[] | null })?.preferredDomains ?? null
+  );
+  const [deprecatedDomains, setDeprecatedDomains] = React.useState<string[] | null>(
+    (agent as unknown as { deprecatedDomains?: string[] | null })?.deprecatedDomains ?? null
+  );
 
   // Preset Steps
   const [presetSteps, setPresetSteps] = React.useState<PresetStep[]>(initialPresetSteps);
@@ -195,6 +202,9 @@ export function AgentBuilder({
       domain_filter_mode: domainFilterMode ?? undefined,
       include_domains: includeDomains ?? undefined,
       exclude_domains: excludeDomains ?? undefined,
+      // Soft per-agent ranking (PR 3) — independent of filter mode.
+      preferred_domains: preferredDomains ?? undefined,
+      deprecated_domains: deprecatedDomains ?? undefined,
     };
 
     // Include preset steps for non-planner modes
@@ -218,7 +228,7 @@ export function AgentBuilder({
 
     // TODO: Align frontend type definitions (CreateCustomAgentRequest, UpdateCustomAgentRequest)
     // with the backend flat schema to remove this type assertion.
-    onSave(payload as any);
+    onSave(payload as CreateCustomAgentRequest | UpdateCustomAgentRequest);
   };
 
   const updateSourceConfig = (updates: Partial<AgentSourceConfig>) => {
@@ -345,10 +355,14 @@ export function AgentBuilder({
                 domainFilterMode={domainFilterMode}
                 includeDomains={includeDomains}
                 excludeDomains={excludeDomains}
-                onChange={(mode, include, exclude) => {
+                preferredDomains={preferredDomains}
+                deprecatedDomains={deprecatedDomains}
+                onChange={(mode, include, exclude, preferred, deprecated) => {
                   setDomainFilterMode(mode);
                   setIncludeDomains(include);
                   setExcludeDomains(exclude);
+                  if (preferred !== undefined) setPreferredDomains(preferred);
+                  if (deprecated !== undefined) setDeprecatedDomains(deprecated);
                 }}
                 disabled={isLoading}
               />

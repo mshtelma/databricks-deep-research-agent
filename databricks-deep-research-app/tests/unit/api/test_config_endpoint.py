@@ -159,3 +159,17 @@ class TestModelCatalogEndpoint:
         data = response.json()
         assert data["categories"] == {}
         assert data["endpoints"] == {}
+
+
+class TestDeploymentDefaultsEndpoint:
+    """Tests for GET /api/v1/config/deployment-defaults."""
+
+    def test_returns_default_framework_ref(
+        self,
+        client: TestClient,
+    ) -> None:
+        """Should return the default framework Git ref."""
+        response = client.get("/api/v1/config/deployment-defaults")
+
+        assert response.status_code == 200
+        assert response.json() == {"frameworkGitTag": "main"}

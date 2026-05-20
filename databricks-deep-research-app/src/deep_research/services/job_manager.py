@@ -695,51 +695,6 @@ class JobManager:
                         except Exception:
                             pass
 
-            # Agent resolution — use factory to support both storage backends (009-custom-agent-config)
-            if agent_id:
-                try:
-                    from deep_research.agent.orchestrator import apply_custom_agent_to_config
-                    from deep_research.core.config import get_settings as _get_settings
-                    from deep_research.services._impl_factory import make_custom_agent_service
-
-                    _ca_settings = _get_settings()
-                    if _ca_settings.storage_service_impl == "cached" and self._storage_stack is not None:
-                        agent_service = make_custom_agent_service(_ca_settings, self._storage_stack)
-                        agent = await agent_service.get_accessible(UUID(agent_id), user_id)
-                    else:
-                        agent_session_maker = get_session_maker()
-                        async with agent_session_maker() as agent_db:
-                            agent_service = make_custom_agent_service(_ca_settings, None, session=agent_db)
-                            agent = await agent_service.get_accessible(UUID(agent_id), user_id)
-                    if agent:
-                        config = apply_custom_agent_to_config(config, agent)
-                        logger.info(
-                            "JOB_AGENT_CONFIG_APPLIED",
-                            extra={
-                                "session_id": str(session_id),
-                                "agent_id": agent_id,
-                                "agent_name": agent.name,
-                            },
-                        )
-                    else:
-                        logger.warning(
-                            "JOB_AGENT_NOT_FOUND",
-                            extra={
-                                "session_id": str(session_id),
-                                "agent_id": agent_id,
-                                "user_id": user_id,
-                            },
-                        )
-                except Exception as e:
-                    logger.warning(
-                        "JOB_AGENT_RESOLUTION_FAILED",
-                        extra={
-                            "session_id": str(session_id),
-                            "agent_id": agent_id,
-                            "error": str(e)[:200],
-                        },
-                    )
-
             async def _consume_research_stream(
                 research_db: AsyncSession | None,
             ) -> None:

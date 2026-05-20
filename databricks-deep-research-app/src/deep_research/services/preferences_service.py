@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from deep_research.core.logging_utils import get_logger
 from deep_research.models.enums import QueryMode
 from deep_research.models.research_session import ResearchDepth
+from deep_research.models.user import User
 from deep_research.models.user_preferences import UserPreferences
 
 logger = get_logger(__name__)
@@ -39,15 +40,28 @@ class PreferencesService:
         """
         from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+        # Ensure FK-bearing preference inserts cannot fail if auth sync was
+        # skipped, delayed, or cached before the durable users row existed.
+        user_stmt = (
+            pg_insert(User)
+            .values(user_id=user_id)
+            .on_conflict_do_nothing(index_elements=["user_id"])
+        )
+        await self._session.execute(user_stmt)
+
         # Upsert: INSERT ... ON CONFLICT DO NOTHING (atomic, no race condition)
-        stmt = pg_insert(UserPreferences).values(
-            user_id=user_id,
-            default_research_depth=ResearchDepth.AUTO,
-            system_instructions=None,
-            default_query_mode="simple",
-            theme="system",
-            notifications_enabled=True,
-        ).on_conflict_do_nothing(index_elements=["user_id"])
+        stmt = (
+            pg_insert(UserPreferences)
+            .values(
+                user_id=user_id,
+                default_research_depth=ResearchDepth.AUTO,
+                system_instructions=None,
+                default_query_mode="simple",
+                theme="system",
+                notifications_enabled=True,
+            )
+            .on_conflict_do_nothing(index_elements=["user_id"])
+        )
 
         await self._session.execute(stmt)
 

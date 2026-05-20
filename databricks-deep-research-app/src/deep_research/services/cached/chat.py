@@ -17,6 +17,7 @@ per-chat lock inside `_mutate_chat`. Different chat IDs are fully concurrent.
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -29,8 +30,8 @@ from deep_research.services._protocols import IChatService
 from deep_research.storage.documents import (
     ChatDocument,
     ChatMeta,
-    ChatState,
     ChatMetaEmbed,
+    ChatState,
 )
 
 if TYPE_CHECKING:
@@ -163,10 +164,8 @@ def _meta_to_view(meta: ChatMeta, state: ChatState | None = None) -> ChatView:
     elif chat_embed is not None:
         raw_status = chat_embed.metadata.get("status")
         if raw_status:
-            try:
+            with suppress(ValueError):
                 status = ChatStatus(raw_status)
-            except ValueError:
-                pass
 
     return ChatView(
         id=meta.chat_id,
@@ -196,7 +195,7 @@ class CachedChatService(_CachedServiceBase, IChatService):
 
     _service_name = "chat"
 
-    def __init__(self, stack: "StorageStack") -> None:
+    def __init__(self, stack: StorageStack) -> None:
         super().__init__(stack)
 
     # -- Reads -----------------------------------------------------------
@@ -466,7 +465,7 @@ class CachedChatService(_CachedServiceBase, IChatService):
 
         await self._mutate_chat(chat_id, _apply)
 
-    async def purge_deleted_chats(self, days_old: int = 30) -> int:
+    async def purge_deleted_chats(self, _days_old: int = 30) -> int:
         """Cold-path permanent deletion — not used on hot paths.
 
         The cached backend has no direct DELETE on the document table; we
@@ -556,12 +555,8 @@ class CachedChatService(_CachedServiceBase, IChatService):
         """Persist changes from a Chat-like object already loaded."""
         chat_id = UUID(str(chat.id))
         # Hydrate into cache first so _mutate_chat can find the entry
-        try:
+        with suppress(Exception):
             await self._read_chat(chat_id)
-        except Exception:
-            pass
-
-        from deep_research.models.chat import ChatType
 
         def _apply(d: ChatDocument) -> None:
             new_title = getattr(chat, "title", None)

@@ -43,14 +43,14 @@ endpoints:
     supports_prompt_caching: true  # Claude supports cache_control
 
   opus:
-    endpoint_identifier: databricks-claude-opus-4-6
+    endpoint_identifier: databricks-claude-opus-4-7
     max_context_window: 128000
-    tokens_per_minute: 200000  # Databricks allows 200k ITPM for Opus 4.5
+    tokens_per_minute: 200000
     supports_structured_output: true
     supports_prompt_caching: true  # Claude supports cache_control
 
   gpt5:
-    endpoint_identifier: databricks-gpt-5-4
+    endpoint_identifier: databricks-gpt-5-5
     max_context_window: 128000
     tokens_per_minute: 200000
     supports_structured_output: true
@@ -355,6 +355,13 @@ search:
     requests_per_second: 1.0
     default_result_count: 10
     freshness: pm  # pd=day, pw=week, pm=month, py=year
+    # Process-wide cap on concurrent Brave API requests across all lanes.
+    # 7 parallel lanes × 5-6 searches each easily blows the rate limit
+    # without this gate. Defaults to paid-tier (~10 QPS); set
+    # BRAVE_MAX_CONCURRENCY=1 in the environment for the free tier.
+    max_concurrency: 10
+    # 429 retry attempts (with exponential backoff + jitter).
+    max_retries: 3
 
   # Domain whitelist/blacklist filtering
   # Supports wildcard patterns: *.gov, *.edu, news.*, *.example.*

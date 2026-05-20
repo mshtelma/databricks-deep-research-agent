@@ -230,9 +230,8 @@ class CachedTemplateService(_CachedServiceBase, ITemplateService):
                 if view.type != type_val:
                     continue
             # Optional tags filter (any match)
-            if tags:
-                if not any(t in view.tags for t in tags):
-                    continue
+            if tags and not any(t in view.tags for t in tags):
+                continue
             accessible.append(view)
 
         # Sort by name (mirrors legacy ORM query)

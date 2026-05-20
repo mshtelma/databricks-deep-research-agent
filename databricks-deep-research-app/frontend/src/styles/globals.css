@@ -33,6 +33,87 @@
     --ring: 222.2 84% 4.9%;
 
     --radius: 0.5rem;
+
+    /* ============================================================
+       Databricks Design System tokens (additive — used by new
+       Agentic Designer UI; do not collide with shadcn variables)
+       ============================================================ */
+    /* Brand primaries */
+    --db-lava-600: #FF3621;
+    --db-navy-800: #1B3139;
+    --db-oat-medium: #EEEDE9;
+    --db-oat-light: #F9F7F4;
+    --db-white: #FFFFFF;
+
+    /* Lava */
+    --db-lava-800: #801C17;
+    --db-lava-700: #BD2B26;
+    --db-lava-500: #FF5F46;
+    --db-lava-400: #FF9E94;
+    --db-lava-300: #FABFBA;
+    --db-lava-100: #FFE5E0;
+
+    /* Maroon */
+    --db-maroon-800: #4A121A;
+    --db-maroon-700: #730D21;
+    --db-maroon-600: #98102A;
+    --db-maroon-500: #AB4057;
+    --db-maroon-400: #BF7080;
+    --db-maroon-300: #D69EA8;
+
+    /* Yellow */
+    --db-yellow-800: #7D5319;
+    --db-yellow-700: #BA7B23;
+    --db-yellow-600: #FFAB00;
+    --db-yellow-500: #FCBA33;
+    --db-yellow-400: #FFCC66;
+    --db-yellow-300: #FFDB96;
+
+    /* Green */
+    --db-green-800: #095A35;
+    --db-green-700: #00875C;
+    --db-green-600: #00A972;
+    --db-green-500: #42BA91;
+    --db-green-400: #70C4AB;
+    --db-green-300: #9ED6C4;
+
+    /* Blue */
+    --db-blue-800: #04355D;
+    --db-blue-700: #0E538B;
+    --db-blue-600: #2272B4;
+    --db-blue-500: #4299E0;
+    --db-blue-400: #8ACAFF;
+    --db-blue-300: #BAE1FC;
+    --db-blue-100: #DDEBF7;
+
+    /* Navy */
+    --db-navy-900: #0B2026;
+    --db-navy-700: #143D4A;
+    --db-navy-600: #1B5162;
+    --db-navy-500: #618794;
+    --db-navy-400: #90A5B1;
+    --db-navy-300: #C4CCD6;
+
+    /* Functional grays */
+    --db-gray-nav: #303F47;
+    --db-gray-text: #5A6F77;
+    --db-gray-lines: #DCE0E2;
+
+    /* Type families */
+    --font-sans-db: "DM Sans", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --font-mono-db: "DM Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+    /* Shadows */
+    --db-shadow-xs: 0 1px 2px rgba(11,32,38,0.06);
+    --db-shadow-sm: 0 1px 3px rgba(11,32,38,0.08), 0 1px 2px rgba(11,32,38,0.04);
+    --db-shadow-md: 0 4px 12px rgba(11,32,38,0.08), 0 1px 3px rgba(11,32,38,0.06);
+    --db-shadow-lg: 0 12px 32px rgba(11,32,38,0.12), 0 2px 6px rgba(11,32,38,0.06);
+    --db-shadow-xl: 0 24px 64px rgba(11,32,38,0.18);
+    --db-shadow-focus: 0 0 0 3px rgba(255, 54, 33, 0.28);
+
+    /* Motion */
+    --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+    --ease-in-out: cubic-bezier(0.5, 0, 0.2, 1);
   }
 
   .dark {
@@ -175,4 +256,132 @@
 /* Image handling */
 .prose img {
   @apply rounded-lg max-w-full h-auto my-4;
+}
+
+/* ==========================================================================
+   Databricks Agentic Designer utilities (additive, scoped via .db-* roots)
+   ========================================================================== */
+
+.db-root {
+  font-family: var(--font-sans-db);
+  color: var(--db-navy-800);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.db-root *,
+.db-root *::before,
+.db-root *::after { box-sizing: border-box; }
+
+.db-root button { font-family: var(--font-sans-db); }
+.db-root input,
+.db-root textarea,
+.db-root select { font-family: var(--font-sans-db); }
+
+/* Buttons */
+.db-root .btn-primary {
+  background: var(--db-lava-600); color: #fff; border: 0;
+  padding: 7px 14px; border-radius: 6px;
+  font: 500 13px/1 var(--font-sans-db);
+  cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  transition: background 200ms var(--ease-out);
+}
+.db-root .btn-primary:hover:not(:disabled) { background: var(--db-lava-700); }
+.db-root .btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.db-root .btn-secondary {
+  background: var(--db-navy-800); color: #fff; border: 0;
+  padding: 7px 14px; border-radius: 6px;
+  font: 500 13px/1 var(--font-sans-db);
+  cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  transition: background 200ms var(--ease-out);
+}
+.db-root .btn-secondary:hover:not(:disabled) { background: var(--db-navy-900); }
+.db-root .btn-secondary:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.db-root .btn-ghost {
+  background: transparent; color: var(--db-navy-800);
+  border: 1px solid var(--db-gray-lines);
+  padding: 6px 12px; border-radius: 6px;
+  font: 500 13px/1 var(--font-sans-db);
+  cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  transition: background 200ms var(--ease-out), border-color 200ms var(--ease-out);
+}
+.db-root .btn-ghost:hover:not(:disabled) { background: var(--db-oat-medium); border-color: var(--db-navy-300); }
+.db-root .btn-ghost:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.db-root .btn-tiny {
+  background: transparent; color: var(--db-gray-text);
+  border: 0; padding: 4px 6px; border-radius: 4px;
+  font: 500 12px/1 var(--font-sans-db);
+  cursor: pointer; display: inline-flex; align-items: center; gap: 4px;
+}
+.db-root .btn-tiny:hover:not(:disabled) { background: var(--db-oat-medium); color: var(--db-navy-800); }
+.db-root .btn-tiny:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* Inputs */
+.db-root .field-input {
+  width: 100%; border: 1px solid var(--db-gray-lines); background: #fff;
+  border-radius: 6px; padding: 7px 10px;
+  font: 400 13px/1.4 var(--font-sans-db);
+  color: var(--db-navy-800); outline: none;
+  transition: border-color 120ms var(--ease-out), box-shadow 120ms var(--ease-out);
+}
+.db-root .field-input:focus { border-color: var(--db-navy-400); box-shadow: var(--db-shadow-focus); }
+.db-root .field-input.mono { font-family: var(--font-mono-db); font-size: 12px; }
+.db-root textarea.field-input { resize: vertical; line-height: 1.55; }
+
+/* Tabs */
+.db-root .db-tabs {
+  display: flex; gap: 0;
+  border-bottom: 1px solid var(--db-gray-lines);
+}
+.db-root .db-tab {
+  padding: 10px 16px; font: 500 13px/1 var(--font-sans-db);
+  color: var(--db-gray-text); background: transparent; border: 0;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.db-root .db-tab.active { color: var(--db-navy-800); border-bottom-color: var(--db-lava-600); }
+.db-root .db-tab:hover:not(.active) { color: var(--db-navy-800); }
+
+/* Modal backdrop */
+.db-root .scrim,
+.scrim.db-scrim {
+  position: fixed; inset: 0;
+  background: rgba(11,32,38,0.32);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 50; backdrop-filter: blur(2px);
+  animation: blockIn 200ms var(--ease-out);
+}
+
+/* Block animations */
+@keyframes blockIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulseRing {
+  0%   { box-shadow: 0 0 0 0 rgba(255,54,33,0.35); }
+  100% { box-shadow: 0 0 0 8px rgba(255,54,33,0); }
+}
+@keyframes saveFlash {
+  0%   { color: var(--db-green-700); }
+  100% { color: var(--db-gray-text); }
+}
+
+.db-anim-blockIn { animation: blockIn 220ms var(--ease-out); }
+.db-anim-pulseRing { animation: pulseRing 1.4s var(--ease-out) infinite; }
+.db-anim-saveFlash { animation: saveFlash 800ms var(--ease-out); }
+
+/* Databricks scrollbars (only inside .db-root) */
+.db-root ::-webkit-scrollbar { width: 10px; height: 10px; }
+.db-root ::-webkit-scrollbar-track { background: transparent; }
+.db-root ::-webkit-scrollbar-thumb {
+  background: var(--db-gray-lines); border-radius: 999px;
+  border: 2px solid transparent; background-clip: padding-box;
+}
+.db-root ::-webkit-scrollbar-thumb:hover {
+  background: var(--db-navy-300);
+  border: 2px solid transparent; background-clip: padding-box;
 }

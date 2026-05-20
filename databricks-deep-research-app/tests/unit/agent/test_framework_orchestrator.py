@@ -15,11 +15,14 @@ from uuid import UUID, uuid4
 import pytest
 
 from deep_research.agent.framework_orchestrator import (
+    _apply_runtime_overlays_to_workflow,
+    _apply_source_scope_to_workflow_declarations,
     _build_state_proxy,
     _extract_verification_from_framework_state,
     _load_enterprise_tools,
     _load_existing_sources,
     _load_file_search_tool,
+    _resolve_agent_v2_workflow,
     _safe_uuid,
     _to_sse_event,
     _to_uuid,
@@ -71,6 +74,109 @@ def _mock_config(**overrides: Any) -> MagicMock:
     for key, value in defaults.items():
         setattr(config, key, value)
     return config
+
+
+def _workflow_dict(output_schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "id": "saved-agent-workflow",
+        "name": "Saved Agent Workflow",
+        "version": 1,
+        "required_inputs": ["query"],
+        "output_keys": ["report"],
+        "root": {
+            "id": "root",
+            "type": "sequence",
+            "label": "Workflow",
+            "config": {},
+            "children": [
+                {
+                    "id": "synthesizer",
+                    "type": "agent",
+                    "label": "Synthesizer",
+                    "config": {
+                        "subtype": "synthesizer",
+                        "model_tier": "analytical",
+                        "input_keys": ["query"],
+                        "output_key": "report",
+                        "system_prompt": "Synthesize an answer.",
+                        "user_prompt_template": "{query}",
+                        **({"output_schema": output_schema} if output_schema is not None else {}),
+                    },
+                    "children": [],
+                },
+            ],
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tests — Agent V2 runtime workflow selection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_agent_v2_workflow_loads_saved_definition() -> None:
+    agent_id = uuid4()
+    workflow = _workflow_dict()
+
+    class _FakeAgentV2Service:
+        def __init__(self, session: object) -> None:
+            self.session = session
+
+        async def get_for_user(self, requested_id: UUID, user_id: str) -> object:
+            assert requested_id == agent_id
+            assert user_id == "user-1"
+            return SimpleNamespace(definition=workflow)
+
+    config = _mock_config(agent_id=str(agent_id), verify_sources=False)
+    with patch("deep_research.services.agent_v2_service.AgentV2Service", _FakeAgentV2Service):
+        definition = await _resolve_agent_v2_workflow(config, "user-1", object())
+
+    assert definition is not None
+    assert definition.id == "saved-agent-workflow"
+    assert definition.root.children[0].label == "Synthesizer"
+
+
+def test_runtime_overlay_enables_reclaim_when_verify_sources_requested() -> None:
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    definition = load_workflow_from_dict(_workflow_dict())
+    config = _mock_config(verify_sources=True)
+
+    updated = _apply_runtime_overlays_to_workflow(definition, config)
+    synth_config = updated.root.children[0].config
+
+    assert synth_config["output_schema"]["synthesis_mode"] == "reclaim"
+    assert synth_config["output_schema"]["enable_citation_verification"] is True
+
+
+def test_runtime_overlay_preserves_explicit_synthesizer_grounding() -> None:
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    workflow = _workflow_dict()
+    workflow["root"]["children"][0]["config"]["grounding_mode"] = "none"
+    definition = load_workflow_from_dict(workflow)
+    config = _mock_config(verify_sources=True)
+
+    updated = _apply_runtime_overlays_to_workflow(definition, config)
+
+    assert updated.root.children[0].config["grounding_mode"] == "none"
+    assert "output_schema" not in updated.root.children[0].config
+
+
+def test_source_scope_filters_saved_workflow_tool_declarations() -> None:
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    workflow = _workflow_dict()
+    workflow["tools"] = [{"name": "web_search", "kind": "web_search", "config": {}}]
+    workflow["root"]["children"][0]["config"]["tools"] = ["web_search"]
+    definition = load_workflow_from_dict(workflow)
+    config = _mock_config(source_scope="enterprise_only")
+
+    updated = _apply_source_scope_to_workflow_declarations(definition, config)
+
+    assert updated.tools == []
+    assert updated.root.children[0].config["tools"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -332,6 +438,7 @@ class TestFileSearchLoading:
                 "deep_research.agent.framework_orchestrator.make_file_upload_service",
                 return_value=mock_service,
             ) as mock_factory,
+            patch("deep_research.core.config.get_settings", return_value=MagicMock()),
             patch(
                 "deep_research.agent.tools.file_search.create_file_search_tool",
                 return_value=mock_tool,

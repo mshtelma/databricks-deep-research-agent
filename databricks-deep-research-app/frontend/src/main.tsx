@@ -6,6 +6,7 @@ import './styles/globals.css'
 
 // External plugin entry point - child projects override via Vite alias
 import { registerExternalPlugins } from '@plugins/external'
+import { startClientMetricsPipeline } from './lib/clientMetrics'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -25,6 +26,9 @@ try {
 } catch (error) {
   console.error('[plugins] Failed to register external plugins:', error)
 }
+
+// Start client-side metrics pipeline (no-op when flag is off)
+startClientMetricsPipeline()
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>

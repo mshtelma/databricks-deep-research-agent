@@ -10,9 +10,10 @@ import { UploadedFileList } from '@/components/files/UploadedFileList';
 import { useQueryMode, useSourceScope } from '@/hooks';
 import { useDiscoveredSources, useRefreshDiscovery } from '@/hooks/useDiscoveredSources';
 import { useFileUpload } from '@/hooks/useFileUpload';
-import { useCustomAgents } from '@/hooks/useCustomAgents';
+import { useAgentsV2List } from '@/hooks/useAgentsV2';
 import type { AvailableSource } from '@/types/dataSources';
 import type { CustomAgentSummary } from '@/types/customAgents';
+import type { AgentV2Summary } from '@/types/agentDesigner';
 import type { InputConfig } from '@/core/plugins/types';
 import type { QuerySubmission } from '@/types/querySubmission';
 
@@ -75,6 +76,18 @@ function writeEnabledEnterpriseSources(ids: Set<string>): void {
   } catch {
     // Ignore localStorage errors
   }
+}
+
+function agentV2ToSelectorSummary(agent: AgentV2Summary): CustomAgentSummary {
+  return {
+    id: agent.id,
+    name: agent.name,
+    description: agent.description,
+    avatarUrl: null,
+    visibility: agent.visibility === 'workspace' ? 'workspace' : 'private',
+    ownerId: agent.visibility === 'system' ? 'system' : agent.owner_id,
+    inAppActive: agent.in_app_active,
+  };
 }
 
 export function MessageInput({
@@ -204,11 +217,17 @@ export function MessageInput({
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [showAgentPicker]);
-  const { data: agentsData } = useCustomAgents(
-    { include_system: true },
-    { enabled: queryMode === 'deep_research' }
+  const {
+    data: agentsData,
+    isLoading: isLoadingAgents,
+    isFetching: isFetchingAgents,
+    isError: isAgentsError,
+    refetch: refetchAgents,
+  } = useAgentsV2List();
+  const agents = React.useMemo(
+    () => (queryMode === 'deep_research' ? (agentsData?.items ?? []).map(agentV2ToSelectorSummary) : []),
+    [agentsData?.items, queryMode],
   );
-  const agents = agentsData?.agents ?? [];
 
   // Restore selected agent from localStorage on mount / when agents load
   React.useEffect(() => {
@@ -486,7 +505,12 @@ export function MessageInput({
             <button
               type="button"
               data-testid="agent-selector-trigger"
-              onClick={() => setShowAgentPicker(!showAgentPicker)}
+              onClick={() => {
+                if (!showAgentPicker) {
+                  void refetchAgents();
+                }
+                setShowAgentPicker(!showAgentPicker);
+              }}
               disabled={disabled || isLoading}
               className={cn(
                 'flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors',
@@ -526,6 +550,8 @@ export function MessageInput({
             {showAgentPicker && (
               <AgentPickerDropdown
                 agents={agents}
+                isLoading={isLoadingAgents || isFetchingAgents}
+                isError={isAgentsError}
                 selectedAgent={selectedAgent}
                 onSelect={(agent) => {
                   handleAgentSelect(agent);
@@ -812,16 +838,22 @@ function XCloseIcon({ className }: { className?: string }) {
 
 function AgentPickerDropdown({
   agents,
+  isLoading,
+  isError,
   selectedAgent,
   onSelect,
 }: {
   agents: CustomAgentSummary[];
+  isLoading: boolean;
+  isError: boolean;
   selectedAgent: CustomAgentSummary | null;
   onSelect: (agent: CustomAgentSummary) => void;
 }) {
-  // Group agents by visibility: private ("My Agents") vs workspace ("Workspace")
+  // Group agents: private ("My Agents") vs in_app-active ("Workspace").
+  // TODO(Q4): remove visibility='workspace' shim from DeploymentJobRunner once
+  // this filter has soaked and the backfill migration (029) has run everywhere.
   const myAgents = agents.filter((a) => a.visibility === 'private');
-  const workspaceAgents = agents.filter((a) => a.visibility === 'workspace');
+  const workspaceAgents = agents.filter((a) => a.inAppActive === true);
 
   const renderAgent = (agent: CustomAgentSummary) => (
     <button
@@ -875,7 +907,17 @@ function AgentPickerDropdown({
           {workspaceAgents.map(renderAgent)}
         </>
       )}
-      {myAgents.length === 0 && workspaceAgents.length === 0 && (
+      {isLoading && agents.length === 0 && (
+        <div className="px-3 py-2 text-sm text-muted-foreground">
+          Loading agents...
+        </div>
+      )}
+      {!isLoading && isError && agents.length === 0 && (
+        <div className="px-3 py-2 text-sm text-destructive">
+          Failed to load agents
+        </div>
+      )}
+      {!isLoading && !isError && myAgents.length === 0 && workspaceAgents.length === 0 && (
         <div className="px-3 py-2 text-sm text-muted-foreground">
           No agents yet —{' '}
           <a href="/agents" className="text-primary hover:underline">

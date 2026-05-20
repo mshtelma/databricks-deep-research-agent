@@ -14,6 +14,9 @@ from databricks_deep_research.agents.config import (
     SynthesisContextConfig,
     SynthesisContextFieldConfig,
 )
+from databricks_deep_research.agents.execution.output_normalizer import (
+    source_is_substantive,
+)
 from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.pools.pool_state import PoolState
 
@@ -294,7 +297,11 @@ async def compile_synthesis_context(
         chars_after += len(observation_text)
 
     if sources_pool and resolved.sources:
-        raw_sources = sources_pool.snapshot()[-resolved.sources.max_items:]
+        raw_pool_sources = sources_pool.snapshot()
+        substantive_sources = [
+            item for item in raw_pool_sources if source_is_substantive(item)
+        ]
+        raw_sources = substantive_sources[-resolved.sources.max_items:]
         source_count_in = len(raw_sources)
         # Render per-source bullets with snippet+content (tiered by top-K).
         top_k = max(0, resolved.sources.keep_full_top_k)
@@ -730,6 +737,8 @@ def _extract_source_fields(src: Any) -> dict[str, Any]:
                 src.get("source_kind") or src.get("source_type") or ""
             ).strip(),
             "relevance_score": src.get("relevance_score"),
+            "evidence_quality": str(src.get("evidence_quality") or "").strip(),
+            "admission_status": str(src.get("admission_status") or "").strip(),
         }
     return {
         "title": str(getattr(src, "title", "") or "").strip(),
@@ -742,6 +751,8 @@ def _extract_source_fields(src: Any) -> dict[str, Any]:
             or ""
         ).strip(),
         "relevance_score": getattr(src, "relevance_score", None),
+        "evidence_quality": str(getattr(src, "evidence_quality", "") or "").strip(),
+        "admission_status": str(getattr(src, "admission_status", "") or "").strip(),
     }
 
 
@@ -792,6 +803,7 @@ def _render_sources_with_budget(
     sources: list[Any],
     cfg: SynthesisContextFieldConfig,
 ) -> tuple[str, dict[str, int]]:
+    sources = [src for src in sources if source_is_substantive(src)]
     rendered: list[str] = []
     snippet_flags: list[bool] = []
     content_flags: list[bool] = []
@@ -856,10 +868,15 @@ def compile_typed_synthesis_context(
     )
 
     raw_source_chars = sum(
-        len(_extract_source_fields(src)["snippet"]) for src in evidence.sources
+        len(_extract_source_fields(src)["snippet"])
+        for src in evidence.sources
+        if source_is_substantive(src)
     )
+    substantive_sources = [
+        source for source in evidence.sources if source_is_substantive(source)
+    ]
     sources_list, src_stats = _render_sources_with_budget(
-        list(evidence.sources), src_cfg
+        substantive_sources, src_cfg
     )
 
     chars_after = len(all_observations) + len(sources_list)
@@ -872,7 +889,7 @@ def compile_typed_synthesis_context(
     stats = CompiledSynthesisContextStats(
         observation_items_in=len(evidence.observations),
         observation_items_out=obs_stats.get("items_out", 0),
-        source_items_in=len(evidence.sources),
+        source_items_in=len(substantive_sources),
         source_clusters_out=src_stats.get("items_out", 0),
         context_chars_before=chars_before,
         context_chars_after=chars_after,

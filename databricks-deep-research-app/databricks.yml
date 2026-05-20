@@ -25,6 +25,7 @@ sync:
     - "uv.lock"
     - "Makefile"
     - "README.md"
+    - "scripts/output/**"
   # NOTE: app.yaml IS synced intentionally. The Databricks Apps runtime
   # requires a file-based app spec. The config: section below overrides
   # env vars at deploy time with production values.
@@ -39,7 +40,15 @@ variables:
     description: "Database name in Lakebase (we create and own this)"
     default: "deep_research"
 
-  # Lakebase connection (set by deploy script after endpoint discovery)
+  # Lakebase connection (set by deploy script after endpoint discovery).
+  # Defaults to the literal sentinel "pending" so that read-only bundle
+  # commands (`bundle summary`, `bundle validate`) work without `--var`
+  # overrides — the Makefile uses `bundle summary` to resolve APP_NAME and
+  # cannot pass real values before Step 5. The app's credential_factory
+  # treats "pending" as unset at runtime (see `_meaningful()` in
+  # `src/deep_research/db/credential_factory.py`), so a "pending"-deployed
+  # bundle fails loudly at app boot rather than corrupting downstream
+  # behaviour.
   endpoint_name:
     description: "Autoscaling endpoint name (discovered during deploy)"
     default: "pending"
@@ -93,7 +102,10 @@ resources:
       # On-behalf-of-user authorization:
       # These scopes allow the app to access enterprise data sources
       # on behalf of the authenticated user (discovery + query).
+      # `apps` is required by Deploy Here for app create/update/list calls.
+      # Source upload uses the app service principal, not the user's OBO token.
       user_api_scopes:
+        - apps
         - sql
         - dashboards.genie
         - serving.serving-endpoints

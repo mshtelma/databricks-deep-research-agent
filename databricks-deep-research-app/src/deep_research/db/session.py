@@ -32,6 +32,15 @@ _STALE_CONNECTION_MARKERS = (
     "another operation is in progress",
 )
 
+_AUTH_FAILURE_MARKERS = (
+    "password authentication failed",
+    "invalid password",
+    "invalid authorization",
+    "invalid credentials",
+    "authentication failed",
+    "authorization failed",
+)
+
 
 def _is_stale_connection_error(exc: BaseException) -> bool:
     """Detect that the DB connection underlying ``exc`` is no longer usable.
@@ -50,6 +59,27 @@ def _is_stale_connection_error(exc: BaseException) -> bool:
         return False
     message = str(exc).lower()
     return any(marker in message for marker in _STALE_CONNECTION_MARKERS)
+
+
+def _is_db_auth_error(exc: BaseException) -> bool:
+    """Detect DB authentication failures that require credential invalidation.
+
+    Lakebase can reject an OAuth-derived password before our local
+    ``expires_at`` threshold says it is stale. In that case asyncpg raises
+    ``InvalidPasswordError: password authentication failed ...``; wrappers may
+    then turn it into a storage-layer ``PermanentError``. Match both the
+    exception class chain and the message so callers refresh the cached engine
+    instead of repeatedly reusing a poisoned credential.
+    """
+    current: BaseException | None = exc
+    while current is not None:
+        if "invalidpassword" in type(current).__name__.lower():
+            return True
+        message = str(current).lower()
+        if any(marker in message for marker in _AUTH_FAILURE_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 # Module-level state
 _engine: AsyncEngine | None = None
@@ -343,13 +373,16 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
                     logger.warning(
                         "DB_ROLLBACK_FAILED: %s", str(rollback_err)[:200]
                     )
-            # Check if this is an auth error that might be fixed by credential refresh
-            error_str = str(e).lower()
-            if "invalid" in error_str and (
-                "password" in error_str or "authorization" in error_str
-            ):
-                logger.warning(f"Database auth failed: {e}")
-                logger.info("Triggering credential refresh for next request...")
+            # Check if this is an auth error that might be fixed by credential refresh.
+            # Lakebase may reject a token before our local expiry threshold says
+            # it is stale, so match the actual asyncpg/Postgres auth messages.
+            if _is_db_auth_error(e):
+                logger.warning(
+                    "Database auth failed; refreshing Lakebase credentials. "
+                    "exc_class=%s error=%s",
+                    type(e).__name__,
+                    str(e)[:300],
+                )
                 await refresh_engine_credentials()
             # Stale-connection on the yield itself (extremely rare) is still
             # not useful to propagate — the request already finished on the

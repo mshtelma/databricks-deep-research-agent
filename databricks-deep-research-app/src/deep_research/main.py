@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -88,6 +89,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Setup logging
     setup_logging(settings.log_level)
 
+    # Deploy-here diagnostic banner — visible in app logs at startup so we
+    # can confirm which build is live. Bump the marker on every iteration of
+    # the deploy-here debugging loop.
+    logger.info(
+        "DEPLOY_HERE_BUILD_MARKER version=T2-diag-1 "
+        "ts_module_loaded=%s",
+        os.environ.get("DATABRICKS_APP_PORT", "no-app-port"),
+    )
+
     # NOTE: Database migrations are NOT run here.
     # The app's service principal has limited permissions (CAN_CONNECT_AND_CREATE)
     # but cannot create tables in the public schema.
@@ -108,6 +118,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.critical("Failed to load central configuration: %s", e)
         raise SystemExit(1) from e
 
+    # Export Brave concurrency knobs as env vars so the framework's
+    # BraveSearchAdapter (process-wide semaphore, retry count) picks them up.
+    # The framework cannot import app config directly, so we bridge via env.
+    os.environ.setdefault(
+        "BRAVE_MAX_CONCURRENCY", str(app_config.search.brave.max_concurrency)
+    )
+    os.environ.setdefault(
+        "BRAVE_MAX_RETRIES", str(app_config.search.brave.max_retries)
+    )
+    os.environ.setdefault(
+        "BRAVE_INTER_CALL_JITTER_SECONDS",
+        str(app_config.search.brave.inter_call_jitter_seconds),
+    )
+
     # Setup tracing (if available)
     try:
         from deep_research.core.tracing import setup_tracing
@@ -115,6 +139,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         setup_tracing()
     except ImportError:
         pass
+
+    # T1 fix verification: confirm deployment template directories resolved
+    # to existing paths at startup. The actual import failure would surface
+    # at first deploy attempt; logging here makes packaging regressions
+    # observable proactively without crashing the app for users who don't
+    # exercise the deployment feature.
+    try:
+        from deep_research.services.deployment.batch import _BATCH_TEMPLATE_DIR
+        from deep_research.services.deployment.shell_app import _TEMPLATE_DIR
+
+        logger.info(
+            "DEPLOYMENT_TEMPLATES_RESOLVED shell=%s shell_exists=%s "
+            "batch=%s batch_exists=%s",
+            _TEMPLATE_DIR,
+            _TEMPLATE_DIR.is_dir(),
+            _BATCH_TEMPLATE_DIR,
+            _BATCH_TEMPLATE_DIR.is_dir(),
+        )
+    except Exception:
+        logger.exception("DEPLOYMENT_TEMPLATES_RESOLUTION_FAILED")
 
     # Initialize Lakebase credential provider if configured
     # NOTE: Credential pre-generation disabled - will generate on first DB request
@@ -199,6 +243,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         job_manager.worker_id,
     )
 
+    # W12: async DeploymentJobRunner — separate from JobManager because the
+    # research-job pool quota / lifecycle is sized for a different
+    # workload. Janitor + orphan recovery start on .start().
+    from deep_research.services.deployment.job_runner import DeploymentJobRunner
+
+    deployment_runner = DeploymentJobRunner(session_factory=session_maker)
+    await deployment_runner.start()
+    app.state.deployment_runner = deployment_runner
+    logger.info("DeploymentJobRunner started")
+
     # Start session cleanup background task
     cleanup_task = asyncio.create_task(
         cleanup_expired_sessions_task(session_maker, app.state.storage_stack)
@@ -272,6 +326,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     if hasattr(app.state, "job_manager") and app.state.job_manager:
         await app.state.job_manager.stop()
         logger.info("Job manager stopped")
+
+    # W12: stop the DeploymentJobRunner — gracefully cancels in-flight
+    # deployments and marks survivors FAILED with error_message=
+    # "server_shutdown" so the UI doesn't poll them indefinitely.
+    if hasattr(app.state, "deployment_runner") and app.state.deployment_runner:
+        await app.state.deployment_runner.shutdown()
+        logger.info("DeploymentJobRunner stopped")
+
+    deploy_here_tasks = getattr(app.state, "deploy_here_tasks", None)
+    if deploy_here_tasks:
+        for task in list(deploy_here_tasks):
+            task.cancel()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                asyncio.gather(*deploy_here_tasks, return_exceptions=True),
+                timeout=10.0,
+            )
+        logger.info("Deploy-here background tasks stopped")
 
     # User-sync is synchronous on cache miss now — nothing to drain here.
 

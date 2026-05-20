@@ -58,6 +58,27 @@ export default function ChatPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'all'>('active');
 
+  // Sidebar collapse state — shared with /agents and /designer/* pages via localStorage
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return window.localStorage?.getItem?.('chatSidebarCollapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const handleToggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('chatSidebarCollapsed', next ? '1' : '0');
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+
   // Get plugin-provided input configuration (controls mode selector visibility, etc.)
   const inputConfig = useMemo(() => ComponentRegistry.getInputConfig(), []);
 
@@ -217,7 +238,10 @@ export default function ChatPage() {
 
   // Claims and verification summary from inline data (replaces useCitations for page load)
   // During streaming, streamingClaims from SSE events are used instead
-  const claims = latestAgentFullMessage?.claims ?? [];
+  const claims = useMemo(
+    () => latestAgentFullMessage?.claims ?? [],
+    [latestAgentFullMessage?.claims],
+  );
   const verificationSummary = latestAgentFullMessage?.verificationSummary ?? null;
 
   // Extract all sources from the latest research session (now populated from DB)
@@ -569,7 +593,7 @@ export default function ChatPage() {
   }, []);
 
   return (
-    <div className="flex h-screen bg-background">
+    <div className="db-root flex h-screen bg-db-oat-light font-db-sans text-db-navy-800">
       {/* Sidebar */}
       <ChatSidebar
         chats={chats}
@@ -587,6 +611,8 @@ export default function ChatPage() {
         statusFilter={statusFilter}
         onStatusFilterChange={setStatusFilter}
         isLoading={isLoadingChats}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={handleToggleSidebar}
       />
 
       {/* Main content */}

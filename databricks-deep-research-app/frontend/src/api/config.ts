@@ -69,3 +69,25 @@ export async function getServingEndpoints(): Promise<ServingEndpointsResponse> {
   }
   return response.json();
 }
+
+/**
+ * Default values for the Agent Designer deployment wizards. Currently exposes
+ * only the framework Git ref for the Mode-2 (shell-app) wizard.
+ */
+export interface DeploymentDefaultsResponse {
+  /** Default Git ref (for example, `main` or `v0.2.0`). */
+  frameworkGitTag: string;
+}
+
+/** Fetch deployment-wizard defaults. */
+export async function getDeploymentDefaults(): Promise<DeploymentDefaultsResponse> {
+  const response = await fetch(`${API_BASE_URL}/config/deployment-defaults`, {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Failed to fetch deployment defaults: ${response.statusText}`,
+    );
+  }
+  return response.json();
+}

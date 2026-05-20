@@ -266,6 +266,18 @@ class GroundingValidationConfig(BaseModel):
     allow_topic_sentences: bool = Field(default=True)
     max_preceding_citations: int = Field(default=10, ge=1, le=20)
     hedging_prefix: str = Field(default="Based on the evidence presented, ")
+    abstained_unsupported_remove_threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "When a claim has verdict in {unsupported, contradicted} AND "
+            "abstained=True AND verification_confidence is below this "
+            "threshold, treat as REMOVE instead of KEEP. Default 0.5 — "
+            "raise toward 1.0 for stricter removal, lower toward 0.0 to "
+            "always keep abstained claims (legacy behavior)."
+        ),
+    )
 
     model_config = {"frozen": True}
 
@@ -317,15 +329,33 @@ class ClaimDispositionConfig(BaseModel):
     """Stage 8: Post-verification claim disposition.
 
     Maps each verification verdict to an action (keep, remove, soften).
+
+    Defaults favour SOFTEN over REMOVE for every non-contradicted verdict,
+    and SOFTEN over KEEP for any verdict the verifier marked uncertain.
+    Rationale (recorded for future contributors):
+
+      * REMOVE leaves visible holes in the report — truncated tables,
+        mid-sentence breaks, dangling section headers — that downstream
+        reviewers (coverage reflectors) flag as defects. SOFTEN hedges
+        the claim in place, preserving structure while signalling
+        uncertainty.
+      * KEEP for ``partial`` or ``abstained`` presents an unverified or
+        only-partly-verified claim as flat fact, which is overconfident.
+      * CONTRADICTED stays REMOVE — a contradicted claim is wrong, not
+        merely uncited; hedging would mislead readers.
+
+    Callers that need the old strict-removal behaviour (e.g., compliance
+    pipelines) can construct ``ClaimDispositionConfig(
+    unsupported=ClaimDisposition.REMOVE, ...)`` explicitly.
     """
 
     supported: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
-    partial: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
-    unsupported: ClaimDisposition = Field(default=ClaimDisposition.REMOVE)
+    partial: ClaimDisposition = Field(default=ClaimDisposition.SOFTEN)
+    unsupported: ClaimDisposition = Field(default=ClaimDisposition.SOFTEN)
     contradicted: ClaimDisposition = Field(default=ClaimDisposition.REMOVE)
-    abstained: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
-    analysis_partial: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
-    analysis_unsupported: ClaimDisposition = Field(default=ClaimDisposition.REMOVE)
+    abstained: ClaimDisposition = Field(default=ClaimDisposition.SOFTEN)
+    analysis_partial: ClaimDisposition = Field(default=ClaimDisposition.SOFTEN)
+    analysis_unsupported: ClaimDisposition = Field(default=ClaimDisposition.SOFTEN)
 
     model_config = {"frozen": True}
 

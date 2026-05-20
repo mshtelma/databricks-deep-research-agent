@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from databricks_deep_research.agents.execution.output_normalizer import (
+    source_is_substantive,
+)
 from databricks_deep_research.events.types import CoordinatorOutput
 from databricks_deep_research.workflow.runtime_core.models import (
     ArtifactEnvelope,
@@ -239,6 +242,16 @@ class TypedRuntimeStateStore:
         seen_obs = set(evidence.observation_hashes_seen)
 
         for source in sources:
+            if not source_is_substantive(source):
+                self.record_diagnostic(
+                    category="evidence",
+                    severity="info",
+                    message=(
+                        "Skipped non-substantive source record during evidence ingestion"
+                    ),
+                    node_id=producer_node_id,
+                )
+                continue
             key = source.url or source.source_id or source.title
             if key and key in seen_urls:
                 delta.duplicate_sources += 1
@@ -359,12 +372,15 @@ class TypedRuntimeStateStore:
             return SynthesisInputPack(
                 blocked_reason_count=len(diagnostics.blocked_reasons),
             )
+        substantive_sources = [
+            source for source in evidence.sources if source_is_substantive(source)
+        ]
         return SynthesisInputPack(
             observation_count=len(evidence.observations),
-            source_count=len(evidence.sources),
+            source_count=len(substantive_sources),
             blocked_reason_count=len(diagnostics.blocked_reasons),
             observations_preview=[obs.text[:200] for obs in evidence.observations[:5]],
-            source_urls=[src.url for src in evidence.sources[:10] if src.url],
+            source_urls=[src.url for src in substantive_sources[:10] if src.url],
         )
 
     def set_synthesis_mode(self, mode: str) -> None:
@@ -446,4 +462,3 @@ class TypedRuntimeStateStore:
             query_decomposition=query_decomposition,
             discovered_sources=discovered_sources,
         )
-

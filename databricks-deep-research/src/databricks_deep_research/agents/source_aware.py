@@ -7,7 +7,10 @@ import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from databricks_deep_research.agents.source_reputation import SourceReputationScorer
 
 from databricks_deep_research.agents.query_policy import (
     EvidenceContract,
@@ -418,6 +421,28 @@ def admit_tool_result(
     """
     _maybe_sources = [_normalize_source(source, definition) for source in result.sources]
     raw_sources: list[dict[str, Any]] = [source for source in _maybe_sources if source is not None]
+
+    if not result.success:
+        reason = result.error or result.content or "unknown tool failure"
+        content = (
+            f"{definition.name} did not return evidence: {reason}. "
+            "Do not use this failed tool output as source evidence; retry with "
+            "a valid retrieval path or report the evidence gap."
+        )
+        return AdmittedToolResult(
+            content=content,
+            accepted_sources=[],
+            rejected_sources=raw_sources,
+            raw_sources=raw_sources,
+            accepted_count=0,
+            rejected_count=len(raw_sources),
+            accepted_substantive_count=0,
+            accepted_low_value_count=0,
+            evidence_quality="empty",
+            failure_mode="tool_error",
+            needs_adaptation=True,
+            adaptation_hint=content,
+        )
 
     if not raw_sources and result.success and result.content.strip():
         synthetic = _build_synthetic_source(definition, result.content)
@@ -1015,7 +1040,27 @@ _VS_MODERATE_RELEVANCE_THRESHOLD = 0.3
 _VS_RELEVANCE_FALLBACK_THRESHOLD = 0.3
 
 
-def _score_source_relevance(source: dict[str, Any], profile: dict[str, Any]) -> tuple[int, str]:
+def _score_source_relevance(
+    source: dict[str, Any],
+    profile: dict[str, Any],
+    *,
+    reputation_scorer: "SourceReputationScorer | None" = None,
+) -> tuple[int, str]:
+    """Score a candidate source for admission to the evidence pool.
+
+    Combines three signals:
+      1. Keyword/phrase overlap against the step's profile (existing).
+      2. Enterprise upstream relevance_score (existing — vector / Genie /
+         knowledge-assistant rankings).
+      3. Optional per-agent reputation delta (NEW — soft ranking nudge
+         driven by ``DomainFilterConfig.preferred_domains`` and
+         ``DomainFilterConfig.deprecated_domains``).
+
+    Reputation is applied LAST so it never interferes with the keyword /
+    enterprise signals — it just nudges the final score. Callers that don't
+    have agent-configured reputation pass ``reputation_scorer=None`` and
+    behaviour is unchanged from the pre-PR-3 path.
+    """
     text = " ".join(
         str(source.get(key, "") or "")
         for key in ("title", "snippet", "content")
@@ -1048,6 +1093,19 @@ def _score_source_relevance(source: dict[str, Any], profile: dict[str, Any]) -> 
             pass
     score += enterprise_boost
 
+    # Reputation adjustment — soft per-agent ranking signal from
+    # preferred/deprecated domain lists. No-op when scorer is None or
+    # has empty pattern lists.
+    reputation_reason: str = ""
+    reputation_delta: int = 0
+    if reputation_scorer is not None and reputation_scorer.is_active:
+        url = str(source.get("url", "") or "")
+        if url:
+            adj = reputation_scorer.score(url)
+            reputation_delta = adj.delta
+            score += reputation_delta
+            reputation_reason = adj.reason
+
     reason_parts: list[str] = []
     if matched_terms:
         reason_parts.append(f"matched terms={matched_terms[:4]}")
@@ -1055,12 +1113,14 @@ def _score_source_relevance(source: dict[str, Any], profile: dict[str, Any]) -> 
         reason_parts.append(f"phrases={matched_phrases[:2]}")
     if enterprise_boost:
         reason_parts.append(f"enterprise_boost=+{enterprise_boost} (relevance_score={relevance_score})")
+    if reputation_delta:
+        reason_parts.append(f"reputation={reputation_delta:+d} ({reputation_reason})")
     reason = ", ".join(reason_parts) if reason_parts else "no meaningful overlap with step profile"
 
     logger.debug(
         "ADMISSION_SCORE_BREAKDOWN source_title=%r source_kind=%s "
         "relevance_score=%s text_len=%d matched_terms=%s matched_phrases=%s "
-        "enterprise_boost=%d final_score=%d threshold=2",
+        "enterprise_boost=%d reputation_delta=%+d final_score=%d threshold=2",
         source.get("title", "")[:120],
         source_kind,
         relevance_score,
@@ -1068,6 +1128,7 @@ def _score_source_relevance(source: dict[str, Any], profile: dict[str, Any]) -> 
         matched_terms[:6],
         matched_phrases[:4],
         enterprise_boost,
+        reputation_delta,
         score,
     )
 

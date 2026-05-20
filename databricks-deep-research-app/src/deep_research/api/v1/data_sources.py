@@ -136,7 +136,7 @@ def _source_to_response(source: Any) -> DataSourceResponse:
 
 @router.get("", response_model=DataSourceListResponse)
 async def list_data_sources(
-    request: Request,
+    _request: Request,
     user: CurrentUser,
     source_type: DataSourceType | None = Query(None, description="Filter by source type"),
     only_valid: bool = Query(True, description="Only return sources with valid OBO access"),
@@ -170,7 +170,7 @@ async def list_data_sources(
 
 @router.get("/{source_id}", response_model=DataSourceResponse)
 async def get_data_source(
-    request: Request,
+    _request: Request,
     source_id: UUID,
     user: CurrentUser,
     service: IDataSourceService = Depends(get_data_source_service),
@@ -304,7 +304,7 @@ async def create_knowledge_assistant_source(
 
 @router.patch("/{source_id}", response_model=DataSourceResponse)
 async def update_data_source(
-    request: Request,
+    _request: Request,
     source_id: UUID,
     request_body: UpdateDataSourceRequest,
     user: AuthenticatedUser,
@@ -359,7 +359,7 @@ async def update_data_source(
 
 @router.delete("/{source_id}", status_code=204)
 async def delete_data_source(
-    request: Request,
+    _request: Request,
     source_id: UUID,
     user: AuthenticatedUser,
     service: IDataSourceService = Depends(get_data_source_service),
@@ -493,7 +493,7 @@ async def validate_connection(
 
 @router.get("/{source_id}/query-config", response_model=QueryConfigResponse)
 async def get_query_config(
-    request: Request,
+    _request: Request,
     source_id: UUID,
     user: CurrentUser,
     validate: bool = Query(False, description="Validate config against source capabilities"),
@@ -567,7 +567,7 @@ async def get_query_config(
 
 @router.put("/{source_id}/query-config", response_model=QueryConfigResponse)
 async def update_query_config(
-    request: Request,
+    _request: Request,
     source_id: UUID,
     request_body: UpdateQueryConfigRequest,
     user: AuthenticatedUser,

@@ -81,6 +81,17 @@ def _collect_errors(node: WorkflowNode, seen_ids: set[str], errors: list[str]) -
             errors.append(
                 f"Node '{node.id}' (type=conditional) must have at least 2 children (branches)"
             )
+        conditions = node.config.get("conditions", [])
+        default_branch = node.config.get("default_branch", len(node.children) - 1)
+        if isinstance(conditions, list) and len(node.children) != len(conditions) + 1:
+            errors.append(
+                f"Node '{node.id}' (type=conditional) must have exactly one more "
+                "child than config.conditions"
+            )
+        if isinstance(default_branch, int) and not (0 <= default_branch < len(node.children)):
+            errors.append(
+                f"Node '{node.id}' (type=conditional) has default_branch outside children range"
+            )
 
     # -- plan_and_execute: exactly 0 children (body lives in config) ----------
     elif node.type is NodeType.plan_and_execute and node.children:

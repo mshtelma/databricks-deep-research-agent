@@ -126,7 +126,12 @@ class AgentNodeConfig(BaseModel):
     dedup_jaccard_threshold: float = 0.8  # Jaccard word overlap threshold for near-dedup (0.0-1.0)
     force_convergence: bool = False  # Gate novelty/anti-loop heuristics (convergence, nudges)
     convergence_rounds: int = 4  # Zero-novel rounds before forced convergence (requires force_convergence=True)
-    conversation_budget: int | None = None
+    # Claude's API default cap is 8192 output tokens when unset, which the
+    # planner/reflector regularly bump into producing structured plans. Bump
+    # the default so callers don't have to remember to set it per-agent.
+    # Overridable via YAML at any node. Claude Sonnet supports up to 64000,
+    # Opus up to 32000; Haiku is hard-capped at 8192 regardless.
+    conversation_budget: int | None = 32000
     pool_inject: list[PoolInjectConfig] = Field(default_factory=list)
     synthesis_context: SynthesisContextConfig | None = None
     output_model: Any = None  # Pydantic model class for structured output

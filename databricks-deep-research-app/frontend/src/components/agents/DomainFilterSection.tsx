@@ -2,11 +2,18 @@
  * DomainFilterSection - Per-agent domain whitelist/blacklist editor.
  *
  * Renders:
- * - Mode selector (None, Include, Exclude, Both)
- * - Textarea for include patterns (one per line)
- * - Textarea for exclude patterns (one per line)
+ * - Mode selector (None, Include, Exclude, Both) — binary search-time filter
+ * - Textarea for include patterns (hard whitelist)
+ * - Textarea for exclude patterns (hard blacklist)
+ * - Textarea for PREFERRED patterns — soft ranking boost (NEW)
+ * - Textarea for DEPRECATED patterns — soft ranking penalty (NEW)
  *
- * Part of 009-custom-agent-config (T037).
+ * Filter and reputation are orthogonal: filter mode controls whether the
+ * include/exclude textareas hard-filter results; preferred/deprecated
+ * always re-rank survivors via the framework's source-admission scorer.
+ *
+ * Part of 009-custom-agent-config (T037); reputation fields added by PR 3
+ * of the scaffolding quality plan.
  */
 
 import * as React from 'react';
@@ -17,21 +24,27 @@ type DomainFilterMode = 'include' | 'exclude' | 'both' | null;
 interface DomainFilterSectionProps {
   /** Current filter mode (null = no filtering) */
   domainFilterMode: string | null;
-  /** Include domain patterns */
+  /** Include domain patterns (hard whitelist) */
   includeDomains: string[] | null;
-  /** Exclude domain patterns */
+  /** Exclude domain patterns (hard blacklist) */
   excludeDomains: string[] | null;
+  /** Preferred domain patterns (soft ranking boost). Independent of mode. */
+  preferredDomains?: string[] | null;
+  /** Deprecated domain patterns (soft ranking penalty). Independent of mode. */
+  deprecatedDomains?: string[] | null;
   /** Callback when any value changes */
   onChange: (
     mode: string | null,
     includeDomains: string[] | null,
     excludeDomains: string[] | null,
+    preferredDomains?: string[] | null,
+    deprecatedDomains?: string[] | null,
   ) => void;
   /** Whether the form is disabled */
   disabled?: boolean;
 }
 
-const DOMAIN_PATTERN_RE = /^[a-zA-Z0-9.*\-]+$/;
+const DOMAIN_PATTERN_RE = /^[a-zA-Z0-9.*-]+$/;
 
 const MODE_OPTIONS: { value: DomainFilterMode; label: string; description: string }[] = [
   { value: null, label: 'None', description: 'No domain filtering' },
@@ -61,6 +74,8 @@ export function DomainFilterSection({
   domainFilterMode,
   includeDomains,
   excludeDomains,
+  preferredDomains = null,
+  deprecatedDomains = null,
   onChange,
   disabled = false,
 }: DomainFilterSectionProps) {
@@ -74,6 +89,14 @@ export function DomainFilterSection({
   const [excludeText, setExcludeText] = React.useState(
     (excludeDomains ?? []).join('\n')
   );
+  // Reputation lists are independent of mode — they're always editable
+  // because they re-rank, not filter.
+  const [preferredText, setPreferredText] = React.useState(
+    (preferredDomains ?? []).join('\n')
+  );
+  const [deprecatedText, setDeprecatedText] = React.useState(
+    (deprecatedDomains ?? []).join('\n')
+  );
 
   const includeErrors = React.useMemo(
     () => (showInclude ? validateDomains(parseDomains(includeText)) : []),
@@ -83,27 +106,52 @@ export function DomainFilterSection({
     () => (showExclude ? validateDomains(parseDomains(excludeText)) : []),
     [excludeText, showExclude]
   );
+  const preferredErrors = React.useMemo(
+    () => validateDomains(parseDomains(preferredText)),
+    [preferredText]
+  );
+  const deprecatedErrors = React.useMemo(
+    () => validateDomains(parseDomains(deprecatedText)),
+    [deprecatedText]
+  );
+
+  // Helper — call onChange forwarding the reputation lists (which are
+  // independent of mode) so a mode change does not nuke them.
+  const currentPreferred = () => parseDomains(preferredText);
+  const currentDeprecated = () => parseDomains(deprecatedText);
 
   const handleModeChange = (newMode: DomainFilterMode) => {
     if (newMode === null) {
-      onChange(null, null, null);
+      onChange(null, null, null, currentPreferred(), currentDeprecated());
     } else {
       onChange(
         newMode,
         newMode === 'include' || newMode === 'both' ? parseDomains(includeText) : null,
         newMode === 'exclude' || newMode === 'both' ? parseDomains(excludeText) : null,
+        currentPreferred(),
+        currentDeprecated(),
       );
     }
   };
 
   const handleIncludeChange = (text: string) => {
     setIncludeText(text);
-    onChange(mode, parseDomains(text), excludeDomains);
+    onChange(mode, parseDomains(text), excludeDomains, currentPreferred(), currentDeprecated());
   };
 
   const handleExcludeChange = (text: string) => {
     setExcludeText(text);
-    onChange(mode, includeDomains, parseDomains(text));
+    onChange(mode, includeDomains, parseDomains(text), currentPreferred(), currentDeprecated());
+  };
+
+  const handlePreferredChange = (text: string) => {
+    setPreferredText(text);
+    onChange(mode, includeDomains, excludeDomains, parseDomains(text), currentDeprecated());
+  };
+
+  const handleDeprecatedChange = (text: string) => {
+    setDeprecatedText(text);
+    onChange(mode, includeDomains, excludeDomains, currentPreferred(), parseDomains(text));
   };
 
   return (
@@ -193,6 +241,70 @@ export function DomainFilterSection({
           </p>
         </div>
       )}
+
+      {/* ------------------------------------------------------------------- */}
+      {/* Reputation (ranking) — independent of filter mode. Soft bias only.   */}
+      {/* ------------------------------------------------------------------- */}
+      <div className="border-t border-border pt-4 mt-2">
+        <h4 className="text-sm font-medium">Source ranking (advanced)</h4>
+        <p className="text-xs text-muted-foreground mt-1">
+          These lists don&apos;t filter — they nudge the admission ranking so
+          higher-quality sources appear first. They apply only to URLs that
+          survive the filter above. Wildcards supported.
+        </p>
+      </div>
+
+      {/* Preferred domains textarea — soft boost */}
+      <div>
+        <label className="text-sm font-medium mb-1.5 block">
+          Preferred Domains (boost in ranking)
+        </label>
+        <textarea
+          value={preferredText}
+          onChange={(e) => handlePreferredChange(e.target.value)}
+          placeholder={"*.gov\ninvestors.*\nofficial-vendor.com"}
+          rows={3}
+          disabled={disabled}
+          className={cn(
+            'w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono',
+            'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            'disabled:cursor-not-allowed disabled:opacity-50',
+            preferredErrors.length > 0 && 'border-destructive'
+          )}
+        />
+        {preferredErrors.length > 0 && (
+          <p className="text-xs text-destructive mt-1">{preferredErrors.join(', ')}</p>
+        )}
+        <p className="text-xs text-muted-foreground mt-1">
+          One pattern per line. Sources from these domains rank higher in admission.
+        </p>
+      </div>
+
+      {/* Deprecated domains textarea — soft penalty */}
+      <div>
+        <label className="text-sm font-medium mb-1.5 block">
+          Deprecated Domains (penalty in ranking)
+        </label>
+        <textarea
+          value={deprecatedText}
+          onChange={(e) => handleDeprecatedChange(e.target.value)}
+          placeholder={"content-farm.example\nai-generated.*"}
+          rows={3}
+          disabled={disabled}
+          className={cn(
+            'w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono',
+            'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            'disabled:cursor-not-allowed disabled:opacity-50',
+            deprecatedErrors.length > 0 && 'border-destructive'
+          )}
+        />
+        {deprecatedErrors.length > 0 && (
+          <p className="text-xs text-destructive mt-1">{deprecatedErrors.join(', ')}</p>
+        )}
+        <p className="text-xs text-muted-foreground mt-1">
+          One pattern per line. Sources from these domains rank lower in admission (not blocked).
+        </p>
+      </div>
     </div>
   );
 }

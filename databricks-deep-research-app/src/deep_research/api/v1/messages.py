@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.api.v1.utils import verify_chat_ownership
-from deep_research.core.deps import get_storage_optional
+from deep_research.core.deps import get_chat_service, get_storage_optional
 from deep_research.core.exceptions import NotFoundError
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
@@ -24,7 +24,6 @@ from deep_research.schemas.message import (
     SendMessageResponse,
 )
 from deep_research.schemas.research import ResearchSession as ResearchSessionSchema
-from deep_research.core.deps import get_chat_service
 from deep_research.services._protocols import IChatService
 from deep_research.services.feedback_service import FeedbackService
 from deep_research.services.message_service import MessageService

@@ -12,14 +12,18 @@ Usage:
     client = auth.get_client()     # WorkspaceClient for special cases
 """
 
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from databricks.sdk import WorkspaceClient
 
 from deep_research.core.config import get_settings
 from deep_research.core.logging_utils import get_logger
+
+if TYPE_CHECKING:
+    from fastapi import Request
 
 logger = get_logger(__name__)
 
@@ -232,6 +236,32 @@ class DatabricksAuth:
         """Check if using OAuth-based authentication (profile or automatic)."""
         return self._auth_mode in ("profile", "automatic")
 
+    def invalidate(self) -> None:
+        """Drop cached credential, WorkspaceClient, and base URL.
+
+        Forces the next get_token() / get_client() / get_base_url() call to
+        rebuild everything from scratch. Defends against a poisoned SDK-side
+        token cache (e.g., when ``databricks auth login`` ran in another
+        shell and the on-disk token cache rotated).
+
+        Concurrent invocation is idempotent: each writer sets fields to None,
+        the next reader rebuilds. Worst case is a redundant rebuild.
+
+        Effects on shared consumers of this singleton:
+          * LLM client : next request mints a fresh bearer (the point of this).
+          * Lakebase   : its credential provider lazily reads get_client();
+                         the next read rebuilds the WorkspaceClient (+~50-200ms
+                         one-time). No correctness impact.
+          * Embedder   : same path as LLM client.
+
+        Distinct from ``clear_databricks_auth()`` (module-level) which drops
+        the singleton itself — used by tests when settings change.
+        """
+        logger.warning("DATABRICKS_AUTH_INVALIDATE", mode=self._auth_mode)
+        self._credential = None
+        self._client = None
+        self._base_url = None
+
 
 # Singleton cache
 _auth_instance: DatabricksAuth | None = None
@@ -256,3 +286,101 @@ def clear_databricks_auth() -> None:
     """
     global _auth_instance
     _auth_instance = None
+
+
+def get_user_workspace_client(request: "Request") -> WorkspaceClient:
+    """Build a request-scoped WorkspaceClient using the user's OBO token.
+
+    This client is request-scoped and MUST NOT be cached across requests.
+    Each call returns a fresh client built from the current request's OBO header.
+
+    The OBO (On-Behalf-Of) token is injected by Databricks Apps as the
+    ``X-Forwarded-Access-Token`` header.  This function is intentionally NOT
+    cached — each invocation builds a new ``WorkspaceClient`` from the token
+    present on the current request.
+
+    Host resolution priority:
+      1. ``DATABRICKS_HOST`` environment variable.
+      2. Host from the singleton SP client (``get_databricks_auth().get_client()``).
+      3. Derived from ``request.url`` — only used for local dev when neither of
+         the above is available.
+
+    Args:
+        request: The current FastAPI ``Request`` object.
+
+    Returns:
+        A fresh ``WorkspaceClient`` authenticated with the user's OBO token.
+
+    Raises:
+        HTTPException: 401 with ``error_kind='missing_obo_token'`` when running
+            inside Databricks Apps (``settings.is_databricks_app`` is True) and
+            the ``X-Forwarded-Access-Token`` header is absent.  This prevents
+            silent SP fallback in production.
+    """
+    from fastapi import HTTPException
+
+    settings = get_settings()
+
+    obo_token: str | None = request.headers.get("X-Forwarded-Access-Token")
+
+    # Diagnostic log: fires at the entry of every call, even before any guards
+    # or branches. If this log is absent in production, the function is not
+    # being invoked from the route handler — narrows the search to "request
+    # is not reaching FastAPI" vs "function is failing inside".
+    logger.info(
+        "OBO_WC_ENTRY",
+        path=str(request.url.path),
+        has_obo_header=obo_token is not None,
+        obo_header_len=len(obo_token) if obo_token else 0,
+        is_databricks_app=settings.is_databricks_app,
+    )
+
+    # T2 fix: treat empty-string header the same as a missing header.
+    # `request.headers.get(...)` returns "" if the header is present but
+    # blank, which would otherwise sail past the `is None` check and reach
+    # the SDK with `token=""`, surfacing an opaque downstream error.
+    if not obo_token:
+        if settings.is_databricks_app:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error_kind": "missing_obo_token",
+                    "message": (
+                        "OBO header X-Forwarded-Access-Token is required"
+                        " when running in Databricks Apps."
+                    ),
+                },
+            )
+        # Local dev: fall back to SP client and log a warning.
+        logger.warning("OBO_HEADER_MISSING_LOCAL_DEV_FALLBACK_SP")
+        return get_databricks_auth().get_client()
+
+    # Resolve host.
+    host: str | None = os.environ.get("DATABRICKS_HOST")
+    if not host:
+        try:
+            host = get_databricks_auth().get_client().config.host
+        except Exception:
+            host = None
+    if not host:
+        host = str(request.url.scheme) + "://" + str(request.url.netloc)
+
+    # Structured per-request observability. `actor` matches the vocabulary
+    # used by the CanDeployHereResponse schema so logs and API responses
+    # share one terminology.
+    logger.info(
+        "OBO_WC_CONSTRUCT",
+        host=host,
+        has_obo=bool(obo_token),
+        env_oauth_set=bool(os.environ.get("DATABRICKS_CLIENT_ID")),
+        actor="obo",
+    )
+
+    # T2 fix: `auth_type="pat"` tells the Databricks SDK to ignore any
+    # OAuth-m2m credentials that the Databricks Apps runtime sets via
+    # `DATABRICKS_CLIENT_ID` / `DATABRICKS_CLIENT_SECRET` env vars. Without
+    # this kwarg, the SDK Config detects BOTH the explicit kwarg `token`
+    # (pat) AND the env-OAuth (oauth-m2m) and raises
+    # `ValueError: more than one authorization method configured`.
+    # Mirrors the existing canonical pattern at core/auth.py:99.
+    return WorkspaceClient(host=host, token=obo_token, auth_type="pat")

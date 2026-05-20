@@ -13,12 +13,14 @@ from fastapi import APIRouter, Request
 from deep_research.core.app_config import get_app_config
 from deep_research.middleware.auth import CurrentUser
 from deep_research.schemas.config import (
+    DeploymentDefaultsResponse,
     EndpointCatalogResponse,
     EndpointInfo,
     ModelCategoryInfo,
     ServingEndpointsResponse,
     ServingEndpointSummary,
 )
+from deep_research.services.deployment.framework_version import framework_git_tag
 
 logger = logging.getLogger(__name__)
 
@@ -124,3 +126,17 @@ async def get_serving_endpoints(
     _serving_cache = result
     _serving_cache_time = time.monotonic()
     return result
+
+
+@router.get("/deployment-defaults", response_model=DeploymentDefaultsResponse)
+async def get_deployment_defaults(
+    _user: CurrentUser,
+) -> DeploymentDefaultsResponse:
+    """Default values for the Agent Designer deployment wizards.
+
+    Mode-2 (shell-app) and Mode-3 (MLflow agent) both pin
+    ``databricks-deep-research`` from a Git ref. We default that ref via the
+    shared ``framework_git_tag`` helper so the wizard and deploy artifact use
+    the same pin.
+    """
+    return DeploymentDefaultsResponse(framework_git_tag=framework_git_tag())

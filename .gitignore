@@ -105,6 +105,8 @@ secrets.yaml
 mlruns/
 mlartifacts/
 traces_output/
+**/scripts/output/
+**/tests/_runs/
 
 # Alembic
 alembic.ini.local

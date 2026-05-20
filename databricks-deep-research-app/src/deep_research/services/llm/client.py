@@ -150,50 +150,92 @@ class LLMClient:
 
         logger.info("LLM_CLIENT_INIT", auth_mode=self._auth.auth_mode)
 
-    def _ensure_fresh_client(self) -> AsyncOpenAI:
-        """Ensure the OpenAI client is initialized with a fresh token.
+    def _build_openai_client(self, token: str) -> AsyncOpenAI:
+        """Single construction point for AsyncOpenAI.
 
-        On first call, performs lazy initialization (creates client + authenticates).
-        On subsequent calls, checks OAuth token freshness and refreshes if needed.
-        For direct token auth, refresh is a no-op after initialization.
-
-        Returns:
-            Initialized AsyncOpenAI client ready for API calls.
+        Centralizing this prevents drift between the lazy-init, passive-refresh,
+        and force-refresh paths — all of which previously instantiated AsyncOpenAI
+        inline with subtly different surrounding logic.
         """
-        # Lazy initialization: create client on first API call
-        if self._client is None:
-            self._current_token = self._auth.get_token()
+        return AsyncOpenAI(api_key=token, base_url=self._base_url)
+
+    def _refresh_client_sync(self, *, force: bool) -> AsyncOpenAI:
+        """Single source of truth for token/client refresh. Sync, no lock.
+
+        force=False (passive): only rebuilds the AsyncOpenAI when the auth
+            layer has a *different* token than what we last cached. Used in
+            the hot path before every request.
+        force=True  (active): invalidates the DatabricksAuth cache (token,
+            WorkspaceClient, base URL), mints a fresh token, and rebuilds
+            AsyncOpenAI unconditionally. Used by the framework's
+            client_provider hook on 403 and by the app's own _force_refresh_token.
+
+        Concurrency: this method is sync and holds no lock. Callers that need
+        retry-count guards or async serialization wrap it (see
+        ``_force_refresh_token``). Concurrent ``force=True`` callers are
+        idempotent — last writer wins, both end up with fresh tokens, at the
+        cost of one redundant OAuth round trip.
+        """
+        if self._base_url is None:
             self._base_url = self._auth.get_base_url()
-            self._client = AsyncOpenAI(
-                api_key=self._current_token,
-                base_url=self._base_url,
-            )
-            logger.info("LLM_CLIENT_INITIALIZED", auth_mode=self._auth.auth_mode)
-            return self._client
 
-        if not self._auth.is_oauth:
-            # Direct token auth - no refresh needed
-            return self._client
+        # PAT mode cannot refresh: ``force=True`` becomes a no-op after lazy init.
+        # The framework's ``client_provider`` callback receives the existing
+        # client unchanged — harmless, the framework just re-assigns it.
+        effective_force = force and self._auth.is_oauth
 
-        # Get potentially refreshed token
-        token = self._auth.get_token()
+        if effective_force:
+            self._auth.invalidate()
 
-        if token != self._current_token:
-            # Token was refreshed - recreate client
-            logger.info("LLM_TOKEN_REFRESHED", auth_mode=self._auth.auth_mode)
+        token = self._auth.get_token(force_refresh=effective_force)
+
+        if self._client is None or token != self._current_token or effective_force:
+            old_prefix = (self._current_token or "")[:8]
             self._current_token = token
-            self._client = AsyncOpenAI(
-                api_key=token,
+            self._client = self._build_openai_client(token)
+            event = (
+                "LLM_CLIENT_FORCE_REFRESHED"
+                if force
+                else ("LLM_CLIENT_INITIALIZED" if not old_prefix else "LLM_TOKEN_REFRESHED")
+            )
+            logger.info(
+                event,
+                auth_mode=self._auth.auth_mode,
                 base_url=self._base_url,
+                token_prefix=((token[:8] + "***") if token else "<empty>"),
+                prev_prefix=((old_prefix + "***") if old_prefix else "<none>"),
             )
 
         return self._client
 
+    def _ensure_fresh_client(self) -> AsyncOpenAI:
+        """Passive: returns the cached AsyncOpenAI, rebuilding only if the
+        auth layer has rotated the token. Cheap hot-path call.
+
+        Used by every LLM request before issuing the network call.
+        """
+        return self._refresh_client_sync(force=False)
+
+    def force_refresh_client(self) -> AsyncOpenAI:
+        """Active sync refresh — invalidates auth cache and mints a fresh token.
+
+        Matches the ``FrameworkLLMClient`` ``client_provider`` contract
+        (``Callable[[], AsyncOpenAI]``). Wired in from
+        ``deep_research.agent.adapters.llm_adapter.create_framework_llm_client``.
+
+        TODO(tech-debt): SDK ``client.config.authenticate()`` is synchronous and
+        blocks the event loop for 100-500ms during refresh. Eliminating this
+        requires the framework's ``client_provider`` contract to become async.
+        """
+        return self._refresh_client_sync(force=True)
+
     async def _force_refresh_token(self) -> bool:
         """Force refresh OAuth token after authentication error.
 
-        Uses async lock to prevent race conditions when multiple
-        concurrent requests encounter auth errors simultaneously.
+        Async wrapper around ``_refresh_client_sync(force=True)`` that adds:
+        - ``_refresh_lock`` to serialize concurrent app-side 403 paths,
+        - ``_auth_retry_count`` cap at 2 to prevent storm-on-persistent-failure,
+        - early-exit fast path when another coroutine already refreshed.
 
         Returns:
             True if token was refreshed and retry should proceed, False otherwise.
@@ -209,30 +251,19 @@ class LLMClient:
                 self._auth_retry_count = 0
                 return False
 
-            # Check if another coroutine already refreshed while we waited
-            token = self._auth.get_token()
-            if token != self._current_token:
-                # Token was already refreshed by another coroutine
+            # Fast path: another coroutine refreshed while we waited for the lock.
+            current = self._auth.get_token()
+            if current != self._current_token:
                 logger.info("LLM_TOKEN_ALREADY_REFRESHED", by="concurrent_request")
-                self._current_token = token
-                self._client = AsyncOpenAI(
-                    api_key=token,
-                    base_url=self._base_url,
-                )
+                self._refresh_client_sync(force=False)  # picks up new token
                 return True
 
-            # Force refresh the token
             logger.warning(
                 "LLM_TOKEN_FORCE_REFRESH",
                 reason="auth_error",
                 attempt=self._auth_retry_count,
             )
-            token = self._auth.get_token(force_refresh=True)
-            self._current_token = token
-            self._client = AsyncOpenAI(
-                api_key=token,
-                base_url=self._base_url,
-            )
+            self._refresh_client_sync(force=True)
             return True
 
     def _reset_auth_retry_count(self) -> None:

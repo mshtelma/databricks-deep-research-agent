@@ -44,6 +44,10 @@ Security Considerations (T110-T111):
 """
 
 import asyncio
+import base64
+import json
+import os
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -58,6 +62,10 @@ from deep_research.core.exceptions import (
     OBOTokenExpiredError,
 )
 from deep_research.core.logging_utils import get_logger
+from deep_research.observability.agent_designer_metrics import (
+    record_token_refresh_attempt,
+    record_token_refresh_failure,
+)
 
 logger = get_logger(__name__)
 
@@ -516,3 +524,111 @@ class OBODatabricksClient:
                 error=str(e)[:200],
             )
             return None
+
+
+# ----- V1.5 OBO Token Refresh -----
+# SECURITY: Raw tokens are NEVER logged. Only SHA-256 hash prefixes appear in logs/metrics.
+
+# Module-level state for the refresh path (gated by env flag)
+_refresh_locks: dict[str, asyncio.Lock] = {}
+_rotation_cache: dict[str, str] = {}  # old_token_hash -> new_token
+
+
+def _is_refresh_enabled() -> bool:
+    return os.environ.get("AGENT_DESIGNER_OBO_REFRESH_ENABLED") == "1"
+
+
+def _token_hash_prefix(token: str) -> str:
+    """SHA-256 hash prefix for safe logging/keying. Reuses pattern from line 99."""
+    import hashlib
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
+
+def _decode_jwt_exp(token: str) -> int | None:
+    """Decode JWT exp claim WITHOUT signature verification (claim inspection only)."""
+    try:
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+        return int(payload.get("exp", 0))
+    except Exception:
+        return None
+
+
+def detect_expiring(token: str, threshold_seconds: int = 300) -> bool:
+    """Returns True if token expires within threshold_seconds. Always False if flag off."""
+    if not _is_refresh_enabled():
+        return False
+    exp = _decode_jwt_exp(token)
+    if exp is None:
+        return False
+    return (exp - time.time()) < threshold_seconds
+
+
+async def refresh(token: str, workspace_client: object) -> str | None:
+    """Atomic refresh via per-token-hash mutex.
+
+    Concurrent calls for the same token coalesce into ONE upstream call.
+    Returns new token on success, None when flag is off, raises on failure.
+    """
+    if not _is_refresh_enabled():
+        return None
+
+    token_key = _token_hash_prefix(token)
+    if token_key not in _refresh_locks:
+        _refresh_locks[token_key] = asyncio.Lock()
+    lock = _refresh_locks[token_key]
+
+    async with lock:
+        # Check rotation cache — if another call already rotated this token, return the new one
+        if token_key in _rotation_cache:
+            record_token_refresh_attempt(outcome="success")
+            return _rotation_cache[token_key]
+
+        # Attempt the actual refresh via Databricks SDK
+        try:
+            new_token = await _call_databricks_token_refresh(workspace_client)
+            _rotation_cache[token_key] = new_token
+            record_token_refresh_attempt(outcome="success")
+            return new_token
+        except (ConnectionError, TimeoutError):
+            record_token_refresh_failure(error_kind="network")
+            record_token_refresh_attempt(outcome="failure")
+            raise
+        except Exception as exc:
+            err_msg = str(exc)
+            if "PERMISSION_DENIED" in err_msg or "403" in err_msg:
+                record_token_refresh_failure(error_kind="permission")
+            else:
+                record_token_refresh_failure(error_kind="expired_refresh")
+            record_token_refresh_attempt(outcome="failure")
+            raise
+
+
+async def _call_databricks_token_refresh(workspace_client: object) -> str:
+    """Wraps the Databricks SDK token-management OBO token exchange call."""
+    response = workspace_client.token_management.create_obo_token()  # type: ignore[attr-defined]
+    return str(response.token_value)
+
+
+def get_rotated_token(old_token: str) -> str | None:
+    """Cache lookup for callers holding an old token reference."""
+    return _rotation_cache.get(_token_hash_prefix(old_token))
+
+
+class TokenRefresher:
+    """V1.5 token refresh service. Methods are module-level functions exposed for OO callers."""
+
+    @staticmethod
+    def detect_expiring(token: str, threshold_seconds: int = 300) -> bool:
+        return detect_expiring(token, threshold_seconds)
+
+    @staticmethod
+    async def refresh(token: str, workspace_client: object) -> str | None:
+        return await refresh(token, workspace_client)
+
+    @staticmethod
+    def get_rotated_token(old_token: str) -> str | None:
+        return get_rotated_token(old_token)

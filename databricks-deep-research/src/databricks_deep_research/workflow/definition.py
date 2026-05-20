@@ -7,11 +7,12 @@ saving to YAML is handled by :pymod:`databricks_deep_research.workflow.loader`.
 
 from __future__ import annotations
 
+import uuid as _uuid
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -39,6 +40,24 @@ class NodeType(StrEnum):
 # ---------------------------------------------------------------------------
 # Support models
 # ---------------------------------------------------------------------------
+
+
+class ServicePrincipalRunAs(BaseModel):
+    """V1.5: run a workflow as a Databricks Service Principal instead of the calling user."""
+
+    model_config = ConfigDict(extra="forbid")
+    service_principal_id: str
+
+    @field_validator("service_principal_id")
+    @classmethod
+    def _validate_uuid(cls, v: str) -> str:
+        try:
+            _uuid.UUID(v)
+        except ValueError as exc:
+            raise ValueError(
+                f"service_principal_id must be a valid UUID, got {v!r}"
+            ) from exc
+        return v
 
 
 class ErrorConfig(BaseModel):
@@ -188,6 +207,20 @@ class WorkflowDefinition(BaseModel):
     output_keys: list[str] = ["output"]
     token_budget: int = 0
     timeout_seconds: int = 1800
+    run_as: Literal["caller"] | ServicePrincipalRunAs = Field(default="caller")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_run_as(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            ra = data.get("run_as")
+            if ra is None:
+                data["run_as"] = "caller"
+            elif isinstance(ra, str) and ra != "caller":
+                raise ValueError(
+                    f"run_as must be 'caller' or a ServicePrincipalRunAs object, got {ra!r}"
+                )
+        return data
 
     # -- Serialisation stubs (real implementation lives in loader.py) -------
 

@@ -1,5 +1,7 @@
 """Synthesizer agent prompt templates."""
 
+from ._shared import TEMPORAL_ANCHOR_BLOCK as _TEMPORAL_ANCHOR_BLOCK
+
 __all__ = [
     "SYNTHESIZER_SYSTEM_PROMPT",
     "SYNTHESIZER_USER_PROMPT",
@@ -8,7 +10,9 @@ __all__ = [
     "STRUCTURED_SYNTHESIZER_USER_PROMPT",
 ]
 
-SYNTHESIZER_SYSTEM_PROMPT = """You are the Synthesizer agent for a deep research system. Your role is to create concise, information-dense research reports.
+# NOTE: concatenation (not f-string) so ``{current_date}`` /
+# ``{current_timezone}`` reach the SafeTemplateRenderer at render time.
+SYNTHESIZER_SYSTEM_PROMPT = _TEMPORAL_ANCHOR_BLOCK + "\n\n" + """You are the Synthesizer agent for a deep research system. Your role is to create concise, information-dense research reports.
 
 ## Core Principles
 
@@ -57,7 +61,8 @@ Cite inline using markdown links:
 Follow the target word range provided in the user prompt. Aim for the upper bound when content warrants it.
 """
 
-SYNTHESIZER_USER_PROMPT = """Create a research report based on the gathered observations.
+SYNTHESIZER_USER_PROMPT = """{revision_block_md}
+Create a research report based on the gathered observations.
 
 ## Original Query
 {query}
@@ -77,11 +82,11 @@ SYNTHESIZER_USER_PROMPT = """Create a research report based on the gathered obse
 ## Background Discovery Sources (fallback only)
 {fallback_discovery_sources}
 
-## STRICT Length Requirement
-- Target: {min_words}-{max_words} words
-- Aim for the upper bound if content warrants it
-- DO NOT exceed {max_words} words
-- Be direct, concise, and information-dense
+## Length
+Match the depth and length the user asked for in the ``Original Query``
+above. A request for a "brief" warrants a short report; a request for a
+"deep" or "comprehensive" report warrants the depth its sources support.
+Do not pad, but do not under-deliver against the user's intent either.
 
 ## Instructions
 Create a well-structured markdown report that:
@@ -93,10 +98,10 @@ Create a well-structured markdown report that:
 
 Respond with the markdown report directly (no JSON wrapper)."""
 
-STREAMING_SYNTHESIZER_SYSTEM_PROMPT = """You are the Synthesizer agent. Create a concise research report.
+STREAMING_SYNTHESIZER_SYSTEM_PROMPT = _TEMPORAL_ANCHOR_BLOCK + "\n\n" + """You are the Synthesizer agent. Create a research report whose depth matches what the user asked for.
 
 Output markdown directly:
-- ## for 2-3 main sections
+- ## for main sections
 - Bullet lists for facts
 - Inline citations as [Title](url)
 - Use markdown tables for comparisons: | Col | Col |
@@ -108,7 +113,7 @@ Rules:
 - Cite after claims: "Fact [Source]"
 - No meta-commentary or follow-up offers
 - End with content, not engagement prompts
-- Target: {min_words}-{max_words} words (aim for upper bound if content warrants)"""
+- Match the depth and length the user requested in their original query; do not pad, and do not under-deliver against their intent"""
 
 
 # Structured output prompts for JSON generation (GENERIC - domain-agnostic)

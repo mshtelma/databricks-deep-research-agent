@@ -12,6 +12,9 @@
 #
 # Databricks Apps Deployment:
 #   make deploy TARGET=dev BRAVE_SCOPE=msh  - Full deployment (recommended)
+#   make app-deploy TARGET=dev              - Fast app-only redeploy (Python/yaml/vars,
+#                                             no DB migrate, no provisioning, no grants)
+#   make app-deploy TARGET=dev BUILD=1      - Also rebuild frontend + requirements.txt
 #   make quickstart     - Set up local development environment
 #   make db-migrate     - Run migrations on configured Lakebase (local dev)
 #   make db-migrate-remote TARGET=dev  - Run migrations on deployed instance
@@ -49,7 +52,7 @@
 #   make lint           - Run linting (backend + frontend)
 #   make logs TARGET=dev - Download app logs (add FOLLOW=-f to follow)
 
-.PHONY: dev dev-backend dev-frontend build build-framework prod clean clean_db db-provision db-cleanup db-migrate db-status db-reset db-migrate-remote db-local db-local-stop clean-e2e typecheck lint install e2e e2e-ui e2e-debug e2e-custom-agents test test-integration test-complex test-all-python test-frontend test-all quickstart deploy requirements bundle-validate bundle-summary logs
+.PHONY: dev dev-backend dev-frontend build build-framework prod clean clean_db db-provision db-cleanup db-migrate db-status db-reset db-migrate-remote db-local db-local-stop clean-e2e typecheck lint install e2e e2e-ui e2e-debug e2e-custom-agents test test-integration test-complex test-scaffold-and-run test-all-python test-frontend test-all quickstart deploy app-deploy requirements bundle-validate bundle-summary logs
 
 # =============================================================================
 # Target-bound env loading
@@ -74,6 +77,7 @@ endef
 DB_SUFFIX ?=
 DB_BASE ?= deep_research
 DB_NAME = $(if $(DB_SUFFIX),$(DB_BASE)_$(DB_SUFFIX),$(DB_BASE))
+NPM_CI_FLAGS ?= --prefer-offline --no-audit --no-fund
 
 # =============================================================================
 # Development
@@ -135,7 +139,7 @@ build-framework:
 
 build: build-framework
 	@echo "Building frontend..."
-	cd frontend && npm ci && npm run build
+	cd frontend && npm ci $(NPM_CI_FLAGS) && npm run build
 	@echo ""
 	@echo "Frontend built to static/"
 	@ls -la static/
@@ -144,6 +148,16 @@ build: build-framework
 	@rm -f src/deep_research/static
 	@ln -s ../../static src/deep_research/static
 	@echo "Symlink created: src/deep_research/static -> ../../static"
+
+# Build a wheel and verify it contains every package-data file the deployment
+# translators (shell-app + spark-batch) expect at runtime. Catches the
+# packaging regression class that broke AIS on 2026-05-12.
+verify-wheel:
+	@echo "Building wheel..."
+	@rm -rf dist/
+	uv build --wheel --out-dir dist
+	@echo "Verifying wheel content..."
+	uv run python scripts/verify_wheel.py
 
 prod: build
 	@echo "Stopping any existing server on port 8000..."
@@ -161,9 +175,9 @@ install:
 	@echo "Installing backend dependencies..."
 	uv sync
 	@echo "Installing frontend dependencies..."
-	cd frontend && npm ci
+	cd frontend && npm ci $(NPM_CI_FLAGS)
 	@echo "Installing E2E dependencies..."
-	cd e2e && npm ci && npx playwright install
+	cd e2e && npm ci $(NPM_CI_FLAGS) && npx playwright install
 	@echo "Done!"
 
 install-dev:
@@ -212,6 +226,29 @@ test-integration:
 # Complex tests (long-running, production config, requires credentials)
 test-complex:
 	uv run pytest tests/complex -v --tb=short --timeout=600
+
+# Scaffold-and-Run live integration test — designer + WorkflowRunner end-to-end
+# Writes per-case artifact dirs under tests/_runs/<ts>-<case>/ for analysis.
+# Sources ../.env + ../.env.$(DEV_TARGET) automatically (same creds as `make dev`),
+# so BRAVE_API_KEY and DATABRICKS_CONFIG_PROFILE / DATABRICKS_TOKEN are picked up
+# without the caller having to export anything.
+#
+# Uses the DEFAULT config/app.yaml (not app.test.yaml) so the designer's
+# analytical tier gets enough max_tokens for Claude extended thinking
+# (CLAUDE_THINKING_BUDGETS[medium]=4096 requires max_tokens > 4096; app.test.yaml
+# caps at 4000 and the API rejects).  Output artifacts are also more
+# comparable to production this way.
+#
+# Usage: make test-scaffold-and-run                              (both cases)
+#        make test-scaffold-and-run CASE=investment_research     (one case)
+#        make test-scaffold-and-run DEV_TARGET=e2e               (different env file)
+CASE ?=
+test-scaffold-and-run:
+	@echo "Target: $(DEV_TARGET) (env: ../.env + ../.env.$(DEV_TARGET))"
+	@bash -c '$(call load-env,$(DEV_TARGET)) && \
+		MLFLOW_ENABLED=false \
+		uv run pytest tests/complex/test_scaffold_and_run.py -v -s --tb=short --timeout=1800 \
+			$(if $(CASE),-k $(CASE),)'
 
 # All Python tests
 test-all-python:
@@ -612,6 +649,11 @@ requirements: build-framework
 bundle-validate:
 	databricks bundle validate
 
+# MLflow experiment that the app traces into. Mirrors MLFLOW_EXPERIMENT_NAME
+# in databricks.yml; granted to the app SP during deploy so set_experiment()
+# does not fail silently inside the app process.
+MLFLOW_EXPERIMENT_PATH ?= /Shared/deep-research-agent-experiments
+
 # Full deployment - ONE COMMAND DOES EVERYTHING
 # Builds frontend, deploys bundle, waits for DB, runs migrations, starts app
 # Usage: make deploy TARGET=dev BRAVE_SCOPE=msh
@@ -702,7 +744,29 @@ deploy: build requirements
 	\
 	echo ""; \
 	echo "Step 8/9: Granting permissions + starting app..."; \
+	if [ -z "$$APP_NAME" ]; then \
+		APP_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.apps.deep_research_agent.name // empty'); \
+	fi; \
+	if [ -z "$$APP_NAME" ]; then \
+		echo "ERROR: Could not resolve app name from bundle summary"; \
+		echo "  Check that 'databricks bundle summary -t $(TARGET) --output json' returns the app config."; \
+		exit 1; \
+	fi; \
+	echo "  Resolved APP_NAME: $$APP_NAME"; \
+	echo "Configuring Databricks App Postgres resource..."; \
+	DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
+	ENDPOINT_NAME="$$ENDPOINT_NAME" \
+	LAKEBASE_DATABASE="deep_research" \
+	uv run python -m deep_research.deployment.app_postgres_resource \
+		--app-name "$$APP_NAME" \
+		--profile "$$PROFILE" \
+		--endpoint-name "$$ENDPOINT_NAME" \
+		--database-name "deep_research" \
+		|| { echo "ERROR: App Postgres resource configuration failed"; exit 1; }; \
 	ENDPOINT_NAME="$$ENDPOINT_NAME" ./scripts/grant-app-permissions.sh "" "$$PROFILE" "deep_research" "$$APP_NAME" || { echo "ERROR: Permission grant failed"; exit 1; }; \
+	echo "Granting MLflow experiment access to app SP..."; \
+	./scripts/grant-app-mlflow-experiment.sh "$(MLFLOW_EXPERIMENT_PATH)" "$$APP_NAME" "$$PROFILE" CAN_EDIT \
+		|| { echo "ERROR: MLflow experiment grant failed"; exit 1; }; \
 	echo "Re-deploying and starting app with bundle run..."; \
 	databricks bundle run -t $(TARGET) --var endpoint_name=$$ENDPOINT_NAME --var pghost=$$PGHOST deep_research_agent || { echo "ERROR: App start failed"; exit 1; }; \
 	\
@@ -722,6 +786,53 @@ deploy: build requirements
 	@echo "If app fails to start, check logs:"
 	@echo "  make logs TARGET=$(TARGET)"
 	@echo "  make logs TARGET=$(TARGET) FOLLOW=-f  # Follow logs in real-time"
+
+# Fast app-only redeploy: bundle deploy + bundle run with vars from ../.env.$(TARGET).
+# Skips: DB migrations, Lakebase provisioning, permission grants, frontend build.
+# Use for Python/yaml/databricks.yml-only changes after a successful `make deploy`.
+# Usage: make app-deploy TARGET=dev
+#        make app-deploy TARGET=dev BUILD=1          # Also rebuild frontend + requirements.txt
+#        make app-deploy TARGET=dev BRAVE_SCOPE=msh  # Override Brave secret scope
+BUILD ?=
+app-deploy: $(if $(BUILD),build requirements,)
+	@if [ ! -f $(ROOT_DIR)/.env.$(TARGET) ]; then \
+		echo "ERROR: $(ROOT_DIR)/.env.$(TARGET) not found. Run 'make deploy TARGET=$(TARGET)' first."; \
+		exit 1; \
+	fi
+	@echo "=============================================="
+	@echo "App-only redeploy (no DB migrate, no grants)"
+	@echo "Target: $(TARGET)"
+	@echo "=============================================="
+	@$(call load-env,$(TARGET)) && \
+	if [ -z "$$ENDPOINT_NAME" ] || [ -z "$$PGHOST" ]; then \
+		echo "ERROR: ENDPOINT_NAME or PGHOST missing in $(ROOT_DIR)/.env.$(TARGET)."; \
+		echo "Run 'make deploy TARGET=$(TARGET)' to regenerate it."; \
+		exit 1; \
+	fi; \
+	LAKEBASE_DB="$${LAKEBASE_DATABASE:-deep_research}"; \
+	DEPLOY_ARGS="-t $(TARGET) --var lakebase_database=$$LAKEBASE_DB --var endpoint_name=$$ENDPOINT_NAME --var pghost=$$PGHOST"; \
+	if [ -n "$(BRAVE_SCOPE)" ]; then \
+		DEPLOY_ARGS="$$DEPLOY_ARGS --var brave_secret_scope=$(BRAVE_SCOPE)"; \
+	fi; \
+	echo ""; \
+	echo "Step 1/3: databricks bundle deploy $$DEPLOY_ARGS"; \
+	echo "  Profile:  $$DATABRICKS_CONFIG_PROFILE"; \
+	echo "  Endpoint: $$ENDPOINT_NAME"; \
+	echo "  PGHOST:   $$PGHOST"; \
+	echo "  Database: $$LAKEBASE_DB"; \
+	databricks bundle deploy $$DEPLOY_ARGS || { echo "ERROR: Bundle deploy failed"; exit 1; }; \
+	echo ""; \
+	echo "Step 2/3: Granting MLflow experiment access to app SP..."; \
+	APP_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.apps.deep_research_agent.name // empty'); \
+	if [ -z "$$APP_NAME" ]; then echo "ERROR: Could not resolve app name from bundle summary"; exit 1; fi; \
+	./scripts/grant-app-mlflow-experiment.sh "$(MLFLOW_EXPERIMENT_PATH)" "$$APP_NAME" "$$DATABRICKS_CONFIG_PROFILE" CAN_EDIT \
+		|| { echo "ERROR: MLflow experiment grant failed"; exit 1; }; \
+	echo ""; \
+	echo "Step 3/3: databricks bundle run -t $(TARGET) deep_research_agent"; \
+	databricks bundle run -t $(TARGET) --var endpoint_name=$$ENDPOINT_NAME --var pghost=$$PGHOST deep_research_agent \
+		|| { echo "ERROR: App start failed"; exit 1; }
+	@echo ""
+	@echo "App redeploy complete. Logs: make logs TARGET=$(TARGET) FOLLOW=-f"
 
 # Show bundle deployment summary
 bundle-summary:

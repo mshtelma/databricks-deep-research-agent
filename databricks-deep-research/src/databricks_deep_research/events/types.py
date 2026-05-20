@@ -127,6 +127,19 @@ class AgentStreamChunkEvent(StreamEvent):
     subtype: str = ""
 
 
+class ModelCallEvent(StreamEvent):
+    """Emitted by FrameworkLLMClient after model resolution, before the HTTP
+    call. Lets observers see which concrete model handled each tier
+    request — used by the scaffold-and-run test to verify the designer's
+    architect used Opus (and critic used GPT-5)."""
+
+    event_type: Literal["model_call"] = "model_call"
+    node_id: str = ""
+    tier: str = ""           # logical tier name ("complex", "critic", etc.)
+    model: str = ""          # concrete endpoint identifier (e.g. "databricks-claude-opus-4-6")
+    request_id: str = ""     # OpenAI-API-style request id, optional
+
+
 # --- Typed output models (per-subtype Pydantic contracts) ---
 
 
@@ -547,6 +560,7 @@ FrameworkEvent = Annotated[
     # Agent
     | AgentOutputEvent
     | AgentStreamChunkEvent
+    | ModelCallEvent
     # Domain-specific (builtin subtypes)
     | PlanCreatedEvent
     | ReflectionDecisionEvent

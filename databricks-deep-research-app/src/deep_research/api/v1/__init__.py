@@ -4,18 +4,21 @@ from fastapi import APIRouter
 
 from deep_research.api.v1 import (
     agent,
+    agent_designer,
+    agents_v2,
     chats,
     citations,
     config,
-    custom_agents,
     data_sources,
     debug,
+    deployments,
     discovery,
     files,
     health,
     hitl,
     jobs,
     messages,
+    metrics,
     preferences,
     research,
     templates,
@@ -49,11 +52,17 @@ router.include_router(data_sources.router, tags=["Data Sources"])
 router.include_router(discovery.router, tags=["Discovery"])
 # Prompt template management routes (US5)
 router.include_router(templates.router, tags=["Templates"])
-# Custom agent management routes (US6)
-router.include_router(custom_agents.router, tags=["Custom Agents"])
 # File upload management routes (US7)
 router.include_router(files.router, tags=["Files"])
 # Configuration catalog routes (009-custom-agent-config)
 router.include_router(config.router, tags=["Config"])
 # HITL approval routes (Phase 2)
 router.include_router(hitl.router, tags=["HITL"])
+# Client metrics ingest endpoint (US-614)
+router.include_router(metrics.router, prefix="/metrics", tags=["Metrics"])
+# Agent Designer routes (US-106)
+router.include_router(agent_designer.router, prefix="/agent-designer", tags=["Agent Designer"])
+# AgentV2 CRUD routes (US-105)
+router.include_router(agents_v2.router, prefix="/agents-v2", tags=["Agents V2"])
+# Deployment routes (Phase 1 backend foundation)
+router.include_router(deployments.router, prefix="/deployments", tags=["Deployments"])

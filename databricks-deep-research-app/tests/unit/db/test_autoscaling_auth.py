@@ -120,7 +120,9 @@ class TestAutoscalingCredentialProviderMethods:
         mock_auth.return_value.get_client.return_value = mock_client
 
         token = _make_jwt("sp-user@example.com")
-        mock_client.postgres.generate_database_credential.return_value = MagicMock(token=token)
+        mock_client.postgres.generate_database_credential.return_value = MagicMock(
+            token=token
+        )
 
         cred = provider.get_credential()
 
@@ -130,6 +132,30 @@ class TestAutoscalingCredentialProviderMethods:
         assert cred.token == token
         assert cred.username == "sp-user@example.com"
         assert cred.expires_at > datetime.now(UTC)
+
+    @patch("deep_research.core.databricks_auth.get_databricks_auth")
+    def test_get_credential_prefers_databricks_client_id(
+        self, mock_auth: MagicMock
+    ) -> None:
+        """Databricks Apps expose the DB role as DATABRICKS_CLIENT_ID."""
+        provider = self._make_provider()
+
+        mock_client = MagicMock()
+        mock_auth.return_value.get_client.return_value = mock_client
+
+        token = _make_jwt("token-subject-not-db-role")
+        mock_client.postgres.generate_database_credential.return_value = MagicMock(
+            token=token
+        )
+
+        with patch.dict(
+            "os.environ",
+            {"DATABRICKS_CLIENT_ID": "app-client-id-123"},
+            clear=True,
+        ):
+            cred = provider.get_credential()
+
+        assert cred.username == "app-client-id-123"
 
     @patch("deep_research.core.databricks_auth.get_databricks_auth")
     def test_credential_caching(self, mock_auth: MagicMock) -> None:

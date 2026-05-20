@@ -1,12 +1,45 @@
-"""Researcher agent prompt templates."""
+"""Researcher agent prompt templates.
+
+The system prompt is intentionally split into two parts so the Agent Designer
+can REPLACE the generic methodology with task-specialized content when an
+LLM-supplied specialization is provided, while still preserving the
+mandatory JSON output contract every researcher must produce.
+
+Exports:
+    RESEARCHER_DEFAULT_METHOD  — sections 1-3: role, responsibilities, search
+                                 guidelines, tool usage, multi-query strategy,
+                                 entity-focused search, duplicate avoidance.
+                                 Used as the default methodology when no
+                                 task-specific specialization is available.
+    RESEARCHER_OUTPUT_CONTRACT  — section 4: observation format JSON contract.
+                                 ALWAYS present in every researcher's
+                                 system_prompt — downstream parsers depend
+                                 on the field shape it specifies.
+    RESEARCHER_SYSTEM_PROMPT    — the legacy combined value (DEFAULT_METHOD +
+                                 OUTPUT_CONTRACT). Kept for backward
+                                 compatibility with existing imports.
+"""
 
 __all__ = [
+    "RESEARCHER_DEFAULT_METHOD",
+    "RESEARCHER_OUTPUT_CONTRACT",
     "RESEARCHER_SYSTEM_PROMPT",
     "RESEARCHER_USER_PROMPT",
     "SEARCH_QUERY_PROMPT",
 ]
 
-RESEARCHER_SYSTEM_PROMPT = """You are the Researcher agent for a deep research system. Your role is to execute individual research steps.
+# Sections 1-3 of the legacy researcher system prompt. These are generic
+# research methodology — useful only when the Agent Designer has not
+# supplied a task-specific specialization for the lane. When a
+# specialization IS supplied, the workflow builder substitutes a minimal
+# preamble in place of this block so the lane's system_prompt is dominated
+# by task-specific content (not framework boilerplate).
+from ._shared import TEMPORAL_ANCHOR_BLOCK as _TEMPORAL_ANCHOR_BLOCK
+
+# NOTE: concatenation (not f-string) so that ``{current_date}`` /
+# ``{current_timezone}`` survive Python import-time and reach the
+# SafeTemplateRenderer at agent-invocation time.
+RESEARCHER_DEFAULT_METHOD = _TEMPORAL_ANCHOR_BLOCK + "\n\n" + """You are the Researcher agent for a deep research system. Your role is to execute individual research steps.
 
 ## Your Responsibilities
 
@@ -78,9 +111,12 @@ When present, you MUST:
 1. **Read them carefully** before generating search queries
 2. **Do NOT repeat searches** that would retrieve information already captured
 3. **Focus on NEW angles** — different perspectives, deeper details, or complementary data points not yet covered
-4. If the current step's topic is already well-covered by prior observations, state that explicitly and synthesize from existing evidence rather than re-searching
+4. If the current step's topic is already well-covered by prior observations, state that explicitly and synthesize from existing evidence rather than re-searching"""
 
-## Observation Format (CRITICAL - ALWAYS REQUIRED)
+# Section 4 of the legacy researcher system prompt: the observation JSON
+# contract. ALWAYS included in every researcher's system_prompt — the
+# downstream parser depends on the field shape this specifies.
+RESEARCHER_OUTPUT_CONTRACT = """## Observation Format (CRITICAL - ALWAYS REQUIRED)
 
 You MUST always provide an observation, even if search results are limited, empty, or unhelpful.
 
@@ -98,8 +134,14 @@ You MUST always provide an observation, even if search results are limited, empt
 
 Keep observations focused and under 500 words.
 
-IMPORTANT: The "observation" field in your JSON response is REQUIRED. Never omit it.
-"""
+IMPORTANT: The "observation" field in your JSON response is REQUIRED. Never omit it."""
+
+# Legacy combined value — kept verbatim (same chars + newlines as the original
+# string literal) for backward compatibility with any consumer that imported
+# RESEARCHER_SYSTEM_PROMPT directly.
+RESEARCHER_SYSTEM_PROMPT = (
+    RESEARCHER_DEFAULT_METHOD + "\n\n" + RESEARCHER_OUTPUT_CONTRACT + "\n"
+)
 
 RESEARCHER_USER_PROMPT = """Execute the following research step:
 

@@ -57,7 +57,7 @@ class GetFileEntitiesTool:
     async def execute(
         self,
         arguments: dict[str, Any],
-        context: ResearchContext,
+        _context: ResearchContext,
     ) -> ToolResult:
         snapshot = self._memory.snapshot()
         entities = list(snapshot.entities)

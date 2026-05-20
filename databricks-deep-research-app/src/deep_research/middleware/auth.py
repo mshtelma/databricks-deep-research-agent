@@ -303,6 +303,11 @@ async def _sync_user_record(
                 settings.user_sync_success_ttl_sec,
                 settings,
             )
+            logger.info(
+                "USER_SYNC_OK user_id=%s backend=%s",
+                user.user_id,
+                settings.storage_service_impl,
+            )
         except Exception:
             # Cache failure briefly to suppress request-rate retries.
             _record_sync_outcome(
@@ -423,3 +428,24 @@ def require_authenticated_user(user: CurrentUser) -> UserIdentity:
 
 
 AuthenticatedUser = Annotated[UserIdentity, Depends(require_authenticated_user)]
+
+
+# V1.5 OBO refresh hook: caller sets request.state.obo_token_rotated; middleware propagates
+# as X-OBO-Token-Rotated header.  The header is injected by the response-finalize helper
+# below.  Call site: wherever refresh_user_token() is invoked in a request handler, set
+# ``request.state.obo_token_rotated = True`` on successful rotation.
+
+
+def propagate_obo_rotation_header(request: Request, response: object) -> None:
+    """Propagate X-OBO-Token-Rotated response header when a rotation occurred.
+
+    Call this from any middleware or endpoint that has access to the Response
+    object after the request handler completes.
+
+    Args:
+        request: The current FastAPI request (reads request.state.obo_token_rotated).
+        response: The FastAPI Response object to mutate.
+    """
+    # After the request handler completes and before returning the response:
+    if getattr(request.state, "obo_token_rotated", False):
+        response.headers["X-OBO-Token-Rotated"] = "true"  # type: ignore[attr-defined]

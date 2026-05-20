@@ -126,3 +126,34 @@ async def test_compile_synthesis_context_dedupes_sources_by_url() -> None:
     )
     # The URL should appear at most once even though there are two raw entries.
     assert result.sources_list.count("https://example.com/10k") <= 1
+
+
+@pytest.mark.asyncio
+async def test_compile_synthesis_context_filters_metadata_only_sources() -> None:
+    src_pool = _FakePool(
+        items=[
+            {
+                "title": "Search result title only",
+                "url": "https://example.com/title-only",
+                "evidence_quality": "metadata_only",
+                "admission_status": "accepted_low_value",
+            },
+            {
+                "title": "Crawled source",
+                "url": "https://example.com/crawled",
+                "snippet": "Extracted source text.",
+                "evidence_quality": "snippet_only",
+                "admission_status": "accepted",
+            },
+        ]
+    )
+    result = await compile_synthesis_context(
+        query="evidence filter",
+        pools={"sources": src_pool},
+        llm_client=_FakeLLMClient(),
+        config=default_synthesis_context(),
+    )
+
+    assert "title-only" not in result.sources_list
+    assert "https://example.com/crawled" in result.sources_list
+    assert result.stats.source_items_in == 1

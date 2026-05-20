@@ -79,7 +79,12 @@ class WorkflowResult:
         """Sources from typed evidence state, falling back to legacy pool."""
         runtime = self.runtime_state
         if runtime is not None and runtime.capabilities.evidence is not None:
-            return [source.model_dump(mode="json") for source in runtime.capabilities.evidence.sources]
+            typed_sources = [
+                source.model_dump(mode="json")
+                for source in runtime.capabilities.evidence.sources
+            ]
+            if typed_sources:
+                return typed_sources
         pool = self.state.pools.get("sources")
         if pool is not None and hasattr(pool, "items"):
             return pool.items  # type: ignore[no-any-return]
@@ -142,6 +147,9 @@ class WorkflowRunner:
         model: str = "databricks-claude-haiku-4-5",
         model_mapping: dict[str, str | ModelTierConfig] | None = None,
         profile: str | None = None,
+        factory_context: ToolFactoryContext | None = None,
+        brave_api_key: str | None = None,
+        user_token: str | None = None,
     ) -> WorkflowRunner:
         """Create a runner with Databricks auth.
 
@@ -154,13 +162,29 @@ class WorkflowRunner:
         profile:
             Databricks CLI profile name from ``~/.databrickscfg``.
             Forwarded to ``FrameworkLLMClient.from_databricks()``.
+        factory_context:
+            Optional pre-built tool dependency context. Use this when the
+            runtime must inject app-bound resources such as Databricks clients
+            or search providers.
+        brave_api_key:
+            Optional Brave Search API key. Used to build a default
+            ``ToolFactoryContext`` when *factory_context* is not provided.
+        user_token:
+            Optional OBO token forwarded into the default ``ToolFactoryContext``
+            when *factory_context* is not provided.
         """
         client = FrameworkLLMClient.from_databricks(
             model=model,
             model_mapping=model_mapping,
             profile=profile,
         )
-        return cls(llm_client=client)
+        resolved_factory_context = factory_context
+        if resolved_factory_context is None and (brave_api_key or user_token):
+            resolved_factory_context = ToolFactoryContext.from_defaults(
+                brave_api_key=brave_api_key,
+                user_token=user_token,
+            )
+        return cls(llm_client=client, factory_context=resolved_factory_context)
 
     async def run(
         self,
@@ -168,6 +192,7 @@ class WorkflowRunner:
         *,
         query: str = "",
         state: WorkflowState | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
     ) -> WorkflowResult:
         """Load and run a workflow to completion, returning a WorkflowResult.
 
@@ -182,10 +207,19 @@ class WorkflowRunner:
             Pre-built state for advanced use (model_overrides, enterprise_tools,
             user_token, domain_filter).  When ``None``, a fresh state is created
             from *query*.
+        conversation_history:
+            Optional list of ``{role, content}`` dicts (OpenAI message format)
+            representing prior conversation turns.  When provided, this value
+            is seeded onto the run state and made available to every agent via
+            ``AgentInput.conversation_history``.  If *state* was also provided
+            and already contained history, this kwarg takes precedence (caller
+            intent is the authority).
         """
         definition = self._resolve(workflow)
         effective_client = self._resolve_client(definition)
         run_state = state if state is not None else WorkflowState(query=query)
+        if conversation_history is not None:
+            run_state.conversation_history = list(conversation_history)
         self._inject_registered_tools(run_state)
         executor = WorkflowExecutor(definition, effective_client, factory_context=self._factory)
         events = [event async for event in executor.execute(run_state)]
@@ -218,14 +252,36 @@ class WorkflowRunner:
         *,
         query: str = "",
         state: WorkflowState | None = None,
+        conversation_history: list[dict[str, Any]] | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Load and stream a workflow, yielding events.
 
         Access the final result via ``runner.last_result`` after iteration.
+
+        Parameters
+        ----------
+        workflow:
+            Path to YAML, Path object, pre-loaded WorkflowDefinition, or
+            a plain dict matching the YAML schema.
+        query:
+            Query string.  Ignored when *state* is provided.
+        state:
+            Pre-built state for advanced use (model_overrides, enterprise_tools,
+            user_token, domain_filter).  When ``None``, a fresh state is created
+            from *query*.
+        conversation_history:
+            Optional list of ``{role, content}`` dicts (OpenAI message format)
+            representing prior conversation turns.  When provided, this value
+            is seeded onto the run state and made available to every agent via
+            ``AgentInput.conversation_history``.  If *state* was also provided
+            and already contained history, this kwarg takes precedence (caller
+            intent is the authority).
         """
         definition = self._resolve(workflow)
         effective_client = self._resolve_client(definition)
         run_state = state if state is not None else WorkflowState(query=query)
+        if conversation_history is not None:
+            run_state.conversation_history = list(conversation_history)
         self._inject_registered_tools(run_state)
         executor = WorkflowExecutor(definition, effective_client, factory_context=self._factory)
         events: list[StreamEvent] = []

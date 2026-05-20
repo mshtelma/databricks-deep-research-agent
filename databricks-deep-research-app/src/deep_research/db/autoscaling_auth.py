@@ -103,13 +103,24 @@ class AutoscalingCredentialProvider(BaseLakebaseCredentialProvider):
         )
 
     def _extract_username(self, token: str) -> str:
-        """Extract username from PGUSER env var or JWT token."""
+        """Extract the Postgres username for the generated credential.
+
+        Databricks Apps custom Lakebase wiring uses the app service
+        principal client id as the database role. Apps expose it as
+        ``DATABRICKS_CLIENT_ID`` even when ``PGUSER`` is not explicitly
+        configured in the app env.
+        """
         pguser = os.environ.get("PGUSER")
         if pguser:
             logger.info(f"Using PGUSER from environment: {pguser}")
             return pguser
 
-        # Extract from JWT token's 'sub' claim
+        client_id = os.environ.get("DATABRICKS_CLIENT_ID")
+        if client_id:
+            logger.info("Using DATABRICKS_CLIENT_ID as Lakebase username")
+            return client_id
+
+        # Local/profile fallback: extract from JWT token's 'sub' claim.
         try:
             payload_b64 = token.split(".")[1]
             payload_b64 += "=" * (4 - len(payload_b64) % 4)

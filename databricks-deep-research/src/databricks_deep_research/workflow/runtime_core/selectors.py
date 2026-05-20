@@ -81,12 +81,18 @@ def select_all_observations_text(state: Any) -> str:
 
 
 def select_sources_count(state: Any, pools: dict[str, Any]) -> int:
+    from databricks_deep_research.agents.execution.output_normalizer import (
+        source_is_substantive,
+    )
+
     runtime = get_runtime(state)
     evidence = getattr(runtime.capabilities, "evidence", None) if runtime else None
     if evidence is not None:
-        return len(evidence.sources)
+        return sum(1 for source in evidence.sources if source_is_substantive(source))
     sources_pool = pools.get("sources")
-    return sources_pool.count() if sources_pool else 0
+    if sources_pool is None:
+        return 0
+    return sum(1 for source in sources_pool.snapshot() if source_is_substantive(source))
 
 
 def select_verification_payload(state: Any) -> dict[str, Any]:

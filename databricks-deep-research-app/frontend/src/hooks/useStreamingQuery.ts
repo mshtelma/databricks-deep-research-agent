@@ -619,7 +619,7 @@ export function useStreamingQuery(
         break;
       }
     }
-  }, [chatId, isDuplicateEvent]);
+  }, [isDuplicateEvent]);
 
   /**
    * Handle a single job event from the SSE stream.
@@ -924,7 +924,7 @@ export function useStreamingQuery(
 
       eventSource.onerror = (e) => handleSseError(e, eventSource);
     },
-    [disconnectStream, handleJobEvent, handleSseError]
+    [chatId, disconnectStream, handleJobEvent, handleSseError]
   );
 
   // Cleanup on unmount

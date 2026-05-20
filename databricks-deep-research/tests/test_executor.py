@@ -26,7 +26,7 @@ from databricks_deep_research.events.types import (
 )
 from databricks_deep_research.templates.renderer import SafeTemplateRenderer
 from databricks_deep_research.tools.resolver import ToolResolver
-from databricks_deep_research.workflow.conditions import StateCondition
+from databricks_deep_research.workflow.conditions import ConditionBranch, StateCondition
 from databricks_deep_research.workflow.definition import (
     ErrorConfig,
     NodeType,
@@ -428,6 +428,62 @@ class TestConditionalNode:
         assert len(branch_events) == 1
         assert branch_events[0].branch_index == 0  # type: ignore[attr-defined]
         assert "branch_0" in executed_children
+
+    @pytest.mark.asyncio
+    async def test_selects_condition_branch_child_index(self) -> None:
+        """Conditional respects ConditionBranch.child_index, not condition list index."""
+        executed_children: list[str] = []
+
+        async def fake_execute_agent(
+            node_id: str, **kwargs: Any
+        ) -> AgentOutput:
+            executed_children.append(node_id)
+            return AgentOutput(content="branch", output_key="output", events=[])
+
+        branch = ConditionBranch(
+            condition=StateCondition(key="status", operator="eq", value="ready"),
+            child_index=1,
+        )
+
+        root = WorkflowNode(
+            id="cond",
+            type=NodeType.conditional,
+            label="conditional",
+            config={
+                "conditions": [branch.model_dump()],
+                "default_branch": 0,
+            },
+            children=[
+                WorkflowNode(
+                    id="branch_0",
+                    type=NodeType.agent,
+                    label="Branch 0 (default)",
+                    config={"subtype": "researcher", "output_key": "b0"},
+                ),
+                WorkflowNode(
+                    id="branch_1",
+                    type=NodeType.agent,
+                    label="Branch 1",
+                    config={"subtype": "researcher", "output_key": "b1"},
+                ),
+            ],
+        )
+        defn = _make_definition(root)
+        executor = WorkflowExecutor(defn, _mock_llm_client())
+        state = WorkflowState(query="test")
+        state.append("init", "status", "ready")
+
+        with patch(
+            "databricks_deep_research.workflow.executor.execute_agent",
+            side_effect=fake_execute_agent,
+        ):
+            events = await _collect_events(executor, state)
+
+        branch_events = _events_of_type(events, BranchSelectedEvent)
+        assert len(branch_events) == 1
+        assert branch_events[0].branch_index == 1  # type: ignore[attr-defined]
+        assert "branch_1" in executed_children
+        assert "branch_0" not in executed_children
 
     @pytest.mark.asyncio
     async def test_falls_through_to_default(self) -> None:

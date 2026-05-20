@@ -11,6 +11,7 @@
 import * as React from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
+import { AppShell } from '@/components/layout/AppShell'
 import { TemplateLibrary } from '@/components/templates/TemplateLibrary'
 import { TemplateEditor } from '@/components/templates/TemplateEditor'
 import {
@@ -78,22 +79,27 @@ export function TemplatesPage() {
 
   if (isLoading) {
     return (
-      <div className="flex-1 flex items-center justify-center">
-        <div className="text-muted-foreground">Loading templates...</div>
-      </div>
+      <AppShell>
+        <div className="flex flex-1 items-center justify-center bg-db-oat-light">
+          <div className="text-[13px] text-db-gray-text">Loading templates...</div>
+        </div>
+      </AppShell>
     )
   }
 
   if (error) {
     return (
-      <div className="flex-1 flex items-center justify-center">
-        <div className="text-destructive">Failed to load templates</div>
-      </div>
+      <AppShell>
+        <div className="flex flex-1 items-center justify-center bg-db-oat-light">
+          <div className="text-[13px] text-db-lava-700">Failed to load templates</div>
+        </div>
+      </AppShell>
     )
   }
 
   return (
-    <div className="flex-1 overflow-auto">
+    <AppShell>
+      <div className="flex-1 overflow-auto bg-db-oat-light">
       <div className="max-w-4xl mx-auto p-6 space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between">
@@ -162,7 +168,8 @@ export function TemplatesPage() {
           </div>
         )}
       </div>
-    </div>
+      </div>
+    </AppShell>
   )
 }
 

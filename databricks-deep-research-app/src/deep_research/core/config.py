@@ -174,6 +174,16 @@ class Settings(BaseSettings):
             self.brave_verify_ssl = True
         return self
 
+    # Deploy-here settings (Section S)
+    framework_git_url: str = "https://github.com/mshtelma/databricks-deep-research-agent"
+    github_api_token: str | None = None
+    deploy_here_reachability_timeout_seconds: float = 300.0
+    deploy_here_probe_ttl_seconds: float = 60.0
+    deploy_here_framework_tag_preflight: bool = True
+    deploy_here_disclose_owner: bool = True
+    deploy_here_brave_secret_scope: str = "deep-research-secrets"
+    deploy_here_brave_secret_key: str = "BRAVE_API_KEY"
+
     # MLflow
     mlflow_enabled: bool = True
     mlflow_tracking_uri: str = "databricks"

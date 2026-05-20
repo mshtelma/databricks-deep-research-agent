@@ -144,6 +144,7 @@ For EVERY claim you make:
 
 ## Query
 {query}
+{generation_instructions_section}
 
 ## Generation Guidelines
 
@@ -214,6 +215,7 @@ You are a Research Synthesizer writing an engaging, comprehensive report.
 
 ## Query
 {query}
+{generation_instructions_section}
 
 ## Writing Guidelines
 
@@ -467,6 +469,7 @@ class InterleavedGenerator:
         previous_content: str = "",
         target_word_count: int = 600,
         max_tokens: int = 2000,
+        generation_instructions: str = "",
     ) -> AsyncGenerator[tuple[str, InterleavedClaim | None], None]:
         """Generate content with interleaved claims and streaming.
 
@@ -508,12 +511,24 @@ class InterleavedGenerator:
 
         min_sources_to_cite = max(2, min(10, unique_sources // 3))
         max_word_count = int(target_word_count * 1.3)
+        instructions = generation_instructions.strip()
+        generation_instructions_section = (
+            "\n## Workflow-Specific Report Contract\n"
+            f"{instructions}\n\n"
+            "Apply this contract for section names, required deliverables, "
+            "tone, and quality gates as strictly as the evidence allows. If a "
+            "required section lacks citeable evidence, keep the section heading "
+            "but do not invent factual content."
+            if instructions
+            else ""
+        )
 
         # Select prompt template
         mode = self._config.generation_mode
         if mode == GenerationMode.NATURAL:
             prompt = _NATURAL_GENERATION_PROMPT.format(
                 query=query,
+                generation_instructions_section=generation_instructions_section,
                 evidence_pool=evidence_text,
                 target_word_count=target_word_count,
                 max_word_count=max_word_count,
@@ -528,6 +543,7 @@ class InterleavedGenerator:
         elif mode == GenerationMode.STRICT:
             prompt = _STRICT_GENERATION_PROMPT.format(
                 query=query,
+                generation_instructions_section=generation_instructions_section,
                 evidence_pool=evidence_text,
                 target_word_count=target_word_count,
                 max_word_count=max_word_count,

@@ -46,11 +46,27 @@ def create_framework_llm_client(
     # Build model mapping from app config
     model_mapping = _build_model_mapping(app_llm, model_overrides)
 
+    # Diagnostic: makes "which token is the framework using?" answerable
+    # from the log stream. Compare token_prefix against the app's
+    # LLM_CLIENT_INITIALIZED / LLM_CLIENT_FORCE_REFRESHED logs to confirm
+    # the framework is on the same auth context as the main app.
+    logger.info(
+        "FWK_LLM_ADAPTER_BIND auth_mode=%s base_url=%s token_prefix=%s***",
+        app_llm._auth.auth_mode,
+        str(openai_client.base_url)[:80],
+        (openai_client.api_key or "")[:8],
+    )
+
     return FrameworkLLMClient(
         openai_client=openai_client,
         model_mapping=model_mapping,
         embedding_model=embedding_model,
-        client_provider=app_llm._ensure_fresh_client,
+        # Active refresh: invalidates DatabricksAuth + SDK cache and mints a
+        # fresh token. Previously this was `_ensure_fresh_client` (passive),
+        # which returned the same stale client when DatabricksAuth's
+        # locally-computed 1h expiry hadn't elapsed — causing the framework's
+        # 403-retry to loop with the same invalid bearer.
+        client_provider=app_llm.force_refresh_client,
     )
 
 

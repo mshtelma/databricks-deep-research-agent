@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from deep_research.services._cached_base import _CachedServiceBase
@@ -28,7 +27,7 @@ logger = logging.getLogger(__name__)
 class CachedUserService(_CachedServiceBase, IUserService):
     """`IUserService` over `UserDocument`."""
 
-    def __init__(self, stack: "StorageStack") -> None:
+    def __init__(self, stack: StorageStack) -> None:
         super().__init__(stack)
 
     async def upsert(

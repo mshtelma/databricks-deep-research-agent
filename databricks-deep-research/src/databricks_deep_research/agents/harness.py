@@ -25,6 +25,8 @@ from databricks_deep_research.agents.execution.output_normalizer import (
     build_observation_records,
     build_source_records,
     merge_and_dedup_sources,
+    source_is_low_value,
+    source_is_substantive,
 )
 from databricks_deep_research.agents.execution.output_normalizer import (
     build_observation_from_sources as _build_observation_from_sources,
@@ -224,6 +226,14 @@ def _serialize_source_for_pool(source: Any) -> Any:
     if relevance_score is not None:
         item["relevance_score"] = relevance_score
 
+    evidence_quality = getattr(source, "evidence_quality", None)
+    if evidence_quality:
+        item["evidence_quality"] = evidence_quality
+
+    admission_status = getattr(source, "admission_status", None)
+    if admission_status:
+        item["admission_status"] = admission_status
+
     return item
 
 
@@ -238,7 +248,26 @@ def _normalize_research_output(
     sources: list[Any] | None = None,
 ) -> NormalizedResearchOutput | None:
     serialized_sources = [_serialize_source_for_pool(source) for source in (sources or [])]
-    return _normalize_research_output_impl(parsed, config, serialized_sources)
+    result = _normalize_research_output_impl(parsed, config, serialized_sources)
+    # DR_LEAK_TRACE output_normalize_out: capture what the normalizer emits
+    # to state_text — this is what downstream consumers (synthesizer prompt,
+    # pool writes) actually read.
+    if result is not None:
+        try:
+            logger.info(
+                "DR_LEAK_TRACE phase=output_normalize_out "
+                "output_key=%s status=%s repair=%s sources=%d "
+                "state_text_len=%d state_text_head=%r",
+                config.output_key,
+                result.research_status,
+                result.repair_mode,
+                len(result.sources),
+                len(result.state_text),
+                (result.state_text or "")[:300].replace("\n", "\\n"),
+            )
+        except Exception as _exc:  # pragma: no cover — diagnostic only
+            logger.debug("DR_LEAK_TRACE output_normalize_out skipped: %s", _exc)
+    return result
 
 
 def _build_pool_batches(
@@ -413,7 +442,7 @@ async def execute_agent(
                 if sources_pool is not None:
                     seen_urls: set[str] = set()
                     for item in sources_pool.snapshot():
-                        if not isinstance(item, dict):
+                        if not isinstance(item, dict) or not source_is_substantive(item):
                             continue
                         url = str(item.get("url", "") or "")
                         title = str(item.get("title", "") or "")
@@ -554,12 +583,31 @@ async def execute_agent(
                 convergence_rounds=config.convergence_rounds,
                 per_tool_limits=config.per_tool_limits,
                 hint_queries=config.hint_queries,
+                suppress_planning_final_output=bool(
+                    config.extras.get("suppress_planning_final_output", False)
+                ),
             )
             result = await loop.execute(messages)
             content = result.content
             events.extend(result.events)
             sources.extend(result.sources)
             token_usage = merge_token_usage(token_usage, result.token_usage)
+            # DR_LEAK_TRACE harness_return: capture what the harness pulled
+            # out of the ReactResult. Compare to react_exit content_head — if
+            # they differ, something between ReactLoop.execute and here
+            # mutated the content.
+            _content_str = content if isinstance(content, str) else (
+                json.dumps(content, default=str) if content is not None else ""
+            )
+            logger.info(
+                "DR_LEAK_TRACE phase=harness_return "
+                "node=%s subtype=%s sources=%d content_len=%d content_head=%r",
+                node_id,
+                getattr(config, "subtype", None),
+                len(sources),
+                len(_content_str),
+                _content_str[:300].replace("\n", "\\n"),
+            )
         else:
             # Simple single LLM call
             response = await llm_client.complete(
@@ -567,6 +615,8 @@ async def execute_agent(
                 config.model_tier,
                 max_tokens=config.conversation_budget,
                 structured_output=config.output_model,
+                event_sink=events.append,
+                node_id=node_id,
             )
             content = response.content
             token_usage = merge_token_usage(token_usage, response.usage)
@@ -590,7 +640,9 @@ async def execute_agent(
                 )
                 pool_output = structured_findings
                 if state.runtime_store is not None:
-                    source_records = build_source_records(normalized_research_output.sources)
+                    source_records = build_source_records(
+                        normalized_research_output.sources
+                    )
                     step_id = None
                     current_step = state.get(config.item_state_key) if hasattr(config, "item_state_key") else None
                     if isinstance(current_step, dict):
@@ -645,6 +697,26 @@ async def execute_agent(
                 )
 
         # -- 5. Write to state ---------------------------------------------------
+        # DR_LEAK_TRACE state_write: capture the value that lands in state
+        # under output_key. Downstream agents read this — if it differs from
+        # the react_exit content, something between react_loop and here
+        # mutated the content (output normalization, projection, parsing).
+        try:
+            _state_value_str = (
+                state_output if isinstance(state_output, str)
+                else json.dumps(state_output, default=str, ensure_ascii=False)
+            )
+            logger.info(
+                "DR_LEAK_TRACE phase=state_write origin=agent "
+                "node=%s subtype=%s output_key=%s value_len=%d value_head=%r",
+                node_id,
+                getattr(config, "subtype", None),
+                config.output_key,
+                len(_state_value_str),
+                _state_value_str[:300].replace("\n", "\\n"),
+            )
+        except Exception as _exc:  # pragma: no cover — diagnostic only
+            logger.debug("DR_LEAK_TRACE state_write skipped: %s", _exc)
         state.append(node_id, config.output_key, state_output)
 
         # -- 6. Pool writes ------------------------------------------------------
@@ -674,7 +746,12 @@ async def execute_agent(
                 if isinstance(pool_output, dict):
                     raw_normalized_sources = pool_output.get("sources", [])
                     if isinstance(raw_normalized_sources, list):
-                        normalized_sources = [item for item in raw_normalized_sources if not _is_semantically_empty(item)]
+                        normalized_sources = [
+                            item
+                            for item in raw_normalized_sources
+                            if not _is_semantically_empty(item)
+                            and source_is_substantive(item)
+                        ]
                 if normalized_sources:
                     items = normalized_sources
                     logger.info(
@@ -682,7 +759,11 @@ async def execute_agent(
                         pw.pool, len(items),
                     )
                 elif sources:
-                    items = [_serialize_source_for_pool(s) for s in sources]
+                    items = [
+                        serialized
+                        for serialized in (_serialize_source_for_pool(s) for s in sources)
+                        if source_is_substantive(serialized)
+                    ]
                     logger.info(
                         "POOL_WRITE_REACT_SOURCES pool=%s count=%d",
                         pw.pool, len(items),
@@ -874,11 +955,49 @@ async def _build_input(
     if context.get("compute_namespace") is None:
         context["compute_namespace"] = ns_summary
 
+    # Auto-inject temporal context (current_date, current_iso_datetime,
+    # current_timezone) unless the caller has already provided one. Caller
+    # overrides are honoured so regression tests can fix the clock (set any
+    # of the three keys to anchor the run deterministically).
+    if context.get("current_date") is None:
+        from databricks_deep_research.agents.temporal import PromptTemporalContext
+        context.update(PromptTemporalContext.now().as_context_keys())
+        logger.info(
+            "TEMPORAL_CONTEXT_INJECTED node=%s date=%s tz=%s",
+            _node_id, context.get("current_date"), context.get("current_timezone"),
+        )
+
+    # Auto-inject the synthesizer revision block. Computed best-effort from
+    # state — returns empty when the workflow has no reflector pass or the
+    # reflector's decision was not 'adjust'. Cost is two state lookups +
+    # one Pydantic validation when applicable; near-zero otherwise.
+    if context.get("revision_block_md") is None:
+        try:
+            from databricks_deep_research.agents.revision import build_revision_block_md
+            # WorkflowState exposes per-key access via .get(), not a values
+            # dict; we build the minimal three-key snapshot the revision
+            # builder needs to keep its API dict-shaped (testable in isolation).
+            state_snapshot: dict[str, Any] = {}
+            for _rk in ("draft_report", "coverage_review", "revision_passes_remaining"):
+                _v = state.get(_rk) if hasattr(state, "get") else None
+                if _v is not None:
+                    state_snapshot[_rk] = _v
+            block_md = build_revision_block_md(state_snapshot)
+        except Exception:  # noqa: BLE001 — never fail the run because of a hook
+            block_md = ""
+            logger.exception("REVISION_BLOCK_BUILD_FAILED node=%s", _node_id)
+        if block_md:
+            context["revision_block_md"] = block_md
+            logger.info(
+                "REVISION_BLOCK_INJECTED node=%s chars=%d",
+                _node_id, len(block_md),
+            )
+
     sources_pool = pools.get("sources")
     if sources_pool is not None and sources_pool.count() > 0:
         pooled_sources = sources_pool.snapshot()
-        substantive = sum(1 for item in pooled_sources if isinstance(item, dict) and item.get("admission_status") == "accepted")
-        low_value = sum(1 for item in pooled_sources if isinstance(item, dict) and item.get("admission_status") == "accepted_low_value")
+        substantive = sum(1 for item in pooled_sources if source_is_substantive(item))
+        low_value = sum(1 for item in pooled_sources if source_is_low_value(item))
         quality_counts: dict[str, int] = {}
         for item in pooled_sources:
             if isinstance(item, dict):
@@ -966,6 +1085,7 @@ async def _build_input(
             user_prompt=user_prompt,
             tools=[t.definition for t in tools],
             pool_sections=pool_sections,
+            conversation_history=state.conversation_history,  # wire multi-turn history into agent
         ),
         pool_token_usage,
     )
@@ -1057,7 +1177,13 @@ def _inject_sources_into_output(
 
 
 def _compute_citation_stats(output: Any, total_sources: int) -> None:
-    """Count actual source_refs across output and update citation_stats in-place."""
+    """Count actual citations across output and update citation_stats in-place.
+
+    Structured synthesizer outputs expose citation fields as ``source_refs``.
+    Reclaim synthesis returns markdown with numeric ``[N]`` markers instead,
+    so count those markers too; otherwise traces misleadingly report zero
+    citations even when the citation pipeline verified and numbered the report.
+    """
     all_refs: list[str] = []
     fields_with_refs = 0
     fields_total = 0
@@ -1082,6 +1208,12 @@ def _compute_citation_stats(output: Any, total_sources: int) -> None:
         data = output.model_dump() if hasattr(output, "model_dump") else output
         if isinstance(data, dict):
             _collect(data)
+        elif isinstance(data, str):
+            refs = re.findall(r"\[(\d+)\]", data)
+            fields_total = 1 if data else 0
+            if refs:
+                fields_with_refs = 1
+                all_refs.extend(refs)
     except Exception:
         return
 
@@ -1158,6 +1290,26 @@ def _build_messages(agent_input: AgentInput) -> list[dict[str, Any]]:
 
     if parts:
         messages.append({"role": "user", "content": "\n\n".join(parts)})
+
+    # DR_LEAK_TRACE synth_prompt_in: capture what each agent's user message
+    # contains (especially synthesizers/reflectors that read lane outputs).
+    # Log per-pool snippets so we can see which lane's content surfaces.
+    try:
+        _pool_dump = {
+            pool_name: (section.rendered_text or "")[:300].replace("\n", "\\n")
+            for pool_name, section in agent_input.pool_sections.items()
+        }
+        _sys_head = (agent_input.system_prompt or "")[:150].replace("\n", "\\n")
+        _user_head = ("\n\n".join(parts))[:300].replace("\n", "\\n")
+        logger.info(
+            "DR_LEAK_TRACE phase=synth_prompt_in "
+            "system_head=%r user_head=%r pools=%r",
+            _sys_head,
+            _user_head,
+            _pool_dump,
+        )
+    except Exception as _exc:  # pragma: no cover — diagnostic only
+        logger.debug("DR_LEAK_TRACE synth_prompt_in skipped: %s", _exc)
 
     return messages
 
@@ -1427,5 +1579,3 @@ def _build_data_landscape(sources: list[Any]) -> dict[str, Any]:
         "sources": ordered_groups,
         "top_sources": [item["source_name"] for item in ordered_groups[:5]],
     }
-
-

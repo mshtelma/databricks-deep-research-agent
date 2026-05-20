@@ -28,7 +28,6 @@ from deep_research.services._protocols import (
     IAuditLogService,
     IChatMemoryService,
     IChatService,
-    ICustomAgentService,
     IDataSourceService,
     IExportService,
     IFeedbackService,
@@ -54,10 +53,10 @@ if TYPE_CHECKING:
 
 
 def make_research_event_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> IResearchEventService:
     """Return the research-event service matching `storage_service_impl`."""
     if settings.storage_service_impl == "cached":
@@ -81,10 +80,10 @@ def make_research_event_service(
 
 
 def make_chat_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> IChatService:
     """Return the chat service matching `storage_service_impl`.
 
@@ -119,10 +118,10 @@ def _not_yet_cached(service_name: str) -> None:
 
 
 def make_feedback_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> IFeedbackService:
     if settings.storage_service_impl == "cached":
         if stack is None:
@@ -138,10 +137,10 @@ def make_feedback_service(
 
 
 def make_user_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> IUserService:
     if settings.storage_service_impl == "cached":
         if stack is None:
@@ -157,10 +156,10 @@ def make_user_service(
 
 
 def make_preferences_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> IPreferencesService:
     if settings.storage_service_impl == "cached":
         if stack is None:
@@ -178,10 +177,10 @@ def make_preferences_service(
 
 
 def make_chat_memory_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
     embedder: Any = None,
     llm: Any = None,
 ) -> IChatMemoryService:
@@ -208,10 +207,10 @@ def make_chat_memory_service(
 
 
 def make_message_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> IMessageService:
     if settings.storage_service_impl == "cached":
         if stack is None:
@@ -227,10 +226,10 @@ def make_message_service(
 
 
 def make_source_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> ISourceService:
     if settings.storage_service_impl == "cached":
         if stack is None:
@@ -246,10 +245,10 @@ def make_source_service(
 
 
 def make_research_session_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> IResearchSessionService:
     if settings.storage_service_impl == "cached":
         if stack is None:
@@ -269,10 +268,10 @@ def make_research_session_service(
 
 
 def make_audit_log_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    _session: AsyncSession | None = None,
 ) -> IAuditLogService:
     """Return the audit-log service matching ``storage_service_impl``.
 
@@ -297,39 +296,11 @@ def make_audit_log_service(
     )
 
 
-def make_custom_agent_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
-    *,
-    session: "AsyncSession | None" = None,
-) -> ICustomAgentService:
-    """Return the custom-agent service matching ``storage_service_impl``.
-
-    Cached path: ``CachedCustomAgentService(stack)`` — reads/writes go through
-    the ``StorageStack`` cold-path list tables.
-
-    Legacy path: ``CustomAgentService(session)`` — reads/writes go through the
-    existing ORM on ``public.custom_agents`` + ``public.agent_preset_steps``.
-    """
-    if settings.storage_service_impl == "cached":
-        if stack is None:
-            raise ValueError("cached custom_agent service requires a StorageStack")
-        from deep_research.services.cached.custom_agent import CachedCustomAgentService
-
-        return CachedCustomAgentService(stack)
-
-    from deep_research.services.custom_agent_service import CustomAgentService
-
-    if session is None:
-        raise ValueError("legacy custom_agent service requires an AsyncSession")
-    return CustomAgentService(session)
-
-
 def make_file_upload_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
     storage_path: str | None = None,
 ) -> IFileUploadService:
     """Return the file-upload service matching ``storage_service_impl``.
@@ -355,10 +326,10 @@ def make_file_upload_service(
 
 
 def make_data_source_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
     obo_client: Any = None,
 ) -> IDataSourceService:
     """Return the data-source service matching ``storage_service_impl``.
@@ -384,10 +355,10 @@ def make_data_source_service(
 
 
 def make_template_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> ITemplateService:
     """Return the template service matching ``storage_service_impl``.
 
@@ -411,10 +382,10 @@ def make_template_service(
 
 
 def make_export_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> IExportService:
     """Return the export service matching ``storage_service_impl``.
 
@@ -448,10 +419,10 @@ def make_export_service(
 
 
 def make_session_service(
-    settings: "Settings",
-    stack: "StorageStack | None" = None,
+    settings: Settings,
+    stack: StorageStack | None = None,
     *,
-    session: "AsyncSession | None" = None,
+    session: AsyncSession | None = None,
 ) -> ISessionService:
     """Return the incognito-session service matching ``storage_service_impl``.
 
@@ -478,7 +449,6 @@ __all__ = [
     "make_audit_log_service",
     "make_chat_service",
     "make_chat_memory_service",
-    "make_custom_agent_service",
     "make_data_source_service",
     "make_export_service",
     "make_feedback_service",

@@ -20,7 +20,7 @@ import json
 import logging
 import time
 import traceback
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -38,30 +38,28 @@ from databricks_deep_research.workflow.context import (
     ExecutionContext,
 )
 from databricks_deep_research.workflow.definition import (
+    NodeType,
     WorkflowDefinition,
 )
 from databricks_deep_research.workflow.executor import (
     WorkflowExecutor,
 )
+from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from databricks_deep_research.workflow.state import WorkflowState
 
 from deep_research.agent.adapters.config_translator import translate
-from deep_research.agent.chat_title import derive_chat_title_from_query
 from deep_research.agent.adapters.domain_context import (
     AppSSEEvent,
     DomainContextTracker,
 )
 from deep_research.agent.adapters.llm_adapter import create_framework_llm_client
 from deep_research.agent.adapters.tool_adapter import create_framework_tools
+from deep_research.agent.chat_title import derive_chat_title_from_query
 from deep_research.agent.tools.file_entities import GetFileEntitiesTool
 from deep_research.agent.tools.list_files import ListAttachedFilesTool
 from deep_research.agent.tools.read_file import ReadAttachedFileTool
-from deep_research.plugins.base import ContextEnricher
-from deep_research.services._impl_factory import make_chat_memory_service, make_file_upload_service
-from deep_research.services._protocols import IChatMemoryService
-from deep_research.services.chat_memory_service import ChatMemoryService
-from deep_research.services.file_upload_service import FileUploadService
 from deep_research.core.tracing import safe_mlflow_run, safe_tool_span, safe_update_trace
+from deep_research.plugins.base import ContextEnricher
 from deep_research.schemas.streaming import (
     AgentCompletedEvent,
     AgentStartedEvent,
@@ -73,6 +71,8 @@ from deep_research.schemas.streaming import (
     SynthesisProgressEvent,
     SynthesisStartedEvent,
 )
+from deep_research.services._impl_factory import make_chat_memory_service, make_file_upload_service
+from deep_research.services._protocols import IChatMemoryService
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.embedder import DEFAULT_EMBEDDING_ENDPOINT
 from deep_research.services.research_event_buffer import EventBuffer
@@ -174,6 +174,162 @@ def _resolve_workflow(
     )
 
 
+async def _resolve_agent_v2_workflow(
+    config: OrchestrationConfig,
+    user_id: str | None,
+    db: Any | None,
+) -> WorkflowDefinition | None:
+    """Load a selected Agent V2 workflow definition, if requested."""
+    if not config.agent_id:
+        return None
+    if not user_id:
+        raise ValueError("agent_id was provided but no user_id is available for visibility checks")
+
+    try:
+        agent_uuid = UUID(config.agent_id)
+    except ValueError as exc:
+        raise ValueError(f"Invalid agent_id {config.agent_id!r}") from exc
+
+    from deep_research.services.agent_v2_service import AgentV2Service
+
+    if db is not None:
+        agent = await AgentV2Service(db).get_for_user(agent_uuid, user_id)
+    else:
+        from deep_research.db.session import get_session_maker
+
+        session_maker = get_session_maker()
+        async with session_maker() as session:
+            agent = await AgentV2Service(session).get_for_user(agent_uuid, user_id)
+
+    if agent is None:
+        raise ValueError(f"Agent {config.agent_id!r} was not found or is not visible to the user")
+
+    workflow_def = load_workflow_from_dict(agent.definition)
+    logger.info(
+        "FWK_AGENT_V2_WORKFLOW_RESOLVED agent_id=%s workflow_id=%s workflow_name=%s",
+        config.agent_id,
+        workflow_def.id,
+        workflow_def.name,
+    )
+    return workflow_def
+
+
+def _visit_workflow_agent_configs(
+    workflow_def: WorkflowDefinition,
+    visitor: Callable[[dict[str, Any]], None],
+) -> None:
+    """Visit agent configs, including agent configs nested inside raw config bodies."""
+
+    def visit_raw(raw_node: dict[str, Any]) -> None:
+        config_dict = raw_node.get("config")
+        if isinstance(config_dict, dict):
+            if raw_node.get("type") == NodeType.agent.value:
+                visitor(config_dict)
+            elif raw_node.get("type") == NodeType.plan_and_execute.value:
+                for nested_key in ("planner", "evaluator"):
+                    nested = config_dict.get(nested_key)
+                    if isinstance(nested, dict):
+                        visitor(nested)
+                body = config_dict.get("body")
+                if isinstance(body, dict):
+                    visit_raw(body)
+        for child in raw_node.get("children") or []:
+            if isinstance(child, dict):
+                visit_raw(child)
+
+    def visit_node(node: Any) -> None:
+        if node.type == NodeType.agent:
+            visitor(node.config)
+        elif node.type == NodeType.plan_and_execute:
+            for nested_key in ("planner", "evaluator"):
+                nested = node.config.get(nested_key)
+                if isinstance(nested, dict):
+                    visitor(nested)
+            body = node.config.get("body")
+            if isinstance(body, dict):
+                visit_raw(body)
+        for child in node.children:
+            visit_node(child)
+
+    visit_node(workflow_def.root)
+
+
+def _apply_runtime_overlays_to_workflow(
+    workflow_def: WorkflowDefinition,
+    config: OrchestrationConfig,
+) -> WorkflowDefinition:
+    """Apply per-run chat toggles that are orthogonal to saved workflow shape."""
+    if not config.verify_sources:
+        return workflow_def
+
+    def maybe_enable_reclaim(agent_config: dict[str, Any]) -> None:
+        if agent_config.get("subtype") != "synthesizer":
+            return
+        output_schema = agent_config.get("output_schema")
+        has_legacy_grounding = (
+            isinstance(output_schema, dict)
+            and output_schema.get("synthesis_mode") in {"reclaim", "interleaved"}
+        )
+        has_explicit_grounding = agent_config.get("grounding_mode") in {
+            "none",
+            "classical_lite",
+            "reclaim",
+        }
+        if has_explicit_grounding or has_legacy_grounding:
+            return
+        schema = output_schema if isinstance(output_schema, dict) else {}
+        schema.setdefault("synthesis_mode", "reclaim")
+        schema.setdefault("enable_citation_verification", True)
+        agent_config["output_schema"] = schema
+
+    _visit_workflow_agent_configs(workflow_def, maybe_enable_reclaim)
+    return workflow_def
+
+
+def _apply_source_scope_to_workflow_declarations(
+    workflow_def: WorkflowDefinition,
+    config: OrchestrationConfig,
+) -> WorkflowDefinition:
+    """Prevent saved workflow declarations from bypassing per-run source scope."""
+    if config.source_scope not in {"enterprise_only", "web_only"}:
+        return workflow_def
+
+    web_kinds = {"web_search", "web_crawl", "brave_search"}
+    enterprise_kinds = {"vector_search", "genie", "knowledge_assistant", "sql_analytics", "qa_assistant"}
+    blocked_tool_names: set[str] = set()
+    kept_declarations = []
+    for tool in workflow_def.tools:
+        kind = getattr(tool.kind, "value", str(tool.kind))
+        if config.source_scope == "enterprise_only" and kind in web_kinds:
+            blocked_tool_names.add(tool.name)
+            continue
+        if config.source_scope == "web_only" and kind in enterprise_kinds:
+            blocked_tool_names.add(tool.name)
+            continue
+        kept_declarations.append(tool)
+    if not blocked_tool_names:
+        return workflow_def
+
+    workflow_def.tools = kept_declarations
+
+    def filter_agent_tools(agent_config: dict[str, Any]) -> None:
+        tools = agent_config.get("tools")
+        if isinstance(tools, list):
+            agent_config["tools"] = [
+                tool
+                for tool in tools
+                if not (isinstance(tool, str) and tool in blocked_tool_names)
+            ]
+
+    _visit_workflow_agent_configs(workflow_def, filter_agent_tools)
+    logger.info(
+        "FWK_WORKFLOW_SOURCE_SCOPE_APPLIED source_scope=%s blocked_tools=%s",
+        config.source_scope,
+        sorted(blocked_tool_names),
+    )
+    return workflow_def
+
+
 def _filter_workflow_tools(
     defn: WorkflowDefinition, available_tools: list[str]
 ) -> None:
@@ -228,7 +384,7 @@ def _filter_node_tools(node: Any, available: set[str]) -> None:
                 body.config["tools"] = [t for t in tools if t in available]
 
 
-async def stream_research_via_framework(
+async def stream_workflow_via_framework(
     query: str,
     llm: LLMClient,
     brave_client: BraveSearchClient,
@@ -242,11 +398,14 @@ async def stream_research_via_framework(
     plugin_manager: PluginManager | None = None,
     plugin_data: dict[str, Any] | None = None,  # noqa: ARG001
     storage_stack: Any = None,
+    workflow_def: WorkflowDefinition | None = None,
+    extra_state: dict[str, Any] | None = None,
 ) -> AsyncGenerator[StreamEvent | str, None]:
-    """Stream research via the multi-agent framework.
+    """Stream a workflow via the multi-agent framework.
 
-    Drop-in replacement for ``stream_research()`` with identical external
-    interface.  Internally delegates to the framework executor.
+    Generalized entry point that backs both the main-chat research path and
+    any caller that supplies a pre-built ``WorkflowDefinition`` directly
+    (e.g. the designer-chat path).
 
     Args:
         query: User's research query.
@@ -261,6 +420,12 @@ async def stream_research_via_framework(
         db: Optional database session.
         plugin_manager: Optional plugin manager.
         plugin_data: Optional plugin context data.
+        workflow_def: When provided, skip agent_id/plugin lookup and use this
+            definition directly.  When ``None``, falls through to existing
+            lookup logic (preserves main-chat behaviour).
+        extra_state: Optional dict of additional state keys to seed into
+            ``wf_state`` after conversation_history seeding.  Caller-supplied
+            values win over any defaults.
 
     Yields:
         StreamEvent objects and synthesis content chunks (strings).
@@ -352,7 +517,10 @@ async def stream_research_via_framework(
                 _SpanType.CHAIN if _SpanType is not None else None,
                 {"research.query": query[:200], "research.use_framework": True},
             ):
-                # Trace metadata for MLflow correlation
+                # Trace metadata for MLflow correlation. The mlflow.trace.*
+                # fields populate the UI's user/session columns; the dr.*
+                # provenance tags below make the trace cross-surface
+                # filterable (designer-chat / main-chat / shell-app).
                 if user_id or chat_id:
                     trace_metadata: dict[str, str] = {}
                     if user_id:
@@ -361,6 +529,14 @@ async def stream_research_via_framework(
                         trace_metadata["mlflow.trace.session"] = chat_id
                     if trace_metadata:
                         safe_update_trace(trace_metadata)
+                from deep_research.core.trace_provenance import set_trace_provenance
+                set_trace_provenance(
+                    surface="main-chat",
+                    user_id=user_id,
+                    session_id=chat_id or session_id,
+                    agent_v2_id=config.agent_id,
+                    query_preview=query[:200] if query else "",
+                )
 
                 # -- 2. Build framework execution context --
                 framework_llm = create_framework_llm_client(
@@ -439,7 +615,7 @@ async def stream_research_via_framework(
                                     "CONTEXT_ENRICHER_DONE plugin=%s",
                                     plugin_label,
                                 )
-                            except asyncio.TimeoutError:
+                            except TimeoutError:
                                 logger.warning(
                                     "CONTEXT_ENRICHER_TIMEOUT plugin=%s",
                                     plugin_label,
@@ -553,7 +729,13 @@ async def stream_research_via_framework(
                             tool_names,
                         )
 
-                workflow_def = _resolve_workflow(config, tool_names, plugin_manager)
+                if workflow_def is None:
+                    workflow_def = (
+                        await _resolve_agent_v2_workflow(config, user_id, db)
+                        or _resolve_workflow(config, tool_names, plugin_manager)
+                    )
+                workflow_def = _apply_runtime_overlays_to_workflow(workflow_def, config)
+                workflow_def = _apply_source_scope_to_workflow_declarations(workflow_def, config)
 
                 logger.info(
                     "FWK_WORKFLOW_TRANSLATED workflow_id=%s tool_names=%s",
@@ -626,6 +808,14 @@ async def stream_research_via_framework(
                 wf_state = WorkflowState(query=query)
                 if conversation_history:
                     wf_state.append("init", "conversation_history", conversation_history)
+                    # Also set the typed field so the framework harness picks it
+                    # up via AgentInput.conversation_history (US-06 W1 primitive).
+                    # Both paths coexist for backward compatibility.
+                    wf_state.conversation_history = list(conversation_history)
+
+                if extra_state:
+                    for key, value in extra_state.items():
+                        wf_state.append("init", key, value)
 
                 # Load existing sources for follow-up queries (Step 4)
                 existing_sources = await _load_existing_sources(
@@ -687,6 +877,22 @@ async def stream_research_via_framework(
                             for app_evt in app_events:
                                 sse_event = _to_sse_event(app_evt)
                                 if sse_event:
+                                    # DR_LEAK_TRACE sse_emit: capture each
+                                    # SSE event sent to the client. Any
+                                    # planning text first observable here
+                                    # means it survived the entire pipeline.
+                                    try:
+                                        _evt_repr = repr(sse_event)[:300].replace("\n", "\\n")
+                                        logger.info(
+                                            "DR_LEAK_TRACE phase=sse_emit "
+                                            "event_type=%s payload_head=%r",
+                                            type(sse_event).__name__,
+                                            _evt_repr,
+                                        )
+                                    except Exception as _exc:  # pragma: no cover
+                                        logger.debug(
+                                            "DR_LEAK_TRACE sse_emit skipped: %s", _exc
+                                        )
                                     yield sse_event
                                     await _buffer_event(sse_event, event_buffer)
 
@@ -921,6 +1127,41 @@ async def stream_research_via_framework(
         final_report=final_report,
         structured_output=structured_output,
     )
+
+
+async def stream_research_via_framework(
+    query: str,
+    llm: LLMClient,
+    brave_client: BraveSearchClient,
+    crawler: WebCrawler,
+    conversation_history: list[dict[str, str]] | None = None,
+    session_id: UUID | None = None,
+    user_id: str | None = None,
+    chat_id: str | None = None,
+    config: OrchestrationConfig | None = None,
+    db: AsyncSession | None = None,
+    plugin_manager: PluginManager | None = None,
+    plugin_data: dict[str, Any] | None = None,
+    storage_stack: Any = None,
+) -> AsyncGenerator[StreamEvent | str, None]:
+    """Back-compat alias for stream_workflow_via_framework. New callers should
+    use stream_workflow_via_framework directly and (optionally) pass workflow_def."""
+    async for event in stream_workflow_via_framework(
+        query=query,
+        llm=llm,
+        brave_client=brave_client,
+        crawler=crawler,
+        conversation_history=conversation_history,
+        session_id=session_id,
+        user_id=user_id,
+        chat_id=chat_id,
+        config=config,
+        db=db,
+        plugin_manager=plugin_manager,
+        plugin_data=plugin_data,
+        storage_stack=storage_stack,
+    ):
+        yield event
 
 
 # ---------------------------------------------------------------------------
@@ -1531,7 +1772,7 @@ async def _load_enterprise_tools(
 
 async def _persist_simple_response(
     config: OrchestrationConfig,
-    db: Any,
+    _db: Any,
     chat_id: str | None,
     user_id: str | None,
     query: str,

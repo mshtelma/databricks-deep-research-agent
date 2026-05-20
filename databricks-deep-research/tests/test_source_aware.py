@@ -191,6 +191,34 @@ def test_admit_tool_result_rejects_irrelevant_vector_hits() -> None:
     assert admitted.rejected_sources[0]["title"] == "Business Internet Setup Guide"
 
 
+def test_admit_tool_result_marks_failed_tool_output_as_non_evidence() -> None:
+    definition = ToolDefinition(
+        name="web_crawl",
+        description="Fetch page content.",
+        parameters={"type": "object", "properties": {"url_index": {"type": "integer"}}},
+        source_type="web_crawl",
+        source_kind="web",
+    )
+    result = ToolResult(
+        content="No URL found for index 0. Valid indices: 0--1.",
+        success=False,
+        error="Invalid url_index: 0",
+    )
+
+    admitted = admit_tool_result(
+        definition,
+        result,
+        current_step={"title": "Find current evidence"},
+        root_query="research current market conditions",
+    )
+
+    assert admitted.accepted_count == 0
+    assert admitted.raw_sources == []
+    assert admitted.failure_mode == "tool_error"
+    assert admitted.needs_adaptation is True
+    assert "did not return evidence" in admitted.content
+
+
 def test_admit_enterprise_source_with_high_relevance_score() -> None:
     """Enterprise source with relevance_score > 0 should be admitted
     even without keyword overlap — trusts upstream semantic ranking."""

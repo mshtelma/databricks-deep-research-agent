@@ -17,8 +17,9 @@ warm/cold hit-rate.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -26,7 +27,6 @@ from uuid import UUID
 from deep_research.storage.observability import get_sink
 
 if TYPE_CHECKING:  # pragma: no cover
-    from deep_research.storage.backend import StorageBackend
     from deep_research.storage.cache import ChatStateCache
     from deep_research.storage.documents import ChatDocument
 
@@ -55,7 +55,7 @@ class HydrationTimeoutError(Exception):
 class HydrationProgress:
     """Per-request helper. Construct fresh on each `POST /research` call."""
 
-    cache: "ChatStateCache"
+    cache: ChatStateCache
     sse_emit: SseEmit | None = None
     backend_label: str = "unknown"
     deadlines: tuple[Deadline, ...] = (
@@ -70,7 +70,7 @@ class HydrationProgress:
         *,
         user_id: str | None = None,
         title_hint: str = "",
-    ) -> "ChatDocument":
+    ) -> ChatDocument:
         """Await cache hydration, emitting SSE events at each progressive deadline.
 
         Raises `HydrationTimeoutError` if the final (cap) deadline passes.
@@ -92,7 +92,7 @@ class HydrationProgress:
                     doc = await asyncio.wait_for(
                         asyncio.shield(task), timeout=remaining
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     elapsed = deadline
                     # Final deadline with no event → hard cap.
                     if event_name is None:
@@ -102,7 +102,7 @@ class HydrationProgress:
                             outcome="capped",
                             backend=self.backend_label,
                         )
-                        raise HydrationTimeoutError(chat_id, deadline)
+                        raise HydrationTimeoutError(chat_id, deadline) from None
                     if self.sse_emit is not None:
                         try:
                             self.sse_emit(event_name, None)
@@ -127,10 +127,8 @@ class HydrationProgress:
             # return_exceptions swallows the CancelledError cleanly.
             if not task.done():
                 task.cancel()
-                try:
+                with contextlib.suppress(Exception):
                     await asyncio.gather(task, return_exceptions=True)
-                except Exception:  # noqa: BLE001 — defensive only
-                    pass
 
 
 def _classify_outcome(emitted_events: list[str]) -> str:

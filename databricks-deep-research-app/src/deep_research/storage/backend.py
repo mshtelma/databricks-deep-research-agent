@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from deep_research.storage.documents import (
         ChatDocument,
         ChatMeta,
-        ChatState,
         PrepJobDocument,
         UserDocument,
     )

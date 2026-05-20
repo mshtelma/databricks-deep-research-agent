@@ -58,6 +58,11 @@ class DecoratedToolFactory:
             )
 
         try:
+            # TRUST BOUNDARY: module_path originates from YAML workflow definitions
+            # authored at import-time by framework users (e.g. @tool-decorated callables
+            # in application code), NOT from database rows or user-supplied HTTP input.
+            # The factory is only instantiated during workflow loading — never at request
+            # time from untrusted caller data — so importlib.import_module is safe here.
             module = importlib.import_module(module_path)
         except ImportError as exc:
             raise ValueError(

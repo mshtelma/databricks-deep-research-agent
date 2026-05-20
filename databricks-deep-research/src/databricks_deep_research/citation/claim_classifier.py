@@ -70,6 +70,9 @@ FACTUAL_PAYLOAD_PATTERNS = re.compile(
 )
 
 ANALYSIS_SPLIT_MARKERS: tuple[str, ...] = (
+    " but still indicating ",
+    " but still suggesting ",
+    " but still reflecting ",
     " indicating ",
     " suggesting ",
     " reflecting ",
@@ -86,6 +89,7 @@ ANALYSIS_SPLIT_MARKERS: tuple[str, ...] = (
 
 ANALYSIS_TAIL_PATTERN = re.compile(
     r",\s*(?:"
+    r"(?:(?:but|and)\s+)?(?:still\s+)?"
     r"marking|continuing|demonstrating|highlighting|suggesting|indicating|"
     r"reflecting|showing|underscoring"
     r")\b.*$",

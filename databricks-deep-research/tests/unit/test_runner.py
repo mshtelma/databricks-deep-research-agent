@@ -10,10 +10,16 @@ import pytest
 from databricks_deep_research.events.types import WorkflowStartedEvent
 from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.runner import WorkflowResult, WorkflowRunner
+from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.workflow.definition import (
     NodeType,
     WorkflowDefinition,
     WorkflowNode,
+)
+from databricks_deep_research.workflow.runtime_core import TypedRuntimeStateStore
+from databricks_deep_research.workflow.runtime_core.models import (
+    EvidenceState,
+    SourceRecord,
 )
 from databricks_deep_research.workflow.state import WorkflowState
 
@@ -93,6 +99,41 @@ class TestWorkflowResultSources:
         state.pools["sources"] = mock_pool
         result = WorkflowResult(state=state, definition=_make_definition())
         assert result.sources == [{"url": "https://a.com", "title": "A"}]
+
+    def test_sources_from_typed_evidence_when_present(self) -> None:
+        state = WorkflowState(query="q")
+        store = TypedRuntimeStateStore(query="q")
+        store.runtime().capabilities.evidence = EvidenceState(
+            sources=[
+                SourceRecord(
+                    url="https://typed.example",
+                    title="Typed",
+                    snippet="Typed evidence.",
+                    evidence_quality="full_text",
+                )
+            ]
+        )
+        state.runtime_store = store
+        mock_pool = MagicMock()
+        mock_pool.items = [{"url": "https://pool.example", "title": "Pool"}]
+        state.pools["sources"] = mock_pool
+
+        result = WorkflowResult(state=state, definition=_make_definition())
+
+        assert result.sources[0]["url"] == "https://typed.example"
+
+    def test_empty_typed_evidence_falls_back_to_pool(self) -> None:
+        state = WorkflowState(query="q")
+        store = TypedRuntimeStateStore(query="q")
+        store.runtime().capabilities.evidence = EvidenceState()
+        state.runtime_store = store
+        mock_pool = MagicMock()
+        mock_pool.items = [{"url": "https://pool.example", "title": "Pool"}]
+        state.pools["sources"] = mock_pool
+
+        result = WorkflowResult(state=state, definition=_make_definition())
+
+        assert result.sources == [{"url": "https://pool.example", "title": "Pool"}]
 
     def test_sources_no_pool(self) -> None:
         state = WorkflowState(query="q")
@@ -321,3 +362,38 @@ class TestFromDatabricks:
         mock_factory.assert_called_once_with(
             model="m", model_mapping=None, profile="my-prof"
         )
+
+    @patch(
+        "databricks_deep_research.runner.FrameworkLLMClient.from_databricks"
+    )
+    def test_accepts_factory_context(self, mock_factory: MagicMock) -> None:
+        mock_factory.return_value = _make_mock_client()
+        ctx = ToolFactoryContext(search_client=MagicMock())
+
+        runner = WorkflowRunner.from_databricks(factory_context=ctx)
+
+        assert runner._factory is ctx
+
+    @patch(
+        "databricks_deep_research.runner.FrameworkLLMClient.from_databricks"
+    )
+    @patch("databricks_deep_research.runner.ToolFactoryContext.from_defaults")
+    def test_builds_context_from_brave_api_key(
+        self,
+        mock_context_factory: MagicMock,
+        mock_llm_factory: MagicMock,
+    ) -> None:
+        mock_llm_factory.return_value = _make_mock_client()
+        ctx = ToolFactoryContext(search_client=MagicMock(), user_token="tok")
+        mock_context_factory.return_value = ctx
+
+        runner = WorkflowRunner.from_databricks(
+            brave_api_key="brave",
+            user_token="tok",
+        )
+
+        mock_context_factory.assert_called_once_with(
+            brave_api_key="brave",
+            user_token="tok",
+        )
+        assert runner._factory is ctx

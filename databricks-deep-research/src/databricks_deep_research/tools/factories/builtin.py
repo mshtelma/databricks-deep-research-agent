@@ -13,7 +13,8 @@ from databricks_deep_research.workflow.definition import ToolDeclaration
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_KINDS = frozenset({
-    "web_search", "web_crawl", "file_search", "compute", "compute_namespace",
+    "web_search", "web_crawl", "web_research",
+    "file_search", "compute", "compute_namespace",
     "delta_read", "delta_grep", "delta_context", "delta_table_read",
     "table_read",
 })
@@ -112,6 +113,41 @@ class BuiltinToolFactory:
                 timeout=decl.config.get("timeout", 30.0),
                 max_content_length=decl.config.get("max_content_length", 50_000),
                 extract_tables=decl.config.get("extract_tables", True),
+            )
+
+        if decl.kind == "web_research":
+            # Merged tool: search + auto-crawl top K in one call. Lets the
+            # researcher get real source bodies on the FIRST tool invocation
+            # without relying on the LLM to orchestrate search→crawl correctly.
+            provider = decl.config.get("provider")
+            if provider is None:
+                if ctx.search_client is None:
+                    raise ValueError(
+                        f"search_client required in ToolFactoryContext for "
+                        f"web_research tool '{decl.name}' (set "
+                        f"brave_api_key in ToolFactoryContext.from_defaults "
+                        f"or provide search_client directly)"
+                    )
+                search_client = ctx.search_client
+            else:
+                search_client = _resolve_search_provider(provider, ctx)
+
+            crawl_provider = decl.config.get("crawl_provider")
+            if crawl_provider is not None:
+                crawler = _resolve_crawl_provider(crawl_provider, ctx)
+            else:
+                crawler = ctx.crawler
+
+            from databricks_deep_research.tools.builtins.web_research import (
+                WebResearchTool,
+            )
+
+            return WebResearchTool(
+                search_client=search_client,
+                crawler=crawler,
+                auto_fetch_top_k=decl.config.get("auto_fetch_top_k", 5),
+                total_results=decl.config.get("total_results", 10),
+                max_body_chars=decl.config.get("max_body_chars", 8000),
             )
 
         if decl.kind == "file_search":

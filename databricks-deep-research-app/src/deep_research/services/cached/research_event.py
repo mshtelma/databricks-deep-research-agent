@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import suppress
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -50,7 +51,7 @@ class CachedResearchEventService(_CachedServiceBase, IResearchEventService):
 
     _EVENTS_TABLE = "research_events"
 
-    def __init__(self, stack: "StorageStack") -> None:
+    def __init__(self, stack: StorageStack) -> None:
         super().__init__(stack)
         # Per-session monotonic counters so `sequence_number` defaults match
         # the legacy behavior when callers don't supply their own. Reset on
@@ -96,7 +97,7 @@ class CachedResearchEventService(_CachedServiceBase, IResearchEventService):
     async def save_events_batch(
         self,
         research_session_id: UUID,
-        events: "Sequence[dict[str, Any]]",
+        events: Sequence[dict[str, Any]],
     ) -> int:
         count = 0
         for e in events:
@@ -275,10 +276,8 @@ def _row_to_event(
 
     session_id = row.get("session_id") or fallback_session_id
     if isinstance(session_id, str):
-        try:
+        with suppress(ValueError, TypeError):
             session_id = UUID(session_id)
-        except (ValueError, TypeError):
-            pass
 
     event_id_raw = event_doc.get("id")
     event_id: UUID | str | None = None

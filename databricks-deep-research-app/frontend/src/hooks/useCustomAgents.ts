@@ -241,7 +241,7 @@ export function useGroupedAgents(params?: ListAgentsParams) {
       // System agents have a special ownerId or no owner
       if (!agent.ownerId || agent.ownerId === 'system') {
         grouped.systemAgents.push(agent);
-      } else if (agent.visibility === 'workspace') {
+      } else if (agent.inAppActive) {
         grouped.workspaceAgents.push(agent);
       } else {
         grouped.userAgents.push(agent);

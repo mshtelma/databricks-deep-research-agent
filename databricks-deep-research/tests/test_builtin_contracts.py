@@ -194,8 +194,15 @@ def test_synthesizer_post_process_uses_state_counts() -> None:
     state = WorkflowState(query="test")
     state.append("r1", "findings", "Finding about AI")
     state.append("r2", "findings", "Finding about ML")
-    state.append("r1", "sources", [{"url": "https://a.com"}, {"url": "https://b.com"}])
-    state.append("r2", "sources", [{"url": "https://c.com"}])
+    state.append(
+        "r1",
+        "sources",
+        [
+            {"url": "https://a.com", "snippet": "Evidence A."},
+            {"url": "https://b.com", "snippet": "Evidence B."},
+        ],
+    )
+    state.append("r2", "sources", [{"url": "https://c.com", "snippet": "Evidence C."}])
     builtin = get_builtin("synthesizer")
 
     assert builtin is not None and builtin.post_process is not None
@@ -219,9 +226,9 @@ def test_synthesizer_post_process_falls_back_to_pool_counts() -> None:
     obs_pool.add("Finding about Kroger")
     obs_pool.add("Finding about impairment")
     src_pool = PoolState(PoolConfig(name="sources"))
-    src_pool.add({"url": "https://a.com"})
-    src_pool.add({"url": "https://b.com"})
-    src_pool.add({"url": "https://c.com"})
+    src_pool.add({"url": "https://a.com", "snippet": "Evidence A."})
+    src_pool.add({"url": "https://b.com", "snippet": "Evidence B."})
+    src_pool.add({"url": "https://c.com", "snippet": "Evidence C."})
     state.pools = {"observations": obs_pool, "sources": src_pool}
     builtin = get_builtin("synthesizer")
 

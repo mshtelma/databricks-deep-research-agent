@@ -20,30 +20,6 @@ interface NumericChipProps {
 }
 
 /**
- * Format a normalized value with appropriate units
- * Exported for use in NumericDetails and other components
- */
-export function formatNormalizedValue(value: number | null, unit: string | null): string {
-  if (value === null) return 'N/A';
-
-  // Format large numbers with suffixes
-  if (Math.abs(value) >= 1_000_000_000_000) {
-    return `${(value / 1_000_000_000_000).toFixed(2)}T ${unit || ''}`.trim();
-  }
-  if (Math.abs(value) >= 1_000_000_000) {
-    return `${(value / 1_000_000_000).toFixed(2)}B ${unit || ''}`.trim();
-  }
-  if (Math.abs(value) >= 1_000_000) {
-    return `${(value / 1_000_000).toFixed(2)}M ${unit || ''}`.trim();
-  }
-  if (Math.abs(value) >= 1_000) {
-    return `${(value / 1_000).toFixed(2)}K ${unit || ''}`.trim();
-  }
-
-  return `${value.toLocaleString()} ${unit || ''}`.trim();
-}
-
-/**
  * Get color classes based on derivation type and QA status
  */
 function getChipColorClasses(

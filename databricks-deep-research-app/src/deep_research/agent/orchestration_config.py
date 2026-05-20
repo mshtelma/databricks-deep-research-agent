@@ -17,7 +17,6 @@ from deep_research.core.logging_utils import get_logger
 
 if TYPE_CHECKING:
     from deep_research.agent.state import ResearchState
-    from deep_research.models.custom_agent import CustomAgent
     from deep_research.schemas.streaming import StreamEvent
 
 logger = get_logger(__name__)
@@ -224,7 +223,7 @@ def _convert_preset_steps_to_manual_steps(
 
 def apply_custom_agent_to_config(
     config: OrchestrationConfig,
-    agent: CustomAgent,
+    agent: Any,
     query_overrides: dict[str, Any] | None = None,
 ) -> OrchestrationConfig:
     """Apply custom agent settings to an orchestration config.

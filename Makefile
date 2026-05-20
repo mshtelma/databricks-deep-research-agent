@@ -30,10 +30,10 @@
 .PHONY: dev dev-backend dev-frontend dev-help build prod install install-dev \
         typecheck typecheck-framework typecheck-app lint lint-framework lint-app \
         format format-framework format-app \
-        test test-framework test-app test-integration test-complex test-all-python test-frontend test-all \
+        test test-framework test-app test-integration test-complex test-scaffold-and-run test-all-python test-frontend test-all \
         db-provision db-cleanup db-migrate db-status db-reset db-migrate-remote db-local db-local-stop clean_db clean-e2e \
         e2e e2e-fast e2e-medium e2e-slow e2e-super-slow e2e-all e2e-ui e2e-debug e2e-custom-agents \
-        clean clean-all quickstart deploy requirements bundle-validate bundle-summary logs \
+        clean clean-all quickstart deploy app-deploy requirements bundle-validate bundle-summary logs \
         run-example \
         worktree worktree-list worktree-remove worktree-link
 
@@ -170,6 +170,11 @@ test-integration:
 test-complex:
 	$(MAKE) -C $(APP_DIR) test-complex
 
+# Scaffold + Run live integration test. CASE=<id> to scope to one case.
+CASE ?=
+test-scaffold-and-run:
+	$(MAKE) -C $(APP_DIR) test-scaffold-and-run CASE=$(CASE)
+
 test-all-python:
 	$(MAKE) -C $(APP_DIR) test-all-python
 
@@ -258,6 +263,12 @@ TARGET ?= ais
 BRAVE_SCOPE ?=
 deploy:
 	$(MAKE) -C $(APP_DIR) deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE)
+
+# Fast app-only redeploy (Python/yaml/vars, no DB migrate, no grants).
+# Set BUILD=1 to also rebuild frontend + requirements.txt.
+BUILD ?=
+app-deploy:
+	$(MAKE) -C $(APP_DIR) app-deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE) BUILD=$(BUILD)
 
 FOLLOW ?=
 SEARCH ?=

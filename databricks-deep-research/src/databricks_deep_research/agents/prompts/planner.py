@@ -123,6 +123,51 @@ When replanning, consider:
 4. Focus on addressing the reflector feedback with remaining/new steps
 
 Increment the iteration number when replanning.
+
+## Per-Step USER Prompt Authoring (REQUIRED for research steps)
+
+Every research step you emit MUST include a `user_prompt_template` string —
+the per-step investigation brief that the body researcher will receive as
+its USER message at runtime. Without it, the researcher gets only generic
+defaults and emits planning text into its findings field instead of real
+observations.
+
+The template MUST satisfy this contract (same shape as the workflow
+designer's per-lane contract — the framework validates both the same way):
+
+1. **Restates the user's query verbatim** in the opening line. Reference
+   the `{query}` template variable so the runtime fills it in:
+   `You are investigating: **{query}**`
+2. **Exactly 5 sub-questions** under a "Sub-questions you MUST address"
+   heading. Each sub-question:
+   - References at least one specific noun from the user's query.
+   - Is answerable by web search (or the available enterprise sources).
+   - Has a measurable definition of done: a number, a date, a comparison,
+     a yes/no with citation, or a ranked list.
+   - Ends with a question mark.
+3. **Exactly 3 output sections** under a "Required output structure"
+   heading, with 2-3 sentences of evidence guidance each.
+4. **A "Search strategy" block** with ≥2 bullets (one focused query per
+   sub-question; primary sources appropriate to the domain; refine rather
+   than crawl when results are generic).
+5. **A "Definition of done" / unknowns block** specifying "Data
+   unavailable" handling — DO NOT improvise.
+
+Each step's `user_prompt_template` must be ROUTED to the step's actual
+focus, not the original query. For decomposed multi-entity queries, step 1
+investigates entity 1 (its user_prompt_template's sub-questions are
+specific to entity 1); step 2 investigates entity 2 with its own template;
+the final synthesis step has a template focused on cross-entity
+comparison.
+
+For analysis-only steps (`step_type: "analysis"`, `needs_search: false`),
+the `user_prompt_template` is optional but recommended — when present, it
+should describe the reasoning task and required output structure for the
+analyst.
+
+If a step cannot satisfy this contract (it's too thin to warrant 5
+sub-questions), merge it with an adjacent step rather than shipping a
+half-formed brief.
 """
 
 PLANNER_USER_PROMPT = """Create a research plan for the following:
@@ -164,10 +209,17 @@ Target: {min_steps} to {max_steps} research steps
       "title": "Brief step title",
       "description": "Detailed instructions for this step",
       "step_type": "research" | "analysis",
-      "needs_search": boolean
+      "needs_search": boolean,
+      "user_prompt_template": "## Investigation Brief\\n\\nYou are investigating: **{{query}}**\\n\\n### Sub-questions you MUST address (in this order)\\n1. <concrete question 1 referencing a query noun>?\\n2. <concrete question 2>?\\n3. <concrete question 3>?\\n4. <concrete question 4>?\\n5. <concrete question 5>?\\n\\n### Required output structure (your `findings` field MUST contain these sections)\\n- **<Section A>**: <evidence guidance, 2-3 sentences>\\n- **<Section B>**: <evidence guidance, 2-3 sentences>\\n- **<Section C>**: <evidence guidance, 2-3 sentences>\\n\\n### Search strategy\\n- One focused query per sub-question.\\n- Prefer <primary sources for this domain>.\\n- Refine rather than crawl when results are generic landing pages.\\n\\n### Definition of done\\nEach sub-question has a concrete answer with citation, OR is marked \\"Data unavailable\\" — DO NOT improvise."
     }}
   ]
 }}
+
+The `user_prompt_template` field is REQUIRED for every research step. It
+will be rendered at runtime with `{{query}}` substituted, and used as the
+researcher's USER message. Adapt the sub-questions and output sections to
+THIS step's focus (one entity, one angle, one slice of the work) — not
+the entire query.
 
 Respond with only valid JSON."""
 
@@ -381,6 +433,7 @@ Target: {min_steps} to {max_steps} research steps
       "description": "Detailed instructions for this step",
       "step_type": "research" | "analysis",
       "needs_search": boolean,
+      "user_prompt_template": "## Investigation Brief\\n\\nYou are investigating: **{{query}}**\\n\\n### Sub-questions you MUST address (in this order)\\n1. <concrete question 1>?\\n2. <concrete question 2>?\\n3. <concrete question 3>?\\n4. <concrete question 4>?\\n5. <concrete question 5>?\\n\\n### Required output structure (your `findings` field MUST contain these sections)\\n- **<Section A>**: <evidence guidance, 2-3 sentences>\\n- **<Section B>**: <evidence guidance, 2-3 sentences>\\n- **<Section C>**: <evidence guidance, 2-3 sentences>\\n\\n### Search strategy\\n- One focused query per sub-question.\\n- Prefer <primary sources for this domain or enterprise source per source_hints>.\\n- Refine rather than crawl when results are generic.\\n\\n### Definition of done\\nEach sub-question has a concrete answer with citation, OR is marked \\"Data unavailable\\" — DO NOT improvise.",
       "source_hints": [
         {{
           "source_name": "source-name",
@@ -395,6 +448,12 @@ Target: {min_steps} to {max_steps} research steps
     }}
   ]
 }}
+
+The `user_prompt_template` field is REQUIRED for every research step. It
+will be rendered at runtime with `{{query}}` substituted, and used as the
+researcher's USER message. Adapt the sub-questions and output sections to
+THIS step's focus (one entity, one angle, one slice of the work) — not
+the entire query.
 
 Respond with only valid JSON."""
 

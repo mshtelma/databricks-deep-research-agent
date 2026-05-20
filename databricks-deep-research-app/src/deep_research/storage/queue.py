@@ -132,7 +132,7 @@ class WriteQueue:
 
     # -- Subscription glue for ChatStateCache -------------------------
 
-    def notify_dirty(self, chat_id: UUID, scope: str) -> None:
+    def notify_dirty(self, chat_id: UUID, _scope: str) -> None:
         """Callback wired into `ChatStateCache.on_dirty`.
 
         `write_chat` is atomic over meta + state + projection, so we collapse
@@ -206,7 +206,7 @@ class WriteQueue:
             await asyncio.wait_for(
                 self._drain_all(), timeout=self._shutdown_timeout_sec
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "WriteQueue shutdown drain timed out after %.1fs; "
                 "remaining: state=%d user=%d prep=%d events=%s",

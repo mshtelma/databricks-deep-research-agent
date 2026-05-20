@@ -352,11 +352,16 @@ async def test_nudge_message_injected_on_retry() -> None:
     )
     await loop.execute([{"role": "user", "content": "go"}])
 
-    # The second call's messages should include the nudge system message
+    # The second call's messages should include the nudge user message
+    # (mid-conversation nudges use role:user so Databricks proxy doesn't
+    # drop them — see commit history for the rationale).
     assert len(captured_messages) == 2
     retry_messages = captured_messages[1]
-    system_msgs = [m for m in retry_messages if m.get("role") == "system"]
-    assert any("search tools available" in m["content"] for m in system_msgs)
+    user_nudge_msgs = [
+        m for m in retry_messages
+        if m.get("role") == "user" and "search tools available" in m.get("content", "")
+    ]
+    assert user_nudge_msgs, "Expected a user-role nudge after first-turn no-tool exit"
 
     # The assistant response from the first turn should also be present
     assistant_msgs = [m for m in retry_messages if m.get("role") == "assistant"]

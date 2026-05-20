@@ -327,9 +327,10 @@ class WebCrawlTool:
         self._definition = ToolDefinition(
             name="web_crawl",
             description=(
-                "Fetch full content from a source. Use the INDEX number from "
-                "search results (0, 1, 2, etc.). Returns extracted page text "
-                "for analysis."
+                "Fetch full content from a source. Use only an INDEX number "
+                "from prior web_search results in this same workflow run "
+                "(0, 1, 2, etc.); call web_search first when no valid index "
+                "is available. Returns extracted page text for analysis."
             ),
             parameters={
                 "type": "object",

@@ -59,8 +59,8 @@ class EventBuffer:
         research_session_id: UUID,
         buffer_size: int = 10,
         *,
-        settings: "Settings | None" = None,
-        stack: "StorageStack | None" = None,
+        settings: Settings | None = None,
+        stack: StorageStack | None = None,
     ) -> None:
         """Initialize event buffer.
 

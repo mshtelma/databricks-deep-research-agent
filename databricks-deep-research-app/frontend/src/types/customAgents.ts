@@ -103,6 +103,8 @@ export interface CustomAgentSummary {
   hasDomainFilter?: boolean;
   /** Whether the agent defines source scope or enabled sources */
   hasSourceConfig?: boolean;
+  /** True if this agent has an active in_app deployment (chat composer picks). */
+  inAppActive?: boolean;
 }
 
 /** Agent capability for display */

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -46,6 +47,57 @@ from databricks_deep_research.workflow.runtime.plan_execute_recovery import (
     hydrate_pools_from_discovered_sources,
 )
 from databricks_deep_research.workflow.runtime.plan_execute_types import PlanCycleContext
+
+
+def _extract_step_user_prompt_template(item: Any) -> str | None:
+    """Return the per-step researcher user prompt template, if the planner supplied one.
+
+    Planner-emitted PlanStepOutput models may surface here as plain dicts after
+    contract normalization. Returns None when the field is absent, empty, or
+    whitespace-only so the caller can preserve today's behavior.
+    """
+    if isinstance(item, dict):
+        value = item.get("user_prompt_template")
+    else:
+        value = getattr(item, "user_prompt_template", None)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _patch_researcher_user_prompt(node_dict: dict[str, Any], template: str) -> None:
+    """Walk a body-node tree in-place, overriding researcher user_prompt_template.
+
+    Only mutates ``type=="agent"`` nodes whose ``config.subtype=="researcher"``;
+    leaves other agent subtypes (planner/reflector/synthesizer) untouched.
+    Recurses into ``children`` so conditional / sequence bodies are handled.
+    """
+    if node_dict.get("type") == "agent":
+        cfg = node_dict.get("config")
+        if isinstance(cfg, dict) and cfg.get("subtype") == "researcher":
+            cfg["user_prompt_template"] = template
+    children = node_dict.get("children") or []
+    if isinstance(children, list):
+        for child in children:
+            if isinstance(child, dict):
+                _patch_researcher_user_prompt(child, template)
+
+
+def _materialize_body_for_step(body_config: dict[str, Any], item: Any) -> dict[str, Any]:
+    """Return a body-node dict for this step, injecting the step's user prompt template.
+
+    When the step carries no ``user_prompt_template``, the original body
+    config is returned unchanged (no deep copy) — preserving today's behavior
+    and zero overhead. When the step supplies a template, a deep-copied
+    body is produced with the override applied to every researcher descendant.
+    """
+    template = _extract_step_user_prompt_template(item)
+    if template is None:
+        return body_config
+    patched = copy.deepcopy(body_config)
+    _patch_researcher_user_prompt(patched, template)
+    return patched
 
 
 async def run_plan_execute(
@@ -265,7 +317,8 @@ async def run_plan_execute(
                 attributes={"item.index": idx, "item.summary": (item.get("title") or str(item))[:200] if isinstance(item, dict) else str(item)[:200]},
             ):
                 if config.body:
-                    body_node = WorkflowNode(**config.body)
+                    body_for_step = _materialize_body_for_step(config.body, item)
+                    body_node = WorkflowNode(**body_for_step)
                     async for event in deps.exec_node(body_node, state):
                         item_events.append(event)
                         yield event

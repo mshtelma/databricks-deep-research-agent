@@ -1,11 +1,15 @@
 """Reflector agent prompt templates - Coverage-aware decision making."""
 
+from ._shared import TEMPORAL_ANCHOR_BLOCK as _TEMPORAL_ANCHOR_BLOCK
+
 __all__ = [
     "REFLECTOR_SYSTEM_PROMPT",
     "REFLECTOR_USER_PROMPT",
 ]
 
-REFLECTOR_SYSTEM_PROMPT = """You are the Reflector agent. After each research step, evaluate progress and decide next action.
+# NOTE: concatenation (not f-string) so ``{current_date}`` /
+# ``{current_timezone}`` reach the SafeTemplateRenderer at render time.
+REFLECTOR_SYSTEM_PROMPT = _TEMPORAL_ANCHOR_BLOCK + "\n\n" + """You are the Reflector agent. After each research step, evaluate progress and decide next action.
 
 ## Decisions
 1. **continue**: Move to next step
@@ -118,7 +122,31 @@ Treat metadata-only, availability-only, and schema-only evidence as insufficient
   "coverage_gaps": ["topic2"],
   "decision": "continue" | "adjust" | "complete",
   "reasoning": "Explicit coverage gap analysis",
-  "suggested_changes": []
+  "suggested_changes": [],
+  "directives": [
+    {{
+      "severity": "critical",
+      "section": "Fundamentals",
+      "issue": "Truncated competitive table cuts off mid-row.",
+      "fix": "Re-emit the competitive table in full; mark any unverified cell as 'n/a (unverified)' rather than leaving it empty."
+    }}
+  ]
 }}
+
+### Directives Contract (REQUIRED when decision='adjust')
+
+When you decide ``adjust``, the next synthesis pass will read your
+``directives`` list and address each one in a 1:1 accountability table.
+The list must therefore be machine-actionable:
+
+- Emit AT LEAST ONE directive per concrete defect.
+- ``severity``: ``critical`` = blocks publication; ``major`` = report
+  should not ship; ``minor`` = polish.
+- ``section``: existing or proposed section header from the draft.
+- ``issue``: ONE sentence describing what is wrong.
+- ``fix``: ONE sentence describing the SHORTEST action to address it.
+- Do not duplicate the same defect across severities.
+- For ``decision='continue'`` or ``decision='complete'``, ``directives``
+  MAY be empty.
 
 Respond with only valid JSON."""

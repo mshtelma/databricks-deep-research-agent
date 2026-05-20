@@ -32,10 +32,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from databricks_deep_research.memory import (
     ChatMemorySnapshot,
     CoverageEntry,
@@ -43,7 +39,6 @@ from databricks_deep_research.memory import (
     FileRef,
     KnowledgeFinding,
 )
-from databricks_deep_research.memory.extraction_schema import FileExtraction
 from databricks_deep_research.memory.llm_extractor import (
     DEFAULT_HEAD_CHARS,
     extract_file_content,
@@ -53,16 +48,21 @@ from databricks_deep_research.memory.spotlighting import (
     SpotlightingMode,
     wrap_attached_context,
 )
+from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from deep_research.models.chat_memory_coverage import ChatMemoryCoverage
 from deep_research.models.chat_memory_entity import ChatMemoryEntity
 from deep_research.models.chat_memory_file import ChatMemoryFile
 from deep_research.models.chat_memory_finding import ChatMemoryFinding
 from deep_research.models.chat_memory_plugin_ext import ChatMemoryPluginExt
-from deep_research.models.enums import Confidence, EntityType, FindingOrigin
+from deep_research.models.enums import EntityType, FindingOrigin
 from deep_research.models.uploaded_file import FileChunk, UploadedFile
 
 if TYPE_CHECKING:
     from databricks_deep_research.llm.client import FrameworkLLMClient
+
     from deep_research.services.file_upload_service import FileUploadService
     from deep_research.services.llm.embedder import Embedder
 

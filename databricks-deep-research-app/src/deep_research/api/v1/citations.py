@@ -32,7 +32,6 @@ from deep_research.core.deps import get_export_service
 from deep_research.core.exceptions import NotFoundError
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
-from deep_research.services._protocols import IExportService
 from deep_research.models.research_session import ResearchSession
 from deep_research.schemas.citation import (
     CitationResponse,
@@ -49,6 +48,7 @@ from deep_research.schemas.citation import (
     VerificationSummary,
     VerificationVerdictEnum,
 )
+from deep_research.services._protocols import IExportService
 
 router = APIRouter()
 

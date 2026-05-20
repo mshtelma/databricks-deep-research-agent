@@ -22,7 +22,7 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,7 +32,6 @@ from deep_research.storage.backend import (
     ConflictError,
     PermanentError,
     SchemaError,
-    StorageBackend,
     TransientError,
 )
 from deep_research.storage.documents import (
@@ -47,6 +46,8 @@ from deep_research.storage.param_codec import params as codec_params
 
 if TYPE_CHECKING:  # pragma: no cover
     from databricks.sdk import WorkspaceClient
+
+    from deep_research.storage.cleanup import CleanupStats
 
 logger = logging.getLogger(__name__)
 
@@ -192,10 +193,7 @@ class SQLWarehouseBackend:
             version=int(r["version"]),
         )
         raw_state = r.get("state")
-        if raw_state:
-            state = ChatState.model_validate_json(raw_state)
-        else:
-            state = ChatState()
+        state = ChatState.model_validate_json(raw_state) if raw_state else ChatState()
         return ChatDocument(meta=meta, state=state)
 
     async def write_chat(
@@ -379,10 +377,7 @@ class SQLWarehouseBackend:
                 version=int(r["version"]),
             )
             raw_state = r.get("state")
-            if raw_state:
-                state = ChatState.model_validate_json(raw_state)
-            else:
-                state = ChatState()
+            state = ChatState.model_validate_json(raw_state) if raw_state else ChatState()
             docs.append(ChatDocument(meta=meta, state=state))
         return docs
 
@@ -617,19 +612,19 @@ class SQLWarehouseBackend:
         self,
         *,
         chat_retention_days: int,
-    ) -> "CleanupStats":
+    ) -> CleanupStats:
         """Delta equivalent of the Lakebase cleanup cascade.
 
         Passes cutoff timestamps as parameters to stay dialect-agnostic and
         avoid Delta interval-literal quirks.
         """
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from deep_research.storage.cleanup import CleanupStats
 
         self._ensure_open()
         stats = CleanupStats()
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         short_cutoff = now - timedelta(days=1)
         long_cutoff = now - timedelta(days=chat_retention_days)
 
@@ -732,7 +727,7 @@ class SQLWarehouseBackend:
         try:
             response = await asyncio.to_thread(_sync_call)
         except Exception as exc:  # noqa: BLE001
-            raise _wrap_sdk_exception(exc)
+            raise _wrap_sdk_exception(exc) from exc
 
         # Poll until terminal state — yielding to the event loop between polls.
         total_elapsed = asyncio.get_event_loop().time() - started
@@ -756,7 +751,7 @@ class SQLWarehouseBackend:
                     response.statement_id,
                 )
             except Exception as exc:  # noqa: BLE001
-                raise _wrap_sdk_exception(exc)
+                raise _wrap_sdk_exception(exc) from exc
             total_elapsed = asyncio.get_event_loop().time() - started
 
         parsed = _parse_response(response)

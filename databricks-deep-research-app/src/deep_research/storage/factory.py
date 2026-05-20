@@ -8,6 +8,7 @@ Late-binding resolves the cache ↔ queue cyclic dependency: cache is built with
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import signal
 from dataclasses import dataclass
@@ -79,7 +80,7 @@ class StorageStack:
     queue: WriteQueue
     hydrator: Hydrator
     cold_cache: ColdReadCache
-    cleanup: "CleanupLoop | None" = None
+    cleanup: CleanupLoop | None = None
 
     _started: bool = False
     _signal_handlers_installed: bool = False
@@ -139,11 +140,8 @@ class StorageStack:
             loop.create_task(self.stop(timeout=15.0))
 
         for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
+            with contextlib.suppress(NotImplementedError, ValueError):
                 loop.add_signal_handler(sig, _on_term)
-            except (NotImplementedError, ValueError):
-                # Signal handlers unsupported on this platform or context.
-                pass
         self._signal_handlers_installed = True
 
 
