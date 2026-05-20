@@ -1,0 +1,504 @@
+"""Unit tests for ShellAppExporter (US-210).
+
+Plan reference: agent-designer-deployment.md Section E (Shell-app).
+
+Verifies the zip artifact contents (8 files), Jinja substitution of the
+immutable Git tag, custom-tool rejection, and the Phase 2-B stub deploy()
+recording the SHA256 + app_name in external_resource_ids.
+"""
+from __future__ import annotations
+
+import io
+import zipfile
+from unittest.mock import MagicMock
+from uuid import uuid4
+
+import pytest
+
+from deep_research.models.agent_deployment import AgentDeployment, DeploymentMode
+from deep_research.services.deployment import (
+    Artifact,
+    DeploymentResult,
+    DeploymentTranslator,
+    ShellAppExporter,
+    ValidationResult,
+)
+
+
+def _valid_config(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "mode": "shell_app",
+        "app_name": "dr-shell-research",
+        "framework_git_tag": "v0.3.0",
+        "target": "dev",
+    }
+    base.update(overrides)
+    return base
+
+
+def _agent_revision(
+    *,
+    custom_tool: bool = False,
+    web_search: bool = False,
+) -> tuple[MagicMock, MagicMock]:
+    agent = MagicMock(id=uuid4(), name="Deep Research Agent")
+    tools: list[dict[str, object]] = []
+    if custom_tool:
+        tools.append({"name": "mytool", "kind": "custom", "config": {}})
+    if web_search:
+        tools.append({"name": "web_search", "kind": "web_search", "config": {}})
+    revision = MagicMock(
+        rev_id=uuid4(),
+        definition={
+            "name": "deep-research",
+            "version": 1,
+            "tools": tools,
+            "root": {"type": "sequence", "children": []},
+        },
+    )
+    return agent, revision
+
+
+class TestProtocolConformance:
+    def test_satisfies_protocol(self) -> None:
+        assert isinstance(ShellAppExporter(), DeploymentTranslator)
+
+    def test_mode_classvar(self) -> None:
+        assert ShellAppExporter.mode == DeploymentMode.SHELL_APP
+
+
+class TestValidate:
+    @pytest.mark.asyncio
+    async def test_valid_when_all_required_fields_present(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        result = await translator.validate(agent, revision, _valid_config())
+        assert isinstance(result, ValidationResult)
+        assert result.valid is True
+        assert result.errors == []
+
+    @pytest.mark.asyncio
+    async def test_invalid_when_app_name_missing_prefix(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        result = await translator.validate(
+            agent, revision, _valid_config(app_name="my-app")
+        )
+        assert result.valid is False
+        assert any("app_name" in e.message for e in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_invalid_when_framework_git_tag_empty(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        result = await translator.validate(
+            agent, revision, _valid_config(framework_git_tag="")
+        )
+        assert result.valid is False
+        assert any("framework_git_tag" in e.message for e in result.errors)
+        assert any("Git ref" in e.message for e in result.errors)
+
+    @pytest.mark.asyncio
+    async def test_rejects_custom_tool_kind(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision(custom_tool=True)
+        result = await translator.validate(agent, revision, _valid_config())
+        assert result.valid is False
+        assert any(
+            "custom tools are not supported" in e.message.lower()
+            for e in result.errors
+        )
+
+    @pytest.mark.asyncio
+    async def test_web_search_uses_default_brave_secret_config(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision(web_search=True)
+        result = await translator.validate(agent, revision, _valid_config())
+        assert result.valid is True
+
+
+class TestTranslate:
+    @pytest.mark.asyncio
+    async def test_artifact_payload_is_bytes(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        assert isinstance(artifact, Artifact)
+        assert isinstance(artifact.payload, bytes)
+        assert artifact.mode == DeploymentMode.SHELL_APP
+
+    @pytest.mark.asyncio
+    async def test_zip_contains_all_8_template_files(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            names = set(zf.namelist())
+        expected = {
+            "app.py",
+            "app.yaml",
+            "databricks.yml",
+            "pyproject.toml",
+            "entrypoint.sh",
+            "static/index.html",
+            "agent.yaml",
+            "README.md",
+        }
+        assert expected.issubset(names), f"missing: {expected - names}"
+
+    @pytest.mark.asyncio
+    async def test_pyproject_pins_supplied_git_tag(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(
+            agent, revision, _valid_config(framework_git_tag="v9.9.9")
+        )
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            pyproject = zf.read("pyproject.toml").decode("utf-8")
+        assert (
+            "git+https://github.com/mshtelma/databricks-deep-research-agent.git@v9.9.9"
+            in pyproject
+        )
+
+    @pytest.mark.asyncio
+    async def test_pyproject_allows_direct_git_dependency_reference(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            pyproject = zf.read("pyproject.toml").decode("utf-8")
+
+        assert "[tool.hatch.metadata]" in pyproject
+        assert "allow-direct-references = true" in pyproject
+
+    @pytest.mark.asyncio
+    async def test_pyproject_disables_self_packaging_for_uv_run(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            pyproject = zf.read("pyproject.toml").decode("utf-8")
+
+        assert "[tool.uv]" in pyproject
+        assert "package = false" in pyproject
+        assert "[tool.hatch.build.targets.wheel]" in pyproject
+        assert '"app.py"' in pyproject
+        assert '"agent.yaml"' in pyproject
+        assert '"static"' in pyproject
+
+    @pytest.mark.asyncio
+    async def test_databricks_yml_references_app_name(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(
+            agent, revision, _valid_config(app_name="dr-shell-foo")
+        )
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            databricks_yml = zf.read("databricks.yml").decode("utf-8")
+        assert "dr-shell-foo" in databricks_yml
+
+    @pytest.mark.asyncio
+    async def test_app_py_builds_tool_factory_context(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            app_py = zf.read("app.py").decode("utf-8")
+
+        assert "ToolFactoryContext.from_defaults" in app_py
+        assert "FrameworkLLMClient.from_databricks()" in app_py
+        assert "WorkflowRunner(llm_client=_llm_client, factory_context=_factory_context)" in app_py
+        assert "logging.basicConfig" in app_py
+        assert "SHELL_APP_STREAM_EVENT" in app_py
+        assert "SHELL_APP_INDEX_SERVED" in app_py
+        assert "planner_guidance_present" in app_py
+        assert '_SHELL_APP_TEMPLATE_VERSION = "2026-05-17.1"' in app_py
+        assert "Cache-Control" in app_py
+        assert "X-Shell-App-Template-Version" in app_py
+
+    @pytest.mark.asyncio
+    async def test_static_chat_ui_parses_crlf_sse_frames(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            html = zf.read("static/index.html").decode("utf-8")
+
+        assert "replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n')" in html
+        assert "buffer.split(/\\n\\n+/)" in html
+        assert "const dataText = dataLines.join('\\n')" in html
+        assert "drainFrames(true)" in html
+        assert "X-Shell-App-Template-Version" in html
+        assert "2026-05-17.1" in html
+        assert "[shell-app] stream frame" in html
+        assert html.count("let buffer = '';") == 1
+        assert html.index("let buffer = '';") < html.index("function drainFrames")
+        assert "function renderMarkdown" in html
+        assert "function appendActivity" in html
+        assert "function renderFinalAnswer" in html
+        assert "activityPanelEl.open = false" in html
+        assert "markdown-body" in html
+        assert "latestFinalReport" in html
+        assert "renderFinalAnswer(payload.output)" in html
+        assert "appendActivity(eventName, payload)" in html
+
+    @pytest.mark.asyncio
+    async def test_web_search_bundle_binds_brave_secret(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision(web_search=True)
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            databricks_yml = zf.read("databricks.yml").decode("utf-8")
+            app_yaml = zf.read("app.yaml").decode("utf-8")
+
+        assert "BRAVE_API_KEY" in databricks_yml
+        assert "value_from: 'brave-api-key'" in databricks_yml
+        assert "secret:" in databricks_yml
+        assert "scope: 'deep-research-secrets'" in databricks_yml
+        assert "key: 'BRAVE_API_KEY'" in databricks_yml
+        assert "BRAVE_API_KEY" in app_yaml
+        assert "valueFrom: 'brave-api-key'" in app_yaml
+        assert artifact.metadata["requires_web_search"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_non_web_search_bundle_does_not_bind_brave_secret(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            databricks_yml = zf.read("databricks.yml").decode("utf-8")
+            app_yaml = zf.read("app.yaml").decode("utf-8")
+
+        assert "BRAVE_API_KEY" not in databricks_yml
+        assert "BRAVE_API_KEY" not in app_yaml
+        assert artifact.metadata["requires_web_search"] == "false"
+
+    @pytest.mark.asyncio
+    async def test_workflow_name_alone_does_not_bind_brave_secret(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        revision.definition = {
+            "name": "web_search",
+            "version": 1,
+            "tools": [],
+            "root": {"type": "sequence", "children": []},
+        }
+        artifact = await translator.translate(agent, revision, _valid_config())
+
+        assert artifact.metadata["requires_web_search"] == "false"
+
+    @pytest.mark.asyncio
+    async def test_agent_yaml_contains_definition_payload(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        # Inject a unique marker into the definition we can grep for.
+        revision.definition = {
+            "name": "deep-research",
+            "version": 1,
+            "marker_unique_str": "MARKER-SENTINEL-12345",
+            "tools": [],
+            "root": {"type": "sequence", "children": []},
+        }
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            agent_yaml = zf.read("agent.yaml").decode("utf-8")
+        assert "MARKER-SENTINEL-12345" in agent_yaml
+
+    @pytest.mark.asyncio
+    async def test_artifact_metadata(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(
+            agent, revision, _valid_config(app_name="dr-shell-meta")
+        )
+        assert artifact.metadata["app_name"] == "dr-shell-meta"
+        assert artifact.metadata["framework_git_tag"] == "v0.3.0"
+        assert len(artifact.metadata["sha256"]) == 64
+
+    @pytest.mark.asyncio
+    async def test_entrypoint_sh_is_executable_in_zip(self) -> None:
+        """T1 fix: entrypoint.sh in the generated zip must carry mode 0o755
+        so ``apps.create``'s upload preserves the +x bit. The bit lives in
+        the high 16 of ZipInfo.external_attr."""
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            entry = zf.getinfo("entrypoint.sh")
+            # high 16 bits of external_attr encode the unix mode.
+            mode = entry.external_attr >> 16
+            assert mode == 0o755, f"entrypoint.sh has mode {mode:o}, expected 0o755"
+            # Regular files should NOT have the executable bit.
+            app_py = zf.getinfo("app.py")
+            assert app_py.external_attr >> 16 == 0o644
+
+    @pytest.mark.asyncio
+    async def test_translate_is_byte_deterministic(self) -> None:
+        """W7: regeneration from the same inputs must produce the same bytes.
+
+        The /export-zip route compares the regenerated SHA256 against the
+        digest captured at deploy time. If translate() were non-deterministic
+        (e.g. zip headers used wall-clock timestamps), every call would
+        mismatch — making the integrity check useless. We pin all zip entry
+        timestamps to the zip epoch (1980-01-01) so this round-trip is stable.
+        """
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        cfg = _valid_config()
+        first = await translator.translate(agent, revision, cfg)
+        second = await translator.translate(agent, revision, cfg)
+        assert isinstance(first.payload, bytes)
+        assert isinstance(second.payload, bytes)
+        assert first.payload == second.payload, (
+            "shell-app zip regeneration must be byte-deterministic; if this "
+            "fails, the W7 integrity check in /export-zip is broken."
+        )
+        assert first.metadata["sha256"] == second.metadata["sha256"]
+
+    @pytest.mark.asyncio
+    async def test_translate_differs_when_inputs_differ(self) -> None:
+        """Sanity-check the determinism test: different inputs MUST differ."""
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        a = await translator.translate(
+            agent, revision, _valid_config(app_name="dr-shell-aaa")
+        )
+        b = await translator.translate(
+            agent, revision, _valid_config(app_name="dr-shell-bbb")
+        )
+        assert a.payload != b.payload
+        assert a.metadata["sha256"] != b.metadata["sha256"]
+
+
+class TestDeploy:
+    @pytest.mark.asyncio
+    async def test_deploy_records_sha_and_app_name(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        deployment = MagicMock(spec=AgentDeployment)
+        result = await translator.deploy(artifact, _valid_config(), deployment)
+        assert isinstance(result, DeploymentResult)
+        assert result.success is True
+        assert result.endpoint_name == "dr-shell-research"
+        assert "shell_app_zip_sha256" in result.external_resource_ids
+        assert len(result.external_resource_ids["shell_app_zip_sha256"]) == 64
+        assert result.external_resource_ids["app_name"] == "dr-shell-research"
+
+    @pytest.mark.asyncio
+    async def test_deploy_fails_on_non_bytes_payload(self) -> None:
+        translator = ShellAppExporter()
+        deployment = MagicMock(spec=AgentDeployment)
+        broken = Artifact(mode=DeploymentMode.SHELL_APP, payload={"not": "bytes"})
+        result = await translator.deploy(broken, _valid_config(), deployment)
+        assert result.success is False
+        assert result.error_message is not None
+
+
+class TestTemplateOutputS1:
+    """Section S1: assert that the rendered templates no longer contain the
+    MLFLOW_EXPERIMENT_ID binding or the 'experiment' resource block."""
+
+    @pytest.mark.asyncio
+    async def test_render_app_yaml_no_experiment_env(self) -> None:
+        """app.yaml must NOT contain MLFLOW_EXPERIMENT_ID after S1 fix."""
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            rendered_app_yaml = zf.read("app.yaml").decode("utf-8")
+        assert "MLFLOW_EXPERIMENT_ID" not in rendered_app_yaml, (
+            "app.yaml must not contain MLFLOW_EXPERIMENT_ID after S1 fix"
+        )
+        # Check non-comment lines only — comments may explain the valueFrom syntax
+        non_comment_lines = [
+            line for line in rendered_app_yaml.splitlines()
+            if not line.lstrip().startswith("#")
+        ]
+        non_comment_text = "\n".join(non_comment_lines)
+        assert "valueFrom" not in non_comment_text, (
+            "app.yaml must not contain valueFrom in non-comment lines after S1 fix"
+        )
+
+    @pytest.mark.asyncio
+    async def test_render_databricks_yml_no_experiment_resource(self) -> None:
+        """databricks.yml must NOT contain the 'experiment' resource block."""
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            rendered_databricks_yml = zf.read("databricks.yml").decode("utf-8")
+        assert "name: 'experiment'" not in rendered_databricks_yml, (
+            "databricks.yml must not contain the 'experiment' resource block after S1 fix"
+        )
+
+    @pytest.mark.asyncio
+    async def test_render_app_yaml_still_has_mlflow_tracking_uri(self) -> None:
+        """MLFLOW_TRACKING_URI must still be present in app.yaml."""
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            rendered_app_yaml = zf.read("app.yaml").decode("utf-8")
+        assert "MLFLOW_TRACKING_URI" in rendered_app_yaml
+
+    @pytest.mark.asyncio
+    async def test_render_app_yaml_declares_shared_experiment(self) -> None:
+        """Every deployed shell-app must trace into the shared experiment.
+
+        Tracing-unification plan A.1: single canonical experiment so designer-
+        chat / main-chat / shell-app traces all live in one queryable surface.
+        """
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            rendered_app_yaml = zf.read("app.yaml").decode("utf-8")
+        assert "MLFLOW_EXPERIMENT_NAME" in rendered_app_yaml
+        assert "/Shared/deep-research-agent-experiments" in rendered_app_yaml
+
+    @pytest.mark.asyncio
+    async def test_render_app_yaml_carries_dr_provenance_env_vars(self) -> None:
+        """The 4 DR_* env vars must be Jinja-interpolated from the exporter
+        context so the deployed shell-app's traces self-identify by app
+        name, agent_v2_id, agent name, and revision id.
+        """
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        # _agent_revision uses MagicMock for .name; pin to a real string so
+        # the template render (and our in-text assertion) sees concrete text.
+        agent.name = "MyDeepResearchAgent"
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            rendered_app_yaml = zf.read("app.yaml").decode("utf-8")
+        # Env var names present.
+        assert "DR_APP_NAME" in rendered_app_yaml
+        assert "DR_AGENT_V2_ID" in rendered_app_yaml
+        assert "DR_AGENT_NAME" in rendered_app_yaml
+        assert "DR_REVISION_ID" in rendered_app_yaml
+        # Values interpolated (not left as raw Jinja).
+        assert "{{" not in rendered_app_yaml, (
+            "app.yaml still contains unrendered Jinja placeholders"
+        )
+        assert "dr-shell-research" in rendered_app_yaml  # app_name from _valid_config
+        assert str(agent.id) in rendered_app_yaml  # DR_AGENT_V2_ID
+        assert "MyDeepResearchAgent" in rendered_app_yaml  # DR_AGENT_NAME
+        assert str(revision.rev_id) in rendered_app_yaml  # DR_REVISION_ID
+
+
+class TestDeactivate:
+    @pytest.mark.asyncio
+    async def test_deactivate_no_external_resources_is_early_return(self) -> None:
+        """When external_resource_ids is missing app_name, deactivate returns
+        early without calling any SDK methods (the deployment was never live).
+
+        The full live-path coverage lives in test_shell_app_deploy_inline.py.
+        """
+        translator = ShellAppExporter()
+        deployment = MagicMock(spec=AgentDeployment)
+        deployment.external_resource_ids = None
+        result = await translator.deactivate(deployment)
+        assert result is None
+        # Idempotency: second call against the same empty-state row is also noop
+        result2 = await translator.deactivate(deployment)
+        assert result2 is None

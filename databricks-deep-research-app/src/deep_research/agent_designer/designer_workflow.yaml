@@ -1,0 +1,351 @@
+# Designer Workflow — architect → structural_gate → conditional(fail→feedback | pass→critic) → extract_critic_approved
+#
+# Replaces the hand-coded DesignerChatOrchestrator with a framework workflow.
+# Loop runs up to 4 iterations or until critic_approved == true (whichever first).
+#
+# Per Codex iter-2 fixes:
+#   - models: block uses REAL Databricks endpoint identifiers (NOT app aliases)
+#   - parse_architect_ast tool extracts JSON from the architect's final message
+#     because output_model is NOT enforced for tool-using ReAct agents
+#   - structural_gate is a `type: tool` node (registered via ToolRegistry)
+#
+# Public outputs after a run:
+#   state.current_ast         JSON-string of the proposed WorkflowDefinition AST
+#   state.critic_verdict      JSON-string of the CriticVerdict
+#   state.critic_approved     bool — true when critic approved this turn
+
+id: designer_workflow
+name: Designer Architect+Critic Loop
+version: 1
+required_inputs: [user_intent]
+output_keys: [current_ast]
+
+# ---------------------------------------------------------------------------
+# Workflow-level model tier mapping. Uses REAL serving-endpoint identifiers
+# (Codex iter-2 fix #1) so the framework's parse_model_config + _select_endpoint
+# pass them verbatim to OpenAI without needing app.yaml alias resolution.
+# ---------------------------------------------------------------------------
+models:
+  complex:
+    endpoints:
+      - databricks-claude-opus-4-7
+      - databricks-claude-sonnet-4-6
+    fallback_on_429: true
+    rotation_strategy: PRIORITY
+    tokens_per_minute: 200000
+  critic:
+    endpoints:
+      - databricks-gpt-5-5
+    fallback_on_429: false
+    rotation_strategy: PRIORITY
+    tokens_per_minute: 100000
+
+root:
+  id: designer_loop
+  type: loop
+  label: Architect-Critic-Revise Loop
+  config:
+    min_iterations: 1
+    max_iterations: 4
+    # Stop when extract_critic_approved writes {"critic_approved": true}.
+    # Tool-node outputs are stored as JSON strings, and StateCondition supports
+    # dot-path traversal through JSON strings.
+    until:
+      type: state
+      key: critic_approved.critic_approved
+      operator: eq
+      value: true
+  children:
+    - id: designer_body
+      type: sequence
+      label: One Iteration
+      children:
+
+        # -------------------------------------------------------------
+        # 1. Architect — Opus. Reads user_intent + prior current_ast +
+        #    critic_feedback (if any) and emits a fenced JSON block
+        #    containing the new WorkflowDefinition AST as its final
+        #    assistant message. Tools below are available for inspection
+        #    but the AST is delivered via the final message text (Codex
+        #    iter-2 fix #2: output_model is NOT enforced for tool-using
+        #    agents, so we capture the AST from the message content via
+        #    the next tool node).
+        # -------------------------------------------------------------
+        - id: architect
+          type: agent
+          label: Workflow Architect (Opus)
+          config:
+            subtype: coordinator    # reuse generic agent subtype; designer logic lives in prompts
+            model_tier: complex
+            output_key: architect_message
+            # Architect gets the mutation tools so it can call propose_workflow
+            # to bootstrap a schema-valid AST (the same path the legacy designer
+            # used), then refine via add_block / update_block / bind_tool_to_block /
+            # set_model_tier / declare_tool. validate is read-only inspection.
+            tools: [propose_workflow, add_block, update_block, bind_tool_to_block,
+                    set_model_tier, declare_tool, validate]
+            max_tool_calls: 12
+            extras:
+              suppress_planning_final_output: true
+            system_prompt: |
+              You are the Workflow Architect. Your job is to design a complete,
+              specialized WorkflowDefinition AST that fulfills the user's request.
+
+              ## Input you receive
+              - user_intent: free-form description of the workflow the user wants
+              - current_ast: empty on iteration 1; the prior iteration's AST otherwise
+              - critic_verdict: empty on iteration 1; after a critic rejection,
+                contains directives naming nodes that must be revised
+              - gate_result: empty on iteration 1; after a structural rejection,
+                contains deterministic defects that must be fixed
+
+              ## MANDATORY workflow — follow these steps in order
+
+              STEP 1 (iteration 1 only — when current_ast is empty):
+                Call the propose_workflow tool with a design_brief derived from
+                user_intent. The design_brief MUST include:
+                  - workflow_name: short customer-facing string
+                  - domain: the user's domain or task category
+                  - user_goal: paraphrased user intent
+                  - research_lanes: list of LaneSpec entries, each with
+                    description (one-line workstream) AND a 150-300 word
+                    system_prompt that gives that lane researcher its domain
+                    specialization AND a 300-600 char user_prompt_template that
+                    enumerates the lane's sub-questions and output sections
+                  - required_outputs: list of named sections the final report
+                    must contain (drawn from user_intent)
+                  - quality_gates: list of critic checks
+                  - topology: one of "parallel_lanes", "plan_and_execute", or
+                    "single_agent", chosen from the task structure
+                The propose_workflow tool returns a complete, schema-valid AST.
+                The builder wraps each non-empty lane user_prompt_template
+                with the required runtime headings and {query} anchor while
+                preserving your authored lane-specific content. Do not spend
+                tool calls reformatting lane prompt templates solely to add
+                those structural headings; only patch lane prompts when the
+                gate_result or critic_verdict names a concrete remaining
+                defect.
+
+              STEP 2 (when current_ast is non-empty OR after step 1):
+                Inspect the current AST. For each agent node that lacks
+                specialization OR for each gate_result failure OR critic_verdict
+                directive, call update_block to patch its system_prompt or
+                user_prompt_template. Call add_block when a missing structural
+                node is required, for example a final coverage reflector after
+                synthesis. You may also call bind_tool_to_block to attach
+                research tools to lane researchers and set_model_tier to
+                upgrade the synthesizer to model_tier=complex.
+                If there are no named failures, avoid cosmetic rewrites: call
+                validate at most once, then emit the final AST.
+
+              STEP 3 (always — your turn-end):
+                After all tool calls, end your turn with a SINGLE fenced JSON
+                code block (triple backticks then the language tag json)
+                containing the FINAL refined WorkflowDefinition AST. The JSON
+                block MUST be the LAST content in your reply. Do not add prose
+                after the closing triple backticks.
+
+              ## Why this matters
+              propose_workflow produces a guaranteed-valid AST with all required
+              id and label fields. Hand-crafting an AST from scratch in JSON is
+              error-prone and you WILL miss required fields like id, label,
+              version, pools schema, etc.
+
+              ## Valid model_tier values
+              When calling set_model_tier OR when emitting model_tier in any
+              agent's config, the tier name MUST be one of EXACTLY these five
+              valid tiers (any other value will cause runtime failure):
+                simple          — fast cheap (haiku / gemini flash)
+                analytical      — balanced (sonnet) — the default for researchers
+                complex         — most capable (opus) — for synthesizers
+                bulk_analysis   — high-throughput batch (gemini-flash / sonnet)
+                fast            — fast inference (gpt-5-nano / haiku)
+              Do NOT invent tier names like "standard", "default", "medium",
+              "high", or anything else not in the above list. If unsure,
+              use "analytical" for researchers and "complex" for synthesizers.
+
+              ## REQUIRED top-level keys
+              id (kebab-case string), name (string), version (int 1),
+              required_inputs (list of strings), output_keys (list of strings),
+              description (string — one-paragraph task summary), tools (list of
+              tool declarations), pools (list of pool definitions),
+              root (the root node object).
+
+              ## REQUIRED on EVERY node — root and ALL descendants
+              Every node — agent, sequence, parallel, conditional,
+              plan_and_execute, loop, tool — MUST have these keys:
+                id      — unique string identifier (kebab-case)
+                label   — short human-readable string
+                type    — one of the supported node types
+                config  — a dict; may be an empty dict for sequence/parallel
+              For composite nodes (sequence, parallel, conditional) include a
+              children list. Omitting id or label makes the workflow fail
+              validation — NEVER omit them.
+
+              ## Required specialization (every agent must be customized)
+              Specialize EVERY agent in the AST — coordinator, researcher(s),
+              reflector, synthesizer, fallback — using the user's domain
+              vocabulary. Generic builtin prompts are NOT acceptable.
+
+              - Each lane researcher: domain-specific system_prompt + a concrete
+                user_prompt_template (≥ 250 chars) with numbered sub-questions
+                and output sections derived from the user's intent.
+              - Synthesizer: system_prompt + user_prompt_template referencing
+                the user's required_outputs as named sections.
+              - Reflector: coverage checklist referencing the required_outputs.
+
+              ## Topology
+              Choose topology by task structure, not domain. Use
+              `parallel_lanes` when the requested sub-questions are independent
+              and can run concurrently. For this topology, author STATIC lane
+              researchers directly: coordinator -> parallel(lane_1, ..., lane_N)
+              -> draft synthesizer -> coverage reflector -> final synthesizer.
+              Do not route static lanes through a planner or conditional
+              branch.
+
+              Use `plan_and_execute` only when later steps depend on earlier
+              findings, the correct plan cannot be known before research starts,
+              or the workflow needs adaptive planning/re-planning. When you
+              choose it, put a one-sentence justification in
+              design_brief.workflow_description.
+
+              Use `single_agent` for bounded questions that one well-prompted
+              agent can answer directly.
+            user_prompt_template: |
+              ## User Intent
+              {user_intent}
+
+              ## Current AST (empty on first iteration)
+              {current_ast}
+
+              ## Prior Critic Verdict (empty on first iteration)
+              {critic_verdict}
+
+              ## Prior Structural Gate Result (empty on first iteration)
+              {gate_result}
+
+              Produce the complete revised WorkflowDefinition AST as a single
+              JSON code block at the end of your message.
+
+        # -------------------------------------------------------------
+        # 2. Parse the architect's fenced JSON block → state.current_ast.
+        #    Codex iter-2 fix #2: replaces the broken output_model
+        #    structured-output path for tool-using agents.
+        # -------------------------------------------------------------
+        - id: parse_architect_ast
+          type: tool
+          label: Extract AST from Architect Message
+          config:
+            ref:
+              name: parse_architect_ast
+            input_mapping:
+              raw_message: architect_message
+            output_key: current_ast
+
+        # -------------------------------------------------------------
+        # 3. Deterministic structural gate — runs the existing 2 +
+        #    3 new detectors (synthesizer/reflector/fallback). Output
+        #    is a JSON string {status, failures}; downstream conditional
+        #    routes on `gate_result.status`.
+        # -------------------------------------------------------------
+        - id: structural_gate
+          type: tool
+          label: Structural Gate
+          config:
+            ref:
+              name: structural_gate
+            input_mapping:
+              ast: current_ast
+            output_key: gate_result
+
+        # -------------------------------------------------------------
+        # 4. Branch: gate fail → copy failures into critic_feedback (loop
+        #    revives the architect with the failures). Gate pass → run
+        #    the GPT-5 critic for semantic-quality review.
+        # -------------------------------------------------------------
+        - id: gate_router
+          type: conditional
+          label: Gate Router (fail → feedback, pass → critic)
+          config:
+            # default_branch=0 → copy_gate_to_feedback runs on gate FAIL.
+            # The pass branch fires when gate_result.status == "pass".
+            default_branch: 0
+            conditions:
+              - condition:
+                  type: state
+                  key: gate_result.status
+                  operator: eq
+                  value: pass
+                child_index: 1
+          children:
+            # child_index 0 — gate FAIL branch
+            - id: copy_gate_to_feedback
+              type: tool
+              label: Surface Gate Failures as Critic Feedback
+              config:
+                ref:
+                  name: extract_critic_approved
+                # Reuse extract_critic_approved with a fake verdict that
+                # marks approved=false and stashes the gate failures so the
+                # next architect iteration sees them as critic_feedback.
+                # (W5c route shim will write a richer mapping if needed.)
+                input_mapping:
+                  critic_verdict: gate_result
+                output_key: critic_approved
+
+            # child_index 1 — gate PASS branch
+            - id: critic
+              type: agent
+              label: Designer Critic (GPT-5)
+              config:
+                subtype: reflector
+                model_tier: critic
+                output_key: critic_verdict
+                tools: []
+                max_tool_calls: 0
+                system_prompt: |
+                  You are the Designer Critic. The structural gate has already
+                  confirmed the AST is structurally complete. Your job is
+                  semantic: verify the workflow actually does what the user
+                  asked for.
+
+                  ## Verdict
+                  Return JSON {{approve: bool, directives: list[CriticDirective]}}
+                  where each CriticDirective = {{node_path, issue, suggested_action}}.
+
+                  ## Checklist before approving
+                  - Each required_output named in the user_intent is referenced
+                    by at least one agent's system_prompt OR user_prompt_template
+                    (preferably the synthesizer's)
+                  - Specialized researchers' prompts contain the user's
+                    domain vocabulary (not generic instructions)
+                  - The synthesizer enumerates the required sections
+                  - The reflector has a coverage checklist
+                  Otherwise return approve=false with directives naming the
+                  paths and concrete fixes.
+                user_prompt_template: |
+                  ## User Intent
+                  {user_intent}
+
+                  ## Current AST
+                  {current_ast}
+
+                  ## Structural Gate Result
+                  {gate_result}
+
+                  Return your verdict as JSON: {{"approve": bool, "directives": [...]}}.
+
+        # -------------------------------------------------------------
+        # 5. Extract critic.approve into a top-level boolean state key
+        #    so the loop's `until:` StateCondition can read it without
+        #    needing dotted attribute access into a Pydantic model.
+        # -------------------------------------------------------------
+        - id: extract_critic_approved
+          type: tool
+          label: Extract critic_approved
+          config:
+            ref:
+              name: extract_critic_approved
+            input_mapping:
+              critic_verdict: critic_verdict
+            output_key: critic_approved

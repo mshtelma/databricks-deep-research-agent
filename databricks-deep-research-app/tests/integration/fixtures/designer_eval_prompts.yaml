@@ -1,0 +1,59 @@
+# Structural eval set for the Agent Designer chat orchestrator.
+# Each prompt has: id, intent (natural language), expected_node_types (subset that
+# must appear in the produced AST), expected_tool_kinds (subset that must appear
+# in the declared tools).
+#
+# This is a STRUCTURAL eval (does the framework accept the produced shape) —
+# NOT a SEMANTIC eval (does the produced workflow actually research the right
+# thing). Semantic eval requires live LLM and human review.
+
+prompts:
+  - id: simple_web_search
+    intent: "Search the web for the latest AI news"
+    expected_node_types: [agent]
+    expected_tool_kinds: [web_search]
+
+  - id: deep_research_with_vector
+    intent: "Build a deep research agent that searches a UC vector index for product specs"
+    expected_node_types: [agent, plan_and_execute]
+    expected_tool_kinds: [vector_search]
+
+  - id: plan_and_execute_with_reflection
+    intent: "Plan and execute research with a reflector that decides when to stop"
+    expected_node_types: [plan_and_execute, agent]
+    expected_tool_kinds: []
+
+  - id: parallel_multi_source
+    intent: "Run web search and vector search in parallel, then synthesize"
+    expected_node_types: [parallel, agent]
+    expected_tool_kinds: [web_search, vector_search]
+
+  - id: conditional_with_web_fallback
+    intent: "If the vector search has no results, fall back to web search"
+    expected_node_types: [conditional, agent]
+    expected_tool_kinds: [vector_search, web_search]
+
+  - id: loop_until_found
+    intent: "Loop research iterations until a target answer is found"
+    expected_node_types: [loop, agent]
+    expected_tool_kinds: []
+
+  - id: sequence_three_researchers
+    intent: "Sequence: gather data, then analyze, then synthesize"
+    expected_node_types: [sequence, agent]
+    expected_tool_kinds: []
+
+  - id: single_step_qa
+    intent: "Single Q&A step using the knowledge assistant"
+    expected_node_types: [agent]
+    expected_tool_kinds: [knowledge_assistant]
+
+  - id: genie_only_enterprise
+    intent: "Use only Genie space for enterprise SQL questions"
+    expected_node_types: [agent]
+    expected_tool_kinds: [genie]
+
+  - id: hybrid_web_and_enterprise
+    intent: "Combine web search and Genie for hybrid research"
+    expected_node_types: [agent]
+    expected_tool_kinds: [web_search, genie]

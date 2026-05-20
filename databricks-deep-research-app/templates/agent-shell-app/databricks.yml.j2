@@ -1,0 +1,53 @@
+bundle:
+  name: {{ app_name }}
+
+resources:
+  apps:
+    {{ app_name }}:
+      name: '{{ app_name }}'
+      source_code_path: ./
+      config:
+        command:
+          - 'uv'
+          - 'run'
+          - 'uvicorn'
+          - 'app:app'
+          - '--host'
+          - '0.0.0.0'
+          - '--port'
+          - '8000'
+        env:
+          - name: MLFLOW_TRACKING_URI
+            value: 'databricks'
+{% if requires_web_search %}
+          - name: BRAVE_API_KEY
+            value_from: '{{ brave_secret_resource_name }}'
+{% endif %}
+      resources:
+{% if requires_web_search %}
+        - name: '{{ brave_secret_resource_name }}'
+          description: 'Brave Search API key for web_search tools'
+          secret:
+            scope: '{{ brave_secret_scope }}'
+            key: '{{ brave_secret_key }}'
+            permission: READ
+{% else %}
+        # Add a serving_endpoint block here for any endpoint your agent calls
+        # (e.g., a Mode 3 agent serving endpoint or any of the workspace's
+        # bundled endpoints — databricks-claude-sonnet-4-5, etc.). Apps grants
+        # the App SP CAN_QUERY automatically when declared as a resource.
+        # - name: 'llm'
+        #   serving_endpoint:
+        #     name: 'databricks-claude-sonnet-4-5'
+        #     permission: 'CAN_QUERY'
+{% endif %}
+      user_api_scopes:
+        - sql
+        - serving.serving-endpoints
+        - vectorsearch.vector-search-endpoints
+
+targets:
+  dev:
+    default: true
+    workspace:
+      profile: '{{ target }}'

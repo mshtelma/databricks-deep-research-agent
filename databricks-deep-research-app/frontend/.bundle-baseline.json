@@ -1,0 +1,23 @@
+{
+  "comment": "Per-chunk gzipped size budgets in KB. Updated baseline produced by Phase 0 of agent-designer-final.md. Run `npm run check-bundle-size` after each build to validate. Glob patterns are matched against filenames in static/assets/.",
+  "totalBudgetGzipKB": 780,
+  "perChunkBudgetsGzipKB": {
+    "agent-designer-*.js": 80,
+    "index-*.js": 160,
+    "vendor-syntax-*.js": 280,
+    "vendor-md-*.js": 75,
+    "vendor-react-*.js": 60,
+    "vendor-query-*.js": 20,
+    "vendor-radix-*.js": 40,
+    "vendor-router-*.js": 15,
+    "vendor-icons-*.js": 30,
+    "ChatPage-*.js": 120,
+    "AgentsPage-*.js": 30,
+    "TemplatesPage-*.js": 30,
+    "input-*.js": 15,
+    "useDiscoveredSources-*.js": 5,
+    "scroll-area-*.js": 5,
+    "tabs-*.js": 5,
+    "*.css": 30
+  }
+}

@@ -1,0 +1,24 @@
+cases:
+  - id: investment_research
+    intent: |
+      Build an investment research assistant that takes a company name or ticker
+      and produces a deep, comprehensive investment report covering:
+      fundamentals (financials, valuation, balance sheet), risk analysis, market
+      trends, news sentiment, recent earnings, and competitor analysis. Use
+      plan-and-execute patterns across research domains and synthesize into a
+      single coherent report.
+    query: "Snowflake Inc. (SNOW)"
+    expected_min_node_count: 3
+    expected_min_tool_count: 1
+
+  - id: saas_competitive_intel
+    intent: |
+      Build a competitive intelligence assistant for a SaaS product. Given a
+      product name and category, research the top 3-5 competitors and produce
+      a comparison covering: pricing tiers, key feature differentiators, target
+      customer segments, recent product launches, and customer review sentiment.
+      Use parallel research lanes per competitor and synthesize into a
+      comparison report.
+    query: "Notion (personal knowledge management)"
+    expected_min_node_count: 3
+    expected_min_tool_count: 1

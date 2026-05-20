@@ -1,0 +1,31 @@
+[project]
+name = "{{ app_name }}"
+version = "0.1.0"
+description = "Standalone Databricks App — pip-installed databricks-deep-research framework"
+requires-python = ">=3.11"
+dependencies = [
+  # IMMUTABLE GIT TAG REQUIRED — moving the tag breaks already-deployed shell apps.
+  # See plan Section C.1 + CONTRIBUTING note on tag immutability.
+  "databricks-deep-research[tracing,web,crawl,search] @ git+https://github.com/mshtelma/databricks-deep-research-agent.git@{{ git_tag }}#subdirectory=databricks-deep-research",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "sse-starlette>=2.1",
+  "PyYAML>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+only-include = [
+  "app.py",
+  "agent.yaml",
+  "static",
+]
