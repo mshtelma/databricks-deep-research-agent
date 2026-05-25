@@ -38,12 +38,20 @@ class SemanticValidationError:
     extraction — the API endpoint adapts dataclasses to its Pydantic
     model. Schema validators use the dataclass directly when raising
     ``ValueError`` from a Pydantic ``field_validator``.
+
+    Plan v2.1 M10 adds ``severity`` to support severity-graded test
+    assertions and the eventual PR-4 deletion of
+    ``detect_topology_mismatch``. Defaults to ``"blocking"`` so existing
+    advice records (which test_scaffold_and_run asserts via
+    ``assert not advice``) keep their blocking semantics until the
+    test contract is updated in US-03/PR-3.
     """
 
     message: str
     path: str | None = None
     line: int | None = None
     kind: str = "validation"  # one of "syntax" | "schema" | "validation"
+    severity: str = "blocking"  # one of "blocking" | "warning" | "info"
 
 
 def semantic_validation_errors(
@@ -182,7 +190,13 @@ _OUTPUT_SECTION_HEADING_MARKERS = (
     "output structure",
     "output sections",
 )
-_SEARCH_STRATEGY_HEADING_MARKERS = ("search strategy",)
+# The lane-prompt builder emits one of two heading variants depending on
+# the workflow's evidence path: "Search strategy" for web-flavoured lanes
+# and "Retrieval strategy" for corpus-only lanes (see
+# ``workflow_builder._CORPUS_RETRIEVAL_STRATEGY_BLOCK``). The validator
+# accepts either so the corpus path does not trigger a spurious "missing
+# block" finding when the prompt was generated correctly.
+_SEARCH_STRATEGY_HEADING_MARKERS = ("search strategy", "retrieval strategy")
 _UNKNOWNS_HANDLING_MARKERS = (
     "data unavailable",
     "definition of done",
@@ -366,8 +380,9 @@ def detect_unspecialized_agents(
          block — i.e. the LLM did not populate ``research_lanes[].system_prompt``
          at propose_workflow time and did not patch it via update_block after.
       3. Lane researcher has no tools bound when the workflow declares any
-         retrieval tools at the top level (web_search, web_crawl, vector_search,
-         genie, knowledge_assistant, file_search, brave_search).
+         retrieval tools at the top level (web_search, web_research, web_crawl,
+         vector_search, genie, knowledge_assistant, file_search, Delta/table
+         retrieval tools).
       4. Synthesizer agent left on the default ``analytical`` model_tier when
          the workflow has 2+ lane producers feeding into it — multi-source
          reconciliation benefits from the ``complex`` tier.
@@ -378,12 +393,17 @@ def detect_unspecialized_agents(
     # Top-level retrieval tools available for binding.
     retrieval_kinds = {
         "web_search",
+        "web_research",
         "web_crawl",
         "vector_search",
         "genie",
         "knowledge_assistant",
         "file_search",
-        "brave_search",
+        "delta_read",
+        "delta_grep",
+        "delta_context",
+        "delta_table_read",
+        "table_read",
     }
     declared_tools = definition.get("tools", []) or []
     available_retrieval_tools: list[str] = []
@@ -403,6 +423,51 @@ def detect_unspecialized_agents(
         label = node.get("label") or node.get("id") or "agent"
         role = _agent_role(node, config)
         is_lane = _is_lane_researcher(node, config)
+
+        # Plan v2.1 generic-robustness — Check 0: deterministic blueprint
+        # placeholder lifecycle list at the AST top level
+        # (``definition["placeholder_pending_nodes"]``). Every researcher
+        # node the blueprint builder emits is stamped there at scaffold
+        # time (see ``blueprint._stamp_placeholder_pending``); the list is
+        # pruned by ``framework_tools._apply_architect_patches`` ONLY when
+        # the architect's final ``node_patches`` JSON delivers a non-empty
+        # ``system_prompt`` or ``user_prompt_template`` for that node id.
+        # If the node id still appears in the list, the architect shipped
+        # a placeholder prompt — block the workflow and direct the
+        # architect at the correct fix.
+        node_id = str(node.get("id") or "")
+        pending_list = definition.get("placeholder_pending_nodes")
+        if (
+            is_lane
+            and node_id
+            and isinstance(pending_list, list)
+            and node_id in pending_list
+        ):
+            # severity=warning so the gate surfaces the issue as
+            # critic-feedback without blocking the workflow. The runtime
+            # ReAct loop can compensate for thin lane prompts in the short
+            # term while the architect's prompt is engineered to satisfy
+            # the lifecycle contract. Flipping back to blocking is a
+            # follow-up once we have telemetry confirming the architect
+            # reliably customizes every lane.
+            errors.append(
+                SemanticValidationError(
+                    message=(
+                        f"Researcher '{label}' has no architect-authored "
+                        "prompt — the deterministic blueprint placeholder "
+                        "is still in place. Emit `node_patches: "
+                        "{<lane_key>: {system_prompt: <80-300 words of "
+                        "use-case-specific guidance>, user_prompt_template: "
+                        "<lane-focused investigation brief>}}` in your final "
+                        "fenced JSON block. Live `update_block` calls during "
+                        "the ReAct loop are advisory only; only the final "
+                        "JSON's node_patches reaches the immutable blueprint."
+                    ),
+                    path=f"{path}.config",
+                    kind="placeholder_pending",
+                    severity="warning",
+                )
+            )
 
         system_prompt = config.get("system_prompt") or ""
         if not isinstance(system_prompt, str):
@@ -468,8 +533,8 @@ def detect_unspecialized_agents(
                             f"(available top-level retrieval tools: "
                             f"{', '.join(available_retrieval_tools)}). Call "
                             "bind_tool_to_block to bind the appropriate "
-                            "retrieval tools (typically web_search + "
-                            "web_crawl for a research lane)."
+                            "retrieval, table, or compute tools for this "
+                            "research lane."
                         ),
                         path=f"{path}.config.tools",
                     )
@@ -761,8 +826,11 @@ def detect_topology_mismatch(
     adaptive execution, or reflection-driven replanning can remain
     ``plan_and_execute`` as long as they satisfy the evidence contract.
 
-    Heuristic: a ``plan_and_execute`` node with ≥3 lane researchers in its
-    lane_router children is a near-certain parallel_lanes candidate.
+    Heuristic: a ``plan_and_execute`` node with ≥4 lane researchers in its
+    lane_router children is a near-certain parallel_lanes candidate. Updated
+    from ``≥3`` in PR3-B: signature-driven pipelined_retrieve_read_compute
+    workflows legitimately use 3 lanes (retrieve → read → compute) inside
+    plan_and_execute.
     """
     errors: list[SemanticValidationError] = []
 
@@ -786,7 +854,7 @@ def detect_topology_mismatch(
                 router_children = lane_router.get("children", []) or []
                 # Exclude the cross-lane fallback (the last child).
                 lane_count = max(0, len(router_children) - 1)
-                if lane_count >= 3:
+                if lane_count >= 4:
                     errors.append(
                         SemanticValidationError(
                             message=(

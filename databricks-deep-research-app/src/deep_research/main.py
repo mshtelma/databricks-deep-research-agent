@@ -98,6 +98,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         os.environ.get("DATABRICKS_APP_PORT", "no-app-port"),
     )
 
+    # Surface missing required secrets at startup, not at synthesis end.
+    # Workflows that declare web tools (web_research, brave_search, web_crawl)
+    # fail loudly under strict_tool_resolution=True when BRAVE_API_KEY is
+    # missing; corpus-only workflows are unaffected. Empty string and unset
+    # are both treated as missing.
+    if not (os.environ.get("BRAVE_API_KEY") or "").strip():
+        logger.warning(
+            "STARTUP_BRAVE_API_KEY_MISSING — web_research / brave_search / "
+            "web_crawl tools will be unresolvable. Set BRAVE_API_KEY in the "
+            "app env (via secret scope binding) for web workflows to function."
+        )
+
     # NOTE: Database migrations are NOT run here.
     # The app's service principal has limited permissions (CAN_CONNECT_AND_CREATE)
     # but cannot create tables in the public schema.

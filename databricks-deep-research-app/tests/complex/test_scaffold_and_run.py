@@ -18,6 +18,8 @@ Run with:
 from __future__ import annotations
 
 import logging
+import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,7 @@ from databricks_deep_research import WorkflowRunner
 from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from tests.complex._scaffold_run_capture import (
+    _bound_tool_names,
     append_jsonl,
     emit_console_report,
     make_run_dir,
@@ -37,7 +40,7 @@ from tests.complex._scaffold_run_capture import (
     write_text,
     write_yaml,
 )
-from tests.shared import requires_brave, requires_databricks
+from tests.shared import requires_databricks
 
 from deep_research.agent.adapters.llm_adapter import create_framework_llm_client
 from deep_research.agent_designer.discovery import DesignerDiscoveryAdapter
@@ -55,18 +58,126 @@ logger = logging.getLogger(__name__)
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "scaffold_and_run_cases.yaml"
 _RUNS_ROOT = Path(__file__).parent.parent / "_runs"  # databricks-deep-research-app/tests/_runs
+_ENV_REF_RE = re.compile(r"^\$\{([A-Z0-9_]+)\}$")
 
 
 def _load_cases() -> list[dict[str, Any]]:
     return yaml.safe_load(_FIXTURE.read_text())["cases"]
 
 
+def _env_refs(value: Any) -> set[str]:
+    if isinstance(value, str):
+        match = _ENV_REF_RE.match(value)
+        return {match.group(1)} if match else set()
+    if isinstance(value, list):
+        refs: set[str] = set()
+        for item in value:
+            refs.update(_env_refs(item))
+        return refs
+    if isinstance(value, dict):
+        refs: set[str] = set()
+        for item in value.values():
+            refs.update(_env_refs(item))
+        return refs
+    return set()
+
+
+def _expand_env_refs(value: Any) -> Any:
+    if isinstance(value, str):
+        match = _ENV_REF_RE.match(value)
+        if match:
+            return os.environ[match.group(1)]
+        return value
+    if isinstance(value, list):
+        return [_expand_env_refs(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_env_refs(item) for key, item in value.items()}
+    return value
+
+
+def _declared_tools(ast: dict[str, Any]) -> list[dict[str, Any]]:
+    return [tool for tool in ast.get("tools", []) if isinstance(tool, dict)]
+
+
+
+def _assert_structural_tool_contract(ast: dict[str, Any], case: dict[str, Any]) -> None:
+    tools = _declared_tools(ast)
+    tool_kinds_by_name = {
+        str(tool.get("name")): str(tool.get("kind"))
+        for tool in tools
+        if isinstance(tool.get("name"), str)
+    }
+    declared_kinds = set(tool_kinds_by_name.values())
+    bound_names = _bound_tool_names(ast)
+
+    expected_kinds = set(case.get("expected_tool_kinds", []))
+    missing_kinds = expected_kinds - declared_kinds
+    assert not missing_kinds, f"missing expected tool kinds: {sorted(missing_kinds)}"
+
+    unbound_expected = [
+        name
+        for name, kind in tool_kinds_by_name.items()
+        if kind in expected_kinds and name not in bound_names
+    ]
+    assert not unbound_expected, (
+        f"expected tools are declared but not node-bound: {sorted(unbound_expected)}"
+    )
+
+    forbidden_kinds = set(case.get("forbidden_tool_kinds", []))
+    present_forbidden = forbidden_kinds & declared_kinds
+    assert not present_forbidden, f"forbidden tool kinds declared: {sorted(present_forbidden)}"
+
+    required_assets = [
+        asset
+        for asset in case.get("assets", [])
+        if asset.get("usage") == "required" and asset.get("full_name")
+    ]
+    for asset in required_assets:
+        full_name = str(asset["full_name"])
+        if asset.get("kind") == "vector_index":
+            assert any(
+                (tool.get("config") or {}).get("index_name") == full_name for tool in tools
+            ), f"required vector index not referenced by any tool: {full_name}"
+        if asset.get("kind") == "delta_table":
+            assert any(
+                (tool.get("config") or {}).get("table_name") == full_name for tool in tools
+            ), f"required Delta table not referenced by any tool: {full_name}"
+
+
+def _runtime_tool_kinds(
+    ast: dict[str, Any],
+    runner_events: list[Any],
+) -> list[str]:
+    tool_kinds_by_name = {
+        str(tool.get("name")): str(tool.get("kind"))
+        for tool in _declared_tools(ast)
+        if isinstance(tool.get("name"), str)
+    }
+    kinds: list[str] = []
+    for event in runner_events:
+        if getattr(event, "event_type", None) != "tool_call":
+            continue
+        tool_name = str(getattr(event, "tool_name", "") or "")
+        kind = tool_kinds_by_name.get(tool_name)
+        if kind:
+            kinds.append(kind)
+    return kinds
+
+
 @requires_databricks
-@requires_brave
 @pytest.mark.asyncio
 @pytest.mark.timeout(1800)
 @pytest.mark.parametrize("case", _load_cases(), ids=lambda c: c["id"])
 async def test_scaffold_and_run(case: dict[str, Any]) -> None:
+    if case.get("requires_brave", True) and not os.environ.get("BRAVE_API_KEY"):
+        pytest.skip("BRAVE_API_KEY not set")
+    missing_env = sorted(ref for ref in _env_refs(case.get("assets", [])) if not os.environ.get(ref))
+    if missing_env:
+        pytest.skip(f"missing required env vars for case assets: {missing_env}")
+
+    assets = _expand_env_refs(case.get("assets", []))
+    case = {**case, "assets": assets}
+
     run_dir = make_run_dir(_RUNS_ROOT, case["id"])
     logger.warning("SCAFFOLD_AND_RUN start case=%s artifact_dir=%s", case["id"], run_dir)
 
@@ -74,6 +185,7 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
     write_text(run_dir / "intent.txt", case["intent"])
     write_text(run_dir / "query.txt", case["query"])
     write_json(run_dir / "case.json", case)
+    write_json(run_dir / "assets.json", assets)
 
     # ── Designer phase ───────────────────────────────────────────────────────
     designer_events_path = run_dir / "designer" / "events.jsonl"
@@ -101,6 +213,7 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
             session_id=f"scaffold-and-run-{case['id']}",
             user_token="local-test-token",
             current_user_id="local-test-user",
+            assets=assets,
         ):
             designer_events.append(ev)
             append_jsonl(designer_events_path, ev)
@@ -130,8 +243,31 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
         assert not validation_errors, (
             f"AST failed validation: {validation_errors}. See {run_dir}/designer/."
         )
-        assert not advice, (
-            f"AST failed designer quality gate: {advice}. See {run_dir}/designer/."
+        # Plan v2.1 M10 — severity-graded advice contract. Each advice
+        # record carries an explicit ``severity`` field
+        # (``blocking|warning|info``); only blocking entries fail the
+        # scaffold gate. Existing detectors default to ``blocking`` for
+        # back-compat (US-01 landed the severity field with that
+        # default), so the strict ``assert not advice`` semantics are
+        # preserved for any detector that hasn't been re-tagged. Detectors
+        # that explicitly downgrade their advice to ``warning`` / ``info``
+        # (e.g., heuristic post-processors kept as telemetry post-PR-3)
+        # surface in logs but no longer fail the run.
+        blocking_advice = [
+            a for a in (advice or []) if a.get("severity", "blocking") == "blocking"
+        ]
+        non_blocking_advice = [
+            a for a in (advice or []) if a.get("severity", "blocking") != "blocking"
+        ]
+        if non_blocking_advice:
+            # Log without failing — surface for observability.
+            print(
+                f"[scaffold-and-run] non-blocking advice "
+                f"({len(non_blocking_advice)}): {non_blocking_advice}"
+            )
+        assert not blocking_advice, (
+            f"AST failed designer quality gate (blocking advice): "
+            f"{blocking_advice}. See {run_dir}/designer/."
         )
         assert workflow_summary is not None  # tautological with len(errors)==0
 
@@ -144,6 +280,7 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
             f"tool_count={workflow_summary['tool_count']} below "
             f"expected_min_tool_count={case['expected_min_tool_count']}"
         )
+        _assert_structural_tool_contract(ast, case)
 
         # Round-trip — the runner accepts dicts, but confirm the framework-level
         # loader is happy with this AST before we burn LLM tokens.
@@ -214,6 +351,7 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
         logger.exception("emit_console_report failed (test continues)")
 
     runtime_state = result.runtime_state
+    runtime_tool_kinds = _runtime_tool_kinds(ast, runner_events)
     write_json(
         run_dir / "runner" / "result.json",
         {
@@ -221,9 +359,20 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
             "source_count": len(result.sources or []),
             "event_count": len(runner_events),
             "event_histogram": summarize_events(runner_events),
+            "runtime_tool_kinds": runtime_tool_kinds,
             "runtime_state": runtime_state.model_dump(mode="json") if runtime_state else None,
         },
     )
+
+    forbidden_runtime_kinds = set(case.get("forbidden_runtime_tool_kinds", []))
+    runtime_forbidden = forbidden_runtime_kinds & set(runtime_tool_kinds)
+    assert not runtime_forbidden, (
+        f"forbidden runtime tool kinds were called: {sorted(runtime_forbidden)}"
+    )
+
+    output = result.output or ""
+    for term in case.get("expected_answer_terms", []):
+        assert term in output, f"expected answer term {term!r} not found in output"
 
     # ── Summary ──────────────────────────────────────────────────────────────
     write_summary_md(

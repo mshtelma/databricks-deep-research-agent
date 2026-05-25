@@ -149,7 +149,15 @@ def tool_source_kind(definition: ToolDefinition) -> str:
         return "web_crawl"
     if "web_search" in combined:
         return "web_search"
-    if "knowledge_assistant" in combined or "assistant" in name or "ask_" in name:
+    if (
+        "knowledge_assistant" in combined
+        or "assistant" in name
+        # ``ask_`` must be a PREFIX of the tool name (e.g. ``ask_data``); a
+        # substring check spuriously matched ``emit_t**ask_**signature`` and
+        # routed designer-side function-call tools through the enterprise
+        # research pipeline.
+        or name.startswith("ask_")
+    ):
         return "knowledge_assistant"
     if "genie" in combined or "query_" in name:
         return "genie"

@@ -77,6 +77,73 @@ from databricks_deep_research.tracing import trace_span
 logger = logging.getLogger(__name__)
 
 
+# Module-level monotonic counter so multiple invocations of
+# ``process_unverified_claims`` within a single run can be distinguished in
+# the trace logs (Stage 8 of the citation pipeline). PR3-0 instrumentation.
+_STAGE8_PASS_COUNTER = 0
+
+
+def _next_stage8_pass_id() -> int:
+    global _STAGE8_PASS_COUNTER
+    _STAGE8_PASS_COUNTER += 1
+    return _STAGE8_PASS_COUNTER
+
+
+# PR3-E R2.2: feature flag controlling the is_negative_existence classifier
+# + force-REMOVE rule. Default off; flip to "true" only after the
+# investment_research regression bar passes (per plan AC7).
+def _synth_pipeline_v2_enabled() -> bool:
+    import os
+
+    return os.environ.get("SYNTH_PIPELINE_V2", "").lower() in ("true", "1", "yes")
+
+
+async def _classify_negative_existence_batch(
+    claims: list["ClaimInfo"],
+    llm_client: Any,
+) -> None:
+    """Set ``claim.is_negative_existence`` on eligible claims via the
+    Haiku-tier classifier.
+
+    PR3-E R2.2 wiring. Iterates claims with non-fully-supported verdicts
+    (abstained/unsupported/contradicted/partial) and consults
+    ``classify_negative_existence``. Mutates each claim in place;
+    failures and supported-verdict claims are no-ops. Latency budget
+    per plan: ≤30s sequential on ~25 claims.
+    """
+    from databricks_deep_research.citation.claim_classifier import (
+        classify_negative_existence,
+    )
+
+    eligible = [
+        c
+        for c in claims
+        if c.abstained
+        or (c.verification_verdict or "").lower()
+        in ("abstained", "unsupported", "contradicted", "partial")
+    ]
+    logger.info(
+        "DR_NEGATIVE_EXISTENCE_CLASSIFIER_RUN eligible=%d total=%d",
+        len(eligible),
+        len(claims),
+    )
+    for claim in eligible:
+        try:
+            flag, reasoning = await classify_negative_existence(
+                claim, llm_client
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.info(
+                "DR_NEGATIVE_EXISTENCE_CLASSIFIER_FAIL claim_head=%r error=%s",
+                claim.claim_text[:60],
+                exc,
+            )
+            continue
+        if flag:
+            claim.is_negative_existence = True
+            claim.is_negative_existence_reasoning = reasoning
+
+
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -1627,6 +1694,39 @@ class CitationVerificationPipeline:
             0.5,
         )
 
+        # PR3-E R2.2 wiring: when SYNTH_PIPELINE_V2 is enabled and an LLM
+        # client is available, classify negative-existence claims BEFORE
+        # the disposition loop runs so the force-REMOVE rule has the flag
+        # to read. Skipped on the disposition_applier path (which bypasses
+        # __init__ so self.llm is unset) and when the flag is off.
+        if _synth_pipeline_v2_enabled() and getattr(self, "llm", None) is not None:
+            await _classify_negative_existence_batch(claims, self.llm)
+
+        # PR3-0 instrumentation: trace what actually reaches Stage 8. The
+        # failing officeqa run had 7 contradicted + 39 abstained verdicts in
+        # events.jsonl but ``removed_claims=0`` in verification_summary; this
+        # trace identifies whether the claims list arriving here matches what
+        # the reflector emitted.
+        _pass_id = _next_stage8_pass_id()
+        _count_by_verdict = Counter(
+            (c.verification_verdict or "<none>") for c in claims
+        )
+        _count_by_role = Counter(c.claim_role for c in claims)
+        _abstained_count = sum(1 for c in claims if c.abstained)
+        _with_verification_text = sum(1 for c in claims if c.verification_text)
+        logger.info(
+            "STAGE8_INPUT_TRACE pass_id=%d input_claims=%d "
+            "by_verdict=%s by_role=%s abstained=%d with_verification_text=%d "
+            "abstained_threshold=%.2f",
+            _pass_id,
+            len(claims),
+            dict(_count_by_verdict),
+            dict(_count_by_role),
+            _abstained_count,
+            _with_verification_text,
+            _abstained_threshold,
+        )
+
         for claim in claims:
             # Determine verdict key for disposition lookup
             _claim_confidence = getattr(claim, "verification_confidence", None) or 0.0
@@ -1666,6 +1766,51 @@ class CitationVerificationPipeline:
             disposition = getattr(
                 self.config.claim_disposition, verdict_key, ClaimDisposition.KEEP,
             )
+
+            # PR3-E R2.2: force REMOVE when is_negative_existence=True AND
+            # verdict is not fully supported. This wins over the per-verdict
+            # policy (e.g. abstained→SOFTEN default). Gated by
+            # SYNTH_PIPELINE_V2 so the legacy path is preserved unchanged.
+            forced_remove = False
+            if (
+                _synth_pipeline_v2_enabled()
+                and getattr(claim, "is_negative_existence", False)
+                and (
+                    claim.abstained
+                    or (claim.verification_verdict or "").lower()
+                    in ("abstained", "unsupported", "contradicted", "partial")
+                )
+            ):
+                disposition = ClaimDisposition.REMOVE
+                forced_remove = True
+                logger.info(
+                    "DR_NEGATIVE_EXISTENCE_FORCE_REMOVE pass_id=%d "
+                    "verdict=%s claim_head=%r",
+                    _pass_id,
+                    claim.verification_verdict,
+                    _truncate(claim.claim_text, 60),
+                )
+
+            # PR3-0 instrumentation: emit a per-claim disposition decision for
+            # every non-supported verdict so the events.jsonl-vs-summary
+            # discrepancy can be traced claim-by-claim. Tight conditional to
+            # avoid log spam on supported claims.
+            if (
+                claim.verification_verdict in ("contradicted", "unsupported")
+                or claim.abstained
+            ):
+                logger.info(
+                    "DR_DISPOSITION_DECISION pass_id=%d verdict_key=%s "
+                    "disposition=%s claim_role=%s confidence=%.2f "
+                    "forced_negative_existence=%s claim_head=%r",
+                    _pass_id,
+                    verdict_key,
+                    disposition.value if hasattr(disposition, "value") else str(disposition),
+                    claim.claim_role,
+                    _claim_confidence,
+                    forced_remove,
+                    _truncate(claim.claim_text, 60),
+                )
 
             if disposition == ClaimDisposition.REMOVE:
                 modifications.append(("remove", claim))
@@ -1759,11 +1904,31 @@ class CitationVerificationPipeline:
 
         _recalculate_claim_positions(content, claims)
 
+        # PR3-0 instrumentation: per-verdict breakdown of how the disposition
+        # policy resolved each modification. Pair this with STAGE8_INPUT_TRACE
+        # via ``pass_id`` to see input → output for a given invocation.
+        _removed_by_verdict: Counter[str] = Counter()
+        _softened_by_verdict: Counter[str] = Counter()
+        for action, claim in modifications:
+            verdict_key = claim.verification_verdict or "<none>"
+            if action == "remove":
+                _removed_by_verdict[verdict_key] += 1
+            elif action in ("soften", "soften_analysis"):
+                _softened_by_verdict[verdict_key] += 1
+        _kept_count = len(claims) - len(modifications)
         logger.info(
-            "STAGE8_COMPLETE removed=%d softened=%d total=%d",
+            "STAGE8_COMPLETE pass_id=%d removed=%d softened=%d rewritten=%d "
+            "total_modifications=%d kept=%d input_claims=%d "
+            "removed_by_verdict=%s softened_by_verdict=%s",
+            _pass_id,
             removed_count,
             softened_count,
+            rewritten_count,
             len(modifications),
+            _kept_count,
+            len(claims),
+            dict(_removed_by_verdict),
+            dict(_softened_by_verdict),
         )
         return content, removed_count, softened_count, rewritten_count
 

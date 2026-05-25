@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, R
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.agent_designer.mermaid_export import serialize_to_mermaid
@@ -19,6 +20,7 @@ from deep_research.agent_designer.workflow_critic import (
     critique_workflow_against_intent,
 )
 from deep_research.agent_designer.yaml_export import serialize_to_yaml
+from deep_research.core.databricks_auth import get_user_workspace_client
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.agent_deployment import MAX_CLEANUP_ATTEMPTS
@@ -41,6 +43,8 @@ from deep_research.services.agent_v2_service import (
     EtagConflictError,
 )
 from deep_research.services.deployment import DeploymentCleanupError
+from deep_research.services.deployment.auth import WorkspaceClientResolver
+from deep_research.services.deployment_service import DeploymentService
 
 logger = logging.getLogger(__name__)
 
@@ -299,6 +303,7 @@ async def update_agent(
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_agent(
     agent_id: UUID,
+    fastapi_request: Request,
     user: CurrentUser,
     force: bool = False,
     session: AsyncSession = Depends(get_db),
@@ -307,10 +312,34 @@ async def delete_agent(
 
     Default returns HTTP 409 when active deployments exist; ``?force=true``
     triggers synchronous deactivation + terminal-row cleanup before delete.
+
+    When the caller carries an OBO token (``x-forwarded-access-token``),
+    builds a user-scoped ``WorkspaceClient`` and threads it into the
+    deactivate cascade via ``WorkspaceClientResolver`` — so Shell-App /
+    MLflow deactivate calls run as the identity that originally created
+    those resources. Falls back to the parent-app SP when no token is
+    present (local dev / curl without OBO).
     """
     service = AgentV2Service(session)
+    # Build the resolver from the request's OBO token when present so the
+    # deactivate cascade runs as the user identity that originally created
+    # the external resources. ``get_user_workspace_client`` raises 401 in
+    # Databricks Apps if the header is absent — we only invoke it when the
+    # header is present, so local-dev / curl-without-OBO continue to work
+    # (resolver falls back to SP internally).
+    obo_client = (
+        get_user_workspace_client(fastapi_request)
+        if fastapi_request.headers.get("X-Forwarded-Access-Token")
+        else None
+    )
+    resolver = WorkspaceClientResolver(obo_client=obo_client)
     try:
-        deleted = await service.delete(agent_id, user.user_id, force=force)
+        deleted = await service.delete(
+            agent_id,
+            user.user_id,
+            force=force,
+            client_resolver=resolver,
+        )
     except ActiveDeploymentsError as exc:
         raise HTTPException(
             status_code=409,
@@ -343,6 +372,39 @@ async def delete_agent(
                     "external cleanup."
                 ),
                 "max_attempts": MAX_CLEANUP_ATTEMPTS,
+            },
+        ) from exc
+    except IntegrityError as exc:
+        # Defense in depth: the force-delete cascade should clear every
+        # blocking row, but a future status set could slip through. Surface
+        # the surviving rows instead of letting FastAPI emit an opaque 500.
+        await session.rollback()
+        deployment_service = DeploymentService(session)
+        blockers = await deployment_service.get_for_agent(agent_id)
+        logger.warning(
+            "AGENT_DELETE_FK_BLOCKED agent_id=%s blocking_count=%s exc=%s",
+            agent_id,
+            len(blockers),
+            exc.orig,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error_kind": "deployment_rows_block_delete",
+                "message": (
+                    "Cannot delete agent: residual deployment rows block "
+                    "the foreign-key constraint. Resolve each row via "
+                    "DELETE /deployments/{id} before retrying."
+                ),
+                "blocking_deployments": [
+                    {
+                        "id": str(d.id),
+                        "mode": d.mode,
+                        "status": d.status,
+                        "endpoint_name": d.endpoint_name,
+                    }
+                    for d in blockers
+                ],
             },
         ) from exc
     if not deleted:

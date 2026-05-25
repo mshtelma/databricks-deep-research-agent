@@ -18,6 +18,41 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
+
+def _bound_tool_names(ast: dict[str, Any]) -> set[str]:
+    """Return the set of tool names referenced inside workflow nodes.
+
+    Walks the AST recursively.  ``body`` is a full NODE (has
+    ``type``/``config``/``children``), so it is descended directly.
+    ``planner`` and ``evaluator`` are agent-config dicts, not nodes, so
+    they are wrapped in a fake node shell to reuse the same walk.
+    """
+    bound: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        config = node.get("config") if isinstance(node.get("config"), dict) else {}
+        for name in config.get("tools") or []:
+            if isinstance(name, str):
+                bound.add(name)
+        # body is a NODE: walk it directly so its children/config are visited normally.
+        body = config.get("body")
+        if isinstance(body, dict):
+            walk(body)
+        # planner / evaluator are agent-config DICTS, not nodes — wrap as a fake
+        # node so the same walk picks up their `tools` list.
+        for cfg_key in ("planner", "evaluator"):
+            cfg = config.get(cfg_key)
+            if isinstance(cfg, dict):
+                walk({"config": cfg})
+        for child in node.get("children") or []:
+            walk(child)
+
+    walk(ast.get("root"))
+    return bound
+
+
 # Cap printed report lines so a huge report does not saturate the terminal.
 # The full report still goes to ``runner/output.md`` for offline review.
 _REPORT_LINE_CAP = 5000

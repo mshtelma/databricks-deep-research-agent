@@ -176,24 +176,32 @@ class TestToolKindRewrite:
 
 
 # ---------------------------------------------------------------------------
-# auto_bind_retrieval
+# tool binding ownership
 # ---------------------------------------------------------------------------
 
 
-class TestAutoBindRetrieval:
-    def test_empty_tools_gets_merged_research_pair(self) -> None:
-        """Auto-bind uses the MERGED pair (web_research + web_crawl) so the
-        researcher gets real source bodies on the first call. web_crawl
-        stays for selective candidate follow-up."""
+class TestToolBindingOwnership:
+    def test_empty_tools_does_not_invent_web_tools(self) -> None:
+        """Tool choice belongs to the Designer LLM, not the normalizer."""
         ast = _make_ast(subtype="researcher", tools=[])
         new, fixes = normalize_ast(ast)
-        bound = new["root"]["config"]["tools"]
-        assert "web_research" in bound and "web_crawl" in bound
-        # Tools should also be declared at top level.
-        declared_names = {t["name"] for t in new["tools"]}
-        assert {"web_research", "web_crawl"} <= declared_names
+        assert new["root"]["config"]["tools"] == []
+        assert new["tools"] == []
         kinds = _fixes_by_kind(fixes)
-        assert "auto_bind_retrieval" in kinds
+        assert "auto_bind_retrieval" not in kinds
+
+    def test_empty_tools_do_not_get_existing_declared_retrieval_tool(self) -> None:
+        ast = _make_ast(
+            subtype="researcher",
+            tools=[],
+            declared_tools=[
+                {"kind": "vector_search", "name": "asset_search", "config": {}}
+            ],
+        )
+        new, fixes = normalize_ast(ast)
+        assert new["root"]["config"]["tools"] == []
+        kinds = _fixes_by_kind(fixes)
+        assert "auto_bind_retrieval" not in kinds
 
     def test_existing_retrieval_tool_left_alone(self) -> None:
         ast = _make_ast(
@@ -434,16 +442,14 @@ class TestBraceEscape:
 
 
 # ---------------------------------------------------------------------------
-# tool_consolidation — rewrite [web_search, ...] → [web_research, web_crawl]
+# web tool bindings are not silently rewritten
 # ---------------------------------------------------------------------------
 
 
-class TestToolConsolidation:
-    """Layer 2 consolidation rewrites legacy web_search/web_crawl bindings to
-    the merged web_research + web_crawl pair. Eliminates the LLM-orchestration
-    burden where the architect could forget to call web_crawl after search."""
+class TestWebToolBindingOwnership:
+    """Tool choice stays with the Designer LLM plus critic/gate loop."""
 
-    def test_legacy_pair_rewritten_to_merged(self) -> None:
+    def test_web_search_pair_is_preserved(self) -> None:
         ast = _make_ast(
             subtype="researcher",
             tools=["web_search", "web_crawl"],
@@ -454,13 +460,12 @@ class TestToolConsolidation:
             max_tool_calls=6,
         )
         new, fixes = normalize_ast(ast)
-        assert new["root"]["config"]["tools"] == ["web_research", "web_crawl"]
+        assert new["root"]["config"]["tools"] == ["web_search", "web_crawl"]
         kinds = _fixes_by_kind(fixes)
-        assert "tool_consolidation" in kinds
-        # web_research auto-declared at top level
-        assert any(t["name"] == "web_research" for t in new["tools"])
+        assert "tool_consolidation" not in kinds
+        assert not any(t["name"] == "web_research" for t in new["tools"])
 
-    def test_lonely_web_search_gets_crawl_companion(self) -> None:
+    def test_lonely_web_search_is_preserved_for_gate_or_critic(self) -> None:
         ast = _make_ast(
             subtype="researcher",
             tools=["web_search"],
@@ -470,9 +475,9 @@ class TestToolConsolidation:
             max_tool_calls=6,
         )
         new, fixes = normalize_ast(ast)
-        assert new["root"]["config"]["tools"] == ["web_research", "web_crawl"]
+        assert new["root"]["config"]["tools"] == ["web_search"]
         kinds = _fixes_by_kind(fixes)
-        assert "tool_consolidation" in kinds
+        assert "tool_consolidation" not in kinds
 
     def test_canonical_pair_passes_through(self) -> None:
         """If the architect already used [web_research, web_crawl] there's
@@ -488,9 +493,10 @@ class TestToolConsolidation:
         )
         new, fixes = normalize_ast(ast)
         kinds = _fixes_by_kind(fixes)
+        assert new["root"]["config"]["tools"] == ["web_research", "web_crawl"]
         assert "tool_consolidation" not in kinds
 
-    def test_canonical_pair_with_stale_web_search_is_cleaned(self) -> None:
+    def test_mixed_web_tools_are_preserved_for_critic_review(self) -> None:
         ast = _make_ast(
             subtype="researcher",
             tools=["web_research", "web_crawl", "web_search"],
@@ -504,13 +510,12 @@ class TestToolConsolidation:
 
         new, fixes = normalize_ast(ast)
 
-        assert new["root"]["config"]["tools"] == ["web_research", "web_crawl"]
+        assert new["root"]["config"]["tools"] == ["web_research", "web_crawl", "web_search"]
         kinds = _fixes_by_kind(fixes)
-        assert "tool_consolidation" in kinds
+        assert "tool_consolidation" not in kinds
 
     def test_non_research_subtype_skipped(self) -> None:
-        """Synthesizers shouldn't get web_research even if they happen to
-        have web_search bound (unusual but defensive)."""
+        """Synthesizers should not be silently changed either."""
         ast = _make_ast(
             subtype="synthesizer",
             tools=["web_search"],
@@ -519,14 +524,12 @@ class TestToolConsolidation:
             ],
         )
         new, fixes = normalize_ast(ast)
-        # Subtype is synthesizer, so _auto_bind_retrieval skips it.
-        # Consolidation still applies to any agent type — design choice.
-        assert new["root"]["config"]["tools"] == ["web_research", "web_crawl"]
+        assert new["root"]["config"]["tools"] == ["web_search"]
         kinds = _fixes_by_kind(fixes)
-        assert "tool_consolidation" in kinds
+        assert "tool_consolidation" not in kinds
 
     def test_preserves_other_tools(self) -> None:
-        """A researcher with [web_search, vector_search] keeps vector_search."""
+        """A researcher with [web_search, vector_search] keeps both choices."""
         ast = _make_ast(
             subtype="researcher",
             tools=["web_search", "vector_search"],
@@ -539,9 +542,9 @@ class TestToolConsolidation:
         new, fixes = normalize_ast(ast)
         tools_after = new["root"]["config"]["tools"]
         assert "vector_search" in tools_after
-        assert "web_research" in tools_after
-        assert "web_crawl" in tools_after
-        assert "web_search" not in tools_after
+        assert "web_search" in tools_after
+        assert "web_research" not in tools_after
+        assert "web_crawl" not in tools_after
 
 
 # ---------------------------------------------------------------------------
@@ -953,7 +956,7 @@ class TestResearcherPromptContract:
 
 
 class TestCombinedDefects:
-    def test_captured_bug_produces_workable_workflow(self) -> None:
+    def test_captured_bug_normalizes_schema_without_inventing_tools(self) -> None:
         """Mirrors the artifact at tests/_runs/20260518T055122-investment_research/
         designer/workflow.json — Opus emitted lane_researcher + standard tier +
         empty tools + referenced-but-undeclared sources pool."""
@@ -995,22 +998,21 @@ class TestCombinedDefects:
             "pools": [],
         }
         new, fixes = normalize_ast(ast)
-        # All four major defect classes get fixed.
+        # Schema defects get fixed, but tool choice remains with the Designer LLM.
         kinds = _fixes_by_kind(fixes)
         assert "subtype_rewrite" in kinds
         assert "tier_rewrite" in kinds
-        assert "auto_bind_retrieval" in kinds
+        assert "auto_bind_retrieval" not in kinds
         assert "auto_declare_pool" in kinds
-        assert "set_minimum_max_tool_calls" in kinds
+        assert "set_minimum_max_tool_calls" not in kinds
         # Both lane researchers got normalized.
         lanes = new["root"]["config"]["body"]["children"]
         for lane in lanes:
             assert lane["config"]["subtype"] == "researcher"
             assert lane["config"]["model_tier"] == "analytical"
-            # Merged web_research is now the auto-bound retrieval tool.
-            assert "web_research" in lane["config"]["tools"]
-            assert "web_crawl" in lane["config"]["tools"]
-            assert lane["config"]["max_tool_calls"] == 6
+            # The normalizer no longer invents public-web tools.
+            assert lane["config"]["tools"] == []
+            assert "max_tool_calls" not in lane["config"]
         # 'sources' pool now declared.
         assert any(p["name"] == "sources" for p in new["pools"])
 

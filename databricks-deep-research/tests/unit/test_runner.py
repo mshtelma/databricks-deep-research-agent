@@ -280,6 +280,116 @@ class TestStream:
 
 
 # ===================================================================
+# WorkflowRunner.factory_context property + new kwargs (PR-1 unification)
+# ===================================================================
+
+
+class TestFactoryContextProperty:
+    def test_property_returns_default_context(self) -> None:
+        """Without an explicit context, the property returns the default
+        ToolFactoryContext.from_defaults() instance the runner builds."""
+        runner = WorkflowRunner(llm_client=_make_mock_client())
+        assert runner.factory_context is not None
+        assert runner.factory_context is runner._factory
+
+    def test_property_returns_caller_provided_context(self) -> None:
+        """Caller-supplied factory_context is exposed verbatim through the
+        property — used by app code to wire the same context into a custom
+        ToolResolver before delegating to runner.stream(...)."""
+        ctx = ToolFactoryContext()
+        runner = WorkflowRunner(llm_client=_make_mock_client(), factory_context=ctx)
+        assert runner.factory_context is ctx
+
+
+class TestExecutorKwargPassthrough:
+    """PR-1 regression — new kwargs on run()/stream() must thread through to
+    WorkflowExecutor.__init__ so app callers can collapse their direct
+    executor construction into a single runner.stream(...) call."""
+
+    @pytest.mark.asyncio
+    @patch("databricks_deep_research.runner.WorkflowExecutor")
+    async def test_run_threads_tool_resolver(
+        self, mock_executor_cls: MagicMock
+    ) -> None:
+        mock_executor = MagicMock()
+        mock_executor.execute = MagicMock(side_effect=_fake_execute)
+        mock_executor_cls.return_value = mock_executor
+
+        resolver_sentinel = MagicMock()
+        runner = WorkflowRunner(llm_client=_make_mock_client())
+        await runner.run(
+            _make_definition(), query="q", tool_resolver=resolver_sentinel
+        )
+
+        kwargs = mock_executor_cls.call_args.kwargs
+        assert kwargs["tool_resolver"] is resolver_sentinel
+
+    @pytest.mark.asyncio
+    @patch("databricks_deep_research.runner.WorkflowExecutor")
+    async def test_run_threads_tool_registry(
+        self, mock_executor_cls: MagicMock
+    ) -> None:
+        mock_executor = MagicMock()
+        mock_executor.execute = MagicMock(side_effect=_fake_execute)
+        mock_executor_cls.return_value = mock_executor
+
+        registry_sentinel = MagicMock()
+        runner = WorkflowRunner(llm_client=_make_mock_client())
+        await runner.run(
+            _make_definition(), query="q", tool_registry=registry_sentinel
+        )
+
+        kwargs = mock_executor_cls.call_args.kwargs
+        assert kwargs["tool_registry"] is registry_sentinel
+
+    @pytest.mark.asyncio
+    @patch("databricks_deep_research.runner.WorkflowExecutor")
+    async def test_stream_threads_context_and_strict(
+        self, mock_executor_cls: MagicMock
+    ) -> None:
+        mock_executor = MagicMock()
+        mock_executor.execute = MagicMock(side_effect=_fake_execute)
+        mock_executor_cls.return_value = mock_executor
+
+        context_sentinel = MagicMock()
+        runner = WorkflowRunner(llm_client=_make_mock_client())
+        events = [
+            e
+            async for e in runner.stream(
+                _make_definition(),
+                query="q",
+                context=context_sentinel,
+                strict_tool_resolution=True,
+            )
+        ]
+
+        assert len(events) == 1
+        kwargs = mock_executor_cls.call_args.kwargs
+        assert kwargs["context"] is context_sentinel
+        assert kwargs["strict_tool_resolution"] is True
+
+    @pytest.mark.asyncio
+    @patch("databricks_deep_research.runner.WorkflowExecutor")
+    async def test_defaults_preserve_existing_behavior(
+        self, mock_executor_cls: MagicMock
+    ) -> None:
+        """When the new kwargs aren't passed, they default to None/False —
+        existing callers see no change."""
+        mock_executor = MagicMock()
+        mock_executor.execute = MagicMock(side_effect=_fake_execute)
+        mock_executor_cls.return_value = mock_executor
+
+        runner = WorkflowRunner(llm_client=_make_mock_client())
+        await runner.run(_make_definition(), query="q")
+
+        kwargs = mock_executor_cls.call_args.kwargs
+        assert kwargs["tool_resolver"] is None
+        assert kwargs["tool_registry"] is None
+        assert kwargs["context"] is None
+        assert kwargs["strict_tool_resolution"] is False
+
+
+# ===================================================================
 # WorkflowRunner.from_databricks
 # ===================================================================
 

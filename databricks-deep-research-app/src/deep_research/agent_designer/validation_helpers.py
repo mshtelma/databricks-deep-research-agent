@@ -82,6 +82,12 @@ def _quality_advice(ast: dict[str, Any]) -> list[dict[str, Any]]:
             "message": defect.message,
             "path": defect.path,
             "kind": defect.kind,
+            # Plan v2.1 M10 — severity-tagged advice. Test contracts
+            # (US-03/PR-3) will assert on this field rather than on the
+            # raw `not advice` boolean. Existing defects default to
+            # "blocking" so behavior is preserved until that test
+            # contract update lands.
+            "severity": defect.severity,
         }
         for defect in defects
     ]

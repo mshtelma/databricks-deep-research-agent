@@ -11,6 +11,7 @@
 /** Data source types */
 export type DataSourceType =
   | 'vector_search'
+  | 'delta_table'
   | 'genie'
   | 'knowledge_assistant'
   | 'web_search'
@@ -256,6 +257,7 @@ export type PlanReviewAction = 'approve' | 'approve_with_edits' | 'reject';
 /** Human-readable labels for data source types */
 export const DATA_SOURCE_TYPE_LABELS: Record<DataSourceType, string> = {
   vector_search: 'Vector Search',
+  delta_table: 'Delta Table',
   genie: 'Genie',
   knowledge_assistant: 'Knowledge Assistant',
   web_search: 'Web Search',
@@ -280,6 +282,7 @@ export const CONFIDENCE_COLORS: Record<AssistantConfidenceLevel, string> = {
 /** Icons/colors for source types */
 export const SOURCE_TYPE_COLORS: Record<DataSourceType, string> = {
   vector_search: 'blue',
+  delta_table: 'cyan',
   genie: 'purple',
   knowledge_assistant: 'emerald',
   web_search: 'orange',

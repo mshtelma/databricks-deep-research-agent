@@ -60,6 +60,7 @@ from deep_research.schemas.deployment import (
     DeploymentStatusResponse,
 )
 from deep_research.services.agent_v2_service import AgentV2Service
+from deep_research.services.deployment.auth import WorkspaceClientResolver
 from deep_research.services.deployment.batch import BatchTranslator
 from deep_research.services.deployment.capability_probe import (
     _classify_probe_error,
@@ -885,8 +886,18 @@ async def deactivate_deployment(
         return _to_response(deployment)
 
     translator = _translator_for(DeploymentMode(deployment.mode))
+    # Prefer the user's OBO-scoped client so shell_app / mlflow deactivate
+    # runs as the identity that originally created the external resources.
+    # Falls back to SP inside the resolver when the OBO header is absent
+    # (local dev / curl) — same behaviour as before this change.
+    obo_client = (
+        get_user_workspace_client(fastapi_request)
+        if fastapi_request.headers.get("X-Forwarded-Access-Token")
+        else None
+    )
+    resolver = WorkspaceClientResolver(obo_client=obo_client)
     try:
-        await translator.deactivate(deployment)
+        await translator.deactivate(deployment, client_resolver=resolver)
     except DeploymentCleanupError as exc:
         # Real upstream cleanup failure (not 404). Bump attempts and decide
         # whether to escalate to CLEANUP_FAILED.

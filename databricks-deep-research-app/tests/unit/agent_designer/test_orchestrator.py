@@ -234,7 +234,7 @@ async def test_propose_research_workflow_scaffolds_web_research_and_synthesis() 
     assert mutation.summary is not None
     assert ast["root"]["type"] == "sequence"
     assert ast["output_keys"] == ["report"]
-    assert {tool["name"] for tool in ast["tools"]} >= {"web_search", "web_crawl"}
+    assert {tool["name"] for tool in ast["tools"]} >= {"web_research", "web_crawl"}
     assert [child["type"] for child in children] == ["agent", "plan_and_execute", "agent"]
     assert ast["description"] == intent
     assert intent in children[1]["config"]["planner_guidance"]
@@ -247,7 +247,7 @@ async def test_propose_research_workflow_scaffolds_web_research_and_synthesis() 
     ]
     assert any(
         config.get("subtype") == "researcher"
-        and {"web_search", "web_crawl"}.issubset(set(config.get("tools", [])))
+        and {"web_research", "web_crawl"}.issubset(set(config.get("tools", [])))
         for config in body_agents
     )
     assert any(intent in config["system_prompt"] for config in body_agents)

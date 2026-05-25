@@ -23,11 +23,13 @@ BUILTIN_FACTORIES: dict[str, type] = {
     # Builtin tool kinds (web search, crawl, file, compute, delta)
     "web_search_v1": BuiltinToolFactory,
     "web_crawl_v1": BuiltinToolFactory,
+    "web_research_v1": BuiltinToolFactory,
     "file_search_v1": BuiltinToolFactory,
     "compute_v1": BuiltinToolFactory,
     "compute_namespace_v1": BuiltinToolFactory,
     "delta_read_v1": BuiltinToolFactory,
     "delta_grep_v1": BuiltinToolFactory,
+    "delta_context_v1": BuiltinToolFactory,
     "delta_table_read_v1": BuiltinToolFactory,
     "table_read_v1": BuiltinToolFactory,
     # Databricks-hosted tool kinds (vector search, Genie, KA)

@@ -231,8 +231,15 @@ def test_update_block_label() -> None:
     assert ast["root"]["children"][0]["label"] == "first agent"
 
 
-def test_update_block_config_merge() -> None:
-    """Patching 'config' replaces (shallow) the config dict."""
+def test_update_block_config_merge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patching 'config' replaces (shallow) the config dict.
+
+    Plan v2.1 PR-3 narrowed config-level patches to a prompt-only
+    allow-list when DESIGNER_DETERMINISTIC_BLUEPRINT is ON (the
+    default). This test exercises the legacy unconstrained semantics
+    via env opt-out — see test_architect_patches.py for the strict-mode
+    coverage."""
+    monkeypatch.setenv("DESIGNER_DETERMINISTIC_BLUEPRINT", "0")
     ast = _seq_ast()
     new_ast = update_block(
         ast, "root.children.0", {"config": {"subtype": "synthesizer", "model_tier": "complex"}}
@@ -415,10 +422,13 @@ def test_remove_tool_existing() -> None:
     """remove_tool removes the named tool from ast['tools']."""
     ast = _minimal_ast()
     ast = declare_tool(ast, "web_search", "brave", {})
+    ast["root"]["config"]["tools"] = ["brave"]
     new_ast = remove_tool(ast, "brave")
     assert new_ast["tools"] == []
+    assert new_ast["root"]["config"]["tools"] == []
     # original unchanged
     assert len(ast["tools"]) == 1
+    assert ast["root"]["config"]["tools"] == ["brave"]
 
 
 def test_remove_tool_missing_is_noop() -> None:

@@ -8,6 +8,7 @@ Plan reference: agent-designer-deployment.md Section E.5.
 """
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -17,13 +18,76 @@ from uuid import uuid4
 
 import mlflow
 import yaml
+from databricks.sdk import WorkspaceClient
 from databricks_deep_research import FrameworkLLMClient, ToolFactoryContext, WorkflowRunner
+from databricks_deep_research.events.types import ToolResultEvent
 from databricks_deep_research.tracing import setup_mlflow_tracing
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
+
+# Feature-detect optional kwargs on WorkflowRunner.stream so this template
+# remains forward/back-compatible with frameworks that don't yet expose them.
+# Older databricks-deep-research releases did not accept `strict_tool_resolution`;
+# passing it unconditionally would raise `TypeError` at runtime.
+try:
+    _STREAM_PARAMS: set[str] = set(inspect.signature(WorkflowRunner.stream).parameters)
+except (TypeError, ValueError):  # pragma: no cover - defensive
+    _STREAM_PARAMS = set()
+_SUPPORTS_STRICT_TOOL_RESOLUTION: bool = "strict_tool_resolution" in _STREAM_PARAMS
+
+
+def _classify_traceback_modules(exc: BaseException) -> list[str]:
+    """Return module names appearing in the exception's traceback frames.
+
+    Used by :func:`_classify_shell_app_exception` to detect ``TypeError`` /
+    ``AttributeError`` that originated inside the framework call chain
+    (rather than user code). Defensive: returns an empty list on any
+    introspection failure so classifier never raises.
+    """
+    try:
+        tb = exc.__traceback__
+        modules: list[str] = []
+        while tb is not None:
+            frame_module = tb.tb_frame.f_globals.get("__name__", "")
+            if isinstance(frame_module, str):
+                modules.append(frame_module)
+            tb = tb.tb_next
+        return modules
+    except Exception:  # pragma: no cover - defensive
+        return []
+
+
+def _classify_shell_app_exception(exc: BaseException) -> str:
+    """Bucket runtime exceptions so the UI can render actionable next-steps.
+
+    Categories (Phase 3 M4):
+
+    * ``workflow_error`` — framework refused to start or aborted the
+      workflow (missing tools under strict mode, schema violations, etc.).
+      User action: redesign or re-deploy the agent with corrected config.
+    * ``framework_skew`` — call into framework code failed with a
+      ``TypeError`` / ``AttributeError`` because the installed framework
+      version doesn't match the template's expected API surface. User
+      action: redeploy with an updated ``framework_git_tag``.
+    * ``runtime_error`` — anything else (network, LLM, generic Python).
+      User action: retry or contact support.
+
+    The classifier is intentionally narrow: only catches well-known
+    framework-side exception types. Anything we don't recognize stays as
+    ``runtime_error`` so the user gets the raw message + class name.
+    """
+    if type(exc).__name__ == "WorkflowError":
+        return "workflow_error"
+    module = getattr(type(exc), "__module__", "") or ""
+    if isinstance(exc, (TypeError, AttributeError)) and (
+        "databricks_deep_research" in module
+        or "databricks_deep_research" in "".join(_classify_traceback_modules(exc))
+    ):
+        return "framework_skew"
+    return "runtime_error"
 
 _LOG_LEVEL_NAME = os.environ.get("LOG_LEVEL", "INFO").upper()
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
@@ -34,7 +98,7 @@ logging.basicConfig(
 logging.getLogger().setLevel(_LOG_LEVEL)
 logger = logging.getLogger(__name__)
 logger.setLevel(_LOG_LEVEL)
-_SHELL_APP_TEMPLATE_VERSION = "2026-05-17.1"
+_SHELL_APP_TEMPLATE_VERSION = "2026-05-25.1"
 _NO_STORE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     "Pragma": "no-cache",
@@ -111,13 +175,112 @@ _AGENT_YAML = Path(__file__).resolve().parent / "agent.yaml"
 _DEFINITION_DICT: dict[str, Any] = yaml.safe_load(_AGENT_YAML.read_text("utf-8"))
 _DEFINITION = load_workflow_from_dict(_DEFINITION_DICT)
 
-# Runner is bound to workspace creds via FrameworkLLMClient.from_databricks().
-# Construct WorkflowRunner directly so deployed shell apps also work with
-# framework refs whose WorkflowRunner.from_databricks() predates factory_context.
+# LLM client + base workspace client are shared across requests (lifecycle
+# is process-scoped). The base workspace client is the app SP; we derive its
+# host once so per-request OBO clients can be built without re-detecting auth.
 _BRAVE_API_KEY = os.environ.get("BRAVE_API_KEY")
-_factory_context = ToolFactoryContext.from_defaults(brave_api_key=_BRAVE_API_KEY)
 _llm_client = FrameworkLLMClient.from_databricks()
-_runner = WorkflowRunner(llm_client=_llm_client, factory_context=_factory_context)
+try:
+    _SP_WORKSPACE_CLIENT: WorkspaceClient | None = WorkspaceClient()
+    _SP_HOST = _SP_WORKSPACE_CLIENT.config.host
+except Exception as exc:  # pragma: no cover - defensive
+    logger.warning("SHELL_APP_SP_WS_CLIENT_INIT_FAILED exc=%s", exc)
+    _SP_WORKSPACE_CLIENT = None
+    _SP_HOST = None
+
+# Default factory context used when no OBO token reaches the handler
+# (local invocations, health probes, etc.). Production requests build a
+# fresh OBO-bound context inside the request handler so vector_search /
+# Genie / serving endpoints run with the caller's UC permissions.
+_factory_context = ToolFactoryContext.from_defaults(
+    workspace_client=_SP_WORKSPACE_CLIENT,
+    brave_api_key=_BRAVE_API_KEY,
+)
+
+# Tool kinds that require a Databricks WorkspaceClient to construct. Mirrors
+# the ToolKind enum at
+# databricks-deep-research/src/databricks_deep_research/tools/protocol.py:54
+# (kept inline because the template ships without an explicit dep on the
+# enum). Any workflow declaring one of these kinds MUST receive a user
+# OBO token in the deployed-app surface — otherwise the constructed tool
+# will silently use the app SP and any UC-gated resource returns empty.
+_DATABRICKS_BOUND_TOOL_KINDS: frozenset[str] = frozenset(
+    {
+        "vector_search",
+        "genie",
+        "knowledge_assistant",
+        "delta_read",
+        "delta_grep",
+        "delta_context",
+        "delta_table_read",
+        "table_read",
+        "compute",
+        "compute_namespace",
+    }
+)
+
+
+def _workflow_requires_databricks(definition: dict[str, Any]) -> bool:
+    """Return True iff any top-level tool declaration is Databricks-bound."""
+    tools = definition.get("tools") or []
+    if not isinstance(tools, list):
+        return False
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        kind = tool.get("kind")
+        if isinstance(kind, str) and kind in _DATABRICKS_BOUND_TOOL_KINDS:
+            return True
+    return False
+
+
+_WORKFLOW_REQUIRES_DATABRICKS = _workflow_requires_databricks(_DEFINITION_DICT)
+
+# Databricks Apps runtime sets DATABRICKS_APP_NAME. Local `uv run uvicorn`
+# does not. We only fail-closed on missing OBO when both: the runtime is
+# Apps AND the workflow actually needs Databricks-bound tools. This keeps
+# notebook-style local development working while enforcing OBO for real
+# deployments that hit UC-gated resources.
+_IS_DATABRICKS_APPS_RUNTIME = bool(os.environ.get("DATABRICKS_APP_NAME"))
+
+
+def _build_per_request_runner(user_token: str | None) -> WorkflowRunner:
+    """Build a fresh WorkflowRunner whose ToolFactoryContext is OBO-bound.
+
+    Pattern mirrors
+    ``deep_research.agent.workflow_runner_factory.build_app_workflow_runner``
+    inline (the shell-app template ships without the main app's package).
+
+    The user's OAuth access token from ``x-forwarded-access-token`` is used
+    directly as a **static bearer token** via ``auth_type="pat"`` — this is
+    NOT an OAuth exchange. We force the SDK to the token-auth path
+    explicitly so it cannot fall back to env OAuth-M2M (which would
+    otherwise auto-select the app SP credentials and silently lose OBO).
+
+    Downstream factories (``DatabricksToolFactory`` etc.) then build VS /
+    Genie / endpoint tools that query Databricks as the calling user —
+    which is the only way UC-gated resources (vector indexes, Genie
+    spaces) become reachable in the deployed shell app.
+
+    When ``user_token`` is missing, the runner falls back to the app SP.
+    The ``/api/chat`` handler refuses to call this path under the Apps
+    runtime when the workflow declares Databricks-bound tools (see
+    ``_IS_DATABRICKS_APPS_RUNTIME`` + ``_WORKFLOW_REQUIRES_DATABRICKS``),
+    so the SP fallback only applies to local-dev and purely-web workflows.
+    """
+    workspace_client: WorkspaceClient | None
+    if user_token and _SP_HOST:
+        workspace_client = WorkspaceClient(
+            host=_SP_HOST, token=user_token, auth_type="pat"
+        )
+    else:
+        workspace_client = _SP_WORKSPACE_CLIENT
+    ctx = ToolFactoryContext.from_defaults(
+        workspace_client=workspace_client,
+        user_token=user_token,
+        brave_api_key=_BRAVE_API_KEY,
+    )
+    return WorkflowRunner(llm_client=_llm_client, factory_context=ctx)
 
 
 def _declared_tool_names(definition: dict[str, Any]) -> list[str]:
@@ -205,6 +368,7 @@ _PLANNER_GUIDANCE = _first_planner_guidance(_DEFINITION_DICT)
 logger.info(
     "SHELL_APP_WORKFLOW_LOADED workflow_id=%s workflow_name=%s tools=%s "
     "output_keys=%s has_brave_api_key=%s has_search_client=%s has_workspace_client=%s "
+    "requires_databricks_obo=%s is_databricks_apps_runtime=%s "
     "log_level=%s template_version=%s workflow_description=%s root_children=%s "
     "planner_guidance_present=%s planner_guidance=%s",
     getattr(_DEFINITION, "id", None),
@@ -214,6 +378,8 @@ logger.info(
     bool(_BRAVE_API_KEY),
     _factory_context.search_client is not None,
     _factory_context.workspace_client is not None,
+    _WORKFLOW_REQUIRES_DATABRICKS,
+    _IS_DATABRICKS_APPS_RUNTIME,
     logging.getLevelName(_LOG_LEVEL),
     _SHELL_APP_TEMPLATE_VERSION,
     _preview(_DEFINITION_DICT.get("description")),
@@ -256,14 +422,72 @@ async def chat(request: Request) -> EventSourceResponse:
     body: dict[str, Any] = await request.json()
     query = body.get("query", "")
     request_id = uuid4().hex[:12]
+    # Databricks Apps injects the caller's OAuth token here for OBO. Without
+    # this, vector_search / Genie / endpoint queries run as the shell-app SP
+    # and any UC-gated resource (e.g. private vector indexes) silently
+    # returns empty.
+    user_token = request.headers.get("x-forwarded-access-token") or None
+
+    # Fail closed under the Databricks Apps runtime when the workflow needs
+    # OBO-bound tools but the caller didn't forward a token. Without this
+    # guard, the request would run against the app SP and silently return
+    # "0 sources" — exactly the bug this template version fixes. Local-dev
+    # callers (no DATABRICKS_APP_NAME) and purely-web workflows are
+    # exempt; they continue to work without OBO.
+    if (
+        _IS_DATABRICKS_APPS_RUNTIME
+        and _WORKFLOW_REQUIRES_DATABRICKS
+        and not user_token
+    ):
+        logger.warning(
+            "SHELL_APP_CHAT_MISSING_OBO request_id=%s workflow_name=%s "
+            "is_databricks_apps_runtime=%s requires_databricks_obo=%s",
+            request_id,
+            _DEFINITION_DICT.get("name"),
+            _IS_DATABRICKS_APPS_RUNTIME,
+            _WORKFLOW_REQUIRES_DATABRICKS,
+        )
+
+        async def _missing_obo_stream():
+            yield {
+                "event": "error",
+                "data": json.dumps(
+                    {
+                        "type": "error",
+                        "code": "missing_obo_token",
+                        "message": (
+                            "This workflow requires Databricks user "
+                            "identity (x-forwarded-access-token) to "
+                            "query its data sources, but the request "
+                            "did not include one. If you are running "
+                            "the deployed app from a browser, sign in "
+                            "via the Databricks Apps landing page; if "
+                            "you are calling the API directly, forward "
+                            "your OBO token."
+                        ),
+                    }
+                ),
+            }
+
+        return EventSourceResponse(
+            _missing_obo_stream(),
+            headers={
+                **_NO_STORE_HEADERS,
+                "X-Shell-App-Request-Id": request_id,
+            },
+        )
+
+    runner = _build_per_request_runner(user_token)
     logger.info(
         "SHELL_APP_CHAT_START request_id=%s query_length=%s "
         "workflow_name=%s planner_guidance_present=%s "
+        "obo_token_present=%s "
         "client_template=%s accept=%s user_agent=%s",
         request_id,
         len(str(query)),
         _DEFINITION_DICT.get("name"),
         bool(_PLANNER_GUIDANCE),
+        bool(user_token),
         _short_header(request, "x-shell-app-template-version"),
         _short_header(request, "accept"),
         _short_header(request, "user-agent"),
@@ -287,8 +511,21 @@ async def chat(request: Request) -> EventSourceResponse:
             workflow_id=str(getattr(_DEFINITION, "id", "") or ""),
             workflow_name=str(_DEFINITION_DICT.get("name", "") or ""),
         )
+        # Only pass strict_tool_resolution to frameworks that accept it.
+        # Older databricks-deep-research releases lack this kwarg; passing it
+        # raises TypeError at runtime (see SHELL_APP_STREAM_KWARG_INCOMPATIBLE).
+        # Production callers should opt in so factory misconfig (missing
+        # index_name, dead workspace_client, etc.) raises WorkflowError
+        # instead of being swallowed as a warning. The except-Exception
+        # block below surfaces such errors as SSE error events for the UI.
+        stream_kwargs: dict[str, Any] = {
+            "workflow": _DEFINITION,
+            "query": query,
+        }
+        if _SUPPORTS_STRICT_TOOL_RESOLUTION:
+            stream_kwargs["strict_tool_resolution"] = True
         try:
-            async for event in _runner.stream(workflow=_DEFINITION, query=query):
+            async for event in runner.stream(**stream_kwargs):
                 event_count += 1
                 if event_count <= 5 or event.event_type in {
                     "workflow_completed",
@@ -302,11 +539,26 @@ async def chat(request: Request) -> EventSourceResponse:
                         event.event_type,
                         getattr(event, "node_id", None),
                     )
+                # Surface tool failures at WARN. The framework's tools (VS,
+                # Genie, etc.) return ToolResult(success=False) when
+                # get_index discovery fails or query_index raises — without
+                # this log line those failures are buried in the SSE stream
+                # and the deployed surface looks the same as "0 sources
+                # found", which made the original OBO bug invisible.
+                if isinstance(event, ToolResultEvent) and not event.tool_success:
+                    logger.warning(
+                        "SHELL_APP_TOOL_FAILURE request_id=%s tool=%s "
+                        "source_count=%s reason=%s",
+                        request_id,
+                        event.tool_name,
+                        event.source_count,
+                        (event.tool_error or "")[:300],
+                    )
                 yield {
                     "event": event.event_type,
                     "data": event.model_dump_json(),
                 }
-            result = _runner.last_result
+            result = runner.last_result
             sources = [_source_to_dict(s) for s in (result.sources[:10] if result else [])]
             logger.info(
                 "SHELL_APP_CHAT_COMPLETE request_id=%s event_count=%s "
@@ -327,15 +579,27 @@ async def chat(request: Request) -> EventSourceResponse:
                 ),
             }
         except Exception as exc:  # noqa: BLE001 — surface to UI as 'error' event
+            # Classify the exception so the UI can render an actionable
+            # next-step instead of a raw Python error string. Phase 3 M4.
+            error_kind = _classify_shell_app_exception(exc)
             logger.exception(
-                "SHELL_APP_CHAT_ERROR request_id=%s event_count=%s exc_class=%s",
+                "SHELL_APP_CHAT_ERROR request_id=%s event_count=%s "
+                "exc_class=%s error_kind=%s",
                 request_id,
                 event_count,
                 type(exc).__name__,
+                error_kind,
             )
             yield {
                 "event": "error",
-                "data": json.dumps({"type": "error", "message": str(exc)}),
+                "data": json.dumps(
+                    {
+                        "type": "error",
+                        "error_kind": error_kind,
+                        "message": str(exc),
+                        "exc_class": type(exc).__name__,
+                    }
+                ),
             }
         finally:
             # Close the root MLflow span. Mirrors __exit__ semantics so the

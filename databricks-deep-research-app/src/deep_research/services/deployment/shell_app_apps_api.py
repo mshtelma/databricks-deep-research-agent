@@ -50,10 +50,17 @@ _PROBE_TIMEOUT_SEC: float = 300.0  # 5 minutes
 _APP_NAME_PREFIX = "dr-shell-"
 _APP_NAME_MAX_LENGTH = 30
 _BRAVE_SECRET_RESOURCE_NAME = "brave-api-key"
+# OBO scopes granted to deployed shell apps. Must include both vector-search
+# scopes — endpoints-only is insufficient because the SDK calls query_index
+# against the index path, not the endpoint. Keep in sync with the bundle
+# template at templates/agent-shell-app/databricks.yml.j2 and with the main
+# DRE bundle at databricks-deep-research-app/databricks.yml.
 _APP_USER_API_SCOPES: tuple[str, ...] = (
     "sql",
     "serving.serving-endpoints",
     "vectorsearch.vector-search-endpoints",
+    "vectorsearch.vector-search-indexes",
+    "dashboards.genie",
 )
 _APP_RUNNING_STATES: frozenset[str] = frozenset({"RUNNING", "ACTIVE"})
 _APP_FAILED_STATES: frozenset[str] = frozenset(
@@ -279,6 +286,35 @@ async def _deploy_via_apps_api(
                         "git_tag": git_tag,
                         "git_url": git_url,
                         "probe_note": tag_probe.note,
+                    },
+                )
+            # M3 — reject branches when tag-only is required. Branches can be
+            # force-pushed under deployed apps and silently change framework
+            # code on the next pip install. Tags are immutable by convention.
+            if (
+                settings.deploy_here_require_tag_only
+                and tag_probe.ref_kind == "branch"
+            ):
+                logger.info(
+                    "DEPLOYMENT_HERE_STAGE deployment=%s stage=tag_preflight outcome=err "
+                    "git_tag=%s git_url=%s ref_kind=branch reason=tag_required",
+                    deployment.id,
+                    git_tag,
+                    git_url,
+                )
+                return DeploymentResult(
+                    success=False,
+                    error_message=(
+                        f"Framework Git ref {git_tag!r} resolves to a branch, "
+                        "but tag-only deploys are required. Tag the commit and "
+                        "redeploy against the tag (branches can be force-pushed "
+                        "and silently change framework code under your app)."
+                    ),
+                    external_resource_ids={
+                        "error_kind": "framework_ref_is_branch",
+                        "git_tag": git_tag,
+                        "git_url": git_url,
+                        "ref_kind": "branch",
                     },
                 )
 

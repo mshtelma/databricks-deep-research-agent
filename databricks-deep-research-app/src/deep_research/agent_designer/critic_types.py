@@ -5,9 +5,15 @@ before the workflow runs (see W5c)."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator
+
+# PR3-C: severity field on CriticDirective. ``blocking`` directives keep the
+# loop from terminating; ``advisory`` directives are polish suggestions the
+# scaffolder_specializer may or may not act on. ``extract_critic_approved``
+# treats all-advisory verdicts as approved.
+DirectiveSeverity = Literal["blocking", "advisory"]
 
 
 class CriticDirective(BaseModel):
@@ -18,6 +24,10 @@ class CriticDirective(BaseModel):
     node_path: str = ""           # JSON-pointer-like address (e.g. "$.root.children[2]")
     issue: str = ""               # one-line problem statement
     suggested_action: str = ""    # one-line fix instruction
+    # PR3-C additions. Optional with defaults so existing tests creating
+    # CriticDirective without these fields continue to pass.
+    severity: DirectiveSeverity = "blocking"
+    tool_hint: str | None = None  # mutation tool the auditor recommends
 
 
 class CriticVerdict(BaseModel):

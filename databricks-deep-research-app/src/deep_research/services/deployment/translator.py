@@ -31,9 +31,12 @@ callers that prefer duck-typing over Protocol isinstance checks.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, ClassVar, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, ClassVar, Protocol, runtime_checkable
 
 from deep_research.models.agent_deployment import AgentDeployment, DeploymentMode
+
+if TYPE_CHECKING:
+    from deep_research.services.deployment.auth import WorkspaceClientResolver
 
 
 class DeploymentCleanupError(Exception):
@@ -63,6 +66,24 @@ class DeploymentCleanupError(Exception):
         super().__init__(message)
         self.resource = resource
         self.upstream_error_type = upstream_error_type
+
+
+class DeploymentCleanupExhaustedError(DeploymentCleanupError):
+    """Cleanup failed deterministically — do NOT retry.
+
+    Raised when a translator has tried every identity it can (e.g., OBO + SP)
+    and all of them got ``PermissionDenied`` from the upstream SDK. The
+    failure is structural (ACL mismatch / missing grants), not transient, so
+    bumping ``cleanup_attempts`` and asking the user to click 3 times would
+    just burn 3 deterministic failures.
+
+    ``agent_v2_service.delete`` catches this specifically and marks the row
+    ``cleanup_failed`` once, without incrementing the retry counter. The
+    downstream ``delete_terminal_rows_for_agent`` then removes the row
+    (``cleanup_failed`` is in ``DELETABLE_STATUSES``), so the parent agent
+    delete still succeeds. The audit trail is the structured ERROR log line
+    emitted by the translator at the point of dual denial.
+    """
 
 
 @dataclass(frozen=True)
@@ -160,7 +181,12 @@ class DeploymentTranslator(Protocol):
         """Execute the deployment. Updates external Databricks resources."""
         ...
 
-    async def deactivate(self, deployment: AgentDeployment) -> None:
+    async def deactivate(
+        self,
+        deployment: AgentDeployment,
+        *,
+        client_resolver: WorkspaceClientResolver | None = None,
+    ) -> None:
         """Tear down external resources. MUST be idempotent.
 
         Implementations MUST treat ``404`` / ``NotFound`` as success: the
@@ -168,6 +194,14 @@ class DeploymentTranslator(Protocol):
         transitioning to ``CLEANUP_FAILED``, and orphan detection requires
         re-running ``deactivate()`` on a row that may have already been
         partially cleaned up.
+
+        ``client_resolver`` lets user-initiated paths supply an OBO-scoped
+        ``WorkspaceClient`` so the SDK call runs as the identity that
+        originally created the resource. Pass ``None`` from janitor /
+        orphan-detection paths — translators MUST fall back to the parent-
+        app SP via ``get_databricks_auth().get_client()`` when the resolver
+        is absent. The kw-only signature keeps existing positional callers
+        compatible.
         """
         ...
 

@@ -98,6 +98,76 @@ class TestValidate:
         assert any("framework_git_tag" in e.message for e in result.errors)
         assert any("Git ref" in e.message for e in result.errors)
 
+    # ----------------------------------------------------------------------
+    # Phase 3 C1 — framework_git_tag whitelist regex. Rendered verbatim into
+    # the shell-app's pyproject.toml pip URL; rogue characters could fragment
+    # the URL or alter pip's parsing. Reject anything outside the
+    # alphanumerics + ``.``, ``_``, ``-``, ``/`` set.
+    # ----------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "main@evil",          # @ — pip URL revision/auth separator
+            "v1.0#evil",          # # — pip URL fragment separator
+            "main?evil",          # ? — query string
+            "main hack",          # whitespace
+            "main\nrm -rf /",     # newline + shell-like content
+            "main\"; pip install evil",  # quote + semicolon
+            ".hidden",            # starts with dot (git rejects)
+            "-flag",              # starts with hyphen (could look like pip flag)
+            "/abs/path",          # starts with slash
+            "branch:with:colons", # colon
+            "x" * 257,            # length overflow
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_rejects_malicious_framework_git_tag(self, tag: str) -> None:
+        """C1 regression — adversarial ``framework_git_tag`` inputs must be
+        rejected by the whitelist regex before the value reaches pyproject."""
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        result = await translator.validate(
+            agent, revision, _valid_config(framework_git_tag=tag)
+        )
+        assert result.valid is False, (
+            f"Expected validator to reject framework_git_tag={tag!r} but it accepted"
+        )
+        assert any(
+            "framework_git_tag" in e.message and (
+                "disallowed characters" in e.message
+                or "Git ref" in e.message
+            )
+            for e in result.errors
+        ), f"Expected whitelist rejection message; got: {[e.message for e in result.errors]}"
+
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "v1.2.3",
+            "main",
+            "develop",
+            "release/2026.05.24",
+            "feat_x-2",
+            "0123456789abcdef0123456789abcdef01234567",  # 40-char sha
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_accepts_valid_framework_git_tag(self, tag: str) -> None:
+        """C1 sanity — common, safe git-ref shapes pass the whitelist."""
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        result = await translator.validate(
+            agent, revision, _valid_config(framework_git_tag=tag)
+        )
+        # No git-tag-related error in the result.
+        git_tag_errors = [
+            e for e in result.errors if "framework_git_tag" in e.message
+        ]
+        assert git_tag_errors == [], (
+            f"Whitelist falsely rejected safe tag {tag!r}: {git_tag_errors}"
+        )
+
     @pytest.mark.asyncio
     async def test_rejects_custom_tool_kind(self) -> None:
         translator = ShellAppExporter()
@@ -198,6 +268,38 @@ class TestTranslate:
         assert "dr-shell-foo" in databricks_yml
 
     @pytest.mark.asyncio
+    async def test_databricks_yml_includes_all_obo_scopes(self) -> None:
+        """Bundle template must declare every OBO scope the framework's
+        Databricks-bound tools can require.
+
+        Regression test for the shell-app OBO bug: previously the template
+        listed only ``vectorsearch.vector-search-endpoints`` so vector-index
+        queries (which call ``query_index`` against the index path, not the
+        endpoint) failed with permission errors that the SDK surfaced as
+        an empty result. Keep this list in sync with the main DRE bundle
+        at databricks-deep-research-app/databricks.yml:124-130 and with
+        the inline-deploy constant ``_APP_USER_API_SCOPES`` in
+        deep_research/services/deployment/shell_app_apps_api.py.
+        """
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            databricks_yml = zf.read("databricks.yml").decode("utf-8")
+
+        for scope in (
+            "sql",
+            "serving.serving-endpoints",
+            "vectorsearch.vector-search-endpoints",
+            "vectorsearch.vector-search-indexes",
+            "dashboards.genie",
+        ):
+            assert scope in databricks_yml, (
+                f"scope {scope!r} missing from rendered databricks.yml; "
+                f"OBO will silently fall back to app SP for that surface"
+            )
+
+    @pytest.mark.asyncio
     async def test_app_py_builds_tool_factory_context(self) -> None:
         translator = ShellAppExporter()
         agent, revision = _agent_revision()
@@ -207,12 +309,41 @@ class TestTranslate:
 
         assert "ToolFactoryContext.from_defaults" in app_py
         assert "FrameworkLLMClient.from_databricks()" in app_py
-        assert "WorkflowRunner(llm_client=_llm_client, factory_context=_factory_context)" in app_py
+        # OBO threading: the shell app must build a per-request runner whose
+        # WorkspaceClient carries the caller's x-forwarded-access-token. A
+        # singleton _runner shared across users blocks UC-gated tools
+        # (vector_search, Genie, ACL'd endpoints) from ever reaching the
+        # caller's permissions — see plans/proud-scribbling-alpaca.md.
+        assert "_build_per_request_runner" in app_py
+        assert "x-forwarded-access-token" in app_py
+        assert 'auth_type="pat"' in app_py
+        assert "obo_token_present" in app_py
+        # Fail-closed gate (codex HIGH): missing OBO under Databricks Apps
+        # runtime with a Databricks-bound workflow must yield a structured
+        # SSE error event with code 'missing_obo_token' instead of falling
+        # back to the app SP.
+        assert "missing_obo_token" in app_py
+        assert "_IS_DATABRICKS_APPS_RUNTIME" in app_py
+        assert "_WORKFLOW_REQUIRES_DATABRICKS" in app_py
+        # strict_tool_resolution (codex HIGH): factory misconfig (missing
+        # index_name, dead workspace_client) must raise WorkflowError
+        # instead of being swallowed. Phase-3-era ``strict_tool_resolution``
+        # was hard-coded; the kwarg is now feature-detected via
+        # ``inspect.signature`` so the template is forward/back-compatible
+        # with framework versions that lack the kwarg. Both the gating
+        # constant and the dict assignment must be present.
+        assert "_SUPPORTS_STRICT_TOOL_RESOLUTION" in app_py
+        assert 'stream_kwargs["strict_tool_resolution"] = True' in app_py
+        # Tool-failure logging (codex MEDIUM): ToolResult(success=False)
+        # surfaces in logs to disambiguate auth failures from genuinely
+        # empty queries.
+        assert "SHELL_APP_TOOL_FAILURE" in app_py
+        assert "ToolResultEvent" in app_py
         assert "logging.basicConfig" in app_py
         assert "SHELL_APP_STREAM_EVENT" in app_py
         assert "SHELL_APP_INDEX_SERVED" in app_py
         assert "planner_guidance_present" in app_py
-        assert '_SHELL_APP_TEMPLATE_VERSION = "2026-05-17.1"' in app_py
+        assert '_SHELL_APP_TEMPLATE_VERSION = "2026-05-25.1"' in app_py
         assert "Cache-Control" in app_py
         assert "X-Shell-App-Template-Version" in app_py
 
@@ -229,7 +360,7 @@ class TestTranslate:
         assert "const dataText = dataLines.join('\\n')" in html
         assert "drainFrames(true)" in html
         assert "X-Shell-App-Template-Version" in html
-        assert "2026-05-17.1" in html
+        assert "2026-05-25.1" in html
         assert "[shell-app] stream frame" in html
         assert html.count("let buffer = '';") == 1
         assert html.index("let buffer = '';") < html.index("function drainFrames")

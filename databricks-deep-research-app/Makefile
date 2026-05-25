@@ -239,16 +239,35 @@ test-complex:
 # caps at 4000 and the API rejects).  Output artifacts are also more
 # comparable to production this way.
 #
-# Usage: make test-scaffold-and-run                              (both cases)
-#        make test-scaffold-and-run CASE=investment_research     (one case)
-#        make test-scaffold-and-run DEV_TARGET=e2e               (different env file)
+# Usage: make test-scaffold-and-run                                      (both cases)
+#        make test-scaffold-and-run CASE=investment_research             (one case)
+#        make test-scaffold-and-run DEV_TARGET=e2e                       (different env file)
+#        make test-scaffold-and-run SCAFFOLD_RUN_LOG=/tmp/scaffold.log   (custom log)
 CASE ?=
+SCAFFOLD_RUN_LOG ?=
 test-scaffold-and-run:
-	@echo "Target: $(DEV_TARGET) (env: ../.env + ../.env.$(DEV_TARGET))"
-	@bash -c '$(call load-env,$(DEV_TARGET)) && \
-		MLFLOW_ENABLED=false \
-		uv run pytest tests/complex/test_scaffold_and_run.py -v -s --tb=short --timeout=1800 \
-			$(if $(CASE),-k $(CASE),)'
+	@mkdir -p tests/_runs
+	@bash -o pipefail -c '\
+		log_file="$(if $(SCAFFOLD_RUN_LOG),$(SCAFFOLD_RUN_LOG),tests/_runs/scaffold-and-run-$$(date +%Y%m%dT%H%M%S).log)"; \
+		mkdir -p "$$(dirname "$$log_file")"; \
+		{ \
+			echo "Scaffold-and-Run log: $$log_file"; \
+			echo "Started: $$(date "+%Y-%m-%dT%H:%M:%S%z")"; \
+			echo "Target: $(DEV_TARGET) (env: ../.env + ../.env.$(DEV_TARGET))"; \
+			echo "Command: MLFLOW_ENABLED=false uv run pytest tests/complex/test_scaffold_and_run.py -v -s --tb=short --timeout=1800 --log-cli-level=INFO $(if $(CASE),-k $(CASE),)"; \
+			echo ""; \
+			$(call load-env,$(DEV_TARGET)); \
+			MLFLOW_ENABLED=false \
+			uv run pytest tests/complex/test_scaffold_and_run.py -v -s --tb=short --timeout=1800 --log-cli-level=INFO \
+				$(if $(CASE),-k $(CASE),); \
+			status=$$?; \
+			echo ""; \
+			echo "Finished: $$(date "+%Y-%m-%dT%H:%M:%S%z")"; \
+			echo "Exit status: $$status"; \
+			exit $$status; \
+		} 2>&1 | tee "$$log_file"; \
+		status=$${PIPESTATUS[0]}; \
+		exit $$status'
 
 # All Python tests
 test-all-python:
@@ -654,82 +673,156 @@ bundle-validate:
 # does not fail silently inside the app process.
 MLFLOW_EXPERIMENT_PATH ?= /Shared/deep-research-agent-experiments
 
+# Verify (and, for fresh targets, provision) the Lakebase Postgres project +
+# `deep_research` database that `make deploy` will bind the app against.
+#
+# Idempotent: a no-op when the project + database already exist (the common
+# AIS / dev path). For brand-new targets, this discovers / creates the
+# Autoscaling endpoint and creates the database via the existing helpers.
+#
+# Usage: make bootstrap-postgres TARGET=ais
+bootstrap-postgres:
+	@PROFILE=$$(uv run python3 -c "import yaml,sys;cfg=yaml.safe_load(open('databricks.yml'));t=cfg.get('targets',{}).get('$(TARGET)');sys.exit(1) if not t else print(t['workspace']['profile'])" 2>/dev/null) || \
+		{ echo "ERROR: Unknown target '$(TARGET)'."; exit 1; }; \
+	RESOURCE_SUFFIX=$$(uv run python3 -c "import yaml;cfg=yaml.safe_load(open('databricks.yml'));print(cfg['targets']['$(TARGET)']['variables']['resource_suffix'])"); \
+	PROJECT_ID="deep-research-$$RESOURCE_SUFFIX"; \
+	echo "Bootstrap-postgres for $(TARGET) (project=$$PROJECT_ID, profile=$$PROFILE)..."; \
+	ENDPOINT_NAME=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
+		"from deep_research.deployment import discover_autoscaling_endpoint; print(discover_autoscaling_endpoint('$$PROJECT_ID'))" 2>/dev/null) || ENDPOINT_NAME=""; \
+	if [ -z "$$ENDPOINT_NAME" ]; then \
+		echo "ERROR: Postgres project '$$PROJECT_ID' has no Autoscaling endpoint."; \
+		echo "  The project + branch must exist before bootstrap-postgres can run."; \
+		echo "  For a brand-new target, deploy the postgres_projects block first via"; \
+		echo "    databricks bundle deploy -t $(TARGET) \\"; \
+		echo "        --var postgres_branch=pending --var postgres_database_resource=pending"; \
+		echo "  but expect the app resource to fail until bootstrap is finished."; \
+		echo "  (Fresh-target support is tracked as a follow-up; AIS unwedge only requires"; \
+		echo "   the existing project + database which this command verifies.)"; \
+		exit 1; \
+	fi; \
+	echo "  ENDPOINT_NAME: $$ENDPOINT_NAME"; \
+	DATABRICKS_CONFIG_PROFILE="$$PROFILE" ENDPOINT_NAME="$$ENDPOINT_NAME" LAKEBASE_DATABASE=postgres \
+		uv run python -c "from deep_research.deployment.lakebase import wait_for_lakebase_sync; exit(0 if wait_for_lakebase_sync(endpoint_name='$$ENDPOINT_NAME', timeout_seconds=300, poll_interval_seconds=10) else 1)" \
+		|| { echo "ERROR: Endpoint not ready"; exit 1; }; \
+	PGHOST=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
+		"from databricks.sdk import WorkspaceClient; w=WorkspaceClient(); ep=w.postgres.get_endpoint(name='$$ENDPOINT_NAME'); print(ep.status.hosts.host if ep.status and ep.status.hosts else '')" 2>/dev/null); \
+	if [ -z "$$PGHOST" ]; then echo "ERROR: Could not resolve PGHOST"; exit 1; fi; \
+	echo "  PGHOST: $$PGHOST"; \
+	DATABRICKS_CONFIG_PROFILE="$$PROFILE" ENDPOINT_NAME="$$ENDPOINT_NAME" PGHOST="$$PGHOST" LAKEBASE_INSTANCE_NAME="" LAKEBASE_DATABASE=deep_research \
+		uv run python -c "import asyncio; from deep_research.db.bootstrap import ensure_database_exists; asyncio.run(ensure_database_exists())" \
+		|| { echo "ERROR: Database bootstrap failed"; exit 1; }; \
+	echo ""; \
+	echo "Resolved binding vars:"; \
+	DATABRICKS_CONFIG_PROFILE="$$PROFILE" ENDPOINT_NAME="$$ENDPOINT_NAME" LAKEBASE_DATABASE=deep_research \
+		uv run python -m deep_research.deployment.app_postgres_resource \
+			--profile "$$PROFILE" --endpoint-name "$$ENDPOINT_NAME" \
+			--database-name deep_research --print-bundle-vars; \
+	echo ""; \
+	echo "Bootstrap complete. You can now run: make deploy TARGET=$(TARGET)"
+
 # Full deployment - ONE COMMAND DOES EVERYTHING
 # Builds frontend, deploys bundle, waits for DB, runs migrations, starts app
 # Usage: make deploy TARGET=dev BRAVE_SCOPE=msh
 #        make deploy TARGET=ais
 #
-# Deployment sequence:
-#   1. Build frontend (npm run build)
-#   2. Generate requirements.txt
-#   3. Deploy bundle (creates Lakebase + app)
-#   4. Wait for Lakebase to be ready + resolve PGHOST
-#   5. Create database + re-deploy with endpoint info
-#   6. Run migrations with developer credentials
-#   7. Write ../.env.{target} with connection info
-#   8. Grant permissions + start app
-#   9. Show deployment summary
+# Deployment sequence (7 steps after the legacy 9-step refactor):
+#   1. Discover Autoscaling endpoint + resolve PGHOST (project must exist)
+#   2. Ensure deep_research database exists (idempotent)
+#   3. Resolve DAB postgres binding vars (postgres_branch, postgres_database_resource)
+#   4. Bundle deploy with DAB-managed lakebase-postgres binding (single deploy)
+#   5. Run alembic migrations with developer credentials
+#   6. Grant Postgres + MLflow permissions to the app service principal
+#   7. Start the app via bundle run
 #
 # NOTE: Migrations are run with developer credentials (not app service principal)
 # because the app's service principal has CAN_CONNECT_AND_CREATE permission
 # but cannot create tables in the public schema.
+#
+# DEPLOY V2: lakebase-postgres is now a DAB-managed app resource. The dual
+# `bundle deploy` from the legacy flow collapses to a single deploy with
+# `--var postgres_branch=... --var postgres_database_resource=...` resolved
+# up front via `app_postgres_resource.py --print-bundle-vars`. The Apps-API
+# write side that mutated the live app outside DAB (causing terraform drift)
+# is gone; permissions grants run before `bundle run`. For brand-new targets
+# where the Postgres project / `deep_research` database don't yet exist,
+# `make bootstrap-postgres TARGET=<name>` provisions them via the SDK.
 TARGET ?= ais
 BRAVE_SCOPE ?=
 deploy: build requirements
 	@echo "=============================================="
-	@echo "Full Deployment Pipeline (Autoscaling)"
+	@echo "Full Deployment Pipeline (Autoscaling, DAB-managed Lakebase binding)"
 	@echo "Target: $(TARGET)"
 	@echo "=============================================="
 	@PROFILE=$$(uv run python3 -c "import yaml,sys;cfg=yaml.safe_load(open('databricks.yml'));t=cfg.get('targets',{}).get('$(TARGET)');sys.exit(1) if not t else print(t['workspace']['profile'])" 2>/dev/null) || \
 		{ echo "ERROR: Unknown target '$(TARGET)'. Valid targets:"; uv run python3 -c "import yaml;[print(f'  {k}') for k in yaml.safe_load(open('databricks.yml'))['targets']]"; exit 1; }; \
 	RESOURCE_SUFFIX=$$(uv run python3 -c "import yaml;cfg=yaml.safe_load(open('databricks.yml'));print(cfg['targets']['$(TARGET)']['variables']['resource_suffix'])" 2>/dev/null); \
 	PROJECT_ID="deep-research-$$RESOURCE_SUFFIX"; \
-	APP_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.apps.deep_research_agent.name // empty'); \
 	DEPLOY_ARGS="-t $(TARGET)"; \
 	if [ -n "$(BRAVE_SCOPE)" ]; then \
 		DEPLOY_ARGS="$$DEPLOY_ARGS --var brave_secret_scope=$(BRAVE_SCOPE)"; \
 	fi; \
 	\
 	echo ""; \
-	echo "Step 1/9: Deploying bundle with postgres (bootstrap)..."; \
+	echo "Step 1/7: Discovering Autoscaling endpoint..."; \
 	echo "  Profile: $$PROFILE"; \
 	echo "  Project: $$PROJECT_ID"; \
-	echo "  Note: Using postgres database for initial deploy"; \
-	databricks bundle deploy $$DEPLOY_ARGS --var lakebase_database=postgres || { echo "ERROR: Bundle deploy failed"; exit 1; }; \
-	\
-	echo ""; \
-	echo "Step 2/9: Discovering Autoscaling endpoint..."; \
 	ENDPOINT_NAME=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
-		"from deep_research.deployment import discover_autoscaling_endpoint; print(discover_autoscaling_endpoint('$$PROJECT_ID'))"); \
+		"from deep_research.deployment import discover_autoscaling_endpoint; print(discover_autoscaling_endpoint('$$PROJECT_ID'))" 2>/dev/null) || ENDPOINT_NAME=""; \
 	if [ -z "$$ENDPOINT_NAME" ]; then \
-		echo "ERROR: Could not discover Autoscaling endpoint for project $$PROJECT_ID"; exit 1; \
+		echo "ERROR: Could not discover Autoscaling endpoint for project $$PROJECT_ID."; \
+		echo "  Hint: if this is a brand-new target, first provision the Postgres"; \
+		echo "        project + database with:"; \
+		echo "            make bootstrap-postgres TARGET=$(TARGET)"; \
+		exit 1; \
 	fi; \
 	echo "  ENDPOINT_NAME: $$ENDPOINT_NAME"; \
-	\
-	echo ""; \
-	echo "Step 3/9: Waiting for Autoscaling endpoint to be ready..."; \
 	DATABRICKS_CONFIG_PROFILE="$$PROFILE" ENDPOINT_NAME="$$ENDPOINT_NAME" LAKEBASE_DATABASE=postgres \
 		uv run python -c "from deep_research.deployment.lakebase import wait_for_lakebase_sync; exit(0 if wait_for_lakebase_sync(endpoint_name='$$ENDPOINT_NAME', timeout_seconds=300, poll_interval_seconds=10) else 1)" \
 		|| { echo "ERROR: Autoscaling endpoint not ready"; exit 1; }; \
-	\
-	echo "  Resolving PGHOST..."; \
 	PGHOST=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
 		"from databricks.sdk import WorkspaceClient; w=WorkspaceClient(); ep=w.postgres.get_endpoint(name='$$ENDPOINT_NAME'); print(ep.status.hosts.host if ep.status and ep.status.hosts else '')" 2>/dev/null || echo ""); \
+	if [ -z "$$PGHOST" ]; then echo "ERROR: Could not resolve PGHOST for endpoint $$ENDPOINT_NAME"; exit 1; fi; \
 	echo "  PGHOST: $$PGHOST"; \
 	export PGHOST; \
 	\
 	echo ""; \
-	echo "Step 4/9: Creating deep_research database..."; \
+	echo "Step 2/7: Ensuring deep_research database exists..."; \
 	DATABRICKS_CONFIG_PROFILE="$$PROFILE" ENDPOINT_NAME="$$ENDPOINT_NAME" PGHOST="$$PGHOST" LAKEBASE_INSTANCE_NAME="" LAKEBASE_DATABASE=deep_research \
 		uv run python -c "import asyncio; from deep_research.db.bootstrap import ensure_database_exists; asyncio.run(ensure_database_exists())" \
-		|| { echo "ERROR: Database creation failed"; exit 1; }; \
+		|| { echo "ERROR: Database bootstrap failed"; exit 1; }; \
 	\
 	echo ""; \
-	echo "Step 5/9: Re-deploying bundle with deep_research + endpoint..."; \
-	databricks bundle deploy $$DEPLOY_ARGS --var lakebase_database=deep_research --var endpoint_name=$$ENDPOINT_NAME --var pghost=$$PGHOST || { echo "ERROR: Bundle re-deploy failed"; exit 1; }; \
+	echo "Step 3/7: Preflight — resolve DAB postgres binding vars + drift check..."; \
+	BUNDLE_TF_JSON=".databricks/bundle/$(TARGET)/terraform/bundle.tf.json"; \
+	APP_NAME_PRE=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.apps.deep_research_agent.name // empty'); \
+	PREFLIGHT_DRIFT_ARGS=""; \
+	if [ -n "$$APP_NAME_PRE" ] && [ -f "$$BUNDLE_TF_JSON" ]; then \
+		PREFLIGHT_DRIFT_ARGS="--app-name $$APP_NAME_PRE --bundle-tf-json $$BUNDLE_TF_JSON"; \
+		echo "  Drift check enabled (app=$$APP_NAME_PRE, tf=$$BUNDLE_TF_JSON)"; \
+	else \
+		echo "  Drift check skipped (no prior bundle.tf.json or app yet — first deploy on this host)"; \
+	fi; \
+	POSTGRES_VAR_ARGS=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" ENDPOINT_NAME="$$ENDPOINT_NAME" LAKEBASE_DATABASE=deep_research \
+		uv run python -m deep_research.deployment.preflight \
+			--target $(TARGET) \
+			--profile "$$PROFILE" \
+			--endpoint-name "$$ENDPOINT_NAME" \
+			--database-name "deep_research" \
+			$$PREFLIGHT_DRIFT_ARGS) \
+		|| { echo "ERROR: Preflight failed. See messages above."; exit 1; }; \
+	echo "  Resolved: $$POSTGRES_VAR_ARGS"; \
 	\
 	echo ""; \
-	echo "Step 6/9: Running database migrations..."; \
+	echo "Step 4/7: Bundle deploy with DAB-managed lakebase-postgres binding..."; \
+	databricks bundle deploy $$DEPLOY_ARGS \
+		--var lakebase_database=deep_research \
+		--var endpoint_name=$$ENDPOINT_NAME \
+		--var pghost=$$PGHOST \
+		$$POSTGRES_VAR_ARGS \
+		|| { echo "ERROR: Bundle deploy failed"; exit 1; }; \
+	\
+	echo ""; \
+	echo "Step 5/7: Running database migrations..."; \
 	DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
 	ENDPOINT_NAME="$$ENDPOINT_NAME" \
 	PGHOST="$$PGHOST" \
@@ -738,40 +831,35 @@ deploy: build requirements
 	uv run alembic upgrade head || { echo "ERROR: Migrations failed"; exit 1; }; \
 	\
 	echo ""; \
-	echo "Step 7/9: Writing ../.env.$(TARGET) with connection info..."; \
+	echo "  Writing ../.env.$(TARGET) with connection info..."; \
 	printf "# Lakebase connection for target: $(TARGET)\n# Generated by: make deploy TARGET=$(TARGET)\nDATABRICKS_CONFIG_PROFILE=%s\nENDPOINT_NAME=%s\nPGHOST=%s\nLAKEBASE_DATABASE=deep_research\n" "$$PROFILE" "$$ENDPOINT_NAME" "$$PGHOST" > $(ROOT_DIR)/.env.$(TARGET); \
 	cat $(ROOT_DIR)/.env.$(TARGET); \
 	\
 	echo ""; \
-	echo "Step 8/9: Granting permissions + starting app..."; \
-	if [ -z "$$APP_NAME" ]; then \
-		APP_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.apps.deep_research_agent.name // empty'); \
-	fi; \
+	echo "Step 6/7: Granting Postgres permissions to the app service principal..."; \
+	APP_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.apps.deep_research_agent.name // empty'); \
 	if [ -z "$$APP_NAME" ]; then \
 		echo "ERROR: Could not resolve app name from bundle summary"; \
 		echo "  Check that 'databricks bundle summary -t $(TARGET) --output json' returns the app config."; \
 		exit 1; \
 	fi; \
 	echo "  Resolved APP_NAME: $$APP_NAME"; \
-	echo "Configuring Databricks App Postgres resource..."; \
-	DATABRICKS_CONFIG_PROFILE="$$PROFILE" \
-	ENDPOINT_NAME="$$ENDPOINT_NAME" \
-	LAKEBASE_DATABASE="deep_research" \
-	uv run python -m deep_research.deployment.app_postgres_resource \
-		--app-name "$$APP_NAME" \
-		--profile "$$PROFILE" \
-		--endpoint-name "$$ENDPOINT_NAME" \
-		--database-name "deep_research" \
-		|| { echo "ERROR: App Postgres resource configuration failed"; exit 1; }; \
 	ENDPOINT_NAME="$$ENDPOINT_NAME" ./scripts/grant-app-permissions.sh "" "$$PROFILE" "deep_research" "$$APP_NAME" || { echo "ERROR: Permission grant failed"; exit 1; }; \
 	echo "Granting MLflow experiment access to app SP..."; \
 	./scripts/grant-app-mlflow-experiment.sh "$(MLFLOW_EXPERIMENT_PATH)" "$$APP_NAME" "$$PROFILE" CAN_EDIT \
 		|| { echo "ERROR: MLflow experiment grant failed"; exit 1; }; \
-	echo "Re-deploying and starting app with bundle run..."; \
-	databricks bundle run -t $(TARGET) --var endpoint_name=$$ENDPOINT_NAME --var pghost=$$PGHOST deep_research_agent || { echo "ERROR: App start failed"; exit 1; }; \
 	\
 	echo ""; \
-	echo "Step 9/9: Deployment summary..."; \
+	echo "Step 7/7: Starting app via bundle run..."; \
+	databricks bundle run -t $(TARGET) \
+		--var endpoint_name=$$ENDPOINT_NAME \
+		--var pghost=$$PGHOST \
+		$$POSTGRES_VAR_ARGS \
+		deep_research_agent \
+		|| { echo "ERROR: App start failed"; exit 1; }; \
+	\
+	echo ""; \
+	echo "Deployment summary..."; \
 	databricks bundle summary -t $(TARGET)
 	@echo ""
 	@echo "=============================================="
@@ -810,26 +898,38 @@ app-deploy: $(if $(BUILD),build requirements,)
 		exit 1; \
 	fi; \
 	LAKEBASE_DB="$${LAKEBASE_DATABASE:-deep_research}"; \
-	DEPLOY_ARGS="-t $(TARGET) --var lakebase_database=$$LAKEBASE_DB --var endpoint_name=$$ENDPOINT_NAME --var pghost=$$PGHOST"; \
+	echo ""; \
+	echo "Step 1/4: Resolving DAB postgres binding vars..."; \
+	POSTGRES_VAR_ARGS=$$(DATABRICKS_CONFIG_PROFILE="$$DATABRICKS_CONFIG_PROFILE" \
+		ENDPOINT_NAME="$$ENDPOINT_NAME" LAKEBASE_DATABASE="$$LAKEBASE_DB" \
+		uv run python -m deep_research.deployment.app_postgres_resource \
+			--profile "$$DATABRICKS_CONFIG_PROFILE" \
+			--endpoint-name "$$ENDPOINT_NAME" \
+			--database-name "$$LAKEBASE_DB" \
+			--print-bundle-vars) \
+		|| { echo "ERROR: Could not resolve postgres binding vars. Run 'make deploy TARGET=$(TARGET)' to re-bootstrap."; exit 1; }; \
+	echo "  Resolved: $$POSTGRES_VAR_ARGS"; \
+	case "$$POSTGRES_VAR_ARGS" in *pending*) echo "ERROR: postgres binding vars resolved to 'pending'."; exit 1;; esac; \
+	DEPLOY_ARGS="-t $(TARGET) --var lakebase_database=$$LAKEBASE_DB --var endpoint_name=$$ENDPOINT_NAME --var pghost=$$PGHOST $$POSTGRES_VAR_ARGS"; \
 	if [ -n "$(BRAVE_SCOPE)" ]; then \
 		DEPLOY_ARGS="$$DEPLOY_ARGS --var brave_secret_scope=$(BRAVE_SCOPE)"; \
 	fi; \
 	echo ""; \
-	echo "Step 1/3: databricks bundle deploy $$DEPLOY_ARGS"; \
+	echo "Step 2/4: databricks bundle deploy $$DEPLOY_ARGS"; \
 	echo "  Profile:  $$DATABRICKS_CONFIG_PROFILE"; \
 	echo "  Endpoint: $$ENDPOINT_NAME"; \
 	echo "  PGHOST:   $$PGHOST"; \
 	echo "  Database: $$LAKEBASE_DB"; \
 	databricks bundle deploy $$DEPLOY_ARGS || { echo "ERROR: Bundle deploy failed"; exit 1; }; \
 	echo ""; \
-	echo "Step 2/3: Granting MLflow experiment access to app SP..."; \
+	echo "Step 3/4: Granting MLflow experiment access to app SP..."; \
 	APP_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.apps.deep_research_agent.name // empty'); \
 	if [ -z "$$APP_NAME" ]; then echo "ERROR: Could not resolve app name from bundle summary"; exit 1; fi; \
 	./scripts/grant-app-mlflow-experiment.sh "$(MLFLOW_EXPERIMENT_PATH)" "$$APP_NAME" "$$DATABRICKS_CONFIG_PROFILE" CAN_EDIT \
 		|| { echo "ERROR: MLflow experiment grant failed"; exit 1; }; \
 	echo ""; \
-	echo "Step 3/3: databricks bundle run -t $(TARGET) deep_research_agent"; \
-	databricks bundle run -t $(TARGET) --var endpoint_name=$$ENDPOINT_NAME --var pghost=$$PGHOST deep_research_agent \
+	echo "Step 4/4: databricks bundle run -t $(TARGET) deep_research_agent"; \
+	databricks bundle run -t $(TARGET) --var endpoint_name=$$ENDPOINT_NAME --var pghost=$$PGHOST $$POSTGRES_VAR_ARGS deep_research_agent \
 		|| { echo "ERROR: App start failed"; exit 1; }
 	@echo ""
 	@echo "App redeploy complete. Logs: make logs TARGET=$(TARGET) FOLLOW=-f"

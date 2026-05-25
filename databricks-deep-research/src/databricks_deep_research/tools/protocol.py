@@ -61,6 +61,7 @@ class ToolKind(StrEnum):
 
     web_search = "web_search"
     web_crawl = "web_crawl"
+    web_research = "web_research"
     file_search = "file_search"
     vector_search = "vector_search"
     genie = "genie"
@@ -69,6 +70,7 @@ class ToolKind(StrEnum):
     compute_namespace = "compute_namespace"
     delta_read = "delta_read"
     delta_grep = "delta_grep"
+    delta_context = "delta_context"
     delta_table_read = "delta_table_read"
     table_read = "table_read"
     custom = "custom"
@@ -77,6 +79,7 @@ class ToolKind(StrEnum):
 _TOOL_KIND_TO_SOURCE_KIND: dict[str, str] = {
     ToolKind.web_search: SourceKind.web,
     ToolKind.web_crawl: SourceKind.builtin,
+    ToolKind.web_research: SourceKind.web,
     ToolKind.file_search: SourceKind.file,
     ToolKind.vector_search: SourceKind.vector_index,
     ToolKind.genie: SourceKind.sql_analytics,
@@ -85,6 +88,7 @@ _TOOL_KIND_TO_SOURCE_KIND: dict[str, str] = {
     ToolKind.compute_namespace: SourceKind.builtin,
     ToolKind.delta_read: SourceKind.delta_table,
     ToolKind.delta_grep: SourceKind.delta_table,
+    ToolKind.delta_context: SourceKind.delta_table,
     ToolKind.delta_table_read: SourceKind.delta_table,
     ToolKind.table_read: SourceKind.builtin,
 }

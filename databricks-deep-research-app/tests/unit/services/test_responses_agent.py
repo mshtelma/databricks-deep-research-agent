@@ -157,7 +157,7 @@ class TestPredictStream:
         chunk2 = MagicMock(event_type="agent_stream_chunk", chunk=" world")
         node_started = MagicMock(event_type="node_started")
 
-        async def fake_stream(*, workflow, query):  # noqa: ARG001
+        async def fake_stream(**kwargs):  # noqa: ARG001
             yield node_started
             yield chunk1
             yield chunk2

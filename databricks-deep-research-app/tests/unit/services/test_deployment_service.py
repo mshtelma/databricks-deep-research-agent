@@ -168,6 +168,95 @@ class TestIncrementCleanupAttempts:
         assert result.cleanup_attempts == 2
 
 
+class TestListFailedForAgent:
+    """list_failed_for_agent powers the force-delete FAILED cascade (D1)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_only_failed_rows(
+        self, mock_db_session: AsyncMock
+    ) -> None:
+        agent_id = uuid4()
+        failed_row = _make_deployment(
+            agent_id=agent_id, status=DeploymentStatus.FAILED
+        )
+        scalars = MagicMock()
+        scalars.all.return_value = [failed_row]
+        result = MagicMock()
+        result.scalars.return_value = scalars
+        mock_db_session.execute = AsyncMock(return_value=result)
+        service = DeploymentService(mock_db_session)
+
+        rows = await service.list_failed_for_agent(agent_id)
+        assert rows == [failed_row]
+        # Statement targets FAILED status only.
+        executed_stmt = str(mock_db_session.execute.call_args.args[0])
+        assert "status" in executed_stmt
+
+
+class TestDeleteTerminalRowsIncludeFailed:
+    """delete_terminal_rows_for_agent must widen its deletable set when
+    invoked from force-delete (include_failed=True) so the FK can clear.
+    """
+
+    @pytest.mark.asyncio
+    async def test_default_excludes_failed_rows(
+        self, mock_db_session: AsyncMock
+    ) -> None:
+        agent_id = uuid4()
+        deactivated = _make_deployment(
+            agent_id=agent_id, status=DeploymentStatus.DEACTIVATED
+        )
+        scalars = MagicMock()
+        scalars.all.return_value = [deactivated]
+        result = MagicMock()
+        result.scalars.return_value = scalars
+        mock_db_session.execute = AsyncMock(return_value=result)
+        mock_db_session.delete = AsyncMock()
+        service = DeploymentService(mock_db_session)
+
+        count = await service.delete_terminal_rows_for_agent(agent_id)
+        # Single SELECT (terminal) executed; no FAILED SELECT issued.
+        assert mock_db_session.execute.await_count == 1
+        assert count == 1
+
+    @pytest.mark.asyncio
+    async def test_include_failed_runs_extra_select(
+        self, mock_db_session: AsyncMock
+    ) -> None:
+        agent_id = uuid4()
+        deactivated = _make_deployment(
+            agent_id=agent_id, status=DeploymentStatus.DEACTIVATED
+        )
+        failed = _make_deployment(
+            agent_id=agent_id, status=DeploymentStatus.FAILED
+        )
+
+        # Two SELECTs in sequence: terminal then failed.
+        terminal_scalars = MagicMock()
+        terminal_scalars.all.return_value = [deactivated]
+        terminal_result = MagicMock()
+        terminal_result.scalars.return_value = terminal_scalars
+
+        failed_scalars = MagicMock()
+        failed_scalars.all.return_value = [failed]
+        failed_result = MagicMock()
+        failed_result.scalars.return_value = failed_scalars
+
+        mock_db_session.execute = AsyncMock(
+            side_effect=[terminal_result, failed_result]
+        )
+        mock_db_session.delete = AsyncMock()
+        service = DeploymentService(mock_db_session)
+
+        count = await service.delete_terminal_rows_for_agent(
+            agent_id, include_failed=True
+        )
+        assert count == 2
+        assert mock_db_session.execute.await_count == 2
+        # Both rows passed to session.delete.
+        assert mock_db_session.delete.await_count == 2
+
+
 class TestPaginationBounds:
     @pytest.mark.asyncio
     async def test_list_for_user_caps_limit_at_max(

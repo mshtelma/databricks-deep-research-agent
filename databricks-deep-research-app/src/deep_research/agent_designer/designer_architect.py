@@ -114,6 +114,8 @@ def designer_system_prompt() -> str:
         "- required_outputs: sections or deliverables the final answer must contain\n"
         "- quality_gates: critic checks that make generic workflows unacceptable\n"
         "- constraints: scope, tone, freshness, source, or compliance constraints\n"
+        "- tool_plan: optional LLM-authored runtime tools and node bindings; "
+        "include it when the user selects assets or requests specific tools\n"
     )
 
 
@@ -173,6 +175,7 @@ def compile_workflow_design_brief(
         # Same pattern for grounding_mode (default "reclaim"): the Designer
         # LLM controls the strictness vs latency trade-off per workflow.
         grounding_mode=supplied_brief.grounding_mode,
+        tool_plan=supplied_brief.tool_plan,
     )
 
 

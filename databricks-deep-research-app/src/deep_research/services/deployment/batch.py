@@ -37,7 +37,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from deep_research.models.agent_deployment import AgentDeployment, DeploymentMode
 from deep_research.services.deployment._paths import resolve_package_data_dir
@@ -47,6 +47,9 @@ from deep_research.services.deployment.translator import (
     ValidationError,
     ValidationResult,
 )
+
+if TYPE_CHECKING:
+    from deep_research.services.deployment.auth import WorkspaceClientResolver
 
 # The SQL template ships as package data. In a wheel install it lives at
 # ``site-packages/deep_research/services/deployment/templates/spark-batch/``;
@@ -247,10 +250,17 @@ class BatchTranslator:
             },
         )
 
-    async def deactivate(self, deployment: AgentDeployment) -> None:
+    async def deactivate(
+        self,
+        deployment: AgentDeployment,
+        *,
+        client_resolver: WorkspaceClientResolver | None = None,
+    ) -> None:
         """No-op for Phase 2 (no live pipeline created).
 
         Phase 3 will pause/delete the Databricks Workflow + Pipeline here.
-        Idempotent by definition.
+        Idempotent by definition. ``client_resolver`` is accepted for
+        Protocol conformance and reserved for the Phase 3 implementation,
+        where the user's OBO client should run the pipeline teardown.
         """
         return None

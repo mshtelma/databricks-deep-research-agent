@@ -20,7 +20,13 @@ import {
   normalizeValidationErrors,
   normalizeWorkflowAst,
 } from '@/lib/workflowAst'
-import type { ChatMessage, DesignerSSEEvent, NormalizationFix, ToolCall } from '@/types/agentDesigner'
+import type {
+  ChatMessage,
+  DesignerAsset,
+  DesignerSSEEvent,
+  NormalizationFix,
+  ToolCall,
+} from '@/types/agentDesigner'
 import type { AST, ValidationError } from '@/types/ast'
 
 // ---------------------------------------------------------------------------
@@ -205,7 +211,12 @@ const EMPTY_AST: AST = createDraftWorkflow()
 // Hook
 // ---------------------------------------------------------------------------
 
-export function useChatSession(opts?: { sessionId?: string | null }): ChatSession {
+type DesignerAssetsProvider = DesignerAsset[] | (() => DesignerAsset[])
+
+export function useChatSession(opts?: {
+  sessionId?: string | null
+  assets?: DesignerAssetsProvider
+}): ChatSession {
   const [state, dispatch] = useReducer(reducer, initialChatState)
   // Keep a live ref to pendingMutations so applyPendingMutation can read
   // the latest list without being a stale closure over state.
@@ -214,6 +225,8 @@ export function useChatSession(opts?: { sessionId?: string | null }): ChatSessio
 
   const abortRef = useRef<AbortController | null>(null)
   const sessionId = opts?.sessionId
+  const assetsRef = useRef<DesignerAssetsProvider | undefined>(opts?.assets)
+  assetsRef.current = opts?.assets
 
   // Keep a live ref to isStreaming and messages for the sendMessage guard
   const isStreamingRef = useRef(false)
@@ -246,6 +259,8 @@ export function useChatSession(opts?: { sessionId?: string | null }): ChatSessio
       // Build the messages list to send: current messages + new user message.
       // (The OPEN_ASSISTANT message is local UI state only — not sent to the API.)
       const allMessages: ChatMessage[] = [...messagesRef.current, userMessage]
+      const assetSource = assetsRef.current
+      const assets = typeof assetSource === 'function' ? assetSource() : assetSource
 
       const controller = new AbortController()
       abortRef.current = controller
@@ -255,6 +270,7 @@ export function useChatSession(opts?: { sessionId?: string | null }): ChatSessio
           messages: allMessages,
           current_ast: currentAst,
           session_id: sessionId,
+          assets,
           signal: controller.signal,
         })
 

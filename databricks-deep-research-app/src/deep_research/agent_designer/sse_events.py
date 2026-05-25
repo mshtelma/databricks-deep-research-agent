@@ -11,7 +11,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-
 # ---- SSE event models (discriminated union) ----
 
 
@@ -42,7 +41,8 @@ class MutationProposedEvent(_SSEBase):
     # Layer 2 auto-repair (designer-hardening plan). Each fix records the
     # deterministic rewrite the normalizer applied to the architect's AST
     # — kind ∈ {subtype_rewrite, tier_rewrite, tool_kind_rewrite,
-    # auto_bind_retrieval, auto_declare_pool, set_minimum_max_tool_calls}.
+    # pool_spec_rewrite, auto_declare_pool, set_minimum_max_tool_calls,
+    # static_parallel_*_rewrite, brace_escape}.
     # Empty list when the architect emitted a clean AST (the common case
     # once Layer 4 architect prompt guardrails settle in).
     normalization_fixes: list[dict[str, Any]] = []

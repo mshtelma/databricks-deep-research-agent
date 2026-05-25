@@ -172,8 +172,9 @@ test-complex:
 
 # Scaffold + Run live integration test. CASE=<id> to scope to one case.
 CASE ?=
+SCAFFOLD_RUN_LOG ?=
 test-scaffold-and-run:
-	$(MAKE) -C $(APP_DIR) test-scaffold-and-run CASE=$(CASE)
+	$(MAKE) -C $(APP_DIR) test-scaffold-and-run CASE="$(CASE)" SCAFFOLD_RUN_LOG="$(SCAFFOLD_RUN_LOG)"
 
 test-all-python:
 	$(MAKE) -C $(APP_DIR) test-all-python

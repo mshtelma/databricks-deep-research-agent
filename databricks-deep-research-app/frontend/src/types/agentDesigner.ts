@@ -74,6 +74,28 @@ export interface DesignerResourcesResponse {
   total: number
 }
 
+export type DesignerAssetKind =
+  | 'vector_index'
+  | 'delta_table'
+  | 'genie_space'
+  | 'knowledge_assistant'
+  | 'serving_endpoint'
+  | 'sql_warehouse'
+
+export type DesignerAssetUsage = 'required' | 'preferred' | 'available'
+
+export interface DesignerAsset {
+  kind: DesignerAssetKind
+  full_name?: string | null
+  source_id?: string | null
+  name?: string | null
+  description?: string | null
+  usage?: DesignerAssetUsage
+  role?: string | null
+  field_roles?: Record<string, string>
+  metadata?: Record<string, unknown>
+}
+
 /**
  * Agent subtype descriptor (coordinator, planner, researcher, …).
  * Shape derived from registry.py::AGENT_SUBTYPES.

@@ -63,6 +63,9 @@ class TestProbeFrameworkTag:
         assert result.reachable is True
         assert result.error_kind is None
         assert result.note is None
+        # M3 — the tag URL is probed first; a 200 on the first request
+        # means we matched ``refs/tags/...``.
+        assert result.ref_kind == "tag"
 
     @pytest.mark.asyncio
     async def test_404_is_unreachable(self) -> None:
@@ -84,6 +87,23 @@ class TestProbeFrameworkTag:
         assert result.error_kind is None
         assert result.note is None
         assert client.get.await_count == 2
+        # M3 — tag URL returned 404, branch URL returned 200, so the ref
+        # resolves to a branch. Callers with deploy_here_require_tag_only
+        # must reject this result.
+        assert result.ref_kind == "branch"
+
+    @pytest.mark.asyncio
+    async def test_ref_kind_is_none_on_fail_open_paths(self) -> None:
+        """M3 — when the probe fails open (rate-limit, network, etc.) we
+        don't know the ref kind. Callers must treat None as "unknown" and
+        avoid the branch-reject path so they don't fail-open AND fail-closed
+        simultaneously."""
+        client = _make_http_client(403)
+        result = await probe_framework_tag(
+            git_url=GITHUB_URL, git_tag=GIT_TAG, http_client=client
+        )
+        assert result.reachable is True
+        assert result.ref_kind is None
 
     @pytest.mark.asyncio
     async def test_403_is_fail_open(self) -> None:

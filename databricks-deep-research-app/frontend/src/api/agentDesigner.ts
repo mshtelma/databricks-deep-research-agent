@@ -14,10 +14,17 @@ import type {
   ValidateResponse,
   ChatMessage,
   DesignerSSEEvent,
+  DesignerAsset,
   DesignerResourcesResponse,
 } from '../types/agentDesigner'
 
-export type { RegistryResponse, ValidateResponse, ChatMessage, DesignerSSEEvent }
+export type {
+  RegistryResponse,
+  ValidateResponse,
+  ChatMessage,
+  DesignerSSEEvent,
+  DesignerAsset,
+}
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1'
 
@@ -148,23 +155,26 @@ export async function listDesignerResources(
  * @param messages     Conversation history (at least one message).
  * @param current_ast  Current workflow AST, or null for a fresh session.
  * @param session_id   Optional correlation ID (no server-side state is stored).
+ * @param assets       Optional structured assets selected for this design turn.
  * @param signal       AbortSignal to cancel the stream.
  */
 export async function* chatStream({
   messages,
   current_ast,
   session_id,
+  assets,
   signal,
 }: {
   messages: ChatMessage[]
   current_ast: AST | null
   session_id?: string | null
+  assets?: DesignerAsset[]
   signal?: AbortSignal
 }): AsyncIterable<DesignerSSEEvent> {
   const response = await fetch(`${API_BASE_URL}/agent-designer/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, current_ast, session_id }),
+    body: JSON.stringify({ messages, current_ast, session_id, assets: assets ?? [] }),
     signal,
   })
 

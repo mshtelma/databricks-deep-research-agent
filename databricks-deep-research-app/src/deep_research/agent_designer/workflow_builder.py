@@ -8,6 +8,7 @@ time, and validates semantic data-flow invariants before the AST reaches the UI.
 from __future__ import annotations
 
 import copy
+import logging
 import re
 from typing import Any
 
@@ -20,7 +21,9 @@ from deep_research.agent_designer.designer_architect import (
     compile_workflow_design_brief,
     format_workflow_design_brief,
 )
-from deep_research.agent_designer.designer_types import WorkflowDesignBrief
+from deep_research.agent_designer.designer_types import ToolPlan, WorkflowDesignBrief
+
+logger = logging.getLogger(__name__)
 
 _RUNTIME_TEMPLATE_KEYS: frozenset[str] = frozenset(
     {
@@ -373,17 +376,476 @@ def make_tool_decl(
     }
 
 
+def _default_web_tool_decls(*, max_results: int = 10, include_crawl: bool = False) -> list[dict[str, Any]]:
+    """Default web-tool declarations for deterministic-blueprint lanes.
+
+    Plan v2.1 generic-robustness — ``include_crawl`` default is now
+    False. The integer-indexed ``web_crawl`` tool was producing
+    deterministic full-workflow failures when parallel lanes
+    speculatively called it BEFORE any ``web_research`` populated the
+    shared URL registry: the first lane errored with "No URL found for
+    index 0", that error was cached at the registry level, and every
+    other parallel lane inherited the cached failure (see
+    ``databricks-deep-research/.../tools/protocol.py`` URL failure
+    cache). ``web_research`` already provides search + auto-fetch of
+    the top-K bodies in a single call; ``web_crawl`` is only useful
+    for selectively retrieving URLs beyond ``auto_fetch_top_k``, which
+    is rare. Architects can opt back in via the explicit ``tool_plan``
+    when a workflow truly needs the extra crawl capability.
+    """
+    tools = [
+        make_tool_decl(
+            name="web_research",
+            kind="web_research",
+            config={
+                "total_results": max_results,
+                "auto_fetch_top_k": min(5, max_results),
+            },
+            description=(
+                "Search the public web and automatically fetch selected "
+                "source bodies for evidence-grounded research. Call this "
+                "FIRST for any web-evidence question — it returns both "
+                "search results AND the top-K fetched page bodies in a "
+                "single call."
+            ),
+        )
+    ]
+    if include_crawl:
+        tools.append(
+            make_tool_decl(
+                name="web_crawl",
+                kind="web_crawl",
+                description=(
+                    "Fetch and extract content from selected web pages. "
+                    "Requires a ``url_index`` from a prior ``web_research`` "
+                    "result in this workflow run — the integer index is "
+                    "issued by ``web_research`` and points at URLs the "
+                    "shared registry has cached. Call ``web_research`` "
+                    "FIRST when no valid index is available; never call "
+                    "``web_crawl`` with ``url_index=0`` before any search."
+                ),
+            )
+        )
+    return tools
+
+
+def _tool_plan_declarations(compiled_brief: WorkflowDesignBrief) -> list[dict[str, Any]] | None:
+    tool_plan = compiled_brief.tool_plan
+    if tool_plan is None:
+        return None
+    return [
+        make_tool_decl(
+            name=tool.name,
+            kind=tool.kind,
+            config=tool.config,
+            description=tool.description,
+        )
+        for tool in tool_plan.tools
+    ]
+
+
+def _tool_plan_bindings(
+    compiled_brief: WorkflowDesignBrief,
+    *,
+    node_id: str,
+    default: list[str],
+    researcher: bool = False,
+) -> list[str]:
+    """Resolve the list of runtime tool names bound to ``node_id``.
+
+    Resolution order:
+
+    1. ``tool_plan`` not declared at all → caller-supplied ``default`` wins.
+    2. ``tool_plan.bindings`` lists this ``node_id`` (or, for researchers,
+       a wildcard alias) → use those binding names.
+    3. No binding matched but ``tool_plan.tools`` declares evidence tools
+       (corpus or web kinds) → fall back to those declared tools. This
+       guards against the silent ``[]`` regression where the architect
+       enumerates specific lanes but omits the cross-lane fallback —
+       previously the researcher was constructed with zero tools and
+       produced an empty "Insufficient Evidence" report.
+    4. No evidence tools declared anywhere → caller-supplied ``default``.
+
+    Every fallback (step 3 or 4) logs ``TOOL_PLAN_BINDING_FALLBACK`` so
+    architect misses surface in deployment logs.
+    """
+    tool_plan = compiled_brief.tool_plan
+    if tool_plan is None:
+        return list(default)
+
+    aliases = {node_id}
+    if researcher:
+        aliases.update({"researchers", "all_researchers", "all-researchers"})
+
+    bound: list[str] = []
+    seen: set[str] = set()
+    for binding in tool_plan.bindings:
+        if binding.node_id not in aliases:
+            continue
+        for name in binding.tool_names:
+            if name not in seen:
+                bound.append(name)
+                seen.add(name)
+    if bound:
+        return bound
+
+    declared_evidence_tools: list[str] = []
+    evidence_kinds = _CORPUS_TOOL_KINDS | _WEB_TOOL_KINDS
+    for tool in tool_plan.tools:
+        if tool.kind not in evidence_kinds:
+            continue
+        if tool.name and tool.name not in declared_evidence_tools:
+            declared_evidence_tools.append(tool.name)
+
+    binding_node_ids = sorted({b.node_id for b in tool_plan.bindings})
+    if declared_evidence_tools:
+        logger.warning(
+            "TOOL_PLAN_BINDING_FALLBACK node_id=%s aliases=%s "
+            "binding_node_ids=%s fallback=declared_evidence_tools tools=%s",
+            node_id,
+            sorted(aliases),
+            binding_node_ids,
+            declared_evidence_tools,
+        )
+        return declared_evidence_tools
+
+    logger.warning(
+        "TOOL_PLAN_BINDING_FALLBACK node_id=%s aliases=%s "
+        "binding_node_ids=%s fallback=default tools=%s",
+        node_id,
+        sorted(aliases),
+        binding_node_ids,
+        default,
+    )
+    return list(default)
+
+
 def make_pool_decl(
     *,
     name: str,
     dedup_key: str | None = None,
     max_items: int = 100,
 ) -> dict[str, Any]:
-    """Build a top-level workflow pool declaration."""
+    """Build a top-level workflow pool declaration.
+
+    The caller chooses ``dedup_key`` per workflow; for corpus-only workflows,
+    ``chunk_id`` is preferred (see ``_sources_dedup_key`` and the ADR at
+    databricks-deep-research-app/docs/adr/2026-05-pool-dedup-key-for-corpus-only.md).
+    """
     pool: dict[str, Any] = {"name": name, "max_items": max_items}
     if dedup_key:
         pool["dedup_key"] = dedup_key
     return pool
+
+
+def _sources_dedup_key(
+    assets: list[dict[str, Any]] | None,
+    tool_plan: ToolPlan | None,
+) -> str:
+    """Pick the sources-pool dedup key.
+
+    Corpus-only assets (vector_index + delta_table, no web tool declared)
+    → ``chunk_id`` so the LLM-authored ``findings.sources[].chunk_id``
+    dedups correctly. Tool-emitted SourceInfo items that lack chunk_id
+    fall back to content-hash dedup at the pool layer.
+
+    Anything web-flavoured (web_search / web_crawl / web_research in the
+    tool_plan, or no corpus assets) → legacy ``url`` default.
+
+    See ADR: databricks-deep-research-app/docs/adr/2026-05-pool-dedup-key-for-corpus-only.md
+    """
+    asset_kinds = {
+        str(a.get("kind"))
+        for a in (assets or [])
+        if isinstance(a, dict) and isinstance(a.get("kind"), str)
+    }
+    corpus_assets = {"vector_index", "delta_table"}
+    web_kinds = {"web_search", "web_crawl", "web_research"}
+    declared_tool_kinds: set[str] = set()
+    if tool_plan is not None:
+        for tool in getattr(tool_plan, "tools", None) or []:
+            kind = getattr(tool, "kind", "") or ""
+            if kind:
+                declared_tool_kinds.add(str(kind))
+    if declared_tool_kinds & web_kinds:
+        return "url"
+    if asset_kinds & corpus_assets:
+        return "chunk_id"
+    return "url"
+
+
+_CORPUS_ASSET_KINDS: frozenset[str] = frozenset({"vector_index", "delta_table"})
+_WEB_TOOL_KINDS: frozenset[str] = frozenset(
+    {"web_search", "web_crawl", "web_research"}
+)
+_CORPUS_TOOL_KINDS: frozenset[str] = frozenset(
+    {"vector_search", "delta_read", "delta_grep", "delta_table_read"}
+)
+
+
+def _evidence_mode(
+    assets: list[dict[str, Any]] | None,
+    tool_plan: ToolPlan | None,
+) -> str:
+    """Plan v2.1 generic-robustness — classify the workflow's evidence path.
+
+    Returns one of ``"corpus_only"``, ``"mixed"``, or ``"web_only"`` so
+    prompt builders can dispatch on a three-way axis instead of the
+    legacy binary corpus-vs-not check. Mixed workflows (the
+    ``asset_signature=corpus_plus_web`` case from the deterministic
+    blueprint builder) currently get web-only guidance because the
+    binary check folds them into the "not corpus_only" branch; this
+    helper surfaces the third mode so the lane prompt can carry BOTH
+    retrieval + search strategy blocks.
+
+    Resolution policy (most authoritative first):
+
+    1. ``tool_plan`` declarations — when present, the kinds the architect
+       (or the deterministic builder) actually wired are the strongest
+       signal. Corpus kinds without web kinds → corpus_only; corpus +
+       web → mixed; web kinds only → web_only.
+    2. ``assets`` only — when ``tool_plan is None`` (legacy callers).
+       Corpus-flavoured asset kinds (vector_index, delta_table) →
+       corpus_only; everything else (or empty) → web_only. No path to
+       infer "mixed" from assets alone because the asset signature is
+       only descriptive at the asset layer (corpus_plus_web declares
+       intent; the actual web tool kinds live in the tool plan).
+    """
+    declared_tool_kinds: set[str] = set()
+    if tool_plan is not None:
+        for tool in getattr(tool_plan, "tools", None) or []:
+            kind = getattr(tool, "kind", "") or ""
+            if kind:
+                declared_tool_kinds.add(str(kind))
+    if declared_tool_kinds:
+        has_corpus_tools = bool(declared_tool_kinds & _CORPUS_TOOL_KINDS)
+        has_web_tools = bool(declared_tool_kinds & _WEB_TOOL_KINDS)
+        if has_corpus_tools and has_web_tools:
+            return "mixed"
+        if has_corpus_tools:
+            return "corpus_only"
+        if has_web_tools:
+            return "web_only"
+        # ToolPlan declares neither corpus nor web kinds (e.g.,
+        # knowledge_assistant only). Fall through to asset inspection.
+
+    asset_kinds = {
+        str(a.get("kind"))
+        for a in (assets or [])
+        if isinstance(a, dict) and isinstance(a.get("kind"), str)
+    }
+    if asset_kinds & _CORPUS_ASSET_KINDS:
+        return "corpus_only"
+    return "web_only"
+
+
+def _is_corpus_only_assets(
+    assets: list[dict[str, Any]] | None,
+    tool_plan: ToolPlan | None,
+) -> bool:
+    """True when the workflow targets a Databricks corpus only, with no web tools.
+
+    Now delegates to :func:`_evidence_mode` so the binary call site keeps
+    working while three-way callers (the lane prompt builder, the
+    coordinator system_prompt) can dispatch on the richer ``"mixed"``
+    branch.
+    """
+    return _evidence_mode(assets, tool_plan) == "corpus_only"
+
+
+_CORPUS_RETRIEVAL_STRATEGY_BLOCK = (
+    "### Retrieval strategy (Databricks corpus only)\n"
+    "- Use vector_search on the selected index FIRST to find candidate\n"
+    "  chunk_ids; then read text or table_json by chunk_id via the Delta\n"
+    "  tools (delta_read / delta_grep / delta_table_read).\n"
+    "- Cite by (file_name, page_info, chunk_id). Do NOT cite URLs.\n"
+    "- Run numeric aggregations through the compute tool (pandas/numpy) —\n"
+    "  never narrate sums or ratios from prose.\n"
+    "- Mark any unresolved sub-question \"Data unavailable\" rather than\n"
+    "  improvising."
+)
+
+# Plan v2.1 generic-robustness — mixed-evidence workflows wire BOTH
+# corpus tools AND web defaults at the blueprint layer (asset_signature=
+# corpus_plus_web). The lane prompts must surface BOTH retrieval paths
+# and a deterministic ordering preference, otherwise researchers tend to
+# default to whichever heading they see first. Joiner is generic
+# ("evidence", "source"); no domain content.
+_MIXED_EVIDENCE_JOINER = (
+    "\n\nWhen evidence may live in either source, query the corpus FIRST; "
+    "fall back to the web only when the corpus is exhausted or the question "
+    "is plainly out of the corpus's scope."
+)
+
+
+def _strategy_block_for_evidence_mode(
+    assets: list[dict[str, Any]] | None,
+    tool_plan: ToolPlan | None,
+    web_block: str,
+    *,
+    corpus_trailing_newline: bool = False,
+) -> str:
+    """Pick the lane/coordinator strategy block per evidence mode.
+
+    Three-way dispatch over ``_evidence_mode``:
+
+    * ``corpus_only`` → the corpus retrieval block (with an optional
+      trailing newline preserved for callers that join it inline).
+    * ``mixed`` → corpus block + ``_MIXED_EVIDENCE_JOINER`` + the
+      caller's ``web_block`` (so both retrieval paths are in the prompt
+      with explicit ordering).
+    * ``web_only`` → the caller's ``web_block`` verbatim.
+
+    ``web_block`` is passed in (not derived) because the lane prompt and
+    coordinator prompt phrase the web search rubric differently and we
+    don't want to centralize their copy.
+    """
+    mode = _evidence_mode(assets, tool_plan)
+    corpus = _CORPUS_RETRIEVAL_STRATEGY_BLOCK
+    if corpus_trailing_newline:
+        corpus = corpus + "\n"
+    if mode == "corpus_only":
+        return corpus
+    if mode == "mixed":
+        return corpus + _MIXED_EVIDENCE_JOINER + "\n\n" + web_block
+    return web_block
+
+
+# PR3-A R4: Per-axis Query Diversification directives. Generic vocabulary
+# only — no corpus or table names. Axes match TaskSignature.question_ambiguity
+# (PR3-B). Until PR3-B's signature lands, ``_infer_ambiguity_axes`` derives
+# axes heuristically from the design brief.
+_AMBIGUITY_AXIS_DIRECTIVES: dict[str, str] = {
+    "period_basis": (
+        "- **period_basis** — If the question references a year token "
+        "(a 4-digit year, or an 'FY<year>' / 'CY<year>' tag) without "
+        "explicitly naming fiscal or calendar basis, issue queries that "
+        "cover BOTH bases: include 'fiscal year' (or FY) AND 'calendar "
+        "year' (or CY) as alternate query variants. If the assets include "
+        "retrospective tables (summary bulletins published years after the "
+        "queried period), include queries that surface them."
+    ),
+    "entity_scope": (
+        "- **entity_scope** — If the question names an entity whose "
+        "institutional name has changed across the period covered by the "
+        "assets, issue queries for BOTH pre-rename and post-rename forms. "
+        "Pull aliases from the Coordinator's extracted_scope.entities list "
+        "when available; otherwise infer from the asset's earliest and "
+        "latest sample chunks."
+    ),
+    "temporal_scope": (
+        "- **temporal_scope** — Include queries with explicit start/end "
+        "dates AND fiscal/calendar qualifiers. Do not assume the date "
+        "framing in the question is the only framing the corpus uses."
+    ),
+    "unit_basis": (
+        "- **unit_basis** — If the question references quantities without "
+        "an explicit unit, issue queries for the most likely unit "
+        "candidates (e.g. millions, thousands, percent, raw count) drawn "
+        "from the asset's column-header sample."
+    ),
+    "geographic_scope": (
+        "- **geographic_scope** — If the question references a region "
+        "whose territory or naming has shifted historically, issue queries "
+        "for both the historical and current names. Use the asset's "
+        "metadata for the historical name vocabulary when available."
+    ),
+}
+
+
+# Regex helpers for heuristic ambiguity detection (PR3-A; replaced by
+# TaskSignature.question_ambiguity in PR3-B).
+_YEAR_TOKEN_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_FY_CY_TOKEN_RE = re.compile(r"\b(?:fy|cy|fiscal\s+year|calendar\s+year)\b", re.IGNORECASE)
+_UNIT_TOKEN_RE = re.compile(
+    r"(?:\$|\b(?:million|billion|trillion|percent|thousand|count)\b)", re.IGNORECASE
+)
+_GEO_TOKEN_RE = re.compile(
+    r"\b(?:country|countries|region|state|province|district|county|nation|nationwide)\b",
+    re.IGNORECASE,
+)
+_ENTITY_RENAME_TOKEN_RE = re.compile(
+    r"\b(?:department|agency|ministry|bureau|administration|commission|"
+    r"organization|institution|corporation)\b",
+    re.IGNORECASE,
+)
+
+
+def _infer_ambiguity_axes(
+    *,
+    intent: str = "",
+    lane_description: str = "",
+    design_brief: WorkflowDesignBrief | None = None,
+    explicit_axes: list[str] | None = None,
+) -> list[str]:
+    """Derive ambiguity axes from a design brief when no TaskSignature is set.
+
+    The plan permits a brief-text heuristic until PR3-B threads
+    ``task_signature.question_ambiguity`` through the builder. Returns the
+    subset of ``_AMBIGUITY_AXIS_DIRECTIVES`` keys whose corresponding
+    vocabulary appears in the brief text.
+
+    When ``explicit_axes`` is provided (e.g. from a TaskSignature), it
+    overrides the heuristic and is filtered against the supported axis set.
+    """
+    if explicit_axes is not None:
+        return [a for a in explicit_axes if a in _AMBIGUITY_AXIS_DIRECTIVES]
+
+    text_parts = [intent or "", lane_description or ""]
+    if design_brief is not None:
+        text_parts.append(getattr(design_brief, "user_goal", "") or "")
+        text_parts.append(getattr(design_brief, "domain", "") or "")
+        for item in (
+            list(getattr(design_brief, "required_outputs", []) or [])
+            + list(getattr(design_brief, "constraints", []) or [])
+            + list(getattr(design_brief, "quality_gates", []) or [])
+        ):
+            text_parts.append(str(item))
+    text = " ".join(p for p in text_parts if p)
+    if not text:
+        return []
+
+    has_year = bool(_YEAR_TOKEN_RE.search(text))
+    has_fy_cy = bool(_FY_CY_TOKEN_RE.search(text))
+    axes: list[str] = []
+    # period_basis: a year token without an explicit FY/CY qualifier, OR
+    # the question already hedges FY/CY (we still want the other axis as a
+    # cross-check).
+    if has_year or has_fy_cy:
+        axes.append("period_basis")
+        # If the question mentions a year, it's also a temporal_scope concern.
+        axes.append("temporal_scope")
+    if _UNIT_TOKEN_RE.search(text):
+        axes.append("unit_basis")
+    if _GEO_TOKEN_RE.search(text):
+        axes.append("geographic_scope")
+    # entity_scope fires when the brief mentions institutional vocabulary
+    # AND a year token (the year hints at a temporal context where names
+    # might have shifted).
+    if has_year and _ENTITY_RENAME_TOKEN_RE.search(text):
+        axes.append("entity_scope")
+    return axes
+
+
+def _query_diversification_block(axes: list[str]) -> str:
+    """Render the Query Diversification block for the given axes.
+
+    Returns an empty string when no axes are active so the lane prompt
+    layout is preserved for non-ambiguous tasks.
+    """
+    if not axes:
+        return ""
+    bullets = "\n".join(
+        _AMBIGUITY_AXIS_DIRECTIVES[axis]
+        for axis in axes
+        if axis in _AMBIGUITY_AXIS_DIRECTIVES
+    )
+    if not bullets:
+        return ""
+    return (
+        "### Query diversification (axes inferred from the question)\n"
+        f"{bullets}"
+    )
 
 
 def _bounded_intent(intent: str, *, max_length: int = 2000) -> str:
@@ -598,6 +1060,9 @@ def _fallback_lane_user_prompt_template(
     lane_description: str,
     intent: str,
     design_brief: WorkflowDesignBrief,
+    assets: list[dict[str, Any]] | None = None,
+    tool_plan: ToolPlan | None = None,
+    ambiguity_axes: list[str] | None = None,
 ) -> str:
     topic = _bounded_intent(lane_description or intent, max_length=140)
     required_outputs = _brief_list(
@@ -614,6 +1079,31 @@ def _fallback_lane_user_prompt_template(
         "\n- Include publication dates and as-of qualifiers for time-sensitive facts."
         if _is_time_sensitive_text(intent, lane_description, *design_brief.constraints)
         else ""
+    )
+    web_strategy_block = (
+        "### Search strategy\n"
+        "- FIRST call: ``web_research`` (it combines search + auto-fetch of "
+        "the top-K page bodies in one call). Subsequent calls: more "
+        "``web_research`` with refined queries — refine with source names, "
+        "official documents, or exact phrases from prior results.\n"
+        "- Only call ``web_crawl`` AFTER ``web_research`` has populated the "
+        "shared URL index; pass a ``url_index`` from a prior result. Never "
+        "call ``web_crawl`` with ``url_index=0`` before any search.\n"
+        "- Crawl or retrieve source text before relying on a result; titles "
+        f"and metadata alone are not citeable evidence.{time_bullet}"
+    )
+    strategy_block = _strategy_block_for_evidence_mode(
+        assets, tool_plan, web_block=web_strategy_block
+    )
+    axes = _infer_ambiguity_axes(
+        intent=intent,
+        lane_description=lane_description,
+        design_brief=design_brief,
+        explicit_axes=ambiguity_axes,
+    )
+    diversification_block = _query_diversification_block(axes)
+    diversification_section = (
+        f"\n\n{diversification_block}" if diversification_block else ""
     )
     return (
         "## Investigation Brief\n\n"
@@ -633,12 +1123,8 @@ def _fallback_lane_user_prompt_template(
         f"- **Evidence-backed findings**: facts that support {required_outputs}.\n"
         f"- **Coverage and conflicts**: source agreement, disagreement, and gaps.\n"
         f"- **Unsupported items**: claims blocked by {quality_gates}.\n\n"
-        "### Search strategy\n"
-        "- Run focused searches for each sub-question; refine with source names, "
-        "official documents, or exact phrases found in promising results.\n"
-        "- Crawl or retrieve source text before relying on a result; titles and "
-        "metadata alone are not citeable evidence."
-        f"{time_bullet}\n\n"
+        f"{strategy_block}"
+        f"{diversification_section}\n\n"
         "### Definition of done\n"
         "Each sub-question has a concise answer with citeable source text, OR "
         "is marked \"Data unavailable\" -- DO NOT improvise."
@@ -680,6 +1166,11 @@ def _with_lane_user_prompt_contract(
     *,
     description: str,
     designer_template: str,
+    assets: list[dict[str, Any]] | None = None,
+    tool_plan: ToolPlan | None = None,
+    intent: str = "",
+    design_brief: WorkflowDesignBrief | None = None,
+    ambiguity_axes: list[str] | None = None,
 ) -> str:
     """Wrap a Designer-authored lane template with the runtime prompt contract.
 
@@ -687,6 +1178,14 @@ def _with_lane_user_prompt_contract(
     comes from the Designer's lane description and template, while the builder
     guarantees the prompt has the headings and runtime anchors that lane
     researchers need to execute without a second LLM repair pass.
+
+    When the workflow targets a Databricks corpus only (no web tools), the
+    generic 'Search strategy' block is replaced with a corpus-specific
+    retrieval strategy so the researcher does not emit web-flavoured guidance.
+
+    When ``ambiguity_axes`` is non-empty (or the heuristic derives axes from
+    ``intent``/``design_brief``), a Query Diversification block is appended
+    enumerating per-axis directives expressed in generic vocabulary only.
     """
     template = _coerce_unknown_template_variables_to_query(
         designer_template.strip(),
@@ -695,6 +1194,31 @@ def _with_lane_user_prompt_contract(
     if not template:
         return ""
     lane_focus = _bounded_intent(description, max_length=420)
+    web_strategy_block = (
+        "### Search strategy\n"
+        "- FIRST call: ``web_research`` with queries combining {query} and "
+        "the lane focus terms above. ``web_research`` returns search results "
+        "AND auto-fetches the top-K page bodies in a single call.\n"
+        "- Refine subsequent ``web_research`` calls around source gaps; "
+        "prefer primary or high-authority sources.\n"
+        "- Only call ``web_crawl`` AFTER ``web_research`` has populated URLs; "
+        "pass a ``url_index`` from a prior result. Never call ``web_crawl`` "
+        "with ``url_index=0`` before any search.\n"
+    )
+    strategy_block = _strategy_block_for_evidence_mode(
+        assets, tool_plan, web_block=web_strategy_block,
+        corpus_trailing_newline=True,
+    )
+    axes = _infer_ambiguity_axes(
+        intent=intent,
+        lane_description=description,
+        design_brief=design_brief,
+        explicit_axes=ambiguity_axes,
+    )
+    diversification_block = _query_diversification_block(axes)
+    diversification_section = (
+        f"{diversification_block}\n\n" if diversification_block else ""
+    )
     contract = (
         "## Investigation Brief\n\n"
         "You are investigating: **{query}**\n\n"
@@ -709,9 +1233,8 @@ def _with_lane_user_prompt_contract(
         "- **Evidence summary**: cite the strongest findings and source context.\n"
         "- **Analysis and implications**: explain why the evidence matters for the user goal.\n"
         "- **Unknowns and caveats**: mark missing, stale, or conflicting evidence explicitly.\n\n"
-        "### Search strategy\n"
-        "- Start with queries that combine {query} with the lane focus terms above.\n"
-        "- Prefer primary or high-authority sources, then refine searches around gaps.\n\n"
+        f"{strategy_block}\n"
+        f"{diversification_section}"
         "### Definition of done\n"
         "Each sub-question has a concise answer with citeable source text, OR "
         "is marked \"Data unavailable\" -- DO NOT improvise.\n\n"
@@ -833,6 +1356,8 @@ def _lane_specs(
     design_brief: WorkflowDesignBrief,
     *,
     intent: str = "",
+    assets: list[dict[str, Any]] | None = None,
+    ambiguity_axes: list[str] | None = None,
 ) -> list[dict[str, str]]:
     """Build builder-side lane spec dicts from the brief's LaneSpec list.
 
@@ -852,7 +1377,6 @@ def _lane_specs(
     supplied only a lane description, the semantic gate must see that gap and
     send the LLM back to author the use-case-specific prompts.
     """
-    del intent  # Retained for compatibility with existing call sites.
     specs: list[dict[str, str]] = []
     for index, lane in enumerate(design_brief.research_lanes, start=1):
         cleaned_description = _bounded_intent(lane.description, max_length=280)
@@ -865,6 +1389,11 @@ def _lane_specs(
             designer_template=_bounded_multiline(
                 lane.user_prompt_template, max_length=2600
             ),
+            assets=assets,
+            tool_plan=design_brief.tool_plan,
+            intent=intent,
+            design_brief=design_brief,
+            ambiguity_axes=ambiguity_axes,
         )
         specs.append(
             {
@@ -880,12 +1409,17 @@ def _lane_specs(
 
 def build_web_research_workflow(
     intent: str,
-    name: str,
+    name: str = "",
     design_brief: WorkflowDesignBrief | dict[str, Any] | None = None,
+    assets: list[dict[str, Any]] | None = None,
+    task_signature: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a Designer research workflow.
 
-    Dispatches on ``compiled_brief.topology``:
+    Dispatches on ``compiled_brief.topology`` — UNLESS a ``task_signature``
+    is supplied (PR3-B Layer 1), in which case the topology is selected
+    deterministically via ``select_topology(signature)`` and overrides the
+    brief's topology field.
 
     * ``parallel_lanes`` (DEFAULT) — coordinator → parallel lane researchers →
       synthesizer. Each lane runs concurrently with its specialized prompt;
@@ -903,15 +1437,61 @@ def build_web_research_workflow(
 
     The default is ``parallel_lanes``; legacy briefs without a topology
     field coerce to it via :class:`WorkflowDesignBrief`'s validator.
+
+    ``assets`` is the list of raw asset dicts (kind/full_name) from the
+    asset-getter; it is forwarded to the pool builder so corpus-only
+    deployments receive ``dedup_key="chunk_id"`` instead of ``"url"``.
+
+    When ``task_signature`` is provided (a serialized TaskSignature dict),
+    the builder honours its ``question_ambiguity`` by threading the axes
+    through the lane-prompt construction (so the per-axis Query
+    Diversification block fires regardless of the brief text heuristic).
     """
     compiled_brief = compile_workflow_design_brief(intent, design_brief)
     topology = compiled_brief.topology
+    ambiguity_axes: list[str] | None = None
+    if task_signature is not None:
+        # Plan v2.1 M11: failure-closed on invalid TaskSignature payloads.
+        # Previously this catch silently fell back to brief topology — the
+        # exact bypass that lets brief vocabulary override the classifier
+        # for the Investment-style failure mode. Now propagate
+        # SignatureError so the designer flow halts with a clear
+        # classification failure rather than producing a wrong AST.
+        from deep_research.agent_designer.task_signature import (
+            SignatureError,
+            TaskSignature,
+            select_topology,
+        )
+
+        try:
+            sig = TaskSignature.load_from_storage(task_signature)
+        except Exception as exc:  # pragma: no cover - guarded by tests
+            raise SignatureError(
+                f"task_signature payload failed validation: {exc}"
+            ) from exc
+        topology = select_topology(sig)
+        compiled_brief = compiled_brief.model_copy(update={"topology": topology})
+        ambiguity_axes = list(sig.question_ambiguity)
     if topology == "plan_and_execute":
-        return _build_plan_and_execute_workflow(intent, name, compiled_brief)
+        return _build_plan_and_execute_workflow(
+            intent,
+            name or compiled_brief.workflow_name or intent,
+            compiled_brief,
+            assets=assets,
+            ambiguity_axes=ambiguity_axes,
+        )
     if topology == "single_agent":
-        return _build_single_agent_workflow(intent, name, compiled_brief)
+        return _build_single_agent_workflow(
+            intent, name or compiled_brief.workflow_name or intent, compiled_brief
+        )
     # Default: parallel_lanes
-    return _build_parallel_lanes_workflow(intent, name, compiled_brief)
+    return _build_parallel_lanes_workflow(
+        intent,
+        name or compiled_brief.workflow_name or intent,
+        compiled_brief,
+        assets=assets,
+        ambiguity_axes=ambiguity_axes,
+    )
 
 
 def _require_authored_lane_specs(
@@ -940,6 +1520,8 @@ def _build_plan_and_execute_workflow(
     intent: str,
     name: str,
     compiled_brief: WorkflowDesignBrief,
+    assets: list[dict[str, Any]] | None = None,
+    ambiguity_axes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Plan-and-execute topology.
 
@@ -956,25 +1538,18 @@ def _build_plan_and_execute_workflow(
     synthesizer_system, _ = _default_prompts("synthesizer")
     synthesizer_system = _designer_synthesizer_system_prompt(synthesizer_system)
     designer_goal = _bounded_intent(intent)
-    lane_specs = _lane_specs(compiled_brief, intent=intent)
+    lane_specs = _lane_specs(
+        compiled_brief, intent=intent, assets=assets, ambiguity_axes=ambiguity_axes
+    )
     _require_authored_lane_specs(lane_specs, topology="plan_and_execute")
-    tools = [
-        make_tool_decl(
-            name="web_search",
-            kind="web_search",
-            config={"max_results": 10},
-            description="Search the public web for relevant sources.",
-        ),
-        make_tool_decl(
-            name="web_crawl",
-            kind="web_crawl",
-            description=(
-                "Fetch and extract content from selected web pages. Requires "
-                "a url_index from a prior web_search result in this workflow "
-                "run; call web_search first when no valid index is available."
-            ),
-        ),
-    ]
+    # Plan v2.1 generic-robustness — ``web_crawl`` removed from default
+    # per-lane bindings. Lanes that need the extra fetch capability can
+    # have it re-added via the architect's tool_plan customization.
+    # ``web_research`` already provides search + auto-fetch in one call.
+    default_researcher_tools = ["web_research"]
+    tools = _tool_plan_declarations(compiled_brief)
+    if tools is None:
+        tools = _default_web_tool_decls(max_results=10)
     coordinator = make_agent_node(
         node_id="coordinator",
         label="Coordinator",
@@ -1008,7 +1583,12 @@ def _build_plan_and_execute_workflow(
             output_key="findings",
             model_tier="analytical",
             output_format="json",
-            tools=["web_search", "web_crawl"],
+            tools=_tool_plan_bindings(
+                compiled_brief,
+                node_id=f"{spec['id']}-researcher",
+                default=default_researcher_tools,
+                researcher=True,
+            ),
             pool_writes=[
                 {"pool": "observations", "extract": "findings"},
                 {"pool": "sources", "extract": "sources"},
@@ -1047,6 +1627,8 @@ def _build_plan_and_execute_workflow(
             ),
             intent=intent,
             design_brief=compiled_brief,
+            assets=assets,
+            tool_plan=compiled_brief.tool_plan,
         ),
     }
     fallback_researcher = make_agent_node(
@@ -1057,7 +1639,12 @@ def _build_plan_and_execute_workflow(
         output_key="findings",
         model_tier="analytical",
         output_format="json",
-        tools=["web_search", "web_crawl"],
+        tools=_tool_plan_bindings(
+            compiled_brief,
+            node_id="cross-lane-researcher",
+            default=default_researcher_tools,
+            researcher=True,
+        ),
         pool_writes=[
             {"pool": "observations", "extract": "findings"},
             {"pool": "sources", "extract": "sources"},
@@ -1201,7 +1788,7 @@ def _build_plan_and_execute_workflow(
         "version": 1,
         "tools": tools,
         "pools": [
-            make_pool_decl(name="sources", dedup_key="url", max_items=100),
+            make_pool_decl(name="sources", dedup_key=_sources_dedup_key(assets, compiled_brief.tool_plan), max_items=100),
             make_pool_decl(name="observations", dedup_key="content_hash", max_items=50),
         ],
         "sources": [],
@@ -1255,6 +1842,17 @@ def _synthesizer_lane_coverage_directive(lane_specs: list[dict[str, str]]) -> st
         "specific dates) without a direct supporting observation in the pool.\n"
         "5. When two observations conflict, surface the contradiction rather "
         "than picking one silently.\n\n"
+        "## Negative-existence claim discipline\n\n"
+        "If you cannot find evidence for a claim, prefer the action "
+        "description 'not retrieved by any lane' over the existence claim "
+        "'X does not exist in the corpus'. A negative-existence claim "
+        "(e.g. 'no calendar-year breakdown exists', 'no figures are "
+        "available') requires explicit search-log evidence in the "
+        "observations pool — at minimum an observation describing an "
+        "attempted-and-failed retrieval for the named axis. Absence of "
+        "retrieved evidence is NOT the same as absence of data; phrase "
+        "your gap notes as actions ('we did not retrieve X') rather than "
+        "existence assertions ('X is not present in the corpus').\n\n"
         "Lanes in this workflow:\n"
         f"{lane_list}\n"
     )
@@ -1373,7 +1971,18 @@ def _plan_execute_synthesizer_directive(lane_specs: list[dict[str, str]]) -> str
         "substantive observation, mark that coverage gap rather than filling it "
         "from planner prose. Cite only URLs that appear in the sources pool and "
         "only when the source record includes usable snippet, content, "
-        "structured metrics, or quoted evidence."
+        "structured metrics, or quoted evidence.\n\n"
+        "## Negative-existence claim discipline\n\n"
+        "If you cannot find evidence for a claim, prefer the action "
+        "description 'not retrieved by any lane' over the existence claim "
+        "'X does not exist in the corpus'. A negative-existence claim "
+        "(e.g. 'no calendar-year breakdown exists', 'no figures are "
+        "available') requires explicit search-log evidence in the "
+        "observations pool — at minimum an observation describing an "
+        "attempted-and-failed retrieval for the named axis. Absence of "
+        "retrieved evidence is NOT the same as absence of data; phrase "
+        "your gap notes as actions ('we did not retrieve X') rather than "
+        "existence assertions ('X is not present in the corpus')."
         f"{lane_section}"
     )
 
@@ -1419,6 +2028,8 @@ def _build_parallel_lanes_workflow(
     intent: str,
     name: str,
     compiled_brief: WorkflowDesignBrief,
+    assets: list[dict[str, Any]] | None = None,
+    ambiguity_axes: list[str] | None = None,
 ) -> dict[str, Any]:
     """Parallel-lanes topology (NEW DEFAULT).
 
@@ -1444,25 +2055,18 @@ def _build_parallel_lanes_workflow(
     reflector_system, _ = _default_prompts("reflector")
     synthesizer_system, _ = _default_prompts("synthesizer")
     synthesizer_system = _designer_synthesizer_system_prompt(synthesizer_system)
-    lane_specs = _lane_specs(compiled_brief, intent=intent)
+    lane_specs = _lane_specs(
+        compiled_brief, intent=intent, assets=assets, ambiguity_axes=ambiguity_axes
+    )
     _require_authored_lane_specs(lane_specs, topology="parallel_lanes")
-    tools = [
-        make_tool_decl(
-            name="web_search",
-            kind="web_search",
-            config={"max_results": 10},
-            description="Search the public web for relevant sources.",
-        ),
-        make_tool_decl(
-            name="web_crawl",
-            kind="web_crawl",
-            description=(
-                "Fetch and extract content from selected web pages. Requires "
-                "a url_index from a prior web_search result in this workflow "
-                "run; call web_search first when no valid index is available."
-            ),
-        ),
-    ]
+    # Plan v2.1 generic-robustness — ``web_crawl`` removed from default
+    # per-lane bindings. Lanes that need the extra fetch capability can
+    # have it re-added via the architect's tool_plan customization.
+    # ``web_research`` already provides search + auto-fetch in one call.
+    default_researcher_tools = ["web_research"]
+    tools = _tool_plan_declarations(compiled_brief)
+    if tools is None:
+        tools = _default_web_tool_decls(max_results=10)
     coordinator = make_agent_node(
         node_id="coordinator",
         label="Coordinator",
@@ -1505,7 +2109,12 @@ def _build_parallel_lanes_workflow(
             output_key=f"findings_{spec['id']}",
             model_tier="analytical",
             output_format="json",
-            tools=["web_search", "web_crawl"],
+            tools=_tool_plan_bindings(
+                compiled_brief,
+                node_id=f"{spec['id']}-researcher",
+                default=default_researcher_tools,
+                researcher=True,
+            ),
             pool_writes=[
                 {"pool": "observations", "extract": f"findings_{spec['id']}"},
                 {"pool": "sources", "extract": "sources"},
@@ -1655,7 +2264,7 @@ def _build_parallel_lanes_workflow(
         "version": 1,
         "tools": tools,
         "pools": [
-            make_pool_decl(name="sources", dedup_key="url", max_items=100),
+            make_pool_decl(name="sources", dedup_key=_sources_dedup_key(assets, compiled_brief.tool_plan), max_items=100),
             make_pool_decl(name="observations", dedup_key="content_hash", max_items=50),
         ],
         "sources": [],
@@ -1736,14 +2345,10 @@ def _build_single_agent_workflow(
         include_scope_block=True,
     )
 
-    tools = [
-        make_tool_decl(
-            name="web_search",
-            kind="web_search",
-            config={"max_results": 5},
-            description="Search the public web for relevant sources.",
-        ),
-    ]
+    default_researcher_tools = ["web_research"]
+    tools = _tool_plan_declarations(compiled_brief)
+    if tools is None:
+        tools = _default_web_tool_decls(max_results=5, include_crawl=False)
     agent_node = make_agent_node(
         node_id="answer-agent",
         label=f"{domain_label} Answer Agent",
@@ -1752,7 +2357,12 @@ def _build_single_agent_workflow(
         output_key="report",
         model_tier="analytical",
         output_format="markdown",
-        tools=["web_search"],
+        tools=_tool_plan_bindings(
+            compiled_brief,
+            node_id="answer-agent",
+            default=default_researcher_tools,
+            researcher=True,
+        ),
         max_tool_calls=4,
         extra_config=_lane_extra_config(
             system_prompt=agent_prompt,

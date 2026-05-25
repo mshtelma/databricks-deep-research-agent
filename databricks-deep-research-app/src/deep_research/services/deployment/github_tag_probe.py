@@ -37,11 +37,18 @@ class TagProbeResult:
         otherwise.
     note:
         Human-readable reason for the decision, useful for log triage.
+    ref_kind:
+        ``"tag"`` when the ref matched ``git/refs/tags/...``; ``"branch"`` when
+        it matched ``git/refs/heads/...``; ``None`` when the kind could not be
+        determined (fail-open paths, 401/403, network errors). Callers that
+        require tag-immutability semantics should reject ``"branch"`` results
+        because branches can be force-pushed underneath deployed apps.
     """
 
     reachable: bool
     error_kind: Literal["framework_tag_unreachable"] | None
     note: str | None
+    ref_kind: Literal["tag", "branch"] | None = None
 
 
 async def probe_framework_tag(
@@ -87,9 +94,13 @@ async def probe_framework_tag(
         )
 
     owner, repo = match.group(1), match.group(2)
-    api_urls = (
-        f"https://api.github.com/repos/{owner}/{repo}/git/refs/tags/{git_tag}",
-        f"https://api.github.com/repos/{owner}/{repo}/git/refs/heads/{git_tag}",
+    # Probe order is tag-first so callers that care about tag-vs-branch
+    # immutability (see ``deploy_here_require_tag_only`` setting) get the
+    # tag answer without needing a second round trip when the ref happens to
+    # exist as both.
+    api_targets: tuple[tuple[str, Literal["tag", "branch"]], ...] = (
+        (f"https://api.github.com/repos/{owner}/{repo}/git/refs/tags/{git_tag}", "tag"),
+        (f"https://api.github.com/repos/{owner}/{repo}/git/refs/heads/{git_tag}", "branch"),
     )
     headers: dict[str, str] = {"Accept": "application/vnd.github+json"}
     if github_token:
@@ -100,7 +111,7 @@ async def probe_framework_tag(
         import httpx  # noqa: PLC0415
 
         async def _probe_with_client(client: Any) -> TagProbeResult:
-            for api_url in api_urls:
+            for api_url, ref_kind in api_targets:
                 response = await client.get(
                     api_url,
                     headers=headers,
@@ -108,7 +119,12 @@ async def probe_framework_tag(
                 )
                 status = response.status_code
                 if status == 200:
-                    return TagProbeResult(reachable=True, error_kind=None, note=None)
+                    return TagProbeResult(
+                        reachable=True,
+                        error_kind=None,
+                        note=None,
+                        ref_kind=ref_kind,
+                    )
                 if status == 404:
                     continue
                 if status in (401, 403):

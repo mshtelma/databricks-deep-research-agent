@@ -171,6 +171,8 @@ class TestAppNameSelection:
             "sql",
             "serving.serving-endpoints",
             "vectorsearch.vector-search-endpoints",
+            "vectorsearch.vector-search-indexes",
+            "dashboards.genie",
         ]
         assert wc.apps.deploy.call_args.kwargs["app_name"] == "dr-shell-ui"
         deployment_arg = wc.apps.deploy.call_args.kwargs["app_deployment"]
@@ -333,6 +335,8 @@ class TestCollisionOwnerIsDeployer:
             "sql",
             "serving.serving-endpoints",
             "vectorsearch.vector-search-endpoints",
+            "vectorsearch.vector-search-indexes",
+            "dashboards.genie",
         ]
         wc.apps.deploy.return_value.result.assert_called()
 

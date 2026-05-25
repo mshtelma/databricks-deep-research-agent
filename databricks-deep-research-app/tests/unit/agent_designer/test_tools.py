@@ -42,6 +42,8 @@ def test_chat_tools_includes_required_set() -> None:
         "bind_tool_to_block",
         "set_model_tier",
         "discover_sources",
+        "inspect_assets",
+        "recommend_tools_for_assets",
         "list_node_types",
         "list_tool_kinds",
         "list_modes",

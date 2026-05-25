@@ -246,7 +246,7 @@ class TestToolBindings:
         tool_defects = [d for d in defects if "no tools bound" in d.message]
         assert len(tool_defects) == 1
         assert "bind_tool_to_block" in tool_defects[0].message
-        assert "web_search" in tool_defects[0].message
+        assert "retrieval, table, or compute tools" in tool_defects[0].message
 
     def test_pass_when_workflow_has_no_retrieval_tools_declared(self) -> None:
         # If no retrieval tools are declared at top level, do not flag agents
@@ -444,12 +444,20 @@ class TestDetectTopologyMismatch:
             "tools": [],
         }
 
-    def test_flags_plan_and_execute_with_three_or_more_lanes(self) -> None:
+    def test_does_not_flag_plan_and_execute_with_three_lanes(self) -> None:
+        # PR3-B: 3-lane plan_and_execute is a legitimate
+        # pipelined_retrieve_read_compute pattern (retrieve → read → compute).
+        # The detector now flags ≥4 lanes only.
         wf = self._pae_with_lanes(3)
+        defects = detect_topology_mismatch(wf)
+        assert defects == []
+
+    def test_flags_plan_and_execute_with_four_or_more_lanes(self) -> None:
+        wf = self._pae_with_lanes(4)
         defects = detect_topology_mismatch(wf)
         assert len(defects) == 1
         assert "parallel_lanes" in defects[0].message
-        assert "3 lanes" in defects[0].message
+        assert "4 lanes" in defects[0].message
 
     def test_flags_plan_and_execute_with_many_lanes(self) -> None:
         wf = self._pae_with_lanes(10)
@@ -458,8 +466,8 @@ class TestDetectTopologyMismatch:
         assert "10 lanes" in defects[0].message
 
     def test_does_not_flag_plan_and_execute_with_two_lanes(self) -> None:
-        # Threshold is ≥3 lanes — two-lane workflows might genuinely want
-        # plan_and_execute's reflection loop.
+        # Threshold is ≥4 lanes — fewer-lane workflows might genuinely want
+        # plan_and_execute's reflection loop or pipelined sub-stages.
         wf = self._pae_with_lanes(2)
         defects = detect_topology_mismatch(wf)
         assert defects == []

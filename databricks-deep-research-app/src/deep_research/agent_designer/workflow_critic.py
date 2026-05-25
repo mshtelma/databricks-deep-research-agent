@@ -194,6 +194,26 @@ def _extract_agents(
     return agents
 
 
+def _extract_tool_declarations(definition: dict[str, Any]) -> list[dict[str, Any]]:
+    tools: list[dict[str, Any]] = []
+    for tool in definition.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        tools.append(
+            {
+                "name": str(tool.get("name") or ""),
+                "kind": str(tool.get("kind") or ""),
+                "description": str(tool.get("description") or "")[:500],
+                "config_keys": sorted(
+                    str(key)
+                    for key in (tool.get("config") or {})
+                    if isinstance(tool.get("config"), dict)
+                ),
+            }
+        )
+    return tools
+
+
 # ---- Tool schema (constrained-decoded by the LLM) ---------------------------
 
 
@@ -225,6 +245,7 @@ _CRITIC_SYSTEM_PROMPT = """You are a Workflow Critic. You evaluate a multi-agent
 You will be given:
   - The user's original intent (the request that triggered the Designer).
   - The brief's required_outputs (what the final report must contain).
+  - The workflow's runtime tool declarations.
   - A list of every agent in the generated workflow with its label, subtype, bound tools, model_tier, and the first ~1500 chars of its system_prompt.
 
 Your job is to emit ONE call to the `emit_critique` tool with a structured verdict:
@@ -239,6 +260,14 @@ Be strict but fair:
 
 For each required_output in the brief, check whether at least one agent's system_prompt is plausibly tasked with producing that output's content (e.g., a "competitive benchmark table" requires an agent that investigates competitors with comparable metrics).
 
+Tool adequacy is part of semantic fit:
+  - A researcher or answer agent expected to gather evidence must have at least one bound runtime tool.
+  - The chosen tools must plausibly access the evidence source named by the user's intent and the agent prompts.
+  - If the user asks for exact table values, totals, counts, row-level lookups, or numeric computation, vector/web-only tooling is not enough unless another bound tool can read tables or compute.
+  - If the user requests private/corpus/vector/table assets, globally declared tools are not enough; compatible tools must be bound to the agent that needs them.
+  - Unused, stale, duplicated, or unrelated runtime tool declarations should trigger a revision directive to remove or rebind them.
+  - Approve only when the workflow has a concrete evidence path: user query -> tool calls -> observations/sources -> synthesis.
+
 Be concise. Emit at most 8 agent_findings, 4 coverage_gaps, 4 output_gaps. Pick the most consequential ones."""
 
 
@@ -246,12 +275,14 @@ def _build_critic_messages(
     *,
     intent: str,
     required_outputs: list[str],
+    tool_declarations: list[dict[str, Any]],
     agents: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     user_content = json.dumps(
         {
             "intent": intent,
             "required_outputs": required_outputs,
+            "tool_declarations": tool_declarations,
             "agents": agents,
         },
         ensure_ascii=False,
@@ -332,6 +363,7 @@ async def critique_workflow_against_intent(
     messages = _build_critic_messages(
         intent=intent,
         required_outputs=required_outputs or [],
+        tool_declarations=_extract_tool_declarations(definition),
         agents=agents,
     )
     tool = _critique_tool_schema()

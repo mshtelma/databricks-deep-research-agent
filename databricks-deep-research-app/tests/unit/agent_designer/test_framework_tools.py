@@ -22,8 +22,11 @@ from deep_research.agent_designer.framework_tools import (
     BindToolToBlockTool,
     DeclareToolTool,
     ExtractCriticApprovedTool,
+    InspectAssetsTool,
     ParseArchitectAstTool,
     ProposeWorkflowTool,
+    RecommendToolsForAssetsTool,
+    RemoveToolTool,
     SetModelTierTool,
     UpdateBlockTool,
     ValidateTool,
@@ -168,6 +171,25 @@ def _legacy_structural_gate_ast() -> dict[str, Any]:
     }
 
 
+def _find_node_by_id(ast: dict[str, Any], node_id: str) -> dict[str, Any]:
+    stack = [ast.get("root")]
+    while stack:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        if node.get("id") == node_id:
+            return node
+        children = node.get("children", [])
+        if isinstance(children, list):
+            stack.extend(children)
+        config = node.get("config")
+        if isinstance(config, dict):
+            body = config.get("body")
+            if isinstance(body, dict):
+                stack.append(body)
+    raise AssertionError(f"node {node_id!r} not found")
+
+
 # ---------------------------------------------------------------------------
 # propose_workflow
 # ---------------------------------------------------------------------------
@@ -219,6 +241,54 @@ async def test_propose_workflow_accepts_python_literal_design_brief(
 
     assert result.success is True
     assert result.data["current_ast"]["name"] == "Literal Brief Research"
+
+
+@pytest.mark.asyncio
+async def test_propose_workflow_with_selected_assets_requires_explicit_tool_plan(
+    ctx: ToolContext,
+) -> None:
+    tool = ProposeWorkflowTool(
+        asset_getter=lambda: [
+            {
+                "kind": "vector_index",
+                "full_name": "main.cat.idx",
+                "usage": "required",
+            }
+        ]
+    )
+    brief = {
+        "workflow_name": "Asset Research",
+        "topology": "single_agent",
+        "research_lanes": [
+            {
+                "description": "Answer from the selected corpus",
+                "system_prompt": "Use selected corpus evidence to answer the question.",
+                "user_prompt_template": "Answer the user's question from selected evidence.",
+            }
+        ],
+    }
+
+    result = await tool.execute(
+        {
+            "intent": "Research selected assets to answer user questions",
+            "design_brief": brief,
+        },
+        ctx,
+    )
+
+    ast = result.data["current_ast"]
+    # Top-level declared tool list stays empty until the architect emits a
+    # tool_plan (still the architect's job).
+    assert ast["tools"] == []
+    # P4-1 contract: when no architect tool_plan exists, _tool_plan_bindings
+    # falls back to the caller's default (default_researcher_tools =
+    # ["web_research"]) instead of silently returning []. This guarantees a
+    # deployed workflow always has SOME tool to run with, even if the
+    # architect didn't finalize tool_plan. The architect's job is now to
+    # OVERRIDE the default with corpus-specific bindings, not to bootstrap
+    # from empty.
+    answer_node = _find_node_by_id(ast, "answer-agent")
+    assert answer_node["config"]["tools"] == ["web_research"]
 
 
 @pytest.mark.asyncio
@@ -305,13 +375,170 @@ async def test_structural_gate_fail_on_legacy_artifact(ctx: ToolContext) -> None
     assert result.data["status"] == "fail"
     assert len(result.data["failures"]) >= 1
     # Each failure carries the shape promised in the docstring.
+    # Plan v2.1 M10 adds the ``severity`` field so the gate can grade
+    # blocking vs warning/info defects.
     for failure in result.data["failures"]:
         assert set(failure.keys()) == {
             "path",
             "kind",
             "message",
+            "severity",
             "suggested_action",
         }
+
+
+@pytest.mark.asyncio
+async def test_structural_gate_passes_with_only_warning_severity_defects(
+    ctx: ToolContext,
+) -> None:
+    """Plan v2.1 M10 — when every defect is severity=warning, the gate
+    status is ``pass`` so the workflow ships. Warnings still surface in
+    the failures list for observability.
+
+    This is the path that lets the placeholder_pending lifecycle finding
+    show up in traces without breaking workflows whose architect prompt
+    is not yet tuned to satisfy it.
+    """
+    from deep_research.agent_designer.blueprint import build_blueprint
+
+    sig = {
+        "asset_signature": "web_only",
+        "retrieval_pattern": "independent_lanes",
+        "question_class": "open_research",
+        "primary_evidence_kind": "web_articles",
+        "expected_output_shape": "structured_report",
+        "independent_workstreams_count": 2,
+        "step_dependencies_present": False,
+        "iteration_required": False,
+        "output_aggregation_kind": "cross_concern_synthesis",
+        "lane_descriptions": ["topic A", "topic B"],
+    }
+    ast = build_blueprint(sig, "q", [])
+    # The deterministic blueprint leaves placeholder_pending_nodes set;
+    # detect_unspecialized_agents emits warning-severity findings for
+    # them. The gate must NOT fail on warnings alone.
+    tool = StructuralGateTool()
+    result = await tool.execute({"ast": ast}, ctx)
+    # The blueprint may still have other blocking defects (e.g., the
+    # synthesizer's generic prompt). For THIS test we assert ONLY that
+    # placeholder_pending warnings — present or not — don't promote to
+    # blocking on the gate.
+    placeholder_warnings = [
+        f for f in result.data["failures"]
+        if f.get("kind") == "placeholder_pending"
+    ]
+    for failure in placeholder_warnings:
+        assert failure["severity"] == "warning", (
+            "placeholder_pending must be severity=warning so the gate "
+            "doesn't block workflows the runtime can still execute"
+        )
+
+
+@pytest.mark.asyncio
+async def test_structural_gate_fails_required_asset_without_bound_tool(
+    ctx: ToolContext,
+) -> None:
+    tool = StructuralGateTool()
+    ast = _specialized_ast()
+    ast["tools"] = [{"name": "web_search", "kind": "web_search", "config": {}}]
+
+    result = await tool.execute(
+        {
+            "ast": ast,
+            "assets": [
+                {
+                    "kind": "vector_index",
+                    "full_name": "main.cat.idx",
+                    "usage": "required",
+                }
+            ],
+            "intent": "Build a fixed-corpus assistant over selected assets.",
+        },
+        ctx,
+    )
+
+    assert result.data["status"] == "fail"
+    assert any("Required asset" in failure["message"] for failure in result.data["failures"])
+
+
+@pytest.mark.asyncio
+async def test_structural_gate_fails_researcher_with_no_tools(ctx: ToolContext) -> None:
+    tool = StructuralGateTool()
+    ast = _specialized_ast()
+    ast["root"]["children"].insert(
+        0,
+        {
+            "id": "researcher",
+            "type": "agent",
+            "label": "Researcher",
+            "config": {
+                "subtype": "researcher",
+                "input_keys": ["query"],
+                "output_key": "findings",
+                "tools": [],
+                "system_prompt": (
+                    "Investigate the user's topic with concrete evidence and "
+                    "return cited findings for synthesis."
+                ),
+            },
+            "children": [],
+        },
+    )
+
+    result = await tool.execute({"ast": ast}, ctx)
+
+    assert result.data["status"] == "fail"
+    assert any(
+        "no bound executable evidence tools" in failure["message"]
+        for failure in result.data["failures"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_structural_gate_rejects_custom_tool_as_researcher_evidence(
+    ctx: ToolContext,
+) -> None:
+    tool = StructuralGateTool()
+    ast = _specialized_ast()
+    ast["tools"] = [{"name": "legacy_tool", "kind": "custom", "config": {}}]
+    ast["root"]["children"].insert(
+        0,
+        {
+            "id": "researcher",
+            "type": "agent",
+            "label": "Researcher",
+            "config": {
+                "subtype": "researcher",
+                "input_keys": ["query"],
+                "output_key": "findings",
+                "tools": ["legacy_tool"],
+                "system_prompt": (
+                    "Investigate the user's topic with concrete evidence and "
+                    "return cited findings for synthesis."
+                ),
+            },
+            "children": [],
+        },
+    )
+
+    result = await tool.execute({"ast": ast}, ctx)
+    messages = [failure["message"] for failure in result.data["failures"]]
+
+    assert result.data["status"] == "fail"
+    assert any("unsupported runtime kind 'custom'" in message for message in messages)
+    assert any("no bound executable evidence tools" in message for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_structural_gate_fails_unused_runtime_tool(ctx: ToolContext) -> None:
+    tool = StructuralGateTool()
+    ast = _specialized_ast()
+    ast["tools"] = [{"name": "asset_search", "kind": "vector_search", "config": {}}]
+
+    result = await tool.execute({"ast": ast}, ctx)
+
+    assert result.data["status"] == "fail"
+    assert any("declared but not bound" in failure["message"] for failure in result.data["failures"])
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +632,69 @@ async def test_parse_architect_ast_empty_json_block_falls_back_to_cache(
     assert result.data["parse_fallback"] == "state_cache"
     assert result.data["current_ast"]["root"]["id"] == cached["root"]["id"]
     assert result.data["current_ast"]["root"]["config"]["subtype"] == "researcher"
-    assert "web_research" in result.data["current_ast"]["root"]["config"]["tools"]
+    assert result.data["current_ast"]["root"]["config"].get("tools", []) == []
+
+
+@pytest.mark.asyncio
+async def test_parse_architect_ast_preserves_llm_chosen_tools(
+    ctx: ToolContext,
+) -> None:
+    cached = {
+        "id": "wf",
+        "name": "wf",
+        "description": "Answer from selected assets only. Do not use public web tools.",
+        "version": 1,
+        "root": {
+            "id": "agent",
+            "type": "agent",
+            "label": "Agent",
+            "config": {
+                "subtype": "researcher",
+                "input_keys": ["query"],
+                "output_key": "out",
+                "tools": ["web_search", "asset_search"],
+                "system_prompt": "Use selected assets only. Do not use public web tools.",
+            },
+            "children": [],
+        },
+        "tools": [
+            {"name": "web_search", "kind": "web_search", "config": {}},
+            {
+                "name": "asset_search",
+                "kind": "vector_search",
+                "config": {"index_name": "main.cat.idx"},
+            },
+        ],
+        "pools": [],
+        "sources": [],
+        "models": {},
+        "required_inputs": ["query"],
+        "output_keys": ["out"],
+    }
+    tool = ParseArchitectAstTool(state_getter=lambda: cached)
+
+    result = await tool.execute(
+        {
+            "raw_message": "no json block",
+            "assets": [
+                {
+                    "kind": "vector_index",
+                    "full_name": "main.cat.idx",
+                    "usage": "required",
+                }
+            ],
+            "intent": "Build a fixed-corpus assistant over selected assets.",
+        },
+        ctx,
+    )
+
+    ast = result.data["current_ast"]
+    kinds = {item["kind"] for item in ast["tools"]}
+    assert {"web_search", "vector_search"}.issubset(kinds)
+    assert "web_research" not in kinds
+    assert ast["root"]["config"]["tools"] == ["web_search", "asset_search"]
+    fix_kinds = {fix["kind"] for fix in result.data["normalization_fixes"]}
+    assert "tool_consolidation" not in fix_kinds
 
 
 # ---------------------------------------------------------------------------
@@ -581,15 +870,65 @@ async def test_declare_and_bind_tool_flow(ctx: ToolContext) -> None:
     )
     assert bound.success is True
     bound_tools = bound.data["current_ast"]["root"]["config"]["tools"]
-    assert "web_research" in bound_tools
-    assert "web_crawl" in bound_tools
-    assert "web_search" not in bound_tools
+    assert bound_tools == ["web_search"]
+
+
+@pytest.mark.asyncio
+async def test_remove_tool_unbinds_every_agent_reference(ctx: ToolContext) -> None:
+    ast: dict[str, Any] = {
+        "id": "wf",
+        "name": "wf",
+        "description": "",
+        "version": 1,
+        "root": {
+            "id": "main",
+            "type": "sequence",
+            "label": "Main",
+            "config": {},
+            "children": [
+                {
+                    "id": "agent",
+                    "type": "agent",
+                    "label": "Agent",
+                    "config": {
+                        "subtype": "researcher",
+                        "input_keys": ["query"],
+                        "output_key": "out",
+                        "tools": ["web_search", "asset_search"],
+                    },
+                    "children": [],
+                }
+            ],
+        },
+        "tools": [
+            {"name": "web_search", "kind": "web_search", "config": {}},
+            {"name": "asset_search", "kind": "vector_search", "config": {}},
+        ],
+        "pools": [],
+        "sources": [],
+        "models": {},
+        "required_inputs": ["query"],
+        "output_keys": ["out"],
+    }
+    tool = RemoveToolTool()
+
+    result = await tool.execute({"current_ast": ast, "name": "web_search"}, ctx)
+
+    new_ast = result.data["current_ast"]
+    assert [item["name"] for item in new_ast["tools"]] == ["asset_search"]
+    assert new_ast["root"]["children"][0]["config"]["tools"] == ["asset_search"]
 
 
 @pytest.mark.asyncio
 async def test_update_block_reapplies_grounding_defaults_after_config_replace(
     ctx: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Plan v2.1 PR-3: this test patches structural config keys
+    # (``subtype``, ``input_keys``, ``output_key``) that the new
+    # allow-list rejects under DESIGNER_DETERMINISTIC_BLUEPRINT=ON.
+    # Disable the flag here to exercise the legacy unconstrained path.
+    monkeypatch.setenv("DESIGNER_DETERMINISTIC_BLUEPRINT", "0")
     cached: dict[str, Any] = {}
 
     def get_cached() -> dict[str, Any]:
@@ -695,6 +1034,58 @@ async def test_validate_reports_errors_on_broken_ast(ctx: ToolContext) -> None:
 
 
 # ---------------------------------------------------------------------------
+# asset inspection / recommendation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_inspect_assets_tool_reads_asset_getter(ctx: ToolContext) -> None:
+    tool = InspectAssetsTool(
+        asset_getter=lambda: {
+            "assets": [
+                {
+                    "kind": "vector_index",
+                    "full_name": "main.cat.idx",
+                    "usage": "required",
+                }
+            ]
+        }
+    )
+
+    result = await tool.execute({}, ctx)
+
+    assert result.success is True
+    assert result.data["count"] == 1
+    assert result.data["assets"][0]["identity"] == "main.cat.idx"
+
+
+@pytest.mark.asyncio
+async def test_recommend_tools_for_assets_tool_reads_asset_getter(
+    ctx: ToolContext,
+) -> None:
+    tool = RecommendToolsForAssetsTool(
+        asset_getter=lambda: {
+            "assets": [
+                {
+                    "kind": "delta_table",
+                    "full_name": "main.cat.rows",
+                    "usage": "required",
+                    "field_roles": {"content": "content"},
+                    "metadata": {"warehouse_id": "abc123"},
+                }
+            ]
+        }
+    )
+
+    result = await tool.execute({"intent": "sum totals from table rows"}, ctx)
+
+    assert result.success is True
+    assert result.data["diagnostics"] == []
+    kinds = {item["kind"] for item in result.data["recommended_tools"]}
+    assert {"delta_read", "delta_grep", "compute", "compute_namespace"}.issubset(kinds)
+
+
+# ---------------------------------------------------------------------------
 # Registry registration
 # ---------------------------------------------------------------------------
 
@@ -706,7 +1097,10 @@ _REQUIRED_TOOL_NAMES = {
     "bind_tool_to_block",
     "set_model_tier",
     "declare_tool",
+    "remove_tool",
     "discover_sources",
+    "inspect_assets",
+    "recommend_tools_for_assets",
     "validate",
     "structural_gate",
     "parse_architect_ast",

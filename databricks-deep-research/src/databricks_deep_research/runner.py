@@ -22,7 +22,7 @@ import logging
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from databricks_deep_research.events.types import StreamEvent
 from databricks_deep_research.llm.client import (
@@ -35,6 +35,11 @@ from databricks_deep_research.workflow.definition import WorkflowDefinition
 from databricks_deep_research.workflow.executor import WorkflowExecutor
 from databricks_deep_research.workflow.loader import load_workflow, load_workflow_from_dict
 from databricks_deep_research.workflow.state import WorkflowState
+
+if TYPE_CHECKING:
+    from databricks_deep_research.tools.registry import ToolRegistry
+    from databricks_deep_research.tools.resolver import ToolResolver
+    from databricks_deep_research.workflow.context import ExecutionContext
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +198,10 @@ class WorkflowRunner:
         query: str = "",
         state: WorkflowState | None = None,
         conversation_history: list[dict[str, Any]] | None = None,
+        tool_resolver: ToolResolver | None = None,
+        tool_registry: ToolRegistry | None = None,
+        context: ExecutionContext | None = None,
+        strict_tool_resolution: bool = False,
     ) -> WorkflowResult:
         """Load and run a workflow to completion, returning a WorkflowResult.
 
@@ -214,6 +223,20 @@ class WorkflowRunner:
             ``AgentInput.conversation_history``.  If *state* was also provided
             and already contained history, this kwarg takes precedence (caller
             intent is the authority).
+        tool_resolver:
+            Custom :class:`ToolResolver` (with pre-built overrides or factories).
+            When provided, takes precedence over the runner's default resolver.
+        tool_registry:
+            Custom :class:`ToolRegistry` pre-populated with tools (e.g., for
+            ``type: tool`` workflow nodes that aren't routed via factories).
+        context:
+            Optional :class:`ExecutionContext` carrying per-run state such as
+            HITL pause/resume tokens, chat_id, broker references.
+        strict_tool_resolution:
+            When True, raise :class:`WorkflowError` immediately if any agent
+            node declares a tool that the resolver cannot construct. Default
+            False matches notebook/playground use; production callers should
+            opt in so deployment misconfigurations surface loudly.
         """
         definition = self._resolve(workflow)
         effective_client = self._resolve_client(definition)
@@ -221,7 +244,15 @@ class WorkflowRunner:
         if conversation_history is not None:
             run_state.conversation_history = list(conversation_history)
         self._inject_registered_tools(run_state)
-        executor = WorkflowExecutor(definition, effective_client, factory_context=self._factory)
+        executor = WorkflowExecutor(
+            definition,
+            effective_client,
+            factory_context=self._factory,
+            tool_resolver=tool_resolver,
+            tool_registry=tool_registry,
+            context=context,
+            strict_tool_resolution=strict_tool_resolution,
+        )
         events = [event async for event in executor.execute(run_state)]
         result = WorkflowResult(
             state=run_state,
@@ -253,6 +284,10 @@ class WorkflowRunner:
         query: str = "",
         state: WorkflowState | None = None,
         conversation_history: list[dict[str, Any]] | None = None,
+        tool_resolver: ToolResolver | None = None,
+        tool_registry: ToolRegistry | None = None,
+        context: ExecutionContext | None = None,
+        strict_tool_resolution: bool = False,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Load and stream a workflow, yielding events.
 
@@ -276,6 +311,20 @@ class WorkflowRunner:
             ``AgentInput.conversation_history``.  If *state* was also provided
             and already contained history, this kwarg takes precedence (caller
             intent is the authority).
+        tool_resolver:
+            Custom :class:`ToolResolver` (with pre-built overrides or factories).
+            When provided, takes precedence over the runner's default resolver.
+        tool_registry:
+            Custom :class:`ToolRegistry` pre-populated with tools (e.g., for
+            ``type: tool`` workflow nodes that aren't routed via factories).
+        context:
+            Optional :class:`ExecutionContext` carrying per-run state such as
+            HITL pause/resume tokens, chat_id, broker references.
+        strict_tool_resolution:
+            When True, raise :class:`WorkflowError` immediately if any agent
+            node declares a tool that the resolver cannot construct. Default
+            False matches notebook/playground use; production callers should
+            opt in so deployment misconfigurations surface loudly.
         """
         definition = self._resolve(workflow)
         effective_client = self._resolve_client(definition)
@@ -283,7 +332,15 @@ class WorkflowRunner:
         if conversation_history is not None:
             run_state.conversation_history = list(conversation_history)
         self._inject_registered_tools(run_state)
-        executor = WorkflowExecutor(definition, effective_client, factory_context=self._factory)
+        executor = WorkflowExecutor(
+            definition,
+            effective_client,
+            factory_context=self._factory,
+            tool_resolver=tool_resolver,
+            tool_registry=tool_registry,
+            context=context,
+            strict_tool_resolution=strict_tool_resolution,
+        )
         events: list[StreamEvent] = []
         try:
             async for event in executor.execute(run_state):
@@ -300,6 +357,17 @@ class WorkflowRunner:
     def last_result(self) -> WorkflowResult | None:
         """Result from the most recent ``run()`` or ``stream()`` call."""
         return self._last_result
+
+    @property
+    def factory_context(self) -> ToolFactoryContext:
+        """Return the :class:`ToolFactoryContext` this runner uses.
+
+        Exposed so callers (notably the app's ``framework_orchestrator``) can
+        build their own :class:`ToolResolver` against the same context the
+        runner will use internally — keeping factory wiring consistent between
+        the app's resolver and the runner's executor.
+        """
+        return self._factory
 
     async def aclose(self) -> None:
         """Close the underlying LLM client."""

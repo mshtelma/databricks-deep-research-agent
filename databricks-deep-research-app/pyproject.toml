@@ -41,6 +41,11 @@ dev = [
     "ruff>=0.2.0",
     "httpx>=0.26.0",
     "types-PyYAML>=6.0.0",
+    # Used by tests/unit/services/test_shell_app_template_runtime.py to
+    # load the rendered shell-app template in-process. Pinned to the
+    # same floor as templates/agent-shell-app/pyproject.toml.j2 so the
+    # test environment matches what gets deployed.
+    "sse-starlette>=2.1",
 ]
 
 [build-system]

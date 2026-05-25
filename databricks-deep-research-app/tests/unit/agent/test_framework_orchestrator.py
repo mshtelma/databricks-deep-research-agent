@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from databricks_deep_research.tools.factory import ToolFactoryContext
 
 from deep_research.agent.framework_orchestrator import (
     _apply_runtime_overlays_to_workflow,
@@ -204,18 +205,19 @@ class TestSimpleModeShortCircuit:
         )
 
         # Create an async generator that yields the classified event
-        async def _mock_execute(state: Any) -> Any:
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
             yield classified_evt
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config(query_mode="simple")
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -300,18 +302,19 @@ class TestSimpleModeShortCircuit:
             direct_response=direct_text,
         )
 
-        async def _mock_execute(state: Any) -> Any:
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
             yield classified_evt
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config(query_mode="simple")
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -722,13 +725,26 @@ class TestExecutorInstantiation:
             direct_response="Hello",
         )
 
-        async def _mock_execute(state: Any) -> Any:
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
             yield classified_evt
 
-        mock_executor_cls = MagicMock()
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
-        mock_executor_cls.return_value = mock_executor_instance
+        # After the unification refactor (2026-05-24), framework_orchestrator
+        # no longer constructs WorkflowExecutor directly — it goes through
+        # build_app_workflow_runner + runner.stream(...). We verify the same
+        # contract (workflow_def, llm, tool_resolver, context plumbed
+        # correctly) at the runner.stream call site.
+        recorded_stream_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        async def _record_stream(*args: Any, **kwargs: Any) -> Any:
+            recorded_stream_calls.append((args, kwargs))
+            async for evt in _mock_execute(*args, **kwargs):
+                yield evt
+
+        mock_runner = MagicMock()
+        mock_runner.stream = _record_stream
+        mock_runner.factory_context = ToolFactoryContext()
+
+        mock_builder = MagicMock(return_value=mock_runner)
 
         mock_workflow_def = MagicMock(name="workflow_def")
         mock_llm = MagicMock(name="framework_llm")
@@ -737,8 +753,8 @@ class TestExecutorInstantiation:
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                mock_executor_cls,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                mock_builder,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -794,13 +810,21 @@ class TestExecutorInstantiation:
             ):
                 events.append(evt)
 
-            # Verify WorkflowExecutor was called with definition and llm_client
-            mock_executor_cls.assert_called_once()
-            args, kwargs = mock_executor_cls.call_args
-            assert args[0] is mock_workflow_def, "1st arg should be workflow_def"
-            assert args[1] is mock_llm, "2nd arg should be framework_llm"
-            assert "tool_resolver" in kwargs, "should pass pre-populated tool_resolver"
-            assert "context" in kwargs
+            # Verify build_app_workflow_runner was called with the right LLM
+            mock_builder.assert_called_once()
+            builder_kwargs = mock_builder.call_args.kwargs
+            assert builder_kwargs.get("llm_client") is mock_llm
+
+            # Verify runner.stream was called with workflow_def + tool_resolver
+            # + context (plumbed through the unified entry point).
+            assert recorded_stream_calls, "runner.stream must be invoked"
+            stream_args, stream_kwargs = recorded_stream_calls[0]
+            assert stream_args[0] is mock_workflow_def, (
+                "1st positional arg to runner.stream is workflow_def"
+            )
+            assert "tool_resolver" in stream_kwargs
+            assert "context" in stream_kwargs
+            assert stream_kwargs.get("strict_tool_resolution") is True
 
     @pytest.mark.asyncio
     async def test_executor_receives_workflow_state(self) -> None:
@@ -819,19 +843,21 @@ class TestExecutorInstantiation:
 
         captured_state: dict[str, Any] = {}
 
-        async def _mock_execute(state: Any) -> Any:
-            captured_state["state"] = state
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
+            # state is passed as a keyword arg to runner.stream(...)
+            captured_state["state"] = kwargs.get("state")
             yield classified_evt
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config(query_mode="simple")
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -1761,19 +1787,20 @@ class TestResearchTimeout:
     async def test_slow_executor_yields_timeout_error(self) -> None:
         """Slow executor (sleeps 100s) + 1s timeout → StreamErrorEvent(RESEARCH_TIMEOUT)."""
 
-        async def _slow_execute(state: Any) -> Any:
+        async def _slow_execute(*args: Any, **kwargs: Any) -> Any:
             await asyncio.sleep(100)
             yield  # never reached
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _slow_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _slow_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config(research_timeout_seconds=1)
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -1869,24 +1896,23 @@ class TestToolRegistration:
 
         captured: dict[str, Any] = {}
 
-        def _capture_executor(*args: Any, **kwargs: Any) -> MagicMock:
+        async def _capture_stream(*args: Any, **kwargs: Any) -> Any:
             captured["tool_resolver"] = kwargs.get("tool_resolver")
             captured["enterprise_tools"] = kwargs.get("enterprise_tools")
-            mock_exec = MagicMock()
+            captured["strict_tool_resolution"] = kwargs.get("strict_tool_resolution")
+            return
+            yield  # noqa: F841 - makes it an async generator
 
-            async def _empty_execute(state: Any) -> Any:
-                return
-                yield  # noqa: F841 - makes it an async generator
-
-            mock_exec.execute = _empty_execute
-            return mock_exec
+        mock_runner = MagicMock()
+        mock_runner.stream = _capture_stream
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config()
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                side_effect=_capture_executor,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -1966,23 +1992,22 @@ class TestToolRegistration:
 
         captured: dict[str, Any] = {}
 
-        def _capture_executor(*args: Any, **kwargs: Any) -> MagicMock:
+        async def _capture_stream(*args: Any, **kwargs: Any) -> Any:
             captured["tool_resolver"] = kwargs.get("tool_resolver")
-            mock_exec = MagicMock()
+            captured["strict_tool_resolution"] = kwargs.get("strict_tool_resolution")
+            return
+            yield
 
-            async def _empty_execute(state: Any) -> Any:
-                return
-                yield
-
-            mock_exec.execute = _empty_execute
-            return mock_exec
+        mock_runner = MagicMock()
+        mock_runner.stream = _capture_stream
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config()
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                side_effect=_capture_executor,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -2081,7 +2106,7 @@ class TestFinalReportCapture:
 
         full_report = "# Research Report\n\n" + "Content. " * 500  # >200 chars
 
-        async def _mock_execute(state: Any) -> Any:
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
             # Emit 4 filler events to reach count=4
             for i in range(4):
                 yield FwkItemCompletedEvent(
@@ -2100,15 +2125,16 @@ class TestFinalReportCapture:
                 final_report=full_report,
             )
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config()
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -2176,7 +2202,7 @@ class TestFinalReportCapture:
 
         full_report = "# Off-boundary Report\n\n" + "Data. " * 500
 
-        async def _mock_execute(state: Any) -> Any:
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
             yield FwkItemCompletedEvent(
                 node_id="researcher",
                 timestamp="2026-01-01T00:00:00Z",
@@ -2192,15 +2218,16 @@ class TestFinalReportCapture:
                 final_report=full_report,
             )
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config()
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",

@@ -1,9 +1,29 @@
-"""Configure Databricks App access to a Lakebase Autoscaling database."""
+"""Configure Databricks App access to a Lakebase Autoscaling database.
+
+Read side (``--print-bundle-vars`` and the underlying helpers) is the
+canonical path: it resolves the DAB ``postgres_branch`` and
+``postgres_database_resource`` variables from the live workspace so the
+Makefile can pass them as ``--var`` arguments to ``databricks bundle
+deploy``.  The DAB ``lakebase-postgres`` app resource block in
+``databricks.yml`` is now the single source of truth for the app↔Lakebase
+binding.
+
+Write side (:func:`configure_app_postgres_resource`) is **deprecated**: it
+upserts the binding directly through the Apps API, which Terraform then
+discovers on refresh and tries to remove on the next ``bundle deploy``,
+producing the opaque ``failed to update app`` error that originally
+motivated this refactor.  The function is retained for one release as an
+explicit, operator-invoked repair tool only; it is no longer part of the
+``make deploy`` pipeline and will be removed in a follow-up.
+"""
 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
+import shlex
+import warnings
 from collections.abc import Iterable, Sequence
 from datetime import timedelta
 from typing import Any
@@ -16,7 +36,20 @@ from databricks.sdk.service.apps import (
     AppResourcePostgresPostgresPermission,
 )
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_RESOURCE_NAME = "lakebase-postgres"
+BUNDLE_VAR_ORDER = ("postgres_branch", "postgres_database_resource")
+
+_WRITE_SIDE_DEPRECATION_MSG = (
+    "configure_app_postgres_resource() is deprecated. The lakebase-postgres "
+    "binding is now managed by DAB via the lakebase-postgres app resource "
+    "in databricks.yml. Use --print-bundle-vars (or the helper "
+    "resolve_postgres_bundle_vars) to resolve postgres_branch and "
+    "postgres_database_resource, then pass them as --var to "
+    "'databricks bundle deploy'. This function will be removed in a "
+    "follow-up release."
+)
 
 
 def branch_name_from_endpoint(endpoint_name: str) -> str:
@@ -67,6 +100,33 @@ def build_postgres_resource(
     )
 
 
+def resolve_postgres_bundle_vars(
+    *,
+    client: WorkspaceClient,
+    endpoint_name: str,
+    database_name: str,
+) -> dict[str, str]:
+    """Resolve the DAB variables required for the app Postgres binding."""
+    branch_name = branch_name_from_endpoint(endpoint_name)
+    database_resource_name = find_database_resource_name(
+        client.postgres.list_databases(parent=branch_name),
+        database_name,
+    )
+    return {
+        "postgres_branch": branch_name,
+        "postgres_database_resource": database_resource_name,
+    }
+
+
+def format_bundle_var_args(bundle_vars: dict[str, str]) -> str:
+    """Return shell-safe ``databricks bundle`` var arguments."""
+    args: list[str] = []
+    for key in BUNDLE_VAR_ORDER:
+        value = bundle_vars[key]
+        args.extend(["--var", f"{key}={value}"])
+    return shlex.join(args)
+
+
 def upsert_postgres_resource(
     resources: Iterable[AppResource] | None,
     postgres_resource: AppResource,
@@ -96,7 +156,19 @@ def configure_app_postgres_resource(
     resource_name: str = DEFAULT_RESOURCE_NAME,
     timeout_seconds: int = 1200,
 ) -> str:
-    """Attach an app-level Postgres resource for a Lakebase Autoscaling DB."""
+    """Attach an app-level Postgres resource for a Lakebase Autoscaling DB.
+
+    .. deprecated::
+        The lakebase-postgres binding is now managed by DAB. Mutating the
+        app through the Apps API creates terraform drift on the next
+        ``bundle deploy``. Use ``--print-bundle-vars`` to resolve binding
+        vars and let DAB own the resource. This function is retained as an
+        explicit operator repair tool and will be removed in a follow-up.
+    """
+    warnings.warn(
+        _WRITE_SIDE_DEPRECATION_MSG, DeprecationWarning, stacklevel=2
+    )
+    logger.warning(_WRITE_SIDE_DEPRECATION_MSG)
     client = WorkspaceClient(profile=profile)
     branch_name = branch_name_from_endpoint(endpoint_name)
     database_resource_name = find_database_resource_name(
@@ -126,7 +198,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Grant a Databricks App access to a Lakebase Postgres database."
     )
-    parser.add_argument("--app-name", required=True)
+    parser.add_argument("--app-name")
     parser.add_argument(
         "--profile",
         default=os.environ.get("DATABRICKS_CONFIG_PROFILE"),
@@ -143,12 +215,33 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--resource-name", default=DEFAULT_RESOURCE_NAME)
     parser.add_argument("--timeout-seconds", type=int, default=1200)
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--print-bundle-vars",
+        action="store_true",
+        help=(
+            "Print DAB --var arguments for a DAB-managed app Postgres resource "
+            "instead of mutating the app through the Apps API."
+        ),
+    )
+    args = parser.parse_args(argv)
+    if not args.print_bundle_vars and not args.app_name:
+        parser.error("--app-name is required unless --print-bundle-vars is set")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     """CLI entry point."""
     args = parse_args(argv)
+    if args.print_bundle_vars:
+        client = WorkspaceClient(profile=args.profile)
+        bundle_vars = resolve_postgres_bundle_vars(
+            client=client,
+            endpoint_name=args.endpoint_name,
+            database_name=args.database_name,
+        )
+        print(format_bundle_var_args(bundle_vars))
+        return
+
     database_resource_name = configure_app_postgres_resource(
         app_name=args.app_name,
         profile=args.profile,

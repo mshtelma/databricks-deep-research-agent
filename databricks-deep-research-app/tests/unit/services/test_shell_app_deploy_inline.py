@@ -21,9 +21,11 @@ import pytest
 
 from deep_research.models.agent_deployment import AgentDeployment, DeploymentMode
 from deep_research.services.deployment.shell_app import ShellAppExporter
+from deep_research.services.deployment.auth import WorkspaceClientResolver
 from deep_research.services.deployment.translator import (
     Artifact,
     DeploymentCleanupError,
+    DeploymentCleanupExhaustedError,
     DeploymentResult,
     DeploymentTranslator,
     InlineDeploymentTranslator,
@@ -193,6 +195,194 @@ class TestDeactivate:
 
         mock_client.apps.delete.assert_not_called()
         mock_client.workspace.delete.assert_not_called()
+
+
+class TestDeactivateWorkspaceDeleteSpFallback:
+    """Coverage for the split-identity workspace.delete cascade.
+
+    The translator now resolves both a user_client (OBO when client_resolver
+    is supplied, SP otherwise) AND an unconditional sp_client. The
+    workspace.delete step tries user_client first; on PermissionDenied it
+    falls back to sp_client; if both deny, raises
+    DeploymentCleanupExhaustedError so the service can mark cleanup_failed
+    once instead of burning 3 retries.
+    """
+
+    @pytest.mark.asyncio
+    async def test_workspace_delete_falls_back_to_sp_on_obo_denied(self) -> None:
+        """OBO user denied → SP succeeds → no exception raised, normal path."""
+        PermissionDenied = type("PermissionDenied", (Exception,), {})
+
+        exporter = ShellAppExporter()
+        deployment = _make_deployment(
+            external_resource_ids={
+                "app_name": "dr-shell-app-x",
+                "deployment_path": "/Workspace/Shared/deep-research-agent/shell-apps/x",
+            }
+        )
+
+        obo_client = MagicMock()
+        obo_client.apps.delete = MagicMock(return_value=None)
+        obo_client.workspace.delete = MagicMock(
+            side_effect=PermissionDenied("permission_denied")
+        )
+
+        sp_client = MagicMock()
+        sp_client.workspace.delete = MagicMock(return_value=None)
+
+        resolver = MagicMock(spec=WorkspaceClientResolver)
+        resolver.resolve = MagicMock(return_value=obo_client)
+
+        with patch(
+            "deep_research.core.databricks_auth.get_databricks_auth",
+            return_value=MagicMock(get_client=MagicMock(return_value=sp_client)),
+        ):
+            # Must NOT raise
+            await exporter.deactivate(deployment, client_resolver=resolver)
+
+        # Both identities were tried, in the expected order
+        obo_client.workspace.delete.assert_called_once_with(
+            path="/Workspace/Shared/deep-research-agent/shell-apps/x",
+            recursive=True,
+        )
+        sp_client.workspace.delete.assert_called_once_with(
+            path="/Workspace/Shared/deep-research-agent/shell-apps/x",
+            recursive=True,
+        )
+        # apps.delete still ran under the OBO identity
+        obo_client.apps.delete.assert_called_once_with("dr-shell-app-x")
+
+    @pytest.mark.asyncio
+    async def test_workspace_delete_raises_exhausted_on_dual_denial(self) -> None:
+        """Both OBO and SP denied → DeploymentCleanupExhaustedError raised
+        (NOT DeploymentCleanupError directly — the subclass signals
+        determinism and tells the service layer to skip retry counters)."""
+        PermissionDenied = type("PermissionDenied", (Exception,), {})
+
+        exporter = ShellAppExporter()
+        deployment = _make_deployment(
+            external_resource_ids={
+                "app_name": "dr-shell-dual-deny",
+                "deployment_path": "/Workspace/Shared/deep-research-agent/shell-apps/y",
+            }
+        )
+
+        obo_client = MagicMock()
+        obo_client.apps.delete = MagicMock(return_value=None)
+        obo_client.workspace.delete = MagicMock(
+            side_effect=PermissionDenied("permission_denied")
+        )
+
+        sp_client = MagicMock()
+        sp_client.workspace.delete = MagicMock(
+            side_effect=PermissionDenied("permission_denied")
+        )
+
+        resolver = MagicMock(spec=WorkspaceClientResolver)
+        resolver.resolve = MagicMock(return_value=obo_client)
+
+        with (
+            patch(
+                "deep_research.core.databricks_auth.get_databricks_auth",
+                return_value=MagicMock(
+                    get_client=MagicMock(return_value=sp_client)
+                ),
+            ),
+            pytest.raises(DeploymentCleanupExhaustedError) as exc_info,
+        ):
+            await exporter.deactivate(deployment, client_resolver=resolver)
+
+        # The exhausted variant is a subclass of DeploymentCleanupError so
+        # downstream catch-blocks for the base class still work as a safety
+        # net, but the specific subclass is what the service layer matches
+        # for the one-shot cleanup_failed path.
+        assert isinstance(exc_info.value, DeploymentCleanupError)
+        assert "workspace.delete" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_workspace_delete_404_does_not_trigger_sp_fallback(self) -> None:
+        """A NotFound on the user_client must short-circuit to the
+        already-gone branch; the SP fallback path must NOT run (avoid an
+        unnecessary SDK round-trip when the resource is already gone)."""
+        NotFound = type("NotFound", (Exception,), {})
+
+        exporter = ShellAppExporter()
+        deployment = _make_deployment(
+            external_resource_ids={
+                "app_name": "dr-shell-gone",
+                "deployment_path": "/Workspace/Shared/deep-research-agent/shell-apps/z",
+            }
+        )
+
+        obo_client = MagicMock()
+        obo_client.apps.delete = MagicMock(return_value=None)
+        obo_client.workspace.delete = MagicMock(
+            side_effect=NotFound("path does not exist")
+        )
+
+        sp_client = MagicMock()
+        sp_client.workspace.delete = MagicMock(return_value=None)
+
+        resolver = MagicMock(spec=WorkspaceClientResolver)
+        resolver.resolve = MagicMock(return_value=obo_client)
+
+        with patch(
+            "deep_research.core.databricks_auth.get_databricks_auth",
+            return_value=MagicMock(get_client=MagicMock(return_value=sp_client)),
+        ):
+            # Must NOT raise — 404 is idempotent success
+            await exporter.deactivate(deployment, client_resolver=resolver)
+
+        # Only the OBO path was tried; SP was NOT consulted because there's
+        # nothing to clean up.
+        obo_client.workspace.delete.assert_called_once()
+        sp_client.workspace.delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_workspace_delete_non_auth_exception_uses_3strike(self) -> None:
+        """A non-PermissionDenied / non-NotFound exception (e.g., 500, network)
+        must fall through to the existing DeploymentCleanupError path so the
+        3-strike retry pattern in agent_v2_service.delete kicks in. We must
+        NOT misroute a transient error to the exhausted-immediately branch."""
+        SomeUpstreamFlake = type("SomeUpstreamFlake", (Exception,), {})
+
+        exporter = ShellAppExporter()
+        deployment = _make_deployment(
+            external_resource_ids={
+                "app_name": "dr-shell-flake",
+                "deployment_path": "/Workspace/Shared/deep-research-agent/shell-apps/f",
+            }
+        )
+
+        obo_client = MagicMock()
+        obo_client.apps.delete = MagicMock(return_value=None)
+        obo_client.workspace.delete = MagicMock(
+            side_effect=SomeUpstreamFlake("upstream returned 500")
+        )
+
+        sp_client = MagicMock()
+        sp_client.workspace.delete = MagicMock(return_value=None)
+
+        resolver = MagicMock(spec=WorkspaceClientResolver)
+        resolver.resolve = MagicMock(return_value=obo_client)
+
+        with (
+            patch(
+                "deep_research.core.databricks_auth.get_databricks_auth",
+                return_value=MagicMock(
+                    get_client=MagicMock(return_value=sp_client)
+                ),
+            ),
+            pytest.raises(DeploymentCleanupError) as exc_info,
+        ):
+            await exporter.deactivate(deployment, client_resolver=resolver)
+
+        # Critical: this MUST be the base class, NOT the exhausted subclass.
+        # Transient errors get the 3-strike retry pattern, not the
+        # immediate-cleanup_failed shortcut.
+        assert not isinstance(exc_info.value, DeploymentCleanupExhaustedError)
+        # And SP fallback was NOT triggered (only PermissionDenied triggers it).
+        sp_client.workspace.delete.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -80,7 +80,10 @@ system_prompt: |
      heading. Each sub-question:
        * References at least one specific noun from the user's query
          (entity name, place, condition, product, year, metric).
-       * Is answerable by web search (not opinion, not metaphysical).
+       * Is answerable through the workflow's available evidence tools
+         (selected assets, vector/table/SQL-like tools, knowledge tools,
+         public web tools, or compute as appropriate), not opinion or
+         metaphysical speculation.
        * Has a measurable definition of done: a number, a date, a
          comparison, a yes/no with citation, or a ranked list.
        * Ends with a question mark.
@@ -89,11 +92,14 @@ system_prompt: |
      Each section names what evidence should go there (2-3 sentences of
      guidance). These match the shape of the user's deliverable.
 
-  4. A "Search strategy" block with at least 2 bullets covering:
-       * One focused query per sub-question (3-5 queries total, not 10).
-       * Prefer primary sources appropriate to this domain (the model
-         already knows what "primary source" means for this query).
-       * Refine rather than crawl when results are generic.
+  4. An "Evidence strategy" block with at least 2 bullets covering:
+       * One focused retrieval/read/query/calculation plan per sub-question
+         (3-5 total, not 10).
+       * Prefer primary or selected sources appropriate to this domain
+         (tables for exact values, vector search for candidate passages,
+         knowledge assistants for curated corpora, public web only when it is
+         actually part of the evidence path).
+       * Refine retrieval when results are generic or insufficient.
 
   5. A "Definition of done" / unknowns-handling block specifying that when
      a sub-question cannot be answered after 2 attempts, the section is
@@ -125,10 +131,10 @@ system_prompt: |
     - **<Section B>**: <what evidence goes here, 2-3 sentences>
     - **<Section C>**: <what evidence goes here, 2-3 sentences>
 
-    ### Search strategy
-    - One focused query per sub-question (3-5 queries total).
-    - Prefer <primary sources appropriate to the domain — pick by query>.
-    - Refine rather than crawl when results are generic landing pages.
+    ### Evidence strategy
+    - One focused retrieval/read/query/calculation plan per sub-question (3-5 total).
+    - Prefer <primary or selected sources appropriate to the domain — pick by query>.
+    - Refine retrieval when results are generic or insufficient.
 
     ### Definition of done
     Each sub-question has a concrete answer with citation, OR is marked
@@ -138,10 +144,12 @@ system_prompt: |
       Walk every agent node and verify each property:
         * config.system_prompt → if generic/short, call update_block with a
           patch installing the 4-element specialization above.
-        * config.tools → if the agent needs external data (web search, vector
-          search, Genie, SQL warehouse), declare_tool then bind_tool_to_block.
-          Lane researchers in a research workflow need at minimum web_search
-          + web_crawl; synthesizers usually need NO tools.
+        * config.tools → if the agent needs evidence or computation (web,
+          vector search, Delta/table reads, Genie, knowledge assistants,
+          SQL-like warehouse access, compute), declare_tool then
+          bind_tool_to_block. Lane researchers in a research workflow need at
+          least one evidence tool appropriate to their evidence path;
+          synthesizers usually need NO tools.
         * config.model_tier → call set_model_tier when:
             - 'complex' for synthesizers, deep-analysis agents, or any agent
               performing multi-step reasoning over many sources.
@@ -179,7 +187,7 @@ system_prompt: |
       single-agent researcher (the lane has nothing concrete to investigate
       and will emit planning text into `findings`),
     - user_prompt_template that lacks a Sub-questions block, a Required
-      output structure block, a Search strategy block, OR a Definition of
+      output structure block, an Evidence/Search strategy block, OR a Definition of
       done / unknowns handling block (the structural contract is mandatory),
     - no tools bound on a lane researcher in a research workflow,
     - default model_tier on a synthesizer when the workflow produces a

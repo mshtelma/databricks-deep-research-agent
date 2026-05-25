@@ -2,14 +2,149 @@
 
 Extracted from pipeline.py to reduce god-object complexity.
 Pure functions with no I/O or LLM calls.
+
+PR3-E R2.2 also adds ``classify_negative_existence`` here — an
+async function that runs ONLY on non-fully-supported claims to flag
+negative-existence assertions for disposition force-REMOVE.
 """
 
 from __future__ import annotations
 
+import json
+import logging
 import re
+from typing import Any
 
 from databricks_deep_research.citation.types import ClaimInfo, ClaimRole
 from databricks_deep_research.citation.utils import NUMERIC_PATTERN, TEMPORAL_PATTERN
+
+logger = logging.getLogger(__name__)
+
+
+# PR3-E R2.2: the verdict set on which the is_negative_existence classifier
+# runs. The plan calls for {abstained, unsupported, contradicted}; the R0
+# ADR finding (hypothesis a — contradicted verdicts get normalized to
+# partial/unsupported/abstained before reaching Stage 8) broadened this to
+# include "partial" so the classifier catches normalized contradicted
+# claims. Keep ``supported`` out — those are pre-validated true claims.
+_NON_FULLY_SUPPORTED_VERDICTS: frozenset[str] = frozenset(
+    {"abstained", "unsupported", "contradicted", "partial"}
+)
+
+
+_NEGATIVE_EXISTENCE_PROMPT = (
+    "Does this claim assert that a specific fact, entity, period, or value "
+    "is NOT present, NOT available, or DOES NOT exist in the source corpus?\n\n"
+    "Claim: {claim_text}\n\n"
+    "Respond with a single JSON object: "
+    '{{"is_negative_existence": <true|false>, "reasoning": "<one sentence>"}}'
+)
+
+
+def _negative_existence_eligible(claim: ClaimInfo) -> bool:
+    """Return True if the claim is in scope for the classifier.
+
+    PR3-E R2.2: only verdicts that are not fully supported get classified
+    (the classifier never fires on ``supported`` claims).
+    """
+    if claim.abstained:
+        return True
+    verdict = (claim.verification_verdict or "").lower()
+    return verdict in _NON_FULLY_SUPPORTED_VERDICTS
+
+
+async def classify_negative_existence(
+    claim: ClaimInfo,
+    llm_client: Any,
+    *,
+    model_tier: str = "fast",
+) -> tuple[bool, str | None]:
+    """Classify whether *claim* is a negative-existence assertion.
+
+    Args:
+        claim: The claim to classify. Returns (False, None) immediately
+            when the claim's verdict is not in the eligible set.
+        llm_client: An object exposing the FrameworkLLMClient API
+            ``await complete(messages, tier, ...)`` OR — for tests — a
+            duck-typed object with a ``complete`` method that returns a
+            dict-shaped JSON response.
+        model_tier: The tier to call. Defaults to ``"fast"`` per plan
+            latency budget.
+
+    Returns:
+        ``(is_negative_existence, reasoning_or_None)``. Defaults to
+        ``(False, None)`` on any classifier error so the disposition
+        pipeline's behaviour is preserved when the model call fails.
+    """
+    if not _negative_existence_eligible(claim):
+        return False, None
+    prompt = _NEGATIVE_EXISTENCE_PROMPT.format(claim_text=claim.claim_text)
+    try:
+        raw = await _call_classifier_llm(llm_client, prompt, model_tier)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.info(
+            "NEGATIVE_EXISTENCE_CLASSIFIER_ERROR claim_head=%r error=%s",
+            claim.claim_text[:60],
+            exc,
+        )
+        return False, None
+    return _coerce_negative_existence_response(raw)
+
+
+async def _call_classifier_llm(
+    llm_client: Any, prompt: str, model_tier: str
+) -> Any:
+    """Call the LLM via the FrameworkLLMClient API OR the duck-typed test stub.
+
+    The framework's ``FrameworkLLMClient.complete`` takes
+    ``(messages, tier, ...)``; test stubs may take
+    ``(prompt=..., model_tier=..., response_format=...)``. This helper
+    tries the framework signature first and falls back to the stub
+    signature on TypeError. Returns the raw response (either an
+    ``LLMResponse`` whose ``content`` field is parsed, or the stub's
+    dict directly).
+    """
+    try:
+        messages = [
+            {
+                "role": "user",
+                "content": prompt,
+            }
+        ]
+        resp = await llm_client.complete(messages, tier=model_tier)
+        # Framework response: LLMResponse(content=str, ...)
+        content = getattr(resp, "content", None)
+        if isinstance(content, str):
+            return content
+        return resp
+    except TypeError:
+        return await llm_client.complete(
+            prompt=prompt,
+            model_tier=model_tier,
+            response_format="json",
+        )
+
+
+def _coerce_negative_existence_response(raw: Any) -> tuple[bool, str | None]:
+    """Best-effort parse of the classifier's response into (bool, reasoning)."""
+    if isinstance(raw, dict):
+        payload = raw
+    elif isinstance(raw, str):
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return False, None
+        if not isinstance(payload, dict):
+            return False, None
+    else:
+        return False, None
+    flag = payload.get("is_negative_existence")
+    if not isinstance(flag, bool):
+        return False, None
+    reasoning = payload.get("reasoning")
+    if not isinstance(reasoning, str):
+        reasoning = None
+    return flag, reasoning
 
 # ---------------------------------------------------------------------------
 # Constants (moved from pipeline.py)

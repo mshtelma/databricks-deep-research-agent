@@ -212,6 +212,31 @@ class DeploymentService(BaseRepository[AgentDeployment]):
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_failed_for_agent(
+        self,
+        agent_id: UUID,
+    ) -> list[AgentDeployment]:
+        """Return FAILED deployments for an agent.
+
+        FAILED rows are produced by:
+          - the recovery sweep at app startup (``error_message="server_shutdown"``)
+          - the zombie janitor (``error_message="worker_zombie"``)
+          - genuine deploy failures from translator.deploy()
+
+        They sit between ACTIVE_STATUSES and DELETABLE_STATUSES, blocking
+        the FK on ``agent_deployments.agent_id`` (``ON DELETE RESTRICT``).
+        Force-delete uses this list to flip them to DEACTIVATED before
+        ``delete_terminal_rows_for_agent`` clears them.
+        """
+        stmt = (
+            select(AgentDeployment)
+            .where(AgentDeployment.agent_id == agent_id)
+            .where(AgentDeployment.status == DeploymentStatus.FAILED.value)
+            .order_by(AgentDeployment.created_at.desc())
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     # ------------------------------------------------------------------
     # Mutations
     # ------------------------------------------------------------------
@@ -290,16 +315,28 @@ class DeploymentService(BaseRepository[AgentDeployment]):
     async def delete_terminal_rows_for_agent(
         self,
         agent_id: UUID,
+        *,
+        include_failed: bool = False,
     ) -> int:
-        """Physically remove DEACTIVATED/CLEANUP_FAILED rows for an agent.
+        """Physically remove deletable rows for an agent.
 
         Plan Section N.2 step 4: PostgreSQL ``ON DELETE RESTRICT`` blocks
         the parent agent delete based on row existence, not status. Terminal
         rows must be physically removed before the agent row can be deleted.
 
+        Default (``include_failed=False``): removes DEACTIVATED + CLEANUP_FAILED
+        only, preserving FAILED rows for forensics on non-forced paths.
+
+        ``include_failed=True``: callers from force-delete cascades have
+        already flipped FAILED rows to DEACTIVATED before calling this — the
+        flag widens the SELECT defensively in case any rows slipped through
+        the cascade (e.g., concurrent INSERT during cascade processing).
+
         Returns the number of rows deleted.
         """
         rows = await self.list_terminal_for_agent(agent_id)
+        if include_failed:
+            rows.extend(await self.list_failed_for_agent(agent_id))
         for row in rows:
             await self._session.delete(row)
         await self._session.flush()

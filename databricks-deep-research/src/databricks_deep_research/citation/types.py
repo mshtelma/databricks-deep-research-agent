@@ -206,6 +206,14 @@ class ClaimInfo:
     """True if extracted from a ``<free>`` block (needs verification)."""
     has_fallback_evidence: bool = False
     """True if evidence was assigned via fallback keyword matching (not LLM citation)."""
+    is_negative_existence: bool = False
+    """PR3-E R2.2: True when the claim asserts that a specific fact, entity,
+    period, or value is NOT present / NOT available / DOES NOT exist in the
+    source corpus. Classified by a small Haiku call gated behind
+    ``SYNTH_PIPELINE_V2``; downstream disposition forces REMOVE when this
+    flag is true AND the verdict is not fully supported."""
+    is_negative_existence_reasoning: str | None = None
+    """Optional one-line reasoning from the is_negative_existence classifier."""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""

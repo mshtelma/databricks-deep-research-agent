@@ -166,6 +166,14 @@ class TestMergeAndCompile:
         assert "static parallel_lanes" in description
         assert "LLM-authored system_prompt and user_prompt_template" in description
 
+    def test_designer_contract_does_not_force_public_web_tools(self) -> None:
+        prompt = designer_system_prompt()
+        normalized = " ".join(prompt.split())
+        assert "web_search + web_crawl" not in prompt
+        assert "answerable by web search" not in prompt
+        assert "at least one evidence tool" in normalized
+        assert "appropriate to their evidence path" in normalized
+
 
 class TestBuilderPlumbing:
     """US-02: lane researcher prompt assembly injects '## Lane Specialization'

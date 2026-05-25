@@ -4,12 +4,13 @@ Replaces the 3769 LOC monolith orchestrator with a clean delegation to the
 multi-agent framework.  The pipeline is:
 
     config_translator.translate(config) → WorkflowDefinition
-    WorkflowExecutor(definition, llm_client, ...).execute(state) → yields StreamEvent
+    build_app_workflow_runner(...).stream(definition, ...) → yields StreamEvent
     DomainContextTracker.process_event(event) → list[AppSSEEvent]
     PersistenceDelta → DB writes
 
 All app-specific concerns (persistence, SSE format, cancellation, error
-handling) are handled here.  The framework handles workflow execution.
+handling) are handled here.  Tool context construction lives in
+``workflow_runner_factory.py``.  The framework handles workflow execution.
 """
 
 from __future__ import annotations
@@ -41,9 +42,6 @@ from databricks_deep_research.workflow.definition import (
     NodeType,
     WorkflowDefinition,
 )
-from databricks_deep_research.workflow.executor import (
-    WorkflowExecutor,
-)
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from databricks_deep_research.workflow.state import WorkflowState
 
@@ -58,6 +56,7 @@ from deep_research.agent.chat_title import derive_chat_title_from_query
 from deep_research.agent.tools.file_entities import GetFileEntitiesTool
 from deep_research.agent.tools.list_files import ListAttachedFilesTool
 from deep_research.agent.tools.read_file import ReadAttachedFileTool
+from deep_research.agent.workflow_runner_factory import build_app_workflow_runner
 from deep_research.core.tracing import safe_mlflow_run, safe_tool_span, safe_update_trace
 from deep_research.plugins.base import ContextEnricher
 from deep_research.schemas.streaming import (
@@ -743,17 +742,14 @@ async def stream_workflow_via_framework(
                     tool_names,
                 )
 
-                # Build ToolResolver with YAML declarations + factories so
-                # declared tools (vector_search, genie, etc.) can be created
-                # on-demand by the factory chain.
+                # Build the shared WorkflowRunner (single execution code path
+                # for all app entry points — see workflow_runner_factory.py
+                # for the project convention).
                 from databricks_deep_research.tools.factories.builtin import (
                     BuiltinToolFactory,
                 )
                 from databricks_deep_research.tools.factories.databricks import (
                     DatabricksToolFactory,
-                )
-                from databricks_deep_research.tools.factory import (
-                    ToolFactoryContext,
                 )
                 from databricks_deep_research.tools.resolver import (
                     ToolResolver,
@@ -776,15 +772,23 @@ async def stream_workflow_via_framework(
                             str(exc)[:200],
                         )
 
+                runner = build_app_workflow_runner(
+                    llm_client=framework_llm,
+                    workspace_client=_ws_client,
+                    user_token=config.user_token,
+                )
+
+                # Build ToolResolver with YAML declarations + factories so
+                # declared tools (vector_search, genie, etc.) can be created
+                # on-demand by the factory chain. The resolver shares the
+                # runner's factory_context — both must see the same
+                # BRAVE_API_KEY / workspace_client / user_token wiring.
                 tool_resolver = ToolResolver(
                     declarations=list(workflow_def.tools) if workflow_def.tools else None,
                     # No kind overlap: builtin handles web_search/web_crawl/file_search;
                     # Databricks handles vector_search/genie/knowledge_assistant.
                     factories=[BuiltinToolFactory(), DatabricksToolFactory()],
-                    factory_context=ToolFactoryContext(
-                        workspace_client=_ws_client,
-                        user_token=config.user_token,
-                    ),
+                    factory_context=runner.factory_context,
                 )
                 logger.info(
                     "FWK_TOOL_RESOLVER_READY declarations=%d "
@@ -796,13 +800,6 @@ async def stream_workflow_via_framework(
                 for tool in framework_tools:
                     tool_resolver.override(tool.definition.name, tool)
 
-                # -- 4. Execute workflow and stream events --
-                executor = WorkflowExecutor(
-                    workflow_def,
-                    framework_llm,
-                    tool_resolver=tool_resolver,
-                    context=context,
-                )
                 tracker = DomainContextTracker()
 
                 wf_state = WorkflowState(query=query)
@@ -846,7 +843,13 @@ async def stream_workflow_via_framework(
 
                 try:
                     async with asyncio.timeout(research_timeout):
-                        async for fw_event in executor.execute(wf_state):
+                        async for fw_event in runner.stream(
+                            workflow_def,
+                            state=wf_state,
+                            tool_resolver=tool_resolver,
+                            context=context,
+                            strict_tool_resolution=True,
+                        ):
                             # Detect simple query short-circuit (Step 2)
                             if isinstance(fw_event, CoordinatorClassifiedEvent) and fw_event.is_simple and fw_event.direct_response:
                                 simple_response = fw_event.direct_response

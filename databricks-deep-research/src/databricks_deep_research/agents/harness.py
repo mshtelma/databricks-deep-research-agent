@@ -943,7 +943,12 @@ async def _build_input(
 
     # Auto-inject compute namespace summary for downstream agents.
     # Enables prompts to reference {compute_namespace} without discovery calls.
-    ns_summary = "(compute tool not available)"
+    # We only write the key when at least one tool actually exposes a
+    # namespace_snapshot() — agents with no compute tool bound (e.g. the
+    # designer architect) get no compute_namespace key at all, which keeps
+    # the variable absent from their prompt context rather than leaking a
+    # misleading "(compute tool not available)" placeholder.
+    ns_summary: str | None = None
     for tool in tools:
         if hasattr(tool, "namespace_snapshot") and callable(tool.namespace_snapshot):
             try:
@@ -952,7 +957,7 @@ async def _build_input(
                 logger.warning("NAMESPACE_SNAPSHOT_FAILED node=%s", _node_id, exc_info=True)
                 ns_summary = "(error reading compute namespace)"
             break
-    if context.get("compute_namespace") is None:
+    if ns_summary is not None and context.get("compute_namespace") is None:
         context["compute_namespace"] = ns_summary
 
     # Auto-inject temporal context (current_date, current_iso_datetime,

@@ -53,7 +53,7 @@ const EMPTY_LIST: AgentV2ListResponse = { items: [], total: 0 }
 const TWO_AGENTS: AgentV2ListResponse = {
   items: [
     {
-      id: 'agent-1',
+      id: 'ffc304b0-a67d-458a-8fb2-7a433cd36107',
       name: 'Alpha Agent',
       description: 'First test agent',
       visibility: 'private',
@@ -63,7 +63,7 @@ const TWO_AGENTS: AgentV2ListResponse = {
       in_app_active: false,
     },
     {
-      id: 'agent-2',
+      id: 'a0d7eaf0-7e8f-4a1a-9db1-bf48652dfa14',
       name: 'Beta Agent',
       description: null,
       visibility: 'workspace',
@@ -110,9 +110,14 @@ describe('AgentDesignerListPage', () => {
     expect(screen.getByText('Private')).toBeInTheDocument()
     expect(screen.getByText('Workspace')).toBeInTheDocument()
 
-    // Owner IDs truncated to 12 chars
-    expect(screen.getByText('user-abc-123')).toBeInTheDocument()
-    expect(screen.getByText('user-xyz-456')).toBeInTheDocument()
+    // Agent IDs (NOT owner IDs) shown in the footer, truncated to 12 chars.
+    // The full UUID is in the title attribute for hover-to-copy.
+    expect(screen.getAllByText('ffc304b0-a67')).toHaveLength(1)
+    expect(screen.getAllByText('a0d7eaf0-7e8')).toHaveLength(1)
+    // Owner IDs MUST NOT be rendered — single-user workspaces would otherwise
+    // see the same opaque user_id repeated on every card (the bug this fixes).
+    expect(screen.queryByText('user-abc-123')).not.toBeInTheDocument()
+    expect(screen.queryByText('user-xyz-456')).not.toBeInTheDocument()
   })
 
   it('clicking an agent card navigates to /designer/:id', async () => {
@@ -126,7 +131,7 @@ describe('AgentDesignerListPage', () => {
     expect(card).not.toBeNull()
     fireEvent.click(card!)
 
-    expect(mockNavigate).toHaveBeenCalledWith('/designer/agent-1')
+    expect(mockNavigate).toHaveBeenCalledWith('/designer/ffc304b0-a67d-458a-8fb2-7a433cd36107')
   })
 
   it('Delete confirm calls deleteAgentV2 with the correct id', async () => {
@@ -155,7 +160,7 @@ describe('AgentDesignerListPage', () => {
     fireEvent.click(confirmBtn!)
 
     await waitFor(() => {
-      expect(deleteAgentV2).toHaveBeenCalledWith('agent-1')
+      expect(deleteAgentV2).toHaveBeenCalledWith('ffc304b0-a67d-458a-8fb2-7a433cd36107')
     })
   })
 
@@ -218,7 +223,7 @@ describe('AgentDesignerListPage', () => {
     )
 
     await waitFor(() => {
-      expect(deleteAgentV2).toHaveBeenLastCalledWith('agent-1', { force: true })
+      expect(deleteAgentV2).toHaveBeenLastCalledWith('ffc304b0-a67d-458a-8fb2-7a433cd36107', { force: true })
     })
   })
 

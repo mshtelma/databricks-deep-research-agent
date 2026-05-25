@@ -22,9 +22,10 @@ import hashlib
 import io
 import logging
 import os
+import re
 import zipfile
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import yaml
 from jinja2 import StrictUndefined, Template
@@ -34,14 +35,27 @@ from deep_research.services.deployment._paths import resolve_package_data_dir
 from deep_research.services.deployment.translator import (
     Artifact,
     DeploymentCleanupError,
+    DeploymentCleanupExhaustedError,
     DeploymentResult,
     ValidationError,
     ValidationResult,
 )
 
+if TYPE_CHECKING:
+    from deep_research.services.deployment.auth import WorkspaceClientResolver
+
 logger = logging.getLogger(__name__)
 _DEFAULT_BRAVE_SECRET_SCOPE = "deep-research-secrets"
 _DEFAULT_BRAVE_SECRET_KEY = "BRAVE_API_KEY"
+
+# Conservative whitelist for framework_git_tag values rendered verbatim into
+# the shell-app's pyproject.toml pip URL. Mirrors a subset of
+# git-check-ref-format: alphanumerics + ``.``, ``_``, ``-``, ``/`` only; must
+# not start with ``.``, ``-``, or ``/`` (which would either be ambiguous git
+# refs or escape into URL-fragment territory); length bounded at 256 chars.
+# Reject ``@``, ``#``, ``?``, whitespace, and quotes — these can fragment the
+# pip git URL or alter pip's parsing.
+_GIT_REF_WHITELIST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
 
 
 def _is_not_found_error(exc: BaseException) -> bool:
@@ -55,6 +69,32 @@ def _is_not_found_error(exc: BaseException) -> bool:
         return True
     msg = str(exc).lower()
     return "404" in msg or "not found" in msg or "does not exist" in msg
+
+
+def _is_permission_denied_error(exc: BaseException) -> bool:
+    """Detect PermissionDenied (HTTP 403) from the Databricks SDK.
+
+    Strict-first: prefers ``isinstance`` against the canonical SDK class so
+    we don't fight string formatting. Falls back to a narrow type-name /
+    message check for wrapped or legacy paths where the original SDK
+    exception was re-raised inside another class.
+
+    Does NOT match a bare ``"403"`` in the message — that's too broad and
+    would false-match unrelated errors that happen to mention the substring.
+    """
+    try:
+        from databricks.sdk.errors.platform import PermissionDenied  # noqa: PLC0415
+
+        if isinstance(exc, PermissionDenied):
+            return True
+    except Exception:  # noqa: BLE001
+        # SDK class not importable for some reason — fall through to duck-type.
+        pass
+    cls_name = type(exc).__name__.lower()
+    if "permissiondenied" in cls_name or "forbidden" in cls_name:
+        return True
+    msg = str(exc).lower()
+    return "permission_denied" in msg or "permission denied" in msg
 
 
 _TEMPLATE_DIR = resolve_package_data_dir(Path(__file__), "agent-shell-app")
@@ -250,6 +290,28 @@ class ShellAppExporter:
                     path="config.framework_git_tag",
                 )
             )
+        else:
+            # Whitelist the framework_git_tag character set. The value is
+            # rendered verbatim into pyproject.toml as
+            # ``git+https://github.com/.../...@{git_tag}#subdirectory=...``
+            # and consumed by pip + git. Characters like ``@``, ``#``, ``?``,
+            # whitespace or quotes could fragment-overflow into the URL or
+            # alter pip's parsing. Allow only the git-ref-safe subset, must
+            # not begin with ``.`` or ``-`` (per git-check-ref-format rules),
+            # and bound length to 256 chars.
+            if not _GIT_REF_WHITELIST.fullmatch(git_tag):
+                errors.append(
+                    ValidationError(
+                        message=(
+                            "framework_git_tag contains disallowed characters. "
+                            "Allowed: alphanumerics, '.', '_', '-', '/'. Must "
+                            "not begin with '.', '-', or '/' and must be 256 "
+                            "chars or fewer. Reject '@', '#', '?', whitespace, "
+                            "and quotes."
+                        ),
+                        path="config.framework_git_tag",
+                    )
+                )
 
         # Reject AST containing custom tool kinds. AgentRevision.definition
         # is a JSONB dict at this point (see AgentV2 model). The 'tools' key
@@ -428,13 +490,25 @@ class ShellAppExporter:
 
         return await _deploy_via_apps_api(artifact, config, deployment, workspace_client)
 
-    async def deactivate(self, deployment: AgentDeployment) -> None:
+    async def deactivate(
+        self,
+        deployment: AgentDeployment,
+        *,
+        client_resolver: WorkspaceClientResolver | None = None,
+    ) -> None:
         """Tear down the live Databricks App and uploaded workspace files.
 
         Idempotent: 404/NotFound from the SDK is treated as success (the resource
         is already gone). Any other upstream failure is raised as
         ``DeploymentCleanupError`` so the API layer can escalate the row to
         ``cleanup_failed`` after ``MAX_CLEANUP_ATTEMPTS``.
+
+        When ``client_resolver`` is supplied (user-initiated DELETE), the
+        Apps / workspace SDK calls run with the user's OBO-scoped client so
+        that resources the user originally created (via OBO at deploy time)
+        can be deleted by the same identity. With a ``None`` resolver
+        (janitor / orphan-detection), falls back to the parent-app SP via
+        ``get_databricks_auth().get_client()`` — same behaviour as before.
         """
         external = deployment.external_resource_ids or {}
         app_name: str | None = external.get("app_name")
@@ -448,14 +522,21 @@ class ShellAppExporter:
             get_databricks_auth,
         )
 
-        client = get_databricks_auth().get_client()
+        sp_client = get_databricks_auth().get_client()
+        if client_resolver is not None:
+            user_client = client_resolver.resolve(
+                purpose="shell_app.deactivate",
+                deployment_id=deployment.id,
+            )
+        else:
+            user_client = sp_client
 
         failures: list[tuple[str, Exception]] = []
 
-        # --- Delete the Databricks App ---
+        # --- Delete the Databricks App (App is OBO-owned: use user_client) ---
         if app_name:
             try:
-                await asyncio.to_thread(client.apps.delete, app_name)
+                await asyncio.to_thread(user_client.apps.delete, app_name)
                 logger.info(
                     "SHELL_APP_DEACTIVATE_APP_DELETED app_name=%s", app_name
                 )
@@ -471,15 +552,25 @@ class ShellAppExporter:
                     failures.append(("apps.delete", exc))
 
         # --- Delete the workspace source tree ---
+        # Files are SP-uploaded today (shell_app_apps_api.py:310 hard-codes SP for
+        # the upload), so the OBO identity often lacks delete permission on them.
+        # Try the user_client first (correct for OBO-uploaded files in a future
+        # consistent-identity world), then fall back to sp_client on
+        # PermissionDenied (correct for today's SP-uploaded files). If BOTH
+        # identities are denied, raise DeploymentCleanupExhaustedError so the
+        # service layer marks cleanup_failed once and proceeds to delete the
+        # parent agent — the user gets a single decisive force-delete instead
+        # of three identical deterministic failures.
         if deployment_path:
-            try:
-                from deep_research.services.deployment.shell_app_apps_api import (  # noqa: PLC0415
-                    delete_workspace_source_tree,
-                )
+            from deep_research.services.deployment.shell_app_apps_api import (  # noqa: PLC0415
+                delete_workspace_source_tree,
+            )
 
-                await delete_workspace_source_tree(client, deployment_path)
+            try:
+                await delete_workspace_source_tree(user_client, deployment_path)
                 logger.info(
-                    "SHELL_APP_DEACTIVATE_WS_DELETED path=%s", deployment_path
+                    "SHELL_APP_DEACTIVATE_WS_DELETED path=%s actor=user",
+                    deployment_path,
                 )
             except Exception as exc:  # noqa: BLE001
                 if _is_not_found_error(exc):
@@ -487,9 +578,57 @@ class ShellAppExporter:
                         "SHELL_APP_DEACTIVATE_WS_ALREADY_GONE path=%s",
                         deployment_path,
                     )
+                elif (
+                    _is_permission_denied_error(exc)
+                    and user_client is not sp_client
+                ):
+                    logger.warning(
+                        "SHELL_APP_DEACTIVATE_WS_OBO_DENIED_FALLBACK_SP "
+                        "path=%s deployment_id=%s",
+                        deployment_path,
+                        deployment.id,
+                    )
+                    try:
+                        await delete_workspace_source_tree(
+                            sp_client, deployment_path
+                        )
+                        logger.info(
+                            "SHELL_APP_DEACTIVATE_WS_DELETED path=%s actor=sp",
+                            deployment_path,
+                        )
+                    except Exception as exc2:  # noqa: BLE001
+                        if _is_not_found_error(exc2):
+                            logger.info(
+                                "SHELL_APP_DEACTIVATE_WS_ALREADY_GONE "
+                                "path=%s actor=sp",
+                                deployment_path,
+                            )
+                        elif _is_permission_denied_error(exc2):
+                            logger.error(
+                                "SHELL_APP_DEACTIVATE_WS_PERMDENIED_BOTH_IDENTITIES "
+                                "path=%s deployment_id=%s "
+                                "obo_error=%s sp_error=%s",
+                                deployment_path,
+                                deployment.id,
+                                type(exc).__name__,
+                                type(exc2).__name__,
+                            )
+                            raise DeploymentCleanupExhaustedError(
+                                "Shell-app deactivate: workspace.delete denied "
+                                f"by both OBO and SP. path={deployment_path}",
+                                resource="workspace.delete",
+                                upstream_error_type=type(exc2).__name__,
+                            ) from exc2
+                        else:
+                            logger.exception(
+                                "SHELL_APP_DEACTIVATE_WS_DELETE_FAILED "
+                                "path=%s actor=sp",
+                                deployment_path,
+                            )
+                            failures.append(("workspace.delete", exc2))
                 else:
                     logger.exception(
-                        "SHELL_APP_DEACTIVATE_WS_DELETE_FAILED path=%s",
+                        "SHELL_APP_DEACTIVATE_WS_DELETE_FAILED path=%s actor=user",
                         deployment_path,
                     )
                     failures.append(("workspace.delete", exc))

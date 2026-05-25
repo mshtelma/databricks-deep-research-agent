@@ -41,10 +41,18 @@ resources:
         #     name: 'databricks-claude-sonnet-4-5'
         #     permission: 'CAN_QUERY'
 {% endif %}
+      # OBO scopes must match the surfaces a designer-built workflow can reach.
+      # vector-search-indexes is REQUIRED to query a VS index (endpoints scope
+      # alone is insufficient — the SDK calls query_index against the index
+      # path). dashboards.genie is required for any Genie tool. Keep this list
+      # in sync with the main DRE bundle (../databricks.yml) so "Test Run in
+      # DRE works → deployed shell app works" remains a true invariant.
       user_api_scopes:
         - sql
         - serving.serving-endpoints
         - vectorsearch.vector-search-endpoints
+        - vectorsearch.vector-search-indexes
+        - dashboards.genie
 
 targets:
   dev:

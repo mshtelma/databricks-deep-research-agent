@@ -36,7 +36,7 @@ import {
 import { useChatSession } from '@/hooks/useChatSession';
 import { useDesignerSettings } from '@/hooks/useDesignerSettings';
 import { PendingMutationCard } from './PendingMutationCard';
-import type { ChatMessage } from '@/types/agentDesigner';
+import type { ChatMessage, DesignerAsset } from '@/types/agentDesigner';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -44,6 +44,7 @@ import type { ChatMessage } from '@/types/agentDesigner';
 
 export interface ChatPanelProps {
   sessionId?: string | null;
+  assets?: DesignerAsset[] | (() => DesignerAsset[]);
 }
 
 // ---------------------------------------------------------------------------
@@ -464,8 +465,8 @@ const SUGGESTIONS = [
   'Make web_crawl HITL-gated',
 ];
 
-export function ChatPanel({ sessionId }: ChatPanelProps): React.ReactElement {
-  const session = useChatSession({ sessionId });
+export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactElement {
+  const session = useChatSession({ sessionId, assets });
   const { settings, setShowAutoRepairDetails } = useDesignerSettings();
 
   const [inputText, setInputText] = React.useState('');

@@ -37,8 +37,10 @@ from deep_research.schemas.agent_v2 import (
 )
 from deep_research.services.deployment import (
     DeploymentCleanupError,
+    DeploymentCleanupExhaustedError,
     translator_for,
 )
+from deep_research.services.deployment.auth import WorkspaceClientResolver
 from deep_research.services.deployment_service import DeploymentService
 
 logger = logging.getLogger(__name__)
@@ -208,6 +210,7 @@ class AgentV2Service:
         user_id: str,
         *,
         force: bool = False,
+        client_resolver: WorkspaceClientResolver | None = None,
     ) -> bool:
         """Delete an owned agent. Plan Section N (deletion guard + lifecycle).
 
@@ -228,6 +231,13 @@ class AgentV2Service:
         If any translator raises ``DeploymentCleanupError``, the cascade
         either retries (under ``MAX_CLEANUP_ATTEMPTS``) or marks the row
         ``cleanup_failed`` and re-raises so the API layer surfaces a 409.
+
+        ``client_resolver`` lets user-initiated paths (the agent DELETE
+        endpoint) thread an OBO-scoped ``WorkspaceClient`` into the
+        translator. Required for Shell-App deactivate because the App
+        was created by the user via OBO at deploy time; the SP doesn't
+        own user-created Apps. ``None`` falls back to SP — used by
+        background callers / tests with no request context.
         """
         agent = await self.get_owned(agent_id, user_id)
         if agent is None:
@@ -255,8 +265,32 @@ class AgentV2Service:
             # success; only real failures escape as DeploymentCleanupError.
             try:
                 translator = translator_for(DeploymentMode(deployment.mode))
-                await translator.deactivate(deployment)
+                await translator.deactivate(
+                    deployment, client_resolver=client_resolver
+                )
+            except DeploymentCleanupExhaustedError as exc:
+                # Deterministic failure (e.g., dual-identity PermissionDenied
+                # on workspace.delete). Bumping cleanup_attempts and asking
+                # the user to click 3 times would just burn 3 identical
+                # failures. Mark cleanup_failed once and continue the loop —
+                # the row stays in DELETABLE_STATUSES so the FK-clearing
+                # pass below physically removes it, and the parent agent
+                # delete proceeds. The structured ERROR log line from the
+                # translator + the persisted error_message form the audit
+                # trail.
+                logger.error(
+                    "AGENT_DELETE_CLEANUP_EXHAUSTED "
+                    "agent_id=%s deployment_id=%s exc=%s",
+                    agent_id,
+                    deployment.id,
+                    exc,
+                )
+                await deployment_service.mark_cleanup_failed(
+                    deployment.id, error_message=str(exc)
+                )
+                continue
             except DeploymentCleanupError as exc:
+                # Transient/retryable failure: 3-strike pattern.
                 # Bump attempts; if we hit the threshold, mark
                 # cleanup_failed (terminal) and re-raise so the API can
                 # 409. Otherwise also re-raise — force-delete is atomic
@@ -275,14 +309,32 @@ class AgentV2Service:
             # Translator success → mark DB row as deactivated.
             await deployment_service.deactivate(deployment.id)
 
-        # PG ON DELETE RESTRICT checks row existence, not status.
-        # Deletable-status rows must be physically removed first. Note:
-        # FAILED and CLEANUP_FAILED rows are NOT in DELETABLE_STATUSES
-        # (W2) — they are preserved for forensics. If any remain, the
-        # subsequent self._session.delete(agent) will raise an FK
-        # IntegrityError, which is the desired behavior (the user must
-        # explicitly resolve the failed deployment first).
-        await deployment_service.delete_terminal_rows_for_agent(agent_id)
+        # Cascade through FAILED rows so they don't block the FK below.
+        # FAILED rows are produced by the recovery sweep (app restart,
+        # error_message="server_shutdown"), the zombie janitor
+        # (error_message="worker_zombie"), or a genuine translator.deploy()
+        # failure. We do NOT call translator.deactivate on them: either no
+        # external resources were ever provisioned (DEPLOYING was
+        # interrupted before deploy ran), or the translator already failed
+        # its pass once and re-running it would just regress the 3-strike
+        # attempt counter. Mirror of api/v1/deployments.py:859-860.
+        #
+        # Gated on ``force=True`` so the forensics-on-default semantics are
+        # preserved: a non-forced delete with leftover FAILED rows still
+        # raises IntegrityError (translated to 409 by the API handler),
+        # surfacing the rows to the user instead of silently erasing them.
+        if force:
+            failed = await deployment_service.list_failed_for_agent(agent_id)
+            for deployment in failed:
+                await deployment_service.deactivate(deployment.id)
+
+        # PG ON DELETE RESTRICT checks row existence, not status. Deletable
+        # rows (DEACTIVATED + CLEANUP_FAILED) and any residual FAILED rows
+        # (defensive — should already be DEACTIVATED above under force=True)
+        # are physically removed before self._session.delete(agent).
+        await deployment_service.delete_terminal_rows_for_agent(
+            agent_id, include_failed=force
+        )
 
         await self._session.delete(agent)
         await self._session.flush()

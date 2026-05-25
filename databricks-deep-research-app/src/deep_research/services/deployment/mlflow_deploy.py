@@ -27,7 +27,7 @@ import logging
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from deep_research.models.agent_deployment import AgentDeployment, DeploymentMode
 from deep_research.services.deployment.framework_version import framework_git_tag
@@ -39,6 +39,9 @@ from deep_research.services.deployment.translator import (
     ValidationError,
     ValidationResult,
 )
+
+if TYPE_CHECKING:
+    from deep_research.services.deployment.auth import WorkspaceClientResolver
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +218,12 @@ class MlflowAgentTranslator:
                 error_message=f"{type(exc).__name__}: {exc}",
             )
 
-    async def deactivate(self, deployment: AgentDeployment) -> None:
+    async def deactivate(
+        self,
+        deployment: AgentDeployment,
+        *,
+        client_resolver: WorkspaceClientResolver | None = None,
+    ) -> None:
         """Idempotent teardown: archive UC model version + delete endpoint.
 
         Both calls treat 404 / NotFound as success per the protocol's
@@ -225,7 +233,21 @@ class MlflowAgentTranslator:
         ``MAX_CLEANUP_ATTEMPTS`` (W4 of the fix plan — replaces the
         previous "swallow everything" pattern that masked failure as
         success).
+
+        ``client_resolver`` is accepted to honour the Protocol but does
+        not yet flow into ``databricks.agents`` / ``mlflow`` SDK calls —
+        those libraries auth via ambient env vars rather than an explicit
+        WorkspaceClient. Wiring OBO into the MLflow path is tracked as a
+        follow-up to the resolver introduction.
         """
+        if client_resolver is not None:
+            # Best-effort: surface that an OBO client was available but
+            # this translator can't route SDK calls through it yet. The
+            # log marker lets on-call audit identity attribution.
+            client_resolver.resolve(
+                purpose="mlflow_deploy.deactivate",
+                deployment_id=deployment.id,
+            )
         await asyncio.to_thread(_deactivate_via_sdk, deployment)
 
 

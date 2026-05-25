@@ -384,6 +384,9 @@ class TestPromptShape:
         messages = _build_critic_messages(
             intent="investment research on NVDA",
             required_outputs=["thesis"],
+            tool_declarations=[
+                {"name": "web_research", "kind": "web_research", "config_keys": []}
+            ],
             agents=agents,
         )
         assert messages[0]["role"] == "system"
@@ -392,6 +395,7 @@ class TestPromptShape:
         payload = json.loads(messages[1]["content"])
         assert payload["intent"] == "investment research on NVDA"
         assert payload["required_outputs"] == ["thesis"]
+        assert payload["tool_declarations"][0]["name"] == "web_research"
         assert len(payload["agents"]) == 1
 
     def test_tool_schema_constrains_critique_shape(self) -> None:

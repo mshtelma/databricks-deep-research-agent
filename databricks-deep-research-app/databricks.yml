@@ -57,6 +57,23 @@ variables:
     description: "PostgreSQL host for Lakebase (discovered during deploy)"
     default: "pending"
 
+  # DAB-managed Lakebase Postgres app resource binding.
+  # These two vars are resolved at deploy time from the live workspace by
+  # `app_postgres_resource.py --print-bundle-vars` (or `preflight.py`) and
+  # injected via `--var` from the Makefile. Defaulting to the literal
+  # "pending" sentinel makes `bundle summary` / `bundle validate` succeed
+  # without an --var override; the preflight asserts that "pending" never
+  # reaches `bundle deploy`. The lakebase-postgres app resource below
+  # references these values so the app binding is fully DAB-managed
+  # (no Apps-API write side).
+  postgres_branch:
+    description: "Lakebase Postgres branch resource path (resolved during deploy)"
+    default: "pending"
+
+  postgres_database_resource:
+    description: "Lakebase Postgres database resource path (resolved during deploy)"
+    default: "pending"
+
   # Lakebase Autoscaling Configuration
   pg_version:
     description: "PostgreSQL version for Autoscaling projects"
@@ -219,6 +236,23 @@ resources:
           serving_endpoint:
             name: databricks-gemini-3-pro
             permission: CAN_QUERY
+
+        # =================================================================
+        # Lakebase Postgres binding (DAB-managed)
+        # =================================================================
+        # The branch and database paths are resolved at deploy time by
+        # `app_postgres_resource.py --print-bundle-vars` and injected as
+        # `--var` arguments from the Makefile. A "pending" sentinel for
+        # either field blocks the deploy via preflight rather than
+        # producing a broken app binding. The Apps-API write side in
+        # `configure_app_postgres_resource()` is deprecated; this YAML
+        # block is now the single source of truth.
+        - name: lakebase-postgres
+          description: "Lakebase Postgres database used by the app"
+          postgres:
+            branch: ${var.postgres_branch}
+            database: ${var.postgres_database_resource}
+            permission: CAN_CONNECT_AND_CREATE
 
         # =================================================================
         # Optional: MLflow Experiment

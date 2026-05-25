@@ -9,6 +9,7 @@ MlflowDeployService (Mode 3), and BatchTranslator (Mode 4) land in later
 phases.
 """
 from deep_research.models.agent_deployment import DeploymentMode
+from deep_research.services.deployment.auth import WorkspaceClientResolver
 from deep_research.services.deployment.batch import BatchTranslator
 from deep_research.services.deployment.in_app import InAppTranslator
 from deep_research.services.deployment.mlflow_deploy import MlflowAgentTranslator
@@ -17,6 +18,7 @@ from deep_research.services.deployment.shell_app import ShellAppExporter
 from deep_research.services.deployment.translator import (
     Artifact,
     DeploymentCleanupError,
+    DeploymentCleanupExhaustedError,
     DeploymentResult,
     DeploymentTranslator,
     ValidationError,
@@ -45,6 +47,7 @@ __all__ = [
     "Artifact",
     "BatchTranslator",
     "DeploymentCleanupError",
+    "DeploymentCleanupExhaustedError",
     "DeploymentResult",
     "DeploymentTranslator",
     "InAppTranslator",
@@ -53,5 +56,6 @@ __all__ = [
     "ShellAppExporter",
     "ValidationError",
     "ValidationResult",
+    "WorkspaceClientResolver",
     "translator_for",
 ]

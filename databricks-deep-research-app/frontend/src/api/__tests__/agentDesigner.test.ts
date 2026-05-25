@@ -407,6 +407,67 @@ describe('deleteAgentV2', () => {
       )
     })
   })
+
+  it('parses app-wrapped {code: "HTTP_ERROR", message: <object>} 409 into AgentDeleteError', async () => {
+    // The app's global http_exception_handler wraps every FastAPI HTTPException
+    // as {code: "HTTP_ERROR", message: <exc.detail>} instead of FastAPI's default
+    // {detail: <exc.detail>}. unwrapDetail must recognise both shapes.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        makeResponse(
+          {
+            code: 'HTTP_ERROR',
+            message: {
+              error_kind: 'active_deployments_exist',
+              active_count: 1,
+              deployments: [
+                {
+                  id: 'dep-wrap-1',
+                  mode: 'shell_app',
+                  status: 'active',
+                  endpoint_name: 'dr-shell-beta',
+                },
+              ],
+              message: 'Deactivate all deployments before deleting, or use ?force=true',
+            },
+          },
+          { status: 409 },
+        ),
+      ),
+    )
+
+    await expect(deleteAgentV2('aaaa')).rejects.toSatisfy((error: unknown) => {
+      const parsed = parseAgentDeleteError(error)
+      return (
+        parsed instanceof AgentDeleteError &&
+        parsed.error_kind === 'active_deployments_exist' &&
+        parsed.deployments[0]?.id === 'dep-wrap-1'
+      )
+    })
+  })
+
+  it('falls through to generic ApiError when wrapper message is a plain string', async () => {
+    // Guard: the additive branch only matches when message is an object.
+    // Plain-string messages must NOT be misparsed as an AgentDeleteError.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        makeResponse(
+          { code: 'HTTP_ERROR', message: 'some opaque server error' },
+          { status: 409 },
+        ),
+      ),
+    )
+
+    await expect(deleteAgentV2('aaaa')).rejects.toSatisfy((error: unknown) => {
+      return (
+        error instanceof ApiError &&
+        !(error instanceof AgentDeleteError) &&
+        error.status === 409
+      )
+    })
+  })
 })
 
 describe('createAgentV2', () => {

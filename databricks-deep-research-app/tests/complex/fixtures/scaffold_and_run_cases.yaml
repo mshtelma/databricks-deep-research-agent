@@ -1,5 +1,6 @@
 cases:
   - id: investment_research
+    requires_brave: true
     intent: |
       Build an investment research assistant that takes a company name or ticker
       and produces a deep, comprehensive investment report covering:
@@ -12,6 +13,7 @@ cases:
     expected_min_tool_count: 1
 
   - id: saas_competitive_intel
+    requires_brave: true
     intent: |
       Build a competitive intelligence assistant for a SaaS product. Given a
       product name and category, research the top 3-5 competitors and produce
@@ -20,5 +22,116 @@ cases:
       Use parallel research lanes per competitor and synthesize into a
       comparison report.
     query: "Notion (personal knowledge management)"
+    expected_min_node_count: 3
+    expected_min_tool_count: 1
+
+  - id: officeqa_treasury_army_1945
+    requires_brave: false
+    intent: |
+      Build an OfficeQA-style research assistant for questions over selected
+      Databricks assets. The assistant must use the selected vector index to
+      find candidate Treasury document chunks, use the selected Delta tables
+      for exact text/table reads, use compute for numeric table calculations,
+      and synthesize a concise answer with the fiscal/calendar-year distinction
+      when the evidence supports it. Do not use public web tools for this
+      corpus-specific task unless the selected assets are unavailable.
+    query: "what are the total US Army expenditures in 1945?"
+    expected_min_node_count: 3
+    expected_min_tool_count: 5
+    expected_tool_kinds:
+      - vector_search
+      - delta_read
+      - delta_grep
+      - delta_table_read
+      - compute
+    forbidden_tool_kinds:
+      - web_search
+      - web_crawl
+      - web_research
+    forbidden_runtime_tool_kinds:
+      - web_search
+      - web_crawl
+      - web_research
+    # PR3 plan AC2: output.md contains either '45,238' (CY1945) or '50,337'
+    # (FY1945) — both are defensible canonical figures for the same question.
+    # The corpus contains both within the same chunk
+    # (treasury_bulletin_1953_02_c0022). Pre-R4 the workflow reliably
+    # produces FY1945=$50,337M (the more readily retrievable annual line
+    # item); after deeper retrieval lands, both can appear together.
+    expected_answer_terms:
+      - "50,337"
+      - million
+    assets:
+      - kind: vector_index
+        full_name: main.officeqa_benchmark.treasury_chunks_vs_index
+        usage: required
+        role: semantic_candidate_retrieval
+        metadata:
+          columns:
+            - chunk_id
+            - file_name
+            - bulletin_date
+            - page_info
+            - content
+            - chunk_type
+          query_type: HYBRID
+      - kind: delta_table
+        full_name: main.officeqa_benchmark.treasury_chunks
+        usage: required
+        role: exact_document_chunk_reads
+        field_roles:
+          primary_key: chunk_id
+          content: content
+          order_by: chunk_id
+        metadata:
+          warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+          columns:
+            - chunk_id
+            - file_name
+            - bulletin_date
+            - page_info
+            - content
+            - chunk_type
+      - kind: delta_table
+        full_name: main.officeqa_benchmark.treasury_tables
+        usage: required
+        role: structured_table_reads
+        field_roles:
+          primary_key: chunk_id
+          content: content
+          structured_json: table_json
+          order_by: chunk_id
+        metadata:
+          warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
+          columns:
+            - chunk_id
+            - file_name
+            - bulletin_date
+            - page_info
+            - table_title
+            - annotation
+            - content
+            - table_json
+            - row_count
+            - col_count
+            - chunk_type
+            - char_count
+
+  - id: correlated_stocks_7lane_investment
+    # Plan v2.1 generic-robustness regression case — mirrors the user's
+    # failed AIS workflow 5442205634071161 (2026-05-24 21:07) where every
+    # lane immediately called web_crawl{"url_index":0} and gave up after
+    # "No URL found for index 0". After F1+F2 land, web_crawl is no
+    # longer in the default tool list AND prompts mandate web_research
+    # first, so lanes cannot fall into this trap.
+    requires_brave: true
+    intent: |
+      Build an investment research assistant that takes a company name or ticker
+      and produces a deep, comprehensive investment report covering:
+      fundamentals (financials, valuation, balance sheet), risk analysis,
+      market trends, news sentiment, earnings call research, competitor
+      analysis, and correlated stocks that move together. Use parallel
+      research lanes per concern and synthesize into a single coherent report.
+    query: "NVIDIA Corporation (NVDA)"
     expected_min_node_count: 3
     expected_min_tool_count: 1

@@ -31,6 +31,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deep_research.agent_designer.assets import DesignerAsset
 from deep_research.agent_designer.discovery import (
     DesignerDiscoveryAdapter,
     DiscoveredResource,
@@ -194,7 +195,7 @@ async def list_custom_tools(
     )
     result = await session.execute(stmt)
     tools = list(result.scalars().all())
-    return CustomToolListResponse(items=tools, total=len(tools))
+    return CustomToolListResponse(items=[_tool_response(tool) for tool in tools], total=len(tools))
 
 
 @router.get("/custom-tools/{tool_id}", response_model=CustomToolResponse)
@@ -393,7 +394,13 @@ class ResourcesResponse(BaseModel):
 
 
 _VALID_RESOURCE_KINDS: frozenset[str] = frozenset(
-    {"vector_index", "genie_space", "knowledge_assistant", "serving_endpoint"}
+    {
+        "vector_index",
+        "genie_space",
+        "knowledge_assistant",
+        "serving_endpoint",
+        "delta_table",
+    }
 )
 
 
@@ -534,6 +541,7 @@ class ChatRequest(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1)
     current_ast: dict[str, Any] | None = None
     session_id: str | None = None
+    assets: list[DesignerAsset] = Field(default_factory=list)
 
 
 def _format_sse(event_type: str, payload: dict[str, Any]) -> str:
@@ -601,7 +609,7 @@ async def chat(
     # so the client receives HTTP 413, not an SSE error frame.
     messages_dicts = [m.model_dump(exclude_none=True) for m in request.messages]
     try:
-        orchestrator.check_limits(messages_dicts, request.current_ast)
+        orchestrator.check_limits(messages_dicts, request.current_ast, request.assets)
     except RequestTooLargeError as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
 
@@ -613,6 +621,7 @@ async def chat(
                 session_id=request.session_id,
                 user_token=obo_token,
                 current_user_id=user.user_id,
+                assets=request.assets,
             ):
                 yield _format_sse(event.type, event.model_dump(exclude={"type"}))
         except Exception:

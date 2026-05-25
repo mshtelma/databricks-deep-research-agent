@@ -180,6 +180,15 @@ class Settings(BaseSettings):
     deploy_here_reachability_timeout_seconds: float = 300.0
     deploy_here_probe_ttl_seconds: float = 60.0
     deploy_here_framework_tag_preflight: bool = True
+    # When True, reject deploys whose ``framework_git_tag`` resolves to a
+    # branch (refs/heads/...) rather than an immutable tag (refs/tags/...).
+    # Branches can be force-pushed; the shell-app's pyproject pins by ref and
+    # would silently pick up new framework code on next install. Defaults to
+    # False to allow branch refs during active development; flip to True for
+    # production tenants that require immutable framework pins. See plan
+    # Phase 3 M3 and the "IMMUTABLE GIT TAG REQUIRED" comment in
+    # ``templates/agent-shell-app/pyproject.toml.j2:7-8``.
+    deploy_here_require_tag_only: bool = False
     deploy_here_disclose_owner: bool = True
     deploy_here_brave_secret_scope: str = "deep-research-secrets"
     deploy_here_brave_secret_key: str = "BRAVE_API_KEY"

@@ -188,7 +188,7 @@ _TOOL_KIND_ALIASES: dict[str, str] = {
     "knowledge_base": "knowledge_assistant",
     "files": "file_search",
     "file": "file_search",
-    "brave": "brave_search",
+    "brave": "web_search",
 }
 
 
@@ -201,7 +201,11 @@ _RETRIEVAL_TOOL_KINDS: frozenset[str] = frozenset(
         "genie",
         "knowledge_assistant",
         "file_search",
-        "brave_search",
+        "delta_read",
+        "delta_grep",
+        "delta_context",
+        "delta_table_read",
+        "table_read",
     }
 )
 
@@ -253,14 +257,6 @@ _UNKNOWNS_HANDLING_MARKERS: tuple[str, ...] = (
     "definition of done",
     "do not improvise",
 )
-
-
-# Tools the LLM should call to do real web research. The merged `web_research`
-# is preferred because it bundles search+crawl in one call (eliminates the
-# "Potemkin research" failure mode where the LLM forgets to crawl). The
-# standalone `web_crawl` stays available for SELECTIVE follow-up on candidate
-# URLs the merged tool returns as snippets-only.
-_CONSOLIDATED_RESEARCH_PAIR: tuple[str, str] = ("web_research", "web_crawl")
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +470,8 @@ def _normalize_model_tiers(ast: dict[str, Any], ctx: _NormalizerContext) -> None
             continue
         canonical: str | None = _TIER_ALIASES.get(tier.lower())
         if canonical is None:
-            subtype = config.get("subtype") if isinstance(config.get("subtype"), str) else ""
+            raw_subtype = config.get("subtype")
+            subtype = raw_subtype if isinstance(raw_subtype, str) else ""
             canonical = _TIER_FALLBACK_BY_SUBTYPE.get(subtype, "analytical")
         config["model_tier"] = canonical
         ctx.record(
@@ -514,109 +511,6 @@ def _normalize_tool_kinds(ast: dict[str, Any], ctx: _NormalizerContext) -> None:
             rationale=(
                 f"'{kind}' is an alias; rewriting to canonical "
                 f"framework kind '{canonical}'."
-            ),
-        )
-
-
-def _declared_tool_names(ast: dict[str, Any]) -> set[str]:
-    tools = ast.get("tools")
-    if not isinstance(tools, list):
-        return set()
-    return {
-        str(t.get("name"))
-        for t in tools
-        if isinstance(t, dict) and isinstance(t.get("name"), str)
-    }
-
-
-def _declared_tool_kinds(ast: dict[str, Any]) -> dict[str, str]:
-    """Map tool name → kind for every declared tool."""
-    out: dict[str, str] = {}
-    tools = ast.get("tools")
-    if not isinstance(tools, list):
-        return out
-    for t in tools:
-        if isinstance(t, dict):
-            name = t.get("name")
-            kind = t.get("kind")
-            if isinstance(name, str) and isinstance(kind, str):
-                out[name] = kind
-    return out
-
-
-def _ensure_top_level_tool(ast: dict[str, Any], name: str, kind: str) -> bool:
-    """Add a tool declaration if not present. Returns True if added."""
-    tools = ast.setdefault("tools", [])
-    if not isinstance(tools, list):
-        return False
-    for t in tools:
-        if isinstance(t, dict) and t.get("name") == name:
-            return False
-    tools.append({"kind": kind, "name": name, "config": {}})
-    return True
-
-
-def _auto_bind_retrieval_to_researchers(
-    ast: dict[str, Any], ctx: _NormalizerContext
-) -> None:
-    """Researchers with empty tools lists get web_search + web_crawl."""
-    declared_kinds = _declared_tool_kinds(ast)
-    declared_names = set(declared_kinds.keys())
-    has_retrieval_declared = any(
-        kind in _RETRIEVAL_TOOL_KINDS for kind in declared_kinds.values()
-    )
-
-    for node, path in _walk_nodes(ast):
-        if node.get("type") != "agent":
-            continue
-        config = node.get("config")
-        if not isinstance(config, dict):
-            continue
-        if config.get("subtype") != "researcher":
-            continue
-        current_tools = config.get("tools")
-        if not isinstance(current_tools, list):
-            current_tools = []
-        # If the researcher already has any retrieval tool bound, leave alone.
-        bound_kinds = {declared_kinds.get(t) for t in current_tools if isinstance(t, str)}
-        if bound_kinds & _RETRIEVAL_TOOL_KINDS:
-            continue
-        # Need to bind something. Prefer existing declared retrieval tools;
-        # otherwise auto-declare web_research only.
-        targets: list[str] = []
-        if has_retrieval_declared:
-            for name, kind in declared_kinds.items():
-                if kind in _RETRIEVAL_TOOL_KINDS and name not in current_tools:
-                    targets.append(name)
-                if len(targets) >= 1:
-                    break
-        declared_added: list[str] = []
-        if not targets:
-            # Auto-declare and bind the canonical pair. web_research handles
-            # search+first-pass crawl in one call; web_crawl remains available
-            # for selective follow-up on candidate URLs.
-            for target in _CONSOLIDATED_RESEARCH_PAIR:
-                if _ensure_top_level_tool(ast, target, target):
-                    declared_added.append(target)
-                    declared_kinds[target] = target
-                    declared_names.add(target)
-            targets = list(_CONSOLIDATED_RESEARCH_PAIR)
-            has_retrieval_declared = True
-        new_tools = list(current_tools) + targets
-        config["tools"] = new_tools
-        declaration_note = (
-            f" Also auto-declared {declared_added} at top level."
-            if declared_added
-            else ""
-        )
-        ctx.record(
-            kind="auto_bind_retrieval",
-            path=f"{path}.config.tools",
-            before=list(current_tools),
-            after=new_tools,
-            rationale=(
-                "Researcher had no retrieval tools bound; cannot do research. "
-                f"Auto-bound: {targets}.{declaration_note}"
             ),
         )
 
@@ -1328,72 +1222,6 @@ def _normalize_static_parallel_researchers(
             )
 
 
-def _consolidate_web_research(
-    ast: dict[str, Any], ctx: _NormalizerContext
-) -> None:
-    """Rewrite researchers' [web_search] / [web_search, web_crawl] to the
-    merged [web_research, web_crawl] pair.
-
-    Rationale: ``web_research`` (search + auto-crawl in one call) eliminates
-    the Class C1 "Potemkin research" failure mode where the LLM forgets to
-    crawl after searching. ``web_crawl`` stays bound for selective follow-up
-    on candidate URLs the merged tool returns as snippets-only.
-
-    This rewrite is safe — both tools are framework builtins and the merged
-    tool's contract is a strict superset of the search-then-crawl flow.
-    """
-    declared_names = _declared_tool_names(ast)
-    for node, path in _walk_nodes(ast):
-        if node.get("type") != "agent":
-            continue
-        config = node.get("config")
-        if not isinstance(config, dict):
-            continue
-        tools = config.get("tools")
-        if not isinstance(tools, list) or not tools:
-            continue
-        before = list(tools)
-        if "web_research" in tools and "web_crawl" in tools and "web_search" not in tools:
-            continue  # Already in canonical form.
-        if "web_search" not in tools and "web_research" not in tools:
-            continue  # Nothing to consolidate.
-
-        # Rewrite: drop legacy web_search plus any partial canonical tools,
-        # then append the canonical pair while preserving any OTHER tools the
-        # architect bound.
-        new_tools = [
-            t for t in tools
-            if t not in ("web_search", "web_crawl", "web_research")
-        ]
-        new_tools.extend(_CONSOLIDATED_RESEARCH_PAIR)
-        config["tools"] = new_tools
-
-        # Auto-declare canonical tools at the top level if the architect hadn't.
-        declared_added: list[str] = []
-        for target in _CONSOLIDATED_RESEARCH_PAIR:
-            if target not in declared_names and _ensure_top_level_tool(ast, target, target):
-                declared_added.append(target)
-                declared_names.add(target)
-
-        declaration_note = (
-            f" Also auto-declared {declared_added} at top level."
-            if declared_added
-            else ""
-        )
-        ctx.record(
-            kind="tool_consolidation",
-            path=f"{path}.config.tools",
-            before=before,
-            after=new_tools,
-            rationale=(
-                "Consolidated web_search → web_research (merged search+crawl "
-                "tool). Researchers using web_research get real source bodies "
-                "on the first call, eliminating the Potemkin-research failure "
-                f"mode. web_crawl is kept for selective candidate follow-up.{declaration_note}"
-            ),
-        )
-
-
 def _normalize_synthesizer_grounding(
     ast: dict[str, Any], ctx: _NormalizerContext
 ) -> None:
@@ -1552,8 +1380,8 @@ def normalize_ast(
 
     Returns ``(new_ast, fixes)``. The input is never mutated — a deep copy is
     rewritten in place. The fix order in the returned list matches the order
-    in which repairs were applied (subtypes → tiers → tool kinds → retrieval
-    binding → pool declarations → max_tool_calls).
+    in which repairs were applied (subtypes → tiers → tool-kind aliases →
+    pool declarations → grounding defaults → max_tool_calls).
 
     Pure function. Zero LLM calls. Safe to invoke from a synchronous code
     path (gate, validator, test).
@@ -1565,8 +1393,6 @@ def normalize_ast(
     _normalize_subtypes(new_ast, ctx)
     _normalize_model_tiers(new_ast, ctx)
     _normalize_tool_kinds(new_ast, ctx)
-    _auto_bind_retrieval_to_researchers(new_ast, ctx)
-    _consolidate_web_research(new_ast, ctx)
     _normalize_pool_specs(new_ast, ctx)
     _auto_declare_pools(new_ast, ctx)
     _lift_config_error_handling(new_ast, ctx)

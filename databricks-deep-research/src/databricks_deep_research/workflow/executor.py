@@ -756,6 +756,35 @@ class WorkflowExecutor:
                     f"Node {node.id!r} is missing declared tools: {errors}"
                 )
 
+        # Researcher zero-tools guard. A researcher that writes to the
+        # sources pool MUST have at least one runtime tool that produces
+        # evidence — otherwise the LLM emits planning text only and the
+        # synthesizer fail-closes with "Insufficient Evidence". Cross-phase
+        # invariant: a source-emitting researcher must have resolvable
+        # evidence tools, or fail before LLM spend. Only enforced under
+        # strict_tool_resolution to stay opt-in.
+        if self._strict_tool_resolution:
+            subtype = (config.subtype or "").casefold()
+            if subtype == "researcher" and not tools:
+                writes_sources = any(
+                    (pw.pool or "").casefold() == "sources"
+                    for pw in (config.pool_writes or [])
+                )
+                if writes_sources:
+                    logger.warning(
+                        "AGENT_ZERO_TOOLS_RESEARCHER node=%s subtype=%s "
+                        "pool_writes=%s — refusing to start under strict mode",
+                        node.id,
+                        subtype,
+                        [pw.pool for pw in (config.pool_writes or [])],
+                    )
+                    raise WorkflowError(
+                        f"Node {node.id!r} is a researcher subtype that writes "
+                        "to the 'sources' pool but has zero bound runtime tools. "
+                        "It cannot produce evidence; refusing to start (see "
+                        "strict_tool_resolution invariant)."
+                    )
+
         # Attach tool resolution details to the parent node span
         node_span = get_current_span()
         if node_span:

@@ -18,7 +18,7 @@ by the runtime_checkable conformance check in ``services/deployment/__init__.py`
 # ruff: noqa: ARG002
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from deep_research.models.agent_deployment import AgentDeployment, DeploymentMode
 from deep_research.services.deployment.translator import (
@@ -26,6 +26,9 @@ from deep_research.services.deployment.translator import (
     DeploymentResult,
     ValidationResult,
 )
+
+if TYPE_CHECKING:
+    from deep_research.services.deployment.auth import WorkspaceClientResolver
 
 
 class InAppTranslator:
@@ -81,9 +84,15 @@ class InAppTranslator:
         """
         return DeploymentResult(success=True)
 
-    async def deactivate(self, deployment: AgentDeployment) -> None:
+    async def deactivate(
+        self,
+        deployment: AgentDeployment,
+        *,
+        client_resolver: WorkspaceClientResolver | None = None,
+    ) -> None:
         """No-op deactivate. There are no external resources to release.
 
-        Idempotent by definition.
+        Idempotent by definition. ``client_resolver`` is accepted to honour
+        the Protocol contract but ignored — Mode 1 has no external state.
         """
         return None

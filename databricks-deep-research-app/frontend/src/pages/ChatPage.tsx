@@ -226,6 +226,32 @@ export default function ChatPage() {
     }
   }, [chatId, isStreaming, activeJob, isLoadingActiveJob, activeSessionId, reconnectToJob, isDraftChat]);
 
+  // SSE-independent completion detection. The polled `useChatActiveJob` (3s
+  // cadence) returns `null` once the backend marks the job complete. When that
+  // transition is observed, invalidate the chat/message caches so the final
+  // report appears even if the SSE persistence_completed event was lost.
+  //
+  // Why this matters: SSE drops more often than persistence completes. Without
+  // this fallback, a user whose SSE connection broke mid-research stays on
+  // stale React Query data (staleTime=2min, gcTime=Infinity) — manual refresh
+  // helps only after staleTime elapses. Polling-based invalidation closes the
+  // gap to the 3s `useChatActiveJob` cadence.
+  const prevActiveJobIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!chatId || isDraftChat(chatId)) return;
+    const previousJobId = prevActiveJobIdRef.current;
+    const currentJobId = activeJob?.sessionId ?? null;
+    prevActiveJobIdRef.current = currentJobId;
+    // Transition from "job in progress" → "no active job" means the backend
+    // completed (or failed) the workflow. Refresh chat-scoped queries so the
+    // newly-persisted final report becomes visible.
+    if (previousJobId && !currentJobId) {
+      queryClient.invalidateQueries({ queryKey: ['messages', chatId] });
+      queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, chatId] });
+      queryClient.invalidateQueries({ queryKey: ['chats'] });
+    }
+  }, [activeJob?.sessionId, chatId, isDraftChat, queryClient]);
+
   // Get the latest agent message with research session from chatFullData
   // This provides claims, verification summary, and sources inline (no separate API call)
   const latestAgentFullMessage = useMemo(() => {

@@ -89,7 +89,11 @@ class DeepResearchResponsesAgent(mlflow.pyfunc.PythonModel):
 
         query = self._extract_query(model_input)
         result = asyncio.run(
-            self._runner.run(workflow=self._definition, query=query)
+            self._runner.run(
+                workflow=self._definition,
+                query=query,
+                strict_tool_resolution=True,
+            )
         )
 
         return {
@@ -120,7 +124,9 @@ class DeepResearchResponsesAgent(mlflow.pyfunc.PythonModel):
 
         query = self._extract_query(model_input)
         async for event in self._runner.stream(
-            workflow=self._definition, query=query
+            workflow=self._definition,
+            query=query,
+            strict_tool_resolution=True,
         ):
             if event.event_type == "agent_stream_chunk":
                 yield {

@@ -156,6 +156,15 @@ export interface DeploymentCleanupFailedErrorResponse {
   max_attempts?: number
 }
 
+// Surfaced when the agent-delete cascade leaves residual deployment rows that
+// the FK ON DELETE RESTRICT still blocks (e.g., a new status the cascade
+// hasn't learned to handle). Defense in depth against an opaque 500.
+export interface DeploymentRowsBlockDeleteErrorResponse {
+  error_kind: 'deployment_rows_block_delete'
+  message: string
+  blocking_deployments: ActiveDeploymentSummary[]
+}
+
 export interface DefaultRevisionNotDeployableErrorResponse {
   error_kind: 'default_revision_not_deployable'
   agent_id: string

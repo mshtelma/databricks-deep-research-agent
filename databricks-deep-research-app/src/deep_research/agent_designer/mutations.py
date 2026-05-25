@@ -49,6 +49,35 @@ _ALLOWED_PATCH_KEYS: frozenset[str] = frozenset(
     {"label", "config", "error_handling", "budget_seconds"}
 )
 
+# Plan v2.1 PR-3 / codex CRITICAL-3 — when DESIGNER_DETERMINISTIC_BLUEPRINT
+# is ON, ``update_block`` is allowed to patch only PROMPT-LEVEL fields
+# under ``config``. Structural keys (``body``, ``evaluator``, ``children``,
+# ``subtype``, ``type``, ``pools``, ``node_id``) become the deterministic
+# blueprint builder's responsibility — the architect cannot mutate them
+# via update_block, which closes the structural-bypass surface the codex
+# review flagged. When the flag is OFF (PR-2 default), legacy semantics
+# are preserved: any key the dict accepts is patchable.
+_ALLOWED_CONFIG_PATCH_KEYS: frozenset[str] = frozenset(
+    {
+        "system_prompt",
+        "user_prompt_template",
+        "model_tier",
+        "error_handling",
+        "max_tool_calls",
+    }
+)
+_FORBIDDEN_CONFIG_PATCH_KEYS: frozenset[str] = frozenset(
+    {
+        "body",
+        "evaluator",
+        "children",
+        "subtype",
+        "type",
+        "pools",
+        "node_id",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Internal path helpers
@@ -444,6 +473,41 @@ def update_block(
             f"Disallowed patch keys: {sorted(forbidden)}"
         )
 
+    # Plan v2.1 PR-3 — config-level allow-list (codex CRITICAL-3 fix).
+    # When DESIGNER_DETERMINISTIC_BLUEPRINT is ON, the architect must
+    # restrict config patches to prompt-only fields. Structural keys
+    # (``body``, ``evaluator``, etc.) belong to the deterministic
+    # blueprint builder; mutating them via update_block bypasses the
+    # immutability fingerprint check that parse_architect_ast enforces
+    # downstream. Flag OFF preserves legacy semantics so PR-2 tests and
+    # the legacy architect flow keep working untouched.
+    config_patch = patches.get("config")
+    if isinstance(config_patch, dict):
+        from deep_research.agent_designer.blueprint import (
+            is_deterministic_blueprint_enabled,
+        )
+
+        if is_deterministic_blueprint_enabled():
+            forbidden_config = (
+                set(config_patch.keys()) & _FORBIDDEN_CONFIG_PATCH_KEYS
+            )
+            if forbidden_config:
+                raise BlockMutationError(
+                    f"Disallowed config patch keys: "
+                    f"{sorted(forbidden_config)} (structural keys cannot be "
+                    f"mutated when DESIGNER_DETERMINISTIC_BLUEPRINT is ON; "
+                    f"use request_signature_revision instead)"
+                )
+            unknown_config = (
+                set(config_patch.keys()) - _ALLOWED_CONFIG_PATCH_KEYS
+            )
+            if unknown_config:
+                raise BlockMutationError(
+                    f"Disallowed config patch keys: "
+                    f"{sorted(unknown_config)} (allowed: "
+                    f"{sorted(_ALLOWED_CONFIG_PATCH_KEYS)})"
+                )
+
     # Resolve the user-supplied reference (id OR dot-path) to an indexed path.
     path = _resolve_node_ref(ast, path)
 
@@ -471,6 +535,63 @@ def update_block(
             target[key] = merged_config
         else:
             target[key] = copy.deepcopy(val)
+    return new_ast
+
+
+# Patch keys that callers are allowed to supply to update_pool. The framework
+# defines pool fields as {name, dedup_key, max_items}; ``name`` is the lookup
+# key and is not patchable, so only the latter two are patch-allowed.
+_ALLOWED_POOL_PATCH_KEYS: frozenset[str] = frozenset({"dedup_key", "max_items"})
+
+
+def update_pool(
+    ast: dict[str, Any],
+    pool_name: str,
+    patches: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a new AST with the top-level ``pools[*]`` entry patched.
+
+    Allowed patch keys: ``dedup_key``, ``max_items``. ``name`` is the lookup
+    key and not patchable; pools that don't exist by ``name`` raise.
+
+    Raises
+    ------
+    BlockMutationError
+        If *patches* contains a forbidden key or if no pool with the given
+        ``pool_name`` exists.
+    """
+    if not isinstance(pool_name, str) or not pool_name:
+        raise BlockMutationError("update_pool requires non-empty pool_name")
+    if not isinstance(patches, dict) or not patches:
+        raise BlockMutationError("update_pool requires non-empty patches dict")
+    forbidden = set(patches.keys()) - _ALLOWED_POOL_PATCH_KEYS
+    if forbidden:
+        raise BlockMutationError(
+            f"Disallowed pool patch keys: {sorted(forbidden)} "
+            f"(allowed: {sorted(_ALLOWED_POOL_PATCH_KEYS)})"
+        )
+    pools = ast.get("pools")
+    if not isinstance(pools, list):
+        raise BlockMutationError(
+            "AST has no top-level 'pools' list; cannot update pool"
+        )
+    target_index = None
+    for i, pool in enumerate(pools):
+        if isinstance(pool, dict) and pool.get("name") == pool_name:
+            target_index = i
+            break
+    if target_index is None:
+        existing_names = [
+            p.get("name") for p in pools if isinstance(p, dict)
+        ]
+        raise BlockMutationError(
+            f"No pool with name {pool_name!r}; existing: {existing_names}"
+        )
+    new_ast = copy.deepcopy(ast)
+    new_pool = dict(new_ast["pools"][target_index])
+    for key, val in patches.items():
+        new_pool[key] = copy.deepcopy(val)
+    new_ast["pools"][target_index] = new_pool
     return new_ast
 
 
@@ -665,12 +786,34 @@ def declare_tool(
 
 
 def remove_tool(ast: dict[str, Any], name: str) -> dict[str, Any]:
-    """Remove tool *name* from ``ast['tools']``.
+    """Remove tool *name* from ``ast['tools']`` and node bindings.
 
     No-op (returns a shallow-copied ast) if the tool is not present.
     """
     new_ast = copy.deepcopy(ast)
     new_ast["tools"] = [t for t in new_ast.get("tools", []) if t.get("name") != name]
+
+    def visit(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        config = node.get("config")
+        if isinstance(config, dict):
+            tools = config.get("tools")
+            if isinstance(tools, list):
+                config["tools"] = [
+                    item for item in tools if not (isinstance(item, str) and item == name)
+                ]
+            body = config.get("body")
+            if isinstance(body, dict):
+                visit(body)
+            for nested_key in ("planner", "evaluator"):
+                nested = config.get(nested_key)
+                if isinstance(nested, dict):
+                    visit({"config": nested})
+        for child in node.get("children") or []:
+            visit(child)
+
+    visit(new_ast.get("root"))
     return new_ast
 
 

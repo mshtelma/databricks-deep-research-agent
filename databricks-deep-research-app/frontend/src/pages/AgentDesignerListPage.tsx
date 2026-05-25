@@ -268,9 +268,9 @@ function AgentCard({ agent, onOpen, onDeleteRequest }: AgentCardProps) {
         </span>
         <span
           className="ml-auto truncate font-db-mono text-[10px] text-db-navy-400"
-          title={agent.owner_id}
+          title={agent.id}
         >
-          {agent.owner_id.slice(0, 16)}
+          {agent.id.slice(0, 12)}
         </span>
       </div>
     </div>
@@ -315,9 +315,9 @@ function AgentRow({ agent, onOpen, onDeleteRequest }: AgentRowProps) {
       </span>
       <span
         className="truncate font-db-mono text-[12px] text-db-navy-400"
-        title={agent.owner_id}
+        title={agent.id}
       >
-        {agent.owner_id.slice(0, 16)}
+        {agent.id.slice(0, 12)}
       </span>
       <span className="font-db-mono text-[12px] text-db-navy-800">
         {relativeTime(agent.updated_at)}

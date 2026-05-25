@@ -83,9 +83,11 @@ class _BrokenFactory:
 class TestToolKind:
     def test_enum_values(self) -> None:
         assert ToolKind.web_search == "web_search"
+        assert ToolKind.web_research == "web_research"
         assert ToolKind.vector_search == "vector_search"
         assert ToolKind.genie == "genie"
         assert ToolKind.knowledge_assistant == "knowledge_assistant"
+        assert ToolKind.delta_context == "delta_context"
 
     def test_tool_kind_to_source_kind_known(self) -> None:
         assert tool_kind_to_source_kind("web_search") == SourceKind.web
@@ -94,6 +96,8 @@ class TestToolKind:
         assert tool_kind_to_source_kind("knowledge_assistant") == SourceKind.qa_assistant
         assert tool_kind_to_source_kind("file_search") == SourceKind.file
         assert tool_kind_to_source_kind("web_crawl") == SourceKind.builtin
+        assert tool_kind_to_source_kind("web_research") == SourceKind.web
+        assert tool_kind_to_source_kind("delta_context") == SourceKind.delta_table
 
     def test_tool_kind_to_source_kind_unknown(self) -> None:
         assert tool_kind_to_source_kind("custom_thing") == SourceKind.builtin

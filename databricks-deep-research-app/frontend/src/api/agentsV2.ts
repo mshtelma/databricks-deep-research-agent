@@ -20,6 +20,7 @@ import type {
   ActiveDeploymentSummary,
   ActiveDeploymentsErrorResponse,
   DeploymentCleanupFailedErrorResponse,
+  DeploymentRowsBlockDeleteErrorResponse,
 } from '../types/deployment'
 
 export type { AgentV2ListResponse, AgentV2Response, CreateAgentV2Request, UpdateAgentV2Request }
@@ -48,6 +49,7 @@ export class EtagConflictError extends Error {
 export type AgentDeleteErrorKind =
   | 'active_deployments_exist'
   | 'deployment_cleanup_failed'
+  | 'deployment_rows_block_delete'
 
 export class AgentDeleteError extends ApiError {
   constructor(
@@ -144,8 +146,15 @@ async function readErrorBody(response: Response): Promise<unknown> {
 }
 
 function unwrapDetail(body: unknown): unknown {
-  if (body && typeof body === 'object' && 'detail' in body) {
-    return (body as { detail: unknown }).detail
+  if (body && typeof body === 'object') {
+    const obj = body as { detail?: unknown; message?: unknown; code?: unknown }
+    // FastAPI default: { detail: <object> }
+    if ('detail' in obj && obj.detail !== undefined) return obj.detail
+    // App's http_exception_handler wrap (core/exceptions.py:406-414):
+    // { code: "HTTP_ERROR", message: <object> }
+    if (obj.code === 'HTTP_ERROR' && obj.message && typeof obj.message === 'object') {
+      return obj.message
+    }
   }
   return body
 }
@@ -283,6 +292,22 @@ export async function deleteAgentV2(
         [],
         0,
         typeof typed.max_attempts === 'number' ? typed.max_attempts : undefined,
+      )
+    }
+    if (errorKind === 'deployment_rows_block_delete') {
+      const typed = detail as Partial<DeploymentRowsBlockDeleteErrorResponse>
+      const blockers = Array.isArray(typed.blocking_deployments)
+        ? typed.blocking_deployments
+        : []
+      throw new AgentDeleteError(
+        'deployment_rows_block_delete',
+        response.status,
+        errorMessageFromDetail(
+          detail,
+          'Residual deployment rows block this agent. Resolve each from the deployments view before retrying.',
+        ),
+        blockers,
+        blockers.length,
       )
     }
   }

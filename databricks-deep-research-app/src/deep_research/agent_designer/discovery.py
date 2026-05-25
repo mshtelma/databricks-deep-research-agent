@@ -1,8 +1,9 @@
 """Adapter that exposes Databricks DiscoveryService results for the
 Agent Designer chat tool-call surface (discover_sources).
 
-Returns a normalized list of DiscoveredResource objects across the 4
-source kinds: vector_index, genie_space, knowledge_assistant, serving_endpoint.
+Returns a normalized list of DiscoveredResource objects across Designer source
+kinds. Delta tables are accepted as a manual/asset kind even when the backing
+DiscoveryService does not enumerate Unity Catalog tables.
 OBO scoping is enforced by the underlying DiscoveryService.
 """
 from __future__ import annotations
@@ -11,7 +12,13 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-SourceKind = Literal["vector_index", "genie_space", "knowledge_assistant", "serving_endpoint"]
+SourceKind = Literal[
+    "vector_index",
+    "genie_space",
+    "knowledge_assistant",
+    "serving_endpoint",
+    "delta_table",
+]
 
 # Map from DiscoveryService DataSourceType.value strings to our SourceKind literals.
 # KNOWLEDGE_ASSISTANT covers both knowledge_assistant and serving_endpoint in the

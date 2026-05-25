@@ -19,6 +19,12 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from deep_research.agent_designer import mutations
+from deep_research.agent_designer.assets import (
+    DesignerAsset,
+    asset_context_payload,
+    inspect_assets,
+    recommend_tools_for_assets,
+)
 from deep_research.agent_designer.ast_normalizer import normalize_ast
 from deep_research.agent_designer.designer_architect import (
     WorkflowDesignBrief,
@@ -49,8 +55,10 @@ from deep_research.agent_designer.tools import (
     DeclareToolArgs,
     DeleteBlockArgs,
     DiscoverSourcesArgs,
+    InspectAssetsArgs,
     MoveBlockArgs,
     ProposeWorkflowArgs,
+    RecommendToolsForAssetsArgs,
     RemoveToolArgs,
     SetModelTierArgs,
     UpdateBlockArgs,
@@ -123,6 +131,8 @@ MAX_DESIGNER_TOOL_ROUNDS = 4
 _READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "discover_sources",
+        "inspect_assets",
+        "recommend_tools_for_assets",
         "list_node_types",
         "list_tool_kinds",
         "list_modes",
@@ -603,6 +613,7 @@ class DesignerChatOrchestrator:
         session_id: str | None,
         user_token: str,
         current_user_id: str = "",
+        assets: list[DesignerAsset] | list[dict[str, Any]] | None = None,
     ) -> AsyncGenerator[DesignerSSEEvent, None]:
         """Drive the designer_workflow.yaml framework workflow and translate
         framework StreamEvents → DesignerSSEEvents for the frontend.
@@ -628,7 +639,7 @@ class DesignerChatOrchestrator:
         )
 
         # Enforce limits BEFORE the workflow starts (cheap and fast)
-        self._check_limits(messages, current_ast)
+        self._check_limits(messages, current_ast, assets)
         # The client owns session persistence; the orchestrator stays stateless.
         _ = session_id
 
@@ -722,6 +733,7 @@ class DesignerChatOrchestrator:
         state.append("init", "current_ast", json.dumps(current_ast or {}))
         state.append("init", "critic_verdict", "")
         state.append("init", "gate_result", "")
+        state.append("init", "designer_assets", asset_context_payload(assets))
 
         # 4. Build the framework LLM client from the app's underlying LLM.
         #    The orchestrator's `self._llm` is the LLMClientProto adapter
@@ -744,14 +756,17 @@ class DesignerChatOrchestrator:
             yield DoneEvent()
             return
 
-        # Build executor directly with a pre-populated ToolRegistry containing
-        # the designer tools. The WorkflowRunner constructs an empty registry
-        # by default, so direct `type: tool` nodes (parse_architect_ast,
-        # structural_gate, extract_critic_approved) wouldn't resolve. Codex
-        # iter-2 fix #4: register with ToolRegistry, not just ToolResolver.
+        # Build a WorkflowRunner via the app's shared factory so the Designer
+        # follows the same construction pattern as every other entry point
+        # (see workflow_runner_factory.py for the convention). The Designer
+        # threads its own ToolRegistry via runner.stream(tool_registry=...)
+        # so `type: tool` nodes (parse_architect_ast, structural_gate,
+        # extract_critic_approved) resolve through the pre-populated registry.
         from databricks_deep_research.tools.registry import ToolRegistry
-        from databricks_deep_research.workflow.executor import WorkflowExecutor
 
+        from deep_research.agent.workflow_runner_factory import (
+            build_app_workflow_runner,
+        )
         from deep_research.agent_designer.framework_tools import (
             register_designer_tools,
         )
@@ -779,21 +794,83 @@ class DesignerChatOrchestrator:
 
         register_designer_tools(
             designer_registry,
+            discovery=self._discovery,
             state_getter=_state_ast_getter,
             state_setter=_state_ast_setter,
+            asset_getter=lambda: state.get("designer_assets"),
+            # Fix D — wire ParseArchitectAstTool patch mode. BuildBlueprintTool
+            # writes ``initial_blueprint`` + ``blueprint_fingerprint`` to state;
+            # without these getters, ParseArchitectAstTool falls back to
+            # legacy AST parsing and the architect's node_patches JSON is
+            # misinterpreted as a standalone AST (the bug observed in
+            # event 13 of the failing investment_research scaffold-and-run).
+            blueprint_getter=lambda: state.get("initial_blueprint"),
+            fingerprint_getter=lambda: state.get("blueprint_fingerprint"),
+            # Fix (live run) — EmitTaskSignatureTool now writes its
+            # validated payload directly to state.task_signature via this
+            # setter. Without it, the classifier agent's free-form prose
+            # would land in state.task_signature via the YAML output_key,
+            # and downstream build_blueprint sees ``task_signature is
+            # required (got None)`` because the prose isn't a dict.
+            signature_setter=lambda value: state.append(
+                "emit_task_signature", "task_signature", value
+            ),
+            # Plan v2.1 generic-robustness — expose blueprint lane_keys to
+            # the architect prompt via the ``{lane_keys}`` template variable.
+            # Without this, the architect cannot READ the content-derived
+            # lane keys (computed in ``blueprint.compute_lane_key``) and
+            # falls back to ordinal addressing for ``node_patches``, which
+            # drifts across signature revisions (plan M7).
+            lane_keys_setter=lambda value: state.append(
+                "build_blueprint", "lane_keys", value
+            ),
+            # Plan v2.1 generic-robustness — surface the placeholder-pending
+            # node id list as its own state key so the architect's
+            # user_prompt_template can render ``{placeholder_pending_nodes}``
+            # directly. Without this, the list is still in
+            # ``initial_blueprint.placeholder_pending_nodes`` but buried
+            # inside a multi-KB JSON blob the LLM tends to skim.
+            placeholder_pending_setter=lambda value: state.append(
+                "build_blueprint", "placeholder_pending_nodes", value
+            ),
+            # Plan v2.1 generic-robustness — wire RequestSignatureRevisionTool
+            # state setters so the architect's escape valve persists. The
+            # outer ``signature_loop`` (designer_workflow.yaml) reads these
+            # to decide whether to re-run the classifier with the revision
+            # hint. Without these closures, the tool was dead code (its
+            # docstring at framework_tools.py:2255 explicitly flagged the
+            # YAML loop-back as deferred PR-3 work).
+            revision_count_getter=lambda: state.get("revision_count"),
+            revision_count_setter=lambda value: state.append(
+                "request_signature_revision", "revision_count", value
+            ),
+            revision_request_setter=lambda value: state.append(
+                "request_signature_revision", "revision_request", value
+            ),
+            error_setter=lambda value: state.append(
+                "request_signature_revision", "error", value
+            ),
         )
 
-        executor = WorkflowExecutor(
-            workflow_def,
-            framework_llm,
-            tool_registry=designer_registry,
+        runner = build_app_workflow_runner(
+            llm_client=framework_llm,
+            # Designer tools don't go through ToolFactoryContext (they're
+            # pre-registered in designer_registry); workspace/user_token
+            # are unused by the Designer phase.
+            workspace_client=None,
+            user_token=None,
         )
 
         last_ast_seen: dict[str, Any] = current_ast or {}
         yielded_done = False
 
         try:
-            async for event in executor.execute(state):
+            async for event in runner.stream(
+                workflow_def,
+                state=state,
+                tool_registry=designer_registry,
+                strict_tool_resolution=True,
+            ):
                 evt_type = getattr(event, "event_type", None)
 
                 if evt_type == "agent_stream_chunk":
@@ -904,18 +981,20 @@ class DesignerChatOrchestrator:
         self,
         messages: list[dict[str, Any]],
         current_ast: dict[str, Any] | None,
+        assets: list[DesignerAsset] | list[dict[str, Any]] | None = None,
     ) -> None:
         """Public alias for pre-flight size validation.
 
         Call this before opening the SSE stream so a RequestTooLargeError can
         be surfaced as an HTTP 413 rather than as an SSE error event.
         """
-        self._check_limits(messages, current_ast)
+        self._check_limits(messages, current_ast, assets)
 
     def _check_limits(
         self,
         messages: list[dict[str, Any]],
         current_ast: dict[str, Any] | None,
+        assets: list[DesignerAsset] | list[dict[str, Any]] | None = None,
     ) -> None:
         if len(messages) > MAX_MESSAGES:
             raise RequestTooLargeError(
@@ -925,7 +1004,8 @@ class DesignerChatOrchestrator:
         if ast_size > MAX_AST_BYTES:
             raise RequestTooLargeError(f"current_ast exceeds {MAX_AST_BYTES} bytes ({ast_size})")
         msg_size = len(json.dumps(messages, default=str).encode("utf-8"))
-        total = ast_size + msg_size
+        asset_size = len(json.dumps(assets or [], default=str).encode("utf-8"))
+        total = ast_size + msg_size + asset_size
         if total > MAX_PAYLOAD_BYTES:
             raise RequestTooLargeError(f"total payload exceeds {MAX_PAYLOAD_BYTES} bytes ({total})")
 
@@ -936,6 +1016,7 @@ class DesignerChatOrchestrator:
         user_token: str,
         current_user_id: str,
         user_intent: str = "",
+        assets: list[DesignerAsset] | list[dict[str, Any]] | None = None,
     ) -> AsyncGenerator[DesignerSSEEvent, None]:
         # Tag the active designer-chat trace with the tool name. MLflow's
         # update_current_trace appends, so successive tool calls accumulate
@@ -989,6 +1070,30 @@ class DesignerChatOrchestrator:
                 logger.exception("AGENT_DESIGNER_DISCOVER_SOURCES_FAILED")
                 log_chat_mutation(tc.name, _args_summary, 0, "error")
                 yield ErrorEvent(message=f"discover_sources failed: {exc}", tool_call_id=tc.id)
+            return
+
+        if tc.name == "inspect_assets":
+            assert isinstance(parsed, InspectAssetsArgs)
+            raw_assets = parsed.assets if parsed.assets is not None else asset_context_payload(assets)
+            result = inspect_assets(raw_assets)
+            log_chat_mutation(tc.name, _args_summary, 0, "success")
+            yield ToolResultEvent(
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+                result=result,
+            )
+            return
+
+        if tc.name == "recommend_tools_for_assets":
+            assert isinstance(parsed, RecommendToolsForAssetsArgs)
+            raw_assets = parsed.assets if parsed.assets is not None else asset_context_payload(assets)
+            result = recommend_tools_for_assets(raw_assets, intent=parsed.intent or user_intent)
+            log_chat_mutation(tc.name, _args_summary, 0, "success")
+            yield ToolResultEvent(
+                tool_call_id=tc.id,
+                tool_name=tc.name,
+                result=result,
+            )
             return
 
         if tc.name == "list_node_types":

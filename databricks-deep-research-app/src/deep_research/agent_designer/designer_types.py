@@ -87,6 +87,111 @@ class LaneSpec(BaseModel):
         return str(value)
 
 
+class ToolDeclarationSpec(BaseModel):
+    """One runtime tool declaration chosen by the Designer LLM."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = ""
+    kind: str = ""
+    config: dict[str, Any] = Field(default_factory=dict)
+    description: str = ""
+
+    @field_validator("name", "kind", "description", mode="before")
+    @classmethod
+    def _stringify_optional_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    @field_validator("config", mode="before")
+    @classmethod
+    def _coerce_config(cls, value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+
+class ToolBindingSpec(BaseModel):
+    """Bind selected runtime tools to an agent node or node group."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    node_id: str = ""
+    tool_names: list[str] = Field(default_factory=list)
+
+    @field_validator("node_id", mode="before")
+    @classmethod
+    def _stringify_node_id(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    @field_validator("tool_names", mode="before")
+    @classmethod
+    def _coerce_tool_names(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [
+            str(item)
+            for item in value
+            if isinstance(item, str) and item.strip()
+        ]
+
+
+class ToolPlan(BaseModel):
+    """LLM-authored runtime tool plan for the generated workflow."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    tools: list[ToolDeclarationSpec] = Field(default_factory=list)
+    bindings: list[ToolBindingSpec] = Field(default_factory=list)
+    rationale: str = ""
+
+    @field_validator("tools", mode="before")
+    @classmethod
+    def _coerce_tools(cls, value: Any) -> list[ToolDeclarationSpec]:
+        if not isinstance(value, list):
+            return []
+        out: list[ToolDeclarationSpec] = []
+        for item in value:
+            try:
+                spec = (
+                    item
+                    if isinstance(item, ToolDeclarationSpec)
+                    else ToolDeclarationSpec.model_validate(item)
+                )
+            except Exception:
+                continue
+            if spec.name.strip() and spec.kind.strip():
+                out.append(spec)
+        return out
+
+    @field_validator("bindings", mode="before")
+    @classmethod
+    def _coerce_bindings(cls, value: Any) -> list[ToolBindingSpec]:
+        if not isinstance(value, list):
+            return []
+        out: list[ToolBindingSpec] = []
+        for item in value:
+            try:
+                spec = (
+                    item
+                    if isinstance(item, ToolBindingSpec)
+                    else ToolBindingSpec.model_validate(item)
+                )
+            except Exception:
+                continue
+            if spec.node_id.strip() and spec.tool_names:
+                out.append(spec)
+        return out
+
+    @field_validator("rationale", mode="before")
+    @classmethod
+    def _stringify_rationale(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+
 def _coerce_lane_item(item: Any) -> LaneSpec | None:
     """Coerce one raw research_lanes element into a LaneSpec.
 
@@ -136,6 +241,7 @@ class WorkflowDesignBrief(BaseModel):
     required_outputs: list[str] = Field(default_factory=list)
     quality_gates: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
+    tool_plan: ToolPlan | None = None
     topology: TopologyKind = "parallel_lanes"
     grounding_mode: GroundingKind = "reclaim"
 
