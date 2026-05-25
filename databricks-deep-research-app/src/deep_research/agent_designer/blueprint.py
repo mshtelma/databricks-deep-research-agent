@@ -449,9 +449,27 @@ def _build_asset_tool_plan(
                 + "recommend_tools_for_assets returned none for required "
                 + f"assets {sorted(required_identities)}"
             )
-        # corpus_only with no required assets is degenerate but not unsafe;
-        # let the no-tool_plan default fire so the builder picks web tools.
-        return None
+        # Plan v2.2 grounding — fail-closed even without required identities.
+        # The original branch returned None ("degenerate but not unsafe") and
+        # let the builder fall back to ``web_research``. With intent
+        # grounding upstream, reaching here means: the classifier inferred a
+        # corpus-grounded signature from the user_intent text, BUT neither
+        # UI-selected nor grounded assets produced a recommendable tool. The
+        # honest answer is to halt and surface — silently swapping in
+        # public-web tools violates the corpus-only contract regardless of
+        # whether any asset was marked "required". The outer signature_loop
+        # bounds retries; persistent failure exits with a clear message
+        # rather than a workflow that researches the wrong evidence.
+        raise SignatureError(
+            "asset_signature="
+            + sig_value
+            + " but no corpus/structured tool could be recommended. "
+            + "The intent-grounding stage did not resolve any workspace "
+            + "resource named in user_intent, and no UI-selected assets "
+            + "were provided. Either select an asset in the UI, name a "
+            + "workspace resource the user can access, or revise the "
+            + "task signature via request_signature_revision."
+        )
 
     tool_decls: list[ToolDeclarationSpec] = []
     seen_names: set[str] = set()

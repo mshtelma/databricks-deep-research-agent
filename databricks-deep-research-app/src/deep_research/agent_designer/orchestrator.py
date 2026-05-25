@@ -850,6 +850,15 @@ class DesignerChatOrchestrator:
             error_setter=lambda value: state.append(
                 "request_signature_revision", "error", value
             ),
+            # Intent-grounding writes back the merged designer_assets payload
+            # (UI-selected ∪ LLM-grounded). All downstream consumers — the
+            # classifier's user_prompt_template, build_blueprint, the architect's
+            # inspect_assets / recommend_tools_for_assets tools — read
+            # state.designer_assets via asset_getter, so a single in-place
+            # write is sufficient.
+            designer_assets_setter=lambda value: state.append(
+                "emit_grounded_assets", "designer_assets", value
+            ),
         )
 
         runner = build_app_workflow_runner(

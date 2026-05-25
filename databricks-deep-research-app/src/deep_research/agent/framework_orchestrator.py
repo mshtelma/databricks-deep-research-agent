@@ -963,6 +963,51 @@ async def stream_workflow_via_framework(
                 ):
                     final_report = joined_chunks
 
+                # Plan v2.3 UX backstop — when the citation pipeline marked
+                # zero claims as verified (Stage 4 NLI returned
+                # unsupported/abstained for every claim) AND Stage 8 then
+                # surgically removed every claim text, the framework's
+                # final_report can come back empty or near-empty. Without
+                # this backstop the UI surfaces "No response returned."
+                # even though the synthesizer streamed substantive content
+                # the user can judge for themselves.
+                #
+                # Surface the streamed synthesis with an explicit banner so
+                # the user sees the draft and knows the verifier could not
+                # ground it — better than silent emptiness. The framework
+                # still reports verified_claims=0 separately, so the
+                # verification badge in the UI remains accurate.
+                _verif = getattr(final_delta, "verification_summary", None) or {}
+                _verified_count = 0
+                _total_claims = 0
+                if isinstance(_verif, dict):
+                    _verified_count = int(_verif.get("verified_claims", 0) or 0)
+                    _total_claims = int(_verif.get("total_claims", 0) or 0)
+                _final_report_len = len(final_report) if final_report else 0
+                _chunks_len = len(joined_chunks)
+                if (
+                    _total_claims > 0
+                    and _verified_count == 0
+                    and _chunks_len > 200
+                    and _final_report_len < _chunks_len // 2
+                ):
+                    logger.warning(
+                        "FWK_VERIFICATION_BACKSTOP_TRIGGERED total_claims=%d "
+                        "verified_claims=%d final_report_len=%d chunks_len=%d",
+                        _total_claims,
+                        _verified_count,
+                        _final_report_len,
+                        _chunks_len,
+                    )
+                    _banner = (
+                        "> ⚠️ **Citations could not be verified.** "
+                        "The framework's entailment checker did not ground "
+                        f"any of the {_total_claims} claims this draft contains. "
+                        "Numbers below come directly from the retrieved corpus "
+                        "chunks; treat as a draft, not a final answer.\n\n"
+                    )
+                    final_report = _banner + joined_chunks
+
             # -- 5. Session completion --
 
             # Simple mode persistence (Step 2)

@@ -1075,6 +1075,14 @@ class CitationVerificationPipeline:
         else:
             if verification_evidence is None:
                 claim.abstained = True
+                logger.info(
+                    "CITATION_ABSTAIN_SILENT claim_role=%s citation_keys=%s "
+                    "evidences_count=%d claim_head=%r",
+                    getattr(claim, "claim_role", "?"),
+                    [getattr(e, "citation_key", None) for e in (claim.evidences or [])],
+                    len(claim.evidences or []),
+                    _truncate(claim.claim_text, 80),
+                )
                 return []
 
             evidence_match_score = self._score_claim_evidence_text(
@@ -1378,7 +1386,13 @@ class CitationVerificationPipeline:
         claim_evidence: EvidenceInfo,
         evidence_pool: list[RankedEvidence],
     ) -> int | None:
-        """Resolve a claim evidence reference back to an evidence-pool index."""
+        """Resolve a claim evidence reference back to an evidence-pool index.
+
+        Diagnostic log ``CITATION_RESOLVE_FAILED`` fires when all three
+        fallback paths miss; the ``reason`` field tells which one (out-of-pool
+        url, url/quote mismatch, source_pool_index miss) so we can attribute
+        Stage 4 silent-abstains to a specific upstream gap.
+        """
         if claim_evidence.evidence_pool_index is not None:
             return claim_evidence.evidence_pool_index
 
@@ -1390,12 +1404,26 @@ class CitationVerificationPipeline:
                 return evidence.evidence_pool_index if evidence.evidence_pool_index is not None else index
 
         if claim_evidence.source_pool_index is None:
+            logger.info(
+                "CITATION_RESOLVE_FAILED reason=no_source_pool_index "
+                "claim_url=%s pool_size=%d quote_head=%r",
+                (claim_evidence.source_url or "")[:80],
+                len(evidence_pool),
+                (claim_evidence.quote_text or "")[:60],
+            )
             return None
 
         for index, evidence in enumerate(evidence_pool):
             if evidence.source_pool_index == claim_evidence.source_pool_index:
                 return evidence.evidence_pool_index if evidence.evidence_pool_index is not None else index
 
+        logger.info(
+            "CITATION_RESOLVE_FAILED reason=source_pool_index_miss "
+            "claim_source_pool_index=%s pool_size=%d claim_url=%s",
+            claim_evidence.source_pool_index,
+            len(evidence_pool),
+            (claim_evidence.source_url or "")[:80],
+        )
         return None
 
     # ===================================================================
@@ -1851,9 +1879,13 @@ class CitationVerificationPipeline:
                     claim.abstained = True
                 removed_count += 1
                 logger.info(
-                    "CLAIM_REMOVED claim=%s verdict=%s",
-                    _truncate(claim.claim_text, 50),
+                    "STAGE8_CLAIM_REMOVED verdict=%s confidence=%.2f "
+                    "citation_keys=%s evidences_count=%d claim=%s",
                     claim.verification_verdict,
+                    float(getattr(claim, "verification_confidence", 0.0) or 0.0),
+                    [getattr(e, "citation_key", None) for e in (claim.evidences or [])],
+                    len(claim.evidences or []),
+                    _truncate(claim.claim_text, 50),
                 )
             elif action == "soften":
                 softened_text = _build_softened_fact_text(claim.claim_text, context)

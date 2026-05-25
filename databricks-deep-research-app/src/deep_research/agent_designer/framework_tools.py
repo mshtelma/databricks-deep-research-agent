@@ -2715,6 +2715,190 @@ class EmitTaskSignatureTool:
         return ToolResult(content=json.dumps(payload), data=payload)
 
 
+class EmitGroundedAssetsTool:
+    """Intent-grounding tool: merge LLM-resolved assets into ``state.designer_assets``.
+
+    The intent-grounding agent (designer_workflow.yaml node before the
+    classifier) calls ``discover_sources`` to enumerate workspace resources,
+    matches user_intent against them, and emits an ``emit_grounded_assets``
+    call with the resolved list. This tool validates each match against
+    :class:`DesignerAsset`, deduplicates against any UI-selected assets
+    already present in ``state.designer_assets`` (case-insensitive identity
+    match), and writes the merged payload back via
+    :func:`asset_context_payload`. Downstream nodes (classifier,
+    build_blueprint, architect's inspect_assets / recommend_tools_for_assets)
+    transparently see the augmented list.
+
+    The tool is generic across :data:`DesignerAssetKind`. Resource-kind
+    semantics live in :func:`recommend_tools_for_assets`; this tool only
+    plumbs identities.
+    """
+
+    def __init__(
+        self,
+        asset_getter: AssetGetter | None = None,
+        designer_assets_setter: StateSetter | None = None,
+    ) -> None:
+        self._asset_getter = asset_getter
+        self._designer_assets_setter = designer_assets_setter
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="emit_grounded_assets",
+            description=(
+                "Emit the list of workspace resources resolved from the user's "
+                "free-text intent. Pass one entry per resource with kind + "
+                "full_name (preferred) or source_id. Grounded entries are "
+                "merged into the user-selected designer_assets so the "
+                "deterministic blueprint builder and the architect's "
+                "asset-aware tools see them. Call AT MOST ONCE per turn; "
+                "if no resources matched, call once with matches=[]."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "matches": {
+                        "type": "array",
+                        "description": (
+                            "List of resolved assets. Each item must have a "
+                            "valid ``kind`` and at least one of ``full_name`` "
+                            "or ``source_id``."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                        "vector_index",
+                                        "delta_table",
+                                        "genie_space",
+                                        "knowledge_assistant",
+                                        "serving_endpoint",
+                                        "sql_warehouse",
+                                    ],
+                                },
+                                "full_name": {"type": "string"},
+                                "source_id": {"type": "string"},
+                                "name": {"type": "string"},
+                                "description": {"type": "string"},
+                                "matched_text": {
+                                    "type": "string",
+                                    "description": (
+                                        "The substring of user_intent that "
+                                        "matched this resource (for audit)."
+                                    ),
+                                },
+                            },
+                            "required": ["kind"],
+                        },
+                    },
+                    "unresolved": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Candidate identifiers from user_intent that did "
+                            "not match any workspace resource. Surfaced for "
+                            "diagnostics; does not affect downstream wiring."
+                        ),
+                    },
+                },
+                "required": ["matches"],
+            },
+            source_type="builtin",
+            source_kind="builtin",
+        )
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(arguments, dict):
+            raise ValueError("emit_grounded_assets requires an object argument")
+        return arguments
+
+    async def execute(
+        self, arguments: dict[str, Any], _context: ToolContext
+    ) -> ToolResult:
+        from deep_research.agent_designer.assets import (
+            DesignerAsset,
+            asset_context_payload,
+            normalize_assets,
+        )
+
+        raw_matches = arguments.get("matches") or []
+        unresolved = [
+            str(item).strip()
+            for item in (arguments.get("unresolved") or [])
+            if isinstance(item, str) and str(item).strip()
+        ]
+
+        grounded: list[DesignerAsset] = []
+        rejected: list[dict[str, str]] = []
+        if isinstance(raw_matches, list):
+            for entry in raw_matches:
+                if not isinstance(entry, dict):
+                    continue
+                payload = {k: v for k, v in entry.items() if k != "matched_text"}
+                # Grounded mentions are inherently lower-confidence than
+                # UI-selected assets — default to "preferred" (same as
+                # UI-selected default). The architect / critic decides
+                # whether to promote to "required" via signature revision.
+                payload.setdefault("usage", "preferred")
+                try:
+                    asset = DesignerAsset.model_validate(payload)
+                except Exception as exc:
+                    rejected.append({
+                        "entry": json.dumps(payload, default=str)[:200],
+                        "error": str(exc)[:200],
+                    })
+                    continue
+                identity = asset.full_name or asset.source_id or asset.name
+                if not identity:
+                    rejected.append({
+                        "entry": json.dumps(payload, default=str)[:200],
+                        "error": "no full_name/source_id/name",
+                    })
+                    continue
+                grounded.append(asset)
+
+        existing = (
+            normalize_assets(self._asset_getter()) if self._asset_getter else []
+        )
+
+        # Merge: existing (UI-selected) wins ties; identity = (kind, casefold).
+        seen: set[tuple[str, str]] = {
+            (a.kind, (a.full_name or a.source_id or a.name or "").casefold())
+            for a in existing
+        }
+        merged: list[DesignerAsset] = list(existing)
+        added: list[DesignerAsset] = []
+        for asset in grounded:
+            identity_lower = (
+                (asset.full_name or asset.source_id or asset.name or "").casefold()
+            )
+            key = (asset.kind, identity_lower)
+            if not identity_lower or key in seen:
+                continue
+            seen.add(key)
+            merged.append(asset)
+            added.append(asset)
+
+        merged_payload = asset_context_payload(
+            [asset.model_dump(exclude_none=True) for asset in merged]
+        )
+
+        if self._designer_assets_setter is not None and added:
+            self._designer_assets_setter(merged_payload)
+
+        result: dict[str, Any] = {
+            "merged_count": merged_payload["count"],
+            "added_count": len(added),
+            "added": [asset.model_dump(exclude_none=True) for asset in added],
+            "unresolved": unresolved,
+            "rejected": rejected,
+        }
+        return ToolResult(content=json.dumps(result), data=result)
+
+
 class SelectTopologyTool:
     """Deterministic topology selector. No LLM.
 
@@ -2815,6 +2999,7 @@ def builtin_designer_tools(
     revision_count_setter: StateSetter | None = None,
     revision_request_setter: StateSetter | None = None,
     error_setter: StateSetter | None = None,
+    designer_assets_setter: StateSetter | None = None,
 ) -> list[ResearchTool]:
     """Return canonical instances of every Designer framework tool.
 
@@ -2871,6 +3056,15 @@ def builtin_designer_tools(
         ),
         ExtractCriticApprovedTool(),
         EmitTaskSignatureTool(state_setter=signature_setter),  # PR3-B Layer 1
+        # Intent-grounding tool — paired with the new ``intent_grounding`` agent
+        # node added before the classifier. Resolves free-text resource mentions
+        # against the discover_sources catalog and merges them into
+        # designer_assets so the deterministic blueprint sees the same asset
+        # list whether the user UI-selected the resource or typed its name.
+        EmitGroundedAssetsTool(
+            asset_getter=asset_getter,
+            designer_assets_setter=designer_assets_setter,
+        ),
         SelectTopologyTool(),  # PR3-B Layer 1
         # Plan v2.1 PR-2 — deterministic blueprint builder + signature revision
         # gate. Stateless registration: the YAML wires their arguments via
@@ -2935,6 +3129,7 @@ def register_designer_tools(
     revision_count_setter: StateSetter | None = None,
     revision_request_setter: StateSetter | None = None,
     error_setter: StateSetter | None = None,
+    designer_assets_setter: StateSetter | None = None,
 ) -> None:
     """Register every Designer framework tool on *registry*.
 
@@ -2967,6 +3162,7 @@ def register_designer_tools(
         revision_count_setter=revision_count_setter,
         revision_request_setter=revision_request_setter,
         error_setter=error_setter,
+        designer_assets_setter=designer_assets_setter,
     ):
         # Register under BOTH paths so YAML refs work whether they specify
         # type=builtin (the YAML default for `ref: {name: foo}`) or
@@ -3021,6 +3217,7 @@ __all__ = [
     "StructuralGateTool",
     "BuildBlueprintTool",
     "RequestSignatureRevisionTool",
+    "EmitGroundedAssetsTool",
     "builtin_designer_tools",
     "register_designer_tools",
     "get_global_registry",

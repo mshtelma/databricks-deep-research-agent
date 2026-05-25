@@ -8,6 +8,7 @@ OBO scoping is enforced by the underlying DiscoveryService.
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -146,3 +147,128 @@ class DesignerDiscoveryAdapter:
             )
 
         return resources
+
+
+# Three-part Unity Catalog identifier: catalog.schema.name. Each segment is a
+# Databricks-legal identifier (letters / digits / underscore, leading letter or
+# underscore). Used for deterministic FQN extraction from free-text intent
+# before falling back to LLM-driven fuzzy matching.
+#
+# The lookahead allows a trailing dot (sentence punctuation) but rejects a
+# dot followed by another identifier segment — that would mean the captured
+# 3-part name is actually a prefix of a longer (malformed) identifier and we
+# should not extract it as a UC FQN.
+_FQN_THREE_PART_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])"
+    r"([A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?![A-Za-z0-9_])"
+    r"(?!\.[A-Za-z_])"
+)
+
+
+class IntentMatch(BaseModel):
+    """One free-text → workspace-resource match produced by ``match_text_to_resources``."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    resource: DiscoveredResource
+    score: int
+    matched_via: Literal["fqn_exact", "fqn_ci", "name_exact", "name_ci"]
+    matched_text: str
+
+
+def _candidate_identities(resource: DiscoveredResource) -> list[str]:
+    out: list[str] = []
+    for value in (resource.full_name, resource.source_id, resource.name):
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                out.append(cleaned)
+    return out
+
+
+def match_text_to_resources(
+    intent: str,
+    resources: list[DiscoveredResource],
+    *,
+    min_score: int = 60,
+) -> list[IntentMatch]:
+    """Match free-text mentions in ``intent`` to ``resources`` deterministically.
+
+    Returns matches whose score >= ``min_score``, sorted by score descending,
+    then by resource name for stable ordering.
+
+    Scoring (additive across match kinds is NOT supported — best per resource wins):
+
+    * 100 — three-part FQN appears verbatim in intent AND equals a resource
+            ``full_name`` / ``source_id`` / ``name``.
+    *  90 — three-part FQN appears verbatim and equals a resource identifier
+            case-insensitively.
+    *  80 — resource identifier appears verbatim as a substring of intent.
+    *  60 — resource identifier appears as a case-insensitive substring.
+
+    Generic across :data:`SourceKind` — does not interpret the resource kind.
+    """
+
+    if not intent or not resources:
+        return []
+
+    intent_text = intent
+    intent_lower = intent.lower()
+    fqn_hits: set[str] = set(_FQN_THREE_PART_RE.findall(intent_text))
+    fqn_hits_lower: set[str] = {hit.lower() for hit in fqn_hits}
+
+    seen_resource_ids: set[int] = set()
+    matches: list[IntentMatch] = []
+    for resource in resources:
+        if id(resource) in seen_resource_ids:
+            continue
+        best: tuple[int, str, str] | None = None  # (score, matched_via, matched_text)
+        for identity in _candidate_identities(resource):
+            identity_lower = identity.lower()
+            is_three_part = identity.count(".") == 2
+            if is_three_part and identity in fqn_hits:
+                candidate = (100, "fqn_exact", identity)
+            elif is_three_part and identity_lower in fqn_hits_lower:
+                candidate = (90, "fqn_ci", identity)
+            elif identity in intent_text:
+                candidate = (80, "name_exact", identity)
+            elif identity_lower in intent_lower:
+                candidate = (60, "name_ci", identity)
+            else:
+                continue
+            if best is None or candidate[0] > best[0]:
+                best = candidate
+        if best is None or best[0] < min_score:
+            continue
+        seen_resource_ids.add(id(resource))
+        matches.append(
+            IntentMatch(
+                resource=resource,
+                score=best[0],
+                matched_via=best[1],  # type: ignore[arg-type]
+                matched_text=best[2],
+            )
+        )
+
+    matches.sort(key=lambda m: (-m.score, m.resource.name))
+    return matches
+
+
+def extract_fqn_candidates(intent: str) -> list[str]:
+    """Return three-part FQN-shaped substrings found in ``intent``.
+
+    Useful when the workspace catalog could not be enumerated and the only
+    deterministic signal is the literal identifier pattern.
+    """
+
+    if not intent:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for hit in _FQN_THREE_PART_RE.findall(intent):
+        if hit in seen:
+            continue
+        seen.add(hit)
+        out.append(hit)
+    return out

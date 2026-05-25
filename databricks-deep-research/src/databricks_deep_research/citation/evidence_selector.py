@@ -21,6 +21,45 @@ from databricks_deep_research.llm.client import FrameworkLLMClient, ModelTier
 
 logger = logging.getLogger(__name__)
 
+# Source kinds whose content is already a short, pre-curated chunk
+# (vector_index hits, Genie SQL answers, KA prose answers, file-search
+# hits). Re-extracting LLM "spans" from these strips numeric facts that
+# the downstream synthesizer cites — see project memory entry on the
+# citation pipeline failure mode where 100% of claims came back
+# ``unsupported`` because the quote_text didn't contain the cited number.
+# For these kinds we promote the full content (capped at
+# ``EvidenceSelectionConfig.max_span_length``) as a single
+# RankedEvidence so the NLI verifier sees the same text the synthesizer
+# cited from.
+#
+# Generic across source kinds — does NOT hardcode any domain, table
+# name, or corpus identifier. ``source_type`` is checked too so callers
+# that only populate the legacy field still benefit.
+_CORPUS_SOURCE_KINDS: frozenset[str] = frozenset(
+    {
+        "vector_index",
+        "sql_analytics",
+        "qa_assistant",
+        "file",
+    }
+)
+_CORPUS_SOURCE_TYPES: frozenset[str] = frozenset(
+    {
+        "vector_search",
+        "genie",
+        "knowledge_assistant",
+    }
+)
+
+
+def _is_corpus_source(src: dict[str, Any]) -> bool:
+    """True when *src* is a pre-curated corpus chunk (skip LLM extraction)."""
+    kind = str(src.get("source_kind") or "")
+    if kind in _CORPUS_SOURCE_KINDS:
+        return True
+    return str(src.get("source_type") or "") in _CORPUS_SOURCE_TYPES
+
+
 # -- Prompt ----------------------------------------------------------------
 
 EVIDENCE_PRESELECTION_PROMPT = """\
@@ -381,9 +420,67 @@ class EvidenceSelector:
             content = src.get("content", "")
             sid = src.get("id")
             source_pool_index = src.get("source_pool_index")
+
+            # Plan v2.3 citation-grounding fix: for corpus-grounded sources
+            # (vector index, Genie, KA, file) the content is already a short
+            # pre-curated chunk — re-extracting LLM spans drops the numeric
+            # facts the synthesizer downstream will cite. Promote the full
+            # content (capped at ``max_span_length``) as one RankedEvidence
+            # so the NLI verifier in Stage 4 sees the same text the
+            # synthesizer cited from. Web sources keep the LLM-extraction
+            # path because long-form pages still benefit from compression.
+            if _is_corpus_source(src):
+                trimmed = (content or "").strip()
+                if len(trimmed) < self._cfg.min_span_length:
+                    logger.info(
+                        "EVIDENCE_EXTRACTED source_url=%s source_kind=%s "
+                        "path=corpus_passthrough span_count=0 reason=too_short "
+                        "len=%d",
+                        url[:80],
+                        src.get("source_kind") or src.get("source_type") or "",
+                        len(trimmed),
+                    )
+                    return []
+                truncated = trimmed[: self._cfg.max_span_length]
+                has_num = _has_numeric(truncated)
+                score = _keyword_relevance(query, truncated) if query else 0.6
+                if has_num:
+                    score = min(1.0, score + self._cfg.numeric_content_boost)
+                score = max(self._cfg.relevance_threshold, score)
+                logger.info(
+                    "EVIDENCE_EXTRACTED source_url=%s source_kind=%s "
+                    "path=corpus_passthrough span_count=1 has_numeric=%s "
+                    "span_chars=%d",
+                    url[:80],
+                    src.get("source_kind") or src.get("source_type") or "",
+                    has_num,
+                    len(truncated),
+                )
+                return [
+                    RankedEvidence(
+                        source_url=url,
+                        canonical_source_url=canonical_url,
+                        source_title=title,
+                        source_id=sid,
+                        quote_text=truncated,
+                        relevance_score=score,
+                        has_numeric_content=has_num,
+                        source_pool_index=source_pool_index,
+                    )
+                ]
+
             async with sem:
                 try:
                     spans = await self._extract_from_source(query, url, title or "Unknown", content)
+                    numeric_count = sum(1 for sp in spans if sp.get("has_numeric"))
+                    logger.info(
+                        "EVIDENCE_EXTRACTED source_url=%s source_kind=%s "
+                        "path=llm_spans span_count=%d numeric_span_count=%d",
+                        url[:80],
+                        src.get("source_kind") or src.get("source_type") or "",
+                        len(spans),
+                        numeric_count,
+                    )
                     return [
                         RankedEvidence(
                             source_url=url, canonical_source_url=canonical_url,

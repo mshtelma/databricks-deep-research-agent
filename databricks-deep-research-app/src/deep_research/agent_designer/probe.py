@@ -56,6 +56,32 @@ _RETRIEVAL_KINDS: frozenset[str] = frozenset(
 _TABLE_READ_KINDS: frozenset[str] = frozenset({"delta_table_read", "table_read"})
 _COMPUTE_KINDS: frozenset[str] = frozenset({"compute"})
 
+# Tool kinds that count as "corpus-grounded" — they fetch evidence from a
+# user-supplied workspace asset rather than the public web. Used by the
+# asset_signature ↔ tool_kinds invariant.
+_CORPUS_TOOL_KINDS: frozenset[str] = frozenset(
+    {
+        "vector_search",
+        "genie",
+        "knowledge_assistant",
+        "delta_read",
+        "delta_grep",
+        "delta_context",
+        "delta_table_read",
+        "table_read",
+        "file_search",
+    }
+)
+_WEB_TOOL_KINDS: frozenset[str] = frozenset(
+    {"web_search", "web_research", "web_crawl"}
+)
+# asset_signature axes that require corpus-grounded tools to be present on
+# every researcher. ``web_only`` and ``no_assets`` are not in this set
+# because the deterministic blueprint legitimately uses web defaults there.
+_CORPUS_REQUIRED_ASSET_SIGS: frozenset[str] = frozenset(
+    {"corpus_only", "structured_only"}
+)
+
 
 # Per-axis keyword sets enforced by the runtime-query check. Each axis
 # requires AT LEAST ONE query that satisfies EVERY group in its tuple
@@ -328,6 +354,32 @@ def run_behavioral_probe(
                 result.conditional_passed.append("structured_tables_has_delta_table_read")
             else:
                 result.gaps.append("structured_tables_missing_delta_table_read")
+
+        # 9. asset_signature ↔ tool_kinds alignment.
+        #    When the classifier said ``corpus_only`` or ``structured_only``,
+        #    every researcher lane MUST bind at least one corpus-grounded tool;
+        #    binding only public-web tools silently violates the contract that
+        #    the deterministic blueprint is supposed to enforce upstream.
+        #    First-principles rationale: tool selection must reflect the
+        #    grounded asset reality, not just the text classification.
+        sig_value = str(sig.asset_signature)
+        if sig_value in _CORPUS_REQUIRED_ASSET_SIGS and lanes:
+            lanes_without_corpus_tool: list[str] = []
+            for lane in lanes:
+                kinds = _tool_kinds_for_lane(lane, ast_tools)
+                if not (kinds & _CORPUS_TOOL_KINDS):
+                    lanes_without_corpus_tool.append(
+                        str(lane.get("id") or "<unnamed>")
+                    )
+            if lanes_without_corpus_tool:
+                result.gaps.append(
+                    f"asset_signature_tool_kind_mismatch:signature={sig_value},"
+                    f"lanes_without_corpus_tool={','.join(lanes_without_corpus_tool)}"
+                )
+            else:
+                result.conditional_passed.append(
+                    f"asset_signature_matches_tool_kinds:{sig_value}"
+                )
 
     # ----- Runtime-query check (opt-in) --------------------------------
 
