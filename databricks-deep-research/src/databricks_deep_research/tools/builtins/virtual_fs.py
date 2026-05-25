@@ -7,9 +7,12 @@ tools return a clear error message rather than crashing.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 from databricks_deep_research.tools.api import tool
+
+if TYPE_CHECKING:
+    from databricks_deep_research.api.vfs.protocol import VirtualFilesystem
 
 _INJECT = {"_inject_vfs": "_framework_vfs"}
 
@@ -19,7 +22,7 @@ def _missing(op: str) -> str:
 
 
 @tool(name="ls", inject=_INJECT)
-async def ls(path: str = "/", *, _inject_vfs: Any | None = None) -> str:
+async def ls(path: str = "/", *, _inject_vfs: VirtualFilesystem | None = None) -> str:
     """List directory entries at the given path.
 
     Args:
@@ -35,7 +38,7 @@ async def ls(path: str = "/", *, _inject_vfs: Any | None = None) -> str:
 
 
 @tool(name="read_file", inject=_INJECT)
-async def read_file(path: str, *, _inject_vfs: Any | None = None) -> str:
+async def read_file(path: str, *, _inject_vfs: VirtualFilesystem | None = None) -> str:
     """Read a file as UTF-8 text.
 
     Args:
@@ -48,7 +51,7 @@ async def read_file(path: str, *, _inject_vfs: Any | None = None) -> str:
 
 
 @tool(name="write_file", inject=_INJECT)
-async def write_file(path: str, content: str, *, _inject_vfs: Any | None = None) -> str:
+async def write_file(path: str, content: str, *, _inject_vfs: VirtualFilesystem | None = None) -> str:
     """Overwrite a file with the given UTF-8 content.
 
     Args:
@@ -68,7 +71,7 @@ async def edit_file(
     new: str,
     unique: bool = True,
     *,
-    _inject_vfs: Any | None = None,
+    _inject_vfs: VirtualFilesystem | None = None,
 ) -> str:
     """Replace ``old`` with ``new`` in the file at ``path``.
 
@@ -90,7 +93,7 @@ async def grep(
     path: str = "/",
     max_matches: int = 100,
     *,
-    _inject_vfs: Any | None = None,
+    _inject_vfs: VirtualFilesystem | None = None,
 ) -> str:
     """Regex-search files in the given path.
 
@@ -110,7 +113,7 @@ async def grep(
 
 
 @tool(name="delete_file", inject=_INJECT)
-async def delete_file(path: str, *, _inject_vfs: Any | None = None) -> str:
+async def delete_file(path: str, *, _inject_vfs: VirtualFilesystem | None = None) -> str:
     """Delete a file.
 
     Args:
@@ -123,7 +126,7 @@ async def delete_file(path: str, *, _inject_vfs: Any | None = None) -> str:
 
 
 @tool(name="exists", inject=_INJECT)
-async def exists(path: str, *, _inject_vfs: Any | None = None) -> str:
+async def exists(path: str, *, _inject_vfs: VirtualFilesystem | None = None) -> str:
     """Check whether a path exists.
 
     Args:

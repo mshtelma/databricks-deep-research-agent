@@ -24,6 +24,8 @@ from databricks_deep_research.workflow.definition import (
 )
 
 if TYPE_CHECKING:
+    from pydantic import BaseModel
+
     from databricks_deep_research.api.result import AgentResult
 
 
@@ -107,7 +109,7 @@ class Sequence:
             composite_id=self.name,
         )
 
-    async def arun(self, query: str, **kwargs: Any) -> AgentResult:
+    async def arun(self, query: str, **kwargs: Any) -> AgentResult[BaseModel]:
         from databricks_deep_research.api.agent import Agent
         return await Agent._run_compiled_workflow(self.as_workflow(), query=query, **kwargs)
 
@@ -140,7 +142,7 @@ class Parallel:
             composite_id=self.name,
         )
 
-    async def arun(self, query: str, **kwargs: Any) -> AgentResult:
+    async def arun(self, query: str, **kwargs: Any) -> AgentResult[BaseModel]:
         from databricks_deep_research.api.agent import Agent
         return await Agent._run_compiled_workflow(self.as_workflow(), query=query, **kwargs)
 

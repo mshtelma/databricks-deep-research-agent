@@ -222,7 +222,7 @@ def _extract_directives_from_reasoning(reasoning: str) -> list[ReflectionDirecti
         try:
             found.append(
                 ReflectionDirective(
-                    severity=severity,  # type: ignore[arg-type]
+                    severity=severity,
                     section=section[:200],
                     issue=issue[:600],
                     fix=fix[:600],

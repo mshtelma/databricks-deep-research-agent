@@ -33,7 +33,7 @@
         test test-framework test-app test-integration test-complex test-scaffold-and-run test-all-python test-frontend test-all \
         db-provision db-cleanup db-migrate db-status db-reset db-migrate-remote db-local db-local-stop clean_db clean-e2e \
         e2e e2e-fast e2e-medium e2e-slow e2e-super-slow e2e-all e2e-ui e2e-debug e2e-custom-agents \
-        clean clean-all quickstart deploy app-deploy requirements bundle-validate bundle-summary logs \
+        clean clean-all quickstart deploy deploy-unchecked app-deploy app-deploy-unchecked requirements bundle-validate bundle-summary logs \
         run-example \
         worktree worktree-list worktree-remove worktree-link
 
@@ -262,13 +262,24 @@ bundle-summary:
 
 TARGET ?= ais
 BRAVE_SCOPE ?=
-deploy:
+# `deploy` and `app-deploy` gate on `typecheck-framework` so attribute-name
+# typos, missing kwargs, and signature drift cannot reach production. Strict
+# mypy is configured in `databricks-deep-research/pyproject.toml`. For
+# emergency reverts where typecheck cannot pass (e.g., a baseline-cleanup
+# follow-up is still pending), use the `*-unchecked` variants.
+deploy: typecheck-framework
+	$(MAKE) -C $(APP_DIR) deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE)
+
+deploy-unchecked:
 	$(MAKE) -C $(APP_DIR) deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE)
 
 # Fast app-only redeploy (Python/yaml/vars, no DB migrate, no grants).
 # Set BUILD=1 to also rebuild frontend + requirements.txt.
 BUILD ?=
-app-deploy:
+app-deploy: typecheck-framework
+	$(MAKE) -C $(APP_DIR) app-deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE) BUILD=$(BUILD)
+
+app-deploy-unchecked:
 	$(MAKE) -C $(APP_DIR) app-deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE) BUILD=$(BUILD)
 
 FOLLOW ?=

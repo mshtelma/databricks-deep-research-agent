@@ -618,6 +618,10 @@ async def list_deployments(
     session: Annotated[AsyncSession, Depends(get_db)],
     mode: DeploymentMode | None = Query(default=None),
     deployment_status: DeploymentStatus | None = Query(default=None, alias="status"),
+    agent_id: UUID | None = Query(
+        default=None,
+        description="Filter to deployments of a single agent (W9 authz still applies)",
+    ),
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> DeploymentListResponse:
@@ -627,6 +631,7 @@ async def list_deployments(
         user.user_id,
         mode=mode,
         status=deployment_status,
+        agent_id=agent_id,
         cursor=cursor,
         limit=limit,
     )
@@ -857,12 +862,27 @@ async def deactivate_deployment(
         # original deployer (closes the shared-agent "ownership
         # dead-end" — codex finding).
         raise HTTPException(status_code=404, detail="Deployment not found")
+    status_before = deployment.status
+    deployment_mode = deployment.mode
     if deployment.status == DeploymentStatus.FAILED.value:
         deployment = await service.deactivate(deployment.id)
         await session.commit()
+        logger.info(
+            "DEPLOYMENT_UNDEPLOY_OK deployment=%s mode=%s "
+            "status_before=%s status_after=%s actor=%s",
+            deployment_id,
+            deployment_mode,
+            status_before,
+            deployment.status,
+            user.user_id,
+        )
         return _to_response(deployment)
 
-    if deployment.is_terminal:
+    # Narrowed short-circuit: only DEACTIVATED is truly terminal here.
+    # CLEANUP_FAILED must drop through to re-enter the translator path so
+    # users can retry cleanup; without this guard a "Retry cleanup" click
+    # would be a no-op. See plan imperative-wishing-lynx.md §Step 2b.
+    if deployment.status == DeploymentStatus.DEACTIVATED.value:
         return _to_response(deployment)
 
     # W12 cancellation path: PENDING / DEPLOYING rows are owned by the
@@ -883,7 +903,23 @@ async def deactivate_deployment(
         if deployment is None:
             raise HTTPException(status_code=404, detail="Deployment not found")
         await session.commit()
+        logger.info(
+            "DEPLOYMENT_UNDEPLOY_OK deployment=%s mode=%s "
+            "status_before=%s status_after=%s actor=%s cancel_requested=%s",
+            deployment_id,
+            deployment_mode,
+            status_before,
+            deployment.status,
+            user.user_id,
+            deployment.cancel_requested,
+        )
         return _to_response(deployment)
+
+    # When the user retries cleanup on a CLEANUP_FAILED row, give them a
+    # fresh budget. Otherwise the next failure would immediately
+    # re-escalate (attempts already at MAX_CLEANUP_ATTEMPTS).
+    if deployment.status == DeploymentStatus.CLEANUP_FAILED.value:
+        deployment = await service.reset_cleanup_attempts(deployment.id)
 
     translator = _translator_for(DeploymentMode(deployment.mode))
     # Prefer the user's OBO-scoped client so shell_app / mlflow deactivate
@@ -925,17 +961,24 @@ async def deactivate_deployment(
                 "message": str(exc),
             },
         ) from exc
-    except Exception as exc:  # noqa: BLE001 -- surface as FAILED + 500
+    except Exception as exc:  # noqa: BLE001 -- surface as CLEANUP_FAILED + 500
+        # Non-DeploymentCleanupError translator crash (programmer bug, DB
+        # error, etc.). Previously marked the row FAILED — but FAILED has
+        # a no-op deactivate branch at the top of this handler, so any
+        # later "Clean up" click would mark the row DEACTIVATED without
+        # actually re-running the translator. That stranded external
+        # resources as invisible orphans. Marking CLEANUP_FAILED routes
+        # the next DELETE through the narrowed-terminal carve-out above,
+        # so the translator can re-run.
         logger.exception("Translator deactivate failed for %s", deployment_id)
-        deployment = await service.update_status(
+        deployment = await service.mark_cleanup_failed(
             deployment.id,
-            DeploymentStatus.FAILED,
             error_message=str(exc),
         )
         await session.commit()
         raise HTTPException(
             status_code=500,
-            detail="Deactivate failed; deployment marked FAILED",
+            detail="Deactivate failed; deployment marked CLEANUP_FAILED",
         ) from exc
 
     deployment = await service.deactivate(deployment.id)
@@ -954,6 +997,15 @@ async def deactivate_deployment(
             await agent_service.update_visibility(deployment.agent_id, "private")
 
     await session.commit()
+    logger.info(
+        "DEPLOYMENT_UNDEPLOY_OK deployment=%s mode=%s "
+        "status_before=%s status_after=%s actor=%s",
+        deployment_id,
+        deployment_mode,
+        status_before,
+        deployment.status,
+        user.user_id,
+    )
     return _to_response(deployment)
 
 

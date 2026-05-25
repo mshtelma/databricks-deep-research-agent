@@ -42,7 +42,7 @@ import contextlib
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, cast, get_type_hints
+from typing import Any, cast, get_type_hints, overload
 
 from pydantic import BaseModel, Field, TypeAdapter
 
@@ -337,6 +337,29 @@ class _DecoratedTool:
         return self.fn(*args, **kwargs)
 
 
+@overload
+def tool(fn: Callable[..., Any]) -> "_DecoratedTool": ...
+@overload
+def tool(
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    inject: dict[str, str] | None = None,
+    requires_confirmation: bool = False,
+    source_kind: str = SourceKind.builtin,
+    source_type: str = "user_function",
+) -> Callable[[Callable[..., Any]], "_DecoratedTool"]: ...
+@overload
+def tool(
+    fn: Callable[..., Any],
+    *,
+    name: str | None = None,
+    description: str | None = None,
+    inject: dict[str, str] | None = None,
+    requires_confirmation: bool = False,
+    source_kind: str = SourceKind.builtin,
+    source_type: str = "user_function",
+) -> "_DecoratedTool": ...
 def tool(
     fn: Callable[..., Any] | None = None,
     *,
@@ -346,7 +369,7 @@ def tool(
     requires_confirmation: bool = False,
     source_kind: str = SourceKind.builtin,
     source_type: str = "user_function",
-) -> Any:
+) -> "_DecoratedTool | Callable[[Callable[..., Any]], _DecoratedTool]":
     """Decorate a callable to expose it as a :class:`ResearchTool`.
 
     The decorator inspects the callable's signature, type hints, and Google-style

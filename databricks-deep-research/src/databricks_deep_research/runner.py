@@ -49,6 +49,61 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+# Banner prepended when every claim failed verification but the synthesizer
+# streamed substantive content. The framework hands the draft back to the
+# caller with a clear warning rather than letting the post-Stage-8 empty
+# string surface as a blank chat response. See plan v2.3 (citation pipeline
+# UX backstop) for the failure-mode this guards against.
+_UNVERIFIED_DRAFT_BANNER_TEMPLATE = (
+    "> ⚠️ **Citations could not be verified.** "
+    "The framework's entailment checker did not ground "
+    "any of the {total_claims} claims this draft contains. "
+    "Numbers below come directly from the retrieved corpus "
+    "chunks; treat as a draft, not a final answer.\n\n"
+)
+
+# Minimum streamed-content length below which we don't bother surfacing
+# the draft — short fragments are usually preamble headers, not answers.
+_UNVERIFIED_DRAFT_MIN_CHARS = 200
+
+
+def _verification_summary_from_events(
+    events: list[StreamEvent],
+) -> tuple[int, int] | None:
+    """Return ``(total_claims, verified_claims)`` from the LAST
+    ``verification_summary`` event in the stream, or ``None`` if no such
+    event was emitted.
+
+    A workflow can emit multiple verification_summary events (one per
+    synthesizer pass under SYNTH_PIPELINE_V2); the last one reflects the
+    final state Stage 8 acted on.
+    """
+    last: tuple[int, int] | None = None
+    for event in events:
+        if getattr(event, "event_type", None) == "verification_summary":
+            total = int(getattr(event, "total_claims", 0) or 0)
+            verified = int(getattr(event, "verified_claims", 0) or 0)
+            last = (total, verified)
+    return last
+
+
+def _joined_stream_chunks(events: list[StreamEvent]) -> str:
+    """Concatenate every ``agent_stream_chunk`` payload from *events*.
+
+    This is the same fallback the main app's framework_orchestrator used
+    before the backstop migrated into the framework — preserved here so
+    every framework consumer (shell app, SDK, notebooks) gets the same
+    safety net.
+    """
+    parts: list[str] = []
+    for event in events:
+        if getattr(event, "event_type", None) == "agent_stream_chunk":
+            chunk = getattr(event, "chunk", None) or ""
+            if chunk:
+                parts.append(str(chunk))
+    return "".join(parts)
+
+
 @dataclass
 class WorkflowResult:
     """Result of a completed workflow run."""
@@ -63,21 +118,56 @@ class WorkflowResult:
 
     @property
     def output(self) -> str:
-        """Primary text output — prefer typed report artifact, then legacy output keys."""
+        """Primary text output — prefer typed report artifact, then legacy output keys.
+
+        Plan v2.3 backstop: when the citation pipeline marked zero claims
+        as verified (Stage 4 returned ``unsupported`` / ``abstained`` for
+        every claim, Stage 8 then surgically deleted all the claim text)
+        AND the synthesizer streamed substantive content, surface the
+        streamed draft with a clear banner rather than returning an empty
+        string. The framework's ``verification_summary`` is still
+        accurate; this only repairs the user-facing report.
+        """
         runtime = self.runtime_state
+        primary_text: str | None = None
         if runtime is not None and runtime.capabilities.synthesis is not None:
             artifact_id = runtime.capabilities.synthesis.report_artifact_id
             if artifact_id and artifact_id in runtime.artifacts:
                 payload = runtime.artifacts[artifact_id].payload
                 if payload is not None and str(payload):
-                    return str(payload)
-        if self.definition is None:
-            return ""
-        for key in self.definition.output_keys:
-            text = self.state.extract_output(key)
-            if text is not None and text:
-                return str(text)
-        return ""
+                    primary_text = str(payload)
+        if primary_text is None and self.definition is not None:
+            for key in self.definition.output_keys:
+                text = self.state.extract_output(key)
+                if text is not None and text:
+                    primary_text = str(text)
+                    break
+        if primary_text is None:
+            primary_text = ""
+
+        verif = _verification_summary_from_events(self.events)
+        if verif is not None:
+            total_claims, verified_claims = verif
+            if total_claims > 0 and verified_claims == 0:
+                joined = _joined_stream_chunks(self.events)
+                if (
+                    len(joined) >= _UNVERIFIED_DRAFT_MIN_CHARS
+                    and len(primary_text) < len(joined) // 2
+                ):
+                    logger.warning(
+                        "WORKFLOW_RESULT_UNVERIFIED_DRAFT_BACKSTOP "
+                        "total_claims=%d verified_claims=%d "
+                        "primary_text_len=%d streamed_chars=%d",
+                        total_claims,
+                        verified_claims,
+                        len(primary_text),
+                        len(joined),
+                    )
+                    banner = _UNVERIFIED_DRAFT_BANNER_TEMPLATE.format(
+                        total_claims=total_claims
+                    )
+                    return banner + joined
+        return primary_text
 
     @property
     def sources(self) -> list[Any]:

@@ -152,10 +152,10 @@ class UCVolumeBackend:
 
     async def grep(
         self, pattern: str, path: str = "/", *, max_matches: int = 100,
-    ) -> list[dict]:
+    ) -> list[dict[str, str | int]]:
         regex = re.compile(pattern)
         names = await self.ls(path)
-        results: list[dict] = []
+        results: list[dict[str, str | int]] = []
         prefix = path.rstrip("/")
         for name in names:
             full_path = f"{prefix}/{name}" if prefix not in ("", "/") else f"/{name}"

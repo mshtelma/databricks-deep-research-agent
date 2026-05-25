@@ -497,6 +497,17 @@ citation_verification:
   # Master toggle for the feature
   enabled: true
 
+  # Pipeline-wide cap on evidence quote length (chars) applied to all 5
+  # truncation sites: evidence selection (Stage 1), claim generation prompt
+  # (Stage 2), single-claim NLI verification (Stage 4 full path), batch
+  # verification (Stage 4 batch path), and retry verification. Single source
+  # of truth — supersedes the legacy evidence_preselection.max_span_length
+  # below. Override per-agent in the agent's output_schema:
+  #   config:
+  #     citation_pipeline:
+  #       max_evidence_chars: 5000
+  max_evidence_chars: 3000
+
   # Synthesis mode: controls the overall synthesis approach
   # - "interleaved": Current approach - evidence in context, [N] markers
   # - "react": ReAct-based - LLM uses tools to retrieve evidence before claims
@@ -538,6 +549,9 @@ citation_verification:
   evidence_preselection:
     max_spans_per_source: 15
     min_span_length: 50
+    # DEPRECATED: superseded by citation_verification.max_evidence_chars above.
+    # If set here it routes to max_evidence_chars with a DeprecationWarning.
+    # Will be removed after the next release. Set max_evidence_chars instead.
     max_span_length: 500
     relevance_threshold: 0.3
     numeric_content_boost: 0.2

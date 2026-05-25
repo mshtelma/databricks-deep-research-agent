@@ -79,7 +79,7 @@ class DecoratedToolFactory:
         if isinstance(value, _DecoratedTool):
             # Optional name override from YAML.
             if decl.name and value.definition.name != decl.name:
-                value._definition = value.definition.__class__(  # type: ignore[misc]
+                value._definition = value.definition.__class__(
                     name=decl.name,
                     description=value.definition.description,
                     parameters=value.definition.parameters,

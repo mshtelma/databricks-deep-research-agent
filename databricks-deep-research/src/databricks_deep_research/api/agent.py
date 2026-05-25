@@ -103,7 +103,7 @@ class Agent:
         state: WorkflowState | None = None,
         thread_id: str | None = None,
         llm_client: FrameworkLLMClient | None = None,
-    ) -> AgentResult:
+    ) -> AgentResult[BaseModel]:
         """Run the agent to completion and return an :class:`AgentResult`."""
         events: list[StreamEvent] = []
         async for event in self._stream(query, state=state, thread_id=thread_id, llm_client=llm_client):
@@ -214,7 +214,7 @@ class Agent:
         self,
         state: WorkflowState,
         events: list[StreamEvent],
-    ) -> AgentResult:
+    ) -> AgentResult[BaseModel]:
         """Assemble an :class:`AgentResult` from the run's final state."""
         output_key = f"{self.name}_output"
         content_obj = state.extract_output(output_key) if hasattr(state, "extract_output") else None
@@ -269,7 +269,7 @@ class Agent:
         state: WorkflowState | None = None,
         thread_id: str | None = None,  # noqa: ARG004 — Phase 2 wiring
         llm_client: FrameworkLLMClient | None = None,
-    ) -> AgentResult:
+    ) -> AgentResult[BaseModel]:
         """Run a pre-compiled :class:`WorkflowDefinition` (used by Sequence/Parallel)."""
         events: list[StreamEvent] = []
         run_state = state or WorkflowState(query=query)

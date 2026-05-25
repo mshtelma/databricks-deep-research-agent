@@ -1,47 +1,40 @@
 /**
  * StatusPanel — renders a deployment status badge + last-update timestamp +
- * error_message (when present). Polls the lightweight `/status` endpoint until
- * the deployment reaches a terminal state.
+ * error_message (when present). Polls the lightweight `/status` endpoint
+ * until the deployment reaches a terminal state.
  *
- * Used by the agent-designer Deploy flow after an `InAppWizard` (or future
- * mode wizard) submits a deployment.
+ * When the optional `deployment` prop is supplied the panel also exposes a
+ * destructive action button (Cancel / Undeploy / Unregister / Clean up /
+ * Retry cleanup) driven by `getAction` from `statusStyles.ts`. The button
+ * opens the shared `UndeployConfirmDialog` via `useDeploymentAction`.
  */
 
 import * as React from 'react'
 
 import { Badge } from '@/components/ui/badge'
 import { useDeploymentStatusPoll } from '@/hooks/useDeployments'
-import type { DeploymentStatus } from '@/types/deployment'
+import type { DeploymentResponse } from '@/types/deployment'
+
+import { STATUS_COLOR, STATUS_LABEL, getAction } from './statusStyles'
+import { useDeploymentAction } from './useDeploymentAction'
 
 interface StatusPanelProps {
   deploymentId: string
   /** When false (e.g. modal closed) the polling query is paused. */
   active?: boolean
-}
-
-const STATUS_COLOR: Record<DeploymentStatus, string> = {
-  pending: 'bg-yellow-500/15 text-yellow-700 border-yellow-300',
-  deploying: 'bg-blue-500/15 text-blue-700 border-blue-300',
-  active: 'bg-green-500/15 text-green-700 border-green-300',
-  failed: 'bg-red-500/15 text-red-700 border-red-300',
-  deactivated: 'bg-zinc-500/15 text-zinc-700 border-zinc-300',
-  cleanup_failed: 'bg-zinc-500/15 text-zinc-700 border-zinc-300',
-}
-
-const STATUS_LABEL: Record<DeploymentStatus, string> = {
-  pending: 'Pending',
-  deploying: 'Deploying',
-  active: 'Active',
-  failed: 'Failed',
-  deactivated: 'Deactivated',
-  cleanup_failed: 'Cleanup failed',
+  /** Full deployment object. When supplied, an action button + confirm
+   *  dialog are rendered for Cancel / Undeploy / etc. Legacy callers may
+   *  omit this and the panel behaves as before. */
+  deployment?: DeploymentResponse
 }
 
 export function StatusPanel({
   deploymentId,
   active = true,
+  deployment,
 }: StatusPanelProps): React.ReactElement {
   const query = useDeploymentStatusPoll(deploymentId, { enabled: active })
+  const action = useDeploymentAction()
 
   if (query.isLoading) {
     return (
@@ -64,6 +57,14 @@ export function StatusPanel({
 
   const { status, updated_at, error_message } = query.data
   const updatedDate = new Date(updated_at)
+
+  // Action button needs the full row (mode + cancel_requested + resources).
+  // Derive a merged view: live status from the poll, static fields from prop.
+  const liveDeployment: DeploymentResponse | null = deployment
+    ? { ...deployment, status, updated_at, error_message }
+    : null
+  const buttonAction = liveDeployment ? getAction(liveDeployment) : null
+
   return (
     <div
       data-testid="deployment-status-panel"
@@ -76,15 +77,31 @@ export function StatusPanel({
         >
           {STATUS_LABEL[status]}
         </Badge>
-        <span className="text-xs text-zinc-500">
-          Updated {updatedDate.toLocaleTimeString()}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-zinc-500">
+            Updated {updatedDate.toLocaleTimeString()}
+          </span>
+          {liveDeployment && buttonAction && (
+            <button
+              type="button"
+              onClick={() => action.openConfirm(liveDeployment)}
+              disabled={action.pendingFor === liveDeployment.id}
+              data-testid={`status-panel-action-${buttonAction.kind}`}
+              className="rounded-db-md border border-db-gray-lines bg-white px-2 py-1 text-[11px] font-medium text-db-navy-800 transition-colors hover:bg-db-lava-100 hover:border-db-lava-300 hover:text-db-lava-700 disabled:opacity-55"
+            >
+              {action.pendingFor === liveDeployment.id
+                ? `${buttonAction.label}…`
+                : buttonAction.label}
+            </button>
+          )}
+        </div>
       </div>
       {error_message ? (
         <p className="text-xs text-red-700" role="alert">
           {error_message}
         </p>
       ) : null}
+      {action.dialog}
     </div>
   )
 }

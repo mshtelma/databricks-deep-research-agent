@@ -46,6 +46,7 @@ const FAKE_PENDING_DEPLOYMENT: DeploymentResponse = {
   external_resource_ids: null,
   error_message: null,
   cleanup_attempts: 0,
+  cancel_requested: false,
   deployed_by: 'tester',
   created_at: '2026-05-09T00:00:00Z',
   updated_at: '2026-05-09T00:00:00Z',

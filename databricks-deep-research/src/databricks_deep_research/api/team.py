@@ -16,6 +16,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from pydantic import BaseModel
+
 from databricks_deep_research.api.agent import Agent
 from databricks_deep_research.api.compile import compile as compile_agent
 from databricks_deep_research.api.composition import _composite_workflow
@@ -124,7 +126,7 @@ class Team:
 
     # -- runtime shims ---------------------------------------------------------
 
-    async def arun(self, query: str, **kwargs: Any) -> AgentResult:
+    async def arun(self, query: str, **kwargs: Any) -> AgentResult[BaseModel]:
         return await Agent._run_compiled_workflow(
             self.as_workflow(), query=query, **kwargs,
         )

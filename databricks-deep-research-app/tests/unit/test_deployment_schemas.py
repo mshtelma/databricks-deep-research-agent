@@ -19,6 +19,7 @@ from deep_research.schemas.deployment import (
     BatchDeploymentConfig,
     CreateDeploymentRequest,
     DeploymentConfig,
+    DeploymentResponse,
     InAppDeploymentConfig,
     MlflowAgentDeploymentConfig,
     ShellAppDeploymentConfig,
@@ -214,3 +215,51 @@ class TestRoundTrip:
         assert revived.agent_id == agent_id
         assert revived.revision_id == rev_id
         assert isinstance(revived.config, InAppDeploymentConfig)
+
+
+class TestDeploymentResponseCancelRequested:
+    """``cancel_requested`` must surface in the API response so the UI can
+    show a 'Cancelling…' badge once a cancel has been dispatched. Without
+    the field, the UI could not distinguish 'still deploying' from
+    'cancel pending'.
+    """
+
+    def _base_row(self, **overrides: object) -> dict[str, object]:
+        from datetime import UTC, datetime
+        row: dict[str, object] = {
+            "id": uuid4(),
+            "agent_id": uuid4(),
+            "revision_id": uuid4(),
+            "mode": DeploymentMode.SHELL_APP.value,
+            "status": "deploying",
+            "config": {"mode": "shell_app"},
+            "endpoint_name": None,
+            "model_name": None,
+            "external_resource_ids": None,
+            "error_message": None,
+            "cleanup_attempts": 0,
+            "deployed_by": "user-1",
+            "created_at": datetime.now(UTC),
+            "updated_at": datetime.now(UTC),
+            "deactivated_at": None,
+        }
+        row.update(overrides)
+        return row
+
+    def test_cancel_requested_defaults_false(self) -> None:
+        row = self._base_row()
+        response = DeploymentResponse.model_validate(row)
+        assert response.cancel_requested is False
+
+    def test_cancel_requested_round_trips_true(self) -> None:
+        row = self._base_row(cancel_requested=True)
+        response = DeploymentResponse.model_validate(row)
+        assert response.cancel_requested is True
+        as_json = response.model_dump_json()
+        assert '"cancel_requested":true' in as_json
+
+    def test_cancel_requested_round_trips_false(self) -> None:
+        row = self._base_row(cancel_requested=False)
+        response = DeploymentResponse.model_validate(row)
+        as_json = response.model_dump_json()
+        assert '"cancel_requested":false' in as_json

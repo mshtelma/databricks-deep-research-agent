@@ -31,8 +31,12 @@ import asyncio
 import logging
 import os
 import random
+from typing import TYPE_CHECKING, Any
 
 from databricks_deep_research.tools.builtins.web_search import SearchResult
+
+if TYPE_CHECKING:
+    import httpx
 
 __all__ = ["BraveSearchAdapter"]
 
@@ -105,14 +109,14 @@ class BraveSearchAdapter:
         self._api_key = api_key
         self._client: object | None = None  # httpx.AsyncClient, imported lazily
 
-    def _get_client(self):  # type: ignore[no-untyped-def]
+    def _get_client(self) -> "httpx.AsyncClient":
         import httpx
 
         client = self._client
         if client is None or getattr(client, "is_closed", False):
             client = httpx.AsyncClient(timeout=30.0)
             self._client = client
-        return client
+        return client  # type: ignore[return-value]
 
     async def aclose(self) -> None:
         client = self._client
@@ -149,10 +153,10 @@ class BraveSearchAdapter:
             jitter_max = _inter_call_jitter()
             if jitter_max > 0:
                 await asyncio.sleep(random.uniform(0.0, jitter_max))
-            data: dict | None = None
+            data: dict[str, Any] | None = None
             for attempt in range(max_attempts):
                 try:
-                    resp = await client.get(_BRAVE_URL, params=params, headers=headers)  # type: ignore[attr-defined]
+                    resp = await client.get(_BRAVE_URL, params=params, headers=headers)
                 except httpx.RequestError as exc:
                     if attempt == max_attempts - 1:
                         raise

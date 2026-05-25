@@ -68,10 +68,10 @@ class InMemoryBackend:
 
     async def grep(
         self, pattern: str, path: str = "/", *, max_matches: int = 100,
-    ) -> list[dict]:
+    ) -> list[dict[str, str | int]]:
         regex = re.compile(pattern)
         prefix = self._normalize(path).rstrip("/") + "/" if path not in ("", "/") else "/"
-        results: list[dict] = []
+        results: list[dict[str, str | int]] = []
         for fpath, data in self._store.items():
             if not fpath.startswith(prefix):
                 continue

@@ -106,7 +106,12 @@ class EvidencePreselectionConfig(BaseModel):
 
     max_spans_per_source: int = Field(default=10, ge=1, le=50)
     min_span_length: int = Field(default=50, ge=10)
-    max_span_length: int = Field(default=500, ge=50)
+    # DEPRECATED: use CitationConfig.max_evidence_chars (the pipeline-wide
+    # cap applied to all 5 truncation sites). This stage-specific knob is
+    # retained for one release cycle for backward compat — if set in YAML
+    # it routes to max_evidence_chars with a DeprecationWarning. Default
+    # bumped from 500 to 3000 to match the new pipeline-wide default.
+    max_span_length: int = Field(default=3000, ge=50)
     relevance_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     numeric_content_boost: float = Field(default=0.2, ge=0.0, le=1.0)
     relevance_computation_method: RelevanceMethod = RelevanceMethod.HYBRID
@@ -148,11 +153,21 @@ class ConfidenceClassificationConfig(BaseModel):
 
 
 class IsolatedVerificationConfig(BaseModel):
-    """Stage 4: Isolated Verification configuration."""
+    """Stage 4: Isolated Verification configuration.
+
+    Defaults use only framework-canonical tiers (``simple|analytical|complex``)
+    so the bare ``FrameworkLLMClient.from_databricks(...)`` used by shell-app
+    deployments resolves them without app-level extensions
+    (``bulk_analysis``, ``fast``). Cost-aware: ``analytical`` for the full path
+    and ``simple`` for the quick path keeps shell-app verification cheap by
+    default while still producing real entailment judgments. Override per-agent
+    via ``output_schema.isolated_verification`` in agent YAML when a richer
+    tier is justified.
+    """
 
     enable_nei_verdict: bool = True
-    verification_model_tier: str = Field(default="complex")
-    quick_verification_tier: str = Field(default="analytical")
+    verification_model_tier: str = Field(default="analytical")
+    quick_verification_tier: str = Field(default="simple")
     max_concurrent_verifications: int = Field(default=10, ge=1, le=50)
 
     model_config = {"frozen": True}
@@ -241,11 +256,18 @@ class VerificationRetrievalConfig(BaseModel):
         default=15.0, ge=1.0, le=60.0,
     )
 
-    # Model tiers for LLM calls
-    decomposition_tier: str = Field(default="bulk_analysis")
-    entailment_tier: str = Field(default="bulk_analysis")
-    reconstruction_tier: str = Field(default="analytical")
-    softening_tier: str = Field(default="fast")
+    # Model tiers for LLM calls.
+    #
+    # Defaults restricted to framework-canonical tiers
+    # (``simple|analytical|complex``) so shell-app deployments using
+    # ``FrameworkLLMClient.from_databricks(...)`` resolve them without
+    # app-level extensions (``bulk_analysis``, ``fast``). Cost-aware
+    # selection: structured fact decomposition / reconstruction / softening
+    # are all simple-tier appropriate; entailment scoring needs analytical.
+    decomposition_tier: str = Field(default="simple")
+    entailment_tier: str = Field(default="analytical")
+    reconstruction_tier: str = Field(default="simple")
+    softening_tier: str = Field(default="simple")
 
     model_config = {"frozen": True}
 
@@ -380,6 +402,23 @@ class CitationConfig(BaseModel):
 
     # Master toggle
     enabled: bool = True
+
+    # Pipeline-wide cap on evidence quote length (chars). Applied at all five
+    # truncation sites: evidence selection (Stage 1), claim generation prompt
+    # (Stage 2), single-claim NLI verification (Stage 4 full path), batch
+    # verification (Stage 4 batch path), and retry verification. This is the
+    # single source of truth — supersedes the per-stage ad-hoc caps that
+    # previously diverged (500/1000/1500). Override per-agent via the agent's
+    # output_schema citation_pipeline.max_evidence_chars.
+    max_evidence_chars: int = Field(
+        default=3000, ge=200, le=10000,
+        description=(
+            "Pipeline-wide cap on evidence quote length applied across all "
+            "5 truncation sites. Default 3000 covers typical multi-row "
+            "markdown tables; raise for richer tabular corpora, lower for "
+            "budget-constrained prompts."
+        ),
+    )
 
     # Synthesis mode
     synthesis_mode: SynthesisMode = SynthesisMode.INTERLEAVED

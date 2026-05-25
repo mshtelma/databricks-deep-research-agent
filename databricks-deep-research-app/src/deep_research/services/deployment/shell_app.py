@@ -5,9 +5,11 @@ Generates a downloadable zip from the 8-file template under
 .py / .yaml / .sh / .html / .md). The agent's ``WorkflowDefinition`` AST is
 serialized into ``agent.yaml`` and embedded in the zip.
 
-Plan reference: agent-designer-deployment.md Section E (Shell-app), with
-GitHub-pinning instead of PyPI per user override (Section C.1, plan tag
-``git+https://github.com/mshtelma/databricks-deep-research-agent.git@<tag>``).
+Plan reference: agent-designer-deployment.md Section E (Shell-app). The
+framework is no longer installed from GitHub at app-startup time; instead a
+locally-built ``databricks_deep_research-*.whl`` is bundled into the zip at
+``wheels/`` and referenced from the generated ``pyproject.toml`` via
+``[tool.uv.sources]``. See plan imperative-wishing-lynx.md.
 
 Phase 2-B ships the zip artifact + recorded metadata; live deploy via
 ``w.apps.create`` lands in Phase 3 alongside MLflow agent live deploy.
@@ -48,14 +50,96 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BRAVE_SECRET_SCOPE = "deep-research-secrets"
 _DEFAULT_BRAVE_SECRET_KEY = "BRAVE_API_KEY"
 
-# Conservative whitelist for framework_git_tag values rendered verbatim into
-# the shell-app's pyproject.toml pip URL. Mirrors a subset of
-# git-check-ref-format: alphanumerics + ``.``, ``_``, ``-``, ``/`` only; must
-# not start with ``.``, ``-``, or ``/`` (which would either be ambiguous git
-# refs or escape into URL-fragment territory); length bounded at 256 chars.
-# Reject ``@``, ``#``, ``?``, whitespace, and quotes — these can fragment the
-# pip git URL or alter pip's parsing.
+# Historical: shell-apps used to install the framework via a git URL pinned
+# in their generated pyproject.toml; the value was validated against this
+# whitelist before being rendered verbatim. The bundled-wheel path (see
+# ``_resolve_framework_wheel`` below) makes the git ref obsolete. The regex
+# stays defined for backwards-compatible type checking of any incoming
+# ``framework_git_tag`` value (we log + ignore it now) and for MLflow
+# agent-deploy mode in ``mlflow_deploy.py`` which still uses git URLs.
 _GIT_REF_WHITELIST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
+
+# Matches the version segment in a PEP 427 framework wheel filename:
+#   ``databricks_deep_research-<version>-py3-none-any.whl``
+_FRAMEWORK_WHEEL_RE = re.compile(
+    r"^databricks_deep_research-(?P<version>[^-]+)-py3-none-any\.whl$"
+)
+
+
+class ShellAppWheelMissingError(RuntimeError):
+    """Raised when the bundled framework wheel cannot be located.
+
+    Surfaced at ``validate()`` time so the caller sees a clear error before
+    the zip-build path starts; never raised from ``translate()``.
+    """
+
+
+def _resolve_framework_wheel() -> tuple[str, bytes]:
+    """Return ``(filename, bytes)`` for the bundled framework wheel.
+
+    Primary location: ``_framework_wheel/`` next to this file. Hatch
+    ``force-include`` copies it there in both source-tree and installed-wheel
+    layouts (see ``pyproject.toml`` ``[tool.hatch.build.targets.wheel.force-include]``).
+    Populated by ``make build-framework``.
+
+    Source-tree dev fallback: if the primary location is empty (devs running
+    ``make dev`` without rebuilding), walk up to find the repo's
+    ``databricks-deep-research-app/wheels/databricks_deep_research-*.whl``
+    and use the newest match. Logs at INFO so the dev knows the fallback fired.
+
+    Raises ``ShellAppWheelMissingError`` if neither path resolves.
+    """
+    primary_dir = Path(__file__).resolve().parent / "_framework_wheel"
+    if primary_dir.is_dir():
+        matches = [
+            p for p in primary_dir.iterdir()
+            if p.is_file() and _FRAMEWORK_WHEEL_RE.match(p.name)
+        ]
+        if len(matches) == 1:
+            return matches[0].name, matches[0].read_bytes()
+        if len(matches) > 1:
+            raise ShellAppWheelMissingError(
+                "Expected exactly one framework wheel in package data "
+                f"({primary_dir}), found {len(matches)}: "
+                f"{sorted(p.name for p in matches)}. Run `make build-framework`."
+            )
+
+    # Source-tree fallback: walk up to find <repo>/databricks-deep-research-app/wheels/.
+    here = Path(__file__).resolve()
+    for ancestor in here.parents:
+        candidate_dir = ancestor / "databricks-deep-research-app" / "wheels"
+        if candidate_dir.is_dir():
+            fallback_matches = sorted(
+                (
+                    p for p in candidate_dir.iterdir()
+                    if p.is_file() and _FRAMEWORK_WHEEL_RE.match(p.name)
+                ),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if fallback_matches:
+                logger.info(
+                    "SHELL_APP_FRAMEWORK_WHEEL_FALLBACK_SOURCE_TREE path=%s "
+                    "(primary _framework_wheel/ empty; ran from source tree without "
+                    "make build-framework)",
+                    fallback_matches[0],
+                )
+                return fallback_matches[0].name, fallback_matches[0].read_bytes()
+            break  # Found wheels dir but no framework wheel — stop searching.
+
+    raise ShellAppWheelMissingError(
+        "Framework wheel not found in package data "
+        f"({primary_dir}) or in source-tree fallback "
+        "(databricks-deep-research-app/wheels/). Run "
+        "`make build-framework` in databricks-deep-research-app/ "
+        "to build and stage it."
+    )
+
+
+def _parse_framework_wheel_version(filename: str) -> str:
+    """Extract version from a framework wheel filename, or "unknown"."""
+    match = _FRAMEWORK_WHEEL_RE.match(filename)
+    return match.group("version") if match else "unknown"
 
 
 def _is_not_found_error(exc: BaseException) -> bool:
@@ -282,36 +366,44 @@ class ShellAppExporter:
                 )
             )
 
+        # framework_git_tag is no longer rendered into the generated shell-app
+        # pyproject.toml — the framework now ships as a bundled wheel (see
+        # _resolve_framework_wheel below + plan imperative-wishing-lynx.md).
+        # We keep accepting the field on the request payload for backwards
+        # compatibility but the value is ignored at translate() time. The
+        # whitelist still runs as a typing guard so malformed values don't
+        # silently slip through into logs / metadata.
         git_tag = config.get("framework_git_tag", "")
-        if not isinstance(git_tag, str) or not git_tag.strip():
+        if git_tag and (
+            not isinstance(git_tag, str) or not _GIT_REF_WHITELIST.fullmatch(git_tag)
+        ):
             errors.append(
                 ValidationError(
-                    message="framework_git_tag is required (Git ref)",
+                    message=(
+                        "framework_git_tag, when supplied, must be a valid "
+                        "Git ref. Allowed: alphanumerics, '.', '_', '-', '/'. "
+                        "Must not begin with '.', '-', or '/' and must be 256 "
+                        "chars or fewer. Disallowed characters: '@', '#', '?', "
+                        "whitespace, and quotes. Note: this field is ignored — "
+                        "the framework is now installed from a bundled wheel."
+                    ),
                     path="config.framework_git_tag",
                 )
             )
-        else:
-            # Whitelist the framework_git_tag character set. The value is
-            # rendered verbatim into pyproject.toml as
-            # ``git+https://github.com/.../...@{git_tag}#subdirectory=...``
-            # and consumed by pip + git. Characters like ``@``, ``#``, ``?``,
-            # whitespace or quotes could fragment-overflow into the URL or
-            # alter pip's parsing. Allow only the git-ref-safe subset, must
-            # not begin with ``.`` or ``-`` (per git-check-ref-format rules),
-            # and bound length to 256 chars.
-            if not _GIT_REF_WHITELIST.fullmatch(git_tag):
-                errors.append(
-                    ValidationError(
-                        message=(
-                            "framework_git_tag contains disallowed characters. "
-                            "Allowed: alphanumerics, '.', '_', '-', '/'. Must "
-                            "not begin with '.', '-', or '/' and must be 256 "
-                            "chars or fewer. Reject '@', '#', '?', whitespace, "
-                            "and quotes."
-                        ),
-                        path="config.framework_git_tag",
-                    )
+
+        # The shell-app deploy bundles the locally-built framework wheel into
+        # the generated zip. Surface a clear error if the wheel hasn't been
+        # built yet so the user sees actionable feedback before the zip-build
+        # path starts.
+        try:
+            _resolve_framework_wheel()
+        except ShellAppWheelMissingError as exc:
+            errors.append(
+                ValidationError(
+                    message=str(exc),
+                    path="server.framework_wheel",
                 )
+            )
 
         # Reject AST containing custom tool kinds. AgentRevision.definition
         # is a JSONB dict at this point (see AgentV2 model). The 'tools' key
@@ -358,13 +450,28 @@ class ShellAppExporter:
     ) -> Artifact:
         """Render the 8 template files + zip them into an in-memory artifact."""
         app_name: str = config["app_name"]
-        git_tag: str = config["framework_git_tag"]
+        # framework_git_tag is accepted on the payload for backwards compat
+        # but no longer rendered into the generated pyproject.toml. The
+        # framework now ships as a bundled wheel; see _resolve_framework_wheel.
+        legacy_git_tag = config.get("framework_git_tag") or ""
+        if legacy_git_tag:
+            logger.warning(
+                "SHELL_APP_FRAMEWORK_GIT_TAG_IGNORED app_name=%s framework_git_tag=%r "
+                "(field is ignored — framework installs from bundled wheel)",
+                app_name,
+                legacy_git_tag,
+            )
         target: str = config.get("target", "dev")
         definition = revision.definition or {}
         uses_web_search = _definition_uses_web_search(definition)
         brave_secret_scope, brave_secret_key = _resolve_brave_secret_config(
             config,
             include_defaults=uses_web_search,
+        )
+
+        framework_wheel_filename, framework_wheel_bytes = _resolve_framework_wheel()
+        framework_wheel_version = _parse_framework_wheel_version(
+            framework_wheel_filename
         )
 
         # Serialize the workflow definition into a YAML string that we splice
@@ -376,7 +483,7 @@ class ShellAppExporter:
 
         context = {
             "app_name": app_name,
-            "git_tag": git_tag,
+            "framework_wheel_filename": framework_wheel_filename,
             "target": target,
             "agent_name": getattr(agent, "name", "Untitled Agent"),
             "agent_id": str(agent.id),
@@ -427,6 +534,16 @@ class ShellAppExporter:
                 info.compress_type = zipfile.ZIP_DEFLATED
                 info.external_attr = _zip_mode_bits(dst)
                 zf.writestr(info, _render(_load_template(src), **context))
+            # Bundle the framework wheel at wheels/<filename>. The generated
+            # pyproject.toml's [tool.uv.sources] block points at this path so
+            # the deployed app installs the framework from a local file
+            # instead of git+https. Stays byte-deterministic via the fixed
+            # 1980-01-01 timestamp and stable wheel filename.
+            wheel_dst = f"wheels/{framework_wheel_filename}"
+            wheel_info = zipfile.ZipInfo(wheel_dst, date_time=(1980, 1, 1, 0, 0, 0))
+            wheel_info.compress_type = zipfile.ZIP_DEFLATED
+            wheel_info.external_attr = _zip_mode_bits(wheel_dst)
+            zf.writestr(wheel_info, framework_wheel_bytes)
 
         payload = buf.getvalue()
         digest = hashlib.sha256(payload).hexdigest()
@@ -436,7 +553,8 @@ class ShellAppExporter:
             payload=payload,
             metadata={
                 "app_name": app_name,
-                "framework_git_tag": git_tag,
+                "framework_wheel_filename": framework_wheel_filename,
+                "framework_wheel_version": framework_wheel_version,
                 "requires_web_search": str(uses_web_search).lower(),
                 "brave_secret_resource_name": _BRAVE_SECRET_RESOURCE_NAME,
                 "brave_secret_scope_configured": str(bool(brave_secret_scope)).lower(),
@@ -467,7 +585,12 @@ class ShellAppExporter:
             external_resource_ids={
                 "app_name": config["app_name"],
                 "shell_app_zip_sha256": hashlib.sha256(artifact.payload).hexdigest(),
-                "framework_git_tag": config["framework_git_tag"],
+                "framework_wheel_filename": artifact.metadata.get(
+                    "framework_wheel_filename", ""
+                ),
+                "framework_wheel_version": artifact.metadata.get(
+                    "framework_wheel_version", ""
+                ),
                 "size_bytes": str(len(artifact.payload)),
             },
         )

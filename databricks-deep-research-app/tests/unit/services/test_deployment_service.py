@@ -291,3 +291,90 @@ class TestPaginationBounds:
         await service.list_for_user("user-1", limit=0)
         executed_stmt = mock_db_session.execute.call_args.args[0]
         assert executed_stmt._limit == 2  # bounded_limit (1) + 1
+
+
+class TestListForUserAgentFilter:
+    """``agent_id`` filter on the list endpoint (Undeploy UI feature)."""
+
+    @pytest.mark.asyncio
+    async def test_agent_id_filter_narrows_query(
+        self, mock_db_session: AsyncMock
+    ) -> None:
+        target_agent = uuid4()
+        scalars = MagicMock()
+        scalars.all.return_value = []
+        result = MagicMock()
+        result.scalars.return_value = scalars
+        mock_db_session.execute = AsyncMock(return_value=result)
+        service = DeploymentService(mock_db_session)
+
+        items, next_cursor = await service.list_for_user(
+            "user-1",
+            agent_id=target_agent,
+        )
+        assert items == []
+        assert next_cursor is None
+        # The compiled WHERE clause must reference both the W9 authz
+        # predicate AND the agent_id narrowing.
+        executed_stmt = str(mock_db_session.execute.call_args.args[0])
+        assert "agent_id" in executed_stmt
+        assert "deployed_by" in executed_stmt  # W9 authz still applied
+
+    @pytest.mark.asyncio
+    async def test_agent_id_omitted_leaves_authz_only(
+        self, mock_db_session: AsyncMock
+    ) -> None:
+        scalars = MagicMock()
+        scalars.all.return_value = []
+        result = MagicMock()
+        result.scalars.return_value = scalars
+        mock_db_session.execute = AsyncMock(return_value=result)
+        service = DeploymentService(mock_db_session)
+
+        await service.list_for_user("user-1")
+        # No additional agent_id predicate when filter omitted; the
+        # workspace-wide list still uses the W9 authz join.
+        executed_stmt = str(mock_db_session.execute.call_args.args[0])
+        assert "deployed_by" in executed_stmt
+
+
+class TestResetCleanupAttempts:
+    """User-driven retry of CLEANUP_FAILED resets the budget to 0."""
+
+    @pytest.mark.asyncio
+    async def test_resets_counter_to_zero(
+        self, mock_db_session: AsyncMock
+    ) -> None:
+        deployment = _make_deployment(status=DeploymentStatus.CLEANUP_FAILED)
+        deployment.cleanup_attempts = 3
+        mock_db_session.get = AsyncMock(return_value=deployment)
+        service = DeploymentService(mock_db_session)
+
+        result = await service.reset_cleanup_attempts(deployment.id)
+        assert result.cleanup_attempts == 0
+        mock_db_session.flush.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_reset_then_increment_yields_one(
+        self, mock_db_session: AsyncMock
+    ) -> None:
+        # Verifies that after the reset, an immediate failure starts a
+        # fresh budget at 1 (not 4) — closes the bug where users were
+        # locked out after the first cycle.
+        deployment = _make_deployment(status=DeploymentStatus.CLEANUP_FAILED)
+        deployment.cleanup_attempts = 3
+        mock_db_session.get = AsyncMock(return_value=deployment)
+        service = DeploymentService(mock_db_session)
+
+        await service.reset_cleanup_attempts(deployment.id)
+        result = await service.increment_cleanup_attempts(deployment.id)
+        assert result.cleanup_attempts == 1
+
+    @pytest.mark.asyncio
+    async def test_reset_on_missing_deployment_raises(
+        self, mock_db_session: AsyncMock
+    ) -> None:
+        mock_db_session.get = AsyncMock(return_value=None)
+        service = DeploymentService(mock_db_session)
+        with pytest.raises(ValueError, match="not found"):
+            await service.reset_cleanup_attempts(uuid4())

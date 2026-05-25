@@ -65,7 +65,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Iterator
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from databricks_deep_research.tools.mcp_auth import MCPAuth
 from databricks_deep_research.tools.mcp_security import (
@@ -114,7 +114,7 @@ def _inline_refs(schema: dict[str, Any]) -> dict[str, Any]:
             return [_resolve(item) for item in node]
         return node
 
-    return _resolve(schema_without_defs)
+    return cast(dict[str, Any], _resolve(schema_without_defs))
 
 
 def _validate_openai_compatible(schema: dict[str, Any]) -> None:
@@ -201,15 +201,15 @@ class _MCPTool:
                 mime = getattr(part, "mimeType", None) or (
                     part.get("mimeType", "") if isinstance(part, dict) else ""
                 )
-                data = getattr(part, "data", None) or (
+                image_bytes = getattr(part, "data", None) or (
                     part.get("data", b"") if isinstance(part, dict) else b""
                 )
-                size = len(data) if isinstance(data, (bytes, bytearray)) else 0
+                size = len(image_bytes) if isinstance(image_bytes, (bytes, bytearray)) else 0
                 text_parts.append(f"[image attached: {mime}, {size} bytes]")
                 attachments.append({
                     "kind": "image",
                     "mime_type": mime,
-                    "bytes": bytes(data) if isinstance(data, (bytes, bytearray)) else None,
+                    "bytes": bytes(image_bytes) if isinstance(image_bytes, (bytes, bytearray)) else None,
                 })
             elif ptype == "resource":
                 uri = getattr(part, "uri", None) or (

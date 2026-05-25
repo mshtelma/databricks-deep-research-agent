@@ -88,6 +88,10 @@ class InterleavedGenerationConfig:
 
     min_evidence_similarity: float = 0.5
     generation_mode: GenerationMode = GenerationMode.NATURAL
+    # Per-evidence-quote cap applied when formatting the generation prompt.
+    # Wired from the pipeline-wide CitationConfig.max_evidence_chars at
+    # construction time so all 5 truncation sites stay aligned.
+    max_evidence_chars: int = 3000
 
 
 # ---------------------------------------------------------------------------
@@ -410,9 +414,10 @@ class InterleavedGenerator:
         if not evidence_pool:
             return None, "none", "No evidence available"
 
+        evidence_cap = self._config.max_evidence_chars
         evidence_text = "\n".join(
-            f"[{i}] {e.quote_text[:1000]}..."
-            if len(e.quote_text) > 1000
+            f"[{i}] {e.quote_text[:evidence_cap]}..."
+            if len(e.quote_text) > evidence_cap
             else f"[{i}] {e.quote_text}"
             for i, e in enumerate(evidence_pool)
         )
@@ -503,9 +508,10 @@ class InterleavedGenerator:
         )
 
         # Format evidence pool for the prompt
+        evidence_cap = self._config.max_evidence_chars
         evidence_text = "\n".join(
             f"[{i}] Source: {e.source_title or 'Unknown'}\n"
-            f'   Quote: "{e.quote_text[:1000]}{"..." if len(e.quote_text) > 1000 else ""}"'
+            f'   Quote: "{e.quote_text[:evidence_cap]}{"..." if len(e.quote_text) > evidence_cap else ""}"'
             for i, e in enumerate(evidence_pool)
         )
 
@@ -563,7 +569,21 @@ class InterleavedGenerator:
             )
 
         if previous_content:
-            prompt += f"\n\nPrevious content:\n{previous_content}\n\nContinue from here:"
+            # Reframe so the LLM does NOT autoregress over previous_content as
+            # prose to continue. The prior framing ("Previous content: ... /
+            # Continue from here:") caused the model to skip the [N] markers
+            # entirely (root cause of the 45-of-45 grounding-warning banner
+            # observed on shell-app deployments). Treat previous_content as
+            # background notes only and re-instruct the model to write from
+            # scratch with mandatory [N] citations.
+            prompt += (
+                "\n\n## Research Notes (background context only — NOT a draft to continue)\n"
+                f"{previous_content}\n\n"
+                "Now write the response from scratch. The instructions above are binding: "
+                "every factual claim MUST be followed by one or more [N] citation markers "
+                "from the evidence pool. Do NOT continue the research notes verbatim; "
+                "do NOT produce a citation-free narrative."
+            )
 
         try:
             key_map = build_citation_key_map(evidence_pool)

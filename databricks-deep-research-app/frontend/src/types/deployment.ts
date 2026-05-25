@@ -99,6 +99,9 @@ export interface DeploymentResponse {
   external_resource_ids: Record<string, unknown> | null
   error_message: string | null
   cleanup_attempts: number
+  /** Set when DELETE has fired against a PENDING/DEPLOYING row;
+   *  the worker resolves the cancel on its next heartbeat. */
+  cancel_requested: boolean
   deployed_by: string
   created_at: string
   updated_at: string
@@ -181,6 +184,9 @@ export interface DefaultRevisionNotDeployableErrorResponse {
 export interface DeploymentListFilters {
   mode?: DeploymentMode
   status?: DeploymentStatus
+  /** Scope the list to deployments of a single agent.
+   *  Server-side W9 authz still applies (deployer OR agent owner). */
+  agent_id?: string
   cursor?: string
   limit?: number
 }

@@ -502,7 +502,13 @@ class EvidencePreselectionConfig(BaseModel):
 
     max_spans_per_source: int = Field(default=10, ge=1, le=50)
     min_span_length: int = Field(default=50, ge=10)
-    max_span_length: int = Field(default=500, ge=50)
+    # DEPRECATED: use CitationVerificationConfig.max_evidence_chars (the
+    # pipeline-wide cap applied to all 5 truncation sites). This stage-
+    # specific knob is retained for one release cycle for backward compat
+    # — if set in YAML it routes to max_evidence_chars with a
+    # DeprecationWarning. Default bumped from 500 to 3000 to match the new
+    # pipeline-wide default.
+    max_span_length: int = Field(default=3000, ge=50)
     relevance_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     numeric_content_boost: float = Field(default=0.2, ge=0.0, le=1.0)
     relevance_computation_method: RelevanceMethod = RelevanceMethod.HYBRID
@@ -751,6 +757,23 @@ class CitationVerificationConfig(BaseModel):
 
     # Master toggle
     enabled: bool = True
+
+    # Pipeline-wide cap on evidence quote length (chars). Applied at all five
+    # truncation sites: evidence selection (Stage 1), claim generation prompt
+    # (Stage 2), single-claim NLI verification (Stage 4 full path), batch
+    # verification (Stage 4 batch path), and retry verification. This is the
+    # single source of truth — supersedes the per-stage ad-hoc caps that
+    # previously diverged (500/1000/1500). Override per-agent via the agent's
+    # output_schema citation_pipeline.max_evidence_chars.
+    max_evidence_chars: int = Field(
+        default=3000, ge=200, le=10000,
+        description=(
+            "Pipeline-wide cap on evidence quote length applied across all "
+            "5 truncation sites. Default 3000 covers typical multi-row "
+            "markdown tables; raise for richer tabular corpora, lower for "
+            "budget-constrained prompts."
+        ),
+    )
 
     # Synthesis mode: controls the overall synthesis approach
     # - "interleaved": Current approach - evidence in context, [N] markers

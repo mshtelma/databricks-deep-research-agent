@@ -99,7 +99,7 @@ Extract the most relevant evidence spans:\
 # -- Structured output models ----------------------------------------------
 
 class _SpanOutput(BaseModel):
-    quote_text: str = Field(description="Exact quote (50-1000 chars)")
+    quote_text: str = Field(description="Exact quote (50-3000 chars)")
     relevance_score: float = Field(ge=0.0, le=1.0)
     has_numeric: bool = Field(description="Contains numbers/statistics")
     section: str | None = Field(default=None)
@@ -111,10 +111,17 @@ class _SpansOutput(BaseModel):
 
 @dataclass
 class EvidenceSelectionConfig:
-    """Configuration knobs for the evidence selector."""
+    """Configuration knobs for the evidence selector.
+
+    Note: ``max_span_length`` is the post-extract truncation cap. Runtime
+    value is always wired from ``CitationConfig.max_evidence_chars`` (the
+    pipeline-wide cap, default 3000) at construction time — see the pipeline
+    factory in ``synthesizer.py``. The default below is only a fallback for
+    direct dataclass instantiation in tests / standalone use.
+    """
     max_spans_per_source: int = 10
     min_span_length: int = 50
-    max_span_length: int = 1000
+    max_span_length: int = 3000
     relevance_threshold: float = 0.3
     numeric_content_boost: float = 0.2
     chunk_size: int = 8_000
@@ -450,11 +457,13 @@ class EvidenceSelector:
                 logger.info(
                     "EVIDENCE_EXTRACTED source_url=%s source_kind=%s "
                     "path=corpus_passthrough span_count=1 has_numeric=%s "
-                    "span_chars=%d",
+                    "span_chars=%d content_chars=%d truncated=%s",
                     url[:80],
                     src.get("source_kind") or src.get("source_type") or "",
                     has_num,
                     len(truncated),
+                    len(trimmed),
+                    len(trimmed) > self._cfg.max_span_length,
                 )
                 return [
                     RankedEvidence(

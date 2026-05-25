@@ -78,14 +78,24 @@ Deep research agent with multi-agent architecture (Coordinator, Planner, Researc
 ### Deployment (Databricks Apps)
 | Command | Description |
 |---------|-------------|
-| `make deploy TARGET=dev` | Full deployment (build, migrate, grant, start) |
-| `make deploy TARGET=ais` | Deploy to AIS workspace |
+| `make deploy TARGET=dev` | Full deployment (build, migrate, grant, start) — gated by `typecheck-framework` |
+| `make deploy TARGET=ais` | Deploy to AIS workspace — gated by `typecheck-framework` |
+| `make deploy-unchecked TARGET=ais` | Emergency revert / typecheck-baseline catch-up only. Skips mypy. |
+| `make app-deploy TARGET=ais` | Fast app-only redeploy — gated by `typecheck-framework` |
+| `make app-deploy-unchecked TARGET=ais` | Fast redeploy, skips mypy. Emergency use only. |
 | `make logs TARGET=dev` | Download app logs |
 | `make logs TARGET=dev FOLLOW=-f` | Follow logs in real-time |
 | `make logs TARGET=dev SEARCH="--search ERROR"` | Filter logs |
 | `make requirements` | Generate requirements.txt from pyproject.toml |
 | `make bundle-validate` | Validate Databricks bundle config |
 | `make bundle-summary` | Show deployment summary |
+
+**Deploy gate (added 2026-05-25):** `make deploy` and `make app-deploy` depend on
+`typecheck-framework` (strict mypy on the framework code). This catches
+attribute-name typos, missing kwargs, and signature drift before they reach
+production — the class of regression that crashed the synthesizer's
+`InterleavedGenerator` on 2026-05-25. Use the `*-unchecked` variants only for
+emergency reverts where typecheck cannot pass.
 
 ### Framework
 | Command | Description |
@@ -362,6 +372,31 @@ research_types:
     steps: {min: 5, max: 10}
     researcher: {mode: react, max_tool_calls: 20}
 ```
+
+### Citation Pipeline Tuning
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `citation_verification.max_evidence_chars` | int (200-10000) | 3000 | Pipeline-wide cap on evidence quote length, applied to all 5 truncation sites (evidence selection, claim generation prompt, single-claim NLI, batch verification, retry verification). Supersedes the legacy `evidence_preselection.max_span_length`. Override per-agent via custom-agent YAML: `config.citation_pipeline.max_evidence_chars`. |
+
+```yaml
+# Project-wide default in app.yaml
+citation_verification:
+  max_evidence_chars: 3000
+
+# Per-agent override in custom-agent YAML
+- node_type: agent
+  subtype: synthesizer
+  config:
+    citation_pipeline:
+      max_evidence_chars: 5000   # raise for richer tabular corpora
+```
+
+Feature flag `CITATION_SOFT_WARN_ENABLED` (default `true`): when the verifier
+cannot produce real entailment judgments (all claims abstained or NLI-crashed),
+the synthesizer emits the LLM-written report with a `> ⚠️ Grounding warning`
+banner instead of the canned "Insufficient Evidence" template. Set to `false`
+to revert to the legacy hard-fail behavior.
 
 ### Query Modes
 - `simple` — Direct LLM response, no research

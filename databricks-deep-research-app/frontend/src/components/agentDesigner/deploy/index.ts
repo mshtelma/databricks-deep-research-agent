@@ -5,8 +5,12 @@
  */
 
 export { DeployDropdown } from './DeployDropdown'
+export { DeploymentRow } from './DeploymentRow'
+export { DeploymentsSection } from './DeploymentsSection'
 export { InAppWizard } from './InAppWizard'
 export { MlflowAgentWizard } from './MlflowAgentWizard'
 export { ShellAppWizard } from './ShellAppWizard'
 export { SparkBatchWizard } from './SparkBatchWizard'
 export { StatusPanel } from './StatusPanel'
+export { UndeployConfirmDialog } from './UndeployConfirmDialog'
+export { useDeploymentAction } from './useDeploymentAction'

@@ -65,6 +65,11 @@ packages = ["src/deep_research"]
 "templates/agent-shell-app" = "deep_research/services/deployment/templates/agent-shell-app"
 "templates/spark-batch" = "deep_research/services/deployment/templates/spark-batch"
 "src/deep_research/agent_designer/designer_architect.yaml" = "deep_research/agent_designer/designer_architect.yaml"
+# The framework wheel under src/deep_research/services/deployment/_framework_wheel/
+# is automatically included by ``packages = ["src/deep_research"]`` above — no
+# explicit force-include needed. Populated by make build-framework. The
+# shell-app exporter reads it from there at deploy-time. Plan:
+# imperative-wishing-lynx.md.
 
 [tool.hatch.build.targets.sdist]
 include = ["src/deep_research", "static", "templates"]

@@ -219,6 +219,8 @@ class IsolatedVerifier:
         self,
         llm_client: FrameworkLLMClient,
         config: IsolatedVerificationConfig | None = None,
+        *,
+        max_evidence_chars: int = 3000,
     ) -> None:
         """Initialise the isolated verifier.
 
@@ -226,9 +228,14 @@ class IsolatedVerifier:
             llm_client: Framework LLM client for verification calls.
             config: Optional stage-4 configuration.  When *None* the
                 default ``IsolatedVerificationConfig()`` is used.
+            max_evidence_chars: Pipeline-wide cap on evidence quote length
+                used for both the single-claim retry truncation and the
+                batch-verification formatting. Wired from the parent
+                ``CitationConfig.max_evidence_chars`` at construction time.
         """
         self._llm = llm_client
         self._config = config or IsolatedVerificationConfig()
+        self._max_evidence_chars = max_evidence_chars
 
     # -- public single-claim API -------------------------------------------
 
@@ -520,7 +527,7 @@ class IsolatedVerifier:
                 )
                 truncated = RankedEvidence(
                     source_url=evidence.source_url,
-                    quote_text=evidence.quote_text[:1500],
+                    quote_text=evidence.quote_text[: self._max_evidence_chars],
                     relevance_score=evidence.relevance_score,
                     canonical_source_url=evidence.canonical_source_url,
                     source_title=evidence.source_title,
@@ -637,7 +644,7 @@ class IsolatedVerifier:
                 f"### Claim {i}\n"
                 f'**Claim:** "{claim_text}"\n'
                 f"**Source:** {evidence.source_title or 'Unknown'}\n"
-                f'**Evidence:** "{evidence.quote_text[:1000]}"\n'
+                f'**Evidence:** "{evidence.quote_text[: self._max_evidence_chars]}"\n'
             )
             sections.append(section)
         return "\n".join(sections)

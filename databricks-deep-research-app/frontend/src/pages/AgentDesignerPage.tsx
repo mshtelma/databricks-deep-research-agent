@@ -23,7 +23,7 @@ import {
   History as HistoryIcon,
   Play,
   ChevronLeft,
-  User as UserIcon,
+  Hash as HashIcon,
 } from 'lucide-react';
 
 import {
@@ -45,6 +45,7 @@ import { ChatPanel } from '@/components/agentDesigner/ChatPanel';
 import { EtagConflictModal } from '@/components/agentDesigner/EtagConflictModal';
 import {
   DeployDropdown,
+  DeploymentsSection,
   StatusPanel,
 } from '@/components/agentDesigner/deploy';
 import { RevisionList } from '@/components/agentDesigner/RevisionList';
@@ -122,8 +123,10 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
     import('@/types/ast').AST | null
   >(null);
 
-  // Tab state: 'edit' | 'revisions' | 'settings'
-  const [activeTab, setActiveTab] = React.useState<'edit' | 'revisions' | 'settings'>('edit');
+  // Tab state: 'edit' | 'revisions' | 'settings' | 'deployments'
+  const [activeTab, setActiveTab] = React.useState<
+    'edit' | 'revisions' | 'settings' | 'deployments'
+  >('edit');
   const [selectedRevId, setSelectedRevId] = React.useState<string | null>(null);
 
   // Save-flash state for the top bar status pill
@@ -179,7 +182,7 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
 
   const agentName = isNew ? localName : (agentQuery.data?.agent.name ?? '');
   const agentDescription = isNew ? localDescription : (agentQuery.data?.agent.description ?? '');
-  const agentOwner = agentQuery.data?.agent.owner_id ?? '';
+  const agentIdFull = agentQuery.data?.agent.id ?? '';
   const agentUpdatedAt = agentQuery.data?.agent.updated_at ?? null;
   const agentIdShort = !isNew && agentQuery.data?.agent.id
     ? agentQuery.data.agent.id.slice(0, 16)
@@ -667,8 +670,11 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
               />
             )}
             {latestDeployment && (
-              <div className="ml-2 max-w-[280px]">
-                <StatusPanel deploymentId={latestDeployment.id} />
+              <div className="ml-2 max-w-[320px]">
+                <StatusPanel
+                  deploymentId={latestDeployment.id}
+                  deployment={latestDeployment}
+                />
               </div>
             )}
           </div>
@@ -710,10 +716,10 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
                   className="mt-1 w-full border-0 bg-transparent p-0 font-db-sans text-[13px] leading-[1.5] text-db-gray-text outline-none placeholder:text-db-navy-300 read-only:cursor-default"
                 />
                 <div className="mt-3 flex items-center gap-3 text-[11px] text-db-gray-text">
-                  {agentOwner && (
-                    <span className="inline-flex items-center gap-1.5">
-                      <UserIcon size={11} />
-                      <span className="truncate">{agentOwner.slice(0, 24)}</span>
+                  {agentIdFull && (
+                    <span className="inline-flex items-center gap-1.5" title={agentIdFull}>
+                      <HashIcon size={11} />
+                      <span className="truncate font-db-mono">{agentIdFull}</span>
                     </span>
                   )}
                   {agentUpdatedAt && (
@@ -746,6 +752,13 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
                   onClick={() => setActiveTab('settings')}
                   label="Settings"
                 />
+                {!isNew && (
+                  <TabButton
+                    active={activeTab === 'deployments'}
+                    onClick={() => setActiveTab('deployments')}
+                    label="Deployments"
+                  />
+                )}
               </div>
 
               {/* Tab content */}
@@ -779,6 +792,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
                   Agent-level settings (visibility, run-as principal, output schema) live here.
                   Coming soon.
                 </div>
+              )}
+              {activeTab === 'deployments' && !isNew && (
+                <DeploymentsSection agentId={id} />
               )}
             </div>
           </main>

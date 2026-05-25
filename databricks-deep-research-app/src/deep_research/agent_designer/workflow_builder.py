@@ -1990,7 +1990,18 @@ def _plan_execute_synthesizer_directive(lane_specs: list[dict[str, str]]) -> str
 def _grounded_synthesizer_output_schema(
     compiled_brief: WorkflowDesignBrief,
 ) -> dict[str, Any]:
-    """Strict verifier defaults for designer-generated grounded workflows."""
+    """Strict verifier defaults for designer-generated grounded workflows.
+
+    The ``isolated_verification`` and ``verification_retrieval`` blocks pin the
+    citation-pipeline LLM tiers to framework-canonical values
+    (``simple|analytical|complex``). This is critical for shell-app
+    deployments: the deployed app uses the bare framework
+    ``FrameworkLLMClient.from_databricks(...)`` which knows ONLY those three
+    tiers. App-only extensions (``bulk_analysis``, ``fast``) would crash at
+    tier resolution. Pinning explicit defaults here also makes the choice
+    visible in the deployed agent YAML so users can edit it via the
+    designer-rendered output_schema.
+    """
     if compiled_brief.grounding_mode == "none":
         return {}
     return {
@@ -2001,6 +2012,20 @@ def _grounded_synthesizer_output_schema(
             "required_outputs": list(compiled_brief.required_outputs),
             "quality_gates": list(compiled_brief.quality_gates),
             "constraints": list(compiled_brief.constraints),
+        },
+        # Stage 4 (NLI verification) tiers — cost-aware defaults safe for
+        # shell-app deployments. Override per-workflow if richer evaluation
+        # is justified.
+        "isolated_verification": {
+            "verification_model_tier": "analytical",
+            "quick_verification_tier": "simple",
+        },
+        # Stage 7 (ARE retrieval) tiers — same constraint.
+        "verification_retrieval": {
+            "decomposition_tier": "simple",
+            "entailment_tier": "analytical",
+            "reconstruction_tier": "simple",
+            "softening_tier": "simple",
         },
     }
 

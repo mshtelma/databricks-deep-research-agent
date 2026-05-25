@@ -619,6 +619,17 @@ class CitationVerificationPipeline:
                     claim_index,
                     _truncate(claim.claim_text, 50),
                 )
+                logger.info(
+                    "CLAIM_EVIDENCE_ATTACHED claim_index=%d claim_role=%s "
+                    "claim_chars=%d attached_count=%d total_quote_chars=%d "
+                    "citation_keys=%s",
+                    claim_index,
+                    getattr(claim, "claim_role", "?"),
+                    len(claim.claim_text or ""),
+                    len(claim.evidences or []),
+                    sum(len(ev.quote_text or "") for ev in (claim.evidences or [])),
+                    list(claim.citation_keys or []),
+                )
                 yield "", claim
 
     # ===================================================================
@@ -1115,6 +1126,7 @@ class CitationVerificationPipeline:
         claim.evidence_match_score = evidence_match_score
         claim.used_quick_verification = used_quick
         claim.verification_latency_ms = verification_latency_ms
+        claim.abstained = claim.abstained or bool(getattr(result, "abstained", False))
         if claim.claim_role == ClaimRole.ANALYSIS.value:
             claim.verification_method = VerificationMethod.GROUNDING.value
         elif not claim.verification_method:

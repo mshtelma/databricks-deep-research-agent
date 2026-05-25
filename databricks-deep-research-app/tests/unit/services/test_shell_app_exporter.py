@@ -88,15 +88,22 @@ class TestValidate:
         assert any("app_name" in e.message for e in result.errors)
 
     @pytest.mark.asyncio
-    async def test_invalid_when_framework_git_tag_empty(self) -> None:
+    async def test_framework_git_tag_now_optional(self) -> None:
+        """framework_git_tag is no longer required — the framework ships as a
+        bundled wheel (see plan imperative-wishing-lynx.md). An absent/empty
+        value must NOT block validation."""
         translator = ShellAppExporter()
         agent, revision = _agent_revision()
         result = await translator.validate(
             agent, revision, _valid_config(framework_git_tag="")
         )
-        assert result.valid is False
-        assert any("framework_git_tag" in e.message for e in result.errors)
-        assert any("Git ref" in e.message for e in result.errors)
+        # The only acceptable failure here is wheel-not-found (CI without a
+        # built framework wheel). framework_git_tag itself must not contribute.
+        git_tag_errors = [e for e in result.errors if "framework_git_tag" in e.message]
+        assert git_tag_errors == [], (
+            f"empty framework_git_tag was rejected; messages: "
+            f"{[e.message for e in result.errors]}"
+        )
 
     # ----------------------------------------------------------------------
     # Phase 3 C1 — framework_git_tag whitelist regex. Rendered verbatim into
@@ -217,18 +224,33 @@ class TestTranslate:
         assert expected.issubset(names), f"missing: {expected - names}"
 
     @pytest.mark.asyncio
-    async def test_pyproject_pins_supplied_git_tag(self) -> None:
+    async def test_pyproject_references_bundled_wheel(self) -> None:
+        """The generated pyproject.toml MUST point at the bundled wheel via
+        [tool.uv.sources] and MUST NOT contain a git+https URL — the deployed
+        shell app installs the framework from a local file at app startup.
+        Plan: imperative-wishing-lynx.md."""
         translator = ShellAppExporter()
         agent, revision = _agent_revision()
-        artifact = await translator.translate(
-            agent, revision, _valid_config(framework_git_tag="v9.9.9")
-        )
+        artifact = await translator.translate(agent, revision, _valid_config())
         with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
             pyproject = zf.read("pyproject.toml").decode("utf-8")
-        assert (
-            "git+https://github.com/mshtelma/databricks-deep-research-agent.git@v9.9.9"
-            in pyproject
+            wheel_entries = [
+                n for n in zf.namelist()
+                if n.startswith("wheels/databricks_deep_research-") and n.endswith(".whl")
+            ]
+        assert "git+https://" not in pyproject, (
+            "shell-app pyproject must not contain a git URL after the "
+            "wheel-bundling refactor"
         )
+        assert "[tool.uv.sources]" in pyproject
+        assert 'databricks-deep-research = { path = "wheels/' in pyproject
+        assert len(wheel_entries) == 1, (
+            f"shell-app zip must bundle exactly one framework wheel under wheels/; "
+            f"got {wheel_entries}"
+        )
+        # The path declared in pyproject must match the actual zip entry.
+        wheel_filename = wheel_entries[0].removeprefix("wheels/")
+        assert f'path = "wheels/{wheel_filename}"' in pyproject
 
     @pytest.mark.asyncio
     async def test_pyproject_allows_direct_git_dependency_reference(self) -> None:
@@ -443,7 +465,13 @@ class TestTranslate:
             agent, revision, _valid_config(app_name="dr-shell-meta")
         )
         assert artifact.metadata["app_name"] == "dr-shell-meta"
-        assert artifact.metadata["framework_git_tag"] == "v0.3.0"
+        # framework_git_tag is no longer authoritative — the wheel is the
+        # ground truth. Verify the new fields exist and reflect the actual
+        # bundled wheel. Plan: imperative-wishing-lynx.md.
+        wheel_filename = artifact.metadata["framework_wheel_filename"]
+        assert wheel_filename.startswith("databricks_deep_research-")
+        assert wheel_filename.endswith("-py3-none-any.whl")
+        assert artifact.metadata["framework_wheel_version"] != "unknown"
         assert len(artifact.metadata["sha256"]) == 64
 
     @pytest.mark.asyncio

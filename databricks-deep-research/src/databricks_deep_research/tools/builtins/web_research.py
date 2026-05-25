@@ -276,7 +276,7 @@ class WebResearchTool:
         fetched: list[dict[str, Any]] = []
         admission_dropped: int = 0
         for idx, item in enumerate(fetched_results):
-            if isinstance(item, Exception):
+            if isinstance(item, BaseException):
                 admission_dropped += 1
                 logger.info(
                     "WEB_RESEARCH_FETCH_FAILED url=%s err=%s",

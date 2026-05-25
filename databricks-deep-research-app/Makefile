@@ -134,8 +134,10 @@ dev-help:
 build-framework:
 	@echo "Building framework wheel..."
 	@rm -f wheels/databricks_deep_research-*.whl
+	@rm -f src/deep_research/services/deployment/_framework_wheel/databricks_deep_research-*.whl
 	cd ../databricks-deep-research && uv build --wheel --out-dir ../databricks-deep-research-app/wheels/
-	@echo "Framework wheel built to wheels/"
+	@cp wheels/databricks_deep_research-*.whl src/deep_research/services/deployment/_framework_wheel/
+	@echo "Framework wheel built to wheels/ and staged at _framework_wheel/ for shell-app bundling"
 
 build: build-framework
 	@echo "Building frontend..."

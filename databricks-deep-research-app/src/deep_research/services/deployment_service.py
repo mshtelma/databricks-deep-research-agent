@@ -112,6 +112,7 @@ class DeploymentService(BaseRepository[AgentDeployment]):
         *,
         mode: DeploymentMode | None = None,
         status: DeploymentStatus | None = None,
+        agent_id: UUID | None = None,
         cursor: str | None = None,
         limit: int = _DEFAULT_LIMIT,
     ) -> tuple[list[AgentDeployment], str | None]:
@@ -137,6 +138,8 @@ class DeploymentService(BaseRepository[AgentDeployment]):
                 ),
             )
         )
+        if agent_id is not None:
+            stmt = stmt.where(AgentDeployment.agent_id == agent_id)
         if mode is not None:
             stmt = stmt.where(AgentDeployment.mode == mode.value)
         if status is not None:
@@ -308,6 +311,24 @@ class DeploymentService(BaseRepository[AgentDeployment]):
         if deployment is None:
             raise ValueError(f"Deployment {deployment_id} not found")
         deployment.cleanup_attempts = deployment.cleanup_attempts + 1
+        await self._session.flush()
+        await self._session.refresh(deployment)
+        return deployment
+
+    async def reset_cleanup_attempts(
+        self,
+        deployment_id: UUID,
+    ) -> AgentDeployment:
+        """Reset cleanup_attempts to 0.
+
+        Called when a user retries cleanup on a CLEANUP_FAILED row so the
+        next translator failure starts a fresh MAX_CLEANUP_ATTEMPTS budget
+        rather than immediately re-escalating.
+        """
+        deployment = await self._session.get(AgentDeployment, deployment_id)
+        if deployment is None:
+            raise ValueError(f"Deployment {deployment_id} not found")
+        deployment.cleanup_attempts = 0
         await self._session.flush()
         await self._session.refresh(deployment)
         return deployment

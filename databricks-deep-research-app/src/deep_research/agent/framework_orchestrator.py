@@ -963,20 +963,15 @@ async def stream_workflow_via_framework(
                 ):
                     final_report = joined_chunks
 
-                # Plan v2.3 UX backstop — when the citation pipeline marked
-                # zero claims as verified (Stage 4 NLI returned
-                # unsupported/abstained for every claim) AND Stage 8 then
-                # surgically removed every claim text, the framework's
-                # final_report can come back empty or near-empty. Without
-                # this backstop the UI surfaces "No response returned."
-                # even though the synthesizer streamed substantive content
-                # the user can judge for themselves.
-                #
-                # Surface the streamed synthesis with an explicit banner so
-                # the user sees the draft and knows the verifier could not
-                # ground it — better than silent emptiness. The framework
-                # still reports verified_claims=0 separately, so the
-                # verification badge in the UI remains accurate.
+                # Plan v2.3 UX backstop (main-app surface). The framework's
+                # ``WorkflowResult.output`` carries an equivalent backstop
+                # for direct consumers (shell app, SDK, notebooks). We
+                # duplicate the logic here because the main-app
+                # orchestrator builds ``final_report`` from
+                # ``tracker.get_persistence_delta()`` + ``_synthesis_chunks``
+                # rather than from ``runner.last_result.output``; without
+                # this duplication the main-app chat would still surface
+                # an empty report when Stage 8 wiped every claim.
                 _verif = getattr(final_delta, "verification_summary", None) or {}
                 _verified_count = 0
                 _total_claims = 0

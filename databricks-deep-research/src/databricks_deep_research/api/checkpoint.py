@@ -128,7 +128,7 @@ class DeltaCheckpointer:
 
         def _run() -> None:
             try:
-                wc.statement_execution.execute_statement(  # type: ignore[union-attr]
+                wc.statement_execution.execute_statement(
                     statement=statement,
                     warehouse_id=self._warehouse_id(),
                 )
@@ -137,13 +137,13 @@ class DeltaCheckpointer:
 
         await loop.run_in_executor(None, _run)
 
-    async def _sql_query(self, statement: str) -> list[dict]:
+    async def _sql_query(self, statement: str) -> list[dict[str, Any]]:
         wc = self._build_workspace_client()
         loop = asyncio.get_event_loop()
 
-        def _run() -> list[dict]:
+        def _run() -> list[dict[str, Any]]:
             try:
-                response = wc.statement_execution.execute_statement(  # type: ignore[union-attr]
+                response = wc.statement_execution.execute_statement(
                     statement=statement,
                     warehouse_id=self._warehouse_id(),
                 )

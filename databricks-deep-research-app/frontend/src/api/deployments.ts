@@ -161,6 +161,7 @@ export function listDeployments(
   const params = new URLSearchParams()
   if (filters.mode) params.set('mode', filters.mode)
   if (filters.status) params.set('status', filters.status)
+  if (filters.agent_id) params.set('agent_id', filters.agent_id)
   if (filters.cursor) params.set('cursor', filters.cursor)
   if (filters.limit !== undefined) params.set('limit', String(filters.limit))
   const qs = params.toString()

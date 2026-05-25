@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import logging
+import os
 import re as _re
+import warnings
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 from databricks_deep_research.agents.builtins.registry import register_builtin
@@ -63,7 +67,11 @@ from databricks_deep_research.citation.pipeline import (
     CitationVerificationPipeline,
     VerificationEvent,
 )
-from databricks_deep_research.citation.types import ClaimInfo, VerificationSummaryInfo
+from databricks_deep_research.citation.types import (
+    ClaimInfo,
+    ClaimRole,
+    VerificationSummaryInfo,
+)
 from databricks_deep_research.citation.verification_retriever import (
     VerificationRetriever,
 )
@@ -188,24 +196,63 @@ def _build_citation_config(config: AgentNodeConfig) -> CitationConfig:
         **{k: v for k, v in disposition_raw.items() if k in ClaimDispositionConfig.model_fields}
     ) if disposition_raw else ClaimDispositionConfig()
 
-    return CitationConfig(
+    # Pipeline-wide max_evidence_chars (nested override path).
+    # Precedence: agent override → legacy nested (with DeprecationWarning) → CitationConfig default.
+    citation_overrides = schema.get("citation_pipeline") or {}
+    max_evidence_chars = citation_overrides.get("max_evidence_chars")
+    if max_evidence_chars is None:
+        legacy = (schema.get("evidence_preselection") or {}).get("max_span_length")
+        if legacy is None:
+            legacy = (
+                (citation_overrides.get("evidence_preselection") or {}).get("max_span_length")
+            )
+        if legacy is not None:
+            warnings.warn(
+                "evidence_preselection.max_span_length is deprecated — use "
+                "citation_pipeline.max_evidence_chars (pipeline-wide cap applied to "
+                "all 5 truncation sites).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            max_evidence_chars = legacy
+
+    # Stage 4 (isolated verification) and Stage 7 (verification retrieval)
+    # tier overrides come from output_schema. When absent, the Pydantic
+    # defaults in citation/config.py apply — those defaults use only
+    # framework-canonical tiers (simple|analytical|complex) so shell-app
+    # deployments without app-level tier extensions (bulk_analysis, fast)
+    # resolve them safely.
+    isolated_verification_overrides = schema.get("isolated_verification") or {}
+    isolated_verification_kwargs: dict[str, Any] = {
+        k: v
+        for k, v in isolated_verification_overrides.items()
+        if k in IsolatedVerificationConfig.model_fields
+    }
+    isolated_verification_kwargs.setdefault(
+        "max_concurrent_verifications",
+        schema.get("max_concurrent_verifications", 10),
+    )
+
+    verification_retrieval_overrides = schema.get("verification_retrieval") or {}
+    verification_retrieval_kwargs: dict[str, Any] = {
+        k: v
+        for k, v in verification_retrieval_overrides.items()
+        if k in VerificationRetrievalConfig.model_fields
+    }
+
+    citation_kwargs: dict[str, Any] = dict(
         generation_mode=generation_mode,
         synthesis_mode=synthesis_mode,
         react_synthesis=react_synthesis,
         enable_verification_retrieval=bool(reclaim_cfg["enable_are_retrieval"]),
-        isolated_verification=IsolatedVerificationConfig(
-            verification_model_tier="bulk_analysis",
-            quick_verification_tier="fast",
-            max_concurrent_verifications=schema.get("max_concurrent_verifications", 10),
-        ),
-        verification_retrieval=VerificationRetrievalConfig(
-            decomposition_tier="simple",
-            entailment_tier="bulk_analysis",
-            reconstruction_tier="analytical",
-            softening_tier="fast",
-        ),
+        isolated_verification=IsolatedVerificationConfig(**isolated_verification_kwargs),
+        verification_retrieval=VerificationRetrievalConfig(**verification_retrieval_kwargs),
         claim_disposition=claim_disposition,
     )
+    if max_evidence_chars is not None:
+        citation_kwargs["max_evidence_chars"] = int(max_evidence_chars)
+
+    return CitationConfig(**citation_kwargs)
 
 
 def _build_reclaim_system_prompt() -> str:
@@ -526,6 +573,13 @@ def _build_reclaim_pipeline(
     if citation_config.generation_mode == CitationGenerationMode.STRICT:
         claim_generation_mode = ClaimGenerationMode.STRICT
 
+    # Pipeline-wide cap on evidence quote length. Single source of truth wired
+    # into every truncation site (evidence selection, claim generation prompt,
+    # single-claim NLI retry, batch verification). Default 3000; override via
+    # output_schema citation_pipeline.max_evidence_chars per-agent or
+    # app.yaml citation_pipeline.max_evidence_chars project-wide.
+    top_level_max_chars = citation_config.max_evidence_chars
+
     return CitationVerificationPipeline(
         llm_client,
         evidence_selector=_EvidenceSelectorAdapter(
@@ -534,7 +588,7 @@ def _build_reclaim_pipeline(
                 EvidenceSelectionConfig(
                     max_spans_per_source=evidence_cfg.max_spans_per_source,
                     min_span_length=evidence_cfg.min_span_length,
-                    max_span_length=evidence_cfg.max_span_length,
+                    max_span_length=top_level_max_chars,
                     relevance_threshold=evidence_cfg.relevance_threshold,
                     numeric_content_boost=evidence_cfg.numeric_content_boost,
                     chunk_size=evidence_cfg.chunk_size,
@@ -549,6 +603,7 @@ def _build_reclaim_pipeline(
             ClaimGenerationConfig(
                 min_evidence_similarity=generation_cfg.min_evidence_similarity,
                 generation_mode=claim_generation_mode,
+                max_evidence_chars=top_level_max_chars,
             ),
         ),
         confidence_classifier=ConfidenceClassifier(
@@ -562,6 +617,7 @@ def _build_reclaim_pipeline(
         isolated_verifier=IsolatedVerifier(
             llm_client,
             citation_config.isolated_verification,
+            max_evidence_chars=top_level_max_chars,
         ),
         citation_corrector=CitationCorrector(
             llm_client,
@@ -1275,37 +1331,125 @@ def _has_numeric_citation_markers(report: str, source_count: int) -> bool:
 
 
 def _insufficient_evidence_report(reason: str, *, source_count: int) -> str:
+    """Hard-fail template — only emitted when the verifier ran and rejected every claim."""
     return (
         "## Insufficient Evidence\n\n"
-        "No grounded report was generated because the workflow did not provide "
-        "enough citeable evidence with usable text.\n\n"
+        "The citation pipeline ran but could not produce a grounded report.\n\n"
         f"- Reason: {reason}\n"
         f"- Citeable sources available: {source_count}\n\n"
-        "Re-run the research step with retrieval tools that return source text, "
-        "snippets, extracted content, or structured evidence. Metadata-only "
-        "source records are not sufficient for a verified report."
+        "Re-run the research step with a different retrieval strategy, or "
+        "refine the query to better match the available corpus."
     )
 
 
-def _grounding_failure_reason(summary: dict[str, Any]) -> str:
-    """Return a fail-closed reason when verification found no grounded claims."""
-    if not summary:
-        return ""
-    total_claims = int(summary.get("total_claims", 0) or 0)
-    if total_claims <= 0:
-        return ""
-
-    supported = int(summary.get("supported_count", summary.get("verified_claims", 0)) or 0)
-    partial = int(summary.get("partial_count", 0) or 0)
-    fully_verified = int(summary.get("claims_fully_verified", 0) or 0)
-    partially_softened = int(summary.get("claims_partially_softened", 0) or 0)
-    atomic_verified = int(summary.get("atomic_facts_verified", 0) or 0)
-
-    if supported + partial + fully_verified + partially_softened + atomic_verified > 0:
-        return ""
+def _grounding_warning_banner(reason: str) -> str:
+    """Soft-warn banner — prepended to the LLM-written report when the verifier
+    could not produce real entailment judgments (typically because evidence was
+    not attached to claims, or the NLI call crashed). The report still flows
+    through, but the user sees an unambiguous warning that the claims have not
+    been independently verified.
+    """
     return (
-        "The verifier found zero supported or partially supported claims "
-        f"across {total_claims} extracted claims."
+        "> ⚠️ **Grounding warning** — the claims in this report have not "
+        "been independently verified by the citation pipeline.\n"
+        f"> {reason}\n\n"
+    )
+
+
+class _GroundingOutcome(StrEnum):
+    """How the grounding gate classifies a verification result."""
+
+    OK = "ok"
+    SOFT_WARN = "soft_warn"
+    HARD_FAIL = "hard_fail"
+    NO_CLAIMS_EXTRACTED = "no_claims_extracted"
+
+
+@dataclass(frozen=True)
+class _GroundingVerdict:
+    """Outcome + user-facing reason. Either field is always non-empty for non-OK outcomes."""
+
+    outcome: _GroundingOutcome
+    reason: str
+
+
+def _soft_warn_enabled() -> bool:
+    """Feature flag for the soft-warn rollout. Default ON; set to false to
+    revert to the legacy hard-fail-on-any-non-positive behavior."""
+    return os.environ.get("CITATION_SOFT_WARN_ENABLED", "true").lower() in {"1", "true", "yes"}
+
+
+def _classify_grounding(
+    claims: list[ClaimInfo] | None,
+    *,
+    report_content: str,
+) -> _GroundingVerdict:
+    """Classify a verification result into one of four grounding outcomes.
+
+    Operates on per-claim data (verdict + confidence + abstained), not the
+    aggregated summary dict, because the summary loses the confidence
+    breakdown needed to distinguish verifier-crash unsupported (confidence=0)
+    from real-LLM-NO unsupported (confidence=0.6 from _default_confidence).
+    """
+    if claims is None:
+        # No verification pipeline ran — defer to caller's other gates
+        # (e.g., empty-report check).
+        return _GroundingVerdict(_GroundingOutcome.OK, "")
+
+    fact_claims = [
+        c for c in claims if getattr(c, "claim_role", None) == ClaimRole.FACT.value
+    ]
+    has_report = bool((report_content or "").strip())
+
+    if not fact_claims:
+        if has_report:
+            return _GroundingVerdict(
+                _GroundingOutcome.NO_CLAIMS_EXTRACTED,
+                "The synthesizer produced report content but the citation "
+                "pipeline extracted no fact claims. The report is treated as "
+                "an LLM-only response and cannot be independently verified.",
+            )
+        return _GroundingVerdict(_GroundingOutcome.OK, "")
+
+    positive = 0
+    no_judgment = 0
+    real_rejection = 0
+
+    for c in fact_claims:
+        verdict = c.verification_verdict
+        conf = c.verification_confidence or 0.0
+        if verdict in {"supported", "partial"}:
+            positive += 1
+        elif c.abstained or (
+            verdict in {"unsupported", "contradicted"} and conf <= 0.0
+        ):
+            no_judgment += 1
+        elif verdict in {"unsupported", "contradicted"}:
+            real_rejection += 1
+        else:
+            # Unknown verdict / not yet verified → conservative bucket
+            no_judgment += 1
+
+    total = len(fact_claims)
+    if positive > 0:
+        return _GroundingVerdict(_GroundingOutcome.OK, "")
+
+    if no_judgment >= real_rejection and no_judgment > 0:
+        return _GroundingVerdict(
+            _GroundingOutcome.SOFT_WARN,
+            f"The verifier could not judge {no_judgment} of {total} claims "
+            "(no evidence attached, or NLI call failed). The LLM-written "
+            "report follows, but its claims have not been independently "
+            "verified. Inspect EVIDENCE_EXTRACTED and CLAIM_EVIDENCE_"
+            "ATTACHED logs for the upstream cause.",
+        )
+
+    return _GroundingVerdict(
+        _GroundingOutcome.HARD_FAIL,
+        f"The verifier judged {real_rejection} of {total} claims as "
+        f"unsupported or contradicted (positive={positive}, "
+        f"no_judgment={no_judgment}). Re-run with a different retrieval "
+        "strategy or refine the query.",
     )
 
 
@@ -1523,6 +1667,12 @@ async def _execute(
         summary_data,
     )
 
+    # Refresh summary_data from the persisted payload — `_persist_grounding_state`
+    # rebuilds the summary from `pipeline.last_verification_summary` when no
+    # verification_summary event was seen. Without this refresh the gate
+    # classifier (and the diagnostic log below) would see a stale dict.
+    summary_data = _payload.get("verification_summary", summary_data)
+
     if not report_content:
         logger.info(
             "SYNTHESIZER_%s_FAIL_CLOSED node_id=%s reason=no_pipeline_content",
@@ -1535,34 +1685,68 @@ async def _execute(
         )
         if state.runtime_store is not None:
             state.runtime_store.set_synthesis_mode("insufficient")
-    elif failure_reason := _grounding_failure_reason(summary_data):
-        logger.warning(
-            "SYNTHESIZER_%s_FAIL_CLOSED node_id=%s reason=zero_grounded_claims "
-            "summary=%s",
-            mode_label,
-            node_id,
-            summary_data,
+    else:
+        verdict = _classify_grounding(
+            pipeline.last_generated_claims,
+            report_content=report_content,
         )
-        report_content = _insufficient_evidence_report(
-            failure_reason,
-            source_count=len(sources),
-        )
-        if state.runtime_store is not None:
-            state.runtime_store.set_synthesis_mode("insufficient")
-    elif not _has_numeric_citation_markers(report_content, len(sources)):
-        logger.warning(
-            "SYNTHESIZER_%s_FAIL_CLOSED node_id=%s "
-            "reason=no_numeric_citation_markers sources=%d",
-            mode_label,
-            node_id,
-            len(sources),
-        )
-        report_content = _insufficient_evidence_report(
-            "The generated report had no numeric citation markers.",
-            source_count=len(sources),
-        )
-        if state.runtime_store is not None:
-            state.runtime_store.set_synthesis_mode("insufficient")
+        if verdict.outcome == _GroundingOutcome.SOFT_WARN:
+            logger.warning(
+                "SYNTHESIZER_%s_GROUNDING_SOFT_WARN node_id=%s reason=%s summary=%s",
+                mode_label,
+                node_id,
+                verdict.reason,
+                summary_data,
+            )
+            if _soft_warn_enabled():
+                report_content = _grounding_warning_banner(verdict.reason) + report_content
+                if state.runtime_store is not None:
+                    state.runtime_store.set_synthesis_mode("soft_warn")
+            else:
+                report_content = _insufficient_evidence_report(
+                    verdict.reason,
+                    source_count=len(sources),
+                )
+                if state.runtime_store is not None:
+                    state.runtime_store.set_synthesis_mode("insufficient")
+        elif verdict.outcome == _GroundingOutcome.HARD_FAIL:
+            logger.warning(
+                "SYNTHESIZER_%s_FAIL_CLOSED node_id=%s reason=zero_grounded_claims "
+                "summary=%s",
+                mode_label,
+                node_id,
+                summary_data,
+            )
+            report_content = _insufficient_evidence_report(
+                verdict.reason,
+                source_count=len(sources),
+            )
+            if state.runtime_store is not None:
+                state.runtime_store.set_synthesis_mode("insufficient")
+        elif verdict.outcome == _GroundingOutcome.NO_CLAIMS_EXTRACTED:
+            logger.warning(
+                "SYNTHESIZER_%s_NO_CLAIMS_EXTRACTED node_id=%s reason=%s",
+                mode_label,
+                node_id,
+                verdict.reason,
+            )
+            report_content = _grounding_warning_banner(verdict.reason) + report_content
+            if state.runtime_store is not None:
+                state.runtime_store.set_synthesis_mode("partial")
+        elif not _has_numeric_citation_markers(report_content, len(sources)):
+            logger.warning(
+                "SYNTHESIZER_%s_FAIL_CLOSED node_id=%s "
+                "reason=no_numeric_citation_markers sources=%d",
+                mode_label,
+                node_id,
+                len(sources),
+            )
+            report_content = _insufficient_evidence_report(
+                "The generated report had no numeric citation markers.",
+                source_count=len(sources),
+            )
+            if state.runtime_store is not None:
+                state.runtime_store.set_synthesis_mode("insufficient")
 
     logger.info(
         "SYNTHESIZER_%s_COMPLETE node_id=%s final_chars=%d token_usage=%s",

@@ -255,6 +255,7 @@ class DeploymentResponse(BaseModel):
     external_resource_ids: dict[str, Any] | None
     error_message: str | None
     cleanup_attempts: int
+    cancel_requested: bool = False
     deployed_by: str
     created_at: datetime
     updated_at: datetime
