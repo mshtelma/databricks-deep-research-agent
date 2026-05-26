@@ -596,7 +596,7 @@ class TestDeltaTableReadTableInjection:
     @pytest.mark.asyncio
     async def test_table_injected_when_json_has_headers_and_rows(self) -> None:
         """Table instance should be injected when JSON has headers+rows."""
-        from databricks_deep_research.tools.builtins.table_api import Table
+        from databricks_deep_research.tools.builtins.text_table.table_api import Table
 
         compute_mock = MagicMock()
         compute_mock.inject_variable = MagicMock()
@@ -619,7 +619,7 @@ class TestDeltaTableReadTableInjection:
         """Raw dict injected + ERROR logged when Table() construction fails."""
         import logging
 
-        import databricks_deep_research.tools.builtins.table_api as _mod
+        import databricks_deep_research.tools.builtins.text_table.table_api as _mod
 
         compute_mock = MagicMock()
         compute_mock.inject_variable = MagicMock()
@@ -662,7 +662,7 @@ class TestDeltaTableReadTableInjection:
     @pytest.mark.asyncio
     async def test_analysis_excludes_table_methods_when_not_wrapped(self) -> None:
         """Structural analysis should show dict access when Table wrapping failed."""
-        import databricks_deep_research.tools.builtins.table_api as _mod
+        import databricks_deep_research.tools.builtins.text_table.table_api as _mod
 
         compute_mock = MagicMock()
         tool = DeltaTableReadTool(**_table_read_tool_kwargs(compute_mock))

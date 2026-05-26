@@ -17,6 +17,7 @@ from .filter_dsl import (
     count_leaves,
 )
 from .schema_cache import Schema, SchemaCache, SchemaColumn
+from .table_api import Table, to_float
 
 __all__ = [
     "BindingInfo",
@@ -40,4 +41,6 @@ __all__ = [
     "TableFilter",
     "compile_filter",
     "count_leaves",
+    "Table",
+    "to_float",
 ]

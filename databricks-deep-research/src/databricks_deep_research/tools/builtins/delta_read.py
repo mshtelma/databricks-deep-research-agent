@@ -1038,7 +1038,7 @@ class DeltaTableReadTool:
                     and "rows" in parsed
                 ):
                     try:
-                        from databricks_deep_research.tools.builtins.table_api import (  # noqa: PLC0415
+                        from databricks_deep_research.tools.builtins.text_table.table_api import (  # noqa: PLC0415
                             Table,
                         )
 

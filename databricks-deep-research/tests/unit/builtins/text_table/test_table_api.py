@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from databricks_deep_research.tools.builtins.table_api import Table, to_float
+from databricks_deep_research.tools.builtins.text_table.table_api import Table, to_float
 
 
 # ---------------------------------------------------------------------------

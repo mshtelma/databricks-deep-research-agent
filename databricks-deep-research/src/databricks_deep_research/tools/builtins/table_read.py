@@ -8,7 +8,7 @@ Follows the same pattern as ``DeltaTableReadTool``:
 
 1. Agent provides ``table_index`` (from ``[table_idx=N]`` in tool output).
 2. Resolve from ``TableRegistry`` via ``ToolContext``.
-3. Wrap in :class:`~databricks_deep_research.tools.builtins.table_api.Table`.
+3. Wrap in :class:`~databricks_deep_research.tools.builtins.text_table.table_api.Table`.
 4. Inject into compute namespace.
 5. Return structural analysis (no raw values — forces agent to use compute).
 """
@@ -125,7 +125,7 @@ class TableReadTool:
         # -- Wrap in Table class and inject into compute --
         injectable: Any = table_json
         try:
-            from databricks_deep_research.tools.builtins.table_api import (  # noqa: PLC0415
+            from databricks_deep_research.tools.builtins.text_table.table_api import (  # noqa: PLC0415
                 Table,
             )
 
