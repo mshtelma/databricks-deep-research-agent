@@ -1,4 +1,11 @@
 from .binding import BindingInfo, BindingSource, RoleMap
+from .budgets import (
+    PER_STMT_LIMIT_BYTES,
+    PER_STMT_LIMIT_GROUPS,
+    PER_STMT_LIMIT_ROWS,
+    Budget3D,
+    BudgetExceeded,
+)
 from .error_codes import ErrorCode, ToolError, ToolErrorException
 
 __all__ = [
@@ -8,4 +15,9 @@ __all__ = [
     "ErrorCode",
     "ToolError",
     "ToolErrorException",
+    "Budget3D",
+    "BudgetExceeded",
+    "PER_STMT_LIMIT_BYTES",
+    "PER_STMT_LIMIT_GROUPS",
+    "PER_STMT_LIMIT_ROWS",
 ]
