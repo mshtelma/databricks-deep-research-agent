@@ -7,6 +7,15 @@ from .budgets import (
     BudgetExceeded,
 )
 from .error_codes import ErrorCode, ToolError, ToolErrorException
+from .filter_dsl import (
+    AndFilter,
+    FlatTableFilter,
+    NotFilter,
+    OrFilter,
+    TableFilter,
+    compile_filter,
+    count_leaves,
+)
 from .schema_cache import Schema, SchemaCache, SchemaColumn
 
 __all__ = [
@@ -24,4 +33,11 @@ __all__ = [
     "Schema",
     "SchemaCache",
     "SchemaColumn",
+    "AndFilter",
+    "FlatTableFilter",
+    "NotFilter",
+    "OrFilter",
+    "TableFilter",
+    "compile_filter",
+    "count_leaves",
 ]

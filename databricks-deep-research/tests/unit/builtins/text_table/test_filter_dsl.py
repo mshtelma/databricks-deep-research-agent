@@ -19,7 +19,7 @@ import os
 
 import pytest
 
-from databricks_deep_research.tools.builtins.table_filter import (
+from databricks_deep_research.tools.builtins.text_table.filter_dsl import (
     AndFilter,
     FlatTableFilter,
     NotFilter,
@@ -363,7 +363,7 @@ def test_rollback_flag_disables_recursive(monkeypatch: pytest.MonkeyPatch) -> No
     # We verify by re-importing the module-level constant under the patched env.
     import importlib
 
-    import databricks_deep_research.tools.builtins.table_filter as tf_module
+    import databricks_deep_research.tools.builtins.text_table.filter_dsl as tf_module
 
     # Re-compute the feature flag exactly as the module does.
     patched_enabled = os.environ.get("AGENT_DESIGNER_TABLE_FILTER_RECURSIVE", "1") != "0"
