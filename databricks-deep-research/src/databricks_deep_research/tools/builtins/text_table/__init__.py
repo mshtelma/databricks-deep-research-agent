@@ -7,6 +7,7 @@ from .budgets import (
     BudgetExceeded,
 )
 from .error_codes import ErrorCode, ToolError, ToolErrorException
+from .schema_cache import Schema, SchemaCache, SchemaColumn
 
 __all__ = [
     "BindingInfo",
@@ -20,4 +21,7 @@ __all__ = [
     "PER_STMT_LIMIT_BYTES",
     "PER_STMT_LIMIT_GROUPS",
     "PER_STMT_LIMIT_ROWS",
+    "Schema",
+    "SchemaCache",
+    "SchemaColumn",
 ]
