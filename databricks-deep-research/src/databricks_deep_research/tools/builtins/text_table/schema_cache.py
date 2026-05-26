@@ -48,6 +48,9 @@ class SchemaCache:
     so a single agent step never re-fetches a table's schema. Tier 2 is a
     process-wide LRU keyed by (fqn, sha256(token)[:16]) with a TTL, so the
     plaintext user token is never held in memory and entries expire under load.
+
+    Not thread-safe. Designed for single-threaded asyncio contexts; concurrent
+    calls from threads can corrupt the OrderedDict LRU state.
     """
 
     def __init__(
