@@ -7,12 +7,13 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import * as React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ConfigPanel } from '../ConfigPanel';
 import { useAgentEditorStore, initialState } from '@/stores/agentEditorStore';
 import { createDraftWorkflow } from '@/lib/workflowAst';
+import { listDesignerResources, startDesignerSqlWarehouse } from '@/api/agentDesigner';
 import type { RegistryResponse } from '@/types/agentDesigner';
 import type { AST } from '@/types/ast';
 
@@ -23,6 +24,16 @@ vi.mock('@/api/agentDesigner', async (importOriginal) => {
     listDesignerResources: vi.fn().mockResolvedValue({
       resources: [],
       total: 0,
+    }),
+    startDesignerSqlWarehouse: vi.fn().mockResolvedValue({
+      kind: 'sql_warehouse',
+      source_id: 'wh-default',
+      name: 'Default Warehouse',
+      full_name: 'Default Warehouse',
+      description: null,
+      status: 'STARTING',
+      capabilities: ['sql'],
+      metadata: { warehouse_id: 'wh-default', state: 'STARTING' },
     }),
   };
 });
@@ -125,6 +136,24 @@ const FIXTURE_REGISTRY: RegistryResponse = {
           num_results: { type: 'integer', title: 'Result Count', default: 10 },
         },
         required: ['index_name'],
+      },
+    },
+    {
+      kind: 'table_search',
+      label: 'Table Search',
+      icon: 'table',
+      config_schema: {
+        type: 'object',
+        properties: {
+          warehouse_id: {
+            type: 'string',
+            title: 'SQL Warehouse',
+            'x-widget': 'resource-select',
+            'x-source-kind': 'sql_warehouse',
+            'x-value-field': 'warehouse_id',
+          },
+        },
+        required: ['warehouse_id'],
       },
     },
   ],
@@ -230,6 +259,64 @@ describe('ConfigPanel', () => {
 
     expect(updateSpy).toHaveBeenCalledWith('customer_vector', {
       config: { index_name: 'main.sales.customer_index', num_results: 10 },
+    });
+    updateSpy.mockRestore();
+  });
+
+  it('starts a stopped SQL warehouse when selected for a table tool', async () => {
+    vi.mocked(listDesignerResources).mockResolvedValueOnce({
+      resources: [
+        {
+          kind: 'sql_warehouse',
+          source_id: 'wh-stopped',
+          name: 'Starter Warehouse',
+          full_name: 'Starter Warehouse',
+          description: null,
+          status: 'STOPPED',
+          capabilities: ['sql'],
+          metadata: { warehouse_id: 'wh-stopped', state: 'STOPPED' },
+        },
+      ],
+      total: 1,
+    });
+    vi.mocked(startDesignerSqlWarehouse).mockResolvedValueOnce({
+      kind: 'sql_warehouse',
+      source_id: 'wh-stopped',
+      name: 'Starter Warehouse',
+      full_name: 'Starter Warehouse',
+      description: null,
+      status: 'STARTING',
+      capabilities: ['sql'],
+      metadata: { warehouse_id: 'wh-stopped', state: 'STARTING' },
+    });
+    const ast: AST = {
+      ...createDraftWorkflow('Test Workflow'),
+      tools: [
+        {
+          kind: 'table_search',
+          name: 'table_search',
+          config: { warehouse_id: '' },
+        },
+      ],
+    };
+    useAgentEditorStore.setState({ ast, selectedPath: null });
+    const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateTool');
+
+    const { container } = renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+    fireEvent.click(screen.getByText('table_search'));
+    await waitFor(() => {
+      expect(container.querySelector('option[value="wh-stopped"]')).toBeInTheDocument();
+    });
+
+    fireEvent.change(screen.getByRole('combobox', { name: /sql warehouse/i }), {
+      target: { value: 'wh-stopped' },
+    });
+
+    expect(updateSpy).toHaveBeenCalledWith('table_search', {
+      config: { warehouse_id: 'wh-stopped' },
+    });
+    await waitFor(() => {
+      expect(vi.mocked(startDesignerSqlWarehouse).mock.calls[0]?.[0]).toBe('wh-stopped');
     });
     updateSpy.mockRestore();
   });

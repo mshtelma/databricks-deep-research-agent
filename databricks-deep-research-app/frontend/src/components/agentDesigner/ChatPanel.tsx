@@ -32,6 +32,8 @@ import {
   Wrench,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
+  Database,
 } from 'lucide-react';
 import { useChatSession } from '@/hooks/useChatSession';
 import { useDesignerSettings } from '@/hooks/useDesignerSettings';
@@ -356,6 +358,365 @@ function deriveResultHeadline(payload: unknown): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
+// DesignerActivityCard — user-facing summaries for Designer init/progress
+// payloads. Raw JSON stays available behind "Technical details".
+// ---------------------------------------------------------------------------
+
+type ActivityStatus = 'complete' | 'warning' | 'blocked' | 'neutral';
+
+interface DesignerActivitySummary {
+  status: ActivityStatus;
+  title: string;
+  headline: string;
+  chips: string[];
+  details?: string[];
+  warnings?: string[];
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+function countFrom(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function arrayLength(value: unknown): number | null {
+  return Array.isArray(value) ? value.length : null;
+}
+
+function plural(count: number, singular: string, pluralLabel = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : pluralLabel}`;
+}
+
+function titleCaseToken(value: string): string {
+  return value
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (ch) => ch.toUpperCase());
+}
+
+function compactPolicy(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  if (value === 'corpus_only') return 'Corpus-only evidence';
+  return titleCaseToken(value);
+}
+
+function compactToolKind(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  if (value === 'vector_search') return 'Vector search';
+  if (value === 'table_search') return 'Table search';
+  if (value === 'table_read') return 'Table read';
+  if (value === 'web_research') return 'Web research';
+  return titleCaseToken(value);
+}
+
+function compactResourceKind(value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  if (value === 'vector_index') return 'vector index';
+  if (value === 'delta_table') return 'Delta table';
+  if (value === 'genie_space') return 'Genie space';
+  if (value === 'knowledge_assistant') return 'knowledge assistant';
+  return titleCaseToken(value).toLowerCase();
+}
+
+function firstString(values: unknown[]): string | null {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+  }
+  return null;
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : [];
+}
+
+function diagnosticSummary(payload: Record<string, unknown>): {
+  messages: string[];
+  blocking: boolean;
+} {
+  const diagnostics = Array.isArray(payload['diagnostics']) ? payload['diagnostics'] : [];
+  const messages: string[] = [];
+  let blocking = false;
+  for (const item of diagnostics) {
+    const diagnostic = asRecord(item);
+    if (!diagnostic) continue;
+    const severity = typeof diagnostic['severity'] === 'string' ? diagnostic['severity'] : '';
+    if (diagnostic['blocking'] === true || severity === 'error') blocking = true;
+    const message = firstString([diagnostic['message'], diagnostic['code']]);
+    if (message) messages.push(message);
+  }
+  return { messages, blocking };
+}
+
+function inferStatus(
+  payload: Record<string, unknown>,
+  fallback: ActivityStatus = 'complete',
+): ActivityStatus {
+  const diagnostics = diagnosticSummary(payload);
+  if (diagnostics.blocking) return 'blocked';
+  if (diagnostics.messages.length > 0) return 'warning';
+  return fallback;
+}
+
+function summarizePromptGrounding(payload: Record<string, unknown>): DesignerActivitySummary {
+  const mentions = countFrom(payload['mentions_count']);
+  const resourceCount =
+    countFrom(payload['resolved_assets_count']) ??
+    arrayLength(payload['resolved_resources']) ??
+    countFrom(payload['resources_count']) ??
+    0;
+  const readyTools = stringList(payload['ready_tool_kinds']).map(compactToolKind).filter(Boolean) as string[];
+  const resourceKindsObj = asRecord(payload['resource_kinds']);
+  const resourceKinds = resourceKindsObj
+    ? Object.keys(resourceKindsObj).map(compactResourceKind).filter(Boolean) as string[]
+    : [];
+  const resourceKind = resourceKinds[0] ?? 'source';
+  const diagnostics = diagnosticSummary(payload);
+  const chips = [
+    mentions !== null ? plural(mentions, 'mention') : null,
+    plural(resourceCount, 'source'),
+    ...readyTools.map((tool) => `${tool} ready`),
+  ].filter((item): item is string => Boolean(item));
+
+  return {
+    status: inferStatus(payload, resourceCount > 0 ? 'complete' : 'neutral'),
+    title: 'Checked selected sources',
+    headline:
+      resourceCount > 0
+        ? `Found ${resourceCount} grounded ${resourceKind}${resourceCount === 1 ? '' : 's'} for this workflow.`
+        : 'No grounded sources were found for this workflow yet.',
+    chips,
+    details: readyTools.length > 0 ? [`Ready capability: ${readyTools.join(', ')}`] : undefined,
+    warnings: diagnostics.messages,
+  };
+}
+
+function summarizeResourceSemantics(payload: Record<string, unknown>): DesignerActivitySummary {
+  const available = payload['available'] === true;
+  const resourceCount = countFrom(payload['resources_count']) ?? arrayLength(payload['resources']) ?? 0;
+  const domainTerms = stringList(payload['task_domain_terms']);
+
+  if (!available) {
+    return {
+      status: inferStatus(payload, 'neutral'),
+      title: 'Checked data semantics',
+      headline: 'No extra semantic profile was available, so Designer will use the grounded source metadata.',
+      chips: ['Source metadata'],
+    };
+  }
+
+  return {
+    status: inferStatus(payload),
+    title: 'Checked data semantics',
+    headline: `Interpreted data needs for ${plural(resourceCount, 'source')}.`,
+    chips: [plural(resourceCount, 'source'), ...domainTerms.slice(0, 2)],
+    details:
+      domainTerms.length > 0
+        ? [`Detected terms: ${domainTerms.slice(0, 8).join(', ')}`]
+        : undefined,
+  };
+}
+
+function summarizeResolvedToolContract(payload: Record<string, unknown>): DesignerActivitySummary {
+  const available = payload['available'] === true;
+  const policy = compactPolicy(payload['evidence_policy']);
+  const resourceCount = countFrom(payload['resources_count']) ?? arrayLength(payload['resources']) ?? 0;
+  const readyTools = stringList(payload['ready_tool_kinds']).map(compactToolKind).filter(Boolean) as string[];
+  const requiredCapabilities = stringList(payload['required_capabilities'])
+    .map(compactToolKind)
+    .filter(Boolean) as string[];
+  const requiredTerms = stringList(payload['required_terms']);
+  const obligations = stringList(payload['planner_obligations']);
+  const diagnostics = diagnosticSummary(payload);
+  const primaryTool = readyTools[0] ?? requiredCapabilities[0] ?? 'configured tools';
+
+  if (!available) {
+    return {
+      status: inferStatus(payload, 'neutral'),
+      title: 'Planned evidence access',
+      headline: 'Designer has not resolved an evidence access plan yet.',
+      chips: policy ? [policy] : [],
+      warnings: diagnostics.messages,
+    };
+  }
+
+  return {
+    status: inferStatus(payload),
+    title: 'Planned evidence access',
+    headline:
+      policy === 'Corpus-only evidence' && primaryTool === 'Vector search'
+        ? 'Designer will answer from the named corpus using vector search.'
+        : `Designer planned evidence access with ${primaryTool.toLowerCase()}.`,
+    chips: [
+      policy,
+      resourceCount > 0 ? plural(resourceCount, 'resource') : null,
+      ...readyTools,
+    ].filter((item): item is string => Boolean(item)),
+    details: [
+      obligations.length > 0 ? `Planner must: ${obligations.join(' ')}` : null,
+      requiredTerms.length > 0 ? `Required terms: ${requiredTerms.slice(0, 8).join(', ')}` : null,
+    ].filter((item): item is string => Boolean(item)),
+    warnings: diagnostics.messages,
+  };
+}
+
+function summarizeDesignerToolResult(
+  toolName: string,
+  payload: unknown,
+): DesignerActivitySummary | null {
+  const obj = asRecord(payload);
+  if (!obj) return null;
+  const schema = typeof obj['schema'] === 'string' ? obj['schema'] : '';
+
+  if (toolName === 'prompt_grounding' || schema === 'prompt_grounding.v1') {
+    return summarizePromptGrounding(obj);
+  }
+  if (toolName === 'resource_semantics' || schema === 'resource_semantics.v1') {
+    return summarizeResourceSemantics(obj);
+  }
+  if (toolName === 'resolved_tool_contract' || schema === 'resolved_tool_contract.v1') {
+    return summarizeResolvedToolContract(obj);
+  }
+  return null;
+}
+
+function DesignerActivityCard({
+  summary,
+  payload,
+}: {
+  summary: DesignerActivitySummary;
+  payload: unknown;
+}): React.ReactElement {
+  const [open, setOpen] = React.useState(false);
+  const statusMeta: Record<
+    ActivityStatus,
+    { color: string; bg: string; border: string; icon: React.ReactNode; label: string }
+  > = {
+    complete: {
+      color: 'text-db-green-700',
+      bg: 'bg-db-green-300/40',
+      border: 'border-db-green-300',
+      icon: <CheckCircle2 size={13} />,
+      label: 'Complete',
+    },
+    warning: {
+      color: 'text-db-yellow-800',
+      bg: 'bg-db-yellow-300/40',
+      border: 'border-db-yellow-300',
+      icon: <AlertTriangle size={13} />,
+      label: 'Needs attention',
+    },
+    blocked: {
+      color: 'text-db-lava-700',
+      bg: 'bg-db-lava-100',
+      border: 'border-db-lava-300',
+      icon: <AlertCircle size={13} />,
+      label: 'Blocked',
+    },
+    neutral: {
+      color: 'text-db-blue-700',
+      bg: 'bg-db-blue-100',
+      border: 'border-db-gray-lines',
+      icon: <Database size={13} />,
+      label: 'Checked',
+    },
+  };
+  const meta = statusMeta[summary.status];
+
+  return (
+    <div
+      className={`overflow-hidden rounded-db-md border bg-white shadow-db-xs ${meta.border}`}
+      aria-label={`${summary.title}, ${meta.label.toLowerCase()}`}
+    >
+      <div className="px-3 py-2.5">
+        <div className="mb-1 flex items-start gap-2">
+          <span
+            className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] ${meta.bg} ${meta.color}`}
+          >
+            {meta.icon}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="truncate text-[12px] font-semibold text-db-navy-800">
+                {summary.title}
+              </span>
+              <span
+                className={`rounded-sm px-1.5 py-0.5 font-db-mono text-[9px] font-semibold uppercase tracking-[0.04em] ${meta.bg} ${meta.color}`}
+              >
+                {meta.label}
+              </span>
+            </div>
+            <p className="mt-0.5 text-[12px] leading-[1.45] text-db-gray-text">
+              {summary.headline}
+            </p>
+          </div>
+        </div>
+
+        {summary.chips.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1">
+            {summary.chips.map((chip) => (
+              <span
+                key={chip}
+                className="rounded-db-pill border border-db-gray-lines bg-db-oat-light px-2 py-0.5 text-[10px] font-medium text-db-navy-800"
+              >
+                {chip}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {summary.warnings && summary.warnings.length > 0 && (
+          <ul className="mt-2 list-disc space-y-0.5 pl-5 text-[11px] leading-[1.4] text-db-yellow-800">
+            {summary.warnings.map((warning, idx) => (
+              <li key={`${warning}-${idx}`}>{warning}</li>
+            ))}
+          </ul>
+        )}
+
+        {summary.details && summary.details.length > 0 && (
+          <ul className="mt-2 space-y-0.5 text-[11px] leading-[1.45] text-db-gray-text">
+            {summary.details.map((detail, idx) => (
+              <li key={`${detail}-${idx}`}>{detail}</li>
+            ))}
+          </ul>
+        )}
+
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-db-gray-text transition-colors hover:text-db-navy-800 focus:outline-none"
+        >
+          {open ? <ChevronDown size={11} /> : <ChevronRightIcon size={11} />}
+          Technical details
+        </button>
+      </div>
+      {open && (
+        <div className="border-t border-db-gray-lines bg-db-oat-light px-2.5 py-2">
+          <JsonTree value={payload} defaultOpen />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function latestDesignerActivityTitle(messages: ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || message.role !== 'tool') continue;
+    const parsed = tryParseJson(message.content);
+    const summary = summarizeDesignerToolResult(message.tool_name ?? 'tool', parsed);
+    if (summary) return summary.title;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Message row
 // ---------------------------------------------------------------------------
 
@@ -375,7 +736,7 @@ function MessageRow({ message, messages }: MessageRowProps): React.ReactElement 
     // UUID. Falls back to "tool" when the call is missing (e.g., the user
     // joined a session mid-stream and the OPEN_ASSISTANT event was dropped).
     const callId = message.tool_call_id ?? null;
-    let toolName = 'tool';
+    let toolName = message.tool_name ?? 'tool';
     if (callId) {
       for (const m of messages) {
         if (m.role !== 'assistant' || !m.tool_calls) continue;
@@ -387,6 +748,16 @@ function MessageRow({ message, messages }: MessageRowProps): React.ReactElement 
       }
     }
     const parsed = tryParseJson(message.content);
+    const activitySummary = summarizeDesignerToolResult(toolName, parsed);
+    if (activitySummary) {
+      return (
+        <div className="flex justify-start" data-role="tool">
+          <div className="w-full min-w-0 max-w-full">
+            <DesignerActivityCard summary={activitySummary} payload={parsed} />
+          </div>
+        </div>
+      );
+    }
     const headline = deriveResultHeadline(parsed);
     return (
       <div className="flex justify-start" data-role="tool">
@@ -473,6 +844,10 @@ export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactEle
   const [collapsed, setCollapsed] = React.useState<boolean>(false);
   const bottomRef = React.useRef<HTMLDivElement>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const latestActivity = React.useMemo(
+    () => latestDesignerActivityTitle(session.messages),
+    [session.messages],
+  );
 
   React.useEffect(() => {
     const node = scrollRef.current;
@@ -554,11 +929,14 @@ export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactEle
           co-pilot
         </span>
         {session.isStreaming && (
-          <span
-            className="ml-1 h-2 w-2 animate-pulse rounded-full bg-db-blue-700"
-            aria-label="Streaming"
-            data-testid="streaming-indicator"
-          />
+          <span className="ml-1 inline-flex min-w-0 items-center gap-1 text-[11px] text-db-blue-700">
+            <span
+              className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-db-blue-700"
+              aria-label="Streaming"
+              data-testid="streaming-indicator"
+            />
+            <span className="max-w-[92px] truncate">{latestActivity ?? 'Working'}</span>
+          </span>
         )}
         <button
           type="button"

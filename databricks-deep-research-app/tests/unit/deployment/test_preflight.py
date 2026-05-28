@@ -12,6 +12,7 @@ import pytest
 from deep_research.deployment.preflight import (
     BUNDLE_VAR_ORDER,
     PENDING_SENTINEL,
+    WAREHOUSE_VAR_ORDER,
     PreflightError,
     ResourceIdentity,
     _load_dab_app_resources,
@@ -57,17 +58,48 @@ def test_sentinel_guard_passes_when_all_resolved() -> None:
             "postgres_database_resource": (
                 "projects/deep-research-ais/branches/production/databases/db-1"
             ),
+            "storage_warehouse_id": "abc1234567890def",
         }
     )
 
 
+def test_sentinel_guard_blocks_pending_storage_warehouse_id() -> None:
+    # Layer 1 of the layered tool-context validation: the warehouse id
+    # leaking through as 'pending' would deploy an app whose
+    # workflow_runner_factory leaves schema_cache + sql_executor unset,
+    # causing a misleading mid-stream "missing declared tools" error for
+    # any workflow that declares table_*. The guard must catch this at
+    # deploy time alongside the postgres bindings.
+    with pytest.raises(PreflightError, match="storage_warehouse_id"):
+        assert_no_pending_sentinels(
+            {
+                "postgres_branch": "projects/x/branches/y",
+                "postgres_database_resource": "projects/x/branches/y/databases/z",
+                "storage_warehouse_id": PENDING_SENTINEL,
+            }
+        )
+
+
+def test_sentinel_guard_blocks_missing_storage_warehouse_id() -> None:
+    # Missing key is treated identically to the 'pending' sentinel — both
+    # would leak past the guard otherwise.
+    with pytest.raises(PreflightError, match="storage_warehouse_id"):
+        assert_no_pending_sentinels(
+            {
+                "postgres_branch": "projects/x/branches/y",
+                "postgres_database_resource": "projects/x/branches/y/databases/z",
+            }
+        )
+
+
 def test_sentinel_guard_covers_all_bundle_vars() -> None:
-    # If BUNDLE_VAR_ORDER grows, this test fails to remind us to update
-    # the sentinel guard's expectations.
+    # If BUNDLE_VAR_ORDER or WAREHOUSE_VAR_ORDER grow, this test fails to
+    # remind us to update the sentinel guard's expectations.
     assert set(BUNDLE_VAR_ORDER) == {
         "postgres_branch",
         "postgres_database_resource",
     }
+    assert set(WAREHOUSE_VAR_ORDER) == {"storage_warehouse_id"}
 
 
 # ---- diff_resources / DriftReport -------------------------------------------

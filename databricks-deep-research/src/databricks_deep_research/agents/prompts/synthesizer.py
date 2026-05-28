@@ -83,6 +83,8 @@ Create a research report based on the gathered observations.
 {fallback_discovery_sources}
 
 ## Length
+Target range: {min_words}-{max_words} words.
+
 Match the depth and length the user asked for in the ``Original Query``
 above. A request for a "brief" warrants a short report; a request for a
 "deep" or "comprehensive" report warrants the depth its sources support.

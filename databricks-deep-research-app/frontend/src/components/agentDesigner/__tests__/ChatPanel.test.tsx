@@ -75,6 +75,15 @@ function makeAssistantMessage(content: string): ChatMessage {
   return { role: 'assistant', content, tool_calls: [] };
 }
 
+function makeToolMessage(toolName: string, payload: Record<string, unknown>): ChatMessage {
+  return {
+    role: 'tool',
+    content: JSON.stringify(payload),
+    tool_call_id: `${toolName}:init`,
+    tool_name: toolName,
+  };
+}
+
 beforeEach(() => {
   mockUseChatSession.mockReset();
 });
@@ -206,5 +215,105 @@ describe('ChatPanel', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: true });
 
     expect(session.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('summarizes prompt grounding results as source-check progress', () => {
+    mockUseChatSession.mockReturnValue(
+      fakeSession({
+        messages: [
+          makeToolMessage('prompt_grounding', {
+            schema: 'prompt_grounding.v1',
+            mentions_count: 1,
+            resolved_assets_count: 1,
+            resolved_resources: [
+              {
+                kind: 'vector_index',
+                identity: 'officeqa_benchmark.treasury.chunks',
+                usage: 'required',
+              },
+            ],
+            resource_kinds: { vector_index: 1 },
+            ready_tool_kinds: ['vector_search'],
+            safe_to_build_blueprint: true,
+            diagnostics: [
+              {
+                severity: 'warning',
+                code: 'missing_semantics',
+                message: 'Run semantic lookup on the grounded vector index.',
+                blocking: false,
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+
+    render(<ChatPanel />);
+
+    expect(screen.getByText('Checked selected sources')).toBeInTheDocument();
+    expect(
+      screen.getByText('Found 1 grounded vector index for this workflow.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('1 mention')).toBeInTheDocument();
+    expect(screen.getByText('1 source')).toBeInTheDocument();
+    expect(screen.getByText('Vector search ready')).toBeInTheDocument();
+    expect(screen.getByText('Run semantic lookup on the grounded vector index.')).toBeInTheDocument();
+    expect(screen.queryByText(/prompt_grounding\.v1/)).not.toBeInTheDocument();
+  });
+
+  it('keeps raw Designer JSON hidden until technical details are expanded', () => {
+    mockUseChatSession.mockReturnValue(
+      fakeSession({
+        messages: [
+          makeToolMessage('resolved_tool_contract', {
+            schema: 'resolved_tool_contract.v1',
+            available: true,
+            evidence_policy: 'corpus_only',
+            resources_count: 1,
+            required_capabilities: ['vector_search'],
+            ready_tool_kinds: ['vector_search'],
+            required_terms: ['officeqa', 'treasury'],
+            planner_obligations: ['Run semantic lookup on the grounded vector index.'],
+            diagnostics: [],
+          }),
+        ],
+      }),
+    );
+
+    render(<ChatPanel />);
+
+    expect(screen.getByText('Planned evidence access')).toBeInTheDocument();
+    expect(
+      screen.getByText('Designer will answer from the named corpus using vector search.'),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Corpus-only evidence')).toBeInTheDocument();
+    expect(screen.queryByText(/resolved_tool_contract\.v1/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /technical details/i }));
+    expect(screen.getByText(/resolved_tool_contract\.v1/)).toBeInTheDocument();
+  });
+
+  it('renders unavailable resource semantics as neutral process context', () => {
+    mockUseChatSession.mockReturnValue(
+      fakeSession({
+        messages: [
+          makeToolMessage('resource_semantics', {
+            schema: 'resource_semantics.v1',
+            available: false,
+          }),
+        ],
+      }),
+    );
+
+    render(<ChatPanel />);
+
+    expect(screen.getByText('Checked data semantics')).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        'No extra semantic profile was available, so Designer will use the grounded source metadata.',
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText('Source metadata')).toBeInTheDocument();
+    expect(screen.queryByText(/resource_semantics\.v1/)).not.toBeInTheDocument();
   });
 });

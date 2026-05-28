@@ -20,7 +20,7 @@ from deep_research.core.exceptions import (
     app_exception_handler,
     http_exception_handler,
 )
-from deep_research.db.session import close_db
+from deep_research.db.session import close_db, log_lakebase_connection_self_test
 from deep_research.middleware.csrf import CSRFMiddleware
 from deep_research.middleware.logging import RequestLoggingMiddleware, setup_logging
 from deep_research.middleware.security import SecurityHeadersMiddleware
@@ -54,25 +54,18 @@ async def cleanup_expired_sessions_task(
     while True:
         try:
             await asyncio.sleep(SESSION_CLEANUP_INTERVAL_SECONDS)
-            if (
-                settings.storage_service_impl == "cached"
-                and storage_stack is not None
-            ):
+            if settings.storage_service_impl == "cached" and storage_stack is not None:
                 service = make_session_service(settings, storage_stack)
                 count = await service.cleanup_expired()
                 if count > 0:
-                    logger.info(
-                        f"Cleaned up {count} expired incognito sessions (cached)"
-                    )
+                    logger.info(f"Cleaned up {count} expired incognito sessions (cached)")
             else:
                 async with session_maker() as db:
                     service = make_session_service(settings, None, session=db)
                     count = await service.cleanup_expired()
                     if count > 0:
                         await db.commit()
-                        logger.info(
-                            f"Cleaned up {count} expired incognito sessions"
-                        )
+                        logger.info(f"Cleaned up {count} expired incognito sessions")
         except asyncio.CancelledError:
             logger.info("Session cleanup task cancelled")
             raise
@@ -93,8 +86,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # can confirm which build is live. Bump the marker on every iteration of
     # the deploy-here debugging loop.
     logger.info(
-        "DEPLOY_HERE_BUILD_MARKER version=T2-diag-1 "
-        "ts_module_loaded=%s",
+        "DEPLOY_HERE_BUILD_MARKER version=T2-diag-1 ts_module_loaded=%s",
         os.environ.get("DATABRICKS_APP_PORT", "no-app-port"),
     )
 
@@ -109,6 +101,54 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             "web_crawl tools will be unresolvable. Set BRAVE_API_KEY in the "
             "app env (via secret scope binding) for web workflows to function."
         )
+
+    # Layer 2 of the layered tool-context validation: walk the static catalog
+    # of tool kinds declared by the agent_designer registry and warn early
+    # for any kind whose required ctx fields are *guaranteed* unsatisfiable
+    # at process scope (e.g. text-table tools when STORAGE_WAREHOUSE_ID is
+    # unset). We log instead of raise here because (a) per-request OBO
+    # workspace_client is not yet available, and (b) workflows that don't
+    # declare these kinds should still boot — the per-request Layer 3 guard
+    # (``ToolResolver.validate_all``) catches actual unsatisfiable
+    # declarations before LLM tokens are spent.
+    try:
+        from databricks_deep_research import required_ctx_fields_for_kind
+
+        from deep_research.agent_designer.registry import _TOOL_KIND_META
+
+        process_ctx_present: dict[str, bool] = {
+            "search_client": bool((os.environ.get("BRAVE_API_KEY") or "").strip()),
+            "schema_cache": bool(
+                (os.environ.get("STORAGE_WAREHOUSE_ID") or "").strip()
+                or (os.environ.get("TABLE_TOOLS_WAREHOUSE_ID") or "").strip()
+            ),
+            "sql_executor": bool(
+                (os.environ.get("STORAGE_WAREHOUSE_ID") or "").strip()
+                or (os.environ.get("TABLE_TOOLS_WAREHOUSE_ID") or "").strip()
+            ),
+            # workspace_client / table_registry / table_discovery_provider
+            # are wired per-request by build_app_workflow_runner; we cannot
+            # determine their presence at boot time.
+        }
+        unmet: dict[str, set[str]] = {}
+        for kind in _TOOL_KIND_META:
+            for field in required_ctx_fields_for_kind(kind):
+                if field in process_ctx_present and not process_ctx_present[field]:
+                    unmet.setdefault(field, set()).add(kind)
+        if unmet:
+            details = "; ".join(
+                f"{field} unsatisfied (env unset) blocks: {', '.join(sorted(kinds))}"
+                for field, kinds in sorted(unmet.items())
+            )
+            logger.warning(
+                "STARTUP_TOOL_CATALOG_UNSATISFIABLE %s. Workflows declaring "
+                "these kinds will fail at ToolResolver.validate_all() before "
+                "execution. See preflight.resolve_warehouse_id_or_fail (for "
+                "STORAGE_WAREHOUSE_ID) / BRAVE_API_KEY secret binding.",
+                details,
+            )
+    except Exception:  # noqa: BLE001 — boot-diagnostic must never crash the app
+        logger.exception("STARTUP_TOOL_CATALOG_SCAN_FAILED")
 
     # NOTE: Database migrations are NOT run here.
     # The app's service principal has limited permissions (CAN_CONNECT_AND_CREATE)
@@ -133,12 +173,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Export Brave concurrency knobs as env vars so the framework's
     # BraveSearchAdapter (process-wide semaphore, retry count) picks them up.
     # The framework cannot import app config directly, so we bridge via env.
-    os.environ.setdefault(
-        "BRAVE_MAX_CONCURRENCY", str(app_config.search.brave.max_concurrency)
-    )
-    os.environ.setdefault(
-        "BRAVE_MAX_RETRIES", str(app_config.search.brave.max_retries)
-    )
+    os.environ.setdefault("BRAVE_MAX_CONCURRENCY", str(app_config.search.brave.max_concurrency))
+    os.environ.setdefault("BRAVE_MAX_RETRIES", str(app_config.search.brave.max_retries))
     os.environ.setdefault(
         "BRAVE_INTER_CALL_JITTER_SECONDS",
         str(app_config.search.brave.inter_call_jitter_seconds),
@@ -162,8 +198,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from deep_research.services.deployment.shell_app import _TEMPLATE_DIR
 
         logger.info(
-            "DEPLOYMENT_TEMPLATES_RESOLVED shell=%s shell_exists=%s "
-            "batch=%s batch_exists=%s",
+            "DEPLOYMENT_TEMPLATES_RESOLVED shell=%s shell_exists=%s batch=%s batch_exists=%s",
             _TEMPLATE_DIR,
             _TEMPLATE_DIR.is_dir(),
             _BATCH_TEMPLATE_DIR,
@@ -244,6 +279,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     job_manager = initialize_job_manager()
     session_maker = get_session_maker(settings)
+    await log_lakebase_connection_self_test(settings)
     if app.state.storage_stack is not None:
         # Cached storage mode: hand the stack to JobManager so background
         # research jobs can thread it into `stream_research(...)`.
@@ -270,7 +306,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         cleanup_expired_sessions_task(session_maker, app.state.storage_stack)
     )
     app.state.cleanup_task = cleanup_task
-    logger.info("Session cleanup task started (runs every %d seconds)", SESSION_CLEANUP_INTERVAL_SECONDS)
+    logger.info(
+        "Session cleanup task started (runs every %d seconds)", SESSION_CLEANUP_INTERVAL_SECONDS
+    )
 
     # Initialize HITL approval broker + periodic cleanup task (PR1/PR2 fix C3).
     # The broker is process-local; no cross-replica state. Cleanup reclaims
@@ -325,10 +363,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Session cleanup task stopped")
 
     # Cancel HITL approval broker cleanup task
-    if (
-        hasattr(app.state, "approval_cleanup_task")
-        and app.state.approval_cleanup_task
-    ):
+    if hasattr(app.state, "approval_cleanup_task") and app.state.approval_cleanup_task:
         app.state.approval_cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await app.state.approval_cleanup_task

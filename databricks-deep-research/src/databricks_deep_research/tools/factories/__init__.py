@@ -20,18 +20,19 @@ from databricks_deep_research.tools.factories.decorated import DecoratedToolFact
 # knows how to build that tool kind.  The same factory class may appear under
 # multiple keys when the class handles several related kinds.
 BUILTIN_FACTORIES: dict[str, type] = {
-    # Builtin tool kinds (web search, crawl, file, compute, delta)
+    # Builtin tool kinds (web search, crawl, file, compute, text_table)
     "web_search_v1": BuiltinToolFactory,
     "web_crawl_v1": BuiltinToolFactory,
     "web_research_v1": BuiltinToolFactory,
     "file_search_v1": BuiltinToolFactory,
     "compute_v1": BuiltinToolFactory,
     "compute_namespace_v1": BuiltinToolFactory,
-    "delta_read_v1": BuiltinToolFactory,
-    "delta_grep_v1": BuiltinToolFactory,
-    "delta_context_v1": BuiltinToolFactory,
-    "delta_table_read_v1": BuiltinToolFactory,
+    "table_discovery_v1": BuiltinToolFactory,
+    "table_search_v1": BuiltinToolFactory,
     "table_read_v1": BuiltinToolFactory,
+    "table_neighbors_v1": BuiltinToolFactory,
+    "table_load_v1": BuiltinToolFactory,
+    "table_aggregate_v1": BuiltinToolFactory,
     # Databricks-hosted tool kinds (vector search, Genie, KA)
     "vector_search_v1": DatabricksToolFactory,
     "genie_v1": DatabricksToolFactory,

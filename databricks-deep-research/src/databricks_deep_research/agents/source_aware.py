@@ -537,13 +537,14 @@ def admit_tool_result(
             rejected.append(source)
 
     if accepted:
-        # Delta tools produce well-structured content with document ordering
-        # and complete table data.  Prefer the tool's native formatting over
-        # the generic _format_admitted_sources() which truncates aggressively
-        # (5 sources × 300 chars for non-enterprise — destroys numeric values).
-        # The tool's own `limit` parameter controls content volume.
+        # Text-table tools produce well-structured content with document
+        # ordering and complete table data.  Prefer the tool's native
+        # formatting over the generic _format_admitted_sources() which
+        # truncates aggressively (5 sources × 300 chars for non-enterprise —
+        # destroys numeric values).  The tool's own `limit` parameter
+        # controls content volume.
         source_kind_str = tool_source_kind(definition)
-        if source_kind_str == "delta_table" and result.content.strip():
+        if source_kind_str == "text_table" and result.content.strip():
             content = result.content
         else:
             content = _format_admitted_sources(definition.name, accepted)
@@ -1027,7 +1028,7 @@ _ENTERPRISE_SOURCE_KINDS = frozenset({
     SourceKind.vector_index,
     SourceKind.sql_analytics,
     SourceKind.qa_assistant,
-    SourceKind.delta_table,
+    SourceKind.text_table,
     # Keep backward compat with old string values
     "vector_search",
     "genie",
@@ -1155,8 +1156,9 @@ def _should_accept_source(
     source_kind = str(source.get("source_kind") or tool_source_kind(definition))
     relevance_score = source.get("relevance_score")
 
-    # Delta tools are deliberately invoked for a specific file — never filter.
-    if source_kind in {SourceKind.delta_table, "delta_read", "delta_grep", "delta_table"}:
+    # Text-table tools are deliberately invoked for a specific binding —
+    # never filter their results out on weak keyword overlap.
+    if source_kind in {SourceKind.text_table, "text_table"}:
         return True
 
     if source_kind in {SourceKind.sql_analytics, SourceKind.qa_assistant, "genie", "knowledge_assistant"}:

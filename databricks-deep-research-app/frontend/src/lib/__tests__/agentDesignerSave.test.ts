@@ -27,6 +27,29 @@ describe('buildDesignerSavePayload', () => {
     );
   });
 
+  it('uses the user-entered name over designer-generated names for new agents', () => {
+    const ast = {
+      ...createDraftWorkflow(),
+      name: 'Build a treasury document research agent with vector search',
+      description: 'Answer treasury document questions from the selected corpus',
+    };
+
+    const payload = buildDesignerSavePayload(ast, {
+      isNew: true,
+      localName: 'Treasury QA Agent',
+      localDescription: '',
+    });
+
+    expect(payload.definition.name).toBe('Treasury QA Agent');
+    expect(payload.definition.description).toBe(
+      'Answer treasury document questions from the selected corpus',
+    );
+    expect(payload.name).toBe('Treasury QA Agent');
+    expect(payload.description).toBe(
+      'Answer treasury document questions from the selected corpus',
+    );
+  });
+
   it('does not strip applied designer intent from existing Untitled Agent definitions', () => {
     const ast = {
       ...createDraftWorkflow(),

@@ -15,6 +15,7 @@ import type {
   ChatMessage,
   DesignerSSEEvent,
   DesignerAsset,
+  DesignerResource,
   DesignerResourcesResponse,
 } from '../types/agentDesigner'
 
@@ -24,6 +25,24 @@ export type {
   ChatMessage,
   DesignerSSEEvent,
   DesignerAsset,
+}
+
+export interface RefreshCatalogResponse {
+  definition: AST
+}
+
+export interface ProbeSample {
+  sample_input: Record<string, unknown>
+  sample_output: string
+  probed_at: string
+  status: 'ok' | 'error' | 'skipped'
+  reason?: string | null
+}
+
+export interface ProbeToolsResponse {
+  samples: ProbeSample[]
+  definition: AST
+  persist: boolean
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1'
@@ -105,6 +124,92 @@ export async function validateWorkflow(
 }
 
 // ---------------------------------------------------------------------------
+// Tool Catalog
+// ---------------------------------------------------------------------------
+
+export async function refreshCatalog({
+  definition,
+  agentId,
+  forceRegen = true,
+}: {
+  definition: AST | Record<string, unknown>
+  agentId?: string | null
+  forceRegen?: boolean
+}): Promise<RefreshCatalogResponse> {
+  const response = await fetch(`${API_BASE_URL}/agent-designer/refresh-catalog`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      definition,
+      agent_id: agentId ?? null,
+      force_regen: forceRegen,
+    }),
+  })
+
+  if (!response.ok) {
+    let errorData: { code?: string; message?: string; detail?: unknown } = {}
+    try {
+      errorData = (await response.json()) as typeof errorData
+    } catch {
+      errorData = { code: 'UNKNOWN', message: response.statusText }
+    }
+    const message =
+      typeof errorData.message === 'string'
+        ? errorData.message
+        : typeof errorData.detail === 'string'
+          ? errorData.detail
+          : 'Catalog refresh failed'
+    throw new ApiError(response.status, errorData.code ?? 'UNKNOWN', message)
+  }
+
+  return response.json() as Promise<RefreshCatalogResponse>
+}
+
+export async function probeTools({
+  definition,
+  agentId,
+  toolNames,
+  userQuery,
+  persist = false,
+}: {
+  definition: AST | Record<string, unknown>
+  agentId?: string | null
+  toolNames?: string[] | null
+  userQuery?: string | null
+  persist?: boolean
+}): Promise<ProbeToolsResponse> {
+  const response = await fetch(`${API_BASE_URL}/agent-designer/probe-tools`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      definition,
+      agent_id: agentId ?? null,
+      tool_names: toolNames ?? null,
+      user_query: userQuery ?? null,
+      persist,
+    }),
+  })
+
+  if (!response.ok) {
+    let errorData: { code?: string; message?: string; detail?: unknown } = {}
+    try {
+      errorData = (await response.json()) as typeof errorData
+    } catch {
+      errorData = { code: 'UNKNOWN', message: response.statusText }
+    }
+    const message =
+      typeof errorData.message === 'string'
+        ? errorData.message
+        : typeof errorData.detail === 'string'
+          ? errorData.detail
+          : 'Tool probe failed'
+    throw new ApiError(response.status, errorData.code ?? 'UNKNOWN', message)
+  }
+
+  return response.json() as Promise<ProbeToolsResponse>
+}
+
+// ---------------------------------------------------------------------------
 // Designer Resources
 // ---------------------------------------------------------------------------
 
@@ -139,6 +244,36 @@ export async function listDesignerResources(
   return response.json() as Promise<DesignerResourcesResponse>
 }
 
+export async function startDesignerSqlWarehouse(
+  warehouseId: string
+): Promise<DesignerResource> {
+  const response = await fetch(
+    `${API_BASE_URL}/agent-designer/resources/sql-warehouses/${encodeURIComponent(warehouseId)}/start`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+    }
+  )
+
+  if (!response.ok) {
+    let errorData: { code?: string; message?: string; detail?: unknown } = {}
+    try {
+      errorData = (await response.json()) as typeof errorData
+    } catch {
+      errorData = { code: 'UNKNOWN', message: response.statusText }
+    }
+    const message =
+      typeof errorData.message === 'string'
+        ? errorData.message
+        : typeof errorData.detail === 'string'
+          ? errorData.detail
+          : 'Failed to start SQL warehouse'
+    throw new ApiError(response.status, errorData.code ?? 'UNKNOWN', message)
+  }
+
+  return response.json() as Promise<DesignerResource>
+}
+
 // ---------------------------------------------------------------------------
 // Chat SSE stream
 // ---------------------------------------------------------------------------
@@ -171,10 +306,16 @@ export async function* chatStream({
   assets?: DesignerAsset[]
   signal?: AbortSignal
 }): AsyncIterable<DesignerSSEEvent> {
+  const wireMessages = messages.map((message) => ({
+    role: message.role,
+    content: message.content,
+    tool_calls: message.tool_calls,
+    tool_call_id: message.tool_call_id,
+  }))
   const response = await fetch(`${API_BASE_URL}/agent-designer/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, current_ast, session_id, assets: assets ?? [] }),
+    body: JSON.stringify({ messages: wireMessages, current_ast, session_id, assets: assets ?? [] }),
     signal,
   })
 

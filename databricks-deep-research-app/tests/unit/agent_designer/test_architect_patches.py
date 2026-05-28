@@ -41,6 +41,9 @@ from deep_research.agent_designer.mutations import (
     BlockMutationError,
     update_block,
 )
+from deep_research.agent_designer.semantic_validation import (
+    detect_grounded_research_contract,
+)
 
 
 def _ctx() -> ToolContext:
@@ -323,9 +326,11 @@ def test_parse_architect_ast_patch_mode_happy_path(
     )
     raw = f"Here is my patch:\n```json\n{patches_json}\n```\n"
 
+    summary_writes: list[dict] = []
     tool = ParseArchitectAstTool(
         blueprint_getter=lambda: blueprint,
         fingerprint_getter=lambda: expected_fp,
+        current_ast_summary_setter=summary_writes.append,
     )
     result = asyncio.run(tool.execute({"raw_message": raw}, _ctx()))
     assert result.success is not False
@@ -333,6 +338,68 @@ def test_parse_architect_ast_patch_mode_happy_path(
     assert data["parse_ok"] is True
     assert data["parse_mode"] == "patches"
     assert data["structural_fingerprint"] == expected_fp
+    assert summary_writes
+    assert summary_writes[-1]["node_count"] > 0
+    assert "root" not in summary_writes[-1]
+
+
+def test_parse_architect_ast_patch_mode_normalizes_prompt_patches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Patch-mode current_ast must be normalized before gate/runtime state.
+
+    A live OfficeQA run exposed that the SSE mutation event normalized the
+    final artifact, while the parse_architect_ast tool returned an
+    un-normalized current_ast to structural_gate. That let gate feedback keep
+    failing on prompt-contract defects even though the saved artifact was
+    repairable.
+    """
+    monkeypatch.setenv(DESIGNER_DETERMINISTIC_BLUEPRINT_ENV, "1")
+    blueprint = _build_test_blueprint()
+    first_key = next(iter(blueprint["lane_keys"].keys()))
+    incomplete_prompt = (
+        "## Investigation Brief\n\n"
+        "You are investigating: **{query}**\n\n"
+        "### Sub-questions\n"
+        "1. Which authoritative records address the request?\n"
+        "2. What exact facts do those records establish?\n"
+        "3. Which metrics materially affect the interpretation?\n"
+        "4. What conflicts or gaps remain?\n\n"
+        "### Required output structure\n"
+        "- **Evidence-backed findings**: cite source-backed facts.\n"
+        "- **Coverage and conflicts**: note agreements and gaps.\n"
+        "- **Unsupported items**: mark weak claims.\n\n"
+        "### Definition of done\n"
+        "Mark missing evidence as \"Data unavailable\" -- DO NOT improvise."
+    )
+    payload = {
+        "node_patches": {
+            first_key: {
+                "user_prompt_template": incomplete_prompt,
+            }
+        }
+    }
+    raw = f"```json\n{json.dumps(payload)}\n```"
+
+    tool = ParseArchitectAstTool(
+        blueprint_getter=lambda: blueprint,
+        fingerprint_getter=lambda: blueprint["structural_fingerprint"],
+    )
+    result = asyncio.run(tool.execute({"raw_message": raw}, _ctx()))
+    data = result.data or {}
+
+    assert data["parse_ok"] is True
+    assert data["parse_mode"] == "patches"
+    ast = data["current_ast"]
+    lane = _flatten_node_index(ast)[first_key]
+    template = lane["config"]["user_prompt_template"]
+    assert "### Search strategy" in template
+    assert "5. What bottom-line implications" in template
+    assert detect_grounded_research_contract(ast) == []
+    assert any(
+        fix.get("kind") == "researcher_prompt_contract"
+        for fix in data["normalization_fixes"]
+    )
 
 
 def test_parse_architect_ast_patch_mode_rejects_structural_drift(
@@ -340,7 +407,7 @@ def test_parse_architect_ast_patch_mode_rejects_structural_drift(
 ) -> None:
     """Plan v2.1 M2: an architect that emits a structural key in a patch
     cannot land it — patch_errors carries structural_drift_detected and
-    state.current_ast reverts to the immutable blueprint.
+    state.current_ast reverts to a normalized copy of the immutable blueprint.
     """
     monkeypatch.setenv(DESIGNER_DETERMINISTIC_BLUEPRINT_ENV, "1")
     blueprint = _build_test_blueprint()
@@ -359,8 +426,14 @@ def test_parse_architect_ast_patch_mode_rejects_structural_drift(
     assert data["parse_ok"] is False
     assert "structural_drift_detected" in (data.get("patch_errors") or [""])[0] or \
         "structural_drift_detected" in str(data.get("error", ""))
-    # Reverted to immutable blueprint
-    assert data["current_ast"] is blueprint or data["current_ast"] == blueprint
+    # The invalid structural subtype change did not land, even though the
+    # fallback AST is normalized before being written to workflow state.
+    fallback_ast = data["current_ast"]
+    assert fallback_ast["structural_fingerprint"] == blueprint["structural_fingerprint"]
+    assert (
+        _flatten_node_index(fallback_ast)[first_key]["config"]["subtype"]
+        == _flatten_node_index(blueprint)[first_key]["config"]["subtype"]
+    )
 
 
 def test_parse_architect_ast_patch_mode_revert_on_unknown_target(

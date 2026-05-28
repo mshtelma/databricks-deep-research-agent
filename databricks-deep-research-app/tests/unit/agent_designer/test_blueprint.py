@@ -557,7 +557,7 @@ def test_blueprint_distinct_signatures_yield_distinct_fingerprints() -> None:
 
 def _officeqa_full_corpus_assets() -> list[dict[str, Any]]:
     """OfficeQA-style assets with the metadata recommend_tools_for_assets
-    needs to wire delta_read/delta_grep/delta_table_read/compute (warehouse_id
+    needs to wire table_search/table_read/table_load/compute (warehouse_id
     + field_roles). Mirrors what the live case fixture carries; the minimal
     ``_corpus_assets()`` fixture above lacks these, so the recommended tool
     set drops to just ``vector_search``."""
@@ -602,6 +602,64 @@ def _officeqa_full_corpus_assets() -> list[dict[str, Any]]:
             },
         },
     ]
+
+
+def _officeqa_tool_contract() -> dict[str, Any]:
+    return {
+        "schema": "resolved_tool_contract.v1",
+        "source": "prompt_grounding",
+        "evidence_policy": "corpus_only",
+        "resources": [
+            {
+                "kind": "vector_index",
+                "identity": "vs.example.chunks_index",
+                "usage": "required",
+                "access_status": "unverified",
+                "provenance": "prompt_exact_identity",
+                "capabilities": ["vector_search"],
+                "domain_terms": ["officeqa", "treasury", "chunks", "vector"],
+            },
+            {
+                "kind": "delta_table",
+                "identity": "delta.example.tables",
+                "usage": "required",
+                "access_status": "unverified",
+                "provenance": "prompt_exact_identity",
+                "capabilities": ["table_read", "table_load", "compute"],
+                "domain_terms": ["treasury", "tables", "compute"],
+            },
+        ],
+        "required_capabilities": [
+            "vector_search",
+            "table_search",
+            "table_read",
+            "table_load",
+            "compute",
+        ],
+        "ready_tool_kinds": [
+            "vector_search",
+            "table_search",
+            "table_read",
+            "table_load",
+            "compute",
+        ],
+        "prompt_obligations": {
+            "required_terms": [
+                "officeqa",
+                "treasury",
+                "fiscal",
+                "calendar",
+                "compute",
+            ],
+            "synthesis_obligations": [
+                "Preserve the fiscal/calendar-year distinction."
+            ],
+            "planner_obligations": [
+                "Use the named Databricks corpus resources before synthesis."
+            ],
+            "forbidden_tool_kinds": ["web_search", "web_crawl", "web_research"],
+        },
+    }
 
 
 def _declared_tool_kinds(ast: dict[str, Any]) -> set[str]:
@@ -662,11 +720,11 @@ def test_blueprint_corpus_only_declares_corpus_tools_not_web() -> None:
         _officeqa_full_corpus_assets(),
     )
     kinds = _declared_tool_kinds(ast)
-    # Required: vector_search + delta_read tools come from the recommender
+    # Required: vector_search + table tools come from the recommender
     assert "vector_search" in kinds
-    assert "delta_read" in kinds
-    assert "delta_grep" in kinds
-    assert "delta_table_read" in kinds
+    assert "table_search" in kinds
+    assert "table_read" in kinds
+    assert "table_load" in kinds
     assert "compute" in kinds
     # Forbidden: web tools must not have leaked in
     assert "web_research" not in kinds
@@ -694,11 +752,15 @@ def test_blueprint_corpus_only_binds_corpus_tools_to_each_lane() -> None:
         )
 
 
-def test_blueprint_corpus_only_required_asset_without_warehouse_fails_closed() -> None:
+def test_blueprint_corpus_only_required_asset_without_warehouse_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Required Delta asset missing its warehouse_id can't be wired into
-    delta_read/delta_grep/delta_table_read. The blueprint builder must fail
+    table_search/table_read/table_load. The blueprint builder must fail
     closed rather than silently fall back to web tools (which would violate
     the case contract)."""
+    monkeypatch.delenv("TABLE_TOOLS_WAREHOUSE_ID", raising=False)
+    monkeypatch.delenv("STORAGE_WAREHOUSE_ID", raising=False)
     sig = _officeqa_signature()
     assets = [
         {
@@ -734,7 +796,7 @@ def test_blueprint_corpus_plus_web_declares_both_kinds() -> None:
     ast = build_blueprint(sig, "q", _officeqa_full_corpus_assets())
     kinds = _declared_tool_kinds(ast)
     assert "vector_search" in kinds
-    assert "delta_read" in kinds
+    assert "table_search" in kinds
     assert "web_research" in kinds
     # web_crawl intentionally excluded — see plan F1
     assert "web_crawl" not in kinds
@@ -758,7 +820,7 @@ def test_blueprint_no_assets_signature_keeps_web_defaults() -> None:
     assert "web_crawl" not in kinds
     # Corpus tool kinds must not appear when there are no assets
     assert "vector_search" not in kinds
-    assert "delta_read" not in kinds
+    assert "table_search" not in kinds
     assert "compute" not in kinds
 
 
@@ -886,7 +948,7 @@ def test_blueprint_corpus_plus_web_emits_both_blocks_after_f2() -> None:
 
 def test_blueprint_structured_only_declares_compute_no_web() -> None:
     """structured_only signature with a Delta table containing a structured
-    JSON column → delta tools + compute, no web. Covers the SQL-only case
+    JSON column → table tools + compute, no web. Covers the SQL-only case
     that neither anchor case exercises directly."""
     sig = _officeqa_signature()
     sig["asset_signature"] = "structured_only"
@@ -910,9 +972,9 @@ def test_blueprint_structured_only_declares_compute_no_web() -> None:
     ]
     ast = build_blueprint(sig, "q", assets)
     kinds = _declared_tool_kinds(ast)
-    assert "delta_read" in kinds
-    assert "delta_grep" in kinds
-    assert "delta_table_read" in kinds
+    assert "table_search" in kinds
+    assert "table_read" in kinds
+    assert "table_load" in kinds
     assert "compute" in kinds
     assert "web_research" not in kinds
     assert "web_crawl" not in kinds
@@ -1000,6 +1062,34 @@ def test_blueprint_placeholder_pending_present_for_corpus_topology() -> None:
     assert pending, "plan_and_execute blueprint must register at least one pending researcher"
     for item in pending:
         assert isinstance(item, str)
+
+
+def test_blueprint_contract_metadata_and_no_placeholder_pending() -> None:
+    from deep_research.agent_designer.blueprint import PLACEHOLDER_PENDING_KEY
+
+    ast = build_blueprint(
+        _officeqa_signature(),
+        "OfficeQA Treasury fiscal calendar compute question",
+        _officeqa_full_corpus_assets(),
+        tool_contract=_officeqa_tool_contract(),
+    )
+
+    assert ast.get(PLACEHOLDER_PENDING_KEY) is None
+    assert ast["evidence_policy"] == "corpus_only"
+    assert {"officeqa", "treasury", "fiscal", "calendar"}.issubset(
+        set(ast["required_prompt_terms"])
+    )
+    summary = ast["resolved_tool_contract_summary"]
+    assert summary["available"] is True
+    assert summary["evidence_policy"] == "corpus_only"
+    assert "web_search" not in _declared_tool_kinds(ast)
+    assert {
+        "vector_search",
+        "table_search",
+        "table_read",
+        "table_load",
+        "compute",
+    }.issubset(_declared_tool_kinds(ast))
 
 
 def test_apply_architect_patches_clears_placeholder_pending_on_prompt_patch() -> None:
@@ -1172,7 +1262,7 @@ def test_evidence_mode_corpus_only_for_corpus_assets() -> None:
     plan = ToolPlan(
         tools=[
             ToolDeclarationSpec(name="vs", kind="vector_search"),
-            ToolDeclarationSpec(name="dr", kind="delta_read"),
+            ToolDeclarationSpec(name="tr", kind="table_read"),
         ]
     )
     assert _evidence_mode([], plan) == "corpus_only"
@@ -1302,10 +1392,14 @@ def test_apply_architect_patches_rejects_pools_key() -> None:
     assert errors
 
 
-def test_blueprint_preferred_asset_without_warehouse_does_not_fail() -> None:
+def test_blueprint_preferred_asset_without_warehouse_does_not_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Symmetric to the fail-closed test: when the Delta asset is
     ``usage="preferred"`` (not required), the builder may degrade to whatever
     tools the recommender can produce without raising."""
+    monkeypatch.delenv("TABLE_TOOLS_WAREHOUSE_ID", raising=False)
+    monkeypatch.delenv("STORAGE_WAREHOUSE_ID", raising=False)
     sig = _officeqa_signature()
     assets = [
         {
@@ -1325,5 +1419,5 @@ def test_blueprint_preferred_asset_without_warehouse_does_not_fail() -> None:
     ast = build_blueprint(sig, "q", assets)
     kinds = _declared_tool_kinds(ast)
     assert "vector_search" in kinds
-    # delta tools couldn't be wired (no warehouse) — degrades gracefully
-    assert "delta_read" not in kinds
+    # table tools couldn't be wired (no warehouse) — degrades gracefully
+    assert "table_search" not in kinds

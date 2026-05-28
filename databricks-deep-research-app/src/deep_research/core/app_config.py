@@ -1505,6 +1505,69 @@ class JobConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class AgentDesignerToolCatalogConfig(BaseModel):
+    """Designer tool-catalog rendering configuration."""
+
+    max_chars: int = Field(
+        default=4000,
+        ge=1,
+        le=20000,
+        description="Hard character ceiling for rendered tool catalogs",
+    )
+    summary_only_above_n_tools: int = Field(
+        default=8,
+        ge=1,
+        le=100,
+        description="Render summary-only catalog entries above this tool count",
+    )
+    include_probes: bool = Field(
+        default=True,
+        description="Include sanitized SafeProbe samples in rendered catalogs",
+    )
+
+    model_config = {"frozen": True}
+
+
+class AgentDesignerProbeConfig(BaseModel):
+    """Designer SafeProbe sampling configuration."""
+
+    timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=300,
+        description="Per-tool SafeProbe timeout",
+    )
+    max_concurrent_probes: int = Field(
+        default=4,
+        ge=1,
+        le=50,
+        description="Maximum SafeProbe calls to run concurrently",
+    )
+    max_output_chars: int = Field(
+        default=800,
+        ge=0,
+        le=20000,
+        description="Maximum sanitized probe output characters per tool",
+    )
+    persist: bool = Field(
+        default=False,
+        description="Default probe persistence policy; false avoids storing samples",
+    )
+
+    model_config = {"frozen": True}
+
+
+class AgentDesignerConfig(BaseModel):
+    """Agent Designer configuration."""
+
+    tool_catalog: AgentDesignerToolCatalogConfig = Field(
+        default_factory=AgentDesignerToolCatalogConfig
+    )
+    probe: AgentDesignerProbeConfig = Field(default_factory=AgentDesignerProbeConfig)
+
+    model_config = {"frozen": True}
+
+
 class AppConfig(BaseModel):
     """Central application configuration loaded from YAML."""
 
@@ -1553,6 +1616,11 @@ class AppConfig(BaseModel):
     query_rewriting: QueryRewritingConfig = Field(
         default_factory=QueryRewritingConfig,
         description="Source-specific query rewriting configuration for enterprise tools.",
+    )
+    # Agent Designer catalog/probe controls
+    agent_designer: AgentDesignerConfig = Field(
+        default_factory=AgentDesignerConfig,
+        description="Agent Designer tool catalog and SafeProbe settings.",
     )
 
     @model_validator(mode="after")

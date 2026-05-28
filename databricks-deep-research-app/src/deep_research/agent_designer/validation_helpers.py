@@ -65,6 +65,7 @@ def _quality_advice(ast: dict[str, Any]) -> list[dict[str, Any]]:
     from deep_research.agent_designer.semantic_validation import (
         detect_generic_reflector_prompt,
         detect_generic_synthesizer_prompt,
+        detect_tool_contract_violations,
         detect_topology_mismatch,
         detect_unspecialized_agents,
         detect_unspecialized_fallback_researcher,
@@ -75,6 +76,7 @@ def _quality_advice(ast: dict[str, Any]) -> list[dict[str, Any]]:
         *detect_topology_mismatch(ast or {}),
         *detect_generic_synthesizer_prompt(ast or {}),
         *detect_generic_reflector_prompt(ast or {}),
+        *detect_tool_contract_violations(ast or {}),
         *detect_unspecialized_fallback_researcher(ast or {}),
     ]
     return [

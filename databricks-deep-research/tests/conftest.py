@@ -1,6 +1,7 @@
 """Shared test fixtures for the framework test suite."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Generator
 from pathlib import Path
 from typing import Any, TypeVar
@@ -25,6 +26,28 @@ from databricks_deep_research.tools.registry import ToolRegistry
 _ENV_TEST = Path(__file__).resolve().parent.parent / ".env.test"
 if _ENV_TEST.exists():
     load_dotenv(_ENV_TEST, override=False)
+
+
+@pytest.fixture(autouse=True)
+def _legacy_sync_event_loop(request: pytest.FixtureRequest) -> Generator[None, None, None]:
+    """Provide a current event loop for older sync tests on Python 3.11+."""
+    if request.node.get_closest_marker("asyncio") is not None:
+        yield
+        return
+
+    created_loop: asyncio.AbstractEventLoop | None = None
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        created_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(created_loop)
+
+    try:
+        yield
+    finally:
+        if created_loop is not None:
+            created_loop.close()
+            asyncio.set_event_loop(None)
 
 
 # ---------------------------------------------------------------------------

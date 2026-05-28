@@ -2,7 +2,10 @@
 
 import base64
 import json
+import logging
+import time
 from datetime import UTC, datetime
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -10,10 +13,15 @@ import pytest
 from deep_research.db.autoscaling_auth import AutoscalingCredentialProvider
 
 
-def _make_jwt(sub: str = "test-user@example.com") -> str:
+def _make_jwt(
+    sub: str = "test-user@example.com",
+    *,
+    extra_claims: dict[str, Any] | None = None,
+) -> str:
     """Create a minimal JWT token for testing."""
     header = base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).rstrip(b"=").decode()
-    payload = base64.urlsafe_b64encode(json.dumps({"sub": sub}).encode()).rstrip(b"=").decode()
+    claims = {"sub": sub, **(extra_claims or {})}
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
     return f"{header}.{payload}.signature"
 
 
@@ -25,7 +33,10 @@ class TestAutoscalingCredentialProviderInit:
         settings = MagicMock()
         settings.endpoint_name = None
 
-        with patch.dict("os.environ", {}, clear=True), pytest.raises(ValueError, match="ENDPOINT_NAME is required"):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            pytest.raises(ValueError, match="ENDPOINT_NAME is required"),
+        ):
             AutoscalingCredentialProvider(settings)
 
     def test_accepts_endpoint_from_settings(self) -> None:
@@ -120,9 +131,7 @@ class TestAutoscalingCredentialProviderMethods:
         mock_auth.return_value.get_client.return_value = mock_client
 
         token = _make_jwt("sp-user@example.com")
-        mock_client.postgres.generate_database_credential.return_value = MagicMock(
-            token=token
-        )
+        mock_client.postgres.generate_database_credential.return_value = MagicMock(token=token)
 
         cred = provider.get_credential()
 
@@ -134,9 +143,7 @@ class TestAutoscalingCredentialProviderMethods:
         assert cred.expires_at > datetime.now(UTC)
 
     @patch("deep_research.core.databricks_auth.get_databricks_auth")
-    def test_get_credential_prefers_databricks_client_id(
-        self, mock_auth: MagicMock
-    ) -> None:
+    def test_get_credential_prefers_databricks_client_id(self, mock_auth: MagicMock) -> None:
         """Databricks Apps expose the DB role as DATABRICKS_CLIENT_ID."""
         provider = self._make_provider()
 
@@ -144,9 +151,7 @@ class TestAutoscalingCredentialProviderMethods:
         mock_auth.return_value.get_client.return_value = mock_client
 
         token = _make_jwt("token-subject-not-db-role")
-        mock_client.postgres.generate_database_credential.return_value = MagicMock(
-            token=token
-        )
+        mock_client.postgres.generate_database_credential.return_value = MagicMock(token=token)
 
         with patch.dict(
             "os.environ",
@@ -156,6 +161,98 @@ class TestAutoscalingCredentialProviderMethods:
             cred = provider.get_credential()
 
         assert cred.username == "app-client-id-123"
+
+    @patch("deep_research.core.databricks_auth.get_databricks_auth")
+    def test_get_credential_prefers_pguser(self, mock_auth: MagicMock) -> None:
+        """PGUSER wins when the platform injects an explicit DB role."""
+        provider = self._make_provider()
+
+        mock_client = MagicMock()
+        mock_auth.return_value.get_client.return_value = mock_client
+
+        token = _make_jwt("token-subject-not-db-role")
+        mock_client.postgres.generate_database_credential.return_value = MagicMock(token=token)
+
+        with patch.dict(
+            "os.environ",
+            {
+                "PGUSER": "app-pg-role-123",
+                "DATABRICKS_CLIENT_ID": "app-client-id-123",
+            },
+            clear=True,
+        ):
+            cred = provider.get_credential()
+
+        assert cred.username == "app-pg-role-123"
+
+    @patch("deep_research.core.databricks_auth.get_databricks_auth")
+    def test_get_credential_logs_redacted_claim_diagnostics(
+        self,
+        mock_auth: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Credential diagnostics include source/match context without secrets."""
+        provider = self._make_provider()
+
+        mock_client = MagicMock()
+        mock_auth.return_value.get_client.return_value = mock_client
+
+        token = _make_jwt(
+            "user@example.com",
+            extra_claims={
+                "client_id": "db-database-credential",
+                "aud": "2226288096546970",
+                "iss": "https://dbc.example",
+                "exp": int(time.time()) + 3600,
+            },
+        )
+        mock_client.postgres.generate_database_credential.return_value = MagicMock(token=token)
+
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            caplog.at_level(logging.INFO, logger="deep_research.db.autoscaling_auth"),
+        ):
+            provider.get_credential()
+
+        logs = caplog.text
+        assert "AUTOSCALING_CREDENTIAL_DIAGNOSTIC" in logs
+        assert "username_source=jwt_sub" in logs
+        assert "username_matches_sub=True" in logs
+        assert "kind=email:" in logs
+        assert token not in logs
+        assert "user@example.com" not in logs
+
+    @patch("deep_research.core.databricks_auth.get_databricks_auth")
+    def test_auth_failure_diagnostics_sanitize_selected_username(
+        self,
+        mock_auth: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Auth-failure diagnostics preserve comparison data but redact identities."""
+        provider = self._make_provider()
+
+        mock_client = MagicMock()
+        mock_auth.return_value.get_client.return_value = mock_client
+
+        token = _make_jwt("runtime-token-subject@example.com")
+        mock_client.postgres.generate_database_credential.return_value = MagicMock(token=token)
+
+        with (
+            patch.dict("os.environ", {"PGUSER": "app-pg-role-123"}, clear=True),
+            caplog.at_level(logging.WARNING, logger="deep_research.db.autoscaling_auth"),
+        ):
+            provider.get_credential()
+            caplog.clear()
+            provider.log_auth_failure_diagnostics(
+                RuntimeError("password authentication failed for user 'app-pg-role-123'")
+            )
+
+        logs = caplog.text
+        assert "AUTOSCALING_DB_AUTH_FAILURE_DIAGNOSTIC" in logs
+        assert "username_source=PGUSER" in logs
+        assert "username_matches_sub=False" in logs
+        assert "app-pg-role-123" not in logs
+        assert "runtime-token-subject@example.com" not in logs
 
     @patch("deep_research.core.databricks_auth.get_databricks_auth")
     def test_credential_caching(self, mock_auth: MagicMock) -> None:
@@ -190,11 +287,14 @@ class TestAutoscalingCredentialProviderMethods:
         token = _make_jwt("user@example.com")
         mock_client.postgres.generate_database_credential.return_value = MagicMock(token=token)
 
-        with patch.dict("os.environ", {
-            "PGHOST": "ep-abc.database.cloud.databricks.com",
-            "PGPORT": "5432",
-            "PGDATABASE": "my_db",
-        }):
+        with patch.dict(
+            "os.environ",
+            {
+                "PGHOST": "ep-abc.database.cloud.databricks.com",
+                "PGPORT": "5432",
+                "PGDATABASE": "my_db",
+            },
+        ):
             url = provider.build_connection_url()
 
         assert url.startswith("postgresql+asyncpg://")

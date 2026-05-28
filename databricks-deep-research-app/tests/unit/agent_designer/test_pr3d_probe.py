@@ -56,7 +56,7 @@ def _conformant_pipelined_ast() -> dict[str, Any]:
         "output_keys": ["final"],
         "tools": [
             {"name": "vs", "kind": "vector_search"},
-            {"name": "dt", "kind": "delta_table_read"},
+            {"name": "dt", "kind": "table_read"},
             {"name": "comp", "kind": "compute"},
         ],
         "pools": [{"name": "sources", "dedup_key": "chunk_id"}],
@@ -113,7 +113,7 @@ def _wrong_topology_ast() -> dict[str, Any]:
         "output_keys": ["final"],
         "tools": [
             {"name": "vs", "kind": "vector_search"},
-            {"name": "dt", "kind": "delta_table_read"},
+            {"name": "dt", "kind": "table_read"},
             {"name": "comp", "kind": "compute"},
         ],
         "pools": [{"name": "sources", "dedup_key": "chunk_id"}],
@@ -205,7 +205,7 @@ def test_probe_clears_conformant_pipelined_workflow() -> None:
     )
     assert "period_basis_in_lane_prompts" in result.conditional_passed
     assert "numeric_aggregation_has_compute_and_table_read" in result.conditional_passed
-    assert "structured_tables_has_delta_table_read" in result.conditional_passed
+    assert "structured_tables_has_table_read" in result.conditional_passed
 
 
 # ---------------------------------------------------------------------------

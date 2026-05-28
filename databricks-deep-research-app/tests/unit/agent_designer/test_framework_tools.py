@@ -1082,7 +1082,7 @@ async def test_recommend_tools_for_assets_tool_reads_asset_getter(
     assert result.success is True
     assert result.data["diagnostics"] == []
     kinds = {item["kind"] for item in result.data["recommended_tools"]}
-    assert {"delta_read", "delta_grep", "compute", "compute_namespace"}.issubset(kinds)
+    assert {"table_search", "table_read", "table_load", "compute", "compute_namespace"}.issubset(kinds)
 
 
 # ---------------------------------------------------------------------------

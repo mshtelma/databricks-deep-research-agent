@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from databricks_deep_research.workflow.conditions import Condition, ConditionBranch
+from databricks_deep_research.workflow.definition import WorkflowNode
 
 # ---------------------------------------------------------------------------
 # Pool-related configs
@@ -159,20 +162,40 @@ class AgentNodeConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ToolRefConfig(BaseModel):
+    """Typed legacy tool reference descriptor used by tool nodes."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: str
+    name: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_legacy_type(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "name" in value and "type" not in value:
+            return {**value, "type": "builtin"}
+        return value
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Small compatibility shim for older runtime code that treated refs as dicts."""
+        return getattr(self, key, default)
+
+
 class ToolNodeConfig(BaseModel):
     """Configuration for a pure-tool (no LLM) node."""
 
     model_config = ConfigDict(extra="forbid")
-    ref: dict[str, Any]  # tool reference descriptor
+    ref: ToolRefConfig  # tool reference descriptor
     input_mapping: dict[str, str] = Field(default_factory=dict)
     output_key: str = "tool_result"
+    output_schema: dict[str, Any] | None = None
 
 
 class LoopNodeConfig(BaseModel):
     """Configuration for a loop control node."""
 
     model_config = ConfigDict(extra="forbid")
-    until: dict[str, Any]  # Serialised Condition (StateCondition / LLMCondition / Composite)
+    until: Condition  # Serialised Condition (StateCondition / LLMCondition / Composite)
     min_iterations: int = 1
     max_iterations: int = 10
 
@@ -181,8 +204,21 @@ class ConditionalNodeConfig(BaseModel):
     """Configuration for a conditional branching node."""
 
     model_config = ConfigDict(extra="forbid")
-    conditions: list[dict[str, Any]]  # list of serialised ConditionBranch
+    conditions: list[ConditionBranch]  # list of serialised ConditionBranch
     default_branch: int = 0
+
+    @field_validator("conditions", mode="before")
+    @classmethod
+    def _wrap_legacy_condition_branches(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        wrapped: list[Any] = []
+        for index, item in enumerate(value):
+            if isinstance(item, dict) and "condition" not in item:
+                wrapped.append({"condition": item, "child_index": index})
+            else:
+                wrapped.append(item)
+        return wrapped
 
 
 class SubworkflowNodeConfig(BaseModel):
@@ -204,7 +240,7 @@ class PlanAndExecuteNodeConfig(BaseModel):
     planner: dict[str, Any]  # Serialised AgentNodeConfig for the planner agent
     items_path: str = "steps"  # dot-path into planner output for the iterable
     item_state_key: str = "current_step"
-    body: dict[str, Any] = Field(default_factory=dict)  # Serialised child node(s) to run per item
+    body: WorkflowNode | None = None  # Serialised child node(s) to run per item
     evaluator: dict[str, Any] | None = None  # Optional evaluator agent config
     max_iterations: int = 10
     min_iterations: int = 1
@@ -212,6 +248,9 @@ class PlanAndExecuteNodeConfig(BaseModel):
     complete_on_exhaustion: bool = True
     planner_guidance: str = ""  # Free-text guidance injected into planner prompt
     synthesis_metadata: dict[str, str] = Field(default_factory=dict)  # Key-value pairs written to state for synthesizer
+    required_tool_kind_groups: list[list[str]] = Field(default_factory=list)
+    # Each inner list is an OR group; every group must be observed before an
+    # evaluator "complete" decision is accepted.
 
 
 # ---------------------------------------------------------------------------

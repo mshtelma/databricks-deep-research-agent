@@ -43,6 +43,14 @@ PLANNER_SYSTEM_PROMPT = """You are the Planner agent for a deep research system.
 - **Uploaded files**: User-provided documents. If file content appears in the prompt,
   use it directly as authoritative evidence. For large files, the file_search tool is available.
 
+## Available Research Tools
+
+The downstream researchers will execute the steps you produce. They have
+access to the following tool kinds — keep your step descriptions and
+`source_hints` consistent with what these tools can actually do:
+
+{tool_catalog}
+
 ## Planning Guidelines
 
 - Be specific and actionable in each step
@@ -261,6 +269,14 @@ Use the Data Landscape Summary and Discovered Sources to understand what has alr
 
 **Web Sources** (external, public):
 - **Web Search**: General web search via Brave Search API
+
+## Available Research Tools
+
+The downstream researchers will execute the steps you produce. They have
+access to the following tool kinds — keep your step descriptions and
+`source_hints` consistent with what these tools can actually do:
+
+{tool_catalog}
 
 ## Source Selection Guidelines
 

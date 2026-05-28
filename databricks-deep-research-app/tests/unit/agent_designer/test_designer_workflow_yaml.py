@@ -100,6 +100,13 @@ def test_loop_body_contains_architect_gate_critic():
     assert "extract_critic_approved" in node_ids
 
 
+def test_architect_guidance_requires_schema_backed_conditionals():
+    text = _YAML.read_text()
+    assert "Do not route static lanes through a planner or conditional" in text
+    assert "declared schema-backed discriminator" in text
+    assert "current_step.lane" in text
+
+
 def test_architect_uses_complex_tier():
     wf = load_workflow(str(_YAML))
     body = _designer_loop(wf).children[0]
@@ -184,6 +191,21 @@ def test_build_blueprint_node_sits_between_classifier_and_designer_loop():
     assert input_mapping["task_signature"] == "task_signature"
     assert input_mapping["intent"] == "user_intent"
     assert input_mapping["assets"] == "designer_assets"
+    assert input_mapping["resolved_tool_contract"] == "resolved_tool_contract"
+
+
+def test_all_tool_nodes_use_builtin_ref_type():
+    """Regression guard for framework ToolNodeConfig.ref.type validation."""
+
+    wf = load_workflow(str(_YAML))
+    tool_nodes = [node for node in _walk_nodes(wf.root) if node.type == "tool"]
+    assert tool_nodes
+    for node in tool_nodes:
+        ref = node.config.get("ref") or {}
+        assert ref.get("type") == "builtin", (
+            f"tool node {node.id!r} must declare config.ref.type=builtin"
+        )
+        assert ref.get("name"), f"tool node {node.id!r} must declare config.ref.name"
 
 
 def test_build_blueprint_tool_registered_in_builtin_tools():
@@ -256,7 +278,7 @@ def test_agent_prompt_templates_are_safe_renderer_compatible():
             if not prompt:
                 continue
             referenced = renderer.extract_variables(prompt)
-            fake_vars = {name: "" for name in referenced}
+            fake_vars = dict.fromkeys(referenced, "")
             renderer.render(prompt, fake_vars)
 
 
@@ -310,7 +332,7 @@ def test_list_tool_kinds_returns_all_kinds():
     assert "kinds" in payload
     assert "vector_search" in payload["kinds"]
     assert "web_search" in payload["kinds"]
-    assert "delta_read" in payload["kinds"]
+    assert "table_search" in payload["kinds"]
     assert payload["count"] == len(payload["kinds"])
 
 
@@ -364,6 +386,34 @@ def test_architect_user_prompt_template_includes_lane_keys_variable():
         "architect user_prompt_template must reference {lane_keys} so the "
         "renderer surfaces the content-derived lane-key map at runtime"
     )
+
+
+def test_architect_user_prompt_uses_contract_and_compact_ast_context():
+    """Architect hot-loop prompt should not inline full blueprint/current AST blobs."""
+
+    wf = load_workflow(str(_YAML))
+    body = _designer_loop(wf).children[0]
+    architect = next(c for c in body.children if c.id == "architect")
+    template = architect.config.get("user_prompt_template") or ""
+    system_prompt = architect.config.get("system_prompt") or ""
+    assert "{resolved_tool_contract_summary}" in template
+    assert "{initial_blueprint}" not in template
+    assert "{current_ast}" not in template
+    assert "{initial_blueprint}" not in system_prompt
+    assert "{current_ast}" not in system_prompt
+    assert "inspect_ast_summary" in template
+
+
+def test_critic_uses_compact_current_ast_summary():
+    """Critic prompt must not inline the full current_ast JSON blob."""
+
+    wf = load_workflow(str(_YAML))
+    body = _designer_loop(wf).children[0]
+    gate_router = next(c for c in body.children if c.id == "gate_router")
+    critic = gate_router.children[1]
+    template = critic.config.get("user_prompt_template") or ""
+    assert "{current_ast_summary}" in template
+    assert "{current_ast}" not in template
 
 
 def test_architect_step_2_documents_placeholder_pending_contract():

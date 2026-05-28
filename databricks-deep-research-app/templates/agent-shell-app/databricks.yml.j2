@@ -23,6 +23,10 @@ resources:
           - name: BRAVE_API_KEY
             value_from: '{{ brave_secret_resource_name }}'
 {% endif %}
+{% if requires_sql_warehouse %}
+          - name: STORAGE_WAREHOUSE_ID
+            value: '{{ storage_warehouse_id }}'
+{% endif %}
       resources:
 {% if requires_web_search %}
         - name: '{{ brave_secret_resource_name }}'
@@ -31,7 +35,15 @@ resources:
             scope: '{{ brave_secret_scope }}'
             key: '{{ brave_secret_key }}'
             permission: READ
-{% else %}
+{% endif %}
+{% if requires_sql_warehouse %}
+        - name: '{{ sql_warehouse_resource_name }}'
+          description: 'SQL Warehouse for text-table tools'
+          sql_warehouse:
+            id: '{{ storage_warehouse_id }}'
+            permission: CAN_USE
+{% endif %}
+{% if not requires_web_search and not requires_sql_warehouse %}
         # Add a serving_endpoint block here for any endpoint your agent calls
         # (e.g., a Mode 3 agent serving endpoint or any of the workspace's
         # bundled endpoints — databricks-claude-sonnet-4-5, etc.). Apps grants

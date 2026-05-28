@@ -21,6 +21,9 @@ from databricks_deep_research.agents.grounding import (
     validate_grounding_config,
 )
 from databricks_deep_research.errors import WorkflowValidationError
+from databricks_deep_research.workflow.condition_contracts import (
+    validate_condition_contracts,
+)
 from databricks_deep_research.workflow.definition import (
     NodeType,
     WorkflowDefinition,
@@ -178,8 +181,7 @@ def _validate_node_config(node: WorkflowNode, seen_ids: set[str], errors: list[s
                         node.id,
                     )
             if pae_config.body:
-                body_node = WorkflowNode(**pae_config.body)
-                _collect_errors(body_node, seen_ids, errors)
+                _collect_errors(pae_config.body, seen_ids, errors)
     except Exception as exc:
         errors.append(
             f"Node '{node.id}' (type={node.type.value}) has invalid config: {exc}"
@@ -235,6 +237,9 @@ def validate_workflow(definition: WorkflowDefinition) -> list[str]:
     # -- Walk the node tree --------------------------------------------------
     seen_ids: set[str] = set()
     _collect_errors(definition.root, seen_ids, errors)
+
+    if not errors:
+        errors.extend(validate_condition_contracts(definition))
 
     if errors:
         raise WorkflowValidationError(errors=errors)

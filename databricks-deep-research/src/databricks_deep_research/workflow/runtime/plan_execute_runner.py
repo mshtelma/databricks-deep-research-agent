@@ -84,7 +84,16 @@ def _patch_researcher_user_prompt(node_dict: dict[str, Any], template: str) -> N
                 _patch_researcher_user_prompt(child, template)
 
 
-def _materialize_body_for_step(body_config: dict[str, Any], item: Any) -> dict[str, Any]:
+def _body_config_to_dict(body_config: dict[str, Any] | WorkflowNode) -> dict[str, Any]:
+    if isinstance(body_config, WorkflowNode):
+        return body_config.model_dump(mode="json")
+    return body_config
+
+
+def _materialize_body_for_step(
+    body_config: dict[str, Any] | WorkflowNode,
+    item: Any,
+) -> dict[str, Any]:
     """Return a body-node dict for this step, injecting the step's user prompt template.
 
     When the step carries no ``user_prompt_template``, the original body
@@ -92,12 +101,70 @@ def _materialize_body_for_step(body_config: dict[str, Any], item: Any) -> dict[s
     and zero overhead. When the step supplies a template, a deep-copied
     body is produced with the override applied to every researcher descendant.
     """
+    body_dict = _body_config_to_dict(body_config)
     template = _extract_step_user_prompt_template(item)
     if template is None:
-        return body_config
-    patched = copy.deepcopy(body_config)
+        return body_dict
+    patched = copy.deepcopy(body_dict)
     _patch_researcher_user_prompt(patched, template)
     return patched
+
+
+def _normalize_tool_kind_groups(groups: list[list[str]]) -> list[tuple[str, ...]]:
+    normalized: list[tuple[str, ...]] = []
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        kinds = tuple(
+            dict.fromkeys(
+                str(kind).strip()
+                for kind in group
+                if isinstance(kind, str) and kind.strip()
+            )
+        )
+        if kinds:
+            normalized.append(kinds)
+    return normalized
+
+
+def _declared_tool_kinds(definition: Any) -> dict[str, str]:
+    return {
+        str(tool.name): str(tool.kind)
+        for tool in getattr(definition, "tools", []) or []
+        if getattr(tool, "name", None)
+    }
+
+
+def _observed_successful_tool_kinds(
+    events: list[StreamEvent],
+    tool_kinds_by_name: dict[str, str],
+) -> set[str]:
+    observed: set[str] = set()
+    for event in events:
+        event_type = getattr(event, "event_type", "")
+        if event_type == "tool_result" and not bool(getattr(event, "tool_success", True)):
+            continue
+        if event_type not in {"tool_result", "tool_cache_hit"}:
+            continue
+        tool_name = str(getattr(event, "tool_name", "") or "")
+        if tool_name:
+            observed.add(tool_kinds_by_name.get(tool_name, tool_name))
+    return observed
+
+
+def _missing_tool_kind_groups(
+    required_groups: list[tuple[str, ...]],
+    observed_tool_kinds: set[str],
+) -> list[tuple[str, ...]]:
+    return [
+        group
+        for group in required_groups
+        if not (set(group) & observed_tool_kinds)
+    ]
+
+
+def _format_tool_kind_groups(groups: list[tuple[str, ...]]) -> str:
+    return "; ".join(" or ".join(group) for group in groups)
 
 
 async def run_plan_execute(
@@ -110,6 +177,11 @@ async def run_plan_execute(
     pools = runtime.pools
     total_items_processed = runtime.total_items_processed
     replan_cycles = runtime.replan_cycles
+    tool_kinds_by_name = _declared_tool_kinds(runtime.definition)
+    observed_tool_kinds: set[str] = set()
+    required_tool_kind_groups = _normalize_tool_kind_groups(
+        config.required_tool_kind_groups
+    )
     cycle_ctx = PlanCycleContext()
     cycle_ctx.available_sources = await build_available_source_catalog(
         runtime.definition,
@@ -140,6 +212,12 @@ async def run_plan_execute(
         state.append(node.id, "step_prompt_guidance", config.planner_guidance)
     for key, value in config.synthesis_metadata.items():
         state.append(node.id, key, value)
+    if required_tool_kind_groups:
+        state.append(
+            node.id,
+            "required_tool_kind_groups",
+            [list(group) for group in required_tool_kind_groups],
+        )
 
     items: list[Any] = []
     for cycle in range(config.max_replan_cycles + 1):
@@ -330,6 +408,22 @@ async def run_plan_execute(
                 sources_before=sources_before,
                 sources_after=sources_after,
             )
+            observed_tool_kinds.update(
+                _observed_successful_tool_kinds(item_events, tool_kinds_by_name)
+            )
+            if required_tool_kind_groups:
+                missing_tool_kind_groups = _missing_tool_kind_groups(
+                    required_tool_kind_groups,
+                    observed_tool_kinds,
+                )
+                state.append(node.id, "observed_tool_kinds", sorted(observed_tool_kinds))
+                state.append(
+                    node.id,
+                    "missing_required_tool_kind_groups",
+                    [list(group) for group in missing_tool_kind_groups],
+                )
+            else:
+                missing_tool_kind_groups = []
             if item_health["blocked"]:
                 state.append(node.id, "last_blocked_step", item_health)
                 if isinstance(item, dict) and state.runtime_store is not None:
@@ -392,6 +486,21 @@ async def run_plan_execute(
                         if reasoning
                         else f"Blocked step detected: {blocked_reason}"
                     )
+                if decision == "complete" and total_items_processed < config.min_iterations:
+                    decision = "continue"
+                if decision == "complete" and missing_tool_kind_groups:
+                    missing_summary = _format_tool_kind_groups(missing_tool_kind_groups)
+                    suffix = (
+                        "Required tool kind groups are still missing: "
+                        f"{missing_summary}"
+                    )
+                    reasoning = f"{reasoning}\n\n{suffix}" if reasoning else suffix
+                    evidence_sufficiency = evidence_sufficiency or "insufficient"
+                    failure_mode = failure_mode or "required_tool_kinds_unmet"
+                    if idx < len(items) - 1:
+                        decision = "continue"
+                    elif replan_cycles < config.max_replan_cycles:
+                        decision = "replan"
                 yield deps.emit(
                     EvaluationDecisionEvent(
                         node_id=node.id,
@@ -403,8 +512,6 @@ async def run_plan_execute(
                         failure_mode=failure_mode,
                     )
                 )
-                if decision == "complete" and total_items_processed < config.min_iterations:
-                    decision = "continue"
                 if decision == "complete":
                     completion_mode = "degraded" if evidence_sufficiency in {"partial", "insufficient"} else "normal"
                     exit_reason = "insufficient_evidence_exhausted" if completion_mode == "degraded" else "evaluator_complete"

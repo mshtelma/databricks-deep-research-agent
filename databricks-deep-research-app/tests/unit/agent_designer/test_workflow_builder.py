@@ -30,6 +30,18 @@ def _corpus_assets() -> list[dict]:
     ]
 
 
+def _walk_nodes(node: dict):
+    yield node
+    config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    for nested_key in ("body", "evaluator", "planner"):
+        nested = config.get(nested_key)
+        if isinstance(nested, dict):
+            yield from _walk_nodes(nested)
+    for child in node.get("children") or []:
+        if isinstance(child, dict):
+            yield from _walk_nodes(child)
+
+
 def _web_brief() -> WorkflowDesignBrief:
     return WorkflowDesignBrief(
         workflow_name="web-only",
@@ -44,6 +56,74 @@ def _web_brief() -> WorkflowDesignBrief:
             tools=[ToolDeclarationSpec(name="web", kind="web_search")]
         ),
     )
+
+
+def _contract_brief() -> WorkflowDesignBrief:
+    return WorkflowDesignBrief(
+        workflow_name="contract",
+        topology="plan_and_execute",
+        user_goal="OfficeQA Treasury fiscal calendar compute answer",
+        research_lanes=[
+            {
+                "description": "retrieve Treasury chunks then compute totals",
+                "user_prompt_template": "Investigate {query}.",
+            }
+        ],
+        tool_plan=ToolPlan(
+            tools=[
+                ToolDeclarationSpec(name="vector_search", kind="vector_search"),
+                ToolDeclarationSpec(name="table_read", kind="table_read"),
+                ToolDeclarationSpec(name="compute", kind="compute"),
+            ],
+            bindings=[
+                ToolBindingSpec(
+                    node_id="all_researchers",
+                    tool_names=["vector_search", "table_read", "compute"],
+                )
+            ],
+        ),
+        tool_contract={
+            "schema": "resolved_tool_contract.v1",
+            "source": "prompt_grounding",
+            "evidence_policy": "corpus_only",
+            "required_capabilities": [
+                "vector_search",
+                "table_read",
+                "compute",
+            ],
+            "ready_tool_kinds": ["vector_search", "table_read", "compute"],
+            "prompt_obligations": {
+                "required_terms": [
+                    "officeqa",
+                    "treasury",
+                    "fiscal",
+                    "calendar",
+                    "compute",
+                ],
+                "synthesis_obligations": [
+                    "Preserve the fiscal/calendar-year distinction."
+                ],
+                "planner_obligations": [
+                    "Use named Databricks corpus resources before synthesis."
+                ],
+                "forbidden_tool_kinds": [
+                    "web_search",
+                    "web_crawl",
+                    "web_research",
+                ],
+            },
+        },
+    )
+
+
+def _contract_brief_without_forbidden_web() -> WorkflowDesignBrief:
+    brief = _contract_brief()
+    assert brief.tool_contract is not None
+    brief.tool_contract.prompt_obligations.forbidden_tool_kinds = []
+    brief.tool_contract.prompt_obligations.planner_obligations = [
+        "Use named Databricks corpus resources before synthesis."
+    ]
+    return brief
 
 
 def test_sources_dedup_key_corpus_only() -> None:
@@ -114,6 +194,113 @@ def test_build_workflow_web_brief_uses_url_dedup() -> None:
     )
     sources_pool = next(p for p in ast["pools"] if p["name"] == "sources")
     assert sources_pool["dedup_key"] == "url"
+
+
+def test_contract_core_prompt_precedes_designer_goal_and_passes_detector() -> None:
+    from deep_research.agent_designer.semantic_validation import (
+        detect_generic_synthesizer_prompt,
+    )
+
+    ast = build_web_research_workflow(
+        intent="OfficeQA Treasury fiscal calendar compute answer",
+        design_brief=_contract_brief(),
+        assets=_corpus_assets(),
+    )
+
+    synthesizers = [
+        node
+        for node in _walk_nodes(ast["root"])
+        if (node.get("config") or {}).get("subtype") == "synthesizer"
+    ]
+    assert synthesizers
+    system_prompt = synthesizers[0]["config"]["system_prompt"]
+    assert system_prompt.index("Workflow-Specific Evidence Contract") < system_prompt.index(
+        "Designer Goal"
+    )
+    core = system_prompt.split("## Designer Goal", 1)[0].lower()
+    assert "officeqa" in core
+    assert "treasury" in core
+    assert detect_generic_synthesizer_prompt(ast) == []
+
+
+def test_plan_and_execute_gets_required_tool_kind_groups_from_contract() -> None:
+    ast = build_web_research_workflow(
+        intent="OfficeQA Treasury fiscal calendar compute answer",
+        design_brief=_contract_brief(),
+        assets=_corpus_assets(),
+    )
+
+    plan_and_execute = next(
+        node
+        for node in _walk_nodes(ast["root"])
+        if node.get("type") == "plan_and_execute"
+    )
+    assert plan_and_execute["config"]["required_tool_kind_groups"] == [
+        ["vector_search"],
+        ["table_search", "table_read", "table_load"],
+        ["compute"],
+    ]
+
+
+def test_plan_and_execute_corpus_body_does_not_emit_lane_router() -> None:
+    ast = build_web_research_workflow(
+        intent="OfficeQA Treasury fiscal calendar compute answer",
+        design_brief=_contract_brief(),
+        assets=_corpus_assets(),
+    )
+
+    plan_and_execute = next(
+        node
+        for node in _walk_nodes(ast["root"])
+        if node.get("type") == "plan_and_execute"
+    )
+    body = plan_and_execute["config"]["body"]
+    serialized_body = str(body)
+
+    assert "research-lane-router" not in serialized_body
+    assert "current_step.lane" not in serialized_body
+    assert body["children"][0]["type"] == "agent"
+    assert body["children"][0]["id"] == "researcher"
+    assert body["children"][1]["id"] == "reflector"
+
+
+def test_corpus_only_contract_replaces_generic_web_planner_prompt() -> None:
+    ast = build_web_research_workflow(
+        intent="OfficeQA Treasury fiscal calendar compute answer",
+        design_brief=_contract_brief(),
+        assets=_corpus_assets(),
+    )
+
+    plan_execute = next(node for node in _walk_nodes(ast["root"]) if node["id"] == "plan-and-execute")
+    planner = plan_execute["config"]["planner"]
+    system_prompt = planner["system_prompt"]
+    user_prompt = planner["user_prompt_template"]
+
+    assert "Databricks corpus research workflow" in system_prompt
+    assert "Web search" not in system_prompt
+    assert "Public information" not in system_prompt
+    assert "Search the public web" not in system_prompt
+    assert "Databricks corpus evidence plan" in user_prompt
+    assert "vector_search" in user_prompt
+    assert "table_read" in user_prompt
+    assert "compute" in user_prompt
+    assert "official documents" not in user_prompt
+
+
+def test_corpus_only_contract_does_not_invent_no_web_policy() -> None:
+    ast = build_web_research_workflow(
+        intent="OfficeQA Treasury fiscal calendar compute answer",
+        design_brief=_contract_brief_without_forbidden_web(),
+        assets=_corpus_assets(),
+    )
+
+    text = str(ast)
+
+    assert "Forbidden tool kinds" not in text
+    assert "Prompt-forbidden web rule" not in text
+    assert "do not fall back to public web evidence" not in text
+    assert "Do not create URL, browser, or outside-source" not in text
+    assert "Plan evidence steps against the named Databricks resources only" not in text
 
 
 def test_is_corpus_only_assets_corpus_only_true() -> None:
@@ -511,7 +698,7 @@ def test_tool_plan_bindings_exact_node_match_returns_bound() -> None:
     plan = ToolPlan(
         tools=[
             ToolDeclarationSpec(name="vector_search", kind="vector_search"),
-            ToolDeclarationSpec(name="delta_read", kind="delta_read"),
+            ToolDeclarationSpec(name="table_read", kind="table_read"),
         ],
         bindings=[
             ToolBindingSpec(
@@ -557,7 +744,7 @@ def test_tool_plan_bindings_no_binding_match_falls_back_to_declared_corpus_tools
     plan = ToolPlan(
         tools=[
             ToolDeclarationSpec(name="vector_search", kind="vector_search"),
-            ToolDeclarationSpec(name="delta_read", kind="delta_read"),
+            ToolDeclarationSpec(name="table_read", kind="table_read"),
         ],
         bindings=[
             ToolBindingSpec(node_id="lane_1-researcher", tool_names=["vector_search"]),
@@ -570,7 +757,7 @@ def test_tool_plan_bindings_no_binding_match_falls_back_to_declared_corpus_tools
         researcher=True,
     )
     # Fallback picks declared evidence tools, not the web-flavored default.
-    assert result == ["vector_search", "delta_read"]
+    assert result == ["vector_search", "table_read"]
 
 
 def test_tool_plan_bindings_web_only_workflow_fallback() -> None:

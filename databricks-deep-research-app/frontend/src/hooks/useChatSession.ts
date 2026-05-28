@@ -20,6 +20,7 @@ import {
   normalizeValidationErrors,
   normalizeWorkflowAst,
 } from '@/lib/workflowAst'
+import { applyBootstrapAgentName } from '@/lib/agentNaming'
 import type {
   ChatMessage,
   DesignerAsset,
@@ -275,7 +276,10 @@ export function useChatSession(opts?: {
         })
 
         for await (const event of stream) {
-          processEvent(event, dispatch, baseHash, { autoApplyInitialWorkflow })
+          processEvent(event, dispatch, baseHash, {
+            autoApplyInitialWorkflow,
+            bootstrapPrompt: text,
+          })
         }
       } catch (err: unknown) {
         if (err instanceof Error && err.name === 'AbortError') {
@@ -370,7 +374,7 @@ function processEvent(
   event: DesignerSSEEvent,
   dispatch: React.Dispatch<ChatAction>,
   baseHash: string,
-  options: { autoApplyInitialWorkflow?: boolean } = {},
+  options: { autoApplyInitialWorkflow?: boolean; bootstrapPrompt?: string } = {},
 ): void {
   switch (event.type) {
     case 'message':
@@ -391,7 +395,11 @@ function processEvent(
     }
 
     case 'mutation_proposed': {
-      const newAst = normalizeWorkflowAst(event.new_ast)
+      const rawNewAst = normalizeWorkflowAst(event.new_ast)
+      const newAst =
+        options.autoApplyInitialWorkflow === true && options.bootstrapPrompt
+          ? applyBootstrapAgentName(rawNewAst, options.bootstrapPrompt)
+          : rawNewAst
       const validationErrors = normalizeValidationErrors(event.validation_errors)
       const mutationKind = event.tool_name ?? 'mutation'
       if (
@@ -427,6 +435,7 @@ function processEvent(
         role: 'tool',
         content: JSON.stringify(event.result),
         tool_call_id: event.tool_call_id,
+        tool_name: event.tool_name,
       }
       dispatch({ type: 'ADD_TOOL_RESULT', message: toolResultMsg })
       break

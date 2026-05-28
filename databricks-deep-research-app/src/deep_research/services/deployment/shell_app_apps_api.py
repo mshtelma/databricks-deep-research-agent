@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import os
 import tempfile
 import time
 import zipfile
@@ -50,6 +51,7 @@ _PROBE_TIMEOUT_SEC: float = 300.0  # 5 minutes
 _APP_NAME_PREFIX = "dr-shell-"
 _APP_NAME_MAX_LENGTH = 30
 _BRAVE_SECRET_RESOURCE_NAME = "brave-api-key"
+_SQL_WAREHOUSE_RESOURCE_NAME = "text-table-sql-warehouse"
 # OBO scopes granted to deployed shell apps. Must include both vector-search
 # scopes — endpoints-only is insufficient because the SDK calls query_index
 # against the index path, not the endpoint. Keep in sync with the bundle
@@ -91,7 +93,10 @@ class ShellAppRuntimeBindings:
     requires_web_search: bool
     brave_secret_scope: str | None
     brave_secret_key: str | None
+    requires_sql_warehouse: bool = False
+    storage_warehouse_id: str | None = None
     brave_secret_resource_name: str = _BRAVE_SECRET_RESOURCE_NAME
+    sql_warehouse_resource_name: str = _SQL_WAREHOUSE_RESOURCE_NAME
 
 
 def _fallback_app_name(deployment_id: str) -> str:
@@ -130,19 +135,35 @@ def _resolve_runtime_bindings(
     """Resolve runtime resource/env bindings from artifact metadata + config."""
     metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
     requires_web_search = _metadata_bool(metadata, "requires_web_search")
+    requires_sql_warehouse = _metadata_bool(metadata, "requires_sql_warehouse")
     scope = config.get("brave_secret_scope") or settings.deploy_here_brave_secret_scope
     key = config.get("brave_secret_key") or settings.deploy_here_brave_secret_key
+    warehouse_id = (
+        config.get("storage_warehouse_id")
+        or getattr(settings, "storage_warehouse_id", None)
+        or os.environ.get("STORAGE_WAREHOUSE_ID")
+        or os.environ.get("TABLE_TOOLS_WAREHOUSE_ID")
+    )
     raw_resource_name = metadata.get("brave_secret_resource_name")
     resource_name = (
         raw_resource_name
         if isinstance(raw_resource_name, str)
         else _BRAVE_SECRET_RESOURCE_NAME
     )
+    raw_sql_resource_name = metadata.get("sql_warehouse_resource_name")
+    sql_resource_name = (
+        raw_sql_resource_name
+        if isinstance(raw_sql_resource_name, str)
+        else _SQL_WAREHOUSE_RESOURCE_NAME
+    )
     return ShellAppRuntimeBindings(
         requires_web_search=requires_web_search,
         brave_secret_scope=str(scope).strip() if scope else None,
         brave_secret_key=str(key).strip() if key else None,
+        requires_sql_warehouse=requires_sql_warehouse,
+        storage_warehouse_id=str(warehouse_id).strip() if warehouse_id else None,
         brave_secret_resource_name=resource_name,
+        sql_warehouse_resource_name=sql_resource_name,
     )
 
 
@@ -247,19 +268,47 @@ async def _deploy_via_apps_api(
                     "requires_web_search": True,
                 },
             )
+        if (
+            runtime_bindings.requires_sql_warehouse
+            and not runtime_bindings.storage_warehouse_id
+        ):
+            return DeploymentResult(
+                success=False,
+                error_message=(
+                    "Shell app workflow uses text-table tools but no SQL "
+                    "Warehouse id is configured. Set STORAGE_WAREHOUSE_ID, "
+                    "TABLE_TOOLS_WAREHOUSE_ID, or storage_warehouse_id."
+                ),
+                external_resource_ids={
+                    "error_kind": "validation_failed",
+                    "requires_sql_warehouse": True,
+                },
+            )
+        runtime_env_vars = [
+            "MLFLOW_ENABLED",
+            "MLFLOW_TRACKING_URI",
+            "SHELL_APP_SSE_HEARTBEAT_SECONDS",
+        ]
+        runtime_resource_names: list[str] = []
+        if runtime_bindings.requires_web_search:
+            runtime_env_vars.append("BRAVE_API_KEY")
+            runtime_resource_names.append(runtime_bindings.brave_secret_resource_name)
+        if runtime_bindings.requires_sql_warehouse:
+            runtime_env_vars.append("STORAGE_WAREHOUSE_ID")
+            runtime_resource_names.append(runtime_bindings.sql_warehouse_resource_name)
         logger.info(
             "DEPLOY_HERE_RUNTIME_BINDINGS deployment=%s requires_web_search=%s "
-            "env_vars=%s resource_names=%s brave_secret_scope_configured=%s "
-            "brave_secret_key_configured=%s",
+            "requires_sql_warehouse=%s env_vars=%s resource_names=%s "
+            "brave_secret_scope_configured=%s brave_secret_key_configured=%s "
+            "storage_warehouse_id_configured=%s",
             deployment.id,
             runtime_bindings.requires_web_search,
-            ["MLFLOW_TRACKING_URI"]
-            + (["BRAVE_API_KEY"] if runtime_bindings.requires_web_search else []),
-            [runtime_bindings.brave_secret_resource_name]
-            if runtime_bindings.requires_web_search
-            else [],
+            runtime_bindings.requires_sql_warehouse,
+            runtime_env_vars,
+            runtime_resource_names,
             bool(runtime_bindings.brave_secret_scope),
             bool(runtime_bindings.brave_secret_key),
+            bool(runtime_bindings.storage_warehouse_id),
         )
         if settings.deploy_here_framework_tag_preflight:
             git_tag: str = config.get("framework_git_tag", "")
@@ -610,23 +659,39 @@ async def _create_or_update_app(
         AppResource,
         AppResourceSecret,
         AppResourceSecretSecretPermission,
+        AppResourceSqlWarehouse,
+        AppResourceSqlWarehouseSqlWarehousePermission,
         EnvVar,
     )
 
     def _app_resources() -> list[Any] | None:
-        if not runtime_bindings.requires_web_search:
-            return None
-        return [
-            AppResource(
-                name=runtime_bindings.brave_secret_resource_name,
-                description="Brave Search API key for web_search tools",
-                secret=AppResourceSecret(
-                    scope=runtime_bindings.brave_secret_scope or "",
-                    key=runtime_bindings.brave_secret_key or "",
-                    permission=AppResourceSecretSecretPermission.READ,
-                ),
+        resources: list[Any] = []
+        if runtime_bindings.requires_web_search:
+            resources.append(
+                AppResource(
+                    name=runtime_bindings.brave_secret_resource_name,
+                    description="Brave Search API key for web_search tools",
+                    secret=AppResourceSecret(
+                        scope=runtime_bindings.brave_secret_scope or "",
+                        key=runtime_bindings.brave_secret_key or "",
+                        permission=AppResourceSecretSecretPermission.READ,
+                    ),
+                )
             )
-        ]
+        if runtime_bindings.requires_sql_warehouse:
+            resources.append(
+                AppResource(
+                    name=runtime_bindings.sql_warehouse_resource_name,
+                    description="SQL Warehouse for text-table tools",
+                    sql_warehouse=AppResourceSqlWarehouse(
+                        id=runtime_bindings.storage_warehouse_id or "",
+                        permission=AppResourceSqlWarehouseSqlWarehousePermission.CAN_USE,
+                    ),
+                )
+            )
+        if not resources:
+            return None
+        return resources
 
     def _app_definition() -> Any:
         return App(
@@ -636,12 +701,23 @@ async def _create_or_update_app(
         )
 
     def _deployment_env_vars() -> list[Any]:
-        env_vars = [EnvVar(name="MLFLOW_TRACKING_URI", value="databricks")]
+        env_vars = [
+            EnvVar(name="MLFLOW_ENABLED", value="false"),
+            EnvVar(name="MLFLOW_TRACKING_URI", value="databricks"),
+            EnvVar(name="SHELL_APP_SSE_HEARTBEAT_SECONDS", value="15"),
+        ]
         if runtime_bindings.requires_web_search:
             env_vars.append(
                 EnvVar(
                     name="BRAVE_API_KEY",
                     value_from=runtime_bindings.brave_secret_resource_name,
+                )
+            )
+        if runtime_bindings.requires_sql_warehouse:
+            env_vars.append(
+                EnvVar(
+                    name="STORAGE_WAREHOUSE_ID",
+                    value=runtime_bindings.storage_warehouse_id or "",
                 )
             )
         return env_vars

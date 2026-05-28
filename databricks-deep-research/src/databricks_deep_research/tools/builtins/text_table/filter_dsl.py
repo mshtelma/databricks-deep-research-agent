@@ -32,8 +32,7 @@ aliased to ``FlatTableFilter`` so the Pydantic discriminator rejects them.
 from __future__ import annotations
 
 import os
-from typing import Any, Union
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 from pydantic import BaseModel, Field
 
@@ -104,7 +103,7 @@ class AndFilter(BaseModel):
     from SQL which rejects empty AND).
     """
 
-    and_: list["TableFilter"] = Field(
+    and_: list[TableFilter] = Field(
         alias="and",
         min_length=0,
         description="Sub-filters combined with AND. Empty → TRUE. Compiler enforces max 64 leaves total.",
@@ -120,7 +119,7 @@ class OrFilter(BaseModel):
     from SQL which rejects empty OR).
     """
 
-    or_: list["TableFilter"] = Field(
+    or_: list[TableFilter] = Field(
         alias="or",
         min_length=0,
         description="Sub-filters combined with OR. Empty → FALSE. Compiler enforces max 64 leaves total.",
@@ -132,7 +131,7 @@ class OrFilter(BaseModel):
 class NotFilter(BaseModel):
     """Logical NOT of a single sub-filter."""
 
-    not_: "TableFilter" = Field(
+    not_: TableFilter = Field(
         alias="not",
         description="Sub-filter to negate.",
     )
@@ -147,14 +146,14 @@ class NotFilter(BaseModel):
 _RECURSIVE_ENABLED = os.environ.get("AGENT_DESIGNER_TABLE_FILTER_RECURSIVE", "1") != "0"
 
 # TableFilter is always the full union for static type checking.
-TableFilter: TypeAlias = Union[FlatTableFilter, AndFilter, OrFilter, NotFilter]
+TableFilter: TypeAlias = FlatTableFilter | AndFilter | OrFilter | NotFilter
 
 # At runtime, when the rollback flag is set, the Pydantic models are rebuilt
 # with only FlatTableFilter in the namespace, so the "TableFilter" forward
 # reference inside AndFilter / OrFilter / NotFilter resolves to FlatTableFilter
 # only — causing Pydantic to reject recursive variants at validation time.
 _runtime_table_filter: object = (
-    Union[FlatTableFilter, AndFilter, OrFilter, NotFilter]
+    FlatTableFilter | AndFilter | OrFilter | NotFilter
     if _RECURSIVE_ENABLED
     else FlatTableFilter
 )

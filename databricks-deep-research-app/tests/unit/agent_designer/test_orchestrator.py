@@ -40,6 +40,7 @@ from deep_research.agent_designer.orchestrator import (
     RequestTooLargeError,
     ToolCallEvent,
     ToolResultEvent,
+    _mutation_event_for_ast_change,
 )
 from deep_research.agent_designer.workflow_builder import build_web_research_workflow
 
@@ -164,6 +165,60 @@ def test_research_workflow_scaffold_has_no_finance_specific_defaults() -> None:
     ]
     for term in forbidden_defaults:
         assert term not in serialized
+
+
+def test_mutation_event_normalizes_researcher_prompt_contract() -> None:
+    raw_ast = {
+        "root": {
+            "id": "lane-researcher",
+            "type": "agent",
+            "label": "Corpus Lane",
+            "config": {
+                "subtype": "researcher",
+                "model_tier": "analytical",
+                "tools": ["table_search", "table_read"],
+                "user_prompt_template": (
+                    "## Investigation Brief\n\n"
+                    "You are investigating: **{query}**\n\n"
+                    "### Sub-questions\n"
+                    "1. Which corpus records address the request?\n"
+                    "2. What exact text evidence supports the answer?\n"
+                    "3. What structured rows support numeric claims?\n"
+                    "4. What calculations are needed?\n"
+                    "5. What evidence gaps remain?\n\n"
+                    "### Required output structure\n"
+                    "- **Evidence-backed findings**: source-backed facts.\n"
+                    "- **Coverage and conflicts**: agreements, disagreements, and gaps.\n"
+                    "- **Unsupported items**: unavailable or weakly supported claims.\n\n"
+                    "### Definition of done\n"
+                    "Mark missing evidence as \"Data unavailable\" -- DO NOT improvise."
+                ),
+            },
+            "children": [],
+        },
+        "tools": [
+            {"kind": "table_search", "name": "table_search", "config": {}},
+            {"kind": "table_read", "name": "table_read", "config": {}},
+        ],
+        "pools": [],
+    }
+
+    event = _mutation_event_for_ast_change(
+        tool_name="propose_workflow",
+        tool_call_id="test",
+        raw_ast=raw_ast,
+        last_ast_seen={},
+        normalization_fixes=[],
+    )
+
+    assert event is not None
+    template = event.new_ast["root"]["config"]["user_prompt_template"]
+    assert "### Search strategy" in template
+    assert "available corpus retrieval tools" in template
+    assert any(
+        fix.get("kind") == "researcher_prompt_contract"
+        for fix in event.normalization_fixes
+    )
 
 
 @_LEGACY_LOOP_SKIP
@@ -317,8 +372,8 @@ async def test_research_workflow_preserves_specific_designer_goal_in_runtime_pro
 
 def test_investment_research_workflow_compiles_domain_specific_design_brief() -> None:
     """Domain-specific design briefs (supplied by the Designer LLM) must propagate
-    through the builder into planner_guidance, synthesis_metadata, and lane router
-    children. Domain keyword matching was removed (no hardcoded domains); domain
+    through the builder into planner_guidance, synthesis_metadata, and the direct
+    plan-and-execute researcher body. Domain keyword matching was removed (no hardcoded domains); domain
     flavor now comes from an explicit ``design_brief`` argument that the LLM
     constructs when calling ``propose_workflow``.
     """
@@ -334,7 +389,7 @@ def test_investment_research_workflow_compiles_domain_specific_design_brief() ->
         domain="Investment Research",
         # Opt into the plan_and_execute topology; the assertions below pin
         # that scaffold's specific shape (planner_guidance, synthesis_metadata,
-        # lane_router). The new default is parallel_lanes, which has a
+        # direct researcher body). The new default is parallel_lanes, which has a
         # different shape — when this test is generalized to parallel_lanes
         # the assertions need to change too.
         topology="plan_and_execute",
@@ -380,22 +435,32 @@ def test_investment_research_workflow_compiles_domain_specific_design_brief() ->
     plan_and_execute = workflow["root"]["children"][1]
     guidance = plan_and_execute["config"]["planner_guidance"]
     metadata = plan_and_execute["config"]["synthesis_metadata"]
-    lane_router = plan_and_execute["config"]["body"]["children"][0]
+    researcher = plan_and_execute["config"]["body"]["children"][0]
 
     assert workflow["name"] == "Investment Research Assistant"
     assert workflow["root"]["label"] == "Investment Research Pipeline"
     assert plan_and_execute["label"] == "Plan & Execute Investment Research"
     assert plan_and_execute["config"]["max_iterations"] >= 6
     assert metadata["designer_domain"] == "Investment Research"
-    assert "`lane` field" in guidance
+    assert "`lane` field" not in guidance
+    assert "Do not emit prompt-only routing fields" in guidance
     assert "lane_1" in metadata["designer_lane_ids"]
-    assert lane_router["type"] == "conditional"
-    assert lane_router["label"] == "Investment Research Lane Router"
-    lane_labels = [child["label"] for child in lane_router["children"]]
-    assert any("financial performance" in label.casefold() for label in lane_labels)
-    assert any("valuation" in label.casefold() for label in lane_labels)
-    assert any("earnings" in label.casefold() for label in lane_labels)
-    assert any("competitors" in label.casefold() for label in lane_labels)
+    assert researcher["type"] == "agent"
+    assert researcher["label"] == "Investment Research Researcher"
+    assert researcher["config"]["subtype"] == "researcher"
+    assert all(
+        child["type"] != "conditional"
+        for child in plan_and_execute["config"]["body"]["children"]
+    )
+    researcher_prompt = (
+        researcher["config"]["system_prompt"]
+        + "\n"
+        + researcher["config"]["user_prompt_template"]
+    ).casefold()
+    assert "financial performance" in researcher_prompt
+    assert "valuation" in researcher_prompt
+    assert "earnings" in researcher_prompt
+    assert "competitors" in researcher_prompt
     for required in [
         "financial performance",
         "valuation",

@@ -1,12 +1,14 @@
 """Database session management with Lakebase OAuth support."""
 
 import asyncio
+import hashlib
 import logging
 from collections.abc import AsyncGenerator
 from typing import Annotated
 
 import sqlalchemy.exc
 from fastapi import Depends, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -80,6 +82,62 @@ def _is_db_auth_error(exc: BaseException) -> bool:
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+def log_lakebase_auth_failure_diagnostics(exc: BaseException) -> None:
+    """Emit provider-specific, redacted context for Lakebase auth failures."""
+    if _credential_provider is None:
+        logger.warning(
+            "LAKEBASE_DB_AUTH_FAILURE_DIAGNOSTIC provider_exists=False "
+            "exc_class=%s error_fingerprint=%s",
+            type(exc).__name__,
+            _error_fingerprint(exc),
+        )
+        return
+
+    diagnostics_logger = getattr(
+        _credential_provider,
+        "log_auth_failure_diagnostics",
+        None,
+    )
+    if callable(diagnostics_logger):
+        try:
+            diagnostics_logger(exc)
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("LAKEBASE_DB_AUTH_FAILURE_DIAGNOSTIC_FAILED")
+
+    logger.warning(
+        "LAKEBASE_DB_AUTH_FAILURE_DIAGNOSTIC backend=%s credential_exists=%s "
+        "exc_class=%s error_fingerprint=%s",
+        _credential_provider.get_backend_type(),
+        _credential_provider.current_credential is not None,
+        type(exc).__name__,
+        _error_fingerprint(exc),
+    )
+
+
+def _error_fingerprint(exc: BaseException) -> str:
+    message = str(exc)
+    digest = hashlib.sha256(message.encode("utf-8")).hexdigest()[:12]
+    return f"sha256={digest}:len={len(message)}"
+
+
+def _redact_db_identity(value: object | None) -> str | None:
+    if value is None:
+        return None
+    rendered = str(value)
+    digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:12]
+    if "@" in rendered:
+        kind = "email"
+    elif len(rendered) == 36 and rendered.count("-") == 4:
+        kind = "uuid"
+    elif rendered.isdigit():
+        kind = "numeric"
+    else:
+        kind = "other"
+    return f"kind={kind}:sha256={digest}:len={len(rendered)}"
+
 
 # Module-level state
 _engine: AsyncEngine | None = None
@@ -302,6 +360,40 @@ async def refresh_engine_credentials() -> None:
     # Engine will be recreated on next request
 
 
+async def log_lakebase_connection_self_test(settings: Settings | None = None) -> None:
+    """Run a non-fatal Lakebase connection probe and log redacted identity context."""
+    if settings is None:
+        settings = get_settings()
+    if not settings.use_lakebase:
+        return
+
+    try:
+        session_maker = get_session_maker(settings)
+        async with session_maker() as session:
+            result = await session.execute(
+                text(
+                    "SELECT current_user AS current_user, "
+                    "current_database() AS database, current_schema() AS schema"
+                )
+            )
+            row = result.mappings().one()
+        logger.info(
+            "LAKEBASE_SELF_TEST_OK current_user=%s database=%s schema=%s",
+            _redact_db_identity(row["current_user"]),
+            row["database"],
+            row["schema"],
+        )
+    except Exception as exc:  # noqa: BLE001 - diagnostic must not block startup
+        auth_error = _is_db_auth_error(exc)
+        if auth_error:
+            log_lakebase_auth_failure_diagnostics(exc)
+        logger.warning(
+            "LAKEBASE_SELF_TEST_FAILED exc_class=%s auth_error=%s",
+            type(exc).__name__,
+            auth_error,
+        )
+
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency for database session with auto-refresh on auth failure.
 
@@ -336,9 +428,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             # Snapshot pending writes BEFORE the commit attempt; a failed
             # commit puts the session into an aborted state where these
             # collections are unreliable.
-            had_pending_writes = (
-                bool(session.new) or bool(session.dirty) or bool(session.deleted)
-            )
+            had_pending_writes = bool(session.new) or bool(session.dirty) or bool(session.deleted)
             try:
                 await session.commit()
             except Exception as commit_err:
@@ -370,27 +460,22 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
                 await session.rollback()
             except Exception as rollback_err:
                 if not _is_stale_connection_error(rollback_err):
-                    logger.warning(
-                        "DB_ROLLBACK_FAILED: %s", str(rollback_err)[:200]
-                    )
+                    logger.warning("DB_ROLLBACK_FAILED: %s", str(rollback_err)[:200])
             # Check if this is an auth error that might be fixed by credential refresh.
             # Lakebase may reject a token before our local expiry threshold says
             # it is stale, so match the actual asyncpg/Postgres auth messages.
             if _is_db_auth_error(e):
+                log_lakebase_auth_failure_diagnostics(e)
                 logger.warning(
-                    "Database auth failed; refreshing Lakebase credentials. "
-                    "exc_class=%s error=%s",
+                    "Database auth failed; refreshing Lakebase credentials. exc_class=%s",
                     type(e).__name__,
-                    str(e)[:300],
                 )
                 await refresh_engine_credentials()
             # Stale-connection on the yield itself (extremely rare) is still
             # not useful to propagate — the request already finished on the
             # caller side; turning it into a 500 helps no one.
             if _is_stale_connection_error(e):
-                logger.warning(
-                    "DB_YIELD_STALE_CONNECTION: %s", str(e)[:200]
-                )
+                logger.warning("DB_YIELD_STALE_CONNECTION: %s", str(e)[:200])
                 return
             raise
         finally:
@@ -403,9 +488,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
                         str(close_err)[:200],
                     )
                 else:
-                    logger.warning(
-                        "DB_CLOSE_FAILED: %s", str(close_err)[:200]
-                    )
+                    logger.warning("DB_CLOSE_FAILED: %s", str(close_err)[:200])
 
 
 # Type alias for dependency injection

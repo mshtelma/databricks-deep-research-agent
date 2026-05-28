@@ -71,6 +71,12 @@ _RUNTIME_TEMPLATE_KEYS: frozenset[str] = frozenset(
         "steps_completed",
         "steps_executed",
         "total_steps",
+        # Per-agent runtime tool catalog block, materialized save-time and
+        # injected by ``harness._build_input`` from
+        # ``config.extras["_framework_tool_catalog"]``. Treated as a
+        # runtime-supplied template variable so Designer-authored lane prompts
+        # may reference ``{tool_catalog}`` without being coerced to ``{query}``.
+        "tool_catalog",
     }
 )
 
@@ -214,8 +220,14 @@ def materialize_agent_config(config: dict[str, Any]) -> dict[str, Any]:
         str(next_config.get("system_prompt", ""))
     ) | renderer.extract_variables(str(next_config.get("user_prompt_template", "")))
     input_keys = list(next_config.get("input_keys") or [])
+    # Variables that the harness supplies directly (NOT from state.input_keys).
+    # ``tool_catalog`` is read from ``config.extras["_framework_tool_catalog"]``
+    # by harness._build_input and injected into template_vars; including it in
+    # input_keys would pollute AGENT_CONTEXT logs and yield a confusing
+    # state-lookup miss for a value that never lives in state.
+    _harness_supplied_vars = {"query", "tool_catalog"}
     for key in sorted(prompt_vars):
-        if key != "query" and key not in input_keys:
+        if key not in _harness_supplied_vars and key not in input_keys:
             input_keys.append(key)
     if "query" in prompt_vars and "query" not in input_keys:
         input_keys.insert(0, "query")
@@ -335,6 +347,7 @@ def make_plan_and_execute(
     max_replan_cycles: int = 3,
     planner_guidance: str = "",
     synthesis_metadata: dict[str, str] | None = None,
+    required_tool_kind_groups: list[list[str]] | None = None,
 ) -> dict[str, Any]:
     """Build a plan-and-execute WorkflowNode."""
     config: dict[str, Any] = {
@@ -347,6 +360,8 @@ def make_plan_and_execute(
         "max_replan_cycles": max_replan_cycles,
         "synthesis_metadata": synthesis_metadata or {},
     }
+    if required_tool_kind_groups:
+        config["required_tool_kind_groups"] = required_tool_kind_groups
     if evaluator is not None:
         config["evaluator"] = materialize_agent_config(evaluator)
     if planner_guidance:
@@ -579,7 +594,15 @@ _WEB_TOOL_KINDS: frozenset[str] = frozenset(
     {"web_search", "web_crawl", "web_research"}
 )
 _CORPUS_TOOL_KINDS: frozenset[str] = frozenset(
-    {"vector_search", "delta_read", "delta_grep", "delta_table_read"}
+    {
+        "vector_search",
+        "table_discovery",
+        "table_search",
+        "table_read",
+        "table_neighbors",
+        "table_load",
+        "table_aggregate",
+    }
 )
 
 
@@ -654,11 +677,12 @@ def _is_corpus_only_assets(
 
 
 _CORPUS_RETRIEVAL_STRATEGY_BLOCK = (
-    "### Retrieval strategy (Databricks corpus only)\n"
+    "### Retrieval strategy (Databricks corpus resources)\n"
     "- Use vector_search on the selected index FIRST to find candidate\n"
-    "  chunk_ids; then read text or table_json by chunk_id via the Delta\n"
-    "  tools (delta_read / delta_grep / delta_table_read).\n"
-    "- Cite by (file_name, page_info, chunk_id). Do NOT cite URLs.\n"
+    "  chunk_ids; then search, read, inspect neighbors, or load rows via\n"
+    "  the table_* tools.\n"
+    "- Cite by corpus identifiers such as file_name, page_info, chunk_id,\n"
+    "  row id, or table id when available.\n"
     "- Run numeric aggregations through the compute tool (pandas/numpy) —\n"
     "  never narrate sums or ratios from prose.\n"
     "- Mark any unresolved sub-question \"Data unavailable\" rather than\n"
@@ -920,6 +944,123 @@ def _designer_goal_block(
     )
 
 
+def _workflow_contract_core_block(
+    design_brief: WorkflowDesignBrief | None,
+) -> str:
+    """Compact contract section that survives generic-prompt detectors.
+
+    The semantic validator strips ``## Designer Goal`` before checking
+    synthesizer specialization. Contract terms therefore need to live in the
+    prompt core, before that appendix.
+    """
+
+    if design_brief is None or design_brief.tool_contract is None:
+        return ""
+    contract = design_brief.tool_contract
+    obligations = contract.prompt_obligations
+    lines = [
+        "",
+        "",
+        "## Workflow-Specific Evidence Contract",
+        "",
+        f"Evidence policy: {contract.evidence_policy}.",
+    ]
+    if obligations.required_terms:
+        lines.append(
+            "Required prompt terms: "
+            + ", ".join(obligations.required_terms[:12])
+            + "."
+        )
+    if contract.ready_tool_kinds:
+        lines.append(
+            "Allowed ready tool kinds: "
+            + ", ".join(contract.ready_tool_kinds[:12])
+            + "."
+        )
+    if obligations.forbidden_tool_kinds:
+        lines.append(
+            "Forbidden tool kinds: "
+            + ", ".join(obligations.forbidden_tool_kinds[:8])
+            + "."
+        )
+    if contract.resources:
+        lines.append("Grounded resources:")
+        for resource in contract.resources[:6]:
+            parts = [f"{resource.kind}:{resource.identity}"]
+            if resource.domain_terms:
+                parts.append("terms=" + ", ".join(resource.domain_terms[:6]))
+            if resource.role_description:
+                parts.append(resource.role_description)
+            lines.append("- " + "; ".join(parts))
+    if obligations.planner_obligations:
+        lines.append("Planner obligations:")
+        lines.extend(f"- {item}" for item in obligations.planner_obligations[:6])
+    if obligations.synthesis_obligations:
+        lines.append("Synthesis obligations:")
+        lines.extend(f"- {item}" for item in obligations.synthesis_obligations[:6])
+    if set(obligations.forbidden_tool_kinds) & _WEB_TOOL_KINDS:
+        lines.append(
+            "Prompt-forbidden web rule: use the named Databricks resources "
+            "and do not fall back to public web evidence."
+        )
+    return "\n".join(lines)
+
+
+def _required_tool_kind_groups(
+    design_brief: WorkflowDesignBrief | None,
+) -> list[list[str]]:
+    """Return runtime completion gates derived from the resolved tool contract.
+
+    The groups are AND-of-OR: every group must be observed, while any tool kind
+    inside one group satisfies that group. This keeps multiple table bindings
+    flexible without letting vector-only evidence complete a table workflow.
+    """
+    if design_brief is None or design_brief.tool_contract is None:
+        return []
+    capabilities = {
+        str(capability).strip()
+        for capability in design_brief.tool_contract.required_capabilities
+        if str(capability).strip()
+    }
+    if not capabilities:
+        return []
+
+    groups: list[list[str]] = []
+    table_kinds = {"table_search", "table_read", "table_load"}
+    if "vector_search" in capabilities:
+        groups.append(["vector_search"])
+    if capabilities & table_kinds:
+        groups.append(["table_search", "table_read", "table_load"])
+    if "compute" in capabilities:
+        groups.append(["compute"])
+
+    grouped = table_kinds | {"vector_search", "compute"}
+    for capability in sorted(capabilities - grouped):
+        groups.append([capability])
+    return groups
+
+
+def _contract_evidence_policy(design_brief: WorkflowDesignBrief | None) -> str:
+    if design_brief is None:
+        return ""
+    contract = getattr(design_brief, "tool_contract", None)
+    if isinstance(contract, dict):
+        value = contract.get("evidence_policy")
+    else:
+        value = getattr(contract, "evidence_policy", None)
+    return str(value or "")
+
+
+def _is_corpus_only_design(
+    design_brief: WorkflowDesignBrief | None,
+    assets: list[dict[str, Any]] | None,
+) -> bool:
+    if _contract_evidence_policy(design_brief) == "corpus_only":
+        return True
+    tool_plan = getattr(design_brief, "tool_plan", None) if design_brief else None
+    return _evidence_mode(assets, tool_plan) == "corpus_only"
+
+
 def _with_designer_goal(
     system_prompt: str,
     intent: str,
@@ -928,7 +1069,135 @@ def _with_designer_goal(
     design_brief: WorkflowDesignBrief | None = None,
 ) -> str:
     """Append the Designer goal to a built-in system prompt."""
-    return f"{system_prompt}{_designer_goal_block(intent, role=role, design_brief=design_brief)}"
+    return (
+        f"{system_prompt}"
+        f"{_workflow_contract_core_block(design_brief)}"
+        f"{_designer_goal_block(intent, role=role, design_brief=design_brief)}"
+    )
+
+
+_CORPUS_ONLY_PLANNER_SYSTEM_PROMPT = """You are the Planner agent for a Databricks corpus research workflow. Your role is to create structured plans that use the named corpus resources and declared tool catalog.
+
+## Evidence Policy
+
+- Treat the Workflow-Specific Evidence Contract and design brief as binding.
+- Do not create steps that require tool kinds absent from the declared tool catalog.
+- Research steps must use Databricks corpus retrieval, table inspection/read/search, vector lookup, or compute when the contract requires evidence.
+- Analysis steps reason over observations already gathered from the corpus.
+
+## Step Types
+
+- **research**: Steps requiring corpus source retrieval or compute.
+  - Set `needs_search: true` for these steps.
+  - Include `source_hints` when a step needs specific corpus tool kinds.
+
+- **analysis**: Steps requiring reasoning without new source retrieval.
+  - Set `needs_search: false`.
+  - Use these for comparison, arithmetic interpretation, and final checks.
+
+## Available Research Tools
+
+The downstream researchers will execute the steps you produce. They have
+access to the following tool kinds; keep step descriptions and source_hints
+consistent with what these tools can actually do:
+
+{tool_catalog}
+
+## Planning Guidelines
+
+- Be specific and actionable in each step.
+- Query vector resources before exact table/chunk reads when both are available.
+- Use table/read/load tools for exact cited evidence and compute tools for arithmetic.
+- Do not mark `has_enough_context: true` until required corpus evidence has been gathered.
+- Preserve completed steps during replanning and add only the remaining work.
+
+## Per-Step USER Prompt Authoring
+
+Every research step MUST include a `user_prompt_template` string. The template
+must restate `{{query}}`, include exactly 5 concrete sub-questions, exactly 3
+required output sections, a "Search strategy" block that names corpus retrieval
+operations, and a definition of done that marks unknowns "Data unavailable"
+rather than improvising.
+"""
+
+
+_CORPUS_ONLY_PLANNER_USER_PROMPT_TEMPLATE = """Create a Databricks corpus evidence plan for the following:
+
+## Query
+{query}
+
+## Research Depth Guidance
+Target: {min_steps} to {max_steps} research steps
+{step_prompt_guidance}
+
+## Background Investigation
+{background}
+
+## Uploaded File Contents
+{file_context}
+
+## Completed Steps (PRESERVED AUTOMATICALLY)
+{completed_steps}
+
+## Previous Observations (from completed steps)
+{all_observations}
+
+## Reflector Feedback (if replanning)
+{reflector_feedback}
+
+## Current Iteration
+{iteration}
+
+## Output Schema
+{{
+  "id": "unique-plan-id",
+  "title": "Research plan title",
+  "thought": "Your reasoning for the corpus evidence plan",
+  "has_enough_context": boolean,
+  "steps": [
+    {{
+      "id": "step-1",
+      "title": "Brief step title",
+      "description": "Detailed corpus evidence instructions for this step",
+      "step_type": "research" | "analysis",
+      "needs_search": boolean,
+      "source_hints": ["vector_search", "table_read", "compute"],
+      "user_prompt_template": "## Investigation Brief\\n\\nYou are investigating: **{{query}}**\\n\\n### Sub-questions you MUST address (in this order)\\n1. <concrete question 1 referencing the corpus/resource terms>?\\n2. <concrete question 2 requiring cited corpus evidence>?\\n3. <concrete question 3 requiring exact rows/chunks>?\\n4. <concrete question 4 requiring compute if arithmetic is needed>?\\n5. <concrete question 5 checking fiscal/calendar or other obligations>?\\n\\n### Required output structure (your `findings` field MUST contain these sections)\\n- **Evidence summary**: Cite corpus records with file/page/chunk/table identifiers.\\n- **Computation or reasoning**: Show calculations or comparison logic grounded in observations.\\n- **Unknowns and caveats**: Mark missing evidence Data unavailable.\\n\\n### Search strategy\\n- Start with vector_search or table_search against the named Databricks resources.\\n- Use table_read/table_load/table_neighbors for exact supporting rows or chunks.\\n- Use compute for sums, ratios, or numeric checks.\\n\\n### Definition of done\\nEach sub-question has a concrete corpus-backed answer, OR is marked \\"Data unavailable\\" — DO NOT improvise."
+    }}
+  ]
+}}
+
+The `user_prompt_template` field is REQUIRED for every research step. Adapt
+the sub-questions, output sections, and source_hints to THIS step's corpus
+evidence focus. Respond with only valid JSON."""
+
+
+def _planner_prompts_for_design(
+    planner_system: str,
+    *,
+    intent: str,
+    design_brief: WorkflowDesignBrief,
+    assets: list[dict[str, Any]] | None,
+) -> tuple[str, str | None]:
+    if not _is_corpus_only_design(design_brief, assets):
+        return (
+            _with_designer_goal(
+                planner_system,
+                intent,
+                role="planner",
+                design_brief=design_brief,
+            ),
+            None,
+        )
+    return (
+        _with_designer_goal(
+            _CORPUS_ONLY_PLANNER_SYSTEM_PROMPT,
+            intent,
+            role="planner",
+            design_brief=design_brief,
+        ),
+        _CORPUS_ONLY_PLANNER_USER_PROMPT_TEMPLATE,
+    )
 
 
 def _designer_planner_guidance(
@@ -947,15 +1216,27 @@ def _designer_planner_guidance(
             f"- {spec['id']}: {spec['description']}" for spec in lane_specs
         )
         lane_section = (
-            "\n\nPlanner lane contract:\n"
-            "Every step object MUST include a `lane` field. Use exactly one of "
-            "the lane ids below so the workflow routes the step to the matching "
-            "domain researcher branch. Use `cross_lane` only for final comparison, "
-            "thesis, or synthesis steps that span multiple lanes.\n"
+            "\n\nPlanner workstream coverage:\n"
+            "Cover the workstreams below through step titles, descriptions, "
+            "source_hints, and per-step user_prompt_template instructions. "
+            "Do not emit prompt-only routing fields such as `lane`; "
+            "plan_and_execute uses one direct researcher body unless an explicit "
+            "typed output_schema discriminator is declared.\n"
             f"{lane_lines}"
         )
     else:
         lane_section = ""
+    contract_section = ""
+    if _contract_evidence_policy(design_brief) == "corpus_only":
+        contract_section = (
+            "\n\nCorpus planner contract:\n"
+            "- Plan evidence steps against the named Databricks resources and "
+            "declared tool catalog.\n"
+            "- Do not create steps that require tool kinds absent from the "
+            "declared catalog.\n"
+            "- Include corpus retrieval before synthesis and compute steps when "
+            "numeric obligations are present."
+        )
     return (
         "Designer task: "
         f"{goal}\n"
@@ -966,6 +1247,7 @@ def _designer_planner_guidance(
         "designed task."
         f"{brief_section}"
         f"{lane_section}"
+        f"{contract_section}"
     )
 
 
@@ -1427,10 +1709,9 @@ def build_web_research_workflow(
       cross-lane fallback. The right shape for multi-aspect research.
 
     * ``plan_and_execute`` — coordinator → plan_and_execute (planner +
-      router-over-lanes + reflector loop, with evaluator + replan) →
-      synthesizer. Preserved verbatim for back-compat with existing saved
-      agents and for the rare case that genuinely needs reflection-driven
-      re-planning.
+      direct researcher + reflector loop, with evaluator + replan) →
+      synthesizer. Use this only for workflows that genuinely need
+      reflection-driven re-planning.
 
     * ``single_agent`` — coordinator → one specialized agent. Right for
       short factual questions.
@@ -1525,9 +1806,11 @@ def _build_plan_and_execute_workflow(
 ) -> dict[str, Any]:
     """Plan-and-execute topology.
 
-    Preserves the planner/router/evaluator shape for workflows that need
+    Uses a planner/direct-researcher/evaluator shape for workflows that need
     sequential decomposition, while applying the same evidence contract and
-    grounding defaults as the parallel topology.
+    grounding defaults as the parallel topology. Static research lanes are not
+    routed through conditionals here; independent lanes belong in the
+    ``parallel_lanes`` topology.
     """
     domain_label = _workflow_domain_label(compiled_brief)
     max_iterations = _workflow_iteration_limit(compiled_brief)
@@ -1537,6 +1820,12 @@ def _build_plan_and_execute_workflow(
     reflector_system, _ = _default_prompts("reflector")
     synthesizer_system, _ = _default_prompts("synthesizer")
     synthesizer_system = _designer_synthesizer_system_prompt(synthesizer_system)
+    planner_system_prompt, planner_user_prompt = _planner_prompts_for_design(
+        planner_system,
+        intent=intent,
+        design_brief=compiled_brief,
+        assets=assets,
+    )
     designer_goal = _bounded_intent(intent)
     lane_specs = _lane_specs(
         compiled_brief, intent=intent, assets=assets, ambiguity_axes=ambiguity_axes
@@ -1574,66 +1863,41 @@ def _build_plan_and_execute_workflow(
         role="researcher",
         design_brief=compiled_brief,
     )
-    lane_researchers = [
-        make_agent_node(
-            node_id=f"{spec['id']}-researcher",
-            label=spec["label"],
-            subtype="researcher",
-            input_keys=["query", "current_step", "research_plan"],
-            output_key="findings",
-            model_tier="analytical",
-            output_format="json",
-            tools=_tool_plan_bindings(
-                compiled_brief,
-                node_id=f"{spec['id']}-researcher",
-                default=default_researcher_tools,
-                researcher=True,
-            ),
-            pool_writes=[
-                {"pool": "observations", "extract": "findings"},
-                {"pool": "sources", "extract": "sources"},
-            ],
-            max_tool_calls=8,
-            extra_config=_lane_extra_config(
-                system_prompt=_assemble_lane_system_prompt(
-                    base_researcher_prompt=base_researcher_prompt,
-                    spec=spec,
-                ),
-                spec=spec,
-            ),
-        )
+    body_focus = "\n".join(f"- {spec['description']}" for spec in lane_specs)
+    body_template = "\n\n".join(
+        (spec.get("user_prompt_template") or spec["description"]).strip()
         for spec in lane_specs
-    ]
-    cross_lane_spec = {
-        "id": "cross_lane",
-        "label": f"{domain_label} Cross-Lane Researcher",
-        "description": (
-            "Cross-lane evidence gathering for steps that compare, reconcile, "
-            "or synthesize multiple workstreams."
-        ),
-        "system_prompt": _fallback_lane_system_prompt(
-            lane_id="cross_lane",
-            lane_description=(
-                "Cross-lane evidence gathering for steps that compare, reconcile, "
-                "or synthesize multiple workstreams."
-            ),
-            intent=intent,
-            design_brief=compiled_brief,
-        ),
-        "user_prompt_template": _fallback_lane_user_prompt_template(
-            lane_description=(
-                "Cross-lane evidence gathering for steps that compare, reconcile, "
-                "or synthesize multiple workstreams."
-            ),
+    )
+    body_user_prompt = _with_lane_user_prompt_contract(
+        description=body_focus,
+        designer_template=body_template,
+        assets=assets,
+        tool_plan=compiled_brief.tool_plan,
+        intent=intent,
+        design_brief=compiled_brief,
+        ambiguity_axes=ambiguity_axes,
+    )
+    if not body_user_prompt:
+        body_user_prompt = _fallback_lane_user_prompt_template(
+            lane_description=body_focus,
             intent=intent,
             design_brief=compiled_brief,
             assets=assets,
             tool_plan=compiled_brief.tool_plan,
+        )
+    body_research_spec = {
+        "id": "adaptive_research",
+        "label": f"{domain_label} Researcher",
+        "description": (
+            "Adaptive evidence gathering for each planner step. Cover these "
+            f"workstreams as the current step requires:\n{body_focus}"
         ),
+        "system_prompt": "",
+        "user_prompt_template": body_user_prompt,
     }
-    fallback_researcher = make_agent_node(
-        node_id="cross-lane-researcher",
-        label=f"{domain_label} Cross-Lane Researcher",
+    researcher = make_agent_node(
+        node_id="researcher",
+        label=f"{domain_label} Researcher",
         subtype="researcher",
         input_keys=["query", "current_step", "research_plan"],
         output_key="findings",
@@ -1641,7 +1905,7 @@ def _build_plan_and_execute_workflow(
         output_format="json",
         tools=_tool_plan_bindings(
             compiled_brief,
-            node_id="cross-lane-researcher",
+            node_id="researcher",
             default=default_researcher_tools,
             researcher=True,
         ),
@@ -1653,25 +1917,10 @@ def _build_plan_and_execute_workflow(
         extra_config=_lane_extra_config(
             system_prompt=_assemble_lane_system_prompt(
                 base_researcher_prompt=base_researcher_prompt,
-                spec=cross_lane_spec,
+                spec=body_research_spec,
             ),
-            spec=cross_lane_spec,
+            spec=body_research_spec,
         ),
-    )
-    lane_router = make_conditional(
-        node_id="research-lane-router",
-        label=f"{domain_label} Lane Router",
-        conditions=[
-            {
-                "type": "state",
-                "key": "current_step.lane",
-                "operator": "eq",
-                "value": spec["id"],
-            }
-            for spec in lane_specs
-        ],
-        default_branch=len(lane_researchers),
-        children=[*lane_researchers, fallback_researcher],
     )
     reflector = make_agent_node(
         node_id="reflector",
@@ -1697,7 +1946,7 @@ def _build_plan_and_execute_workflow(
     body = make_sequence(
         node_id="research-body",
         label=f"{domain_label} Research Body",
-        children=[lane_router, reflector],
+        children=[researcher, reflector],
     )
     plan_and_execute = make_plan_and_execute(
         node_id="plan-and-execute",
@@ -1708,11 +1957,11 @@ def _build_plan_and_execute_workflow(
             "input_keys": ["query", "coordination"],
             "output_key": "research_plan",
             "output_format": "json",
-            "system_prompt": _with_designer_goal(
-                planner_system,
-                intent,
-                role="planner",
-                design_brief=compiled_brief,
+            "system_prompt": planner_system_prompt,
+            **(
+                {"user_prompt_template": planner_user_prompt}
+                if planner_user_prompt
+                else {}
             ),
         },
         body=body,
@@ -1739,6 +1988,7 @@ def _build_plan_and_execute_workflow(
         max_iterations=max_iterations,
         max_replan_cycles=3,
         planner_guidance=_designer_planner_guidance(intent, compiled_brief),
+        required_tool_kind_groups=_required_tool_kind_groups(compiled_brief),
         synthesis_metadata={
             "research_depth": "medium",
             "min_words": "400",
@@ -1803,6 +2053,7 @@ def _build_plan_and_execute_workflow(
             children=[coordinator, plan_and_execute, synthesizer],
         ),
     }
+    _inject_tool_catalogs_into_workflow(workflow)
     validate_generated_workflow(workflow)
     return workflow
 
@@ -2012,6 +2263,11 @@ def _grounded_synthesizer_output_schema(
             "required_outputs": list(compiled_brief.required_outputs),
             "quality_gates": list(compiled_brief.quality_gates),
             "constraints": list(compiled_brief.constraints),
+            "resolved_tool_contract": (
+                compiled_brief.tool_contract.model_dump(mode="json")
+                if compiled_brief.tool_contract is not None
+                else None
+            ),
         },
         # Stage 4 (NLI verification) tiers — cost-aware defaults safe for
         # shell-app deployments. Override per-workflow if richer evaluation
@@ -2310,6 +2566,7 @@ def _build_parallel_lanes_workflow(
             ],
         ),
     }
+    _inject_tool_catalogs_into_workflow(workflow)
     validate_generated_workflow(workflow)
     return workflow
 
@@ -2413,6 +2670,7 @@ def _build_single_agent_workflow(
             children=[coordinator, agent_node],
         ),
     }
+    _inject_tool_catalogs_into_workflow(workflow)
     validate_generated_workflow(workflow)
     return workflow
 
@@ -2451,8 +2709,39 @@ def build_direct_workflow(intent: str, name: str) -> dict[str, Any]:
         "token_budget": 0,
         "timeout_seconds": 1800,
     }
+    _inject_tool_catalogs_into_workflow(workflow)
     validate_generated_workflow(workflow)
     return workflow
+
+
+_CATALOG_INJECT_SUBTYPES: frozenset[str] = frozenset({"researcher", "planner"})
+
+
+def _inject_tool_catalogs_into_workflow(workflow: dict[str, Any]) -> None:
+    """Materialize per-agent tool-catalog blocks into a generated workflow.
+
+    Walks every agent node in ``workflow["root"]`` (recursively, including the
+    ``planner``/``evaluator``/``body`` of a ``plan_and_execute`` node) and,
+    for researcher and planner agents that have one or more bound tools,
+    renders the tool catalog text by mapping bound tool NAMES to declared
+    ``ToolDeclaration`` records and delegating to
+    :class:`CatalogService`.
+
+    The rendered text is stashed in ``config.extras`` under the reserved
+    ``_framework_`` prefix so the harness can inject it into the agent's
+    ``{tool_catalog}`` template variable at run time without re-running the
+    Designer LLM. We also persist the renderer registry version so the
+    runtime can detect drift and re-render against the live factory metadata
+    when the constant has been bumped.
+
+    No-op when the workflow declares no tools, or when no qualifying agent
+    has any bound tools — defensive so legacy briefs (pre-catalog) round-trip
+    without crashing. Failures during a single node's render are isolated:
+    we log and continue rather than fail the whole workflow build.
+    """
+    from deep_research.agent_designer.catalog_service import CatalogService
+
+    CatalogService().materialize_inplace(workflow)
 
 
 def validate_generated_workflow(workflow: dict[str, Any]) -> None:

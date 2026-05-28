@@ -207,6 +207,16 @@ _JINJA_FILES: tuple[tuple[str, str], ...] = (
 # in the high 16 bits.
 _EXEC_ENTRIES: frozenset[str] = frozenset({"entrypoint.sh"})
 _BRAVE_SECRET_RESOURCE_NAME = "brave-api-key"
+_SQL_WAREHOUSE_RESOURCE_NAME = "text-table-sql-warehouse"
+_SQL_WAREHOUSE_TOOL_KINDS: frozenset[str] = frozenset(
+    {
+        "table_search",
+        "table_read",
+        "table_neighbors",
+        "table_load",
+        "table_aggregate",
+    }
+)
 
 
 def _zip_mode_bits(dst: str) -> int:
@@ -250,6 +260,14 @@ def _definition_uses_web_search(definition: dict[str, Any]) -> bool:
     return _walk(definition)
 
 
+def _definition_requires_sql_warehouse(definition: dict[str, Any]) -> bool:
+    """Return True when declared tools need text-table SQL execution."""
+    for tool in definition.get("tools", []) or []:
+        if isinstance(tool, dict) and tool.get("kind") in _SQL_WAREHOUSE_TOOL_KINDS:
+            return True
+    return False
+
+
 def _resolve_brave_secret_config(
     config: dict[str, Any],
     *,
@@ -278,6 +296,23 @@ def _resolve_brave_secret_config(
         str(scope).strip() if scope else None,
         str(key).strip() if key else None,
     )
+
+
+def _resolve_storage_warehouse_id(config: dict[str, Any]) -> str | None:
+    """Resolve the SQL Warehouse id used by generated shell-app table tools."""
+    value = (
+        config.get("storage_warehouse_id")
+        or os.environ.get("STORAGE_WAREHOUSE_ID")
+        or os.environ.get("TABLE_TOOLS_WAREHOUSE_ID")
+    )
+    if not value:
+        try:
+            from deep_research.core.config import get_settings  # noqa: PLC0415
+
+            value = get_settings().storage_warehouse_id
+        except Exception:  # noqa: BLE001 - settings can be unavailable in tests
+            value = None
+    return str(value).strip() if value else None
 
 
 def _preview(value: Any, *, max_length: int = 200) -> str:
@@ -410,6 +445,8 @@ class ShellAppExporter:
         # is the top-level tool list; each entry has a 'kind' string field.
         definition = revision.definition or {}
         uses_web_search = _definition_uses_web_search(definition)
+        requires_sql_warehouse = _definition_requires_sql_warehouse(definition)
+        storage_warehouse_id = _resolve_storage_warehouse_id(config)
         for tool in definition.get("tools", []) or []:
             if isinstance(tool, dict) and tool.get("kind") == "custom":
                 errors.append(
@@ -440,6 +477,20 @@ class ShellAppExporter:
                     )
                 )
 
+        if requires_sql_warehouse and not storage_warehouse_id:
+            errors.append(
+                ValidationError(
+                    message=(
+                        "Shell-app workflows using table_search/table_read/"
+                        "table_neighbors/table_load/table_aggregate require "
+                        "a SQL Warehouse id. Set storage_warehouse_id in the "
+                        "deployment config, STORAGE_WAREHOUSE_ID, or "
+                        "TABLE_TOOLS_WAREHOUSE_ID."
+                    ),
+                    path="config.storage_warehouse_id",
+                )
+            )
+
         return ValidationResult(valid=not errors, errors=errors)
 
     async def translate(
@@ -464,10 +515,12 @@ class ShellAppExporter:
         target: str = config.get("target", "dev")
         definition = revision.definition or {}
         uses_web_search = _definition_uses_web_search(definition)
+        requires_sql_warehouse = _definition_requires_sql_warehouse(definition)
         brave_secret_scope, brave_secret_key = _resolve_brave_secret_config(
             config,
             include_defaults=uses_web_search,
         )
+        storage_warehouse_id = _resolve_storage_warehouse_id(config)
 
         framework_wheel_filename, framework_wheel_bytes = _resolve_framework_wheel()
         framework_wheel_version = _parse_framework_wheel_version(
@@ -493,15 +546,21 @@ class ShellAppExporter:
             "brave_secret_scope": brave_secret_scope,
             "brave_secret_key": brave_secret_key,
             "brave_secret_resource_name": _BRAVE_SECRET_RESOURCE_NAME,
+            "requires_sql_warehouse": requires_sql_warehouse,
+            "storage_warehouse_id": storage_warehouse_id,
+            "sql_warehouse_resource_name": _SQL_WAREHOUSE_RESOURCE_NAME,
         }
 
         logger.info(
             "SHELL_APP_TRANSLATE_RUNTIME_REQUIREMENTS app_name=%s requires_web_search=%s "
-            "brave_secret_scope_configured=%s brave_secret_key_configured=%s",
+            "brave_secret_scope_configured=%s brave_secret_key_configured=%s "
+            "requires_sql_warehouse=%s storage_warehouse_id_configured=%s",
             app_name,
             uses_web_search,
             bool(brave_secret_scope),
             bool(brave_secret_key),
+            requires_sql_warehouse,
+            bool(storage_warehouse_id),
         )
         planner_guidance = _first_planner_guidance(definition)
         logger.info(
@@ -559,6 +618,9 @@ class ShellAppExporter:
                 "brave_secret_resource_name": _BRAVE_SECRET_RESOURCE_NAME,
                 "brave_secret_scope_configured": str(bool(brave_secret_scope)).lower(),
                 "brave_secret_key_configured": str(bool(brave_secret_key)).lower(),
+                "requires_sql_warehouse": str(requires_sql_warehouse).lower(),
+                "sql_warehouse_resource_name": _SQL_WAREHOUSE_RESOURCE_NAME,
+                "storage_warehouse_id_configured": str(bool(storage_warehouse_id)).lower(),
                 "sha256": digest,
                 "size_bytes": str(len(payload)),
             },

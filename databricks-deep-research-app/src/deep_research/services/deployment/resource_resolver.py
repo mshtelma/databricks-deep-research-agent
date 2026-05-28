@@ -40,13 +40,15 @@ _NO_RESOURCE_KINDS: frozenset[str] = frozenset(
 )
 
 # Tool kinds that resolve to a SQL warehouse (the kind config carries
-# ``warehouse_id``). SQL-analytics paths (delta_read, table_read, compute*).
+# ``warehouse_id``). SQL-analytics paths include table_* and compute* tools.
 _SQL_WAREHOUSE_KINDS: frozenset[str] = frozenset(
     {
-        "delta_read",
-        "delta_grep",
-        "delta_table_read",
+        "table_discovery",
+        "table_search",
         "table_read",
+        "table_neighbors",
+        "table_load",
+        "table_aggregate",
         "compute",
         "compute_namespace",
     }

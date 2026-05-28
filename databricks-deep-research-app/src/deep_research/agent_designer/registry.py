@@ -172,6 +172,12 @@ SOURCE_KINDS: list[dict[str, str]] = [
         "source_type": "delta_table",
         "icon": "table",
     },
+    {
+        "kind": "sql_warehouse",
+        "label": "SQL Warehouse",
+        "source_type": "sql_warehouse",
+        "icon": "warehouse",
+    },
 ]
 
 
@@ -229,53 +235,87 @@ _DELTA_COMMON_PROPERTIES: dict[str, Any] = {
     },
 }
 
-_DELTA_READ_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": dict(_DELTA_COMMON_PROPERTIES),
-    "required": ["table_name", "warehouse_id"],
+_TABLE_BINDING_COMMON: dict[str, Any] = {
+    "table_name": {
+        "type": "string",
+        "title": "Delta Table",
+        "description": "Three-part Unity Catalog table name (catalog.schema.table).",
+        "x-widget": "resource-select",
+        "x-source-kind": "delta_table",
+        "x-value-field": "full_name",
+        "x-label-field": "name",
+        "x-allow-manual": True,
+    },
+    "warehouse_id": {
+        "type": "string",
+        "title": "SQL Warehouse",
+        "description": "Databricks SQL warehouse used to execute table queries.",
+        "x-widget": "resource-select",
+        "x-source-kind": "sql_warehouse",
+        "x-value-field": "warehouse_id",
+        "x-label-field": "name",
+        "x-allow-manual": True,
+    },
+    "as_var": {
+        "type": "string",
+        "title": "Bind As",
+        "description": "Optional binding alias used in compute and prompts.",
+    },
 }
 
-_DELTA_GREP_SCHEMA: dict[str, Any] = {
+_TABLE_DISCOVERY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        **_DELTA_COMMON_PROPERTIES,
-        "date_column": {
+        "name_pattern": {
             "type": "string",
-            "title": "Date Column",
-            "description": "Optional YYYY-MM/DD-like publication date column for year/month filters.",
+            "title": "Name Pattern",
+            "description": "Optional substring filter for table names returned by discovery.",
+        },
+        "max_results": {
+            "type": "integer",
+            "title": "Max Results",
+            "description": "Maximum tables to return per discovery call.",
+            "minimum": 1,
+            "default": 50,
         },
     },
+}
+
+_TABLE_SEARCH_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": dict(_TABLE_BINDING_COMMON),
     "required": ["table_name", "warehouse_id"],
 }
 
-_DELTA_TABLE_READ_SCHEMA: dict[str, Any] = {
+_TABLE_READ_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": dict(_TABLE_BINDING_COMMON),
+    "required": ["table_name", "warehouse_id"],
+}
+
+_TABLE_NEIGHBORS_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": dict(_TABLE_BINDING_COMMON),
+    "required": ["table_name", "warehouse_id"],
+}
+
+_TABLE_LOAD_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
-        **_DELTA_COMMON_PROPERTIES,
-        "pk_column": {
-            "type": "string",
-            "title": "Primary Key Column",
-            "description": "Column used for exact row lookup.",
-            "default": "chunk_id",
-        },
-        "store_in_compute": {
-            "type": "string",
-            "title": "Compute Variable",
-            "description": "Optional variable name for parsed JSON/table injection into compute.",
-        },
+        **_TABLE_BINDING_COMMON,
         "compute_tool_name": {
             "type": "string",
             "title": "Compute Tool Name",
-            "description": "Sibling compute tool used when store_in_compute is set.",
+            "description": "Sibling compute tool whose namespace receives the loaded table.",
             "default": "compute",
         },
-        "structural_analysis": {
-            "type": "boolean",
-            "title": "Structural Analysis",
-            "description": "Return table structure and force numeric extraction through compute.",
-            "default": False,
-        },
     },
+    "required": ["table_name", "warehouse_id"],
+}
+
+_TABLE_AGGREGATE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": dict(_TABLE_BINDING_COMMON),
     "required": ["table_name", "warehouse_id"],
 }
 
@@ -322,24 +362,6 @@ _COMPUTE_NAMESPACE_SCHEMA: dict[str, Any] = {
             "description": "Sibling compute tool whose namespace should be inspected.",
             "default": "compute",
         }
-    },
-}
-
-_TABLE_READ_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "store_in_compute": {
-            "type": "string",
-            "title": "Compute Variable",
-            "description": "Variable name for a table loaded from the runtime table registry.",
-            "default": "web_table",
-        },
-        "compute_tool_name": {
-            "type": "string",
-            "title": "Compute Tool Name",
-            "description": "Sibling compute tool used when store_in_compute is set.",
-            "default": "compute",
-        },
     },
 }
 
@@ -462,31 +484,40 @@ _TOOL_KIND_META: dict[str, dict[str, Any]] = {
     },
     "compute": {"layer": "C", "config_schema": _COMPUTE_SCHEMA},
     "compute_namespace": {"layer": "C", "config_schema": _COMPUTE_NAMESPACE_SCHEMA},
-    "delta_read": {
+    "table_discovery": {
+        "layer": "B",
+        "config_schema": _TABLE_DISCOVERY_SCHEMA,
+    },
+    "table_search": {
         "layer": "B",
         "discoverable": True,
         "discovery_path": "delta_tables",
-        "config_schema": _DELTA_READ_SCHEMA,
+        "config_schema": _TABLE_SEARCH_SCHEMA,
     },
-    "delta_grep": {
+    "table_read": {
         "layer": "B",
         "discoverable": True,
         "discovery_path": "delta_tables",
-        "config_schema": _DELTA_GREP_SCHEMA,
+        "config_schema": _TABLE_READ_SCHEMA,
     },
-    "delta_context": {
+    "table_neighbors": {
         "layer": "B",
         "discoverable": True,
         "discovery_path": "delta_tables",
-        "config_schema": _DELTA_READ_SCHEMA,
+        "config_schema": _TABLE_NEIGHBORS_SCHEMA,
     },
-    "delta_table_read": {
+    "table_load": {
         "layer": "B",
         "discoverable": True,
         "discovery_path": "delta_tables",
-        "config_schema": _DELTA_TABLE_READ_SCHEMA,
+        "config_schema": _TABLE_LOAD_SCHEMA,
     },
-    "table_read": {"layer": "B", "config_schema": _TABLE_READ_SCHEMA},
+    "table_aggregate": {
+        "layer": "B",
+        "discoverable": True,
+        "discovery_path": "delta_tables",
+        "config_schema": _TABLE_AGGREGATE_SCHEMA,
+    },
     "custom": {"layer": "D", "config_schema": _EMPTY_SCHEMA},
 }
 

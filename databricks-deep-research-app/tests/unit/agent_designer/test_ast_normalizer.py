@@ -1061,6 +1061,48 @@ class TestCombinedDefects:
         _, fixes = normalize_ast(ast)
         assert fixes == []
 
+    def test_corpus_researcher_prompt_repair_uses_corpus_strategy(self) -> None:
+        ast = _make_ast(
+            subtype="researcher",
+            model_tier="analytical",
+            tools=["vector_search", "table_search", "table_read"],
+            max_tool_calls=10,
+            declared_tools=[
+                {"kind": "vector_search", "name": "vector_search", "config": {}},
+                {"kind": "table_search", "name": "table_search", "config": {}},
+                {"kind": "table_read", "name": "table_read", "config": {}},
+            ],
+        )
+        ast["root"]["config"]["system_prompt"] = "Specialized corpus prompt. " * 20
+        ast["root"]["config"]["user_prompt_template"] = (
+            "## Investigation Brief\n\n"
+            "You are investigating: **{query}**\n\n"
+            "### Sub-questions\n"
+            "1. Which corpus records address the request?\n"
+            "2. What exact text evidence supports the answer?\n"
+            "3. What structured rows support numeric claims?\n"
+            "4. What calculations are needed?\n"
+            "5. What evidence gaps remain?\n\n"
+            "### Required output structure\n"
+            "- **Evidence-backed findings**: source-backed facts.\n"
+            "- **Coverage and conflicts**: agreements, disagreements, and gaps.\n"
+            "- **Unsupported items**: unavailable or weakly supported claims.\n\n"
+            "### Definition of done\n"
+            "Mark missing evidence as \"Data unavailable\" -- DO NOT improvise."
+        )
+
+        new, fixes = normalize_ast(ast)
+
+        template = new["root"]["config"]["user_prompt_template"]
+        assert "### Search strategy" in template
+        assert "available corpus retrieval tools" in template
+        assert "vector_search" in template
+        assert "table_read" in template
+        assert "web_research" not in template
+        assert "Crawl or retrieve source text" not in template
+        assert _quality_advice(new) == []
+        assert "researcher_prompt_contract" in _fixes_by_kind(fixes)
+
     def test_non_dict_input_returns_empty(self) -> None:
         new, fixes = normalize_ast("not a dict")  # type: ignore[arg-type]
         assert new == "not a dict"

@@ -4,6 +4,7 @@ from __future__ import annotations
 from deep_research.agent_designer.semantic_validation import (
     detect_generic_reflector_prompt,
     detect_generic_synthesizer_prompt,
+    detect_tool_contract_violations,
     detect_unspecialized_fallback_researcher,
 )
 
@@ -130,10 +131,127 @@ def test_specialized_synthesizer_passes() -> None:
     assert errors == [], f"Expected no errors, got {errors}"
 
 
+def test_contract_terms_are_preferred_for_synthesizer_specialization() -> None:
+    ast = {
+        "description": (
+            "Build a workflow covering unrelated valuation, dividends, "
+            "balance sheet, and growth drivers."
+        ),
+        "required_prompt_terms": ["officeqa", "treasury", "calendar", "compute"],
+        "resolved_tool_contract_summary": {
+            "schema": "resolved_tool_contract.v1",
+            "available": True,
+            "evidence_policy": "corpus_only",
+            "required_terms": ["officeqa", "treasury", "calendar", "compute"],
+        },
+        "root": {
+            "type": "agent",
+            "config": {
+                "subtype": "synthesizer",
+                "system_prompt": (
+                    "Use officeqa treasury evidence and preserve calendar "
+                    "compute distinctions."
+                ),
+                "user_prompt_template": "Write the final corpus-grounded answer.",
+            },
+        },
+    }
+
+    errors = detect_generic_synthesizer_prompt(ast)
+
+    assert errors == [], f"Expected contract terms to pass, got {errors}"
+
+
+def test_corpus_only_contract_rejects_forbidden_web_tools() -> None:
+    ast = {
+        "resolved_tool_contract_summary": {
+            "schema": "resolved_tool_contract.v1",
+            "available": True,
+            "evidence_policy": "corpus_only",
+            "ready_tool_kinds": ["vector_search"],
+            "forbidden_tool_kinds": ["web_search", "web_crawl", "web_research"],
+        },
+        "tools": [
+            {"name": "search_corpus", "kind": "vector_search", "config": {}},
+            {"name": "search_web", "kind": "web_search", "config": {}},
+        ],
+        "root": {
+            "type": "agent",
+            "config": {
+                "subtype": "researcher",
+                "tools": ["search_corpus", "search_web"],
+            },
+        },
+    }
+
+    errors = detect_tool_contract_violations(ast)
+
+    assert any(error.kind == "tool_contract" for error in errors)
+    assert any("forbids public web tools" in error.message for error in errors)
+
+
+def test_corpus_only_contract_without_forbidden_policy_allows_web_tools() -> None:
+    ast = {
+        "resolved_tool_contract_summary": {
+            "schema": "resolved_tool_contract.v1",
+            "available": True,
+            "evidence_policy": "corpus_only",
+            "ready_tool_kinds": ["vector_search"],
+            "forbidden_tool_kinds": [],
+        },
+        "tools": [
+            {"name": "search_corpus", "kind": "vector_search", "config": {}},
+            {"name": "search_web", "kind": "web_search", "config": {}},
+        ],
+        "root": {
+            "type": "agent",
+            "config": {
+                "subtype": "researcher",
+                "tools": ["search_corpus", "search_web"],
+            },
+        },
+    }
+
+    errors = detect_tool_contract_violations(ast)
+
+    assert not any(
+        "forbids public web tools" in error.message for error in errors
+    )
+
+
+def test_contract_ready_tool_kinds_must_be_declared_and_bound() -> None:
+    ast = {
+        "resolved_tool_contract_summary": {
+            "schema": "resolved_tool_contract.v1",
+            "available": True,
+            "evidence_policy": "corpus_only",
+            "ready_tool_kinds": ["vector_search", "table_read", "compute"],
+            "forbidden_tool_kinds": ["web_search", "web_crawl", "web_research"],
+        },
+        "tools": [
+            {"name": "search_corpus", "kind": "vector_search", "config": {}},
+            {"name": "compute_numbers", "kind": "compute", "config": {}},
+        ],
+        "root": {
+            "type": "agent",
+            "config": {
+                "subtype": "researcher",
+                "tools": ["search_corpus"],
+            },
+        },
+    }
+
+    errors = detect_tool_contract_violations(ast)
+
+    assert any("not declared" in error.message for error in errors)
+    assert any("not node-bound" in error.message for error in errors)
+
+
 def test_empty_ast_does_not_crash() -> None:
     for detector in (
         detect_generic_synthesizer_prompt,
         detect_generic_reflector_prompt,
+        detect_tool_contract_violations,
         detect_unspecialized_fallback_researcher,
     ):
         assert detector({}) == []

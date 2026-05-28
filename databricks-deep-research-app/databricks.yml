@@ -74,6 +74,22 @@ variables:
     description: "Lakebase Postgres database resource path (resolved during deploy)"
     default: "pending"
 
+  # SQL Warehouse used by the framework's text-table tools
+  # (table_search / table_read / table_neighbors / table_load /
+  # table_aggregate). Resolved at deploy time by `preflight.py
+  # resolve_warehouse_id_or_fail` and injected via `--var` from the
+  # Makefile. Defaulting to the literal "pending" sentinel keeps
+  # `bundle summary` / `bundle validate` working without an --var
+  # override; preflight asserts the sentinel never reaches `bundle
+  # deploy`. Without this var, the deployed app's
+  # `workflow_runner_factory` silently leaves `schema_cache` /
+  # `sql_executor` unset and any workflow that declares a table_*
+  # tool fails mid-stream as a misleading
+  # "missing declared tools" WorkflowError.
+  storage_warehouse_id:
+    description: "SQL Warehouse ID for text-table tools (resolved during deploy)"
+    default: "pending"
+
   # Lakebase Autoscaling Configuration
   pg_version:
     description: "PostgreSQL version for Autoscaling projects"
@@ -164,6 +180,12 @@ resources:
             value: ${var.endpoint_name}
           - name: PGHOST
             value: ${var.pghost}
+
+          # SQL Warehouse — used by the text-table tools
+          # (workflow_runner_factory wires schema_cache + sql_executor
+          # only when this is set).
+          - name: STORAGE_WAREHOUSE_ID
+            value: ${var.storage_warehouse_id}
 
           # Brave Search (references 'brave-api-key' resource binding)
           - name: BRAVE_API_KEY

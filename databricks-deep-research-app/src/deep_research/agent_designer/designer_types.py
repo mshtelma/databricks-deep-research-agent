@@ -40,6 +40,12 @@ _MAX_LANE_USER_PROMPT_TEMPLATE_LENGTH = 4000
 #   for short factual questions where the multi-lane scaffold is overkill.
 TopologyKind = Literal["parallel_lanes", "plan_and_execute", "single_agent"]
 GroundingKind = Literal["reclaim", "none", "classical_lite"]
+EvidencePolicy = Literal[
+    "corpus_only",
+    "corpus_plus_web",
+    "web_only",
+    "structured_only",
+]
 
 
 class LaneSpec(BaseModel):
@@ -64,6 +70,30 @@ class LaneSpec(BaseModel):
     # compatibility, but designer-generated workflows treat it as a quality
     # defect so the LLM must author use-case-specific prompts.
     user_prompt_template: str = ""
+    # Save-time materialized tool catalog block — the rendered prompt
+    # fragment that lists each tool kind's affordances (summary, input
+    # shape, output shape, optional probe sample). Persisted alongside the
+    # prompts so the runtime can reproduce the exact text the Designer LLM
+    # saw when shaping its plan. Empty when the lane has no tools or when
+    # the brief predates catalog auto-injection.
+    tool_catalog_text: str = ""
+    # Plan-aligned field name. Kept alongside tool_catalog_text for
+    # backward compatibility with in-flight briefs and UI payloads.
+    tool_catalog_prose: str | None = None
+    tool_catalog_decls_hash: str | None = None
+    # Renderer registry version stamped at materialization time. The
+    # runtime compares this against the live REGISTRY_VERSION; on mismatch
+    # it re-renders from the current factory metadata so prompt-block
+    # upgrades roll forward without requiring a full Designer regeneration.
+    tool_catalog_registry_version: str = ""
+    tool_catalog_user_edited: bool = False
+    tool_catalog_render_error: str | None = None
+    injection_enabled: bool = True
+    # Tool kinds (e.g. ["vector_search", "table_search"]) that contributed
+    # cards to ``tool_catalog_text``. Stored for diagnostics and for the
+    # UI to render a chip list; the renderer itself derives kinds from the
+    # tool declarations at run time, so this is informational only.
+    tool_catalog_kinds: list[str] = Field(default_factory=list)
 
     @field_validator("description", mode="before")
     @classmethod
@@ -85,6 +115,38 @@ class LaneSpec(BaseModel):
         if value is None:
             return ""
         return str(value)
+
+    @field_validator("tool_catalog_text", mode="before")
+    @classmethod
+    def _stringify_tool_catalog_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    @field_validator("tool_catalog_prose", "tool_catalog_decls_hash", "tool_catalog_render_error", mode="before")
+    @classmethod
+    def _stringify_optional_tool_catalog_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        return str(value)
+
+    @field_validator("tool_catalog_registry_version", mode="before")
+    @classmethod
+    def _stringify_tool_catalog_registry_version(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    @field_validator("tool_catalog_kinds", mode="before")
+    @classmethod
+    def _coerce_tool_catalog_kinds(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [
+            str(item).strip()
+            for item in value
+            if isinstance(item, str) and item.strip()
+        ]
 
 
 class ToolDeclarationSpec(BaseModel):
@@ -192,6 +254,122 @@ class ToolPlan(BaseModel):
         return str(value)
 
 
+class ResourceSemanticItem(BaseModel):
+    """Advisory LLM-extracted meaning for one already-grounded resource.
+
+    This shape is intentionally non-executable: it describes the resource's
+    role in the task and the vocabulary the workflow should preserve, but it
+    must never carry warehouse ids, SQL, credentials, endpoints, or final tool
+    declarations.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    identity: str = ""
+    role_description: str = ""
+    domain_terms: list[str] = Field(default_factory=list)
+    intended_operations: list[str] = Field(default_factory=list)
+
+    @field_validator("identity", "role_description", mode="before")
+    @classmethod
+    def _stringify_semantic_text(cls, value: Any) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+    @field_validator("domain_terms", "intended_operations", mode="before")
+    @classmethod
+    def _coerce_semantic_list(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if str(item or "").strip()]
+
+
+class ResourceSemanticExtraction(BaseModel):
+    """Structured semantic extraction from the initial user prompt.
+
+    The object is advisory and is validated against deterministic prompt
+    grounding before any field is used downstream.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    schema: Literal["resource_semantics.v1"] = "resource_semantics.v1"
+    resources: list[ResourceSemanticItem] = Field(default_factory=list)
+    answer_obligations: list[str] = Field(default_factory=list)
+    task_domain_terms: list[str] = Field(default_factory=list)
+
+    @field_validator("resources", mode="before")
+    @classmethod
+    def _coerce_resources(cls, value: Any) -> list[ResourceSemanticItem]:
+        if not isinstance(value, list):
+            return []
+        out: list[ResourceSemanticItem] = []
+        for item in value:
+            try:
+                semantic = (
+                    item
+                    if isinstance(item, ResourceSemanticItem)
+                    else ResourceSemanticItem.model_validate(item)
+                )
+            except Exception:
+                continue
+            if semantic.identity.strip():
+                out.append(semantic)
+        return out
+
+    @field_validator("answer_obligations", "task_domain_terms", mode="before")
+    @classmethod
+    def _coerce_semantic_strings(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if str(item or "").strip()]
+
+
+class ResourceContract(BaseModel):
+    """Prompt-safe downstream contract for one grounded resource."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    kind: str = ""
+    identity: str = ""
+    usage: Literal["required", "optional"] = "optional"
+    access_status: Literal["verified", "unverified", "inaccessible"] = "unverified"
+    provenance: str = ""
+    capabilities: list[str] = Field(default_factory=list)
+    role_description: str = ""
+    domain_terms: list[str] = Field(default_factory=list)
+    intended_operations: list[str] = Field(default_factory=list)
+
+
+class PromptObligationContract(BaseModel):
+    """Prompt and runtime obligations derived from grounded resources."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    required_terms: list[str] = Field(default_factory=list)
+    synthesis_obligations: list[str] = Field(default_factory=list)
+    planner_obligations: list[str] = Field(default_factory=list)
+    forbidden_tool_kinds: list[str] = Field(default_factory=list)
+
+
+class ResolvedToolContract(BaseModel):
+    """Compact non-executable contract passed from grounding to blueprint."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    schema: Literal["resolved_tool_contract.v1"] = "resolved_tool_contract.v1"
+    source: Literal["prompt_grounding"] = "prompt_grounding"
+    evidence_policy: EvidencePolicy = "web_only"
+    resources: list[ResourceContract] = Field(default_factory=list)
+    required_capabilities: list[str] = Field(default_factory=list)
+    ready_tool_kinds: list[str] = Field(default_factory=list)
+    prompt_obligations: PromptObligationContract = Field(
+        default_factory=PromptObligationContract
+    )
+    diagnostics: list[dict[str, Any]] = Field(default_factory=list)
+
+
 def _coerce_lane_item(item: Any) -> LaneSpec | None:
     """Coerce one raw research_lanes element into a LaneSpec.
 
@@ -242,6 +420,7 @@ class WorkflowDesignBrief(BaseModel):
     quality_gates: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     tool_plan: ToolPlan | None = None
+    tool_contract: ResolvedToolContract | None = None
     topology: TopologyKind = "parallel_lanes"
     grounding_mode: GroundingKind = "reclaim"
 
@@ -381,6 +560,14 @@ def _merge_lane_lists(
                 description=description,
                 system_prompt=system_prompt,
                 user_prompt_template=user_prompt_template,
+                tool_catalog_text=spec.tool_catalog_text,
+                tool_catalog_prose=spec.tool_catalog_prose,
+                tool_catalog_decls_hash=spec.tool_catalog_decls_hash,
+                tool_catalog_registry_version=spec.tool_catalog_registry_version,
+                tool_catalog_user_edited=spec.tool_catalog_user_edited,
+                tool_catalog_render_error=spec.tool_catalog_render_error,
+                injection_enabled=spec.injection_enabled,
+                tool_catalog_kinds=list(spec.tool_catalog_kinds),
             )
         )
         seen.add(key)

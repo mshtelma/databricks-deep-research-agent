@@ -800,6 +800,15 @@ async def stream_workflow_via_framework(
                 for tool in framework_tools:
                     tool_resolver.override(tool.definition.name, tool)
 
+                # Pre-execution guard — fail before LLM tokens are spent.
+                # Layer 3 of the layered tool-context validation: if a declared
+                # tool's factory cannot construct it (e.g. ``schema_cache`` is
+                # ``None`` because ``STORAGE_WAREHOUSE_ID`` was not propagated
+                # to the deployed app), raise here with the per-tool error
+                # list rather than letting the failure surface mid-stream as
+                # a misleading ``WorkflowError: missing declared tools``.
+                await tool_resolver.validate_all()
+
                 tracker = DomainContextTracker()
 
                 wf_state = WorkflowState(query=query)

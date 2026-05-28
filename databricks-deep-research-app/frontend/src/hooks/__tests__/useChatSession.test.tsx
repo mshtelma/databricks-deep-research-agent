@@ -95,6 +95,41 @@ describe('useChatSession', () => {
     expect(assistant?.content).toBe('Hello, world!')
   })
 
+  it('tool_result events preserve tool_name for UI rendering', async () => {
+    mockChatStream.mockReturnValue(
+      fakeEvents([
+        {
+          type: 'tool_result',
+          tool_name: 'prompt_grounding',
+          tool_call_id: 'prompt_grounding:init',
+          result: { schema: 'prompt_grounding.v1', mentions_count: 1 },
+        },
+        { type: 'done' },
+      ]),
+    )
+
+    const { result } = renderHook(() => useChatSession())
+
+    await act(async () => {
+      await result.current.sendMessage('Use the OfficeQA corpus')
+    })
+
+    await waitFor(() => {
+      expect(result.current.isStreaming).toBe(false)
+    })
+
+    const toolMessage = result.current.messages.find((m) => m.role === 'tool')
+    expect(toolMessage).toMatchObject({
+      role: 'tool',
+      tool_call_id: 'prompt_grounding:init',
+      tool_name: 'prompt_grounding',
+    })
+    expect(JSON.parse(toolMessage!.content)).toEqual({
+      schema: 'prompt_grounding.v1',
+      mentions_count: 1,
+    })
+  })
+
   it('mutation_proposed events queue into pendingMutations with correct shape', async () => {
     const newAst = makeAst('new')
     const oldAst = makeAst('old')
@@ -208,6 +243,44 @@ describe('useChatSession', () => {
     })
     expect(useAgentEditorStore.getState().ast?.root.label).toBe('generated')
     expect(useAgentEditorStore.getState().isDirty).toBe(true)
+  })
+
+  it('auto-applied bootstrap mutations replace prompt-like names with short prompt-derived names', async () => {
+    const draft = createDraftWorkflow()
+    const prompt =
+      'Use main OfficeQA benchmark treasury chunks vector search create deep treseaury documetns'
+    const newAst = {
+      ...makeAst('generated'),
+      name: prompt,
+    }
+    act(() => {
+      useAgentEditorStore.setState({ ast: draft, isDirty: false })
+    })
+
+    mockChatStream.mockReturnValue(
+      fakeEvents([
+        {
+          type: 'mutation_proposed',
+          tool_name: 'propose_workflow',
+          tool_call_id: 'tc-auto-name',
+          old_ast: draft,
+          new_ast: newAst,
+          validation_errors: [],
+          summary: null,
+        },
+        { type: 'done' },
+      ]),
+    )
+
+    const { result } = renderHook(() => useChatSession())
+
+    await act(async () => {
+      await result.current.sendMessage(prompt)
+    })
+
+    expect(useAgentEditorStore.getState().ast?.name).toBe(
+      'OfficeQA Treasury Documents Agent',
+    )
   })
 
   it('rejectPendingMutation removes the entry without calling setAst', async () => {

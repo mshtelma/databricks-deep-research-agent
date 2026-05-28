@@ -25,9 +25,7 @@ from databricks_deep_research.tools.builtins.text_table.filter_dsl import (
     NotFilter,
     OrFilter,
     compile_filter,
-    count_leaves,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -358,19 +356,6 @@ def test_rollback_flag_disables_recursive(monkeypatch: pytest.MonkeyPatch) -> No
     # happen if the module were imported fresh with the flag off.
     recursive_enabled = os.environ.get("AGENT_DESIGNER_TABLE_FILTER_RECURSIVE", "1") != "0"
     assert not recursive_enabled, "Flag should be 0 = disabled"
-
-    # With the flag off, the TableFilter type alias should be FlatTableFilter only.
-    # We verify by re-importing the module-level constant under the patched env.
-    import importlib
-
-    import databricks_deep_research.tools.builtins.text_table.filter_dsl as tf_module
-
-    # Re-compute the feature flag exactly as the module does.
-    patched_enabled = os.environ.get("AGENT_DESIGNER_TABLE_FILTER_RECURSIVE", "1") != "0"
-    if patched_enabled:
-        expected_union_includes_and = True
-    else:
-        expected_union_includes_and = False
 
     # The flat shape still compiles fine regardless of flag.
     flat = FlatTableFilter.model_validate({"eq": {"x": 1}})

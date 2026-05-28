@@ -26,8 +26,6 @@ from typing import Any
 
 import pytest
 import yaml
-from databricks_deep_research import WorkflowRunner
-from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from tests.complex._scaffold_run_capture import (
     _bound_tool_names,
@@ -43,6 +41,8 @@ from tests.complex._scaffold_run_capture import (
 from tests.shared import requires_databricks
 
 from deep_research.agent.adapters.llm_adapter import create_framework_llm_client
+from deep_research.agent.workflow_runner_factory import build_app_workflow_runner
+from deep_research.agent_designer.assets import resolve_default_table_warehouse_id
 from deep_research.agent_designer.discovery import DesignerDiscoveryAdapter
 from deep_research.agent_designer.llm_adapter import AppLLMAdapter
 from deep_research.agent_designer.orchestrator import (
@@ -50,6 +50,14 @@ from deep_research.agent_designer.orchestrator import (
     MutationProposedEvent,
     _quality_advice,
     _validate_ast,
+)
+from deep_research.agent_designer.prompt_grounding import (
+    ground_prompt,
+    prompt_grounding_sse_result,
+)
+from deep_research.agent_designer.tool_contract import (
+    project_resolved_tool_contract,
+    sanitized_resolved_tool_contract_summary,
 )
 from deep_research.services.discovery_service import DiscoveryService
 from deep_research.services.llm.client import LLMClient
@@ -63,6 +71,65 @@ _ENV_REF_RE = re.compile(r"^\$\{([A-Z0-9_]+)\}$")
 
 def _load_cases() -> list[dict[str, Any]]:
     return yaml.safe_load(_FIXTURE.read_text())["cases"]
+
+
+@pytest.mark.asyncio
+async def test_officeqa_scaffold_uses_prompt_only_resource_grounding() -> None:
+    cases = {case["id"]: case for case in _load_cases()}
+    case = cases["officeqa_treasury_army_1945"]
+
+    assert not case.get("assets"), (
+        "OfficeQA scaffold must name resources in the prompt instead of "
+        "supplying exact structured asset config"
+    )
+    assert not any(
+        key in case
+        for key in ("config", "tool_config", "designer_assets", "grounded_assets")
+    )
+    for resource_name in case["expected_resource_names"]:
+        assert resource_name in case["intent"]
+    assert case["requires_table_tools_warehouse"] is True
+    assert resolve_default_table_warehouse_id() == "d837825f69a03500"
+    assert {
+        "vector_search",
+        "table_search",
+        "table_read",
+        "table_load",
+        "compute",
+    }.issubset(set(case["expected_tool_kinds"]))
+
+    grounding = await ground_prompt(
+        intent=case["intent"],
+        existing_assets=[],
+        discovery=None,
+        default_warehouse_id="warehouse-from-trusted-test-default",
+    )
+    _assert_prompt_grounding_payload(prompt_grounding_sse_result(grounding), case)
+
+    assets_by_name = {
+        str(asset.full_name): asset for asset in grounding.resolved_assets
+    }
+    assert set(case["expected_resource_names"]).issubset(assets_by_name)
+    assert (
+        assets_by_name["main.officeqa_benchmark.treasury_chunks_vs_index"].kind
+        == "vector_index"
+    )
+    assert assets_by_name["main.officeqa_benchmark.treasury_chunks"].kind == "delta_table"
+    assert assets_by_name["main.officeqa_benchmark.treasury_tables"].kind == "delta_table"
+    assert all(
+        assets_by_name[name].usage == "required"
+        for name in case["expected_resource_names"]
+    )
+    assert all(
+        asset.metadata.get("warehouse_id") == "warehouse-from-trusted-test-default"
+        for asset in assets_by_name.values()
+        if asset.kind == "delta_table"
+    )
+
+    contract = project_resolved_tool_contract(grounding, intent=case["intent"])
+    assert contract is not None
+    summary = sanitized_resolved_tool_contract_summary(contract)
+    _assert_resolved_tool_contract_payload(summary, case)
 
 
 def _env_refs(value: Any) -> set[str]:
@@ -98,6 +165,34 @@ def _expand_env_refs(value: Any) -> Any:
 def _declared_tools(ast: dict[str, Any]) -> list[dict[str, Any]]:
     return [tool for tool in ast.get("tools", []) if isinstance(tool, dict)]
 
+
+def _walk_nodes(node: Any) -> list[dict[str, Any]]:
+    if not isinstance(node, dict):
+        return []
+    nodes = [node]
+    config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    body = config.get("body")
+    if isinstance(body, dict):
+        nodes.extend(_walk_nodes(body))
+    for child in node.get("children") or []:
+        nodes.extend(_walk_nodes(child))
+    return nodes
+
+
+def _config_string_values(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, list):
+        values: set[str] = set()
+        for item in value:
+            values.update(_config_string_values(item))
+        return values
+    if isinstance(value, dict):
+        values: set[str] = set()
+        for item in value.values():
+            values.update(_config_string_values(item))
+        return values
+    return set()
 
 
 def _assert_structural_tool_contract(ast: dict[str, Any], case: dict[str, Any]) -> None:
@@ -143,6 +238,184 @@ def _assert_structural_tool_contract(ast: dict[str, Any], case: dict[str, Any]) 
                 (tool.get("config") or {}).get("table_name") == full_name for tool in tools
             ), f"required Delta table not referenced by any tool: {full_name}"
 
+    expected_resource_names = {str(name) for name in case.get("expected_resource_names", [])}
+    if expected_resource_names:
+        config_values: set[str] = set()
+        for tool in tools:
+            config_values.update(_config_string_values(tool.get("config") or {}))
+        missing_resources = expected_resource_names - config_values
+        assert not missing_resources, (
+            "expected prompt-named resources not referenced by tool config: "
+            f"{sorted(missing_resources)}"
+        )
+
+
+def _assert_prompt_grounding_events(
+    designer_events: list[Any],
+    case: dict[str, Any],
+) -> None:
+    expected_resource_names = {str(name) for name in case.get("expected_resource_names", [])}
+    if not expected_resource_names:
+        return
+    assert not case.get("assets"), (
+        "prompt-grounding scaffold cases must not supply structured assets; "
+        "resource names should come from the initial prompt"
+    )
+    grounding_events = [
+        event
+        for event in designer_events
+        if getattr(event, "type", None) == "tool_result"
+        and getattr(event, "tool_name", None) == "prompt_grounding"
+    ]
+    assert grounding_events, "designer did not emit prompt_grounding diagnostics"
+    _assert_prompt_grounding_payload(grounding_events[-1].result, case)
+
+
+def _assert_runtime_forbidden_policy_is_prompted(case: dict[str, Any]) -> None:
+    if not case.get("forbidden_runtime_tool_kinds"):
+        return
+    intent = str(case.get("intent", "")).lower()
+    assert (
+        "do not use public web tools" in intent
+        or "do not use web tools" in intent
+        or "no public web" in intent
+    ), (
+        "forbidden_runtime_tool_kinds must be grounded in the initial "
+        "user prompt, not assumed by the scaffold test"
+    )
+
+
+def _assert_resolved_tool_contract_events(
+    designer_events: list[Any],
+    case: dict[str, Any],
+) -> None:
+    expected_resource_names = {str(name) for name in case.get("expected_resource_names", [])}
+    if not expected_resource_names:
+        return
+    contract_events = [
+        event
+        for event in designer_events
+        if getattr(event, "type", None) == "tool_result"
+        and getattr(event, "tool_name", None) == "resolved_tool_contract"
+    ]
+    assert contract_events, "designer did not emit resolved_tool_contract diagnostics"
+    _assert_resolved_tool_contract_payload(contract_events[-1].result, case)
+
+
+def _assert_prompt_grounding_payload(
+    result: dict[str, Any],
+    case: dict[str, Any],
+) -> None:
+    expected_resource_names = {str(name) for name in case.get("expected_resource_names", [])}
+    if not expected_resource_names:
+        return
+    assert result["schema"] == "prompt_grounding.v1"
+    assert result["safe_to_build_blueprint"] is True
+    assert result["resolved_assets_count"] >= len(expected_resource_names)
+    assert result["resource_kinds"].get("vector_index", 0) >= 1
+    assert result["resource_kinds"].get("delta_table", 0) >= 2
+    resolved_resources = {
+        str(resource.get("identity")): resource
+        for resource in result.get("resolved_resources", [])
+        if isinstance(resource, dict)
+    }
+    missing_resources = expected_resource_names - set(resolved_resources)
+    assert not missing_resources, (
+        "prompt grounding did not resolve expected prompt-named resources: "
+        f"{sorted(missing_resources)}"
+    )
+    assert resolved_resources[
+        "main.officeqa_benchmark.treasury_chunks_vs_index"
+    ].get("kind") == "vector_index"
+    assert resolved_resources[
+        "main.officeqa_benchmark.treasury_chunks"
+    ].get("kind") == "delta_table"
+    assert resolved_resources[
+        "main.officeqa_benchmark.treasury_tables"
+    ].get("kind") == "delta_table"
+    assert all(
+        resolved_resources[name].get("usage") == "required"
+        for name in expected_resource_names
+    )
+    assert all(
+        resolved_resources[name].get("access_status") != "inaccessible"
+        for name in expected_resource_names
+    )
+    assert set(case.get("expected_tool_kinds", [])).issubset(
+        set(result.get("ready_tool_kinds", []))
+    )
+    blocking = [
+        diagnostic
+        for diagnostic in result.get("diagnostics", [])
+        if diagnostic.get("blocking")
+    ]
+    assert blocking == []
+
+
+def _assert_resolved_tool_contract_payload(
+    result: dict[str, Any],
+    case: dict[str, Any],
+) -> None:
+    expected_resource_names = {str(name) for name in case.get("expected_resource_names", [])}
+    if not expected_resource_names:
+        return
+    assert result["schema"] == "resolved_tool_contract.v1"
+    assert result["available"] is True
+    assert result["evidence_policy"] == "corpus_only"
+    assert set(case.get("expected_tool_kinds", [])).issubset(
+        set(result.get("ready_tool_kinds", []))
+    )
+    assert set(case.get("forbidden_tool_kinds", [])).issubset(
+        set(result.get("forbidden_tool_kinds", []))
+    )
+    resources = {
+        str(resource.get("identity")): resource
+        for resource in result.get("resources", [])
+        if isinstance(resource, dict)
+    }
+    missing = expected_resource_names - set(resources)
+    assert not missing, (
+        "resolved tool contract did not include expected prompt-named "
+        f"resources: {sorted(missing)}"
+    )
+    required_terms = set(result.get("required_terms", []))
+    assert {"officeqa", "treasury", "chunks", "vector", "compute"} & required_terms
+    assert len(required_terms) >= 2
+
+
+def _assert_ast_resolved_contract_metadata(
+    ast: dict[str, Any],
+    case: dict[str, Any],
+) -> None:
+    if not case.get("expected_resource_names"):
+        return
+    summary = ast.get("resolved_tool_contract_summary")
+    assert isinstance(summary, dict), "AST missing resolved_tool_contract_summary"
+    _assert_resolved_tool_contract_payload(summary, case)
+    assert ast.get("evidence_policy") == "corpus_only"
+    assert len(ast.get("required_prompt_terms") or []) >= 2
+    assert not ast.get("placeholder_pending_nodes"), (
+        "contract-specialized blueprint should not carry stale "
+        "placeholder_pending_nodes"
+    )
+    plan_configs = [
+        node.get("config") or {}
+        for node in _walk_nodes(ast.get("root"))
+        if node.get("type") == "plan_and_execute"
+    ]
+    required_groups = [
+        group
+        for config in plan_configs
+        for group in config.get("required_tool_kind_groups", [])
+        if isinstance(group, list)
+    ]
+    assert ["vector_search"] in required_groups
+    assert ["compute"] in required_groups
+    assert any(
+        {"table_search", "table_read", "table_load"} & set(group)
+        for group in required_groups
+    ), "plan_and_execute must gate completion on a table tool family"
+
 
 def _runtime_tool_kinds(
     ast: dict[str, Any],
@@ -171,7 +444,14 @@ def _runtime_tool_kinds(
 async def test_scaffold_and_run(case: dict[str, Any]) -> None:
     if case.get("requires_brave", True) and not os.environ.get("BRAVE_API_KEY"):
         pytest.skip("BRAVE_API_KEY not set")
-    missing_env = sorted(ref for ref in _env_refs(case.get("assets", [])) if not os.environ.get(ref))
+    if (
+        case.get("requires_table_tools_warehouse")
+        and not resolve_default_table_warehouse_id()
+    ):
+        pytest.skip("TABLE_TOOLS_WAREHOUSE_ID or STORAGE_WAREHOUSE_ID not set")
+    missing_env = sorted(
+        ref for ref in _env_refs(case.get("assets", [])) if not os.environ.get(ref)
+    )
     if missing_env:
         pytest.skip(f"missing required env vars for case assets: {missing_env}")
 
@@ -186,6 +466,7 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
     write_text(run_dir / "query.txt", case["query"])
     write_json(run_dir / "case.json", case)
     write_json(run_dir / "assets.json", assets)
+    _assert_runtime_forbidden_policy_is_prompted(case)
 
     # ── Designer phase ───────────────────────────────────────────────────────
     designer_events_path = run_dir / "designer" / "events.jsonl"
@@ -226,6 +507,8 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
             f"See {designer_events_path}. Event types seen: "
             f"{summarize_events(designer_events)}"
         )
+        _assert_prompt_grounding_events(designer_events, case)
+        _assert_resolved_tool_contract_events(designer_events, case)
 
         # Persist the AST in two forms
         write_json(run_dir / "designer" / "workflow.json", ast)
@@ -281,6 +564,7 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
             f"expected_min_tool_count={case['expected_min_tool_count']}"
         )
         _assert_structural_tool_contract(ast, case)
+        _assert_ast_resolved_contract_metadata(ast, case)
 
         # Round-trip — the runner accepts dicts, but confirm the framework-level
         # loader is happy with this AST before we burn LLM tokens.
@@ -303,22 +587,12 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
             logger.warning("WORKSPACE_CLIENT_UNAVAILABLE: %s", exc)
             ws_client = None
 
-        # IMPORTANT: use from_defaults(), not the bare constructor — the bare
-        # constructor leaves search_client=None which causes the BuiltinToolFactory
-        # to fail every web_search resolution silently. The previous run produced
-        # source_count=0 ("Potemkin research") because researchers had no Brave
-        # search client to retrieve URLs. from_defaults wires up search_client
-        # from BRAVE_API_KEY (env), pre-builds the BraveSearchAdapter, and also
-        # populates api_keys for other factory paths.
-        import os as _os
-
-        runner = WorkflowRunner(
+        # Build through the app factory so web and table-tool dependencies are
+        # wired the same way production requests are.
+        runner = build_app_workflow_runner(
             llm_client=framework_llm,
-            factory_context=ToolFactoryContext.from_defaults(
-                workspace_client=ws_client,
-                user_token=None,
-                brave_api_key=_os.environ.get("BRAVE_API_KEY"),
-            ),
+            workspace_client=ws_client,
+            user_token=None,
         )
 
         runner_events: list[Any] = []
@@ -364,8 +638,21 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
         },
     )
 
+    runtime_kinds = set(runtime_tool_kinds)
+    expected_runtime_kinds = set(case.get("expected_runtime_tool_kinds", []))
+    missing_runtime_kinds = expected_runtime_kinds - runtime_kinds
+    assert not missing_runtime_kinds, (
+        f"expected runtime tool kinds were not called: {sorted(missing_runtime_kinds)}"
+    )
+    expected_any_runtime_kinds = set(case.get("expected_runtime_any_tool_kinds", []))
+    if expected_any_runtime_kinds:
+        assert expected_any_runtime_kinds & runtime_kinds, (
+            "none of the expected runtime tool kind family was called: "
+            f"{sorted(expected_any_runtime_kinds)}"
+        )
+
     forbidden_runtime_kinds = set(case.get("forbidden_runtime_tool_kinds", []))
-    runtime_forbidden = forbidden_runtime_kinds & set(runtime_tool_kinds)
+    runtime_forbidden = forbidden_runtime_kinds & runtime_kinds
     assert not runtime_forbidden, (
         f"forbidden runtime tool kinds were called: {sorted(runtime_forbidden)}"
     )

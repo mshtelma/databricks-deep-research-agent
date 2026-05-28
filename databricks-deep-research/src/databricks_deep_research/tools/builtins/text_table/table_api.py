@@ -2,7 +2,7 @@
 
 Wraps the ``table_json`` dict produced by ``html_table_parser.grid_to_table_json()``
 with typed extraction methods.  Injected into the compute namespace by
-``DeltaTableReadTool`` so that agent code can call ``table.cell()``,
+``TableLoadTool`` so that agent code can call ``table.cell()``,
 ``table.series()``, etc. instead of manually traversing nested dicts.
 
 Backward-compatible with raw dict access via ``__getitem__`` / ``get()``.
@@ -323,7 +323,7 @@ class Table:
 
 
 # ---------------------------------------------------------------------------
-# Module-level utility (also used by DeltaTableReadTool)
+# Module-level utility (also used by TableLoadTool)
 # ---------------------------------------------------------------------------
 
 

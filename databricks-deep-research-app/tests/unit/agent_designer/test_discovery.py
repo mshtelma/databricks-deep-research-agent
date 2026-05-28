@@ -50,6 +50,45 @@ class _FakeDiscoveryService:
         return _FakeDiscoveryResponse(self._sources)
 
 
+class _FakeWarehousesAPI:
+    def __init__(self, warehouses: list[Any]) -> None:
+        self._warehouses = {warehouse.id: warehouse for warehouse in warehouses}
+        self.started: list[str] = []
+
+    def list(self) -> list[Any]:
+        return list(self._warehouses.values())
+
+    def get(self, id: str) -> Any:
+        return self._warehouses[id]
+
+    def start(self, id: str) -> None:
+        self.started.append(id)
+        self._warehouses[id].state = SimpleNamespace(value="STARTING")
+
+
+class _FakeWorkspaceClient:
+    def __init__(self, warehouses: list[Any]) -> None:
+        self.warehouses = _FakeWarehousesAPI(warehouses)
+
+
+def _make_warehouse(
+    warehouse_id: str,
+    name: str,
+    state: str = "RUNNING",
+    warehouse_type: str = "PRO",
+) -> Any:
+    return SimpleNamespace(
+        id=warehouse_id,
+        name=name,
+        state=SimpleNamespace(value=state),
+        warehouse_type=SimpleNamespace(value=warehouse_type),
+        cluster_size="Small",
+        auto_stop_mins=10,
+        creator_name="creator@example.com",
+        enable_serverless_compute=True,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -218,3 +257,55 @@ async def test_returned_objects_are_discovered_resource_instances() -> None:
     out = await adapter.list_for_user(user_token="t")
 
     assert all(isinstance(r, DiscoveredResource) for r in out)
+
+
+async def test_lists_sql_warehouses_without_running_general_discovery() -> None:
+    """SQL warehouses are exposed as selectable Designer resources."""
+    fake = _FakeDiscoveryService([
+        _make_source("vector_search", "idx1"),
+    ])
+    workspace_client = _FakeWorkspaceClient([
+        _make_warehouse("wh-stopped", "Starter Warehouse", "STOPPED"),
+    ])
+    adapter = DesignerDiscoveryAdapter(
+        fake,
+        workspace_client_factory=lambda _token: workspace_client,
+    )
+
+    out = await adapter.list_for_user(
+        user_token="t1",
+        user_id="u1",
+        kinds=["sql_warehouse"],
+    )
+
+    assert fake.calls == []
+    assert len(out) == 1
+    assert out[0].kind == "sql_warehouse"
+    assert out[0].source_id == "wh-stopped"
+    assert out[0].name == "Starter Warehouse"
+    assert out[0].status == "STOPPED"
+    assert out[0].metadata["warehouse_id"] == "wh-stopped"
+    assert out[0].metadata["state"] == "STOPPED"
+    assert "sql" in out[0].capabilities
+
+
+async def test_starts_stopped_sql_warehouse() -> None:
+    """Selecting a stopped warehouse can start it through the same adapter."""
+    fake = _FakeDiscoveryService([])
+    workspace_client = _FakeWorkspaceClient([
+        _make_warehouse("wh-stopped", "Starter Warehouse", "STOPPED"),
+    ])
+    adapter = DesignerDiscoveryAdapter(
+        fake,
+        workspace_client_factory=lambda _token: workspace_client,
+    )
+
+    out = await adapter.start_sql_warehouse(
+        user_token="t1",
+        warehouse_id="wh-stopped",
+    )
+
+    assert workspace_client.warehouses.started == ["wh-stopped"]
+    assert out.kind == "sql_warehouse"
+    assert out.source_id == "wh-stopped"
+    assert out.status == "STARTING"

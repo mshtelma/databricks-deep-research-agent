@@ -399,11 +399,12 @@ def detect_unspecialized_agents(
         "genie",
         "knowledge_assistant",
         "file_search",
-        "delta_read",
-        "delta_grep",
-        "delta_context",
-        "delta_table_read",
+        "table_discovery",
+        "table_search",
         "table_read",
+        "table_neighbors",
+        "table_load",
+        "table_aggregate",
     }
     declared_tools = definition.get("tools", []) or []
     available_retrieval_tools: list[str] = []
@@ -645,8 +646,9 @@ def detect_unspecialized_agents(
                                 f"has {subquestion_count} numbered sub-"
                                 "questions; the contract requires exactly 5. "
                                 "Each sub-question must reference a specific "
-                                "noun from the user's query, be answerable by "
-                                "web search, and end with a question mark."
+                                "noun from the user's query, be answerable "
+                                "through the workflow's available evidence "
+                                "tools, and end with a question mark."
                             ),
                             path=f"{path}.config.user_prompt_template",
                         )
@@ -1015,6 +1017,40 @@ def _domain_anchor(definition: dict[str, Any]) -> str:
     return first_user_prompt(definition.get("root") or definition)
 
 
+def _contract_required_terms(definition: dict[str, Any]) -> list[str]:
+    """Return compact prompt terms from a resolved tool contract, if present."""
+
+    terms = definition.get("required_prompt_terms")
+    if not isinstance(terms, list) or len(terms) < 2:
+        summary = definition.get("resolved_tool_contract_summary")
+        if isinstance(summary, dict):
+            terms = summary.get("required_terms")
+    if not isinstance(terms, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in terms:
+        if not isinstance(item, str):
+            continue
+        cleaned = item.strip().casefold()
+        if len(cleaned) < 3 or cleaned in seen:
+            continue
+        out.append(cleaned)
+        seen.add(cleaned)
+        if len(out) >= 12:
+            break
+    return out if len(out) >= 2 else []
+
+
+def _required_domain_terms(definition: dict[str, Any]) -> list[str]:
+    """Prefer contract terms, then fall back to legacy domain-anchor nouns."""
+
+    contract_terms = _contract_required_terms(definition)
+    if contract_terms:
+        return contract_terms
+    return _extract_nouns(_domain_anchor(definition))
+
+
 def _coverage_failure(prompt_text: str, nouns: list[str], min_matches: int = 2) -> bool:
     """Return True when prompt_text contains FEWER than min_matches of nouns."""
     if not nouns:
@@ -1034,8 +1070,7 @@ def detect_generic_synthesizer_prompt(
     kind='unspecialized_synthesizer'."""
     if not isinstance(definition, dict):
         return []
-    anchor = _domain_anchor(definition)
-    nouns = _extract_nouns(anchor)
+    nouns = _required_domain_terms(definition)
     if len(nouns) < 2:
         return []  # not enough vocabulary to judge; skip silently
     errors: list[SemanticValidationError] = []
@@ -1070,8 +1105,7 @@ def detect_generic_reflector_prompt(
     kind='unspecialized_reflector'."""
     if not isinstance(definition, dict):
         return []
-    anchor = _domain_anchor(definition)
-    nouns = _extract_nouns(anchor)
+    nouns = _required_domain_terms(definition)
     if len(nouns) < 2:
         return []
     errors: list[SemanticValidationError] = []
@@ -1093,6 +1127,126 @@ def detect_generic_reflector_prompt(
                 path=path,
                 kind="unspecialized_reflector",
             ))
+    return errors
+
+
+_CONTRACT_REQUIRED_TOOL_KINDS = {
+    "vector_search",
+    "table_search",
+    "table_read",
+    "table_load",
+    "compute",
+}
+
+
+def _contract_summary(definition: dict[str, Any]) -> dict[str, Any]:
+    summary = definition.get("resolved_tool_contract_summary")
+    return summary if isinstance(summary, dict) else {}
+
+
+def _declared_tool_names_by_kind(definition: dict[str, Any]) -> dict[str, set[str]]:
+    by_kind: dict[str, set[str]] = {}
+    for tool in definition.get("tools", []) or []:
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name")
+        kind = tool.get("kind")
+        if isinstance(name, str) and isinstance(kind, str):
+            by_kind.setdefault(kind, set()).add(name)
+    return by_kind
+
+
+def _bound_tool_names(definition: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    for _node, config, _path in _collect_agent_paths(definition):
+        tools = config.get("tools") if isinstance(config, dict) else None
+        if isinstance(tools, list):
+            names.update(item for item in tools if isinstance(item, str))
+    return names
+
+
+def detect_tool_contract_violations(
+    definition: dict[str, Any],
+) -> list[SemanticValidationError]:
+    """Validate prompt-derived resolved tool contract invariants.
+
+    This detector activates only when a resolved contract summary is present.
+    It is intentionally non-executable: it checks declared/bound tool kinds
+    against the contract, but it does not generate or mutate tool config.
+    """
+
+    if not isinstance(definition, dict):
+        return []
+    summary = _contract_summary(definition)
+    if not summary.get("available"):
+        return []
+
+    errors: list[SemanticValidationError] = []
+    declared_by_kind = _declared_tool_names_by_kind(definition)
+    declared_kinds = set(declared_by_kind)
+    bound_names = _bound_tool_names(definition)
+    bound_kinds = {
+        kind
+        for kind, names in declared_by_kind.items()
+        if any(name in bound_names for name in names)
+    }
+
+    forbidden = set(summary.get("forbidden_tool_kinds") or [])
+    if forbidden:
+        forbidden_declared = sorted(forbidden & declared_kinds)
+        if forbidden_declared:
+            errors.append(
+                SemanticValidationError(
+                    message=(
+                        "Resolved tool contract forbids public "
+                        f"web tools, but these kinds are declared: "
+                        f"{forbidden_declared}."
+                    ),
+                    path="tools",
+                    kind="tool_contract",
+                )
+            )
+        forbidden_bound = sorted(forbidden & bound_kinds)
+        if forbidden_bound:
+            errors.append(
+                SemanticValidationError(
+                    message=(
+                        "Resolved tool contract forbids public "
+                        f"web tools, but these kinds are node-bound: "
+                        f"{forbidden_bound}."
+                    ),
+                    path="root",
+                    kind="tool_contract",
+                )
+            )
+
+    ready_kinds = set(summary.get("ready_tool_kinds") or [])
+    required_kinds = ready_kinds & _CONTRACT_REQUIRED_TOOL_KINDS
+    missing_declared = sorted(required_kinds - declared_kinds)
+    if missing_declared:
+        errors.append(
+            SemanticValidationError(
+                message=(
+                    "Resolved tool contract reports ready required tool "
+                    f"kinds that are not declared: {missing_declared}."
+                ),
+                path="tools",
+                kind="tool_contract",
+            )
+        )
+    missing_bound = sorted(required_kinds - bound_kinds)
+    if missing_bound:
+        errors.append(
+            SemanticValidationError(
+                message=(
+                    "Resolved tool contract reports ready required tool "
+                    f"kinds that are declared but not node-bound: "
+                    f"{missing_bound}."
+                ),
+                path="root",
+                kind="tool_contract",
+            )
+        )
     return errors
 
 
@@ -1158,5 +1312,6 @@ __all__ = [
     "detect_topology_mismatch",
     "detect_generic_synthesizer_prompt",
     "detect_generic_reflector_prompt",
+    "detect_tool_contract_violations",
     "detect_unspecialized_fallback_researcher",
 ]

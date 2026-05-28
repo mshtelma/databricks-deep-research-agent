@@ -29,7 +29,10 @@
 import * as React from 'react';
 import * as SelectPrimitive from '@radix-ui/react-select';
 import { ChevronDown, Plus, X } from 'lucide-react';
-import { useDesignerResources } from '@/hooks/useDesignerResources';
+import {
+  useDesignerResources,
+  useStartDesignerSqlWarehouse,
+} from '@/hooks/useDesignerResources';
 import type { DesignerResource } from '@/types/agentDesigner';
 
 // ---------------------------------------------------------------------------
@@ -65,6 +68,8 @@ const BTN_DELETE_CLASS =
 
 const BTN_GHOST_CLASS =
   'inline-flex items-center gap-1.5 rounded-db-md border border-db-gray-lines bg-white px-2.5 py-1 font-db-sans text-[12px] font-medium text-db-navy-800 transition-colors hover:border-db-navy-300 hover:bg-db-oat-medium focus:outline-none focus:shadow-db-focus';
+
+const EMPTY_RESOURCES: DesignerResource[] = [];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -522,9 +527,40 @@ function ResourceSelectField({
     ? schema['x-value-field']
     : 'full_name';
   const listId = `${fieldId}-resources`;
-  const resourceQuery = useDesignerResources(sourceKind ? [sourceKind] : [], Boolean(sourceKind));
-  const resources = resourceQuery.data?.resources ?? [];
+  const resourceQuery = useDesignerResources(
+    sourceKind ? [sourceKind] : [],
+    Boolean(sourceKind),
+  );
+  const {
+    mutate: startWarehouse,
+    isPending: isStartingWarehouse,
+    isError: isStartWarehouseError,
+    error: startWarehouseMutationError,
+  } = useStartDesignerSqlWarehouse();
+  const resources = resourceQuery.data?.resources ?? EMPTY_RESOURCES;
   const currentVal = typeof value === 'string' ? value : '';
+  const startWarehouseError = startWarehouseMutationError instanceof Error
+    ? startWarehouseMutationError.message
+    : 'Could not start SQL warehouse.';
+  const handleValueChange = React.useCallback((nextValue: string) => {
+    onChange(nextValue);
+    if (sourceKind !== 'sql_warehouse' || isStartingWarehouse) return;
+
+    const selected = findResourceByValue(resources, valueField, nextValue);
+    if (!selected || !shouldStartSqlWarehouse(selected)) return;
+
+    const warehouseId = resourceValue(selected, 'warehouse_id');
+    if (warehouseId) {
+      startWarehouse(warehouseId);
+    }
+  }, [
+    isStartingWarehouse,
+    onChange,
+    resources,
+    sourceKind,
+    startWarehouse,
+    valueField,
+  ]);
 
   return (
     <div className="mb-3.5">
@@ -538,7 +574,7 @@ function ResourceSelectField({
         list={listId}
         name={name}
         value={currentVal}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => handleValueChange(e.target.value)}
         placeholder={resourceQuery.isLoading ? 'Loading resources...' : 'Select or type manually'}
         className={FIELD_INPUT_CLASS}
       />
@@ -558,10 +594,28 @@ function ResourceSelectField({
           Could not load resources. You can still type the value manually.
         </p>
       )}
+      {sourceKind === 'sql_warehouse' && isStartingWarehouse && (
+        <p className="mt-1 text-[11px] text-db-navy-500">
+          Starting SQL warehouse...
+        </p>
+      )}
+      {sourceKind === 'sql_warehouse' && isStartWarehouseError && (
+        <p className="mt-1 text-[11px] text-db-lava-700">
+          {startWarehouseError}
+        </p>
+      )}
       {description}
       {errors}
     </div>
   );
+}
+
+function findResourceByValue(
+  resources: DesignerResource[],
+  valueField: string,
+  value: string,
+): DesignerResource | null {
+  return resources.find((resource) => resourceValue(resource, valueField) === value) ?? null;
 }
 
 function resourceValue(resource: DesignerResource, valueField: string): string {
@@ -576,5 +630,19 @@ function resourceLabel(resource: DesignerResource): string {
   const details = resource.full_name && resource.full_name !== resource.name
     ? resource.full_name
     : resource.description;
-  return details ? `${resource.name} (${details})` : resource.name;
+  const base = details ? `${resource.name} (${details})` : resource.name;
+  const status = resourceStatus(resource);
+  return resource.kind === 'sql_warehouse' && status ? `${base} - ${status}` : base;
+}
+
+function resourceStatus(resource: DesignerResource): string {
+  if (typeof resource.status === 'string' && resource.status.length > 0) {
+    return resource.status;
+  }
+  const metadataState = resource.metadata['state'];
+  return typeof metadataState === 'string' ? metadataState : '';
+}
+
+function shouldStartSqlWarehouse(resource: DesignerResource): boolean {
+  return resourceStatus(resource).toUpperCase() === 'STOPPED';
 }

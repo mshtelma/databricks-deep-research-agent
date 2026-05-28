@@ -107,6 +107,41 @@ async def test_content_column_from_discovered_embedding_source():
     assert src.title == "Battlecard: Snowflake (p.5)"
 
 
+def test_vector_search_compute_callable_returns_native_rows():
+    ws = MagicMock()
+    manifest = SimpleNamespace(
+        columns=[
+            SimpleNamespace(name="chunk_id"),
+            SimpleNamespace(name="content"),
+            SimpleNamespace(name="score"),
+        ]
+    )
+    result_data = SimpleNamespace(data_array=[["c1", "needle content", 0.91]])
+    ws.vector_search_indexes.query_index.return_value = SimpleNamespace(
+        manifest=manifest,
+        result=result_data,
+    )
+
+    tool = DatabricksVectorSearchTool(
+        workspace_client=ws,
+        name="vs_docs",
+        index_name="cat.sch.docs_idx",
+        columns=["chunk_id", "content", "score"],
+    )
+
+    call = tool.to_compute_callable(compute=None)
+    rows = call("needle", num_results=3, filters={"year >=": 2024})
+
+    assert rows == [{"chunk_id": "c1", "content": "needle content", "score": 0.91}]
+    ws.vector_search_indexes.query_index.assert_called_once()
+    kwargs = ws.vector_search_indexes.query_index.call_args.kwargs
+    assert kwargs["index_name"] == "cat.sch.docs_idx"
+    assert kwargs["query_text"] == "needle"
+    assert kwargs["num_results"] == 3
+    assert kwargs["columns"] == ["chunk_id", "content", "score"]
+    assert kwargs["filters_json"] == '{"year >=": 2024}'
+
+
 # ---------------------------------------------------------------------------
 # Harness label fallback — generic VS titles replaced with source metadata
 # ---------------------------------------------------------------------------

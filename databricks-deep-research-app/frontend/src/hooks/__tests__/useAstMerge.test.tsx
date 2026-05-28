@@ -15,7 +15,7 @@ import type { AST } from '@/types/ast';
 function makeAst(overrides: Partial<AST> = {}): AST {
   return {
     ...createDraftWorkflow('Test Workflow'),
-    schema_version: '1.0.0',
+    schema_version: 1,
     root: {
       id: 'root-id',
       type: 'sequence',
@@ -33,8 +33,8 @@ function makeAst(overrides: Partial<AST> = {}): AST {
 
 describe('useAstMerge', () => {
   it('test_idle_to_merging — calling selectField transitions state to merging', () => {
-    const local = makeAst({ schema_version: '1.0.0' });
-    const server = makeAst({ schema_version: '2.0.0' });
+    const local = makeAst({ schema_version: 1 });
+    const server = makeAst({ schema_version: 2 });
 
     const { result } = renderHook(() => useAstMerge(local, server));
 
@@ -48,8 +48,8 @@ describe('useAstMerge', () => {
   });
 
   it('test_select_field_changes_selection — selecting twice for same path overwrites', () => {
-    const local = makeAst({ schema_version: '1.0.0' });
-    const server = makeAst({ schema_version: '2.0.0' });
+    const local = makeAst({ schema_version: 1 });
+    const server = makeAst({ schema_version: 2 });
 
     const { result } = renderHook(() => useAstMerge(local, server));
 
@@ -68,7 +68,7 @@ describe('useAstMerge', () => {
 
   it('test_apply_merge_produces_correct_ast — mixed selections produce correct merged AST', () => {
     const local = makeAst({
-      schema_version: '1.0.0',
+      schema_version: 1,
       root: {
         id: 'root-id',
         type: 'sequence',
@@ -78,7 +78,7 @@ describe('useAstMerge', () => {
       },
     });
     const server = makeAst({
-      schema_version: '2.0.0',
+      schema_version: 2,
       root: {
         id: 'root-id',
         type: 'sequence',
@@ -101,13 +101,13 @@ describe('useAstMerge', () => {
       merged = result.current.applyMerge();
     });
 
-    expect(merged.schema_version).toBe('1.0.0');        // from local
+    expect(merged.schema_version).toBe(1);        // from local
     expect(merged.root.label).toBe('server-label');     // from server
   });
 
   it('test_identical_side_detection — all local → hasRealMerge false; mixed → true', () => {
     const local = makeAst({
-      schema_version: '1.0.0',
+      schema_version: 1,
       root: {
         id: 'root-id',
         type: 'sequence',
@@ -117,7 +117,7 @@ describe('useAstMerge', () => {
       },
     });
     const server = makeAst({
-      schema_version: '2.0.0',
+      schema_version: 2,
       root: {
         id: 'root-id',
         type: 'sequence',
@@ -146,8 +146,8 @@ describe('useAstMerge', () => {
   });
 
   it('test_reset_clears_state — reset() sets state to idle and clears selections', () => {
-    const local = makeAst({ schema_version: '1.0.0' });
-    const server = makeAst({ schema_version: '2.0.0' });
+    const local = makeAst({ schema_version: 1 });
+    const server = makeAst({ schema_version: 2 });
 
     const { result } = renderHook(() => useAstMerge(local, server));
 
@@ -168,7 +168,7 @@ describe('useAstMerge', () => {
 
   it('conflicts list correctly identifies differing leaf paths', () => {
     const local = makeAst({
-      schema_version: '1.0.0',
+      schema_version: 1,
       root: {
         id: 'root-id',
         type: 'sequence',
@@ -178,7 +178,7 @@ describe('useAstMerge', () => {
       },
     });
     const server = makeAst({
-      schema_version: '1.0.0',   // same
+      schema_version: 1,   // same
       root: {
         id: 'root-id',
         type: 'sequence',

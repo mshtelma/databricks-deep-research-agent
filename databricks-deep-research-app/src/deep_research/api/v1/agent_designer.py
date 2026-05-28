@@ -22,7 +22,10 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 from uuid import UUID
 
+from databricks_deep_research.tools.catalog_types import ProbeSample
 from databricks_deep_research.tools.factories import BUILTIN_FACTORIES
+from databricks_deep_research.tools.protocol import ToolContext
+from databricks_deep_research.workflow.definition import ToolDeclaration
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -32,6 +35,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.agent_designer.assets import DesignerAsset
+from deep_research.agent_designer.catalog_service import CatalogService
 from deep_research.agent_designer.discovery import (
     DesignerDiscoveryAdapter,
     DiscoveredResource,
@@ -51,7 +55,9 @@ from deep_research.agent_designer.registry import (
 from deep_research.agent_designer.semantic_validation import (
     semantic_validation_errors,
 )
+from deep_research.agent_designer.tool_probe import ProbeConfig, ProbeOrchestrator
 from deep_research.agent_designer.yaml_import import YamlImportError, parse_and_validate_yaml
+from deep_research.core.app_config import get_app_config
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.agent_v2 import CustomToolDef
@@ -60,10 +66,24 @@ from deep_research.observability.agent_designer_metrics import (
     record_validation_error,
     record_yaml_import_outcome,
 )
+from deep_research.services.agent_v2_service import AgentV2Service
 from deep_research.services.discovery_service import DiscoveryService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+async def _verify_agent_edit_permission(
+    agent_id: UUID | None,
+    *,
+    user: CurrentUser,
+    session: AsyncSession,
+) -> None:
+    if agent_id is None:
+        return
+    agent = await AgentV2Service(session).get_owned(agent_id, user.user_id)
+    if agent is None:
+        raise HTTPException(status_code=403, detail="Agent edit permission required")
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +413,34 @@ class ResourcesResponse(BaseModel):
     total: int
 
 
+class RefreshCatalogRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    definition: dict[str, Any]
+    agent_id: UUID | None = None
+    force_regen: bool = True
+
+
+class RefreshCatalogResponse(BaseModel):
+    definition: dict[str, Any]
+
+
+class ProbeToolsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    definition: dict[str, Any]
+    agent_id: UUID | None = None
+    tool_names: list[str] | None = None
+    user_query: str | None = None
+    persist: bool = False
+
+
+class ProbeToolsResponse(BaseModel):
+    samples: list[ProbeSample]
+    definition: dict[str, Any]
+    persist: bool
+
+
 _VALID_RESOURCE_KINDS: frozenset[str] = frozenset(
     {
         "vector_index",
@@ -400,8 +448,16 @@ _VALID_RESOURCE_KINDS: frozenset[str] = frozenset(
         "knowledge_assistant",
         "serving_endpoint",
         "delta_table",
+        "sql_warehouse",
     }
 )
+
+
+def _obo_token_from_request(fastapi_request: Request) -> str:
+    return str(
+        getattr(fastapi_request.state, "obo_token", None)
+        or fastapi_request.headers.get("x-forwarded-access-token", "")
+    )
 
 
 def _parse_resource_kinds(raw_kinds: list[str] | None) -> list[SourceKind] | None:
@@ -433,10 +489,7 @@ async def list_resources(
     kinds: list[str] | None = Query(default=None),
 ) -> ResourcesResponse:
     """List Databricks resources available for Designer tool configuration."""
-    obo_token: str = (
-        getattr(fastapi_request.state, "obo_token", None)
-        or fastapi_request.headers.get("x-forwarded-access-token", "")
-    )
+    obo_token = _obo_token_from_request(fastapi_request)
     discovery_adapter = DesignerDiscoveryAdapter(
         cast(_DiscoveryServiceProto, DiscoveryService())
     )
@@ -446,6 +499,38 @@ async def list_resources(
         user_id=user.user_id,
     )
     return ResourcesResponse(resources=resources, total=len(resources))
+
+
+@router.post(
+    "/resources/sql-warehouses/{warehouse_id}/start",
+    response_model=DiscoveredResource,
+)
+async def start_sql_warehouse(
+    warehouse_id: str,
+    _user: CurrentUser,
+    fastapi_request: Request,
+) -> DiscoveredResource:
+    """Start a stopped SQL warehouse selected in Designer tool configuration."""
+    discovery_adapter = DesignerDiscoveryAdapter(
+        cast(_DiscoveryServiceProto, DiscoveryService())
+    )
+    try:
+        return await discovery_adapter.start_sql_warehouse(
+            user_token=_obo_token_from_request(fastapi_request),
+            warehouse_id=warehouse_id,
+        )
+    except Exception as exc:  # noqa: BLE001 - surface Databricks SDK failures to the UI
+        logger.warning(
+            "DESIGNER_SQL_WAREHOUSE_START_FAILED",
+            extra={"warehouse_id": warehouse_id, "error": repr(exc)},
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error_kind": "sql_warehouse_start_failed",
+                "message": "Could not start SQL warehouse.",
+            },
+        ) from exc
 
 
 @router.get("/registry", response_model=RegistryResponse)
@@ -466,6 +551,114 @@ async def get_registry(
     )
     record_registry_fetch((time.monotonic() - _t0) * 1000)
     return result
+
+
+def _tool_declarations_from_definition(
+    definition: dict[str, Any],
+    *,
+    tool_names: list[str] | None = None,
+) -> list[ToolDeclaration]:
+    by_name: dict[str, dict[str, Any]] = {}
+    ordered_raw: list[dict[str, Any]] = []
+    for raw in definition.get("tools") or []:
+        if not isinstance(raw, dict):
+            continue
+        raw_name = raw.get("name")
+        if not isinstance(raw_name, str):
+            continue
+        by_name.setdefault(raw_name, raw)
+        ordered_raw.append(raw)
+
+    selected_raw: list[dict[str, Any]]
+    if tool_names:
+        selected_raw = [by_name[name] for name in tool_names if name in by_name]
+    else:
+        selected_raw = ordered_raw
+
+    declarations: list[ToolDeclaration] = []
+    for raw in selected_raw:
+        try:
+            declarations.append(ToolDeclaration(**raw))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid tool declaration for catalog probe: {exc}",
+            ) from exc
+    return declarations
+
+
+def _probe_config_from_app(*, persist: bool) -> ProbeConfig:
+    cfg = get_app_config().agent_designer.probe
+    return ProbeConfig(
+        timeout_seconds=cfg.timeout_seconds,
+        max_concurrent_probes=cfg.max_concurrent_probes,
+        max_output_chars=cfg.max_output_chars,
+        persist=persist,
+    )
+
+
+@router.post("/refresh-catalog", response_model=RefreshCatalogResponse)
+async def refresh_catalog(
+    req: RefreshCatalogRequest,
+    user: CurrentUser,
+    session: AsyncSession = Depends(get_db),
+) -> RefreshCatalogResponse:
+    """Refresh Designer materialized tool catalog prose without persisting it."""
+    await _verify_agent_edit_permission(req.agent_id, user=user, session=session)
+    try:
+        load_workflow_from_dict(req.definition)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid workflow definition: {exc}") from exc
+    refreshed = CatalogService().materialize_for_save(
+        req.definition,
+        force_regen=req.force_regen,
+    )
+    return RefreshCatalogResponse(definition=refreshed)
+
+
+@router.post("/probe-tools", response_model=ProbeToolsResponse)
+async def probe_tools(
+    req: ProbeToolsRequest,
+    user: CurrentUser,
+    session: AsyncSession = Depends(get_db),
+) -> ProbeToolsResponse:
+    """Run SafeProbe-only samples for declared tools, isolated per tool."""
+    await _verify_agent_edit_permission(req.agent_id, user=user, session=session)
+    try:
+        load_workflow_from_dict(req.definition)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid workflow definition: {exc}") from exc
+    declarations = _tool_declarations_from_definition(
+        req.definition,
+        tool_names=req.tool_names,
+    )
+    samples = await ProbeOrchestrator.from_default_factories(
+        config=_probe_config_from_app(persist=req.persist),
+    ).probe(
+        declarations,
+        ctx=ToolContext(query=req.user_query or "", read_only=True),
+        user_query=req.user_query,
+    )
+
+    definition = dict(req.definition)
+    if req.persist:
+        by_name = {
+            decl.name: sample.model_dump(mode="json")
+            for decl, sample in zip(declarations, samples, strict=False)
+        }
+        tools = []
+        for raw in req.definition.get("tools") or []:
+            raw_name = raw.get("name") if isinstance(raw, dict) else None
+            if isinstance(raw, dict) and isinstance(raw_name, str) and raw_name in by_name:
+                next_raw = dict(raw)
+                next_raw["probe"] = by_name[raw_name]
+                tools.append(next_raw)
+            else:
+                tools.append(raw)
+        definition = {**req.definition, "tools": tools}
+        definition = CatalogService().materialize_for_save(definition, force_regen=True)
+
+    return ProbeToolsResponse(samples=samples, definition=definition, persist=req.persist)
 
 
 # ---------- /import-yaml ----------

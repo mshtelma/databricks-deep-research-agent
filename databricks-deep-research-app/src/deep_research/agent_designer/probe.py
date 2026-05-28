@@ -21,8 +21,8 @@ The probe runs three classes of checks:
      * period_basis → at least one lane prompt mentions both FY and CY
        framing;
      * numeric_aggregation → at least one lane has compute-kind AND
-       delta_table_read-kind tools bound;
-     * structured_tables → at least one lane has delta_table_read-kind
+       table-read-kind tools bound;
+     * structured_tables → at least one lane has table-read-kind
        tool bound.
 
 3. **Runtime-query check** *(opt-in via ``run_runtime_query_check=True``)*
@@ -51,9 +51,9 @@ from deep_research.agent_designer.task_signature import (
 
 # Tool kinds that the probe recognizes as evidence collectors.
 _RETRIEVAL_KINDS: frozenset[str] = frozenset(
-    {"vector_search", "delta_grep", "web_search", "web_research"}
+    {"vector_search", "table_search", "web_search", "web_research"}
 )
-_TABLE_READ_KINDS: frozenset[str] = frozenset({"delta_table_read", "table_read"})
+_TABLE_READ_KINDS: frozenset[str] = frozenset({"table_read", "table_load"})
 _COMPUTE_KINDS: frozenset[str] = frozenset({"compute"})
 
 # Tool kinds that count as "corpus-grounded" — they fetch evidence from a
@@ -64,11 +64,12 @@ _CORPUS_TOOL_KINDS: frozenset[str] = frozenset(
         "vector_search",
         "genie",
         "knowledge_assistant",
-        "delta_read",
-        "delta_grep",
-        "delta_context",
-        "delta_table_read",
+        "table_discovery",
+        "table_search",
         "table_read",
+        "table_neighbors",
+        "table_load",
+        "table_aggregate",
         "file_search",
     }
 )
@@ -331,7 +332,7 @@ def run_behavioral_probe(
                     missing.append("calendar_year")
                 result.gaps.append(f"period_basis_query_diversity_gap:missing={','.join(missing)}")
 
-        # 7. numeric_aggregation → some lane has compute + delta_table_read.
+        # 7. numeric_aggregation → some lane has compute + table-read.
         if sig.question_class == "numeric_aggregation":
             satisfied = False
             for lane in lanes:
@@ -345,15 +346,15 @@ def run_behavioral_probe(
                 result.gaps.append("numeric_aggregation_missing_compute_or_table_read")
 
         # 8. primary_evidence_kind == structured_tables → some lane has
-        #    delta_table_read-kind bound.
+        #    table-read-kind bound.
         if sig.primary_evidence_kind == "structured_tables":
             satisfied = any(
                 _tool_kinds_for_lane(lane, ast_tools) & _TABLE_READ_KINDS for lane in lanes
             )
             if satisfied:
-                result.conditional_passed.append("structured_tables_has_delta_table_read")
+                result.conditional_passed.append("structured_tables_has_table_read")
             else:
-                result.gaps.append("structured_tables_missing_delta_table_read")
+                result.gaps.append("structured_tables_missing_table_read")
 
         # 9. asset_signature ↔ tool_kinds alignment.
         #    When the classifier said ``corpus_only`` or ``structured_only``,

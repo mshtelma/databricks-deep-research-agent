@@ -8,10 +8,16 @@ OBO scoping is enforced by the underlying DiscoveryService.
 """
 from __future__ import annotations
 
+import logging
 import re
+from collections.abc import Callable, Iterable
 from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from deep_research.core.auth import get_user_workspace_client, get_workspace_client
+
+logger = logging.getLogger(__name__)
 
 SourceKind = Literal[
     "vector_index",
@@ -19,6 +25,7 @@ SourceKind = Literal[
     "knowledge_assistant",
     "serving_endpoint",
     "delta_table",
+    "sql_warehouse",
 ]
 
 # Map from DiscoveryService DataSourceType.value strings to our SourceKind literals.
@@ -68,12 +75,47 @@ class _DiscoveryServiceProto(Protocol):
         ...
 
 
+class _WarehousesAPIProto(Protocol):
+    """Structural subset of the Databricks SQL Warehouses SDK API."""
+
+    def list(self) -> Iterable[Any]:
+        ...
+
+    def get(self, id: str) -> Any:
+        ...
+
+    def start(self, id: str) -> Any:
+        ...
+
+
+class _WorkspaceClientProto(Protocol):
+    @property
+    def warehouses(self) -> _WarehousesAPIProto:
+        ...
+
+
+def _workspace_client_for_user_token(user_token: str | None) -> _WorkspaceClientProto:
+    if user_token:
+        return get_user_workspace_client(user_token)
+    return get_workspace_client()
+
+
 class DesignerDiscoveryAdapter:
     """Normalizes DiscoveryService output into DiscoveredResource list for the
     chat tool-call surface."""
 
-    def __init__(self, discovery_service: _DiscoveryServiceProto) -> None:
+    def __init__(
+        self,
+        discovery_service: _DiscoveryServiceProto,
+        *,
+        workspace_client_factory: (
+            Callable[[str | None], _WorkspaceClientProto] | None
+        ) = None,
+    ) -> None:
         self._svc = discovery_service
+        self._workspace_client_factory = (
+            workspace_client_factory or _workspace_client_for_user_token
+        )
 
     async def list_for_user(
         self,
@@ -98,55 +140,142 @@ class DesignerDiscoveryAdapter:
         if not cache_user_id:
             raise ValueError("Either user_id or user_token must be provided")
 
-        response = await self._svc.discover_all(
-            user_id=cache_user_id,
-            user_token=user_token or None,
-            include_all_endpoints=True,
-        )
-
         resources: list[DiscoveredResource] = []
-        for source in response.sources:
-            metadata: dict[str, Any] = dict(source.metadata) if source.metadata else {}
-            # source.source_type is a DataSourceType enum or its string value
-            raw_type = source.source_type
-            type_str: str = (
-                raw_type.value if hasattr(raw_type, "value") else str(raw_type)
+        include_discovery_resources = kinds is None or any(
+            kind != "sql_warehouse" for kind in kinds
+        )
+        if include_discovery_resources:
+            response = await self._svc.discover_all(
+                user_id=cache_user_id,
+                user_token=user_token or None,
+                include_all_endpoints=True,
             )
 
-            kind = _SOURCE_TYPE_TO_KIND.get(type_str)
-            if kind == "knowledge_assistant" and metadata.get("is_knowledge_assistant") is False:
-                kind = "serving_endpoint"
-            if kind is None:
-                # Unknown source type — skip rather than error
-                continue
-
-            if kinds is not None and kind not in kinds:
-                continue
-
-            # Extract full_name: for vector indexes the index_name metadata field
-            # holds the full three-part name; fall back to endpoint_name or name.
-            full_name: str | None = (
-                metadata.get("index_name")
-                or metadata.get("space_id")
-                or metadata.get("endpoint_name")
-                or getattr(source, "endpoint_name", None)
-                or None
-            )
-
-            resources.append(
-                DiscoveredResource(
-                    kind=kind,
-                    source_id=getattr(source, "source_id", None),
-                    name=source.name,
-                    full_name=full_name,
-                    description=source.description,
-                    status=getattr(source, "status", None),
-                    capabilities=list(getattr(source, "capabilities", []) or []),
-                    metadata=metadata,
+            for source in response.sources:
+                metadata: dict[str, Any] = dict(source.metadata) if source.metadata else {}
+                # source.source_type is a DataSourceType enum or its string value
+                raw_type = source.source_type
+                type_str: str = (
+                    raw_type.value if hasattr(raw_type, "value") else str(raw_type)
                 )
-            )
+
+                kind = _SOURCE_TYPE_TO_KIND.get(type_str)
+                if (
+                    kind == "knowledge_assistant"
+                    and metadata.get("is_knowledge_assistant") is False
+                ):
+                    kind = "serving_endpoint"
+                if kind is None:
+                    # Unknown source type — skip rather than error
+                    continue
+
+                if kinds is not None and kind not in kinds:
+                    continue
+
+                # Extract full_name: for vector indexes the index_name metadata field
+                # holds the full three-part name; fall back to endpoint_name or name.
+                full_name: str | None = (
+                    metadata.get("index_name")
+                    or metadata.get("space_id")
+                    or metadata.get("endpoint_name")
+                    or getattr(source, "endpoint_name", None)
+                    or None
+                )
+
+                resources.append(
+                    DiscoveredResource(
+                        kind=kind,
+                        source_id=getattr(source, "source_id", None),
+                        name=source.name,
+                        full_name=full_name,
+                        description=source.description,
+                        status=getattr(source, "status", None),
+                        capabilities=list(getattr(source, "capabilities", []) or []),
+                        metadata=metadata,
+                    )
+                )
+
+        if kinds is None or "sql_warehouse" in kinds:
+            try:
+                resources.extend(self._list_sql_warehouses(user_token or None))
+            except Exception:
+                if kinds is not None and "sql_warehouse" in kinds:
+                    raise
+                logger.warning("DESIGNER_SQL_WAREHOUSE_DISCOVERY_SKIPPED", exc_info=True)
 
         return resources
+
+    def _list_sql_warehouses(self, user_token: str | None) -> list[DiscoveredResource]:
+        client = self._workspace_client_factory(user_token)
+        resources = [
+            resource
+            for warehouse in client.warehouses.list()
+            if (resource := _sql_warehouse_resource(warehouse)) is not None
+        ]
+        resources.sort(key=lambda item: (item.name.lower(), item.source_id or ""))
+        return resources
+
+    async def start_sql_warehouse(
+        self,
+        *,
+        user_token: str,
+        warehouse_id: str,
+    ) -> DiscoveredResource:
+        """Start a stopped SQL warehouse and return its current resource shape."""
+        client = self._workspace_client_factory(user_token or None)
+        warehouse = client.warehouses.get(id=warehouse_id)
+        if _enum_value(getattr(warehouse, "state", None)).upper() == "STOPPED":
+            client.warehouses.start(id=warehouse_id)
+            warehouse = client.warehouses.get(id=warehouse_id)
+        resource = _sql_warehouse_resource(warehouse)
+        if resource is None:
+            raise ValueError(f"SQL warehouse {warehouse_id!r} was not returned by Databricks")
+        return resource
+
+
+def _enum_value(value: Any) -> str:
+    raw = getattr(value, "value", None) or getattr(value, "name", None) or value
+    return str(raw) if raw is not None else ""
+
+
+def _warehouse_string(warehouse: Any, attr: str) -> str:
+    value = getattr(warehouse, attr, None)
+    return str(value).strip() if value is not None else ""
+
+
+def _sql_warehouse_resource(warehouse: Any) -> DiscoveredResource | None:
+    warehouse_id = _warehouse_string(warehouse, "id")
+    name = _warehouse_string(warehouse, "name") or warehouse_id
+    if not warehouse_id and not name:
+        return None
+
+    state = _enum_value(getattr(warehouse, "state", None))
+    warehouse_type = _enum_value(getattr(warehouse, "warehouse_type", None))
+    cluster_size = _warehouse_string(warehouse, "cluster_size")
+    description_parts = [part for part in (warehouse_type, cluster_size) if part]
+
+    metadata: dict[str, Any] = {"warehouse_id": warehouse_id}
+    if state:
+        metadata["state"] = state
+    if warehouse_type:
+        metadata["warehouse_type"] = warehouse_type
+    if cluster_size:
+        metadata["cluster_size"] = cluster_size
+    for attr in ("auto_stop_mins", "creator_name", "enable_serverless_compute"):
+        value = getattr(warehouse, attr, None)
+        if value is not None:
+            metadata[attr] = value
+
+    return DiscoveredResource(
+        kind="sql_warehouse",
+        source_id=warehouse_id or None,
+        name=name,
+        full_name=name,
+        description=", ".join(description_parts) or None,
+        status=state or None,
+        capabilities=["sql", "table_queries"],
+        metadata=metadata,
+    )
 
 
 # Three-part Unity Catalog identifier: catalog.schema.name. Each segment is a
@@ -175,6 +304,9 @@ class IntentMatch(BaseModel):
     score: int
     matched_via: Literal["fqn_exact", "fqn_ci", "name_exact", "name_ci"]
     matched_text: str
+
+
+MatchVia = Literal["fqn_exact", "fqn_ci", "name_exact", "name_ci"]
 
 
 def _candidate_identities(resource: DiscoveredResource) -> list[str]:
@@ -223,10 +355,11 @@ def match_text_to_resources(
     for resource in resources:
         if id(resource) in seen_resource_ids:
             continue
-        best: tuple[int, str, str] | None = None  # (score, matched_via, matched_text)
+        best: tuple[int, MatchVia, str] | None = None  # (score, matched_via, matched_text)
         for identity in _candidate_identities(resource):
             identity_lower = identity.lower()
             is_three_part = identity.count(".") == 2
+            candidate: tuple[int, MatchVia, str]
             if is_three_part and identity in fqn_hits:
                 candidate = (100, "fqn_exact", identity)
             elif is_three_part and identity_lower in fqn_hits_lower:
@@ -246,7 +379,7 @@ def match_text_to_resources(
             IntentMatch(
                 resource=resource,
                 score=best[0],
-                matched_via=best[1],  # type: ignore[arg-type]
+                matched_via=best[1],
                 matched_text=best[2],
             )
         )

@@ -91,7 +91,7 @@ def test_refresh_invalidates_both_tiers() -> None:
     cache.begin_step()
     cache.get(fqn="cat.s.t", user_token="tok")
     cache.refresh(fqn="cat.s.t", user_token="tok")
-    assert fetcher.call_count == 2
+    assert fetcher.call_count == 1
     cache.get(fqn="cat.s.t", user_token="tok")
     assert fetcher.call_count == 2
 

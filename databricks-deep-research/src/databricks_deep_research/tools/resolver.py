@@ -42,7 +42,7 @@ class ToolResolver:
         # Shallow-copy the context so each resolver gets its own extras dict.
         # Without this, concurrent resolvers sharing a ToolFactoryContext
         # overwrite each other's _resolver_cache reference, causing
-        # cross-question namespace leaks (e.g. DeltaTableReadTool injects
+        # cross-question namespace leaks (e.g. TableLoadTool injects
         # variables into the wrong PythonComputeTool instance).
         base_ctx = factory_context or ToolFactoryContext()
         self._context: ToolFactoryContext = dataclasses.replace(
@@ -161,9 +161,52 @@ class ToolResolver:
                         "TOOL_INIT_FAILED name=%s kind=%s", name, decl.kind
                     )
 
+    async def validate_all(self) -> None:
+        """Eagerly resolve every declared tool, raising on the first failure batch.
+
+        Stricter sibling of :meth:`initialize`. Whereas ``initialize`` swallows
+        per-tool resolution failures and emits a warning, ``validate_all``
+        collects them and raises a single ``ValueError`` listing every
+        unsatisfiable declaration. Intended as a pre-execution guard so a
+        misconfigured workflow fails before any LLM tokens are spent on
+        planning.
+
+        Tools already satisfied by an override or by a previous resolution
+        (cache hit) are skipped — they are known-good.
+        """
+        failures: list[str] = []
+        for name, decl in self._declarations.items():
+            if name in self._overrides or name in self._cache:
+                continue
+            try:
+                await self.resolve(name)
+            except ValueError as exc:
+                failures.append(f"{name} (kind={decl.kind}): {exc}")
+        if failures:
+            raise ValueError(
+                "Workflow declares tools that cannot be constructed:\n  "
+                + "\n  ".join(failures)
+            )
+
     def list_available(self) -> list[str]:
         """Return all resolvable tool names."""
         names: set[str] = set(self._overrides) | set(self._declarations) | set(self._cache)
         if self._legacy:
             names |= set(self._legacy.get_all_builtins())
         return sorted(names)
+
+    def get_declaration(self, name: str) -> ToolDeclaration | None:
+        """Return the original YAML declaration for a named tool, if any."""
+        return self._declarations.get(name)
+
+    @property
+    def factory_context(self) -> ToolFactoryContext:
+        """Return the resolver-local factory context.
+
+        The resolver owns a shallow copy of the caller-provided context so
+        factory extras, including the per-resolver cache, cannot leak across
+        concurrent workflow runs.  Read-only consumers such as the workflow
+        executor use this accessor to wire runtime integrations after all tools
+        for a node have been resolved.
+        """
+        return self._context

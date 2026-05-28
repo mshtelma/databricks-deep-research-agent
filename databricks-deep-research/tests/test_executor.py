@@ -9,7 +9,11 @@ import pytest
 
 from databricks_deep_research.agents.config import AgentNodeConfig, PlanAndExecuteNodeConfig
 from databricks_deep_research.agents.isolation import AgentOutput
-from databricks_deep_research.errors import PlanningContractError, WorkflowExecutionError
+from databricks_deep_research.errors import (
+    PlanningContractError,
+    WorkflowConditionEvaluationError,
+    WorkflowExecutionError,
+)
 from databricks_deep_research.events.types import (
     AgentOutputEvent,
     BranchSelectedEvent,
@@ -525,6 +529,7 @@ class TestConditionalNode:
         defn = _make_definition(root)
         executor = WorkflowExecutor(defn, _mock_llm_client())
         state = WorkflowState(query="test")
+        state.append("init", "status", "pending")
 
         with patch(
             "databricks_deep_research.workflow.executor.execute_agent",
@@ -534,7 +539,59 @@ class TestConditionalNode:
 
         branch_events = _events_of_type(events, BranchSelectedEvent)
         assert branch_events[0].branch_index == 1  # type: ignore[attr-defined]
+        assert "no conditions matched" in branch_events[0].condition_summary
         assert "branch_1" in executed_children
+
+    @pytest.mark.asyncio
+    async def test_missing_condition_operand_raises_instead_of_defaulting(self) -> None:
+        """Missing condition operands fail closed instead of selecting default_branch."""
+        executed_children: list[str] = []
+
+        async def fake_execute_agent(
+            node_id: str, **kwargs: Any
+        ) -> AgentOutput:
+            executed_children.append(node_id)
+            return AgentOutput(content="branch", output_key="output", events=[])
+
+        cond = StateCondition(key="missing.status", operator="eq", value="ready")
+
+        root = WorkflowNode(
+            id="cond",
+            type=NodeType.conditional,
+            label="conditional",
+            config={
+                "conditions": [cond.model_dump()],
+                "default_branch": 1,
+            },
+            children=[
+                WorkflowNode(
+                    id="branch_0",
+                    type=NodeType.agent,
+                    label="Branch 0",
+                    config={"subtype": "researcher", "output_key": "b0"},
+                ),
+                WorkflowNode(
+                    id="branch_1",
+                    type=NodeType.agent,
+                    label="Branch 1 (default)",
+                    config={"subtype": "researcher", "output_key": "b1"},
+                ),
+            ],
+        )
+        defn = _make_definition(root)
+        executor = WorkflowExecutor(defn, _mock_llm_client())
+        state = WorkflowState(query="test")
+
+        with (
+            patch(
+                "databricks_deep_research.workflow.executor.execute_agent",
+                side_effect=fake_execute_agent,
+            ),
+            pytest.raises(WorkflowConditionEvaluationError, match="condition\\[0\\]"),
+        ):
+            await _collect_events(executor, state)
+
+        assert executed_children == []
 
 
 # ---------------------------------------------------------------------------
@@ -1334,6 +1391,173 @@ async def test_available_source_catalog_uses_body_tools_and_excludes_helpers() -
     )
 
     assert [item.source_name for item in catalog] == ["web_search", "vector_search"]
+
+
+@pytest.mark.asyncio
+async def test_agent_compute_namespace_gets_table_and_vector_providers() -> None:
+    from types import SimpleNamespace
+
+    from databricks_deep_research.tools.builtins.compute import PythonComputeTool
+    from databricks_deep_research.tools.builtins.text_table import (
+        BindingInfo,
+        BindingSource,
+        RoleMap,
+        Schema,
+        SchemaColumn,
+        TableBindingRegistry,
+    )
+    from databricks_deep_research.tools.factory import ToolFactoryContext
+    from databricks_deep_research.tools.protocol import ToolContext
+
+    class _SchemaCache:
+        def get(self, fqn: str, user_token: str) -> Schema:
+            return Schema(
+                fqn=fqn,
+                columns=(
+                    SchemaColumn(name="chunk_id", data_type="string"),
+                    SchemaColumn(name="content", data_type="string"),
+                ),
+            )
+
+    class _VectorIndexes:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def query_index(self, **kwargs: Any) -> Any:
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                manifest=SimpleNamespace(
+                    columns=[
+                        SimpleNamespace(name="id"),
+                        SimpleNamespace(name="content"),
+                        SimpleNamespace(name="score"),
+                    ],
+                ),
+                result=SimpleNamespace(
+                    data_array=[["v1", "vector hit", 0.98]],
+                ),
+            )
+
+    registry = TableBindingRegistry()
+    registry.register_bound(
+        BindingInfo(
+            name="docs",
+            fqn="cat.sch.docs",
+            source=BindingSource.BOUND,
+            roles=RoleMap(id_column="chunk_id", content_column="content"),
+        )
+    )
+
+    def sql_executor(
+        sql: str, params: list[dict[str, Any]], user_token: str
+    ) -> list[dict[str, Any]]:
+        assert "LIKE" in sql
+        assert params
+        assert user_token == ""
+        return [{"chunk_id": "r1", "content": "hello table hit"}]
+
+    vector_indexes = _VectorIndexes()
+    workspace_client = SimpleNamespace(vector_search_indexes=vector_indexes)
+    definition = WorkflowDefinition(
+        id="wf",
+        name="wf",
+        tools=[
+            ToolDeclaration(name="compute", kind="compute", config={}),
+            ToolDeclaration(name="table_search", kind="table_search", config={}),
+            ToolDeclaration(
+                name="vs",
+                kind="vector_search",
+                config={
+                    "index_name": "cat.sch.docs_vs",
+                    "columns": ["id", "content", "score"],
+                    "num_results": 1,
+                },
+            ),
+        ],
+        root=WorkflowNode(
+            id="agent",
+            type=NodeType.agent,
+            label="Agent",
+            config={
+                "subtype": "researcher",
+                "output_key": "answer",
+                "tools": ["compute", "table_search", "vs"],
+            },
+        ),
+    )
+
+    async def fake_execute_agent(
+        node_id: str, tools: list[Any], **kwargs: Any
+    ) -> AgentOutput:
+        config = kwargs["config"]
+        assert "## Available text tables" in config.system_prompt
+        assert "binding: docs" in config.system_prompt
+        compute = next(tool for tool in tools if isinstance(tool, PythonComputeTool))
+        first = await compute.execute(
+            {
+                "code": "\n".join(
+                    [
+                        "print('docs' in bindings)",
+                        "print(vector_indexes['vs']['index_name'])",
+                        "print(table_search(binding='docs', query='hello')[0]['id'])",
+                        "print(vector_search('hello', num_results=1)[0]['content'])",
+                    ]
+                )
+            },
+            ToolContext(),
+        )
+        assert first.success is True
+        assert "True" in first.content
+        assert "cat.sch.docs_vs" in first.content
+        assert "r1" in first.content
+        assert "vector hit" in first.content
+
+        registry.register_discovered(
+            BindingInfo(
+                name="late",
+                fqn="cat.sch.late",
+                source=BindingSource.DISCOVERED,
+            )
+        )
+        second = await compute.execute(
+            {"code": "print('late' in bindings)"},
+            ToolContext(),
+        )
+        assert second.success is True
+        assert "True" in second.content
+
+        return AgentOutput(
+            content="ok",
+            output_key="answer",
+            events=[
+                AgentOutputEvent(
+                    node_id=node_id,
+                    timestamp="T",
+                    output_key="answer",
+                    output_preview="ok",
+                )
+            ],
+        )
+
+    executor = WorkflowExecutor(
+        definition,
+        _mock_llm_client(),
+        factory_context=ToolFactoryContext(
+            workspace_client=workspace_client,
+            table_registry=registry,
+            schema_cache=_SchemaCache(),
+            sql_executor=sql_executor,
+        ),
+    )
+
+    with patch(
+        "databricks_deep_research.workflow.executor.execute_agent",
+        side_effect=fake_execute_agent,
+    ):
+        events = await _collect_events(executor, WorkflowState(query="test"))
+
+    assert isinstance(events[-1], WorkflowCompletedEvent)
+    assert vector_indexes.calls[0]["index_name"] == "cat.sch.docs_vs"
 
 
 def test_planner_event_uses_normalized_executable_steps() -> None:

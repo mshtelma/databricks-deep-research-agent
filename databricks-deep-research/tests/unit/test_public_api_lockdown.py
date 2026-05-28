@@ -34,9 +34,23 @@ _APP_SRC = _APP_PKG / "src"
 _API_DIR = _FRAMEWORK_SRC / "api"
 
 # Canonical writers permitted to assign ``_framework_*`` extras keys.
+#
+# Each entry is a deliberate, reviewed pinch-point that materializes
+# framework-reserved keys into ``AgentNodeConfig.extras``. Adding a new
+# entry must be paired with a docstring on the writer explaining what
+# key it materializes and from where.
 _FRAMEWORK_PREFIX_ALLOWLIST = {
+    # Run-time canonical writer — stamps per-run keys (e.g. domain, OBO
+    # token reference) into agent extras during framework_orchestrator
+    # bootstrap.
     _FRAMEWORK_SRC / "api" / "agent.py",
     _APP_SRC / "deep_research" / "agent" / "framework_orchestrator.py",
+    # Save-time canonical writer — materializes the per-agent tool
+    # catalog block into ``extras["_framework_tool_catalog"]`` (and the
+    # paired registry-version + kinds keys) at workflow build time so the
+    # harness can splice it into the agent's ``{tool_catalog}`` template
+    # variable at run time without re-running the Designer LLM.
+    _APP_SRC / "deep_research" / "agent_designer" / "workflow_builder.py",
 }
 
 # Pattern for ``from databricks_deep_research[.x.y]._private import ...``.

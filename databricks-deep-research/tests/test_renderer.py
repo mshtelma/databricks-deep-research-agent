@@ -5,7 +5,10 @@ from __future__ import annotations
 import pytest
 
 from databricks_deep_research.agents.prompts.background import BACKGROUND_USER_PROMPT
-from databricks_deep_research.agents.prompts.planner import SOURCE_AWARE_PLANNER_SYSTEM_PROMPT
+from databricks_deep_research.agents.prompts.planner import (
+    PLANNER_SYSTEM_PROMPT,
+    SOURCE_AWARE_PLANNER_SYSTEM_PROMPT,
+)
 from databricks_deep_research.templates.renderer import (
     SafeTemplateRenderer,
     TemplateSecurityError,
@@ -95,5 +98,21 @@ class TestExtractVariables:
         assert names == {"query", "conversation_history"}
 
     def test_source_aware_planner_system_prompt_is_safe(self, renderer: SafeTemplateRenderer) -> None:
+        # ``{tool_catalog}`` is the per-agent catalog block injected at
+        # workflow build time (Phase 1 of the tool-catalog auto-injection
+        # plan). Every other JSON example, schema sample, and replan-output
+        # placeholder in this prompt is brace-escaped, so the renderer
+        # must see exactly one unfilled template variable.
         names = renderer.extract_variables(SOURCE_AWARE_PLANNER_SYSTEM_PROMPT)
-        assert names == set()
+        assert names == {"tool_catalog"}
+
+    def test_planner_system_prompt_is_safe(self, renderer: SafeTemplateRenderer) -> None:
+        # The base planner system prompt has two unfilled template
+        # variables: ``{query}`` (the active research question, embedded
+        # inline in the system role) and ``{tool_catalog}`` (the per-agent
+        # catalog block injected at workflow build time, Phase 1 of the
+        # tool-catalog auto-injection plan). Every other JSON example,
+        # schema sample, and replan-output placeholder is brace-escaped,
+        # so the renderer must see exactly these two variables.
+        names = renderer.extract_variables(PLANNER_SYSTEM_PROMPT)
+        assert names == {"query", "tool_catalog"}

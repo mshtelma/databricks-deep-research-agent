@@ -159,15 +159,19 @@ def populate_synthesis_state(node_id: str, state: WorkflowState, pools: dict[str
             state.append(sid, "fallback_discovery_sources", "\n".join(lines))
 
 
-def tool_ref_name(ref: str | dict[str, Any]) -> str:
-    return ref if isinstance(ref, str) else str(ref.get("name", "") or "")
+def tool_ref_name(ref: str | dict[str, Any] | Any) -> str:
+    if isinstance(ref, str):
+        return ref
+    if isinstance(ref, dict):
+        return str(ref.get("name", "") or "")
+    return str(getattr(ref, "name", "") or "")
 
 
-def collect_body_tool_refs(raw_node: dict[str, Any] | None) -> list[str | dict[str, Any]]:
+def collect_body_tool_refs(raw_node: dict[str, Any] | WorkflowNode | None) -> list[Any]:
     if not raw_node:
         return []
-    node = WorkflowNode(**raw_node)
-    refs: list[str | dict[str, Any]] = []
+    node = raw_node if isinstance(raw_node, WorkflowNode) else WorkflowNode(**raw_node)
+    refs: list[Any] = []
     if node.type == NodeType.agent:
         refs.extend(AgentNodeConfig(**node.config).tools)
     elif node.type == NodeType.tool:
@@ -183,7 +187,7 @@ def is_evidence_tool_kind(tool_kind: str, source_kind: str) -> bool:
     return tool_kind not in {"web_crawl"} and source_kind not in {"builtin", "web_crawl"}
 
 
-async def build_available_source_catalog(definition: WorkflowDefinition, resolver: ToolResolver, body: dict[str, Any]) -> list[AvailableSourceDescriptor]:
+async def build_available_source_catalog(definition: WorkflowDefinition, resolver: ToolResolver, body: dict[str, Any] | WorkflowNode | None) -> list[AvailableSourceDescriptor]:
     refs = collect_body_tool_refs(body)
     if not refs:
         return []

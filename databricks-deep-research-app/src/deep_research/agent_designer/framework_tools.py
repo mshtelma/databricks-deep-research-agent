@@ -1144,7 +1144,7 @@ class ListToolKindsTool:
             name="list_tool_kinds",
             description=(
                 "Return the sorted list of all valid tool 'kind' values "
-                "(e.g. 'web_search', 'vector_search', 'delta_read'). Use "
+                "(e.g. 'web_search', 'vector_search', 'table_search'). Use "
                 "this before declare_tool to avoid invalid kinds."
             ),
             parameters={"type": "object", "properties": {}, "required": []},
@@ -1396,10 +1396,19 @@ class ParseArchitectAstTool:
         state_getter: StateGetter | None = None,
         blueprint_getter: StateGetter | None = None,
         fingerprint_getter: StateGetter | None = None,
+        current_ast_summary_setter: StateSetter | None = None,
     ) -> None:
         self._state_getter = state_getter
         self._blueprint_getter = blueprint_getter
         self._fingerprint_getter = fingerprint_getter
+        self._current_ast_summary_setter = current_ast_summary_setter
+
+    def _publish_summary(self, ast: Any, payload: dict[str, Any]) -> None:
+        summary = _ast_summary_payload(ast)
+        payload["current_ast_summary"] = summary
+        if self._current_ast_summary_setter is not None:
+            with suppress(Exception):
+                self._current_ast_summary_setter(summary)
 
     def _cached_ast_result(
         self,
@@ -1428,6 +1437,7 @@ class ParseArchitectAstTool:
             "error": error,
             "normalization_fixes": _normalization_fix_payload(fixes),
         }
+        self._publish_summary(normalized, payload)
         return ToolResult(content=json.dumps(normalized), data=payload)
 
     @property
@@ -1506,31 +1516,40 @@ class ParseArchitectAstTool:
         # Extract the architect's patch JSON from the raw message.
         match = _JSON_BLOCK_RE.search(raw)
         if match is None:
+            normalized_blueprint, fixes = normalize_ast(blueprint)
             payload: dict[str, Any] = {
-                "current_ast": blueprint,
+                "current_ast": normalized_blueprint,
                 "parse_ok": False,
                 "parse_mode": "patches",
                 "error": "no ```json``` patch block in architect message",
+                "normalization_fixes": _normalization_fix_payload(fixes),
             }
-            return ToolResult(content=json.dumps(blueprint), data=payload)
+            self._publish_summary(normalized_blueprint, payload)
+            return ToolResult(content=json.dumps(normalized_blueprint), data=payload)
         try:
             parsed = json.loads(match.group(1))
         except json.JSONDecodeError as exc:
+            normalized_blueprint, fixes = normalize_ast(blueprint)
             payload = {
-                "current_ast": blueprint,
+                "current_ast": normalized_blueprint,
                 "parse_ok": False,
                 "parse_mode": "patches",
                 "error": f"json.loads failed on patch block: {exc}",
+                "normalization_fixes": _normalization_fix_payload(fixes),
             }
-            return ToolResult(content=json.dumps(blueprint), data=payload)
+            self._publish_summary(normalized_blueprint, payload)
+            return ToolResult(content=json.dumps(normalized_blueprint), data=payload)
         if not isinstance(parsed, dict):
+            normalized_blueprint, fixes = normalize_ast(blueprint)
             payload = {
-                "current_ast": blueprint,
+                "current_ast": normalized_blueprint,
                 "parse_ok": False,
                 "parse_mode": "patches",
                 "error": "architect output is not a JSON object",
+                "normalization_fixes": _normalization_fix_payload(fixes),
             }
-            return ToolResult(content=json.dumps(blueprint), data=payload)
+            self._publish_summary(normalized_blueprint, payload)
+            return ToolResult(content=json.dumps(normalized_blueprint), data=payload)
 
         # Plan v2.1 generic-robustness — reject unknown top-level keys.
         # Historical docs mentioned ``tool_bindings`` but the parser never
@@ -1539,8 +1558,9 @@ class ParseArchitectAstTool:
         # clear "use request_signature_revision" hint.
         unknown_top_level = set(parsed.keys()) - _TOP_LEVEL_PATCH_ALLOW_LIST
         if unknown_top_level:
+            normalized_blueprint, fixes = normalize_ast(blueprint)
             payload = {
-                "current_ast": blueprint,
+                "current_ast": normalized_blueprint,
                 "parse_ok": False,
                 "parse_mode": "patches",
                 "error": (
@@ -1555,8 +1575,10 @@ class ParseArchitectAstTool:
                     "patch document"
                     for key in sorted(unknown_top_level)
                 ],
+                "normalization_fixes": _normalization_fix_payload(fixes),
             }
-            return ToolResult(content=json.dumps(blueprint), data=payload)
+            self._publish_summary(normalized_blueprint, payload)
+            return ToolResult(content=json.dumps(normalized_blueprint), data=payload)
 
         node_patches = parsed.get("node_patches", {})
         if not isinstance(node_patches, dict):
@@ -1571,34 +1593,43 @@ class ParseArchitectAstTool:
                 f"({expected_fp[:16]}... → {post_fp[:16]}...); "
                 f"reverting to immutable blueprint"
             )
+            normalized_blueprint, fixes = normalize_ast(blueprint)
             payload = {
-                "current_ast": blueprint,
+                "current_ast": normalized_blueprint,
                 "parse_ok": False,
                 "parse_mode": "patches",
                 "error": "structural_drift_detected",
                 "structural_drift_detected": True,
                 "patch_errors": patch_errors,
+                "normalization_fixes": _normalization_fix_payload(fixes),
             }
-            return ToolResult(content=json.dumps(blueprint), data=payload)
+            self._publish_summary(normalized_blueprint, payload)
+            return ToolResult(content=json.dumps(normalized_blueprint), data=payload)
         if patch_errors:
             # Patches failed allow-list / lane-key resolution; revert
             # to the immutable blueprint and surface errors as
             # critic_feedback for the next architect iteration.
+            normalized_blueprint, fixes = normalize_ast(blueprint)
             payload = {
-                "current_ast": blueprint,
+                "current_ast": normalized_blueprint,
                 "parse_ok": False,
                 "parse_mode": "patches",
                 "error": "; ".join(patch_errors),
                 "patch_errors": patch_errors,
+                "normalization_fixes": _normalization_fix_payload(fixes),
             }
-            return ToolResult(content=json.dumps(blueprint), data=payload)
+            self._publish_summary(normalized_blueprint, payload)
+            return ToolResult(content=json.dumps(normalized_blueprint), data=payload)
+        normalized_merged_ast, fixes = normalize_ast(merged_ast)
         payload = {
-            "current_ast": merged_ast,
+            "current_ast": normalized_merged_ast,
             "parse_ok": True,
             "parse_mode": "patches",
             "structural_fingerprint": post_fp,
+            "normalization_fixes": _normalization_fix_payload(fixes),
         }
-        return ToolResult(content=json.dumps(merged_ast), data=payload)
+        self._publish_summary(normalized_merged_ast, payload)
+        return ToolResult(content=json.dumps(normalized_merged_ast), data=payload)
 
     async def execute(
         self, arguments: dict[str, Any], _context: ToolContext
@@ -1622,6 +1653,7 @@ class ParseArchitectAstTool:
                 "parse_ok": False,
                 "error": "no ```json``` block found in raw_message",
             }
+            self._publish_summary({}, payload)
             return ToolResult(content="{}", data=payload)
         try:
             parsed = json.loads(match.group(1))
@@ -1636,6 +1668,7 @@ class ParseArchitectAstTool:
                 "parse_ok": False,
                 "error": f"json.loads failed: {exc}",
             }
+            self._publish_summary({}, payload)
             return ToolResult(content="{}", data=payload)
         if not isinstance(parsed, dict):
             cached = self._cached_ast_result(
@@ -1648,6 +1681,7 @@ class ParseArchitectAstTool:
                 "parse_ok": False,
                 "error": "extracted JSON is not an object",
             }
+            self._publish_summary({}, payload)
             return ToolResult(content="{}", data=payload)
         # Layer 2 auto-repair: rewrite invalid identifiers (subtype, tier,
         # tool kind) and emit NormalizationFix records the SSE stream surfaces
@@ -1670,6 +1704,7 @@ class ParseArchitectAstTool:
             "parse_ok": True,
             "normalization_fixes": _normalization_fix_payload(fixes),
         }
+        self._publish_summary(normalized, payload)
         return ToolResult(content=json.dumps(normalized), data=payload)
 
 
@@ -1756,8 +1791,9 @@ class EvaluateSignatureLoopTool:
         # ``critic_approved`` argument. Unwrap the inner boolean if we see
         # that shape, before falling back to the general coercer (which
         # understands raw bools, JSON strings, and CriticVerdict shapes).
-        if isinstance(approved_raw, dict) and "critic_approved" in approved_raw:
-            approved = bool(approved_raw["critic_approved"])
+        approved_payload = _coerce_dict(approved_raw)
+        if "critic_approved" in approved_payload:
+            approved = bool(approved_payload["critic_approved"])
         elif isinstance(approved_raw, bool):
             approved = approved_raw
         else:
@@ -2186,32 +2222,45 @@ class InspectAstSummaryTool:
         self, _arguments: dict[str, Any], _context: ToolContext
     ) -> ToolResult:
         ast = _resolve_current_ast({}, self._state_getter)
-        node_count = _count_nodes_total(ast.get("root"))
-        tools = ast.get("tools") or []
-        pools = ast.get("pools") or []
-        pool_summary = [
-            {
-                "name": p.get("name"),
-                "dedup_key": p.get("dedup_key"),
-                "max_items": p.get("max_items"),
-            }
-            for p in pools
-            if isinstance(p, dict)
-        ]
-        agent_roles = sorted(_collect_agent_role_ids(ast.get("root")))
-        errors, _ = _validate_ast(ast)
-        payload = {
-            "ast_id": ast.get("id"),
-            "node_count": node_count,
-            "tool_count": len(tools),
-            "tool_names": [
-                t.get("name") for t in tools if isinstance(t, dict)
-            ],
-            "pools": pool_summary,
-            "agent_roles": agent_roles,
-            "validation_errors": errors,
-        }
+        payload = _ast_summary_payload(ast)
         return ToolResult(content=json.dumps(payload), data=payload)
+
+
+def _ast_summary_payload(ast: Any) -> dict[str, Any]:
+    """Return the compact prompt-safe AST summary shared by tools and state."""
+
+    if isinstance(ast, str):
+        with suppress(TypeError, ValueError):
+            ast = json.loads(ast)
+    if not isinstance(ast, dict):
+        ast = {}
+    node_count = _count_nodes_total(ast.get("root"))
+    tools = ast.get("tools") or []
+    pools = ast.get("pools") or []
+    pool_summary = [
+        {
+            "name": p.get("name"),
+            "dedup_key": p.get("dedup_key"),
+            "max_items": p.get("max_items"),
+        }
+        for p in pools
+        if isinstance(p, dict)
+    ]
+    agent_roles = sorted(_collect_agent_role_ids(ast.get("root")))
+    errors, _ = _validate_ast(ast)
+    return {
+        "ast_id": ast.get("id"),
+        "node_count": node_count,
+        "tool_count": len(tools),
+        "tool_names": [t.get("name") for t in tools if isinstance(t, dict)],
+        "pools": pool_summary,
+        "agent_roles": agent_roles,
+        "placeholder_pending_nodes": ast.get("placeholder_pending_nodes") or [],
+        "evidence_policy": ast.get("evidence_policy"),
+        "required_prompt_terms": ast.get("required_prompt_terms") or [],
+        "resolved_tool_contract_summary": ast.get("resolved_tool_contract_summary"),
+        "validation_errors": errors,
+    }
 
 
 def _count_nodes_total(node: Any) -> int:
@@ -2281,6 +2330,8 @@ class BuildBlueprintTool:
         signature_getter: StateGetter | None = None,
         intent_getter: StateGetter | None = None,
         assets_getter: StateGetter | None = None,
+        prompt_grounding_getter: StateGetter | None = None,
+        resolved_tool_contract_getter: StateGetter | None = None,
         blueprint_setter: StateSetter | None = None,
         ast_setter: StateSetter | None = None,
         fingerprint_setter: StateSetter | None = None,
@@ -2290,6 +2341,8 @@ class BuildBlueprintTool:
         self._signature_getter = signature_getter
         self._intent_getter = intent_getter
         self._assets_getter = assets_getter
+        self._prompt_grounding_getter = prompt_grounding_getter
+        self._resolved_tool_contract_getter = resolved_tool_contract_getter
         self._blueprint_setter = blueprint_setter
         self._ast_setter = ast_setter
         self._fingerprint_setter = fingerprint_setter
@@ -2326,6 +2379,19 @@ class BuildBlueprintTool:
                         "description": (
                             "Optional list of asset dicts; falls back to "
                             "state.assets when omitted."
+                        ),
+                    },
+                    "prompt_grounding": {
+                        "description": (
+                            "Optional PromptGroundingResult dict; falls back "
+                            "to state.prompt_grounding when omitted."
+                        ),
+                    },
+                    "resolved_tool_contract": {
+                        "description": (
+                            "Optional ResolvedToolContract dict; falls back "
+                            "to state.resolved_tool_contract when omitted. "
+                            "This is prompt-safe and non-executable."
                         ),
                     },
                 },
@@ -2397,11 +2463,59 @@ class BuildBlueprintTool:
         elif not isinstance(assets, list):
             assets = []
 
+        prompt_grounding: Any = arguments.get("prompt_grounding")
+        if (
+            prompt_grounding is None
+            and self._prompt_grounding_getter is not None
+        ):
+            with suppress(Exception):
+                prompt_grounding = self._prompt_grounding_getter()
+        if isinstance(prompt_grounding, str):
+            try:
+                prompt_grounding = json.loads(prompt_grounding)
+            except (TypeError, ValueError):
+                prompt_grounding = None
+        if (
+            isinstance(prompt_grounding, dict)
+            and prompt_grounding.get("safe_to_build_blueprint") is False
+        ):
+            diagnostics = prompt_grounding.get("diagnostics")
+            blocking: list[str] = []
+            if isinstance(diagnostics, list):
+                for diagnostic in diagnostics:
+                    if not isinstance(diagnostic, dict):
+                        continue
+                    if diagnostic.get("blocking") or diagnostic.get("severity") == "error":
+                        message = str(
+                            diagnostic.get("message")
+                            or diagnostic.get("code")
+                            or "blocking prompt-grounding diagnostic"
+                        )
+                        blocking.append(message)
+            detail = "; ".join(blocking) if blocking else "unsafe prompt grounding"
+            return _error_result(
+                "build_blueprint blocked by prompt grounding: " + detail
+            )
+
+        resolved_tool_contract: Any = arguments.get("resolved_tool_contract")
+        if (
+            resolved_tool_contract is None
+            and self._resolved_tool_contract_getter is not None
+        ):
+            with suppress(Exception):
+                resolved_tool_contract = self._resolved_tool_contract_getter()
+        if isinstance(resolved_tool_contract, str):
+            try:
+                resolved_tool_contract = json.loads(resolved_tool_contract)
+            except (TypeError, ValueError):
+                resolved_tool_contract = None
+
         try:
             ast = build_blueprint(
                 task_signature=sig_payload,
                 intent=intent,
                 assets=assets,
+                tool_contract=resolved_tool_contract,
             )
         except SignatureError as exc:
             return _error_result(f"build_blueprint failed: {exc}")
@@ -2449,6 +2563,9 @@ class BuildBlueprintTool:
                 "current_ast": ast,
                 "blueprint_fingerprint": fingerprint,
                 "blueprint_lane_keys": lane_keys,
+                "resolved_tool_contract_summary": ast.get(
+                    "resolved_tool_contract_summary"
+                ),
             },
         )
 
@@ -2556,12 +2673,13 @@ class RequestSignatureRevisionTool:
                     current_count = int(fetched)
 
         if current_count >= self._MAX_REVISIONS:
+            message = (
+                f"signature_unresolved: classifier exhausted "
+                f"{self._MAX_REVISIONS} revisions; halting per plan M12"
+            )
             err_payload = {
                 "kind": "signature_unresolved",
-                "message": (
-                    f"signature_unresolved: classifier exhausted "
-                    f"{self._MAX_REVISIONS} revisions; halting per plan M12"
-                ),
+                "message": message,
                 "revision_count": current_count,
             }
             if self._error_setter is not None:
@@ -2571,7 +2689,7 @@ class RequestSignatureRevisionTool:
                 content=json.dumps(err_payload),
                 success=False,
                 data={"error": err_payload, "revision_count": current_count},
-                error=err_payload["message"],
+                error=message,
             )
 
         new_count = current_count + 1
@@ -2990,8 +3108,11 @@ def builtin_designer_tools(
     state_getter: StateGetter | None = None,
     state_setter: StateSetter | None = None,
     asset_getter: AssetGetter | None = None,
+    prompt_grounding_getter: StateGetter | None = None,
+    resolved_tool_contract_getter: StateGetter | None = None,
     blueprint_getter: StateGetter | None = None,
     fingerprint_getter: StateGetter | None = None,
+    current_ast_summary_setter: StateSetter | None = None,
     signature_setter: StateSetter | None = None,
     lane_keys_setter: StateSetter | None = None,
     placeholder_pending_setter: StateSetter | None = None,
@@ -3053,6 +3174,7 @@ def builtin_designer_tools(
             state_getter=state_getter,
             blueprint_getter=blueprint_getter,
             fingerprint_getter=fingerprint_getter,
+            current_ast_summary_setter=current_ast_summary_setter,
         ),
         ExtractCriticApprovedTool(),
         EmitTaskSignatureTool(state_setter=signature_setter),  # PR3-B Layer 1
@@ -3078,6 +3200,8 @@ def builtin_designer_tools(
         # and falls back to ordinal addressing for ``node_patches``, which
         # drifts across signature revisions (plan M7).
         BuildBlueprintTool(
+            prompt_grounding_getter=prompt_grounding_getter,
+            resolved_tool_contract_getter=resolved_tool_contract_getter,
             lane_keys_setter=lane_keys_setter,
             placeholder_pending_setter=placeholder_pending_setter,
         ),
@@ -3120,8 +3244,11 @@ def register_designer_tools(
     state_getter: StateGetter | None = None,
     state_setter: StateSetter | None = None,
     asset_getter: AssetGetter | None = None,
+    prompt_grounding_getter: StateGetter | None = None,
+    resolved_tool_contract_getter: StateGetter | None = None,
     blueprint_getter: StateGetter | None = None,
     fingerprint_getter: StateGetter | None = None,
+    current_ast_summary_setter: StateSetter | None = None,
     signature_setter: StateSetter | None = None,
     lane_keys_setter: StateSetter | None = None,
     placeholder_pending_setter: StateSetter | None = None,
@@ -3153,8 +3280,11 @@ def register_designer_tools(
         state_getter=state_getter,
         state_setter=state_setter,
         asset_getter=asset_getter,
+        prompt_grounding_getter=prompt_grounding_getter,
+        resolved_tool_contract_getter=resolved_tool_contract_getter,
         blueprint_getter=blueprint_getter,
         fingerprint_getter=fingerprint_getter,
+        current_ast_summary_setter=current_ast_summary_setter,
         signature_setter=signature_setter,
         lane_keys_setter=lane_keys_setter,
         placeholder_pending_setter=placeholder_pending_setter,

@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -97,6 +98,22 @@ def _starts_with_planning_prefix(text: str) -> bool:
         return False
     lower = stripped.lower()
     return any(lower.startswith(p) for p in _PLANNING_PREFIXES)
+
+
+def _contains_structured_payload(text: str) -> bool:
+    """Return True when preface text is followed by a structured payload.
+
+    Some non-researcher tool agents are configured to suppress bare planning
+    final output because their authoritative result lives in tool state. That
+    suppression must not discard a valid JSON patch wrapped in a short preface,
+    because downstream parser tools can extract fenced JSON from the message.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("{") or stripped.startswith("["):
+        return True
+    return bool(re.search(r"```(?:json)?\s*[\{\[]", stripped, re.IGNORECASE))
 
 
 def _value_looks_like_planning(value: Any) -> bool:
@@ -861,6 +878,7 @@ class ReactLoop:
                         self._suppress_planning_final_output
                         and not bare_leak
                         and _starts_with_planning_prefix(response.content)
+                        and not _contains_structured_payload(response.content)
                     )
                     if bare_leak or json_leak:
                         leaked_preview = response.content.strip()[:160]
@@ -1402,10 +1420,10 @@ class ReactLoop:
                     [query[:200] for query in planned.alternate_queries],
                 )
 
-            # For delta tools (file_name + pattern), include all retrieval-
-            # shaping args in the dedup key so different patterns on the same
-            # file are not falsely deduplicated.
-            if source_kind in ("delta_table",):
+            # For text-table tools (binding + filter), include all retrieval-
+            # shaping args in the dedup key so different filters on the same
+            # binding are not falsely deduplicated.
+            if source_kind in ("text_table",):
                 dedup_parts = []
                 for k in sorted(planned.arguments.keys()):
                     v = planned.arguments[k]

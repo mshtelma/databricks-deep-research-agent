@@ -102,6 +102,7 @@ export interface AST {
   id: string;
   name: string;
   description?: string;
+  schema_version?: number;
   version: number;
   root: Block;
   tools: ToolDecl[];

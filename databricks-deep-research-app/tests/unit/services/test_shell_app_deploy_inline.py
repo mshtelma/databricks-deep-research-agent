@@ -14,14 +14,15 @@ Tests:
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
 
 from deep_research.models.agent_deployment import AgentDeployment, DeploymentMode
-from deep_research.services.deployment.shell_app import ShellAppExporter
 from deep_research.services.deployment.auth import WorkspaceClientResolver
+from deep_research.services.deployment.shell_app import ShellAppExporter
 from deep_research.services.deployment.translator import (
     Artifact,
     DeploymentCleanupError,
@@ -85,6 +86,71 @@ class TestDeployInline:
         assert result is expected
         assert result.success is True
         assert result.endpoint_name == "dr-shell-x"
+
+    def test_runtime_bindings_resolve_sql_warehouse_from_settings(self) -> None:
+        from deep_research.services.deployment.shell_app_apps_api import (
+            _resolve_runtime_bindings,
+        )
+
+        artifact = Artifact(
+            mode=DeploymentMode.SHELL_APP,
+            payload=b"fake-zip-bytes",
+            metadata={"requires_sql_warehouse": "true"},
+        )
+        settings = SimpleNamespace(
+            deploy_here_brave_secret_scope=None,
+            deploy_here_brave_secret_key=None,
+            storage_warehouse_id="d837825f69a03500",
+        )
+
+        bindings = _resolve_runtime_bindings(artifact, {}, settings)
+
+        assert bindings.requires_sql_warehouse is True
+        assert bindings.storage_warehouse_id == "d837825f69a03500"
+        assert bindings.sql_warehouse_resource_name == "text-table-sql-warehouse"
+
+    @pytest.mark.asyncio
+    async def test_create_or_update_app_binds_sql_warehouse_resource_and_env(self) -> None:
+        from deep_research.services.deployment.shell_app_apps_api import (
+            ShellAppRuntimeBindings,
+            _create_or_update_app,
+        )
+
+        workspace_client = MagicMock()
+        workspace_client.apps.create = MagicMock(
+            return_value=MagicMock(result=MagicMock(return_value=None))
+        )
+        workspace_client.apps.deploy = MagicMock(
+            return_value=MagicMock(result=MagicMock(return_value=None))
+        )
+        workspace_client.apps.get = MagicMock(return_value=MagicMock(url="https://app"))
+        bindings = ShellAppRuntimeBindings(
+            requires_web_search=False,
+            brave_secret_scope=None,
+            brave_secret_key=None,
+            requires_sql_warehouse=True,
+            storage_warehouse_id="d837825f69a03500",
+        )
+        settings = SimpleNamespace()
+
+        app, collision = await _create_or_update_app(
+            workspace_client=workspace_client,
+            app_name="dr-shell-x",
+            workspace_path="/Workspace/Shared/deep-research-agent/shell-apps/x",
+            deployer_email="owner@example.com",
+            settings=settings,
+            runtime_bindings=bindings,
+        )
+
+        assert collision is None
+        assert app.url == "https://app"
+        created_app = workspace_client.apps.create.call_args.args[0]
+        assert created_app.resources[0].name == "text-table-sql-warehouse"
+        assert created_app.resources[0].sql_warehouse.id == "d837825f69a03500"
+        assert created_app.resources[0].sql_warehouse.permission.value == "CAN_USE"
+        deployed = workspace_client.apps.deploy.call_args.kwargs["app_deployment"]
+        env_vars = {env.name: env for env in deployed.env_vars}
+        assert env_vars["STORAGE_WAREHOUSE_ID"].value == "d837825f69a03500"
 
 
 # ---------------------------------------------------------------------------

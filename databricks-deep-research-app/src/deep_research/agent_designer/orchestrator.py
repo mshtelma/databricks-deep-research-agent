@@ -23,7 +23,9 @@ from deep_research.agent_designer.assets import (
     DesignerAsset,
     asset_context_payload,
     inspect_assets,
+    normalize_assets,
     recommend_tools_for_assets,
+    resolve_default_table_warehouse_id,
 )
 from deep_research.agent_designer.ast_normalizer import normalize_ast
 from deep_research.agent_designer.designer_architect import (
@@ -31,6 +33,11 @@ from deep_research.agent_designer.designer_architect import (
     designer_system_prompt,
 )
 from deep_research.agent_designer.discovery import DesignerDiscoveryAdapter, SourceKind
+from deep_research.agent_designer.prompt_grounding import (
+    ground_prompt,
+    prompt_grounding_sse_result,
+    sanitized_prompt_grounding_summary,
+)
 from deep_research.agent_designer.registry import (
     model_tiers_payload as _model_tiers_payload,
 )
@@ -48,6 +55,13 @@ from deep_research.agent_designer.registry import (
 )
 from deep_research.agent_designer.registry import (
     tool_kinds_payload as _tool_kinds_payload,
+)
+from deep_research.agent_designer.tool_contract import (
+    extract_resource_semantics_structured,
+    project_resolved_tool_contract,
+    resolved_tool_contract_sse_result,
+    resource_semantics_summary,
+    sanitized_resolved_tool_contract_summary,
 )
 from deep_research.agent_designer.tools import (
     AddBlockArgs,
@@ -286,6 +300,29 @@ def _mutation_event_for_ast_change(
     new_ast = _coerce_ast_snapshot(raw_ast)
     if new_ast is None:
         return None
+    new_ast, event_fixes = normalize_ast(new_ast)
+    if event_fixes:
+        existing_fix_keys = {
+            (
+                fix.get("kind"),
+                fix.get("path"),
+                repr(fix.get("before")),
+                repr(fix.get("after")),
+            )
+            for fix in normalization_fixes
+            if isinstance(fix, dict)
+        }
+        for fix in event_fixes:
+            payload = fix.to_dict()
+            key = (
+                payload.get("kind"),
+                payload.get("path"),
+                repr(payload.get("before")),
+                repr(payload.get("after")),
+            )
+            if key not in existing_fix_keys:
+                normalization_fixes.append(payload)
+                existing_fix_keys.add(key)
     new_ast = _normalize_model_tiers(new_ast)
     if new_ast == last_ast_seen or not new_ast:
         return None
@@ -675,9 +712,6 @@ class DesignerChatOrchestrator:
                 }
             )
 
-        # Unused-but-required by the legacy signature; kept for back-compat.
-        _ = user_token
-
         # 1. Resolve workflow path (allow override via env var for A/B testing).
         wf_path_env = os.environ.get("DESIGNER_WORKFLOW_YAML")
         if wf_path_env:
@@ -721,6 +755,54 @@ class DesignerChatOrchestrator:
             user_intent = _message_content_to_text(last.get("content"))
 
         prior_messages = messages[:-1] if len(messages) > 1 else []
+        normalized_request_assets = normalize_assets(assets or [])
+        prompt_grounding = await ground_prompt(
+            intent=user_intent,
+            existing_assets=normalized_request_assets,
+            discovery=self._discovery,
+            user_id=current_user_id,
+            user_token=user_token,
+            default_warehouse_id=resolve_default_table_warehouse_id(),
+        )
+        designer_assets = asset_context_payload(prompt_grounding.resolved_assets)
+        prompt_grounding_payload = prompt_grounding.model_dump(mode="json")
+        prompt_grounding_summary = sanitized_prompt_grounding_summary(prompt_grounding)
+        semantic_llm = getattr(self._llm, "_llm", None) or self._llm
+        resource_semantics, semantic_diagnostics = (
+            await extract_resource_semantics_structured(
+                llm=semantic_llm,
+                intent=user_intent,
+                grounding=prompt_grounding,
+            )
+        )
+        resolved_tool_contract = project_resolved_tool_contract(
+            prompt_grounding,
+            intent=user_intent,
+            semantics=resource_semantics,
+        )
+        if resolved_tool_contract is not None and semantic_diagnostics:
+            resolved_tool_contract = resolved_tool_contract.model_copy(
+                update={
+                    "diagnostics": [
+                        *resolved_tool_contract.diagnostics,
+                        *semantic_diagnostics,
+                    ]
+                }
+            )
+        resource_semantics_payload = (
+            resource_semantics.model_dump(mode="json")
+            if resource_semantics is not None
+            else None
+        )
+        resolved_tool_contract_payload = (
+            resolved_tool_contract.model_dump(mode="json")
+            if resolved_tool_contract is not None
+            else None
+        )
+        resource_semantics_sse = resource_semantics_summary(resource_semantics)
+        resolved_tool_contract_summary = sanitized_resolved_tool_contract_summary(
+            resolved_tool_contract
+        )
 
         state = WorkflowState(
             query=user_intent,
@@ -733,7 +815,37 @@ class DesignerChatOrchestrator:
         state.append("init", "current_ast", json.dumps(current_ast or {}))
         state.append("init", "critic_verdict", "")
         state.append("init", "gate_result", "")
-        state.append("init", "designer_assets", asset_context_payload(assets))
+        state.append("init", "designer_assets", designer_assets)
+        state.append("init", "prompt_grounding", prompt_grounding_payload)
+        state.append("init", "prompt_grounding_summary", prompt_grounding_summary)
+        state.append("init", "resource_semantics", resource_semantics_payload)
+        state.append("init", "resource_semantics_summary", resource_semantics_sse)
+        state.append("init", "resolved_tool_contract", resolved_tool_contract_payload)
+        state.append(
+            "init",
+            "resolved_tool_contract_summary",
+            resolved_tool_contract_summary,
+        )
+        state.append(
+            "init",
+            "prompt_grounding_diagnostics",
+            prompt_grounding_summary.get("diagnostics", []),
+        )
+        yield ToolResultEvent(
+            tool_call_id="prompt_grounding:init",
+            tool_name="prompt_grounding",
+            result=prompt_grounding_sse_result(prompt_grounding),
+        )
+        yield ToolResultEvent(
+            tool_call_id="resource_semantics:init",
+            tool_name="resource_semantics",
+            result=resource_semantics_sse,
+        )
+        yield ToolResultEvent(
+            tool_call_id="resolved_tool_contract:init",
+            tool_name="resolved_tool_contract",
+            result=resolved_tool_contract_sse_result(resolved_tool_contract),
+        )
 
         # 4. Build the framework LLM client from the app's underlying LLM.
         #    The orchestrator's `self._llm` is the LLMClientProto adapter
@@ -798,6 +910,8 @@ class DesignerChatOrchestrator:
             state_getter=_state_ast_getter,
             state_setter=_state_ast_setter,
             asset_getter=lambda: state.get("designer_assets"),
+            prompt_grounding_getter=lambda: state.get("prompt_grounding"),
+            resolved_tool_contract_getter=lambda: state.get("resolved_tool_contract"),
             # Fix D — wire ParseArchitectAstTool patch mode. BuildBlueprintTool
             # writes ``initial_blueprint`` + ``blueprint_fingerprint`` to state;
             # without these getters, ParseArchitectAstTool falls back to
@@ -806,6 +920,9 @@ class DesignerChatOrchestrator:
             # event 13 of the failing investment_research scaffold-and-run).
             blueprint_getter=lambda: state.get("initial_blueprint"),
             fingerprint_getter=lambda: state.get("blueprint_fingerprint"),
+            current_ast_summary_setter=lambda value: state.append(
+                "parse_architect_ast", "current_ast_summary", value
+            ),
             # Fix (live run) — EmitTaskSignatureTool now writes its
             # validated payload directly to state.task_signature via this
             # setter. Without it, the classifier agent's free-form prose

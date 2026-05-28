@@ -176,6 +176,7 @@ def compile_workflow_design_brief(
         # LLM controls the strictness vs latency trade-off per workflow.
         grounding_mode=supplied_brief.grounding_mode,
         tool_plan=supplied_brief.tool_plan,
+        tool_contract=supplied_brief.tool_contract,
     )
 
 
@@ -198,6 +199,30 @@ def format_workflow_design_brief(brief: WorkflowDesignBrief) -> str:
             continue
         lines.append(f"{title}:")
         lines.extend(f"- {value}" for value in values)
+    if brief.tool_contract is not None:
+        contract = brief.tool_contract
+        lines.append("Resolved evidence contract:")
+        lines.append(f"- evidence_policy: {contract.evidence_policy}")
+        if contract.ready_tool_kinds:
+            lines.append(
+                "- ready_tool_kinds: "
+                + ", ".join(contract.ready_tool_kinds[:12])
+            )
+        terms = contract.prompt_obligations.required_terms
+        if terms:
+            lines.append("- required_terms: " + ", ".join(terms[:12]))
+        forbidden = contract.prompt_obligations.forbidden_tool_kinds
+        if forbidden:
+            lines.append("- forbidden_tool_kinds: " + ", ".join(forbidden[:8]))
+        for resource in contract.resources[:6]:
+            label = f"{resource.kind}:{resource.identity}"
+            details: list[str] = []
+            if resource.role_description:
+                details.append(resource.role_description)
+            if resource.domain_terms:
+                details.append("terms=" + ", ".join(resource.domain_terms[:6]))
+            suffix = " — " + "; ".join(details) if details else ""
+            lines.append(f"- resource {label}{suffix}")
     return "\n".join(lines)
 
 

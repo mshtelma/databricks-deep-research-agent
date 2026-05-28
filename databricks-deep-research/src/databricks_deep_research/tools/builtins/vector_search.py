@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any
+from typing import Any, Callable
 
 from databricks_deep_research.tools.protocol import (
     SourceInfo,
@@ -143,6 +143,10 @@ class DatabricksVectorSearchTool:
     def definition(self) -> ToolDefinition:
         return self._definition
 
+    @property
+    def compute_name(self) -> str:
+        return "vector_search"
+
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         query = arguments.get("query")
         if not query or not isinstance(query, str):
@@ -170,6 +174,76 @@ class DatabricksVectorSearchTool:
                     arguments["filters"], type(raw).__name__,
                 )
         return validated
+
+    def to_compute_callable(self, *, compute: Any) -> Callable[..., list[dict[str, Any]]]:
+        """Return a plain callable for use inside ``python_compute``.
+
+        This mirrors the external vector-search query path but returns native
+        row dictionaries instead of a ``ToolResult`` envelope.
+        """
+        del compute
+
+        def _call(
+            query: str,
+            num_results: int | None = None,
+            filters: dict[str, Any] | str | None = None,
+        ) -> list[dict[str, Any]]:
+            raw_args: dict[str, Any] = {"query": query}
+            if num_results is not None:
+                raw_args["num_results"] = num_results
+            if filters:
+                raw_args["filters"] = filters
+            args = self.validate_arguments(raw_args)
+
+            if self._columns is None:
+                self._columns = self._discover_columns()
+            if not self._columns:
+                raise RuntimeError(
+                    f"vector_search: no columns available for index "
+                    f"{self._index_name!r}; set columns explicitly in the tool config"
+                )
+
+            requested = args.get("num_results", self._num_results)
+            effective_num = (
+                min(requested * 2, 50) if self._exclude_chunk_types else requested
+            )
+            kwargs: dict[str, Any] = {
+                "index_name": self._index_name,
+                "query_text": args["query"],
+                "num_results": effective_num,
+                "columns": self._columns,
+            }
+            if self._query_type:
+                kwargs["query_type"] = self._query_type
+            if args.get("filters"):
+                import json as _json
+
+                kwargs["filters_json"] = _json.dumps(args["filters"])
+            elif self._filters_json:
+                kwargs["filters_json"] = self._filters_json
+
+            result = self._ws.vector_search_indexes.query_index(**kwargs)
+            col_names = self._result_column_names(result)
+            rows = self._result_rows(result)
+
+            if self._exclude_chunk_types and rows and col_names:
+                ct_idx = col_names.index("chunk_type") if "chunk_type" in col_names else -1
+                if ct_idx >= 0:
+                    rows = [r for r in rows if r[ct_idx] not in self._exclude_chunk_types]
+            if self._exclude_chunk_types:
+                rows = rows[:requested]
+
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                out.append(
+                    {
+                        col_names[i] if i < len(col_names) else f"col_{i}": value
+                        for i, value in enumerate(row)
+                    }
+                )
+            return out
+
+        return _call
 
     @staticmethod
     def _normalize_filters(filters: dict[str, Any]) -> dict[str, Any]:
@@ -257,6 +331,20 @@ class DatabricksVectorSearchTool:
         )
         return None
 
+    @staticmethod
+    def _result_column_names(result: Any) -> list[str]:
+        manifest = getattr(result, "manifest", None)
+        if manifest and hasattr(manifest, "columns"):
+            return [c.name for c in manifest.columns if hasattr(c, "name")]
+        return []
+
+    @staticmethod
+    def _result_rows(result: Any) -> list[list[Any]]:
+        data_array = getattr(result, "result", None)
+        if data_array and hasattr(data_array, "data_array"):
+            return data_array.data_array or []
+        return []
+
     async def execute(
         self, arguments: dict[str, Any], context: ToolContext
     ) -> ToolResult:
@@ -319,13 +407,9 @@ class DatabricksVectorSearchTool:
             manifest = getattr(result, "manifest", None)
             col_names: list[str] = []
             if manifest and hasattr(manifest, "columns"):
-                col_names = [c.name for c in manifest.columns if hasattr(c, "name")]
+                col_names = self._result_column_names(result)
 
-            data_array = getattr(result, "result", None)
-            if data_array and hasattr(data_array, "data_array"):
-                rows = data_array.data_array or []
-            else:
-                rows = []
+            rows = self._result_rows(result)
 
             # Post-filter excluded chunk types and trim to requested count
             if self._exclude_chunk_types and rows and col_names:

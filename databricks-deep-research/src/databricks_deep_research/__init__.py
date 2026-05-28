@@ -111,6 +111,7 @@ from databricks_deep_research.tools.protocol import (
     ToolContext,
     ToolDefinition,
     ToolResult,
+    required_ctx_fields_for_kind,
 )
 from databricks_deep_research.tracing import (
     setup_mlflow_tracing,
@@ -164,6 +165,7 @@ __all__ = [
     "ToolDefinition",
     "ToolResult",
     "ToolFactoryContext",
+    "required_ctx_fields_for_kind",
     # Loader
     "load_workflow",
     "load_workflow_from_dict",

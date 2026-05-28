@@ -240,15 +240,19 @@ def _build_citation_config(config: AgentNodeConfig) -> CitationConfig:
         if k in VerificationRetrievalConfig.model_fields
     }
 
-    citation_kwargs: dict[str, Any] = dict(
-        generation_mode=generation_mode,
-        synthesis_mode=synthesis_mode,
-        react_synthesis=react_synthesis,
-        enable_verification_retrieval=bool(reclaim_cfg["enable_are_retrieval"]),
-        isolated_verification=IsolatedVerificationConfig(**isolated_verification_kwargs),
-        verification_retrieval=VerificationRetrievalConfig(**verification_retrieval_kwargs),
-        claim_disposition=claim_disposition,
-    )
+    citation_kwargs: dict[str, Any] = {
+        "generation_mode": generation_mode,
+        "synthesis_mode": synthesis_mode,
+        "react_synthesis": react_synthesis,
+        "enable_verification_retrieval": bool(reclaim_cfg["enable_are_retrieval"]),
+        "isolated_verification": IsolatedVerificationConfig(
+            **isolated_verification_kwargs
+        ),
+        "verification_retrieval": VerificationRetrievalConfig(
+            **verification_retrieval_kwargs
+        ),
+        "claim_disposition": claim_disposition,
+    }
     if max_evidence_chars is not None:
         citation_kwargs["max_evidence_chars"] = int(max_evidence_chars)
 
@@ -324,6 +328,7 @@ def _build_reclaim_user_prompt() -> str:
         "## Available Sources\n{sources_list}\n\n"
         "## Background Discovery Sources (fallback only)\n{fallback_discovery_sources}\n\n"
         "## Length\n"
+        "Target range: {min_words}-{max_words} words.\n\n"
         "Match the depth and length the user asked for in the ``Original Query``\n"
         "above. A request for a 'brief' warrants a short report; a request for\n"
         "a 'deep' or 'comprehensive' report warrants the depth its sources\n"
@@ -424,7 +429,7 @@ def _build_reclaim_generation_instructions(config: AgentNodeConfig) -> str:
 
 def _normalize_source(source: Any) -> dict[str, Any] | None:
     """Normalize a pool source into a citation-pipeline-friendly dict."""
-    if not source_is_substantive(source):
+    if not _source_is_normalizable_for_synthesis(source):
         return None
     if isinstance(source, dict):
         url = source.get("url")
@@ -475,6 +480,43 @@ def _normalize_source(source: Any) -> dict[str, Any] | None:
         "evidence_quality": getattr(source, "evidence_quality", ""),
         "admission_status": getattr(source, "admission_status", "accepted"),
     }
+
+
+def _source_is_normalizable_for_synthesis(source: Any) -> bool:
+    """Allow URL/title-only records through so title fallback can run.
+
+    Generic source-admission gates are intentionally stricter because they
+    decide whether a source can independently support a citation. This
+    normalizer also handles sparse source records and may hydrate them from
+    observations later, so a URL-only source is acceptable unless it carries
+    explicit low-value or rejected metadata.
+    """
+    if source_is_substantive(source):
+        return True
+    if source is None:
+        return False
+
+    def _value(field: str, default: Any = None) -> Any:
+        if isinstance(source, dict):
+            return source.get(field, default)
+        return getattr(source, field, default)
+
+    status = str(_value("admission_status", "accepted") or "accepted").lower()
+    if status in {"rejected", "blocked", "failed", "accepted_low_value"}:
+        return False
+
+    explicit_quality = (
+        "evidence_quality" in source
+        if isinstance(source, dict)
+        else hasattr(source, "evidence_quality")
+    )
+    quality = str(_value("evidence_quality", "") or "").lower()
+    if quality in {"metadata_only", "title_only"}:
+        return False
+    if explicit_quality and quality in {"empty", "unknown", "none", "null"}:
+        return False
+
+    return bool(_value("url"))
 
 
 def _collect_sources(pools: dict[str, Any]) -> list[dict[str, Any]]:

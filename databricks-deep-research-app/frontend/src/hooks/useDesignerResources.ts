@@ -1,6 +1,7 @@
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
-import { listDesignerResources } from '@/api/agentDesigner';
+import { listDesignerResources, startDesignerSqlWarehouse } from '@/api/agentDesigner';
+import type { DesignerResourcesResponse } from '@/types/agentDesigner';
 
 export const designerResourceKeys = {
   all: ['agent-designer', 'resources'] as const,
@@ -18,4 +19,38 @@ export function useDesignerResources(kinds: string[], enabled = true) {
     gcTime: CACHE_TIME,
     enabled: enabled && kinds.length > 0,
   });
+}
+
+export function useStartDesignerSqlWarehouse() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: startDesignerSqlWarehouse,
+    onSuccess: (resource) => {
+      queryClient.setQueryData<DesignerResourcesResponse>(
+        designerResourceKeys.byKinds(['sql_warehouse']),
+        (current) => {
+          if (!current) return current;
+          const nextResources = current.resources.map((item) => {
+            const itemId = resourceWarehouseId(item);
+            const resourceId = resourceWarehouseId(resource);
+            return itemId && itemId === resourceId ? resource : item;
+          });
+          return { ...current, resources: nextResources };
+        },
+      );
+      void queryClient.invalidateQueries({
+        queryKey: designerResourceKeys.byKinds(['sql_warehouse']),
+      });
+    },
+  });
+}
+
+function resourceWarehouseId(resource: {
+  source_id?: string | null;
+  metadata: Record<string, unknown>;
+}) {
+  const metadataId = resource.metadata['warehouse_id'];
+  if (typeof metadataId === 'string' && metadataId.length > 0) return metadataId;
+  return resource.source_id ?? '';
 }

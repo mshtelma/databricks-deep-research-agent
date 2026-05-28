@@ -292,3 +292,14 @@ citation_verification:
     abstained: keep
     analysis_partial: keep
     analysis_unsupported: remove
+
+agent_designer:
+  tool_catalog:
+    max_chars: 4000
+    summary_only_above_n_tools: 8
+    include_probes: true
+  probe:
+    timeout_seconds: 30
+    max_concurrent_probes: 4
+    max_output_chars: 800
+    persist: false

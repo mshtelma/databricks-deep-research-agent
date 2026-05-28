@@ -3,11 +3,11 @@ from __future__ import annotations
 import pytest
 
 from databricks_deep_research.tools.builtins.text_table.budgets import (
-    Budget3D,
-    BudgetExceeded,
     PER_STMT_LIMIT_BYTES,
     PER_STMT_LIMIT_GROUPS,
     PER_STMT_LIMIT_ROWS,
+    Budget3D,
+    BudgetExceeded,
 )
 from databricks_deep_research.tools.builtins.text_table.error_codes import ErrorCode
 

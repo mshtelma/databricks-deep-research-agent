@@ -48,7 +48,7 @@ class SourceKind(StrEnum):
     qa_assistant = "qa_assistant"
     file = "file"
     builtin = "builtin"
-    delta_table = "delta_table"
+    text_table = "text_table"
 
 
 class ToolKind(StrEnum):
@@ -68,11 +68,12 @@ class ToolKind(StrEnum):
     knowledge_assistant = "knowledge_assistant"
     compute = "compute"
     compute_namespace = "compute_namespace"
-    delta_read = "delta_read"
-    delta_grep = "delta_grep"
-    delta_context = "delta_context"
-    delta_table_read = "delta_table_read"
+    table_discovery = "table_discovery"
+    table_search = "table_search"
     table_read = "table_read"
+    table_neighbors = "table_neighbors"
+    table_load = "table_load"
+    table_aggregate = "table_aggregate"
     custom = "custom"
 
 
@@ -86,17 +87,64 @@ _TOOL_KIND_TO_SOURCE_KIND: dict[str, str] = {
     ToolKind.knowledge_assistant: SourceKind.qa_assistant,
     ToolKind.compute: SourceKind.builtin,
     ToolKind.compute_namespace: SourceKind.builtin,
-    ToolKind.delta_read: SourceKind.delta_table,
-    ToolKind.delta_grep: SourceKind.delta_table,
-    ToolKind.delta_context: SourceKind.delta_table,
-    ToolKind.delta_table_read: SourceKind.delta_table,
-    ToolKind.table_read: SourceKind.builtin,
+    ToolKind.table_discovery: SourceKind.text_table,
+    ToolKind.table_search: SourceKind.text_table,
+    ToolKind.table_read: SourceKind.text_table,
+    ToolKind.table_neighbors: SourceKind.text_table,
+    ToolKind.table_load: SourceKind.text_table,
+    ToolKind.table_aggregate: SourceKind.text_table,
 }
 
 
 def tool_kind_to_source_kind(kind: str) -> str:
     """Map a ToolKind to a SourceKind.  Returns ``'builtin'`` for unknown kinds."""
     return _TOOL_KIND_TO_SOURCE_KIND.get(kind, SourceKind.builtin)
+
+
+# Each entry lists ``ToolFactoryContext`` field names a factory needs to
+# successfully construct that tool kind. Used by the app's deploy-time and
+# boot-time validators to fail loud when a workflow declares a kind whose
+# runtime dependencies are unset (e.g. ``schema_cache`` is None because
+# ``STORAGE_WAREHOUSE_ID`` was not propagated to the deployed app env). The
+# inline ``if ctx.X is None: raise`` checks inside concrete factories remain
+# the runtime backstop — this table is additive metadata.
+_TOOL_KIND_REQUIRED_CTX: dict[str, frozenset[str]] = {
+    ToolKind.web_search: frozenset({"search_client"}),
+    ToolKind.web_research: frozenset({"search_client"}),
+    ToolKind.vector_search: frozenset({"workspace_client"}),
+    ToolKind.genie: frozenset({"workspace_client"}),
+    ToolKind.knowledge_assistant: frozenset({"workspace_client"}),
+    ToolKind.table_discovery: frozenset(
+        {"table_registry", "table_discovery_provider"}
+    ),
+    ToolKind.table_search: frozenset(
+        {"table_registry", "schema_cache", "sql_executor"}
+    ),
+    ToolKind.table_read: frozenset(
+        {"table_registry", "schema_cache", "sql_executor"}
+    ),
+    ToolKind.table_neighbors: frozenset(
+        {"table_registry", "schema_cache", "sql_executor"}
+    ),
+    ToolKind.table_load: frozenset(
+        {"table_registry", "schema_cache", "sql_executor"}
+    ),
+    ToolKind.table_aggregate: frozenset(
+        {"table_registry", "schema_cache", "sql_executor"}
+    ),
+    # web_crawl, file_search, compute, compute_namespace, custom: no required ctx
+}
+
+
+def required_ctx_fields_for_kind(kind: str) -> frozenset[str]:
+    """Return ``ToolFactoryContext`` field names required to construct *kind*.
+
+    Returns an empty frozenset for kinds with no statically-declared
+    requirements (custom tools, or tools that are constructible without
+    factory context fields). Callers should treat the empty set as
+    "no precheck possible" rather than "no dependencies".
+    """
+    return _TOOL_KIND_REQUIRED_CTX.get(kind, frozenset())
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +310,7 @@ class UrlRegistry:
 
 
 # ---------------------------------------------------------------------------
-# Table registry — source-agnostic structured table storage
+# Table registry — in-memory structured table storage
 # ---------------------------------------------------------------------------
 
 
@@ -383,6 +431,7 @@ class ToolContext:
     background_summary: str = ""
     recent_observations: list[str] = field(default_factory=list)
     discovered_sources: list[Any] = field(default_factory=list)
+    read_only: bool = False
     # Runtime-capability attachment point. ``frozen=True`` prevents rebinding the
     # ``extras`` reference, but the contained dict is mutable — standard Python
     # idiom shared with :class:`ToolFactoryContext.extras`. Keys prefixed with

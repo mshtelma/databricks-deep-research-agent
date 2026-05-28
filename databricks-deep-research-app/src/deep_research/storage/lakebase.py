@@ -78,14 +78,15 @@ async def _wrap_error_with_auth_refresh(exc: BaseException) -> Exception:
     try:
         from deep_research.db.session import (  # noqa: PLC0415
             _is_db_auth_error,
+            log_lakebase_auth_failure_diagnostics,
             refresh_engine_credentials,
         )
 
         if _is_db_auth_error(exc) or _is_db_auth_error(wrapped):
+            log_lakebase_auth_failure_diagnostics(exc)
             logger.warning(
-                "LAKEBASE_STORAGE_AUTH_FAILED_REFRESH_TRIGGERED exc_class=%s error=%s",
+                "LAKEBASE_STORAGE_AUTH_FAILED_REFRESH_TRIGGERED exc_class=%s",
                 type(exc).__name__,
-                str(exc)[:300],
             )
             await refresh_engine_credentials()
     except Exception:  # noqa: BLE001
@@ -192,9 +193,7 @@ class LakebaseBackend:
         self._schema = schema
         self._sm = _scoped_sm(raw_sm, schema) if schema else raw_sm
 
-        self._ddl_path = ddl_path or (
-            Path(__file__).with_name("lakebase_ddl.sql")
-        )
+        self._ddl_path = ddl_path or (Path(__file__).with_name("lakebase_ddl.sql"))
         self._closed = False
 
     # -- Lifecycle -----------------------------------------------------
@@ -248,9 +247,7 @@ class LakebaseBackend:
 
                 raw_sm = get_session_maker()
                 async with raw_sm() as session, session.begin():
-                    await session.execute(
-                        text(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
-                    )
+                    await session.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"'))
             async with self._sm() as session, session.begin():
                 for stmt in statements:
                     await session.execute(text(stmt))
@@ -366,8 +363,7 @@ class LakebaseBackend:
                     # a concurrent INSERT won the race (not possible in
                     # single-worker, but defensively handle).
                     raise ConflictError(
-                        f"version conflict on chat {cid}: expected "
-                        f"{expected_version}"
+                        f"version conflict on chat {cid}: expected {expected_version}"
                     )
                 new_version = int(row.version)
 
@@ -384,9 +380,7 @@ class LakebaseBackend:
 
                 # Rebuild chat_deleted_files projection for this chat.
                 await session.execute(
-                    text(
-                        f"DELETE FROM {self._ns}.chat_deleted_files WHERE chat_id = :cid"
-                    ),
+                    text(f"DELETE FROM {self._ns}.chat_deleted_files WHERE chat_id = :cid"),
                     {"cid": cid},
                 )
                 file_ids = doc.state.live_file_ids()
@@ -661,9 +655,7 @@ class LakebaseBackend:
                     {"ts": ts, "jid": job_id},
                 )
                 if _result_rowcount(result) == 0:
-                    raise PermanentError(
-                        f"prep_job {job_id} does not exist"
-                    )
+                    raise PermanentError(f"prep_job {job_id} does not exist")
         except PermanentError:
             raise
         except Exception as exc:
@@ -717,9 +709,7 @@ class LakebaseBackend:
             _assert_safe_identifier(c)
         cols_sql = ", ".join(cols)
         placeholders = ", ".join(f":{c}" for c in cols)
-        update_sql = ", ".join(
-            f"{c} = EXCLUDED.{c}" for c in cols if c != pk
-        )
+        update_sql = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != pk)
         sql = (
             f"INSERT INTO {self._ns}.{table} ({cols_sql}) VALUES ({placeholders}) "
             f"ON CONFLICT ({pk}) DO UPDATE SET {update_sql}"
@@ -781,10 +771,7 @@ class LakebaseBackend:
                     _assert_safe_identifier(k)
                     cols.append(k)
         placeholders = ", ".join(f":{c}" for c in cols)
-        sql = (
-            f"INSERT INTO {self._ns}.{table} ({', '.join(cols)}) "
-            f"VALUES ({placeholders})"
-        )
+        sql = f"INSERT INTO {self._ns}.{table} ({', '.join(cols)}) VALUES ({placeholders})"
         try:
             async with self._sm() as session, session.begin():
                 await session.execute(
@@ -884,14 +871,18 @@ class LakebaseBackend:
         try:
             async with self._sm() as session:
                 rows = (
-                    await session.execute(
-                        text(
-                            f"SELECT * FROM {self._ns}.file_chunks "
-                            f"WHERE {filter_sql} ORDER BY chunk_index"
-                        ),
-                        params,
+                    (
+                        await session.execute(
+                            text(
+                                f"SELECT * FROM {self._ns}.file_chunks "
+                                f"WHERE {filter_sql} ORDER BY chunk_index"
+                            ),
+                            params,
+                        )
                     )
-                ).mappings().all()
+                    .mappings()
+                    .all()
+                )
         except Exception as exc:
             wrapped = await _wrap_error_with_auth_refresh(exc)
             raise wrapped from exc

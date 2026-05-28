@@ -55,7 +55,7 @@ root:
     # =====================================================================
     # Intent Grounding (runs ONCE before the signature loop). Resolves any
     # workspace resource the user named in free-text (e.g.
-    # ``main.officeqa_benchmark.treasury_chunks_vs_index``) against the
+    # ``catalog.schema.resource_name``) against the
     # actual workspace catalog via ``discover_sources``, and merges
     # matches into ``state.designer_assets`` via ``emit_grounded_assets``.
     #
@@ -107,7 +107,7 @@ root:
                 * Case-insensitive match on ``full_name`` / ``name`` /
                   ``source_id``.
                 * Substring match on ``name`` when the user used a short
-                  descriptive phrase ("the treasury index").
+                  descriptive phrase ("the named vector index").
           5. Emit EXACTLY ONE ``emit_grounded_assets`` call with:
                 * ``matches``: list of {kind, full_name, source_id?, name?,
                   matched_text} for every resolved resource.
@@ -191,9 +191,10 @@ root:
                   suppress_planning_final_output: true
                 system_prompt: |
                   You are the Task Signature Classifier. Read the user_intent and
-                  User-selected Assets. Emit EXACTLY ONE call to ``emit_task_signature``
-                  with a structured JSON object that classifies the task. Do NOT
-                  attempt to design a workflow; downstream nodes do that.
+                  deterministic Prompt Grounding summary. Emit EXACTLY ONE call to
+                  ``emit_task_signature`` with a structured JSON object that
+                  classifies the task. Do NOT attempt to design a workflow;
+                  downstream nodes do that.
 
                   ## Vocabulary-robustness rule (READ FIRST)
                   User intent may include topology vocabulary like "plan-and-execute",
@@ -285,6 +286,9 @@ root:
                   ## User-selected Assets
                   {designer_assets}
 
+                  ## Deterministic Prompt Grounding
+                  {prompt_grounding_summary}
+
                   ## Architect's Revision Request (empty on first iteration)
                   {revision_request}
 
@@ -317,11 +321,14 @@ root:
               label: PR-2 Deterministic Blueprint Builder (flag-gated)
               config:
                 ref:
+                  type: builtin
                   name: build_blueprint
                 input_mapping:
                   task_signature: task_signature
                   intent: user_intent
                   assets: designer_assets
+                  prompt_grounding: prompt_grounding
+                  resolved_tool_contract: resolved_tool_contract
                 output_key: initial_blueprint
 
             # =====================================================================
@@ -403,8 +410,8 @@ root:
                             **Structure is mechanical — the deterministic blueprint
                             builder has already mapped the signature to a topology
                             (single_agent, parallel_lanes, or plan_and_execute) and
-                            laid out the lane/pool/synthesizer scaffold. You receive
-                            that scaffold as ``{initial_blueprint}`` and you may
+                            laid out the lane/pool/synthesizer scaffold. The scaffold
+                            is held in workflow state as ``initial_blueprint`` and you may
                             customize PROMPTS only. To inspect topology decisions,
                             you may call ``select_topology`` (read-only).**
                           - initial_blueprint: the deterministically scaffolded AST
@@ -419,7 +426,7 @@ root:
 
                           STEP 1 (always — orient against the blueprint):
                             The deterministic blueprint builder has already produced a
-                            fully-scaffolded AST in ``{initial_blueprint}`` from the
+                            fully-scaffolded AST in workflow state from the
                             classifier's TaskSignature. Topology, lane count, pool
                             dedup_key, evaluator/reflector presence, synthesizer
                             sections, AND the runtime tool registry + per-lane tool
@@ -518,8 +525,8 @@ root:
                             resulting tool declarations + lane bindings into the
                             immutable blueprint. You may call
                             ``recommend_tools_for_assets`` (read-only) to confirm those
-                            decisions, but the runtime tool registry is closed by the
-                            time you receive ``{initial_blueprint}``.
+                            decisions, but the runtime tool registry is closed before
+                            your architect turn starts.
                           - If ``recommend_tools_for_assets`` reports diagnostics such
                             as a missing warehouse id or missing field role for a
                             ``usage="required"`` asset, the blueprint builder will
@@ -607,8 +614,18 @@ root:
                           Use `plan_and_execute` only when later steps depend on earlier
                           findings, the correct plan cannot be known before research starts,
                           or the workflow needs adaptive planning/re-planning. When you
-                          choose it, put a one-sentence justification in
-                          design_brief.workflow_description.
+                          choose it, use a direct reusable body
+                          (planner -> researcher -> reflector/evaluator), put a
+                          one-sentence justification in design_brief.workflow_description,
+                          and do not add conditional routers over planner step fields.
+
+                          Use a conditional node only when an upstream producer has a
+                          declared schema-backed discriminator, such as
+                          `reflection.decision` or `intent.intent_type`. A planner prompt
+                          instruction like "include lane" is not a schema contract; never
+                          reference prompt-only fields such as `current_step.lane` unless
+                          the planner output_schema explicitly declares that field and its
+                          allowed values.
 
                           Use `single_agent` for bounded questions that one well-prompted
                           agent can answer directly.
@@ -618,7 +635,7 @@ root:
 
                           When the deterministic blueprint builder has already produced
                           a fully-scaffolded AST in state.initial_blueprint (visible to
-                          you as ``{initial_blueprint}`` below), DO NOT emit a full AST.
+                          you through compact summary fields), DO NOT emit a full AST.
                           Your job changes to per-node prompt customization only.
 
                           In the fenced ```json``` block of your FINAL message, emit
@@ -694,9 +711,9 @@ root:
 
                           ``initial_blueprint`` should always be populated when this
                           workflow runs — the deterministic builder is the default
-                          contract. If for any reason ``{initial_blueprint}`` is empty
-                          in your context, call ``inspect_ast_summary`` and report the
-                          gap; do not synthesize a full AST yourself.
+                          contract. If the blueprint summary context is empty, call
+                          ``inspect_ast_summary`` and report the gap; do not synthesize
+                          a full AST yourself.
                         user_prompt_template: |
                           ## User Intent
                           {user_intent}
@@ -704,10 +721,11 @@ root:
                           ## Task Signature (from the classifier — PR3-B)
                           {task_signature}
 
-                          ## Initial Blueprint (deterministic builder; empty when
-                          ## DESIGNER_DETERMINISTIC_BLUEPRINT is OFF or build_blueprint
-                          ## could not run; emit node_patches when populated)
-                          {initial_blueprint}
+                          ## Initial Blueprint Summary
+                          The deterministic blueprint is held in workflow state and
+                          should be inspected with ``inspect_ast_summary`` rather than
+                          copied into this prompt. Emit node_patches against the
+                          lane_keys/placeholders below when a blueprint exists.
 
                           ## Lane Keys (content-derived; preferred addressing for
                           ## node_patches across signature revisions per plan M7)
@@ -723,8 +741,10 @@ root:
                           ## id still in this list at parse time.
                           {placeholder_pending_nodes}
 
-                          ## Current AST (empty on first iteration)
-                          {current_ast}
+                          ## Current AST Summary
+                          The current AST is intentionally not injected as a full JSON
+                          blob. Use ``inspect_ast_summary`` for node ids, subtypes,
+                          tool bindings, and patch targets.
 
                           ## Prior Critic Verdict (empty on first iteration)
                           {critic_verdict}
@@ -734,6 +754,12 @@ root:
 
                           ## User-selected Assets
                           {designer_assets}
+
+                          ## Deterministic Prompt Grounding
+                          {prompt_grounding_summary}
+
+                          ## Resolved Tool Contract
+                          {resolved_tool_contract_summary}
 
                           Specialize each researcher node in ``initial_blueprint`` —
                           every one carries ``placeholder_pending: true`` until your
@@ -756,6 +782,7 @@ root:
                       label: Extract AST from Architect Message
                       config:
                         ref:
+                          type: builtin
                           name: parse_architect_ast
                         input_mapping:
                           raw_message: architect_message
@@ -774,12 +801,20 @@ root:
                       label: Structural Gate
                       config:
                         ref:
+                          type: builtin
                           name: structural_gate
                         input_mapping:
                           ast: current_ast
                           assets: designer_assets
                           intent: user_intent
                         output_key: gate_result
+                        output_schema:
+                          type: object
+                          required: [status]
+                          properties:
+                            status:
+                              type: string
+                              enum: [pass, fail]
 
                     # -------------------------------------------------------------
                     # 3b. PR3-D Layer 3a — synthetic behavioral probe. Runs
@@ -793,11 +828,18 @@ root:
                       label: Behavioral Probe (signature-aware)
                       config:
                         ref:
+                          type: builtin
                           name: behavioral_probe
                         input_mapping:
                           current_ast: current_ast
                           task_signature: task_signature
                         output_key: probe_result
+                        output_schema:
+                          type: object
+                          required: [passed]
+                          properties:
+                            passed:
+                              type: boolean
 
                     # -------------------------------------------------------------
                     # 4. Branch: gate fail OR probe fail → copy failures into
@@ -846,6 +888,7 @@ root:
                           label: Surface Gate Failures as Critic Feedback
                           config:
                             ref:
+                              type: builtin
                               name: extract_critic_approved
                             # Reuse extract_critic_approved with a fake verdict that
                             # marks approved=false and stashes the gate failures so the
@@ -854,6 +897,12 @@ root:
                             input_mapping:
                               critic_verdict: gate_result
                             output_key: critic_approved
+                            output_schema:
+                              type: object
+                              required: [critic_approved]
+                              properties:
+                                critic_approved:
+                                  type: boolean
 
                         # child_index 1 — gate PASS branch
                         - id: critic
@@ -939,14 +988,17 @@ root:
                               ## User Intent
                               {user_intent}
 
-                              ## Current AST
-                              {current_ast}
+                              ## Current AST Summary
+                              {current_ast_summary}
 
                               ## Structural Gate Result
                               {gate_result}
 
                               ## User-selected Assets
                               {designer_assets}
+
+                              ## Deterministic Prompt Grounding
+                              {prompt_grounding_summary}
 
                               Return your verdict as JSON: {{"approve": bool, "directives": [...]}}.
 
@@ -956,6 +1008,7 @@ root:
                           label: Surface Probe Failures as Critic Feedback
                           config:
                             ref:
+                              type: builtin
                               name: extract_critic_approved
                             # Plan v2.1 M9: probe failures must surface to the
                             # architect's next iteration as critic_feedback.
@@ -965,6 +1018,12 @@ root:
                             input_mapping:
                               critic_verdict: probe_result
                             output_key: critic_approved
+                            output_schema:
+                              type: object
+                              required: [critic_approved]
+                              properties:
+                                critic_approved:
+                                  type: boolean
 
                     # -------------------------------------------------------------
                     # 5. Extract critic.approve into a top-level boolean state key
@@ -976,10 +1035,17 @@ root:
                       label: Extract critic_approved
                       config:
                         ref:
+                          type: builtin
                           name: extract_critic_approved
                         input_mapping:
                           critic_verdict: critic_verdict
                         output_key: critic_approved
+                        output_schema:
+                          type: object
+                          required: [critic_approved]
+                          properties:
+                            critic_approved:
+                              type: boolean
             # =====================================================================
             # Outer signature_loop exit gate. Combines critic_approved +
             # revision_request + revision_count into a single boolean for
@@ -990,9 +1056,16 @@ root:
               label: Evaluate signature_loop exit condition
               config:
                 ref:
+                  type: builtin
                   name: evaluate_signature_loop
                 input_mapping:
                   critic_approved: critic_approved
                   revision_request: revision_request
                   revision_count: revision_count
                 output_key: signature_loop_done
+                output_schema:
+                  type: object
+                  required: [signature_loop_done]
+                  properties:
+                    signature_loop_done:
+                      type: boolean

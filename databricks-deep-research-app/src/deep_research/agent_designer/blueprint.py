@@ -43,6 +43,7 @@ from deep_research.agent_designer.assets import (
 )
 from deep_research.agent_designer.designer_types import (
     LaneSpec,
+    ResolvedToolContract,
     ToolBindingSpec,
     ToolDeclarationSpec,
     ToolPlan,
@@ -52,6 +53,9 @@ from deep_research.agent_designer.task_signature import (
     SignatureError,
     TaskSignature,
     select_topology,
+)
+from deep_research.agent_designer.tool_contract import (
+    sanitized_resolved_tool_contract_summary,
 )
 from deep_research.agent_designer.workflow_builder import (
     build_web_research_workflow,
@@ -216,17 +220,14 @@ def compute_structural_fingerprint(ast: dict[str, Any]) -> str:
 
 
 # Plan v2.1 generic-robustness — the placeholder prompts ship as
-# FUNCTIONAL DEFAULTS rather than "fill me in" markers. The runtime
-# researcher executes these as-is when the architect skips
-# customization, and the result is good enough that BOTH anchor cases
-# pass end-to-end (investment_research 152/148 claims, officeqa
-# treasury 55/57 claims, 3-7% citation correction rate). The architect's
-# job is to ADD domain-specific intelligence; without it, the lane
-# still produces source-backed answers via runtime ReAct. The
-# ``placeholder_pending_nodes`` list at the AST top level tracks which
-# lanes still want architect customization; it surfaces as
-# ``severity=warning`` advice from ``detect_unspecialized_agents`` so
-# observability captures the gap without blocking the workflow.
+# functional defaults rather than "fill me in" markers. The runtime
+# researcher can execute these as-is when the architect skips
+# customization; the architect's job is to add domain-specific
+# intelligence. The ``placeholder_pending_nodes`` list at the AST top
+# level tracks which lanes still want architect customization; it
+# surfaces as ``severity=warning`` advice from
+# ``detect_unspecialized_agents`` so observability captures the gap
+# without blocking the workflow.
 _PLACEHOLDER_SYSTEM_PROMPT_TEMPLATE = (
     "You are a research agent investigating the following concern:\n"
     "\n"
@@ -246,8 +247,9 @@ _PLACEHOLDER_SYSTEM_PROMPT_TEMPLATE = (
     "  ``web_research`` result; never call ``web_crawl`` with\n"
     "  ``url_index=0`` before any search — the URL registry is empty\n"
     "  at that point and the call will error.\n"
-    "- For corpus tools (vector_search, delta_read, delta_grep,\n"
-    "  delta_table_read): cite by (file_name, page_info, chunk_id);\n"
+    "- For corpus tools (vector_search, table_search, table_read,\n"
+    "  table_neighbors, table_load, table_aggregate): cite by\n"
+    "  (file_name, page_info, chunk_id) when those fields are available;\n"
     "  do NOT cite URLs.\n"
     "- For computation (compute, compute_namespace): pass numeric work\n"
     "  through the tool — never narrate sums, ratios, or aggregations\n"
@@ -286,6 +288,123 @@ def _placeholder_system_prompt(lane_focus: str) -> str:
 
 def _placeholder_user_prompt_template(lane_focus: str) -> str:
     return _PLACEHOLDER_USER_PROMPT_TEMPLATE.format(lane_focus=lane_focus)
+
+
+def _coerce_tool_contract(raw: Any) -> ResolvedToolContract | None:
+    if raw is None:
+        return None
+    if isinstance(raw, ResolvedToolContract):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return ResolvedToolContract.model_validate_json(raw)
+        except Exception:
+            return None
+    if isinstance(raw, dict):
+        try:
+            return ResolvedToolContract.model_validate(raw)
+        except Exception:
+            return None
+    return None
+
+
+def _contract_resource_lines(contract: ResolvedToolContract | None) -> list[str]:
+    if contract is None:
+        return []
+    lines: list[str] = []
+    for resource in contract.resources[:6]:
+        bits = [
+            f"{resource.kind}:{resource.identity}",
+            f"usage={resource.usage}",
+        ]
+        if resource.capabilities:
+            bits.append("capabilities=" + ", ".join(resource.capabilities[:6]))
+        if resource.domain_terms:
+            bits.append("terms=" + ", ".join(resource.domain_terms[:6]))
+        if resource.role_description:
+            bits.append(resource.role_description)
+        lines.append("- " + "; ".join(bits))
+    return lines
+
+
+def _contract_evidence_block(contract: ResolvedToolContract | None) -> str:
+    if contract is None:
+        return ""
+    obligations = contract.prompt_obligations
+    lines = [
+        "## Resolved Tool Contract",
+        "",
+        f"Evidence policy: {contract.evidence_policy}",
+    ]
+    if contract.ready_tool_kinds:
+        lines.append("Ready tool kinds: " + ", ".join(contract.ready_tool_kinds[:12]))
+    if obligations.required_terms:
+        lines.append("Required prompt terms: " + ", ".join(obligations.required_terms[:12]))
+    if obligations.forbidden_tool_kinds:
+        lines.append(
+            "Forbidden tool kinds: "
+            + ", ".join(obligations.forbidden_tool_kinds[:8])
+        )
+    resource_lines = _contract_resource_lines(contract)
+    if resource_lines:
+        lines.append("")
+        lines.append("Grounded resources:")
+        lines.extend(resource_lines)
+    if obligations.planner_obligations:
+        lines.append("")
+        lines.append("Evidence steps:")
+        lines.extend(f"- {item}" for item in obligations.planner_obligations[:8])
+    if obligations.synthesis_obligations:
+        lines.append("")
+        lines.append("Answer obligations:")
+        lines.extend(f"- {item}" for item in obligations.synthesis_obligations[:8])
+    return "\n".join(lines)
+
+
+def _contract_specialized_system_prompt(
+    lane_focus: str,
+    contract: ResolvedToolContract | None,
+) -> str:
+    block = _contract_evidence_block(contract)
+    if not block:
+        return _placeholder_system_prompt(lane_focus)
+    forbidden = set(contract.prompt_obligations.forbidden_tool_kinds)
+    missing_evidence = (
+        "Do not use forbidden tool kinds. Mark missing evidence as Data "
+        "unavailable rather than improvising."
+        if forbidden
+        else "Mark missing evidence as Data unavailable rather than improvising."
+    )
+    return (
+        "You are a resource-grounded research agent for this workflow. "
+        "Use only the declared runtime tools and preserve the compact evidence "
+        "contract below while investigating the lane focus.\n\n"
+        f"{block}\n\n"
+        "## Lane Focus\n"
+        f"{lane_focus}\n\n"
+        "Use grounded resources before synthesis. "
+        f"{missing_evidence}"
+    )
+
+
+def _contract_specialized_user_prompt_template(
+    lane_focus: str,
+    contract: ResolvedToolContract | None,
+) -> str:
+    block = _contract_evidence_block(contract)
+    if not block:
+        return _placeholder_user_prompt_template(lane_focus)
+    return (
+        "## Resolved evidence contract\n"
+        f"{block}\n\n"
+        "## Concern focus\n"
+        f"{lane_focus}\n\n"
+        "## Research request\n"
+        "{{ query }}\n\n"
+        "Investigate the concern focus using the declared Databricks/corpus "
+        "tools. Return source-backed findings, resource identifiers used, "
+        "and explicit missing-data notes."
+    )
 
 
 def _derive_workflow_name(intent: str) -> str:
@@ -393,7 +512,7 @@ def _build_asset_tool_plan(
     Fails closed when any ``usage="required"`` asset has a severity=error
     diagnostic from :func:`recommend_tools_for_assets` (the most common
     case is a Delta table asset missing its ``warehouse_id`` so
-    ``delta_read``/``delta_grep``/``delta_table_read`` cannot be wired).
+    ``table_*`` tools cannot be wired).
     The alternative — falling back to web defaults — would silently break
     the workflow contract; per plan v2.1 M11, prefer fail-closed.
     """
@@ -533,6 +652,7 @@ def build_blueprint(
     task_signature: dict[str, Any],
     intent: str,
     assets: list[dict[str, Any]] | None = None,
+    tool_contract: ResolvedToolContract | dict[str, Any] | str | None = None,
 ) -> dict[str, Any]:
     """Plan v2.1 M1+M6+M11 deterministic blueprint builder.
 
@@ -574,12 +694,13 @@ def build_blueprint(
 
     descriptions = _resolve_lane_descriptions(sig)
     lane_key_pairs = [(compute_lane_key(desc), desc) for desc in descriptions]
+    contract = _coerce_tool_contract(tool_contract)
 
     lane_specs = [
         LaneSpec(
             description=desc,
-            system_prompt=_placeholder_system_prompt(desc),
-            user_prompt_template=_placeholder_user_prompt_template(desc),
+            system_prompt=_contract_specialized_system_prompt(desc, contract),
+            user_prompt_template=_contract_specialized_user_prompt_template(desc, contract),
         )
         for desc in descriptions
     ]
@@ -592,6 +713,7 @@ def build_blueprint(
         research_lanes=lane_specs,
         topology=select_topology(sig),
         tool_plan=tool_plan,
+        tool_contract=contract,
     )
 
     ast = build_web_research_workflow(
@@ -601,8 +723,20 @@ def build_blueprint(
         task_signature=task_signature,
     )
 
-    _stamp_placeholder_pending(ast)
+    if contract is None:
+        _stamp_placeholder_pending(ast)
     ast["lane_keys"] = dict(lane_key_pairs)
+    ast["evidence_policy"] = contract.evidence_policy if contract is not None else None
+    ast["required_prompt_terms"] = (
+        list(contract.prompt_obligations.required_terms)
+        if contract is not None
+        else []
+    )
+    ast["resolved_tool_contract_summary"] = (
+        sanitized_resolved_tool_contract_summary(contract)
+        if contract is not None
+        else {"schema": "resolved_tool_contract.v1", "available": False}
+    )
     ast["structural_fingerprint"] = compute_structural_fingerprint(ast)
     return ast
 

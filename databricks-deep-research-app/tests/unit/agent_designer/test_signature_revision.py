@@ -272,6 +272,49 @@ def test_build_blueprint_tool_invalid_signature_fails_closed() -> None:
     assert "build_blueprint failed" in result.error
 
 
+def test_build_blueprint_tool_prompt_grounding_gate_blocks_unsafe_plan() -> None:
+    tool = BuildBlueprintTool(
+        prompt_grounding_getter=lambda: {
+            "safe_to_build_blueprint": False,
+            "diagnostics": [
+                {
+                    "severity": "error",
+                    "code": "missing_warehouse_id",
+                    "message": "Required Delta table needs a warehouse.",
+                    "blocking": True,
+                }
+            ],
+        }
+    )
+
+    result = asyncio.run(
+        tool.execute(
+            {
+                "task_signature": _officeqa_signature(),
+                "intent": "OfficeQA table question",
+                "assets": [
+                    {
+                        "kind": "vector_index",
+                        "full_name": "main.officeqa_benchmark.treasury_chunks_vs_index",
+                        "usage": "required",
+                    },
+                    {
+                        "kind": "delta_table",
+                        "full_name": "main.officeqa_benchmark.treasury_tables",
+                        "usage": "required",
+                    },
+                ],
+            },
+            _ctx(),
+        )
+    )
+
+    assert result.success is False
+    assert result.error is not None
+    assert "blocked by prompt grounding" in result.error
+    assert "warehouse" in result.error
+
+
 def test_build_blueprint_tool_signature_as_json_string_accepted() -> None:
     """LLM may stringify the signature payload; the tool tolerates that.
 
@@ -532,7 +575,7 @@ def test_build_blueprint_tool_unwraps_designer_assets_dict_form() -> None:
         "vector_search must be declared from the wrapped dict's vector_index "
         f"asset; got kinds={sorted(declared_kinds)}"
     )
-    assert "delta_read" in declared_kinds
+    assert "table_search" in declared_kinds
     # No web tools — corpus_only signature must NOT leak public-web defaults.
     assert "web_research" not in declared_kinds
     assert "web_crawl" not in declared_kinds
@@ -598,6 +641,29 @@ def test_evaluate_signature_loop_done_when_approved_and_no_revision() -> None:
     assert data["critic_approved"] is True
     assert data["has_revision_request"] is False
     assert data["exhausted"] is False
+
+
+def test_evaluate_signature_loop_unwraps_json_string_approval_payload() -> None:
+    """Workflow state can pass the upstream tool payload as a JSON string."""
+    from deep_research.agent_designer.framework_tools import (
+        EvaluateSignatureLoopTool,
+    )
+
+    tool = EvaluateSignatureLoopTool()
+    result = asyncio.run(
+        tool.execute(
+            {
+                "critic_approved": '{"critic_approved": true}',
+                "revision_request": {},
+                "revision_count": 0,
+            },
+            _ctx(),
+        )
+    )
+    data = result.data or {}
+    assert data["signature_loop_done"] is True
+    assert data["critic_approved"] is True
+    assert data["has_revision_request"] is False
 
 
 def test_evaluate_signature_loop_continues_when_revision_pending() -> None:

@@ -92,6 +92,35 @@ class TestOptInPlanningFinalOutputSuppression:
         assert result.tool_calls_made == 0
 
     @pytest.mark.asyncio
+    async def test_opt_in_preserves_prefaced_json_patch_output(self) -> None:
+        llm = AsyncMock()
+        content = (
+            "I'll proceed with patches keyed by lane_key.\n\n"
+            "```json\n"
+            '{"node_patches": {"lane_a": {"system_prompt": "Use the corpus."}}}\n'
+            "```"
+        )
+        llm.complete = AsyncMock(
+            return_value=LLMResponse(
+                content=content,
+                tool_calls=[],
+                model="test-model",
+            )
+        )
+
+        loop = ReactLoop(
+            llm,
+            tools=[],
+            node_id="architect",
+            subtype="custom",
+            suppress_planning_final_output=True,
+        )
+        result = await loop.execute([{"role": "user", "content": "design"}])
+
+        assert result.content == content
+        assert result.tool_calls_made == 0
+
+    @pytest.mark.asyncio
     async def test_suppression_is_off_by_default(self) -> None:
         llm = AsyncMock()
         content = "I now need to add the final coverage reflector node."

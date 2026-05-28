@@ -9,6 +9,8 @@ represented by executable tool declarations and node-local bindings.
 
 from __future__ import annotations
 
+import os
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -135,6 +137,92 @@ def _warehouse_id(assets: list[DesignerAsset], table_asset: DesignerAsset | None
     return None
 
 
+def resolve_default_table_warehouse_id() -> str | None:
+    """Return the process-wide default warehouse for framework table tools."""
+
+    for key in ("TABLE_TOOLS_WAREHOUSE_ID", "STORAGE_WAREHOUSE_ID"):
+        value = os.environ.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _intent_context(intent: str, needle: str, *, window: int = 120) -> str:
+    pattern = (
+        r"(?<![A-Za-z0-9_.])"
+        + re.escape(needle)
+        + r"(?![A-Za-z0-9_])"
+        + r"(?!\.[A-Za-z_])"
+    )
+    match = re.search(pattern, intent, flags=re.IGNORECASE)
+    if match is None:
+        return intent.casefold()
+    idx = match.start()
+    line_start = intent.rfind("\n", 0, idx) + 1
+    previous_line_start = intent.rfind("\n", 0, max(line_start - 1, 0)) + 1
+    line_end = intent.find("\n", idx)
+    if line_end < 0:
+        line_end = len(intent)
+    marker_re = r"\b(vector|semantic|embedding|delta|table|tables|sql)\b"
+    current_line_context = intent[line_start:line_end].casefold()
+    if re.search(marker_re, current_line_context):
+        return current_line_context
+    line_context = intent[previous_line_start:line_end].casefold()
+    if re.search(marker_re, line_context):
+        return line_context
+    start = max(0, idx - window)
+    end = min(len(intent), idx + len(needle) + window)
+    return intent[start:end].casefold()
+
+
+def _infer_asset_kind_from_intent(intent: str, full_name: str) -> DesignerAssetKind | None:
+    context = _intent_context(intent, full_name)
+    lowered = full_name.casefold()
+    if (
+        re.search(r"\b(vector|semantic|embedding)\s+(search\s+)?index\b", context)
+        or "vector_search" in context
+        or lowered.endswith("_vs_index")
+    ):
+        return "vector_index"
+    if re.search(r"\b(delta\s+)?(tables?|structured\s+tables?|sql\s+tables?)\b", context):
+        return "delta_table"
+    return None
+
+
+def infer_assets_from_intent(intent: str) -> list[dict[str, Any]]:
+    """Infer minimal DesignerAsset records from exact resource names in intent.
+
+    This is intentionally conservative: it only emits assets for exact
+    three-part names whose surrounding text identifies the resource kind.
+    Rich metadata still comes from selected assets or discovery when present.
+    """
+
+    from deep_research.agent_designer.discovery import extract_fqn_candidates
+
+    inferred: list[dict[str, Any]] = []
+    for full_name in extract_fqn_candidates(intent):
+        kind = _infer_asset_kind_from_intent(intent, full_name)
+        if kind is None:
+            continue
+        metadata: dict[str, Any] = {}
+        if kind == "delta_table":
+            warehouse_id = resolve_default_table_warehouse_id()
+            if warehouse_id:
+                metadata["warehouse_id"] = warehouse_id
+        payload = {
+            "kind": kind,
+            "full_name": full_name,
+            "usage": "preferred",
+            "metadata": metadata,
+        }
+        try:
+            asset = DesignerAsset.model_validate(payload)
+        except Exception:
+            continue
+        inferred.append(asset.model_dump(exclude_none=True))
+    return inferred
+
+
 def _numeric_or_table_intent(intent: str) -> bool:
     normalized = intent.casefold()
     terms = (
@@ -228,7 +316,7 @@ def recommend_tools_for_assets(raw_assets: Any, *, intent: str = "") -> dict[str
         if asset.kind != "delta_table":
             continue
 
-        warehouse_id = _warehouse_id(assets, asset)
+        warehouse_id = _warehouse_id(assets, asset) or resolve_default_table_warehouse_id()
         if not warehouse_id:
             diagnostics.append(
                 {
@@ -236,79 +324,68 @@ def recommend_tools_for_assets(raw_assets: Any, *, intent: str = "") -> dict[str
                     "severity": "error",
                     "message": (
                         "Delta table asset needs a sql_warehouse asset or "
-                        "metadata.warehouse_id before delta_read/delta_grep/"
-                        "delta_table_read can run."
+                        "metadata.warehouse_id before table_search/table_read/"
+                        "table_load can run."
                     ),
                 }
             )
             continue
 
-        roles = asset.field_roles
-        columns = _columns_from_asset(asset)
-        pk_column = roles.get("primary_key") or roles.get("pk")
-        content_column = roles.get("content")
-        structured_json_column = roles.get("structured_json") or roles.get("json")
-        order_by = roles.get("order_by") or pk_column
+        as_var = re.sub(r"[^A-Za-z0-9_]+", "_", (asset.name or asset.full_name or asset.kind)).strip("_").lower() or "tbl"
 
-        read_name = _unique_name("delta_read", used_names)
-        read_config: dict[str, Any] = {
-            "table_name": identity,
-            "warehouse_id": warehouse_id,
-            "columns": columns,
-        }
-        if content_column:
-            read_config["content_column"] = content_column
-        if order_by:
-            read_config["order_by"] = order_by
+        search_name = _unique_name("table_search", used_names)
         tools.append(
             {
-                "name": read_name,
-                "kind": "delta_read",
-                "config": read_config,
-                "description": f"Read rows from selected Delta table {identity}.",
+                "name": search_name,
+                "kind": "table_search",
+                "config": {
+                    "table_name": identity,
+                    "warehouse_id": warehouse_id,
+                    "as_var": as_var,
+                },
+                "description": (
+                    f"Search rows in selected Delta table {identity} by text."
+                ),
                 "asset_ref": identity,
             }
         )
 
-        if content_column:
-            grep_name = _unique_name("delta_grep", used_names)
-            grep_config = dict(read_config)
-            grep_config["content_column"] = content_column
-            tools.append(
-                {
-                    "name": grep_name,
-                    "kind": "delta_grep",
-                    "config": grep_config,
-                    "description": (
-                        f"Search exact text patterns in selected Delta table {identity}."
-                    ),
-                    "asset_ref": identity,
-                }
-            )
+        read_name = _unique_name("table_read", used_names)
+        tools.append(
+            {
+                "name": read_name,
+                "kind": "table_read",
+                "config": {
+                    "table_name": identity,
+                    "warehouse_id": warehouse_id,
+                    "as_var": as_var,
+                },
+                "description": (
+                    f"Read one row from selected Delta table {identity} by id."
+                ),
+                "asset_ref": identity,
+            }
+        )
 
-        if pk_column and structured_json_column:
-            table_name = _unique_name("delta_table_read", used_names)
-            tools.append(
-                {
-                    "name": table_name,
-                    "kind": "delta_table_read",
-                    "config": {
-                        "table_name": identity,
-                        "warehouse_id": warehouse_id,
-                        "columns": columns,
-                        "content_column": structured_json_column,
-                        "pk_column": pk_column,
-                        "store_in_compute": "table",
-                        "compute_tool_name": "compute",
-                        "structural_analysis": True,
-                    },
-                    "description": (
-                        f"Read one structured row/table from {identity} by primary key."
-                    ),
-                    "asset_ref": identity,
-                }
-            )
-            compute_needed = True
+        load_name = _unique_name("table_load", used_names)
+        tools.append(
+            {
+                "name": load_name,
+                "kind": "table_load",
+                "config": {
+                    "table_name": identity,
+                    "warehouse_id": warehouse_id,
+                    "as_var": as_var,
+                    "store_in_compute": as_var,
+                    "compute_tool_name": "compute",
+                },
+                "description": (
+                    f"Load rows from {identity} into the compute namespace."
+                ),
+                "asset_ref": identity,
+            }
+        )
+        compute_needed = True
 
     if compute_needed or (_numeric_or_table_intent(intent) and any(a.kind == "delta_table" for a in assets)):
         tools.append(
@@ -416,14 +493,14 @@ def _tool_references_asset(tool: dict[str, Any], asset: DesignerAsset) -> bool:
 
 _EXPECTED_TOOL_KINDS_BY_ASSET_KIND: dict[DesignerAssetKind, set[str]] = {
     "vector_index": {"vector_search"},
-    "delta_table": {"delta_read", "delta_grep", "delta_table_read"},
+    "delta_table": {"table_search", "table_read", "table_neighbors", "table_load", "table_aggregate"},
     "genie_space": {"genie"},
     "knowledge_assistant": {"knowledge_assistant"},
     "serving_endpoint": {"knowledge_assistant"},
     # A warehouse is usually a supporting asset for SQL-backed retrieval tools.
     # Until the framework grows a generic sql_query tool, the concrete consumers
     # are Delta/table-read tools that carry config.warehouse_id.
-    "sql_warehouse": {"delta_read", "delta_grep", "delta_table_read"},
+    "sql_warehouse": {"table_search", "table_read", "table_neighbors", "table_load", "table_aggregate"},
 }
 
 
@@ -496,18 +573,18 @@ def detect_asset_contract(ast: dict[str, Any], raw_assets: Any) -> list[Semantic
             )
         if asset.kind == "delta_table":
             matching_kinds = {str(tool.get("kind") or "") for _name, tool in matching}
-            if not matching_kinds.intersection({"delta_read", "delta_grep", "delta_table_read"}):
+            if not matching_kinds.intersection({"table_search", "table_read", "table_neighbors", "table_load", "table_aggregate"}):
                 errors.append(
                     SemanticValidationError(
                         message=(
                             f"Required Delta table '{identity}' is not backed "
-                            "by a Delta table tool."
+                            "by a table_* tool."
                         ),
                         path="tools",
                     )
                 )
             for _name, tool in matching:
-                if str(tool.get("kind") or "").startswith("delta_"):
+                if str(tool.get("kind") or "").startswith("table_"):
                     raw_config = tool.get("config")
                     config: dict[str, Any] = raw_config if isinstance(raw_config, dict) else {}
                     if not config.get("warehouse_id"):
@@ -529,7 +606,9 @@ __all__ = [
     "DesignerAssetUsage",
     "asset_context_payload",
     "detect_asset_contract",
+    "infer_assets_from_intent",
     "inspect_assets",
     "normalize_assets",
     "recommend_tools_for_assets",
+    "resolve_default_table_warehouse_id",
 ]

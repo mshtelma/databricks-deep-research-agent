@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import io
 import zipfile
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -40,6 +40,7 @@ def _agent_revision(
     *,
     custom_tool: bool = False,
     web_search: bool = False,
+    table_tools: bool = False,
 ) -> tuple[MagicMock, MagicMock]:
     agent = MagicMock(id=uuid4(), name="Deep Research Agent")
     tools: list[dict[str, object]] = []
@@ -47,6 +48,21 @@ def _agent_revision(
         tools.append({"name": "mytool", "kind": "custom", "config": {}})
     if web_search:
         tools.append({"name": "web_search", "kind": "web_search", "config": {}})
+    if table_tools:
+        tools.extend(
+            [
+                {
+                    "name": "table_read",
+                    "kind": "table_read",
+                    "config": {"table_name": "main.officeqa_benchmark.treasury_chunks"},
+                },
+                {
+                    "name": "table_load",
+                    "kind": "table_load",
+                    "config": {"table_name": "main.officeqa_benchmark.treasury_chunks"},
+                },
+            ]
+        )
     revision = MagicMock(
         rev_id=uuid4(),
         definition={
@@ -185,6 +201,19 @@ class TestValidate:
             "custom tools are not supported" in e.message.lower()
             for e in result.errors
         )
+
+    @pytest.mark.asyncio
+    async def test_rejects_table_tools_without_storage_warehouse_id(self) -> None:
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision(table_tools=True)
+        with patch(
+            "deep_research.services.deployment.shell_app._resolve_storage_warehouse_id",
+            return_value=None,
+        ):
+            result = await translator.validate(agent, revision, _valid_config())
+
+        assert result.valid is False
+        assert any("SQL Warehouse id" in e.message for e in result.errors)
 
     @pytest.mark.asyncio
     async def test_web_search_uses_default_brave_secret_config(self) -> None:
@@ -330,6 +359,12 @@ class TestTranslate:
             app_py = zf.read("app.py").decode("utf-8")
 
         assert "ToolFactoryContext.from_defaults" in app_py
+        assert "_wire_text_table_context(ctx)" in app_py
+        assert "wire_statement_execution_text_table_context" in app_py
+        assert "class _StatementExecutionTableSQL" not in app_py
+        assert "TableBindingRegistry" not in app_py
+        assert "SchemaCache" not in app_py
+        assert "STORAGE_WAREHOUSE_ID" in app_py
         assert "FrameworkLLMClient.from_databricks()" in app_py
         # OBO threading: the shell app must build a per-request runner whose
         # WorkspaceClient carries the caller's x-forwarded-access-token. A
@@ -364,8 +399,12 @@ class TestTranslate:
         assert "logging.basicConfig" in app_py
         assert "SHELL_APP_STREAM_EVENT" in app_py
         assert "SHELL_APP_INDEX_SERVED" in app_py
+        assert "MLFLOW_ENABLED" in app_py
+        assert "SHELL_APP_MLFLOW_TRACING_DISABLED" in app_py
+        assert "ping=_SSE_HEARTBEAT_SECONDS" in app_py
+        assert "SHELL_APP_CHAT_CLIENT_DISCONNECTED" in app_py
         assert "planner_guidance_present" in app_py
-        assert '_SHELL_APP_TEMPLATE_VERSION = "2026-05-25.1"' in app_py
+        assert '_SHELL_APP_TEMPLATE_VERSION = "2026-05-28.1"' in app_py
         assert "Cache-Control" in app_py
         assert "X-Shell-App-Template-Version" in app_py
 
@@ -382,7 +421,7 @@ class TestTranslate:
         assert "const dataText = dataLines.join('\\n')" in html
         assert "drainFrames(true)" in html
         assert "X-Shell-App-Template-Version" in html
-        assert "2026-05-25.1" in html
+        assert "2026-05-28.1" in html
         assert "[shell-app] stream frame" in html
         assert html.count("let buffer = '';") == 1
         assert html.index("let buffer = '';") < html.index("function drainFrames")
@@ -425,6 +464,32 @@ class TestTranslate:
         assert "BRAVE_API_KEY" not in databricks_yml
         assert "BRAVE_API_KEY" not in app_yaml
         assert artifact.metadata["requires_web_search"] == "false"
+
+    @pytest.mark.asyncio
+    async def test_table_tool_bundle_binds_storage_warehouse(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("TABLE_TOOLS_WAREHOUSE_ID", "d837825f69a03500")
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision(table_tools=True)
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            databricks_yml = zf.read("databricks.yml").decode("utf-8")
+            app_yaml = zf.read("app.yaml").decode("utf-8")
+            agent_yaml = zf.read("agent.yaml").decode("utf-8")
+
+        assert "STORAGE_WAREHOUSE_ID" in databricks_yml
+        assert "value: 'd837825f69a03500'" in databricks_yml
+        assert "sql_warehouse:" in databricks_yml
+        assert "id: 'd837825f69a03500'" in databricks_yml
+        assert "permission: CAN_USE" in databricks_yml
+        assert "STORAGE_WAREHOUSE_ID" in app_yaml
+        assert "value: 'd837825f69a03500'" in app_yaml
+        assert "table_read" in agent_yaml
+        assert "main.officeqa_benchmark.treasury_chunks" in agent_yaml
+        assert artifact.metadata["requires_sql_warehouse"] == "true"
+        assert artifact.metadata["storage_warehouse_id_configured"] == "true"
 
     @pytest.mark.asyncio
     async def test_workflow_name_alone_does_not_bind_brave_secret(self) -> None:
@@ -600,6 +665,22 @@ class TestTemplateOutputS1:
         with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
             rendered_app_yaml = zf.read("app.yaml").decode("utf-8")
         assert "MLFLOW_TRACKING_URI" in rendered_app_yaml
+
+    @pytest.mark.asyncio
+    async def test_render_app_yaml_disables_mlflow_by_default(self) -> None:
+        """Shell apps must not enable MLflow tracing unless explicitly opted in.
+
+        Regression target: trace artifact upload retries can otherwise starve
+        long SSE responses behind the Databricks Apps proxy.
+        """
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision()
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            rendered_app_yaml = zf.read("app.yaml").decode("utf-8")
+        assert "MLFLOW_ENABLED" in rendered_app_yaml
+        assert "value: 'false'" in rendered_app_yaml
+        assert "SHELL_APP_SSE_HEARTBEAT_SECONDS" in rendered_app_yaml
 
     @pytest.mark.asyncio
     async def test_render_app_yaml_declares_shared_experiment(self) -> None:

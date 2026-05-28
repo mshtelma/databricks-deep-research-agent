@@ -21,6 +21,7 @@ from sqlalchemy import exists, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deep_research.agent_designer.catalog_service import CatalogService
 from deep_research.models.agent_deployment import (
     MAX_CLEANUP_ATTEMPTS,
     AgentDeployment,
@@ -136,7 +137,7 @@ class AgentV2Service:
 
     async def create(self, owner_id: str, request: CreateAgentV2Request) -> AgentV2:
         now = datetime.now(UTC)
-        definition = request.definition
+        definition = CatalogService().materialize_for_save(request.definition)
         etag = _compute_etag(definition, now)
         agent = AgentV2(
             id=uuid4(),
@@ -197,7 +198,10 @@ class AgentV2Service:
         if request.visibility is not None:
             agent.visibility = request.visibility
         if request.definition is not None:
-            agent.definition = request.definition
+            agent.definition = CatalogService().materialize_for_save(
+                request.definition,
+                previous=agent.definition,
+            )
 
         agent.updated_at = datetime.now(UTC)
         agent.etag = _compute_etag(agent.definition, agent.updated_at)

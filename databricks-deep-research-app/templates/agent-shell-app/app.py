@@ -8,10 +8,12 @@ Plan reference: agent-designer-deployment.md Section E.5.
 """
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -19,8 +21,15 @@ from uuid import uuid4
 import mlflow
 import yaml
 from databricks.sdk import WorkspaceClient
-from databricks_deep_research import FrameworkLLMClient, ToolFactoryContext, WorkflowRunner
+from databricks_deep_research import (
+    FrameworkLLMClient,
+    ToolFactoryContext,
+    WorkflowRunner,
+)
 from databricks_deep_research.events.types import ToolResultEvent
+from databricks_deep_research.tools.builtins.text_table import (
+    wire_statement_execution_text_table_context,
+)
 from databricks_deep_research.tracing import setup_mlflow_tracing
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from fastapi import FastAPI, Request
@@ -98,7 +107,7 @@ logging.basicConfig(
 logging.getLogger().setLevel(_LOG_LEVEL)
 logger = logging.getLogger(__name__)
 logger.setLevel(_LOG_LEVEL)
-_SHELL_APP_TEMPLATE_VERSION = "2026-05-25.1"
+_SHELL_APP_TEMPLATE_VERSION = "2026-05-28.1"
 _NO_STORE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
     "Pragma": "no-cache",
@@ -107,11 +116,44 @@ _NO_STORE_HEADERS = {
 }
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, *, default: int, minimum: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "SHELL_APP_INVALID_INT_ENV name=%s value=%r default=%s",
+            name,
+            raw,
+            default,
+        )
+        return default
+    if value < minimum:
+        logger.warning(
+            "SHELL_APP_INVALID_INT_ENV name=%s value=%s minimum=%s default=%s",
+            name,
+            value,
+            minimum,
+            default,
+        )
+        return default
+    return value
+
+
 # ── MLflow tracing setup ─────────────────────────────────────────────────
-# All deployed shell-apps write to the shared experiment so every trace
-# (designer-chat, main-chat, shell-app) lives in one queryable surface.
-# Provenance is sourced from the DR_* env vars Jinja-interpolated by the
-# ShellAppExporter at deploy time.
+# Shell-app MLflow tracing is opt-in because trace artifact export can block
+# long-lived SSE streams when Databricks storage is unreachable from the app.
+# When enabled, provenance is sourced from the DR_* env vars Jinja-interpolated
+# by the ShellAppExporter at deploy time.
 
 _MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "databricks")
 _MLFLOW_EXPERIMENT_NAME = os.environ.get(
@@ -121,20 +163,32 @@ _DR_APP_NAME = os.environ.get("DR_APP_NAME", "")
 _DR_AGENT_V2_ID = os.environ.get("DR_AGENT_V2_ID", "")
 _DR_AGENT_NAME = os.environ.get("DR_AGENT_NAME", "")
 _DR_REVISION_ID = os.environ.get("DR_REVISION_ID", "")
+_MLFLOW_ENABLED = _env_flag("MLFLOW_ENABLED", default=False)
+_SSE_HEARTBEAT_SECONDS = _env_int(
+    "SHELL_APP_SSE_HEARTBEAT_SECONDS",
+    default=15,
+    minimum=5,
+)
 
-try:
-    setup_mlflow_tracing(
-        tracking_uri=_MLFLOW_TRACKING_URI,
-        experiment_name=_MLFLOW_EXPERIMENT_NAME,
-    )
+if _MLFLOW_ENABLED:
+    try:
+        setup_mlflow_tracing(
+            tracking_uri=_MLFLOW_TRACKING_URI,
+            experiment_name=_MLFLOW_EXPERIMENT_NAME,
+        )
+        logger.info(
+            "SHELL_APP_MLFLOW_TRACING_INITIALIZED tracking_uri=%s experiment=%s "
+            "app_name=%s agent_v2_id=%s revision_id=%s",
+            _MLFLOW_TRACKING_URI, _MLFLOW_EXPERIMENT_NAME,
+            _DR_APP_NAME, _DR_AGENT_V2_ID, _DR_REVISION_ID,
+        )
+    except Exception as exc:  # pragma: no cover - tracing must never fail boot
+        logger.warning("SHELL_APP_MLFLOW_TRACING_INIT_FAILED exc=%s", exc)
+else:
     logger.info(
-        "SHELL_APP_MLFLOW_TRACING_INITIALIZED tracking_uri=%s experiment=%s "
-        "app_name=%s agent_v2_id=%s revision_id=%s",
-        _MLFLOW_TRACKING_URI, _MLFLOW_EXPERIMENT_NAME,
-        _DR_APP_NAME, _DR_AGENT_V2_ID, _DR_REVISION_ID,
+        "SHELL_APP_MLFLOW_TRACING_DISABLED mlflow_enabled_env=%r",
+        os.environ.get("MLFLOW_ENABLED"),
     )
-except Exception as exc:  # pragma: no cover - tracing must never fail boot
-    logger.warning("SHELL_APP_MLFLOW_TRACING_INIT_FAILED exc=%s", exc)
 
 
 def _set_dr_provenance_tags(query: str, workflow_id: str, workflow_name: str) -> None:
@@ -145,6 +199,8 @@ def _set_dr_provenance_tags(query: str, workflow_id: str, workflow_name: str) ->
     dependency on the main app's package. Safe to call when mlflow has no
     active trace; failures are swallowed (tracing is best-effort).
     """
+    if not _MLFLOW_ENABLED:
+        return
     tags = {
         "dr.surface": "shell-app",
         "dr.app_name": _DR_APP_NAME,
@@ -188,6 +244,22 @@ except Exception as exc:  # pragma: no cover - defensive
     _SP_WORKSPACE_CLIENT = None
     _SP_HOST = None
 
+
+def _resolve_table_warehouse_id() -> str | None:
+    value = os.environ.get("TABLE_TOOLS_WAREHOUSE_ID") or os.environ.get(
+        "STORAGE_WAREHOUSE_ID"
+    )
+    return value.strip() if value else None
+
+
+def _wire_text_table_context(ctx: ToolFactoryContext) -> ToolFactoryContext:
+    """Populate table-tool dependencies expected by framework factories."""
+    return wire_statement_execution_text_table_context(
+        ctx,
+        warehouse_id=_resolve_table_warehouse_id(),
+    )
+
+
 # Default factory context used when no OBO token reaches the handler
 # (local invocations, health probes, etc.). Production requests build a
 # fresh OBO-bound context inside the request handler so vector_search /
@@ -196,6 +268,7 @@ _factory_context = ToolFactoryContext.from_defaults(
     workspace_client=_SP_WORKSPACE_CLIENT,
     brave_api_key=_BRAVE_API_KEY,
 )
+_wire_text_table_context(_factory_context)
 
 # Tool kinds that require a Databricks WorkspaceClient to construct. Mirrors
 # the ToolKind enum at
@@ -209,11 +282,12 @@ _DATABRICKS_BOUND_TOOL_KINDS: frozenset[str] = frozenset(
         "vector_search",
         "genie",
         "knowledge_assistant",
-        "delta_read",
-        "delta_grep",
-        "delta_context",
-        "delta_table_read",
+        "table_discovery",
+        "table_search",
         "table_read",
+        "table_neighbors",
+        "table_load",
+        "table_aggregate",
         "compute",
         "compute_namespace",
     }
@@ -280,6 +354,7 @@ def _build_per_request_runner(user_token: str | None) -> WorkflowRunner:
         user_token=user_token,
         brave_api_key=_BRAVE_API_KEY,
     )
+    _wire_text_table_context(ctx)
     return WorkflowRunner(llm_client=_llm_client, factory_context=ctx)
 
 
@@ -368,6 +443,8 @@ _PLANNER_GUIDANCE = _first_planner_guidance(_DEFINITION_DICT)
 logger.info(
     "SHELL_APP_WORKFLOW_LOADED workflow_id=%s workflow_name=%s tools=%s "
     "output_keys=%s has_brave_api_key=%s has_search_client=%s has_workspace_client=%s "
+    "has_table_registry=%s has_table_sql_executor=%s has_table_schema_cache=%s "
+    "storage_warehouse_id_present=%s "
     "requires_databricks_obo=%s is_databricks_apps_runtime=%s "
     "log_level=%s template_version=%s workflow_description=%s root_children=%s "
     "planner_guidance_present=%s planner_guidance=%s",
@@ -378,6 +455,10 @@ logger.info(
     bool(_BRAVE_API_KEY),
     _factory_context.search_client is not None,
     _factory_context.workspace_client is not None,
+    _factory_context.table_registry is not None,
+    _factory_context.sql_executor is not None,
+    _factory_context.schema_cache is not None,
+    bool(_resolve_table_warehouse_id()),
     _WORKFLOW_REQUIRES_DATABRICKS,
     _IS_DATABRICKS_APPS_RUNTIME,
     logging.getLevelName(_LOG_LEVEL),
@@ -482,12 +563,15 @@ async def chat(request: Request) -> EventSourceResponse:
         "SHELL_APP_CHAT_START request_id=%s query_length=%s "
         "workflow_name=%s planner_guidance_present=%s "
         "obo_token_present=%s "
+        "mlflow_enabled=%s sse_heartbeat_seconds=%s "
         "client_template=%s accept=%s user_agent=%s",
         request_id,
         len(str(query)),
         _DEFINITION_DICT.get("name"),
         bool(_PLANNER_GUIDANCE),
         bool(user_token),
+        _MLFLOW_ENABLED,
+        _SSE_HEARTBEAT_SECONDS,
         _short_header(request, "x-shell-app-template-version"),
         _short_header(request, "accept"),
         _short_header(request, "user-agent"),
@@ -495,17 +579,22 @@ async def chat(request: Request) -> EventSourceResponse:
 
     async def event_generator():
         event_count = 0
-        # Wrap the entire run in a root MLflow span so every framework span
-        # (nodes, ReAct loops, tool calls) nests beneath one trace with our
-        # ``dr.*`` provenance tags. The span name embeds the app name so the
-        # MLflow UI's trace list shows "which deployed app" at a glance.
-        span_cm = mlflow.start_span(
-            name=f"shell_app_chat.{_DR_APP_NAME or 'unknown'}"
-        )
-        try:
-            span_cm.__enter__()
-        except Exception:  # pragma: no cover - defensive
-            span_cm = None
+        # If enabled, wrap the run in a root MLflow span so framework spans
+        # nest beneath one trace with ``dr.*`` provenance tags.
+        span_cm = None
+        if _MLFLOW_ENABLED:
+            span_cm = mlflow.start_span(
+                name=f"shell_app_chat.{_DR_APP_NAME or 'unknown'}"
+            )
+            try:
+                span_cm.__enter__()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning(
+                    "SHELL_APP_MLFLOW_SPAN_START_FAILED request_id=%s exc=%s",
+                    request_id,
+                    exc,
+                )
+                span_cm = None
         _set_dr_provenance_tags(
             query=str(query),
             workflow_id=str(getattr(_DEFINITION, "id", "") or ""),
@@ -559,7 +648,10 @@ async def chat(request: Request) -> EventSourceResponse:
                     "data": event.model_dump_json(),
                 }
             result = runner.last_result
-            sources = [_source_to_dict(s) for s in (result.sources[:10] if result else [])]
+            sources = [
+                _source_to_dict(s)
+                for s in (result.sources[:10] if result else [])
+            ]
             logger.info(
                 "SHELL_APP_CHAT_COMPLETE request_id=%s event_count=%s "
                 "output_length=%s source_count=%s",
@@ -578,6 +670,13 @@ async def chat(request: Request) -> EventSourceResponse:
                     }
                 ),
             }
+        except asyncio.CancelledError:
+            logger.warning(
+                "SHELL_APP_CHAT_CLIENT_DISCONNECTED request_id=%s event_count=%s",
+                request_id,
+                event_count,
+            )
+            raise
         except Exception as exc:  # noqa: BLE001 — surface to UI as 'error' event
             # Classify the exception so the UI can render an actionable
             # next-step instead of a raw Python error string. Phase 3 M4.
@@ -606,12 +705,33 @@ async def chat(request: Request) -> EventSourceResponse:
             # span is flushed even on error paths. Failures are swallowed —
             # we never want tracing cleanup to mask the real error.
             if span_cm is not None:
+                trace_close_started = time.monotonic()
                 try:
                     span_cm.__exit__(None, None, None)
-                except Exception:  # pragma: no cover - defensive
-                    pass
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "SHELL_APP_MLFLOW_SPAN_CLOSE_FAILED request_id=%s "
+                        "elapsed_ms=%s exc=%s",
+                        request_id,
+                        int((time.monotonic() - trace_close_started) * 1000),
+                        exc,
+                    )
+                else:
+                    logger.info(
+                        "SHELL_APP_MLFLOW_SPAN_CLOSED request_id=%s elapsed_ms=%s",
+                        request_id,
+                        int((time.monotonic() - trace_close_started) * 1000),
+                    )
+            logger.info(
+                "SHELL_APP_CHAT_STREAM_CLOSED request_id=%s event_count=%s "
+                "mlflow_enabled=%s",
+                request_id,
+                event_count,
+                _MLFLOW_ENABLED,
+            )
 
     return EventSourceResponse(
         event_generator(),
         headers={**_NO_STORE_HEADERS, "X-Shell-App-Request-Id": request_id},
+        ping=_SSE_HEARTBEAT_SECONDS,
     )

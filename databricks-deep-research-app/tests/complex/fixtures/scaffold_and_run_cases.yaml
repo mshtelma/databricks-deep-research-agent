@@ -29,20 +29,28 @@ cases:
     requires_brave: false
     intent: |
       Build an OfficeQA-style research assistant for questions over selected
-      Databricks assets. The assistant must use the selected vector index to
-      find candidate Treasury document chunks, use the selected Delta tables
-      for exact text/table reads, use compute for numeric table calculations,
-      and synthesize a concise answer with the fiscal/calendar-year distinction
-      when the evidence supports it. Do not use public web tools for this
-      corpus-specific task unless the selected assets are unavailable.
-    query: "what are the total US Army expenditures in 1945?"
+      Databricks assets. Infer the needed tool configuration from these
+      resource names:
+      - Vector index: main.officeqa_benchmark.treasury_chunks_vs_index
+      - Delta table for exact Treasury document chunk reads:
+        main.officeqa_benchmark.treasury_chunks
+      - Delta table for structured Treasury bulletin tables:
+        main.officeqa_benchmark.treasury_tables
+
+      The assistant must use the vector index to find candidate Treasury
+      document chunks, use the Delta tables for exact text/table reads, use
+      compute for numeric table calculations, and synthesize a concise answer
+      with the fiscal/calendar-year distinction when the evidence supports it.
+      Do not use public web tools for this corpus-specific task unless these
+      named assets are unavailable.
+    query: "In the Treasury bulletin table titled Department of the Army 3/ for period range 1939-1952, what total is shown for 1945?"
     expected_min_node_count: 3
     expected_min_tool_count: 5
     expected_tool_kinds:
       - vector_search
-      - delta_read
-      - delta_grep
-      - delta_table_read
+      - table_search
+      - table_read
+      - table_load
       - compute
     forbidden_tool_kinds:
       - web_search
@@ -52,6 +60,12 @@ cases:
       - web_search
       - web_crawl
       - web_research
+    expected_runtime_tool_kinds:
+      - vector_search
+    expected_runtime_any_tool_kinds:
+      - table_search
+      - table_read
+      - table_load
     # PR3 plan AC2: output.md contains either '45,238' (CY1945) or '50,337'
     # (FY1945) — both are defensible canonical figures for the same question.
     # The corpus contains both within the same chunk
@@ -61,61 +75,11 @@ cases:
     expected_answer_terms:
       - "50,337"
       - million
-    assets:
-      - kind: vector_index
-        full_name: main.officeqa_benchmark.treasury_chunks_vs_index
-        usage: required
-        role: semantic_candidate_retrieval
-        metadata:
-          columns:
-            - chunk_id
-            - file_name
-            - bulletin_date
-            - page_info
-            - content
-            - chunk_type
-          query_type: HYBRID
-      - kind: delta_table
-        full_name: main.officeqa_benchmark.treasury_chunks
-        usage: required
-        role: exact_document_chunk_reads
-        field_roles:
-          primary_key: chunk_id
-          content: content
-          order_by: chunk_id
-        metadata:
-          warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
-          columns:
-            - chunk_id
-            - file_name
-            - bulletin_date
-            - page_info
-            - content
-            - chunk_type
-      - kind: delta_table
-        full_name: main.officeqa_benchmark.treasury_tables
-        usage: required
-        role: structured_table_reads
-        field_roles:
-          primary_key: chunk_id
-          content: content
-          structured_json: table_json
-          order_by: chunk_id
-        metadata:
-          warehouse_id: "${OFFICEQA_WAREHOUSE_ID}"
-          columns:
-            - chunk_id
-            - file_name
-            - bulletin_date
-            - page_info
-            - table_title
-            - annotation
-            - content
-            - table_json
-            - row_count
-            - col_count
-            - chunk_type
-            - char_count
+    requires_table_tools_warehouse: true
+    expected_resource_names:
+      - main.officeqa_benchmark.treasury_chunks_vs_index
+      - main.officeqa_benchmark.treasury_chunks
+      - main.officeqa_benchmark.treasury_tables
 
   - id: correlated_stocks_7lane_investment
     # Plan v2.1 generic-robustness regression case — mirrors the user's

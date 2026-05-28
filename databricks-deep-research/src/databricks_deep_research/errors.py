@@ -9,6 +9,10 @@ class WorkflowError(Exception):
     """Base exception for all framework errors."""
 
 
+class WorkflowConditionEvaluationError(WorkflowError):
+    """Raised when a workflow condition cannot be evaluated safely."""
+
+
 class PlanningContractError(WorkflowError):
     """Raised when a planning loop cannot satisfy its execution contract."""
 

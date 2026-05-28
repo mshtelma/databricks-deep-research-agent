@@ -13,13 +13,23 @@ from __future__ import annotations
 
 import ast
 import pathlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from databricks_deep_research import WorkflowRunner
 from databricks_deep_research.llm.client import FrameworkLLMClient
+from databricks_deep_research.tools.builtins.text_table import (
+    BindingInfo,
+    BindingSource,
+    TableBindingRegistry,
+)
 
+from deep_research.agent.adapters.table_discovery_adapter import (
+    DesignerTableDiscoveryProvider,
+)
 from deep_research.agent.workflow_runner_factory import (
+    assert_runtime_can_satisfy_workflows,
     build_app_workflow_runner,
 )
 
@@ -97,6 +107,255 @@ class TestBuildAppWorkflowRunner:
         )
         assert a is not b
         assert a.factory_context is not b.factory_context
+
+    def test_table_registry_and_discovery_provider_are_wired(self) -> None:
+        """Every runner gets a fresh TableBindingRegistry + a
+        DesignerTableDiscoveryProvider so the framework's table_* tools can
+        construct without a separate setup call."""
+        runner = build_app_workflow_runner(
+            llm_client=_fake_llm(), workspace_client=None, user_token=None,
+        )
+        ctx = runner.factory_context
+        assert isinstance(ctx.table_registry, TableBindingRegistry)
+        assert isinstance(
+            ctx.table_discovery_provider, DesignerTableDiscoveryProvider
+        )
+
+    def test_table_sql_runtime_dependencies_wired_when_warehouse_available(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A workspace client plus warehouse id wires SchemaCache + SQL executor."""
+        monkeypatch.setenv("TABLE_TOOLS_WAREHOUSE_ID", "wh-123")
+        statement_execution = MagicMock()
+        statement_execution.execute_statement.return_value = SimpleNamespace(
+            statement_id="stmt-1",
+            status=SimpleNamespace(state="SUCCEEDED"),
+            manifest=SimpleNamespace(
+                schema=SimpleNamespace(
+                    columns=[
+                        SimpleNamespace(name="col_name"),
+                        SimpleNamespace(name="data_type"),
+                    ]
+                )
+            ),
+            result=SimpleNamespace(
+                data_array=[
+                    ["id", "string"],
+                    ["text", "string"],
+                ]
+            ),
+        )
+        workspace_client = SimpleNamespace(statement_execution=statement_execution)
+
+        runner = build_app_workflow_runner(
+            llm_client=_fake_llm(),
+            workspace_client=workspace_client,  # type: ignore[arg-type]
+            user_token="obo-token",
+        )
+
+        ctx = runner.factory_context
+        assert ctx.schema_cache is not None
+        assert ctx.sql_executor is not None
+        schema = ctx.schema_cache.get("cat.sch.docs", "obo-token")
+        assert [col.name for col in schema.columns] == ["id", "text"]
+        statement_execution.execute_statement.assert_called_once()
+        call = statement_execution.execute_statement.call_args.kwargs
+        assert call["statement"] == "DESCRIBE TABLE `cat`.`sch`.`docs`"
+        assert call["warehouse_id"] == "wh-123"
+
+    def test_table_registries_are_independent_per_runner(self) -> None:
+        """Discovered bindings in one runner must not leak into another —
+        registries are per-request state."""
+        a = build_app_workflow_runner(
+            llm_client=_fake_llm(), workspace_client=None, user_token=None,
+        )
+        b = build_app_workflow_runner(
+            llm_client=_fake_llm(), workspace_client=None, user_token=None,
+        )
+        assert a.factory_context.table_registry is not (
+            b.factory_context.table_registry
+        )
+
+    def test_static_bindings_flow_into_discovery_provider(self) -> None:
+        """Designer-supplied static bindings are visible from
+        ``list_tables`` even with no UC scopes / workspace client."""
+        import asyncio
+
+        static = BindingInfo(
+            name="alpha",
+            fqn="cat.sch.alpha",
+            source=BindingSource.DISCOVERED,
+        )
+        runner = build_app_workflow_runner(
+            llm_client=_fake_llm(),
+            workspace_client=None,
+            user_token=None,
+            table_static_bindings=[static],
+        )
+        provider = runner.factory_context.table_discovery_provider
+        assert isinstance(provider, DesignerTableDiscoveryProvider)
+        out = asyncio.run(provider.list_tables(user_token=""))
+        assert {info.name for info in out} == {"alpha"}
+
+
+class TestAssertRuntimeCanSatisfyWorkflows:
+    """Layer 2 boot-time guard: the helper must group every unmet ctx field
+    with the kinds blocked by it and emit a remediation hint per blocker.
+
+    Encoded as anti-regression so a future ``ToolFactoryContext`` field
+    rename or hint deletion fails CI loudly instead of silently regressing
+    the failure-mode introduced on 2026-05-27 (text-table tools failing
+    mid-stream because ``STORAGE_WAREHOUSE_ID`` propagated nowhere)."""
+
+    def test_no_op_when_all_required_fields_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BRAVE_API_KEY", "k")
+        runner = build_app_workflow_runner(
+            llm_client=_fake_llm(),
+            workspace_client=None,
+            user_token=None,
+        )
+        ctx = runner.factory_context
+        # No declared kinds → no required fields → no error.
+        assert_runtime_can_satisfy_workflows(ctx, declared_kinds=[])
+
+    def test_no_op_when_kind_has_no_required_ctx(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``web_crawl`` has no required ctx fields → never blocks."""
+        monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+        runner = build_app_workflow_runner(
+            llm_client=_fake_llm(),
+            workspace_client=None,
+            user_token=None,
+        )
+        assert_runtime_can_satisfy_workflows(
+            runner.factory_context, declared_kinds=["web_crawl"]
+        )
+
+    def test_raises_when_search_client_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without BRAVE_API_KEY, ``web_search`` declares search_client →
+        helper must raise listing the missing field, the blocked kind, and
+        the BRAVE-key remediation hint."""
+        monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+        runner = build_app_workflow_runner(
+            llm_client=_fake_llm(),
+            workspace_client=None,
+            user_token=None,
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            assert_runtime_can_satisfy_workflows(
+                runner.factory_context,
+                declared_kinds=["web_search", "web_research"],
+            )
+        message = str(exc_info.value)
+        assert "APP_BOOT_TOOL_DEPS_MISSING:" in message
+        assert "search_client=None" in message
+        assert "web_search" in message and "web_research" in message
+        assert "BRAVE_API_KEY" in message  # remediation hint
+
+    def test_groups_multiple_kinds_under_one_field(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Five table_* kinds share schema_cache + sql_executor; the helper
+        must group them under the missing field rather than emit five
+        separate sentences."""
+        monkeypatch.delenv("STORAGE_WAREHOUSE_ID", raising=False)
+        monkeypatch.delenv("TABLE_TOOLS_WAREHOUSE_ID", raising=False)
+        runner = build_app_workflow_runner(
+            llm_client=_fake_llm(),
+            workspace_client=None,
+            user_token=None,
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            assert_runtime_can_satisfy_workflows(
+                runner.factory_context,
+                declared_kinds=[
+                    "table_search",
+                    "table_read",
+                    "table_neighbors",
+                ],
+            )
+        message = str(exc_info.value)
+        # All three kinds must appear under each shared field once.
+        assert "schema_cache=None blocks tool kinds:" in message
+        assert "sql_executor=None blocks tool kinds:" in message
+        for kind in ("table_search", "table_read", "table_neighbors"):
+            assert kind in message
+        assert "STORAGE_WAREHOUSE_ID" in message  # warehouse remediation hint
+
+    def test_emits_each_remediation_hint_only_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``schema_cache`` and ``sql_executor`` both fix from STORAGE_WAREHOUSE_ID;
+        the helper must dedupe the hint so the message stays scannable."""
+        monkeypatch.delenv("STORAGE_WAREHOUSE_ID", raising=False)
+        monkeypatch.delenv("TABLE_TOOLS_WAREHOUSE_ID", raising=False)
+        runner = build_app_workflow_runner(
+            llm_client=_fake_llm(),
+            workspace_client=None,
+            user_token=None,
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            assert_runtime_can_satisfy_workflows(
+                runner.factory_context,
+                declared_kinds=["table_search", "table_read"],
+            )
+        # Same hint string ("Set STORAGE_WAREHOUSE_ID ... preflight.resolve_warehouse_id_or_fail.")
+        # must appear exactly once even though two fields would produce it.
+        message = str(exc_info.value)
+        assert message.count("preflight.resolve_warehouse_id_or_fail") == 1
+
+
+class TestTextTableWiringIncompleteWarning:
+    """When the workspace client is wired but the warehouse id is unset,
+    ``build_app_workflow_runner`` must emit the
+    ``TEXT_TABLE_WIRING_INCOMPLETE`` WARNING — promoted from the previous
+    invisible INFO line on 2026-05-27 so log scanners catch the deploy
+    misconfiguration that triggered the original incident."""
+
+    def test_warning_fires_when_workspace_present_but_warehouse_missing(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        monkeypatch.delenv("STORAGE_WAREHOUSE_ID", raising=False)
+        monkeypatch.delenv("TABLE_TOOLS_WAREHOUSE_ID", raising=False)
+        # Ensure settings.storage_warehouse_id is empty too — the resolver
+        # falls back to settings before declaring None.
+        from deep_research.core import config as _config_module
+
+        monkeypatch.setattr(
+            _config_module,
+            "get_settings",
+            lambda: SimpleNamespace(storage_warehouse_id=""),
+        )
+        statement_execution = MagicMock()
+        workspace_client = SimpleNamespace(
+            statement_execution=statement_execution
+        )
+        with caplog.at_level(
+            logging.WARNING, logger="deep_research.agent.workflow_runner_factory"
+        ):
+            runner = build_app_workflow_runner(
+                llm_client=_fake_llm(),
+                workspace_client=workspace_client,  # type: ignore[arg-type]
+                user_token="t",
+            )
+        assert any(
+            "TEXT_TABLE_WIRING_INCOMPLETE" in rec.message
+            and rec.levelno == logging.WARNING
+            for rec in caplog.records
+        ), (
+            "Expected a TEXT_TABLE_WIRING_INCOMPLETE WARNING when "
+            "workspace_client is present but warehouse_id is None"
+        )
+        ctx = runner.factory_context
+        assert ctx.schema_cache is None
+        assert ctx.sql_executor is None
 
 
 class TestAntiRegressionLint:

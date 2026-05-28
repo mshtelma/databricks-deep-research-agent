@@ -29,6 +29,7 @@ from deep_research.agent_designer.semantic_validation import (
     detect_generic_reflector_prompt,
     detect_generic_synthesizer_prompt,
     detect_grounded_research_contract,
+    detect_tool_contract_violations,
     detect_unspecialized_agents,
     detect_unspecialized_fallback_researcher,
 )
@@ -258,6 +259,7 @@ class StructuralGateTool:
             *detect_grounded_research_contract(ast),
             *detect_generic_synthesizer_prompt(ast),
             *detect_generic_reflector_prompt(ast),
+            *detect_tool_contract_violations(ast),
             *detect_unspecialized_fallback_researcher(ast),
             *detect_tool_access_contract(ast),
             *detect_asset_contract(ast, arguments.get("assets")),

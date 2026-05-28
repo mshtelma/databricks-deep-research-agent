@@ -5,6 +5,7 @@ from typing import Any
 from deep_research.agent_designer.assets import (
     asset_context_payload,
     detect_asset_contract,
+    infer_assets_from_intent,
     inspect_assets,
     normalize_assets,
     recommend_tools_for_assets,
@@ -74,6 +75,27 @@ def test_normalize_assets_accepts_context_and_deduplicates() -> None:
     ]
 
 
+def test_infer_assets_from_intent_uses_prompt_resource_names(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("TABLE_TOOLS_WAREHOUSE_ID", "wh-auto")
+    intent = """
+    Use vector index main.officeqa_benchmark.treasury_chunks_vs_index.
+    Use Delta table main.officeqa_benchmark.treasury_chunks for chunks and
+    Delta table main.officeqa_benchmark.treasury_tables for structured rows.
+    """
+
+    assets = infer_assets_from_intent(intent)
+
+    assert [(asset["kind"], asset["full_name"]) for asset in assets] == [
+        ("vector_index", "main.officeqa_benchmark.treasury_chunks_vs_index"),
+        ("delta_table", "main.officeqa_benchmark.treasury_chunks"),
+        ("delta_table", "main.officeqa_benchmark.treasury_tables"),
+    ]
+    table_assets = [asset for asset in assets if asset["kind"] == "delta_table"]
+    assert all(asset["metadata"]["warehouse_id"] == "wh-auto" for asset in table_assets)
+
+
 def test_asset_context_and_inspection_are_compact_and_untrusted() -> None:
     payload = asset_context_payload(_office_like_assets())
     inspected = inspect_assets(payload)
@@ -95,9 +117,9 @@ def test_recommend_tools_for_assets_returns_vector_delta_and_compute_tools() -> 
     tools = result["recommended_tools"]
     kinds = [tool["kind"] for tool in tools]
     assert "vector_search" in kinds
-    assert "delta_read" in kinds
-    assert "delta_grep" in kinds
-    assert "delta_table_read" in kinds
+    assert "table_search" in kinds
+    assert "table_read" in kinds
+    assert "table_load" in kinds
     assert "compute" in kinds
     assert "compute_namespace" in kinds
 
@@ -105,10 +127,8 @@ def test_recommend_tools_for_assets_returns_vector_delta_and_compute_tools() -> 
     assert vector_tool["config"]["index_name"].endswith("treasury_chunks_vs_index")
     assert vector_tool["config"]["query_type"] == "HYBRID"
 
-    table_tool = next(tool for tool in tools if tool["kind"] == "delta_table_read")
+    table_tool = next(tool for tool in tools if tool["kind"] == "table_load")
     assert table_tool["config"]["warehouse_id"] == "abc123"
-    assert table_tool["config"]["content_column"] == "table_json"
-    assert table_tool["config"]["pk_column"] == "chunk_id"
     assert table_tool["config"]["compute_tool_name"] == "compute"
 
 
@@ -138,11 +158,15 @@ def test_recommend_tools_for_assets_uses_generic_runtime_tool_names() -> None:
     )
 
     names = {tool["name"] for tool in result["recommended_tools"]}
-    assert {"vector_search", "delta_read", "delta_grep"}.issubset(names)
+    assert {"vector_search", "table_search", "table_read", "table_load"}.issubset(names)
     assert all("secret_domain" not in name and "customer_notes" not in name for name in names)
 
 
-def test_recommend_tools_for_delta_table_without_warehouse_reports_diagnostic() -> None:
+def test_recommend_tools_for_delta_table_without_warehouse_reports_diagnostic(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.delenv("TABLE_TOOLS_WAREHOUSE_ID", raising=False)
+    monkeypatch.delenv("STORAGE_WAREHOUSE_ID", raising=False)
     result = recommend_tools_for_assets(
         [
             {
@@ -158,6 +182,24 @@ def test_recommend_tools_for_delta_table_without_warehouse_reports_diagnostic() 
     assert result["recommended_tools"] == []
     assert result["diagnostics"][0]["severity"] == "error"
     assert "warehouse" in result["diagnostics"][0]["message"]
+
+
+def test_recommend_tools_for_assets_uses_default_table_warehouse(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("STORAGE_WAREHOUSE_ID", "wh-default")
+    monkeypatch.delenv("TABLE_TOOLS_WAREHOUSE_ID", raising=False)
+
+    result = recommend_tools_for_assets(
+        [{"kind": "delta_table", "full_name": "main.cat.rows"}],
+        intent="answer questions from tables",
+    )
+
+    assert result["diagnostics"] == []
+    table_tool = next(
+        tool for tool in result["recommended_tools"] if tool["kind"] == "table_search"
+    )
+    assert table_tool["config"]["warehouse_id"] == "wh-default"
 
 
 def test_detect_asset_contract_requires_declared_and_bound_tools() -> None:
@@ -178,7 +220,7 @@ def test_detect_asset_contract_requires_declared_and_bound_tools() -> None:
         "tools": [
             {
                 "name": "rows_read",
-                "kind": "delta_read",
+                "kind": "table_read",
                 "config": {"table_name": "main.cat.rows", "warehouse_id": "abc123"},
             }
         ],
@@ -210,7 +252,7 @@ def test_detect_asset_contract_fails_required_delta_tool_without_warehouse() -> 
         "tools": [
             {
                 "name": "rows_read",
-                "kind": "delta_read",
+                "kind": "table_read",
                 "config": {"table_name": "main.cat.rows"},
             }
         ],
@@ -257,8 +299,9 @@ def test_registry_exposes_generic_table_and_compute_schemas() -> None:
     tool_kinds = {item["kind"]: item for item in tool_kinds_payload()}
 
     assert "delta_table" in source_kinds
+    assert "sql_warehouse" in source_kinds
     assert "custom" not in tool_kinds
-    for kind in ("delta_read", "delta_grep", "delta_table_read"):
+    for kind in ("table_search", "table_read", "table_neighbors", "table_load", "table_aggregate"):
         schema = tool_kinds[kind]["config_schema"]
         assert "table_name" in schema["properties"]
         assert "warehouse_id" in schema["properties"]
@@ -272,4 +315,4 @@ def test_registry_exposes_generic_table_and_compute_schemas() -> None:
         == "compute"
     )
     assert "auto_fetch_top_k" in tool_kinds["web_research"]["config_schema"]["properties"]
-    assert "delta_context" in tool_kinds
+    assert "table_discovery" in tool_kinds

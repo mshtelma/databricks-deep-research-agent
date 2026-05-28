@@ -208,6 +208,12 @@ export interface ChatMessage {
   content: string
   tool_calls?: ToolCall[] | null
   tool_call_id?: string | null
+  /**
+   * UI-only label for tool result rendering. The backend ChatMessage schema
+   * has extra="forbid", so API clients must strip this before POSTing chat
+   * history back to /agent-designer/chat.
+   */
+  tool_name?: string | null
 }
 
 // ---------------------------------------------------------------------------

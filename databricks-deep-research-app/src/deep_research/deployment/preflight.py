@@ -45,6 +45,12 @@ logger = logging.getLogger(__name__)
 
 PENDING_SENTINEL = "pending"
 
+# Bundle-var keys for the SQL Warehouse used by the framework's text-table
+# tools. Resolved by :func:`resolve_warehouse_id_or_fail` and asserted
+# non-pending by :func:`assert_no_pending_sentinels` (the same guard as the
+# postgres binding vars).
+WAREHOUSE_VAR_ORDER: tuple[str, ...] = ("storage_warehouse_id",)
+
 
 class PreflightError(RuntimeError):
     """A preflight gate refused to let the deploy proceed."""
@@ -207,24 +213,132 @@ def resolve_postgres_vars_or_fail(
 
 
 def assert_no_pending_sentinels(bundle_vars: Mapping[str, str]) -> None:
-    """Raise if any postgres binding var is still the ``pending`` sentinel.
+    """Raise if any required bundle var is still the ``pending`` sentinel.
 
     ``bundle_vars`` is the resolved dict to be passed to
     ``databricks bundle deploy``. Required keys come from
-    :data:`BUNDLE_VAR_ORDER`.
+    :data:`BUNDLE_VAR_ORDER` (postgres binding) and
+    :data:`WAREHOUSE_VAR_ORDER` (text-table SQL warehouse).
     """
-    leaked = [
+    leaked_postgres = [
         key
         for key in BUNDLE_VAR_ORDER
         if bundle_vars.get(key, PENDING_SENTINEL) == PENDING_SENTINEL
     ]
-    if leaked:
+    leaked_warehouse = [
+        key
+        for key in WAREHOUSE_VAR_ORDER
+        if bundle_vars.get(key, PENDING_SENTINEL) == PENDING_SENTINEL
+    ]
+    if leaked_postgres:
         raise PreflightError(
             "Refusing to deploy: the following DAB variables are still "
-            f"set to the 'pending' sentinel: {leaked!r}. The lakebase-postgres "
-            "app resource would be deployed with an invalid binding. Run "
-            "`make bootstrap-postgres TARGET=<name>` to resolve real values."
+            f"set to the 'pending' sentinel: {leaked_postgres!r}. The "
+            "lakebase-postgres app resource would be deployed with an invalid "
+            "binding. Run `make bootstrap-postgres TARGET=<name>` to resolve "
+            "real values."
         )
+    if leaked_warehouse:
+        raise PreflightError(
+            "Refusing to deploy: the following DAB variables are still "
+            f"set to the 'pending' sentinel: {leaked_warehouse!r}. The "
+            "deployed app would silently boot without text-table SQL "
+            "wiring (workflow_runner_factory leaves schema_cache and "
+            "sql_executor unset), and any workflow that declares a table_* "
+            "tool would fail mid-stream as a misleading 'missing declared "
+            "tools' WorkflowError. Pin the workspace's SQL Warehouse via "
+            "STORAGE_WAREHOUSE_ID, the bundle var "
+            "`storage_warehouse_id`, or expose exactly one STARTED "
+            "warehouse for auto-discovery."
+        )
+
+
+def resolve_warehouse_id_or_fail(
+    *,
+    profile: str,
+    target: str = "",
+) -> dict[str, str]:
+    """Resolve ``storage_warehouse_id`` for the deploy.
+
+    Resolution order (each step short-circuits on success):
+
+    1. Explicit env var ``STORAGE_WAREHOUSE_ID`` (CI / per-developer override).
+    2. Explicit env var ``TABLE_TOOLS_WAREHOUSE_ID`` (legacy alias used by
+       ``workflow_runner_factory._resolve_table_warehouse_id``).
+    3. ``WorkspaceClient(profile=profile).warehouses.list()`` — pick the
+       single ``STARTED`` warehouse, else raise with the candidate list so
+       the operator can pin one in the bundle.
+
+    Returns a single-key dict ``{"storage_warehouse_id": <id>}`` shaped to
+    feed straight into ``assert_no_pending_sentinels``.
+    """
+    env_id = os.environ.get("STORAGE_WAREHOUSE_ID") or os.environ.get(
+        "TABLE_TOOLS_WAREHOUSE_ID"
+    )
+    if env_id:
+        return {"storage_warehouse_id": env_id}
+
+    try:
+        client = WorkspaceClient(profile=profile)
+        warehouses = list(client.warehouses.list())
+    except Exception as exc:  # noqa: BLE001 - surface details in the message
+        hint_target = target or "<target>"
+        raise PreflightError(
+            "Could not enumerate SQL Warehouses to resolve "
+            f"storage_warehouse_id ({exc!r}). Either set "
+            "STORAGE_WAREHOUSE_ID in your environment, pin "
+            "`storage_warehouse_id` per target in databricks.yml, or "
+            f"verify `--profile {profile!r}` has warehouse list access "
+            f"(target={hint_target})."
+        ) from exc
+
+    started = [w for w in warehouses if _warehouse_is_started(w)]
+    if len(started) == 1:
+        wid = _warehouse_id(started[0])
+        if not wid:
+            raise PreflightError(
+                "Single STARTED warehouse has no id attribute — refusing to "
+                "use it. Set STORAGE_WAREHOUSE_ID explicitly."
+            )
+        return {"storage_warehouse_id": wid}
+
+    if len(started) == 0:
+        candidates = ", ".join(
+            f"{_warehouse_name(w) or '<unnamed>'} ({_warehouse_id(w) or '<no-id>'})"
+            for w in warehouses
+        ) or "<none>"
+        raise PreflightError(
+            "No STARTED SQL Warehouse found in the workspace. Start one or "
+            "set STORAGE_WAREHOUSE_ID explicitly. "
+            f"All warehouses: [{candidates}]"
+        )
+
+    candidates = ", ".join(
+        f"{_warehouse_name(w) or '<unnamed>'} ({_warehouse_id(w) or '<no-id>'})"
+        for w in started
+    )
+    raise PreflightError(
+        f"{len(started)} STARTED SQL Warehouses found — refusing to "
+        "auto-pick. Set STORAGE_WAREHOUSE_ID explicitly or pin "
+        "`storage_warehouse_id` per target in databricks.yml. Started "
+        f"warehouses: [{candidates}]"
+    )
+
+
+def _warehouse_id(warehouse: Any) -> str:
+    return str(getattr(warehouse, "id", "") or "")
+
+
+def _warehouse_name(warehouse: Any) -> str:
+    return str(getattr(warehouse, "name", "") or "")
+
+
+def _warehouse_is_started(warehouse: Any) -> bool:
+    state = getattr(warehouse, "state", None)
+    if state is None:
+        return False
+    name = getattr(state, "value", None) or getattr(state, "name", None) or state
+    return str(name).upper() == "RUNNING" or str(name).upper() == "STARTED"
 
 
 def _load_dab_app_resources(bundle_tf_json: Path) -> list[ResourceIdentity]:
@@ -355,6 +469,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             database_name=args.database_name,
             target=args.target,
         )
+        warehouse_vars = resolve_warehouse_id_or_fail(
+            profile=args.profile,
+            target=args.target,
+        )
+        bundle_vars = {**bundle_vars, **warehouse_vars}
         assert_no_pending_sentinels(bundle_vars)
         if args.app_name and args.bundle_tf_json:
             assert_no_drift(
@@ -370,7 +489,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         # Echo the resolved vars so the Makefile can capture them.
         print(
-            " ".join(f"--var {k}={bundle_vars[k]}" for k in BUNDLE_VAR_ORDER)
+            " ".join(
+                f"--var {k}={bundle_vars[k]}"
+                for k in (*BUNDLE_VAR_ORDER, *WAREHOUSE_VAR_ORDER)
+            )
         )
         return 0
     except PreflightError as exc:

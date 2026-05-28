@@ -31,6 +31,8 @@ import {
   getRegistry,
   clearRegistryCache,
   chatStream,
+  listDesignerResources,
+  startDesignerSqlWarehouse,
 } from '../agentDesigner'
 
 import { ApiError } from '../client'
@@ -122,6 +124,59 @@ describe('getRegistry', () => {
     await getRegistry()
 
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('designer resources', () => {
+  it('lists SQL warehouse resources by source kind', async () => {
+    const payload = {
+      resources: [
+        {
+          kind: 'sql_warehouse',
+          source_id: 'wh-1',
+          name: 'Starter Warehouse',
+          full_name: 'Starter Warehouse',
+          description: null,
+          status: 'STOPPED',
+          capabilities: ['sql'],
+          metadata: { warehouse_id: 'wh-1', state: 'STOPPED' },
+        },
+      ],
+      total: 1,
+    }
+    const fetchMock = vi.fn().mockResolvedValue(makeResponse(payload))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await listDesignerResources(['sql_warehouse'])
+
+    expect(result.resources[0]?.metadata.warehouse_id).toBe('wh-1')
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/agent-designer/resources?kinds=sql_warehouse',
+      { headers: { 'Content-Type': 'application/json' } },
+    )
+  })
+
+  it('starts a selected SQL warehouse', async () => {
+    const payload = {
+      kind: 'sql_warehouse',
+      source_id: 'wh-1',
+      name: 'Starter Warehouse',
+      full_name: 'Starter Warehouse',
+      description: null,
+      status: 'STARTING',
+      capabilities: ['sql'],
+      metadata: { warehouse_id: 'wh-1', state: 'STARTING' },
+    }
+    const fetchMock = vi.fn().mockResolvedValue(makeResponse(payload))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await startDesignerSqlWarehouse('wh/1')
+
+    expect(result.status).toBe('STARTING')
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/agent-designer/resources/sql-warehouses/wh%2F1/start',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+    )
   })
 })
 
@@ -235,6 +290,45 @@ describe('chatStream', () => {
     expect(events).toHaveLength(2)
     expect(events[0]).toMatchObject({ type: 'message', content: 'Hello world' })
     expect(events[1]).toMatchObject({ type: 'done' })
+  })
+
+  it('strips UI-only tool_name before sending chat history', async () => {
+    const stream = makeSSEStream([['done', {}]])
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const events = []
+    for await (const event of chatStream({
+      messages: [
+        {
+          role: 'tool',
+          content: '{"schema":"prompt_grounding.v1"}',
+          tool_call_id: 'prompt_grounding:init',
+          tool_name: 'prompt_grounding',
+        },
+      ],
+      current_ast: null,
+    })) {
+      events.push(event)
+    }
+
+    expect(events).toHaveLength(1)
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string) as {
+      messages: Array<Record<string, unknown>>
+    }
+    expect(body.messages[0]).toEqual({
+      role: 'tool',
+      content: '{"schema":"prompt_grounding.v1"}',
+      tool_call_id: 'prompt_grounding:init',
+    })
+    expect(body.messages[0]).not.toHaveProperty('tool_name')
   })
 
   // 7. chatStream throws on 413 BEFORE yielding any events

@@ -42,10 +42,11 @@ export function buildDesignerSavePayload(
   );
   const astDescription = nonBlank(normalized.description);
 
-  const definitionName = astName ?? fallbackName;
+  const explicitNewName = identity.isNew && !isDefaultName(displayName) ? displayName : null;
+  const definitionName = explicitNewName ?? astName ?? fallbackName;
   const definitionDescription = astDescription ?? formDescription ?? alternateDescription ?? '';
 
-  const shouldUseDefinitionName = identity.isNew || isDefaultName(displayName);
+  const shouldUseDefinitionName = isDefaultName(displayName);
   const metadataName = shouldUseDefinitionName ? definitionName : (displayName ?? definitionName);
   const metadataDescription = formDescription ?? alternateDescription ?? astDescription;
 

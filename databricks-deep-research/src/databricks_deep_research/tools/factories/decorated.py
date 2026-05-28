@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import importlib
 import logging
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, ClassVar
 
 from databricks_deep_research.tools.api import _DecoratedTool, tool
+from databricks_deep_research.tools.catalog_types import CatalogCard, SafeProbe
 from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.tools.protocol import ResearchTool
 from databricks_deep_research.workflow.definition import ToolDeclaration
@@ -34,6 +36,8 @@ class DecoratedToolFactory:
     """Creates :class:`_DecoratedTool` instances from ``kind: decorated`` YAML."""
 
     SUPPORTED_KIND = "decorated"
+    catalog_cards: ClassVar[Mapping[str, CatalogCard]] = {}
+    safe_probes: ClassVar[Mapping[str, SafeProbe | None]] = {}
 
     def supports(self, kind: str) -> bool:
         return kind == self.SUPPORTED_KIND

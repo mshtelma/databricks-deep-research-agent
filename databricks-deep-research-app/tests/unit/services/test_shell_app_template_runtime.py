@@ -9,7 +9,7 @@ Regression target: the original shell-app template silently fell back to
 the app service principal when ``x-forwarded-access-token`` was absent,
 which caused UC-gated vector_search / Genie / serving-endpoint queries
 to return empty without any visible error. The fail-closed gate added in
-template version 2026-05-25.1 is what these tests guard.
+template version 2026-05-28.1 is what these tests guard.
 """
 from __future__ import annotations
 
@@ -228,6 +228,33 @@ async def test_local_dev_does_not_fail_closed(
 
 
 @pytest.mark.asyncio
+async def test_table_tool_context_is_wired_in_rendered_shell_app(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cleanup_app_module: None,
+) -> None:
+    """Rendered shell apps must build table_* factory dependencies.
+
+    Regression target: shell apps used ``ToolFactoryContext.from_defaults``
+    directly, which left table_registry/schema_cache/sql_executor unset and
+    caused strict runtime resolution to report table tools as missing.
+    """
+    app_dir = await _render_and_unpack(["table_read"], tmp_path / "app-table")
+    monkeypatch.delenv("DATABRICKS_APP_NAME", raising=False)
+    monkeypatch.setenv("STORAGE_WAREHOUSE_ID", "d837825f69a03500")
+    app_module = _load_app_module(app_dir)
+
+    app_module._build_per_request_runner("obo-token")
+
+    assert app_module._test_runner_class.call_count == 1
+    _, kwargs = app_module._test_runner_class.call_args
+    ctx = kwargs["factory_context"]
+    assert ctx.table_registry is not None
+    assert ctx.schema_cache is not None
+    assert ctx.sql_executor is not None
+
+
+@pytest.mark.asyncio
 async def test_purely_web_workflow_bypasses_obo_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -277,7 +304,7 @@ def test_workflow_requires_databricks_helper_unit(
     assert helper({"tools": [{"kind": "vector_search"}]}) is True
     assert helper({"tools": [{"kind": "genie"}]}) is True
     assert helper({"tools": [{"kind": "knowledge_assistant"}]}) is True
-    assert helper({"tools": [{"kind": "delta_read"}]}) is True
+    assert helper({"tools": [{"kind": "table_search"}]}) is True
     assert helper({"tools": [{"kind": "table_read"}]}) is True
     # Mixed declarations
     assert (

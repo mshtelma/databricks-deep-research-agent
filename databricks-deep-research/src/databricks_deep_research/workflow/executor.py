@@ -13,7 +13,7 @@ from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, TypeAdapter
 
 from databricks_deep_research.agents.config import (
     AgentNodeConfig,
@@ -29,6 +29,7 @@ from databricks_deep_research.agents.harness import execute_agent
 from databricks_deep_research.errors import (
     NodeBudgetExceededError,
     WorkflowCancelledError,
+    WorkflowConditionEvaluationError,
     WorkflowError,
     WorkflowExecutionError,
 )
@@ -71,9 +72,13 @@ from databricks_deep_research.tools.registry import ToolRegistry
 from databricks_deep_research.tools.resolver import ToolResolver
 from databricks_deep_research.tracing import get_current_span, trace_span
 from databricks_deep_research.workflow.conditions import (
-    ConditionBranch,
+    CompositeCondition,
+    Condition,
+    ConditionEvaluationError,
+    LLMCondition,
     StateCondition,
-    evaluate_state_condition,
+    evaluate_condition_strict,
+    summarize_condition,
 )
 from databricks_deep_research.workflow.context import ExecutionContext
 from databricks_deep_research.workflow.definition import NodeType, WorkflowDefinition, WorkflowNode
@@ -169,20 +174,27 @@ from databricks_deep_research.workflow.runtime_core import TypedRuntimeStateStor
 from databricks_deep_research.workflow.runtime_core.api import WorkflowRunRequest, WorkflowRunResult
 from databricks_deep_research.workflow.state import WorkflowState
 
+RuntimeCondition = StateCondition | LLMCondition | CompositeCondition
 
-def _deserialize_condition(cond: Any) -> StateCondition:
-    """Convert a dict/model into a StateCondition for evaluation."""
-    if isinstance(cond, StateCondition):
+
+_CONDITION_ADAPTER: TypeAdapter[RuntimeCondition] = TypeAdapter(Condition)
+
+
+def _deserialize_condition(cond: Any) -> RuntimeCondition:
+    """Convert a dict/model into a condition for evaluation."""
+    if isinstance(cond, (StateCondition, LLMCondition, CompositeCondition)):
         return cond
+    if hasattr(cond, "model_dump"):
+        cond = cond.model_dump(mode="json")
     if isinstance(cond, dict):
-        return StateCondition(**{k: v for k, v in cond.items() if k != "type"})
+        return _CONDITION_ADAPTER.validate_python(cond)
     raise TypeError(f"Cannot deserialize condition: {cond!r}")
 
 
 def _state_to_eval_dict(state: WorkflowState) -> dict[str, Any]:
     """Build a flat dict of latest state values for condition evaluation.
 
-    ``evaluate_state_condition`` uses ``resolve_dot_path`` which expects
+    ``evaluate_condition_strict`` uses dot-path resolution which expects
     dict-style access.  WorkflowState stores data in an append-only log,
     so we materialise a snapshot of latest values here.
     """
@@ -195,6 +207,48 @@ _TOOL_KIND_ENDPOINT_KEY: dict[str, str] = {
     "genie_space": "space_id",
     "sql_warehouse": "endpoint_name",
 }
+
+
+def _vector_index_metadata(
+    tools: list[ResearchTool],
+    declarations: list[Any],
+) -> dict[str, Any]:
+    """Build a compute-safe snapshot of configured vector-search indexes."""
+    by_name = {getattr(decl, "name", ""): decl for decl in declarations}
+    snapshot: dict[str, Any] = {}
+    for tool in tools:
+        definition = tool.definition
+        decl = by_name.get(definition.name)
+        if getattr(decl, "kind", None) == "vector_search":
+            config = getattr(decl, "config", {}) or {}
+            entry = {
+                key: config[key]
+                for key in (
+                    "index_name",
+                    "columns",
+                    "num_results",
+                    "query_type",
+                    "filters_json",
+                    "exclude_chunk_types",
+                )
+                if key in config
+            }
+            if entry:
+                snapshot[definition.name] = entry
+            continue
+
+        if str(getattr(definition, "source_kind", "")) != "vector_index":
+            continue
+
+        index_name = getattr(tool, "_index_name", None)
+        if isinstance(index_name, str) and index_name:
+            snapshot[definition.name] = {
+                "index_name": index_name,
+                "columns": getattr(tool, "_columns", None),
+                "num_results": getattr(tool, "_num_results", None),
+                "query_type": getattr(tool, "_query_type", None),
+            }
+    return snapshot
 
 
 
@@ -365,6 +419,56 @@ class WorkflowExecutor:
         self._registry = PoolRegistry(llm_client=llm_client)
         self._registry.initialize_from_configs(definition.pools)
         self._pools: dict[str, PoolState] = self._registry.all_pools()
+
+    def _inject_compute_callables(
+        self,
+        tools: list[ResearchTool],
+        tool_declarations: list[Any],
+    ) -> None:
+        """Expose provider-backed callables inside each Python compute tool."""
+        from databricks_deep_research.tools.builtins.compute import PythonComputeTool
+        from databricks_deep_research.tools.builtins.text_table import (
+            ComputeCallableProvider,
+            TableBindingRegistry,
+            inject_table_callables,
+        )
+
+        compute_tools = [
+            tool for tool in tools if isinstance(tool, PythonComputeTool)
+        ]
+        if not compute_tools:
+            return
+
+        providers = [
+            tool
+            for tool in tools
+            if not isinstance(tool, PythonComputeTool)
+            and isinstance(tool, ComputeCallableProvider)
+        ]
+        if not providers:
+            return
+
+        factory_context = getattr(self._resolver, "factory_context", None)
+        registry = getattr(factory_context, "table_registry", None)
+        if registry is not None and not isinstance(registry, TableBindingRegistry):
+            registry = None
+        vector_indexes = _vector_index_metadata(tools, tool_declarations)
+
+        for compute in compute_tools:
+            injected = inject_table_callables(
+                compute=compute,
+                providers=providers,
+                registry=registry,
+                vector_indexes=vector_indexes,
+            )
+            logger.info(
+                "COMPUTE_CALLABLES_INJECTED compute=%s callables=%s "
+                "bindings=%s vector_indexes=%s",
+                compute.definition.name,
+                injected,
+                registry is not None,
+                sorted(vector_indexes),
+            )
 
     def _emit(self, event: StreamEvent) -> StreamEvent:
         """Log and return an event."""
@@ -659,7 +763,7 @@ class WorkflowExecutor:
             if iteration >= config.min_iterations:
                 try:
                     cond = _deserialize_condition(config.until)
-                    should_exit = evaluate_state_condition(cond, _state_to_eval_dict(state))
+                    should_exit = evaluate_condition_strict(cond, _state_to_eval_dict(state))
                     if should_exit:
                         yield self._emit(LoopExitEvent(
                             node_id=node.id, timestamp=_now(),
@@ -667,13 +771,11 @@ class WorkflowExecutor:
                             total_iterations=iteration,
                         ))
                         return
-                except Exception:
-                    yield self._emit(LoopExitEvent(
-                        node_id=node.id, timestamp=_now(),
-                        reason="parse_failure",
-                        total_iterations=iteration,
-                    ))
-                    return
+                except Exception as exc:
+                    raise WorkflowConditionEvaluationError(
+                        f"Workflow loop condition evaluation failed at node {node.id!r}: "
+                        f"{exc}. This workflow should not have passed validation."
+                    ) from exc
 
         yield self._emit(LoopExitEvent(
             node_id=node.id, timestamp=_now(),
@@ -687,28 +789,34 @@ class WorkflowExecutor:
         """Evaluate conditions and execute the matching branch."""
         config = ConditionalNodeConfig(**node.config)
         selected_idx = config.default_branch
+        condition_summary = (
+            f"Default branch {selected_idx} selected: no conditions matched"
+        )
 
         eval_dict = _state_to_eval_dict(state)
-        for i, cond_dict in enumerate(config.conditions):
+        for i, branch in enumerate(config.conditions):
+            child_index = getattr(branch, "child_index", i)
+            branch_condition: Any = getattr(branch, "condition", branch)
+            cond = _deserialize_condition(branch_condition)
             try:
-                child_index = i
-                branch_condition: Any = cond_dict
-                if isinstance(cond_dict, dict) and "condition" in cond_dict:
-                    branch = ConditionBranch(**cond_dict)
-                    branch_condition = branch.condition
-                    child_index = branch.child_index
-
-                cond = _deserialize_condition(branch_condition)
-                if evaluate_state_condition(cond, eval_dict):
+                if evaluate_condition_strict(cond, eval_dict):
                     selected_idx = child_index
+                    condition_summary = (
+                        f"Branch {selected_idx} selected: {summarize_condition(cond)}"
+                    )
                     break
-            except Exception:
-                continue
+            except (ConditionEvaluationError, TypeError, ValueError) as exc:
+                raise WorkflowConditionEvaluationError(
+                    f"Workflow condition evaluation failed at node {node.id!r}, "
+                    f"condition[{i}] {summarize_condition(cond)!r}: {exc}. "
+                    "This workflow should not have passed validation. Remove the router "
+                    "or declare a typed upstream discriminator."
+                ) from exc
 
         yield self._emit(BranchSelectedEvent(
             node_id=node.id, timestamp=_now(),
             branch_index=selected_idx,
-            condition_summary=f"Branch {selected_idx} selected",
+            condition_summary=condition_summary,
         ))
 
         if 0 <= selected_idx < len(node.children):
@@ -723,11 +831,16 @@ class WorkflowExecutor:
 
         # Resolve tools for this agent
         tools: list[ResearchTool] = []
+        tool_declarations: list[Any] = []
         errors: list[str] = []
         for ref in config.tools:
             try:
                 tool = await self._resolver.resolve(ref)
                 tools.append(tool)
+                if isinstance(ref, str):
+                    decl = self._resolver.get_declaration(ref)
+                    if decl is not None:
+                        tool_declarations.append(decl)
             except ValueError as exc:
                 ref_name = ref if isinstance(ref, str) else ref.get("name", str(ref))
                 errors.append(str(ref_name))
@@ -785,6 +898,40 @@ class WorkflowExecutor:
                         "strict_tool_resolution invariant)."
                     )
 
+        if tool_declarations:
+            from databricks_deep_research.tools.catalog_service import (
+                CATALOG_DECLARATIONS_EXTRA,
+                declarations_to_jsonable,
+            )
+
+            config.extras[CATALOG_DECLARATIONS_EXTRA] = declarations_to_jsonable(
+                tool_declarations
+            )
+
+        if tools:
+            from databricks_deep_research.tools.builtins.text_table import (
+                TableBindingRegistry,
+                render_table_bindings_prompt,
+            )
+
+            factory_context = getattr(self._resolver, "factory_context", None)
+            registry = getattr(factory_context, "table_registry", None)
+            has_table_tool = any(
+                str(getattr(tool.definition, "source_kind", "")) == "text_table"
+                for tool in tools
+            )
+            if has_table_tool and isinstance(registry, TableBindingRegistry):
+                table_prompt = render_table_bindings_prompt(registry)
+                if table_prompt and table_prompt not in config.system_prompt:
+                    separator = "\n\n" if config.system_prompt else ""
+                    config = config.model_copy(
+                        update={
+                            "system_prompt": (
+                                f"{config.system_prompt}{separator}{table_prompt}"
+                            )
+                        }
+                    )
+
         # Attach tool resolution details to the parent node span
         node_span = get_current_span()
         if node_span:
@@ -805,6 +952,8 @@ class WorkflowExecutor:
                         registry=self._registry,
                     )
                     tools.extend(pool_tools)
+
+        self._inject_compute_callables(tools, tool_declarations)
 
         output = await execute_agent(
             node_id=node.id,

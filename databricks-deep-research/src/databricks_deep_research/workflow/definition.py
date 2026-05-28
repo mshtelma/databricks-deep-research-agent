@@ -14,6 +14,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from databricks_deep_research.tools.catalog_types import ProbeSample
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -132,6 +134,7 @@ class ToolDeclaration(BaseModel):
     kind: str  # ToolKind value or custom string
     config: dict[str, Any] = {}  # kind-specific configuration
     description: str = ""  # human-readable, injected into tool definition
+    probe: ProbeSample | None = None  # optional SafeProbe sample, sanitized/truncated
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +200,7 @@ class WorkflowDefinition(BaseModel):
     id: str
     name: str
     description: str = ""
+    schema_version: int = 1
     version: int = 1
     root: WorkflowNode
     tools: list[ToolDeclaration] = []

@@ -42,8 +42,13 @@ class Budget3D:
     rows_used: int = field(default=0, init=False)
     wall_clock_used_s: float = field(default=0.0, init=False)
 
-    def tick(self, rows: int = 0, wall_clock_s: float = 0.0) -> None:
-        next_calls = self.calls_used + 1
+    def tick(
+        self,
+        rows: int = 0,
+        wall_clock_s: float = 0.0,
+        calls: int = 1,
+    ) -> None:
+        next_calls = self.calls_used + calls
         next_rows = self.rows_used + rows
         next_wc = self.wall_clock_used_s + wall_clock_s
         if next_calls > self.max_calls:

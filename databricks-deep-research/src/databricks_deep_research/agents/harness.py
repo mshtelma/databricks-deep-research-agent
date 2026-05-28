@@ -1028,8 +1028,20 @@ async def _build_input(
         _node_id, config.input_keys, resolved_preview,
     )
 
+    # Materialized per-agent tool catalog block. Runtime resolution prefers
+    # save-time prose when the declaration hash + registry version match and
+    # falls back to the same pure renderer when the persisted block is absent
+    # or stale.
+    from databricks_deep_research.tools.catalog_service import CatalogService
+
+    tool_catalog_text = CatalogService.from_default_factories().resolve_for_runtime(
+        config,
+        tools,
+        node_id=_node_id,
+    )
     template_vars = {
         "query": state.query,
+        "tool_catalog": tool_catalog_text,
         **{k: v for k, v in context_vars.items() if v},
     }
 
@@ -1041,7 +1053,10 @@ async def _build_input(
         _node_id, list(template_vars.keys()), template_var_preview,
     )
 
+    has_tool_catalog_placeholder = "{tool_catalog}" in config.system_prompt
     system_prompt = renderer.render(config.system_prompt, template_vars)
+    if tool_catalog_text and not has_tool_catalog_placeholder:
+        system_prompt = f"{system_prompt}\n\n{tool_catalog_text}"
     user_prompt = renderer.render(config.user_prompt_template, template_vars)
 
     # Append the chat-memory <attached_context> block to the system prompt.

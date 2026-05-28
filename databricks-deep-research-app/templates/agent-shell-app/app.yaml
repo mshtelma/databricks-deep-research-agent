@@ -4,13 +4,16 @@
 command: ['uv', 'run', 'uvicorn', 'app:app', '--host', '0.0.0.0', '--port', '8000']
 
 env:
-  # MLflow tracing — every shell-app writes to the shared experiment so
-  # designer-chat + main-chat + shell-app traces all live in one queryable
-  # surface. ``analyze_traces.py`` filters by the ``dr.*`` tags below.
+  # MLflow tracing is opt-in for shell-apps. Synchronous trace export failures
+  # can otherwise block long SSE responses behind the Databricks Apps proxy.
+  - name: MLFLOW_ENABLED
+    value: 'false'
   - name: MLFLOW_TRACKING_URI
     value: 'databricks'
   - name: MLFLOW_EXPERIMENT_NAME
     value: '/Shared/deep-research-agent-experiments'
+  - name: SHELL_APP_SSE_HEARTBEAT_SECONDS
+    value: '15'
   # Provenance — Jinja-interpolated at template-render time by
   # ShellAppExporter so each deployed app's traces self-identify via
   # ``dr.app_name``, ``dr.agent_v2_id``, ``dr.agent_name``, and
@@ -26,4 +29,8 @@ env:
 {% if requires_web_search %}
   - name: BRAVE_API_KEY
     valueFrom: '{{ brave_secret_resource_name }}'
+{% endif %}
+{% if requires_sql_warehouse %}
+  - name: STORAGE_WAREHOUSE_ID
+    value: '{{ storage_warehouse_id }}'
 {% endif %}

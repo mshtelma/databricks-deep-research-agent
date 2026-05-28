@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import time
 from collections import OrderedDict
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Callable, Mapping
 
 DEFAULT_TTL_S: float = 600.0
 DEFAULT_LRU_SIZE: int = 256
@@ -80,8 +80,6 @@ class SchemaCache:
         key = (fqn, _hash_token(user_token))
         self._step_cache.pop(key, None)
         self._process_cache.pop(key, None)
-        schema = self._fetcher(fqn, user_token)
-        self._populate(key, schema)
 
     def get(self, fqn: str, user_token: str) -> Schema:
         key = (fqn, _hash_token(user_token))

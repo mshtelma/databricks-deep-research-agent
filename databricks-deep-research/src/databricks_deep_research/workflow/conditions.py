@@ -82,6 +82,10 @@ def negate(condition: StateCondition | LLMCondition | CompositeCondition) -> Com
 _MISSING = object()
 
 
+class ConditionEvaluationError(ValueError):
+    """Raised when a condition cannot be evaluated safely."""
+
+
 def resolve_dot_path(obj: Any, path: str) -> Any:
     """Resolve a dot-separated path like ``'a.b.c'`` on dicts or objects.
 
@@ -101,16 +105,60 @@ def resolve_dot_path(obj: Any, path: str) -> Any:
             # Try to parse so dot-path navigation works.
             try:
                 parsed = json.loads(current)
-                if isinstance(parsed, dict):
-                    current = parsed.get(segment, _MISSING)
-                else:
-                    current = _MISSING
+                current = parsed.get(segment, _MISSING) if isinstance(parsed, dict) else _MISSING
             except (json.JSONDecodeError, TypeError):
                 current = getattr(current, segment, _MISSING)
         else:
             current = getattr(current, segment, _MISSING)
         if current is _MISSING:
             return _MISSING
+    return current
+
+
+def resolve_dot_path_strict(obj: Any, path: str) -> Any:
+    """Resolve a dot-path and raise when any segment is absent."""
+
+    current = obj
+    traversed: list[str] = []
+    for segment in path.split("."):
+        traversed.append(segment)
+        if isinstance(current, dict):
+            if segment not in current:
+                available = ", ".join(sorted(str(key) for key in current)) or "<none>"
+                raise ConditionEvaluationError(
+                    f"path segment {segment!r} is missing at "
+                    f"{'.'.join(traversed[:-1]) or '<root>'}; "
+                    f"available keys: {available}"
+                )
+            current = current[segment]
+        elif isinstance(current, str):
+            try:
+                parsed = json.loads(current)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ConditionEvaluationError(
+                    f"cannot descend into non-JSON string at "
+                    f"{'.'.join(traversed[:-1]) or '<root>'}"
+                ) from exc
+            if not isinstance(parsed, dict):
+                raise ConditionEvaluationError(
+                    f"cannot descend into JSON {type(parsed).__name__} at "
+                    f"{'.'.join(traversed[:-1]) or '<root>'}"
+                )
+            if segment not in parsed:
+                available = ", ".join(sorted(str(key) for key in parsed)) or "<none>"
+                raise ConditionEvaluationError(
+                    f"path segment {segment!r} is missing at "
+                    f"{'.'.join(traversed[:-1]) or '<root>'}; "
+                    f"available keys: {available}"
+                )
+            current = parsed[segment]
+        else:
+            if not hasattr(current, segment):
+                raise ConditionEvaluationError(
+                    f"path segment {segment!r} is missing at "
+                    f"{'.'.join(traversed[:-1]) or '<root>'}"
+                )
+            current = getattr(current, segment)
     return current
 
 
@@ -152,3 +200,79 @@ def evaluate_state_condition(condition: StateCondition, state: Any) -> bool:
 
     msg = f"Unknown operator: {op}"
     raise ValueError(msg)
+
+
+def evaluate_state_condition_strict(condition: StateCondition, state: Any) -> bool:
+    """Evaluate a state condition and raise on unsafe missing operands."""
+
+    op = condition.operator
+    val = condition.value
+
+    if op in {"exists", "not_exists"}:
+        resolved = resolve_dot_path(state, condition.key)
+        return resolved is not _MISSING if op == "exists" else resolved is _MISSING
+
+    resolved = resolve_dot_path_strict(state, condition.key)
+
+    if op == "eq":
+        return bool(resolved == val)
+    if op == "neq":
+        return bool(resolved != val)
+    if op == "gt":
+        return bool(resolved > val)
+    if op == "lt":
+        return bool(resolved < val)
+    if op == "gte":
+        return bool(resolved >= val)
+    if op == "lte":
+        return bool(resolved <= val)
+    if op == "contains":
+        return val in resolved
+    if op == "in":
+        return resolved in val
+
+    msg = f"Unknown operator: {op}"
+    raise ConditionEvaluationError(msg)
+
+
+def evaluate_condition_strict(
+    condition: StateCondition | LLMCondition | CompositeCondition,
+    state: Any,
+) -> bool:
+    """Evaluate a condition tree with strict state-path semantics."""
+
+    if isinstance(condition, StateCondition):
+        return evaluate_state_condition_strict(condition, state)
+
+    if isinstance(condition, LLMCondition):
+        raise ConditionEvaluationError(
+            "LLM conditions are not executable by the synchronous workflow "
+            "condition evaluator"
+        )
+
+    if condition.operator == "all":
+        if not condition.conditions:
+            raise ConditionEvaluationError("Composite 'all' requires child conditions")
+        return all(evaluate_condition_strict(child, state) for child in condition.conditions)
+    if condition.operator == "any":
+        if not condition.conditions:
+            raise ConditionEvaluationError("Composite 'any' requires child conditions")
+        return any(evaluate_condition_strict(child, state) for child in condition.conditions)
+    if condition.operator == "not":
+        if len(condition.conditions) != 1:
+            raise ConditionEvaluationError("Composite 'not' requires exactly one child")
+        return not evaluate_condition_strict(condition.conditions[0], state)
+
+    raise ConditionEvaluationError(f"Unknown composite operator: {condition.operator}")
+
+
+def summarize_condition(condition: StateCondition | LLMCondition | CompositeCondition) -> str:
+    """Return a compact, diagnostics-safe condition summary."""
+
+    if isinstance(condition, StateCondition):
+        if condition.operator in {"exists", "not_exists"}:
+            return f"{condition.key} {condition.operator}"
+        return f"{condition.key} {condition.operator} {condition.value!r}"
+    if isinstance(condition, LLMCondition):
+        return "llm condition"
+    return f"composite {condition.operator}({len(condition.conditions)} conditions)"

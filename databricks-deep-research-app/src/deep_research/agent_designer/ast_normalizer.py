@@ -201,11 +201,25 @@ _RETRIEVAL_TOOL_KINDS: frozenset[str] = frozenset(
         "genie",
         "knowledge_assistant",
         "file_search",
-        "delta_read",
-        "delta_grep",
-        "delta_context",
-        "delta_table_read",
+        "table_discovery",
+        "table_search",
         "table_read",
+        "table_neighbors",
+        "table_load",
+        "table_aggregate",
+    }
+)
+_WEB_TOOL_KINDS: frozenset[str] = frozenset(
+    {"web_search", "web_crawl", "web_research"}
+)
+_CORPUS_TOOL_KINDS: frozenset[str] = frozenset(
+    {
+        "vector_search",
+        "table_search",
+        "table_read",
+        "table_neighbors",
+        "table_load",
+        "table_aggregate",
     }
 )
 
@@ -897,6 +911,7 @@ def _wrap_researcher_user_prompt_contract(
     *,
     lane_focus: str,
     designer_template: str,
+    search_strategy_block: str | None = None,
 ) -> str:
     """Wrap substantive Designer text with the runtime lane prompt contract.
 
@@ -910,6 +925,11 @@ def _wrap_researcher_user_prompt_contract(
         allowed_vars=_GENERAL_RESEARCHER_ALLOWED_TEMPLATE_VARS,
     )
     template = _bounded_multiline(normalized_template, max_length=2600)
+    strategy_block = search_strategy_block or (
+        "### Search strategy\n"
+        "- Start with queries that combine {query} with the lane focus terms above.\n"
+        "- Prefer primary or high-authority sources, then refine searches around gaps."
+    )
     wrapped = (
         "## Investigation Brief\n\n"
         "You are investigating: **{query}**\n\n"
@@ -924,9 +944,7 @@ def _wrap_researcher_user_prompt_contract(
         "- **Evidence summary**: cite the strongest findings and source context.\n"
         "- **Analysis and implications**: explain why the evidence matters for the user goal.\n"
         "- **Unknowns and caveats**: mark missing, stale, or conflicting evidence explicitly.\n\n"
-        "### Search strategy\n"
-        "- Start with queries that combine {query} with the lane focus terms above.\n"
-        "- Prefer primary or high-authority sources, then refine searches around gaps.\n\n"
+        f"{strategy_block}\n\n"
         "### Definition of done\n"
         "Each sub-question has a concise answer with citeable source text, OR "
         "is marked \"Data unavailable\" -- DO NOT improvise.\n\n"
@@ -1004,6 +1022,33 @@ def _count_output_section_bullets(template: str) -> int:
     return count
 
 
+def _declared_tool_kinds(ast: dict[str, Any]) -> set[str]:
+    kinds: set[str] = set()
+    for tool in ast.get("tools", []) or []:
+        if isinstance(tool, dict) and isinstance(tool.get("kind"), str):
+            kinds.add(tool["kind"])
+    return kinds
+
+
+def _researcher_search_strategy_block(tool_kinds: set[str]) -> str:
+    if tool_kinds & _CORPUS_TOOL_KINDS and not tool_kinds & _WEB_TOOL_KINDS:
+        corpus_tools = ", ".join(sorted(tool_kinds & _CORPUS_TOOL_KINDS))
+        return (
+            "### Search strategy\n"
+            f"- Start with the available corpus retrieval tools ({corpus_tools}) "
+            "against the named resources, combining {query} with the lane focus terms.\n"
+            "- Use exact read/load/neighbor/aggregate tools for supporting records; "
+            "retrieval metadata alone is not sufficient evidence."
+        )
+    return (
+        "### Search strategy\n"
+        "- Run focused searches for each sub-question; refine with source names, "
+        "official documents, or exact phrases found in promising results.\n"
+        "- Crawl or retrieve source text before relying on a result; titles and "
+        "metadata alone are not citeable evidence."
+    )
+
+
 def _normalize_researcher_user_prompts(
     ast: dict[str, Any], ctx: _NormalizerContext
 ) -> None:
@@ -1014,6 +1059,7 @@ def _normalize_researcher_user_prompts(
     text. Empty, generic, or too-short prompts stay visible to the Designer
     validation loop instead of being replaced with canned domain content.
     """
+    search_strategy_block = _researcher_search_strategy_block(_declared_tool_kinds(ast))
     for node, path in _walk_nodes(ast):
         if node.get("type") != "agent":
             continue
@@ -1050,6 +1096,7 @@ def _normalize_researcher_user_prompts(
             new_template = _wrap_researcher_user_prompt_contract(
                 lane_focus=lane_focus,
                 designer_template=stripped,
+                search_strategy_block=search_strategy_block,
             )
             config["user_prompt_template"] = new_template
             missing: list[str] = []
@@ -1083,14 +1130,7 @@ def _normalize_researcher_user_prompts(
             )
             additions.append("query_binding")
         if not _has_marker(new_template, _SEARCH_STRATEGY_HEADING_MARKERS):
-            new_template += (
-                "\n\n### Search strategy\n"
-                "- Run focused searches for each sub-question; refine with "
-                "source names, official documents, or exact phrases found in "
-                "promising results.\n"
-                "- Crawl or retrieve source text before relying on a result; "
-                "titles and metadata alone are not citeable evidence."
-            )
+            new_template += f"\n\n{search_strategy_block}"
             additions.append("search_strategy")
         if not _has_marker(new_template, _UNKNOWNS_HANDLING_MARKERS):
             new_template += (

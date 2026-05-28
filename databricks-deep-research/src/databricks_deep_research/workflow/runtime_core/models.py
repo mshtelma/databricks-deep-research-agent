@@ -147,7 +147,7 @@ class SourceRecord(BaseModel):
     source_type: str = ""
     tool_name: str = ""
     accepted: bool = True
-    evidence_quality: str = "empty"
+    evidence_quality: str = "builtin"
     admission_status: str = "accepted"
     admission_reason_code: str = ""
 

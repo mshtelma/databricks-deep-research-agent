@@ -16,9 +16,22 @@
 import * as React from 'react';
 import Ajv from 'ajv';
 import addFormats from 'ajv-formats';
-import { Wrench, Plus, X, Lock, Check, Info, Box } from 'lucide-react';
+import {
+  Wrench,
+  Plus,
+  X,
+  Lock,
+  Check,
+  Info,
+  Box,
+  RefreshCw,
+  FlaskConical,
+  Pencil,
+  Save,
+} from 'lucide-react';
 import type { RegistryResponse, ToolKindSpec } from '@/types/agentDesigner';
 import type { ToolDecl } from '@/types/ast';
+import { refreshCatalog, probeTools, type ProbeSample } from '@/api/agentDesigner';
 import { resolveBlock } from '@/lib/blockPath';
 import { requiredConfigErrors, schemaProperties } from '@/lib/jsonSchema';
 import { useAgentEditorStore } from '@/stores/agentEditorStore';
@@ -425,6 +438,31 @@ function ToolsBindingForm({
   boundToolNames,
   onShowAddTool,
 }: ToolsBindingFormProps): React.ReactElement {
+  const ast = useAgentEditorStore((s) => s.ast);
+  const agentId = useAgentEditorStore((s) => s.agentId);
+  const setAst = useAgentEditorStore((s) => s.setAst);
+  const [catalogBusy, setCatalogBusy] = React.useState<'refresh' | 'probe' | null>(null);
+  const [catalogEditing, setCatalogEditing] = React.useState(false);
+  const [catalogDraft, setCatalogDraft] = React.useState('');
+  const [probeSamples, setProbeSamples] = React.useState<ProbeSample[]>([]);
+  const [catalogError, setCatalogError] = React.useState<string | null>(null);
+  const extras =
+    _block.config && typeof _block.config['extras'] === 'object' && _block.config['extras'] !== null
+      ? (_block.config['extras'] as Record<string, unknown>)
+      : {};
+  const catalogText = typeof extras['_framework_tool_catalog'] === 'string'
+    ? extras['_framework_tool_catalog']
+    : '';
+  const renderError = typeof extras['_framework_tool_catalog_render_error'] === 'string'
+    ? extras['_framework_tool_catalog_render_error']
+    : '';
+
+  React.useEffect(() => {
+    if (!catalogEditing) {
+      setCatalogDraft(catalogText);
+    }
+  }, [catalogEditing, catalogText]);
+
   const toggleBinding = (name: string) => {
     const store = useAgentEditorStore.getState();
     if (boundToolNames.includes(name)) {
@@ -434,6 +472,53 @@ function ToolsBindingForm({
     } else {
       store.bindToolToBlock(selectedPath, name);
     }
+  };
+
+  const handleRefreshCatalog = async () => {
+    if (!ast) return;
+    setCatalogError(null);
+    setCatalogBusy('refresh');
+    try {
+      const result = await refreshCatalog({ definition: ast, agentId, forceRegen: true });
+      setAst(result.definition);
+    } catch (err) {
+      setCatalogError(err instanceof Error ? err.message : 'Catalog refresh failed');
+    } finally {
+      setCatalogBusy(null);
+    }
+  };
+
+  const handleProbeTools = async () => {
+    if (!ast || boundToolNames.length === 0) return;
+    setCatalogError(null);
+    setCatalogBusy('probe');
+    try {
+      const result = await probeTools({
+        definition: ast,
+        agentId,
+        toolNames: boundToolNames,
+        persist: false,
+      });
+      setProbeSamples(result.samples);
+    } catch (err) {
+      setCatalogError(err instanceof Error ? err.message : 'Tool probe failed');
+    } finally {
+      setCatalogBusy(null);
+    }
+  };
+
+  const handleSaveCatalogEdit = () => {
+    const nextExtras = {
+      ...extras,
+      '_framework_tool_catalog': catalogDraft,
+      '_framework_tool_catalog_user_edited': true,
+      '_framework_tool_catalog_render_error': null,
+      '_framework_tool_catalog_injection_enabled': true,
+    };
+    useAgentEditorStore.getState().updateBlock(selectedPath, {
+      config: { ..._block.config, extras: nextExtras },
+    });
+    setCatalogEditing(false);
   };
 
   return (
@@ -498,6 +583,104 @@ function ToolsBindingForm({
       >
         <Plus size={11} /> Add to workflow
       </button>
+      {boundToolNames.length > 0 && (
+        <div className="mt-4 border-t border-db-gray-lines pt-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <h3 className="text-[12px] font-medium text-db-navy-800">Catalog Preview</h3>
+            <div className="flex gap-1.5">
+              {catalogEditing ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCatalogDraft(catalogText);
+                      setCatalogEditing(false);
+                    }}
+                    disabled={catalogBusy !== null}
+                    className="inline-flex h-7 items-center gap-1 rounded-db-md border border-db-gray-lines bg-white px-2 text-[11px] font-medium text-db-navy-800 hover:bg-db-oat-light disabled:opacity-60"
+                  >
+                    <X size={12} /> Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveCatalogEdit}
+                    disabled={catalogBusy !== null}
+                    className="inline-flex h-7 items-center gap-1 rounded-db-md border border-db-gray-lines bg-white px-2 text-[11px] font-medium text-db-navy-800 hover:bg-db-oat-light disabled:opacity-60"
+                  >
+                    <Save size={12} /> Save
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCatalogDraft(catalogText);
+                    setCatalogEditing(true);
+                  }}
+                  disabled={catalogBusy !== null}
+                  className="inline-flex h-7 items-center gap-1 rounded-db-md border border-db-gray-lines bg-white px-2 text-[11px] font-medium text-db-navy-800 hover:bg-db-oat-light disabled:opacity-60"
+                >
+                  <Pencil size={12} /> Edit
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleRefreshCatalog}
+                disabled={catalogBusy !== null}
+                className="inline-flex h-7 items-center gap-1 rounded-db-md border border-db-gray-lines bg-white px-2 text-[11px] font-medium text-db-navy-800 hover:bg-db-oat-light disabled:opacity-60"
+              >
+                <RefreshCw size={12} /> Refresh
+              </button>
+              <button
+                type="button"
+                onClick={handleProbeTools}
+                disabled={catalogBusy !== null}
+                className="inline-flex h-7 items-center gap-1 rounded-db-md border border-db-gray-lines bg-white px-2 text-[11px] font-medium text-db-navy-800 hover:bg-db-oat-light disabled:opacity-60"
+              >
+                <FlaskConical size={12} /> Probe
+              </button>
+            </div>
+          </div>
+          {(renderError || catalogError) && (
+            <div className="mb-2 rounded-db-md border border-db-lava-200 bg-db-lava-50 px-2 py-1.5 text-[11px] text-db-lava-700">
+              {catalogError || renderError}
+            </div>
+          )}
+          {catalogEditing ? (
+            <textarea
+              value={catalogDraft}
+              onChange={(event) => setCatalogDraft(event.target.value)}
+              className="min-h-44 w-full resize-y rounded-db-md border border-db-gray-lines bg-white p-2 font-db-mono text-[11px] leading-[1.45] text-db-navy-800 outline-none focus:border-db-navy-300"
+            />
+          ) : (
+            <pre className="max-h-56 overflow-auto rounded-db-md border border-db-gray-lines bg-db-oat-light p-2 font-db-mono text-[11px] leading-[1.45] text-db-navy-800">
+              {catalogText || 'Catalog will be generated on save.'}
+            </pre>
+          )}
+          {probeSamples.length > 0 && (
+            <div className="mt-2 flex flex-col gap-1">
+              {probeSamples.map((sample, idx) => {
+                const toolName = boundToolNames[idx] ?? `tool_${idx + 1}`;
+                return (
+                  <div
+                    key={`${toolName}-${sample.status}-${idx}`}
+                    className="rounded-db-md border border-db-gray-lines px-2 py-1.5 text-[11px] text-db-gray-text"
+                  >
+                    <span className="font-db-mono font-medium text-db-navy-800">
+                      {toolName}
+                    </span>
+                    <span> - {sample.status}</span>
+                    {sample.reason ? <span> - {sample.reason}</span> : null}
+                    {sample.sample_output ? (
+                      <div className="mt-1 truncate font-db-mono">{sample.sample_output}</div>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

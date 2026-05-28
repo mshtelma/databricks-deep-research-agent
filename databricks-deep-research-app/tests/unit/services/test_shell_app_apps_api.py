@@ -176,7 +176,11 @@ class TestAppNameSelection:
         ]
         assert wc.apps.deploy.call_args.kwargs["app_name"] == "dr-shell-ui"
         deployment_arg = wc.apps.deploy.call_args.kwargs["app_deployment"]
-        assert [env.name for env in deployment_arg.env_vars] == ["MLFLOW_TRACKING_URI"]
+        assert [env.name for env in deployment_arg.env_vars] == [
+            "MLFLOW_ENABLED",
+            "MLFLOW_TRACKING_URI",
+            "SHELL_APP_SSE_HEARTBEAT_SECONDS",
+        ]
         wc.apps.get.assert_called_with(name="dr-shell-ui")
 
     def test_fallback_app_name_is_bounded_to_apps_limit(self) -> None:
@@ -239,7 +243,9 @@ class TestAppNameSelection:
 
         deployment_arg = wc.apps.deploy.call_args.kwargs["app_deployment"]
         env_by_name = {env.name: env for env in deployment_arg.env_vars}
+        assert env_by_name["MLFLOW_ENABLED"].value == "false"
         assert env_by_name["MLFLOW_TRACKING_URI"].value == "databricks"
+        assert env_by_name["SHELL_APP_SSE_HEARTBEAT_SECONDS"].value == "15"
         assert env_by_name["BRAVE_API_KEY"].value_from == "brave-api-key"
 
 

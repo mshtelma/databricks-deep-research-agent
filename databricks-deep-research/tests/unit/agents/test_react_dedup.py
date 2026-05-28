@@ -289,8 +289,8 @@ def test_is_known_duplicate_jaccard_near_match() -> None:
     assert loop._is_known_duplicate_sig(sig3, "treasury_search") is True
 
 
-def test_delta_grep_different_patterns_not_jaccard_deduped() -> None:
-    """Different patterns on same file should not be Jaccard-deduped.
+def test_table_search_different_patterns_not_jaccard_deduped() -> None:
+    """Different patterns on same binding should not be Jaccard-deduped.
 
     Canonical sigs: 'treasury_grep:chunk_type=table file_name=x.txt pattern=judiciary'
     vs 'treasury_grep:chunk_type=table file_name=x.txt pattern=ffo-3'

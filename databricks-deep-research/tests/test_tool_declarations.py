@@ -87,7 +87,29 @@ class TestToolKind:
         assert ToolKind.vector_search == "vector_search"
         assert ToolKind.genie == "genie"
         assert ToolKind.knowledge_assistant == "knowledge_assistant"
-        assert ToolKind.delta_context == "delta_context"
+
+    def test_table_tool_kinds(self) -> None:
+        """Six text-table tool kinds replace the legacy delta_* and table_read."""
+        assert ToolKind.table_discovery == "table_discovery"
+        assert ToolKind.table_search == "table_search"
+        assert ToolKind.table_read == "table_read"
+        assert ToolKind.table_neighbors == "table_neighbors"
+        assert ToolKind.table_load == "table_load"
+        assert ToolKind.table_aggregate == "table_aggregate"
+
+    def test_legacy_delta_kinds_removed(self) -> None:
+        """The legacy delta_* enum members must no longer exist."""
+        members = {m.value for m in ToolKind}
+        assert "delta_read" not in members
+        assert "delta_grep" not in members
+        assert "delta_context" not in members
+        assert "delta_table_read" not in members
+
+    def test_text_table_source_kind(self) -> None:
+        """SourceKind.text_table replaces the legacy delta_table value."""
+        assert SourceKind.text_table == "text_table"
+        members = {m.value for m in SourceKind}
+        assert "delta_table" not in members
 
     def test_tool_kind_to_source_kind_known(self) -> None:
         assert tool_kind_to_source_kind("web_search") == SourceKind.web
@@ -97,7 +119,15 @@ class TestToolKind:
         assert tool_kind_to_source_kind("file_search") == SourceKind.file
         assert tool_kind_to_source_kind("web_crawl") == SourceKind.builtin
         assert tool_kind_to_source_kind("web_research") == SourceKind.web
-        assert tool_kind_to_source_kind("delta_context") == SourceKind.delta_table
+
+    def test_tool_kind_to_source_kind_table_kinds(self) -> None:
+        """All six table_* kinds map to the generic SourceKind.text_table."""
+        assert tool_kind_to_source_kind("table_discovery") == SourceKind.text_table
+        assert tool_kind_to_source_kind("table_search") == SourceKind.text_table
+        assert tool_kind_to_source_kind("table_read") == SourceKind.text_table
+        assert tool_kind_to_source_kind("table_neighbors") == SourceKind.text_table
+        assert tool_kind_to_source_kind("table_load") == SourceKind.text_table
+        assert tool_kind_to_source_kind("table_aggregate") == SourceKind.text_table
 
     def test_tool_kind_to_source_kind_unknown(self) -> None:
         assert tool_kind_to_source_kind("custom_thing") == SourceKind.builtin
