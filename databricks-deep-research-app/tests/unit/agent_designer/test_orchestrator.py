@@ -435,7 +435,7 @@ def test_investment_research_workflow_compiles_domain_specific_design_brief() ->
     plan_and_execute = workflow["root"]["children"][1]
     guidance = plan_and_execute["config"]["planner_guidance"]
     metadata = plan_and_execute["config"]["synthesis_metadata"]
-    researcher = plan_and_execute["config"]["body"]["children"][0]
+    researcher = plan_and_execute["config"]["body"]
 
     assert workflow["name"] == "Investment Research Assistant"
     assert workflow["root"]["label"] == "Investment Research Pipeline"
@@ -448,10 +448,9 @@ def test_investment_research_workflow_compiles_domain_specific_design_brief() ->
     assert researcher["type"] == "agent"
     assert researcher["label"] == "Investment Research Researcher"
     assert researcher["config"]["subtype"] == "researcher"
-    assert all(
-        child["type"] != "conditional"
-        for child in plan_and_execute["config"]["body"]["children"]
-    )
+    # Phase 0 (dataflow-enforcement plan): body is the direct researcher agent —
+    # no router/conditional, no body reflector.
+    assert plan_and_execute["config"]["body"]["type"] == "agent"
     researcher_prompt = (
         researcher["config"]["system_prompt"]
         + "\n"

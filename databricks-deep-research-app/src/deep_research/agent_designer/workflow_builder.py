@@ -1922,32 +1922,12 @@ def _build_plan_and_execute_workflow(
             spec=body_research_spec,
         ),
     )
-    reflector = make_agent_node(
-        node_id="reflector",
-        label=f"{domain_label} Critic",
-        subtype="reflector",
-        input_keys=["query", "current_step", "findings", "research_plan"],
-        output_key="reflection",
-        model_tier="analytical",
-        output_format="json",
-        pool_inject=[{"pool": "observations", "threshold": 0}],
-        max_tool_calls=0,
-        extra_config={
-            "system_prompt": _with_designer_goal(
-                _reflector_workflow_directive(compiled_brief)
-                + "\n\n"
-                + reflector_system,
-                intent,
-                role="reflector",
-                design_brief=compiled_brief,
-            ),
-        },
-    )
-    body = make_sequence(
-        node_id="research-body",
-        label=f"{domain_label} Research Body",
-        children=[researcher, reflector],
-    )
+    # Body is the direct researcher. The loop's continue/replan/complete decision
+    # is driven by the evaluator (``evaluator=`` below); a body-level reflector
+    # would emit a control decision nothing reads — a dead control output that
+    # wastes one analytical-tier call per step.
+    # See docs/superpowers/specs/2026-05-29-scoped-bindings-dataflow-enforcement-design.md (Phase 0 / §1.1).
+    body = researcher
     plan_and_execute = make_plan_and_execute(
         node_id="plan-and-execute",
         label=f"Plan & Execute {domain_label}",
@@ -2009,7 +1989,7 @@ def _build_plan_and_execute_workflow(
         node_id="synthesizer",
         label=f"{domain_label} Report Synthesizer",
         subtype="synthesizer",
-        input_keys=["query", "research_plan", "findings", "reflection"],
+        input_keys=["query", "research_plan", "findings", "evaluation"],
         output_key="report",
         model_tier="complex",
         output_format="markdown",
@@ -2233,7 +2213,11 @@ def _plan_execute_synthesizer_directive(lane_specs: list[dict[str, str]]) -> str
         "attempted-and-failed retrieval for the named axis. Absence of "
         "retrieved evidence is NOT the same as absence of data; phrase "
         "your gap notes as actions ('we did not retrieve X') rather than "
-        "existence assertions ('X is not present in the corpus')."
+        "existence assertions ('X is not present in the corpus').\n\n"
+        "## Final coverage assessment (control context — NOT evidence)\n"
+        "The evaluator's final assessment of coverage and gaps is below. Use it "
+        "only to decide which coverage gaps to flag; do not cite it as evidence.\n"
+        "{evaluation}\n"
         f"{lane_section}"
     )
 
@@ -2796,6 +2780,17 @@ def validate_generated_workflow(workflow: dict[str, Any]) -> None:
                 _validate_agent_semantics(
                     f"{node_id}.evaluator", evaluator, declared_tools, eval_keys, errors
                 )
+                # The evaluator's output_key (e.g. "evaluation") is written to
+                # state every iteration (harness writes output_key for every
+                # agent) and is therefore available to nodes AFTER the
+                # plan_and_execute (e.g. the synthesizer). Register it like the
+                # planner output so downstream input_keys resolve. Mirrors
+                # condition_contracts exporting the evaluator output to the outer
+                # scope.
+                eval_output = evaluator.get("output_key")
+                if isinstance(eval_output, str) and eval_output:
+                    next_keys.add(eval_output)
+                    produced_outputs.add(eval_output)
         return next_keys
 
     walk(workflow["root"], set(definition.required_inputs), set())

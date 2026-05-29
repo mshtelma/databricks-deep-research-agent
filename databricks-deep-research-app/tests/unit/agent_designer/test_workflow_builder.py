@@ -259,9 +259,11 @@ def test_plan_and_execute_corpus_body_does_not_emit_lane_router() -> None:
 
     assert "research-lane-router" not in serialized_body
     assert "current_step.lane" not in serialized_body
-    assert body["children"][0]["type"] == "agent"
-    assert body["children"][0]["id"] == "researcher"
-    assert body["children"][1]["id"] == "reflector"
+    # Phase 0 (dataflow-enforcement plan): the body is the direct researcher —
+    # the dead body reflector (whose control decision nothing read) was removed.
+    assert body["type"] == "agent"
+    assert body["id"] == "researcher"
+    assert body["config"]["subtype"] == "researcher"
 
 
 def test_corpus_only_contract_replaces_generic_web_planner_prompt() -> None:
