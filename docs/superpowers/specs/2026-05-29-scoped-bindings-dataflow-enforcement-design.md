@@ -270,18 +270,23 @@ A binding is a **dead store** iff it has **zero consumption edges** (§2.1) of a
 kind. For each dead store, classify by what the producer *is*, to assign
 severity:
 
-| Dead store producer | Verdict |
+| Producer / consumer situation | Verdict |
 |---|---|
-| Produced by a node positioned as a container's decision-maker (evaluator/reflector feeding a loop/conditional) but **nothing branches on it** | **error** — a control producer with no controller is the §1.1 bug |
+| A **container control source that does not resolve** — a loop `until` key, a conditional branch key, or a plan_and_execute evaluator slot whose key has **no producer** | **error** — the container cannot make its decision ("a controller with no signal"); realized as a dangling *control read* in Pass A |
 | A plain data `output_key` read by nobody | **warning** — wasted compute, not incorrect |
 | Top-level workflow result (e.g. synthesizer `report`) | **exempt** — the workflow's output is *supposed* to be terminal |
 | A `pool_writes` whose pool a *later* node injects | **exempt** — see §3.3 (this binding is **not** dead; it has a POOL data edge) |
 
-The error/warning split is deliberate: a value produced *as a control signal*
-that nothing branches on means the topology is wrong (something was supposed to
-branch and doesn't — exactly the §1.1 body reflector). A dead plain-data output
-is merely inefficient. Note that because kind is a per-edge property (§2.1), a
-binding with even one live edge of *any* kind is not a dead store — so the
+The error tier is a **dangling control *read*** (a container needs a control
+signal that no node produces), **not** a "dead control *producer*." We
+deliberately do **not** flag a reflector/evaluator whose decision is consumed
+only as *data* — e.g. the legitimate `coverage-reflector → finalizer`, or the
+pre-fix body reflector → synthesizer. The framework cannot structurally
+distinguish "useful critique" from "wasted reflection"; that is a semantic
+judgment, not a dataflow violation (the §1.1 body reflector is removed by Phase 0
+judgment, not caught by the checker — a subtype-based "redundant decision-maker"
+check would false-positive the legitimate `coverage-reflector`). Because a
+binding with even one live edge of *any* kind is not a dead store, the
 post-Phase-0 `evaluation` (control edge + data edge) is unambiguously live.
 
 ### 3.3 The interior-observation exemption
