@@ -7,6 +7,7 @@ and output-key conflicts before any runtime execution begins.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from databricks_deep_research.agents.config import (
@@ -23,6 +24,9 @@ from databricks_deep_research.agents.grounding import (
 from databricks_deep_research.errors import WorkflowValidationError
 from databricks_deep_research.workflow.condition_contracts import (
     validate_condition_contracts,
+)
+from databricks_deep_research.workflow.dataflow_contracts import (
+    validate_dataflow_contracts,
 )
 from databricks_deep_research.workflow.definition import (
     NodeType,
@@ -216,6 +220,15 @@ def _validate_pool_write_extract(node_id: str, config: dict[str, Any]) -> list[s
 # ---------------------------------------------------------------------------
 
 
+def _dataflow_strict_enabled() -> bool:
+    """Lint-first: dataflow diagnostics are warnings unless explicitly enabled.
+
+    Flip the default to ``True`` (or set ``DATAFLOW_CHECK_STRICT=true`` in the
+    deploy env) once the generated-workflow corpus is measured clean.
+    """
+    return os.getenv("DATAFLOW_CHECK_STRICT", "false").lower() in {"1", "true", "yes"}
+
+
 def validate_workflow(definition: WorkflowDefinition) -> list[str]:
     """Validate a :class:`WorkflowDefinition` and return a list of error messages.
 
@@ -240,6 +253,15 @@ def validate_workflow(definition: WorkflowDefinition) -> list[str]:
 
     if not errors:
         errors.extend(validate_condition_contracts(definition))
+        # Dataflow reachability lint (Pass A dangling reads + Pass B dead stores).
+        # Lint-first: warnings are logged (DATAFLOW_LINT), not raised, unless
+        # DATAFLOW_CHECK_STRICT is set. See dataflow_contracts.py.
+        dataflow_report = validate_dataflow_contracts(
+            definition, strict=_dataflow_strict_enabled()
+        )
+        for warning in dataflow_report.warnings:
+            logger.warning("DATAFLOW_LINT %s", warning)
+        errors.extend(dataflow_report.errors)
 
     if errors:
         raise WorkflowValidationError(errors=errors)

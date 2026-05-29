@@ -236,3 +236,38 @@ def _resolve_loop(node: WorkflowNode, visible: set[str], dangling: list[str]) ->
                 f"loop '{node.id}': until-condition reads '{key}' with no producer"
             )
     return exported
+
+
+# ---------------------------------------------------------------------------
+# Pass B (dead stores) + public entry point
+# ---------------------------------------------------------------------------
+
+
+def detect_dead_stores(definition: WorkflowDefinition) -> list[Diagnostic]:
+    """Pass B — produced values consumed by nobody. Implemented in Phase 2
+    (US-DF5); returns no diagnostics until then."""
+    _ = definition
+    return []
+
+
+def validate_dataflow_contracts(
+    definition: WorkflowDefinition, *, strict: bool
+) -> DataflowReport:
+    """Run Pass A (dangling reads — error-severity) and Pass B (dead stores).
+
+    Lint-first: in lint mode (``strict=False``) every diagnostic is a warning; in
+    strict mode error-severity diagnostics become validation errors and
+    warning-severity diagnostics stay warnings.
+    """
+    diagnostics: list[Diagnostic] = [
+        Diagnostic(message=message, severity="error")
+        for message in dangling_reads(definition)
+    ]
+    diagnostics.extend(detect_dead_stores(definition))
+    report = DataflowReport()
+    for diag in diagnostics:
+        if strict and diag.severity == "error":
+            report.errors.append(diag.message)
+        else:
+            report.warnings.append(diag.message)
+    return report
