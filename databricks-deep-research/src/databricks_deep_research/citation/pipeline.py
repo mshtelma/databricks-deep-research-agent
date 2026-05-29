@@ -2679,7 +2679,16 @@ def _detect_special_context(content: str, position: int) -> str | None:
         return None
 
     last_line = lines_before[-1]
-    if "|" in last_line:
+
+    # Examine the FULL line `position` sits on, not just the text before it.
+    # A claim whose span begins at a table-row boundary has `position` right
+    # after the preceding '\n' (before the leading '|'), so a backward-only
+    # check sees an empty `last_line` and misses the table — the hedge/rewrite
+    # is then spliced before the '|', corrupting the row. Include the forward
+    # remainder of the current line so row-start claims register as table
+    # context (also repairs _remove_claim / _format_claim_rewrite_text).
+    current_line = last_line + content[position : position + 200].split("\n", 1)[0]
+    if "|" in current_line:
         return "table"
 
     stripped = last_line.strip()
