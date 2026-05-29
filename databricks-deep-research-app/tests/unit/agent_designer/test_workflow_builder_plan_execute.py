@@ -16,6 +16,9 @@ from deep_research.agent_designer.designer_types import (
     ToolPlan,
     WorkflowDesignBrief,
 )
+from deep_research.agent_designer.semantic_validation import (
+    detect_unspecialized_agents,
+)
 from deep_research.agent_designer.workflow_builder import build_web_research_workflow
 
 
@@ -79,3 +82,76 @@ def test_synthesizer_reads_evaluation_with_real_slot() -> None:
     # The slot must be referenced in the prompt so the read is not a no-op
     # (raw input_keys only render if the template references them).
     assert "{evaluation}" in json.dumps(synth["config"])
+
+
+# ---------------------------------------------------------------------------
+# PAE body specialization: the body must thread the scaffold/architect lane
+# system_prompt instead of falling to the generic builtin. Reproduces the
+# officeqa designer quality-gate failure (Check 2 in semantic_validation:
+# "still on the generic researcher prompt") that fired only when the
+# classifier routed the task to plan_and_execute.
+# ---------------------------------------------------------------------------
+
+_LANE_SPECIALIZATION = (
+    "You are a resource-grounded research agent for this workflow. Use only "
+    "the declared runtime tools (vector_search, table_read, compute) and "
+    "preserve the evidence contract. Investigate the Treasury bulletin "
+    "tables; cite exact rows; mark missing values as Data unavailable."
+)
+
+# The framework's generic builtin researcher opening (semantic_validation's
+# _DEFAULT_METHOD_OPENING_MARKER). Its presence is what Check 2 blocks on.
+_GENERIC_MARKER = "You are the Researcher agent for a deep research system."
+
+
+def _plan_execute_brief_specialized() -> WorkflowDesignBrief:
+    return WorkflowDesignBrief(
+        workflow_name="pae-specialized",
+        topology="plan_and_execute",
+        research_lanes=[
+            {
+                "description": "Corpus lookup over Treasury chunks.",
+                "system_prompt": _LANE_SPECIALIZATION,
+                "user_prompt_template": "Investigate {query} over the corpus.",
+            }
+        ],
+        tool_plan=ToolPlan(
+            tools=[ToolDeclarationSpec(name="vs", kind="vector_search")]
+        ),
+    )
+
+
+def test_pae_body_threads_lane_specialization() -> None:
+    ast = build_web_research_workflow(
+        intent="specialized pae", design_brief=_plan_execute_brief_specialized()
+    )
+    body = _find_node(ast, "plan-and-execute")["config"]["body"]
+    sp = body["config"]["system_prompt"]
+    # The discarded-specialization bug: body used to carry the generic builtin.
+    assert _GENERIC_MARKER not in sp
+    # The lane specialization actually reaches the body.
+    assert "resource-grounded research agent" in sp
+    assert len(sp) >= 200  # clears _MIN_SYSTEM_PROMPT_CHARS
+
+
+def test_pae_body_empty_specialization_is_unchanged() -> None:
+    # Regression guard: when no lane system_prompt exists (legacy brief), the
+    # body keeps the legacy generic path — byte-identical to prior behavior.
+    ast = _build()  # _plan_execute_brief() has no lane system_prompt
+    body = _find_node(ast, "plan-and-execute")["config"]["body"]
+    assert _GENERIC_MARKER in body["config"]["system_prompt"]
+
+
+def test_pae_body_passes_unspecialized_gate() -> None:
+    # Gate-level reproduction of the officeqa failure: detect_unspecialized_agents
+    # must emit no blocking advice on the body system_prompt once specialized.
+    ast = build_web_research_workflow(
+        intent="specialized pae", design_brief=_plan_execute_brief_specialized()
+    )
+    blocking = [
+        e
+        for e in detect_unspecialized_agents(ast)
+        if getattr(e, "severity", "blocking") == "blocking"
+        and "config.body.config.system_prompt" in (e.path or "")
+    ]
+    assert blocking == [], f"unexpected blocking advice on body: {blocking}"

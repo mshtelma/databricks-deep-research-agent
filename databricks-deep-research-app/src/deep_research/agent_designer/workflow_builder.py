@@ -1885,6 +1885,21 @@ def _build_plan_and_execute_workflow(
             assets=assets,
             tool_plan=compiled_brief.tool_plan,
         )
+    # Thread the scaffold/architect lane specialization into the single PAE
+    # body researcher, mirroring how body_focus/body_template already aggregate
+    # the lanes. parallel_lanes feeds each lane's system_prompt to
+    # _assemble_lane_system_prompt's specialized branch; the body must do the
+    # same or it falls to the legacy generic builtin and the structural gate's
+    # Check 2 ("still on the generic researcher prompt") blocks it. Empty when
+    # no lane carries a system_prompt (legacy briefs) -> legacy path unchanged.
+    body_system_prompt = _bounded_multiline(
+        "\n\n".join(
+            (spec.get("system_prompt") or "").strip()
+            for spec in lane_specs
+            if (spec.get("system_prompt") or "").strip()
+        ),
+        max_length=4000,
+    )
     body_research_spec = {
         "id": "adaptive_research",
         "label": f"{domain_label} Researcher",
@@ -1892,7 +1907,7 @@ def _build_plan_and_execute_workflow(
             "Adaptive evidence gathering for each planner step. Cover these "
             f"workstreams as the current step requires:\n{body_focus}"
         ),
-        "system_prompt": "",
+        "system_prompt": body_system_prompt,
         "user_prompt_template": body_user_prompt,
     }
     researcher = make_agent_node(
