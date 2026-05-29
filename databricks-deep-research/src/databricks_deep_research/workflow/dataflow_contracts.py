@@ -84,17 +84,15 @@ def _template_reads(template: str) -> set[str]:
     return _renderer.extract_variables(template) - set(_FOR_LOOP_VAR.findall(template))
 
 
-def effective_reads(cfg: AgentNodeConfig, *, exclude_runtime: bool = False) -> set[str]:
+def effective_reads(cfg: AgentNodeConfig) -> set[str]:
     """STATE keys an agent actually consumes: declared ``input_keys`` ∪ the
     variables referenced by its system/user prompt templates (the authoritative
     read signal — ``input_keys`` are documentation-only), minus loop-local
-    variables. Optionally drop runtime-injected keys.
+    variables. Runtime-injected keys are excluded at the Pass A *seed*, not here.
     """
     reads = set(cfg.input_keys)
     reads |= _template_reads(cfg.system_prompt or "")
     reads |= _template_reads(cfg.user_prompt_template or "")
-    if exclude_runtime:
-        reads -= RUNTIME_INJECTED_KEYS
     return reads
 
 
