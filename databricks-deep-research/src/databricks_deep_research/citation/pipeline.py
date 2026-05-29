@@ -69,6 +69,7 @@ from databricks_deep_research.citation.types import (
     VerificationResult,
     VerificationSummaryInfo,
     VerificationVerdict,
+    is_corpus_source_value,
 )
 from databricks_deep_research.citation.utils import truncate as _truncate
 from databricks_deep_research.llm.client import FrameworkLLMClient
@@ -153,6 +154,35 @@ def _counter_dict(values: list[str]) -> dict[str, int]:
     return dict(sorted(Counter(value for value in values if value).items()))
 
 
+_NUMERIC_PROMOTION_MIN_CONFIDENCE = 0.9
+
+
+def _should_promote_numeric_verdict(
+    verdict: str | None,
+    numeric_result: dict[str, Any],
+    *,
+    enabled: bool,
+    min_confidence: float = _NUMERIC_PROMOTION_MIN_CONFIDENCE,
+) -> bool:
+    """True when deterministic numeric corroboration should override a
+    non-supported NLI verdict (Defect E / Part 1).
+
+    The numeric verifier corroborates a claim's value against the cited
+    evidence (verbatim match -> confidence 0.95, every QA pair agreeing ->
+    1.0). The NLI judge under-credits verbatim numerics and routes them to
+    PARTIAL/UNSUPPORTED, which Stage 8 hedges -- wrong for a value read
+    straight from the corpus. Promote only PARTIAL/UNSUPPORTED; never
+    CONTRADICTED (a contradicted number is wrong, not merely uncited).
+    """
+    if not enabled or not numeric_result:
+        return False
+    if verdict not in ("partial", "unsupported"):
+        return False
+    if not numeric_result.get("overall_match"):
+        return False
+    return float(numeric_result.get("confidence") or 0.0) >= min_confidence
+
+
 def _evidence_info_from_ranked(ranked: RankedEvidence) -> EvidenceInfo:
     """Convert RankedEvidence to EvidenceInfo (lossless field copy)."""
     return EvidenceInfo(
@@ -167,6 +197,7 @@ def _evidence_info_from_ranked(ranked: RankedEvidence) -> EvidenceInfo:
         has_numeric_content=ranked.has_numeric_content,
         source_pool_index=ranked.source_pool_index,
         evidence_pool_index=ranked.evidence_pool_index,
+        source_kind=ranked.source_kind,
     )
 
 
@@ -812,6 +843,7 @@ class CitationVerificationPipeline:
                     has_numeric_content=evidence.has_numeric_content,
                     source_pool_index=evidence.source_pool_index,
                     evidence_pool_index=evidence.evidence_pool_index,
+                    source_kind=evidence.source_kind,
                 )
             )
         return ranked
@@ -1132,6 +1164,18 @@ class CitationVerificationPipeline:
         elif not claim.verification_method:
             claim.verification_method = VerificationMethod.ENTAILMENT.value
 
+        numeric_promoted = False
+        if _should_promote_numeric_verdict(
+            claim.verification_verdict,
+            numeric_result,
+            enabled=self.config.numeric_match_promotes_verdict,
+        ):
+            # Numeric QA corroborated the value against the cited evidence;
+            # the NLI judge under-credited a verbatim/corpus number. Keep it.
+            claim.verification_verdict = VerificationVerdict.SUPPORTED.value
+            claim.abstained = False
+            numeric_promoted = True
+
         routing_score = (
             claim.routing_confidence_score
             if claim.routing_confidence_score is not None
@@ -1163,6 +1207,7 @@ class CitationVerificationPipeline:
                     "citation_keys": claim.citation_keys,
                     "claim_role": claim.claim_role,
                     "verification_method": claim.verification_method or "",
+                    "numeric_promoted": numeric_promoted,
                 },
             )
         ]
@@ -1900,7 +1945,13 @@ class CitationVerificationPipeline:
                     _truncate(claim.claim_text, 50),
                 )
             elif action == "soften":
-                softened_text = _build_softened_fact_text(claim.claim_text, context)
+                corpus_grounded = any(
+                    is_corpus_source_value(getattr(ev, "source_kind", None))
+                    for ev in (claim.evidences or [])
+                )
+                softened_text = _build_softened_fact_text(
+                    claim.claim_text, context, corpus_grounded=corpus_grounded
+                )
                 content = _replace_claim_span(content, claim, softened_text)
                 claim.claim_text = softened_text
                 softened_count += 1
@@ -2880,12 +2931,17 @@ def _normalize_softened_lead(text: str) -> str:
     return text
 
 
-def _build_softened_fact_text(claim_text: str, context: str | None) -> str:
+def _build_softened_fact_text(
+    claim_text: str, context: str | None, *, corpus_grounded: bool = False
+) -> str:
     """Return a hedged version of a fact claim."""
     clean_text = _strip_citation_markers(claim_text)
     if not _needs_hedging(clean_text):
         return clean_text
-    if context == "table":
+    # Corpus-grounded facts come from a single authoritative source; a
+    # multi-source hedge ("Some sources indicate", "Reportedly") misrepresents
+    # their provenance. Use the same neutral marker as table context.
+    if context == "table" or corpus_grounded:
         return f"{clean_text} [unverified]"
     hedging_phrases = [
         "It has been suggested that",
@@ -3076,6 +3132,7 @@ def _assign_fallback_evidence(
                 has_numeric_content=best.has_numeric_content,
                 source_pool_index=best.source_pool_index,
                 evidence_pool_index=best.evidence_pool_index,
+                source_kind=best.source_kind,
             )
             claim.evidences = [claim.evidence]
             claim.has_fallback_evidence = True

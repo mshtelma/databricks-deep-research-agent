@@ -433,6 +433,13 @@ class CitationConfig(BaseModel):
     enable_numeric_qa_verification: bool = True
     enable_verification_retrieval: bool = False
 
+    # Defect E (prevention): when numeric QA corroborates a claim's value
+    # against the cited evidence (verbatim match -> 0.95, or all QA pairs
+    # agreeing -> 1.0), promote a PARTIAL/UNSUPPORTED NLI verdict to SUPPORTED
+    # so the grounded number is KEPT rather than hedged ("Reportedly, $X").
+    # Never promotes CONTRADICTED. Set False to restore NLI-only verdicts.
+    numeric_match_promotes_verdict: bool = True
+
     # Per-stage configuration
     evidence_preselection: EvidencePreselectionConfig = Field(
         default_factory=EvidencePreselectionConfig,

@@ -15,7 +15,11 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from databricks_deep_research.citation.types import ContentQuality, RankedEvidence
+from databricks_deep_research.citation.types import (
+    ContentQuality,
+    RankedEvidence,
+    is_corpus_source_value,
+)
 from databricks_deep_research.citation.utils import has_numeric_content as _has_numeric
 from databricks_deep_research.llm.client import FrameworkLLMClient, ModelTier
 
@@ -35,29 +39,21 @@ logger = logging.getLogger(__name__)
 # Generic across source kinds — does NOT hardcode any domain, table
 # name, or corpus identifier. ``source_type`` is checked too so callers
 # that only populate the legacy field still benefit.
-_CORPUS_SOURCE_KINDS: frozenset[str] = frozenset(
-    {
-        "vector_index",
-        "sql_analytics",
-        "qa_assistant",
-        "file",
-    }
-)
-_CORPUS_SOURCE_TYPES: frozenset[str] = frozenset(
-    {
-        "vector_search",
-        "genie",
-        "knowledge_assistant",
-    }
-)
+# The corpus kind/type sets now live in ``types`` so Stage 8 can share the
+# same classifier (``is_corpus_source_value``) without re-listing them.
 
 
 def _is_corpus_source(src: dict[str, Any]) -> bool:
     """True when *src* is a pre-curated corpus chunk (skip LLM extraction)."""
-    kind = str(src.get("source_kind") or "")
-    if kind in _CORPUS_SOURCE_KINDS:
-        return True
-    return str(src.get("source_type") or "") in _CORPUS_SOURCE_TYPES
+    return is_corpus_source_value(src.get("source_kind")) or is_corpus_source_value(
+        src.get("source_type")
+    )
+
+
+def _source_kind_of(src: dict[str, Any]) -> str | None:
+    """Resolve evidence provenance for the ``source_kind`` field (prefers the
+    explicit ``source_kind``, falls back to the legacy ``source_type``)."""
+    return src.get("source_kind") or src.get("source_type") or None
 
 
 # -- Prompt ----------------------------------------------------------------
@@ -410,6 +406,7 @@ class EvidenceSelector:
                     relevance_score=score,
                     has_numeric_content=has_num,
                     source_pool_index=source_pool_index,
+                    source_kind=_source_kind_of(src),
                     is_snippet_based=True,
                 ))
                 continue
@@ -475,6 +472,7 @@ class EvidenceSelector:
                         relevance_score=score,
                         has_numeric_content=has_num,
                         source_pool_index=source_pool_index,
+                        source_kind=_source_kind_of(src),
                     )
                 ]
 
@@ -499,6 +497,7 @@ class EvidenceSelector:
                             section_heading=sp.get("section"),
                             has_numeric_content=sp.get("has_numeric", False),
                             source_pool_index=source_pool_index,
+                            source_kind=_source_kind_of(src),
                         )
                         for sp in spans[:cap]
                     ]
@@ -506,7 +505,8 @@ class EvidenceSelector:
                     logger.warning("LLM extraction failed for %s, heuristic fallback",
                                    url[:60], exc_info=True)
                     return self._heuristic_extract(
-                        query, content, url, canonical_url, title, sid, source_pool_index,
+                        query, content, url, canonical_url, title, sid,
+                        source_pool_index, source_kind=_source_kind_of(src),
                     )[:cap]
 
         results = await asyncio.gather(
@@ -587,6 +587,7 @@ class EvidenceSelector:
         title: str | None,
         sid: str | None,
         source_pool_index: int | None,
+        source_kind: str | None = None,
     ) -> list[RankedEvidence]:
         ev: list[RankedEvidence] = []
         for sp in self._segment(content):
@@ -607,6 +608,7 @@ class EvidenceSelector:
                     relevance_score=score,
                     has_numeric_content=num,
                     source_pool_index=source_pool_index,
+                    source_kind=source_kind,
                 ))
         return ev
 

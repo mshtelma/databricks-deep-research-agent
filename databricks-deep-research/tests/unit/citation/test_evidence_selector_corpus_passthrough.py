@@ -141,6 +141,25 @@ def test_corpus_source_preserves_source_pool_index() -> None:
     assert result.evidence[0].source_pool_index == 7
 
 
+def test_corpus_source_populates_source_kind() -> None:
+    """source_kind must round-trip onto RankedEvidence so Stage 8 can pick a
+    source-appropriate softening register (corpus -> neutral [unverified])."""
+    from databricks_deep_research.citation.types import is_corpus_source_value
+
+    selector = _make_selector()
+    src = {
+        "url": "vs://x/y",
+        "content": "Treasury bulletin 1945-10 reported $90.5 billion in war expenditures across all federal agencies during fiscal year 1945.",
+        "source_kind": "vector_index",
+        "source_pool_index": 0,
+    }
+    result = asyncio.run(
+        selector.select_evidence("treasury", [src], filter_quality=False)
+    )
+    assert result.evidence[0].source_kind == "vector_index"
+    assert is_corpus_source_value(result.evidence[0].source_kind) is True
+
+
 def test_corpus_kind_set_is_generic_across_kinds() -> None:
     """Every corpus-grounded kind in the framework's SourceKind enum has
     the same path — no kind-specific carve-outs that violate
