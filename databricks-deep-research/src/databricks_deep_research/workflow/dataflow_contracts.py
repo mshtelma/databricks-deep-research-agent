@@ -205,14 +205,20 @@ def _resolve_pae(node: WorkflowNode, visible: set[str], dangling: list[str]) -> 
                 f"node '{node.id}.planner': read '{key}' has no producer in scope"
             )
     inner = set(visible) | {planner.output_key, cfg.item_state_key}
+    body_produced: set[str] = set()
     if cfg.body is not None:
         # 2-pass loop-carry: the body re-runs per item, so its outputs carry across
         # iterations. Pass 1 collects body-produced keys (throwaway sink); pass 2
         # resolves the body's reads against the fixpoint.
         body_sink: list[str] = []
-        inner |= _resolve(cfg.body, inner, body_sink)
+        body_produced = _resolve(cfg.body, inner, body_sink)
+        inner |= body_produced
         _resolve(cfg.body, inner, dangling)
-    exported = {planner.output_key}
+    # Export planner + body + evaluator outputs: every agent writes its output_key
+    # to state, so the body's outputs (e.g. 'findings') remain available to nodes
+    # AFTER the plan_and_execute (e.g. the synthesizer). Mirrors the builder's
+    # availability walk.
+    exported = {planner.output_key} | body_produced
     if cfg.evaluator is not None:
         evaluator = AgentNodeConfig(**cfg.evaluator)
         for key in effective_reads(evaluator):
@@ -342,33 +348,33 @@ def detect_dead_stores(definition: WorkflowDefinition) -> list[Diagnostic]:
     consumption (loop/conditional/PAE evaluator) counts as consumption. A dangling
     *control read* (the error tier) is surfaced by Pass A, not here.
     """
-    producers, state_reads, pool_reads = _collect_producers_reads(definition)
+    producers, state_reads, _pool_reads = _collect_producers_reads(definition)
     consumed_state = set(state_reads) | control_consumed_keys(definition)
-    consumed_pool = set(pool_reads)
     terminal = set(definition.output_keys)
+    # A node that writes to a pool routes its substantive output through that pool
+    # (consumed downstream by pool_inject AND by the runtime citation pipeline), so
+    # its state output_key being unread is NOT a dead store. POOL producers are not
+    # flagged at all: pool consumption is runtime-mediated (e.g. the citation
+    # pipeline reads the sources/observations pools) and not statically
+    # determinable from the AST.
+    pool_writing_nodes = {p.node_id for p in producers if p.channel == "pool"}
     diagnostics: list[Diagnostic] = []
     for producer in producers:
         if producer.channel == "pool":
-            if producer.key not in consumed_pool:
-                diagnostics.append(
-                    Diagnostic(
-                        message=(
-                            f"pool '{producer.key}' (written by '{producer.node_id}') "
-                            "is never injected"
-                        ),
-                        severity="warning",
-                    )
-                )
-        elif producer.key not in terminal and producer.key not in consumed_state:
-            diagnostics.append(
-                Diagnostic(
-                    message=(
-                        f"state '{producer.key}' (produced by '{producer.node_id}') "
-                        "is read by nobody"
-                    ),
-                    severity="warning",
-                )
+            continue
+        if producer.key in terminal or producer.key in consumed_state:
+            continue
+        if producer.node_id in pool_writing_nodes:
+            continue
+        diagnostics.append(
+            Diagnostic(
+                message=(
+                    f"state '{producer.key}' (produced by '{producer.node_id}') "
+                    "is read by nobody"
+                ),
+                severity="warning",
             )
+        )
     return diagnostics
 
 
