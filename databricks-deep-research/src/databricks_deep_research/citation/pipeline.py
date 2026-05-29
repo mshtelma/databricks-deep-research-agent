@@ -99,7 +99,7 @@ def _synth_pipeline_v2_enabled() -> bool:
 
 
 async def _classify_negative_existence_batch(
-    claims: list["ClaimInfo"],
+    claims: list[ClaimInfo],
     llm_client: Any,
 ) -> None:
     """Set ``claim.is_negative_existence`` on eligible claims via the
@@ -2694,22 +2694,87 @@ def _detect_special_context(content: str, position: int) -> str | None:
     return None
 
 
+def _claim_match_core(claim: ClaimInfo) -> str:
+    """Claim text used to verify span alignment: claim_text minus trailing
+    citation markers, stripped."""
+    return _TERMINAL_CITATION_RE.sub("", (claim.claim_text or "")).strip()
+
+
+def _aligned_claim_span(content: str, claim: ClaimInfo) -> tuple[int, int] | None:
+    """Validate — and if necessary re-locate — the (start, end) span to modify.
+
+    Stage-8 modifications splice ``content[start:end]``. If a drifted offset
+    (e.g. from the sentence-offset tracking in claim_generator) points mid-token,
+    blindly splicing corrupts unrelated prose — a cited claim ends up inside the
+    middle of a word (e.g. ``"...mark" + claim + "et targeted..."``). Trust the
+    stored offsets ONLY when the span actually contains the claim text; otherwise
+    re-locate by anchored search, and skip (return ``None``) when the claim text
+    cannot be found at all — keeping an uncited claim beats corrupting the report.
+
+    The misalignment is logged so the upstream offset drift remains diagnosable.
+    """
+    start, end = claim.position_start, claim.position_end
+    in_bounds = 0 <= start <= end <= len(content)
+
+    def _mid_word(pos: int) -> bool:
+        # A span boundary that lands between two alphanumerics is cutting a word —
+        # the signature of a drifted offset that would splice mid-token.
+        return (
+            0 < pos < len(content)
+            and content[pos - 1].isalnum()
+            and content[pos].isalnum()
+        )
+
+    # Normal path: in-bounds and neither boundary cuts a word -> trust the offsets.
+    # (Legitimate spans align to sentence/word boundaries even when they enclose
+    # citation markers the claim_text omits, so this does not over-skip.)
+    if in_bounds and not _mid_word(start) and not _mid_word(end):
+        return start, end
+    # Drifted (a boundary lands mid-word, or the span is out of bounds): re-locate
+    # by the claim's core text; skip entirely if it cannot be found, rather than
+    # splice the modification into unrelated prose.
+    core = _claim_match_core(claim)
+    if core:
+        located = content.find(core)
+        if located >= 0:
+            logger.warning(
+                "CITATION_SPAN_RELOCATED stored=(%d,%d) relocated=%d claim=%s",
+                start,
+                end,
+                located,
+                _truncate(core, 60),
+            )
+            return located, located + len(core)
+    logger.warning(
+        "CITATION_SPAN_MISALIGNED skip_modification stored=(%d,%d) claim=%s",
+        start,
+        end,
+        _truncate(core, 60),
+    )
+    return None
+
+
 def _remove_claim(content: str, claim: ClaimInfo, context: str | None) -> str:
     """Remove a contradicted claim from *content*."""
+    span = _aligned_claim_span(content, claim)
+    if span is None:
+        return content
+    start_pos, end_pos = span
+
     if context == "table":
-        before = content[: claim.position_start]
-        after = content[claim.position_end :]
+        before = content[:start_pos]
+        after = content[end_pos:]
         return before + "[removed for factual inaccuracy]" + after
 
     if context == "list":
-        start = content.rfind("\n", 0, claim.position_start) + 1
-        end = content.find("\n", claim.position_end)
+        start = content.rfind("\n", 0, start_pos) + 1
+        end = content.find("\n", end_pos)
         if end == -1:
             end = len(content)
         return content[:start] + content[end:]
 
-    before = content[: claim.position_start].rstrip()
-    after = content[claim.position_end :].lstrip()
+    before = content[:start_pos].rstrip()
+    after = content[end_pos:].lstrip()
     if (
         before
         and after
@@ -2721,10 +2786,13 @@ def _remove_claim(content: str, claim: ClaimInfo, context: str | None) -> str:
 
 
 def _replace_claim_span(content: str, claim: ClaimInfo, replacement: str) -> str:
-    """Replace a claim span with *replacement* using stored offsets."""
-    before = content[: claim.position_start]
-    after = content[claim.position_end :]
-    return before + replacement + after
+    """Replace a claim span with *replacement*, guarding against drifted offsets
+    that would splice the replacement mid-token (see _aligned_claim_span)."""
+    span = _aligned_claim_span(content, claim)
+    if span is None:
+        return content
+    start, end = span
+    return content[:start] + replacement + content[end:]
 
 
 _TERMINAL_CITATION_RE = re.compile(
