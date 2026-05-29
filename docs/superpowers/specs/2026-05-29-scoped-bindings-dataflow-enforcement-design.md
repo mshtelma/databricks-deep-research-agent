@@ -67,7 +67,11 @@ The dead-store analysis must distinguish:
   branch (loop continue/break, conditional route). A control output is
   "consumed" iff some enclosing container actually branches on it. The body
   reflector's `reflection` *looks* like a control output (it's a reflector's
-  decision) but no container branches on it — that's what makes it dead.
+  decision) but no container branches on it. Crucially it is still *read as
+  data* by the synthesizer, so it is **semantically redundant but
+  dataflow-live** — Phase 0 removes it by judgment, and the checker does **not**
+  flag it (a data-edge-only reflector is structurally indistinguishable from a
+  legitimate one; see §3.2).
 
 The framework currently cannot tell these apart, so it cannot tell a
 legitimately-terminal output (e.g. the top-level synthesizer's `report`, which
@@ -215,11 +219,11 @@ plan_and_execute "plan-and-execute"          scope: {query, coordination}
 ├─ body = sequence "research-body"            scope inherits {query, coordination, research_plan, current_step}
 │  ├─ researcher      in: [query, current_step, research_plan]   out: findings (data)
 │  │                  pool_writes: observations, sources
-│  └─ reflector       in: [query, current_step, findings, research_plan]  out: reflection (data)   ← DEAD STORE
+│  └─ reflector       in: [query, current_step, findings, research_plan]  out: reflection (data)   ← redundant (data-only; removed by Phase 0, NOT checker-flagged)
 │     pool_inject: observations
 └─ evaluator          in: [query, current_step, findings, research_plan]  out: evaluation
                       return value → CONTROL edge consumed by the loop (plan_execute_runner.py:475)
-synthesizer           in: [query, research_plan, findings, reflection]   ← reads the dead store
+synthesizer           in: [query, research_plan, findings, reflection]   ← reads reflection (repointed to evaluation in Phase 0)
 ```
 
 Checker verdict (post-fix-design):

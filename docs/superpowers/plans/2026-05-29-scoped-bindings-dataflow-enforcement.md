@@ -28,13 +28,13 @@ This plan was hardened through two review passes (Architect + Codex gpt-5.5 xhig
 ### Iteration-2 fixes (v2 → final)
 A second Architect + Codex (gpt-5.5 xhigh) pass found, and this plan applies:
 9. **[BLOCKER] Pass A seeding:** seed `definition.required_inputs` (not just `query`) and **scope `current_step` to plan_and_execute only** (it was wrongly a global seed) — `condition_contracts.py:142-152`, `plan_execute_runner.py:378`.
-10. **[MAJOR] Loop-local over-collection:** `extract_variables` returns the `{%for x in …%}` loop var (as `{x}` in the body); `effective_reads` now subtracts loop-locals (`test_renderer.py:80-84`).
+10. **[MAJOR] Loop-local over-collection:** `extract_variables` returns the `{%for x in …%}` loop var (as `{x}` in the body); `effective_reads` now subtracts loop-locals (`test_renderer.py:82-84`).
 11. **[MAJOR] Severity/spec reconciliation:** dropped the spec's "dead control producer = error" tier (it would false-positive the legitimate `coverage-reflector`); the error tier is now a **dangling control read**. Spec §3.2 updated to match.
 12. **[MAJOR] Coercion decoupling:** the app's `_RUNTIME_TEMPLATE_KEYS` feeds lane-prompt coercion (`workflow_builder.py:84-91`), so it is **left unchanged**; the framework registry is separate.
 13. **[MAJOR] Test paths:** corrected to `tests/unit/workflow/` and `tests/unit/agent_designer/`.
 14. **[MINOR] `set[str]` existence walk** (no private `ValidationScope`/`_UNKNOWN_SCHEMA` coupling); Task 1.0 refactor **skipped** (`condition_contracts.py` unchanged); subworkflow dead code removed.
 
-**Consensus status:** 2 iterations complete (Planner→Architect→Codex each), per the user's request. Final Codex verdict was `ITERATE`; all of its concrete findings above are applied directly to this plan (a 3rd review round was not run — capped at 2). Remaining judgment calls (e.g. keep `{evaluation}` vs. drop it; full traversal unification) are recorded in the ADR for the user's review.
+**Consensus status:** 3 iterations (Planner→Architect→Codex gpt-5.5 xhigh each). **The BLOCKER is RESOLVED** — both the iter-3 Architect (`APPROVE`) and the iter-3 Codex (`BLOCKER status: RESOLVED`) confirm Pass A now seeds `definition.required_inputs` and scopes `current_step` to plan_and_execute. Iter-3 Codex returned `ITERATE` solely for **internal-consistency drift** — stale prose left by the iter-2 finalize edits (a `Modify app workflow_builder` Files line, "shared scope helpers" / Task 1.0 remnants, a "seed `current_step`" phrase, and the spec §1.3/§2.4 `DEAD STORE` glyph) contradicting the corrected snippets. **All four were fixed** in iteration 3 (verified clean). No correctness/logic defects remain; the Architect validated all post-iter-2 code edits against source. Remaining items are judgment calls in the ADR (keep `{evaluation}` vs. drop it; full traversal unification), not blockers.
 
 ---
 
@@ -78,7 +78,7 @@ A second Architect + Codex (gpt-5.5 xhigh) pass found, and this plan applies:
 | Phase | In plan? | Deliverable |
 |---|---|---|
 | **0** | ✅ Full TDD | Delete body reflector; synthesizer gains a real `{evaluation}` slot. |
-| **1** | ✅ Full TDD | Shared scope helpers; runtime-key registry; read model; Pass A (dangling reads), lint. |
+| **1** | ✅ Full TDD | Runtime-key registry; effective-read model; Pass A (dangling reads, `set[str]` walk), lint. |
 | **2** | ✅ Full TDD | Control edges; Pass B (dead stores) + fixpoint; adversarial tests; strict-flip gate. |
 | **3** | ⛔ Deferred | Visualization (own plan). |
 | **4** | ⛔ Deferred | Spike: is `plan_and_execute` a macro? |
@@ -225,8 +225,8 @@ Earlier drafts extracted scope helpers from `condition_contracts.py` so the data
 
 **Files:**
 - Create: `databricks-deep-research/src/databricks_deep_research/workflow/runtime_keys.py`
-- Modify: `databricks-deep-research-app/src/deep_research/agent_designer/workflow_builder.py:28-80` (import, drop the local copy)
 - Test: `databricks-deep-research/tests/unit/workflow/test_runtime_keys.py`
+- (App `workflow_builder.py` is intentionally **NOT** modified — see Step 4: aliasing its `_RUNTIME_TEMPLATE_KEYS` would change lane-prompt coercion.)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -244,7 +244,7 @@ def test_registry_includes_known_runtime_keys():
 
 - [ ] **Step 2: Run to verify it fails** — `ModuleNotFoundError`.
 
-- [ ] **Step 3: Create the registry** (seeded from the verified inventory: app `_RUNTIME_TEMPLATE_KEYS` `workflow_builder.py:28-80` + `state.py:_RUNTIME_DERIVED_KEYS` + runner bookkeeping + the per-iteration `current_step`)
+- [ ] **Step 3: Create the registry** (seeded from the verified inventory: app `_RUNTIME_TEMPLATE_KEYS` `workflow_builder.py:28-80` + `state.py:_RUNTIME_DERIVED_KEYS` + runner bookkeeping. **Not** `current_step` — it is PAE-scoped and bound in `_resolve_pae`, not a global seed.)
 
 ```python
 # src/databricks_deep_research/workflow/runtime_keys.py
@@ -387,7 +387,7 @@ _FOR_LOOP_VAR = re.compile(r"\{%\s*for\s+(\w+)\s+in\s+\w+\s*%\}")
 def _template_reads(template: str) -> set[str]:
     """STATE keys a template reads, EXCLUDING loop-local variables. ``extract_variables``
     returns BOTH the ``{%for x in items%}`` iterable AND the loop var ``x`` (because ``{x}``
-    in the body is matched as a plain ``{var}`` — see tests/test_renderer.py:80-84). The
+    in the body is matched as a plain ``{var}`` — see tests/test_renderer.py:82-84). The
     loop var is a local binding, not a state read, so subtract it or it false-flags as
     dangling."""
     if not template:
@@ -930,9 +930,9 @@ These four (dangling data, dead store, dangling control, dangling tool input) ar
 
 - **Decision:** Build a build-time dataflow checker (`dataflow_contracts.py`) as a focused existence-only walk that mirrors `condition_contracts.py`'s scoping rules (leaving that validator unchanged), drives reads off prompt-template variables (minus loop-locals), models three channels (STATE/POOL/RUNTIME-RETURN), ships lint→strict, and fixes the body reflector (Phase 0) by deleting it and giving the synthesizer a real `{evaluation}` slot.
 - **Drivers:** dataflow correctness on generated workflows; zero false positives on current output; an earned path to free-form synthesis (Phase 5).
-- **Alternatives considered:** (A) parallel hand-rolled walk — rejected: re-derives traversal, proven field-name bugs, divergence risk. (C) full lexical scoping + synthesis in one plan — rejected: synthesis is gated on a not-yet-existing measurement. **Phase 0 sub-decision:** add a real `{evaluation}` slot vs. drop reflection/evaluation entirely (parallel_lanes style) — chose the slot to honor "synthesizer reads evaluation"; drop-alternative recorded here for the user's call.
+- **Alternatives considered:** (A-naive, v1) parallel walk with unverified field names — rejected (compile-time field-name bugs). (B) shared-helper refactor of `condition_contracts` — rejected (unnecessary for an existence check; risks dropping its availability lattice → drift). (C) full lexical scoping + synthesis in one plan — rejected (synthesis gated on a not-yet-existing measurement). **Chosen: A-refined** — a parallel walk with every field name verified and `set[str]` existence semantics, leaving `condition_contracts.py` unchanged. **Phase 0 sub-decision:** add a real `{evaluation}` slot vs. drop reflection/evaluation entirely (parallel_lanes style) — chose the slot to honor "synthesizer reads evaluation"; drop-alternative recorded for the user's call.
 - **Why chosen (A-refined):** verifying every field name against source eliminates the v1 bug class without touching the working condition validator; Pass A is existence-only so the availability lattice is irrelevant; a deliberate second walk tested against the same corpus is simpler and lower-risk than a shared-helper refactor. Full traversal unification is a follow-up, not a precondition.
-- **Consequences:** a small test-guarded refactor of condition_contracts (Task 1.0); a new framework runtime-key registry the app now depends on; the checker is a *maintained approximation* of runtime reads (registry can drift) — mitigated by lint-first + corpus gate.
+- **Consequences:** `condition_contracts.py` is unchanged (Task 1.0 skipped); a new framework runtime-key registry maintained separately from the app's `_RUNTIME_TEMPLATE_KEYS` (the app is NOT modified — aliasing would change lane coercion); the checker is a *maintained approximation* of runtime reads (registry can drift) — mitigated by lint-first + corpus gate.
 - **Follow-ups:** Phases 3–5; consolidate the two traversals fully if they drift; derive the runtime-key registry programmatically from context builders rather than a curated list.
 
 ---
@@ -940,7 +940,7 @@ These four (dangling data, dead store, dangling control, dangling tool input) ar
 ## Definition of Done (Phases 0–2)
 
 - [ ] Phase 0: body reflector gone; synthesizer has a real `{evaluation}` slot; builder tests pass; `make e2e-medium` green.
-- [ ] `condition_contracts` scope helpers extracted; its existing suite green with no behavior change.
+- [ ] `condition_contracts.py` unchanged (Task 1.0 skipped; Pass A is a self-contained `set[str]` walk).
 - [ ] Framework `RUNTIME_INJECTED_KEYS` registry created; app `_RUNTIME_TEMPLATE_KEYS` left unchanged (coercion-safe; DRY reconciliation is a follow-up).
 - [ ] `dataflow_contracts.py`: effective-read extraction (template vars minus loop-locals); Pass A (dangling data+control+tool reads, `set[str]` existence walk seeding `required_inputs`); Pass B (dead stores, severity-tiered, terminal+pool exemptions); loop-carry fixpoint.
 - [ ] Wired into `validation.py` behind `DATAFLOW_CHECK_STRICT` (default lint); intrinsic diagnostic severity.
