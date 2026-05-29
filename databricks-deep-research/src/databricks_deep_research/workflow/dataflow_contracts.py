@@ -130,7 +130,11 @@ def dangling_reads(definition: WorkflowDefinition) -> list[str]:
     global (Pass B), not lexically scoped here.
     """
     dangling: list[str] = []
-    seed = set(definition.required_inputs) | set(RUNTIME_INJECTED_KEYS)
+    seed = (
+        set(definition.required_inputs)
+        | set(definition.runtime_injected_keys)
+        | set(RUNTIME_INJECTED_KEYS)
+    )
     _resolve(definition.root, seed, dangling)
     return dangling
 
@@ -363,12 +367,15 @@ def detect_dead_stores(definition: WorkflowDefinition) -> list[Diagnostic]:
     # pipeline reads the sources/observations pools) and not statically
     # determinable from the AST.
     pool_writing_nodes = {p.node_id for p in producers if p.channel == "pool"}
+    runtime_keys = set(definition.runtime_injected_keys)
     diagnostics: list[Diagnostic] = []
     for producer in producers:
         if producer.channel == "pool":
             continue
         if producer.key in terminal or producer.key in consumed_state:
             continue
+        if producer.key in runtime_keys:
+            continue  # runtime-mediated producer (consumed outside the static graph)
         if producer.node_id in pool_writing_nodes:
             continue
         diagnostics.append(

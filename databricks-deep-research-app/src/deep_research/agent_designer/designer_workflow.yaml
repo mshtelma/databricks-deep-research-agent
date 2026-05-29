@@ -19,6 +19,23 @@ name: Designer Architect+Critic Loop
 version: 1
 required_inputs: [user_intent]
 output_keys: [current_ast]
+# Keys whose dataflow is runtime-mediated (injected into runtime_context by the
+# designer orchestrator, or consumed by side-effecting tools) rather than the
+# static STATE graph. Declared so the build-time dataflow checker does not
+# false-positive them as dangling reads / dead stores. See dataflow_contracts.py.
+runtime_injected_keys:
+  - designer_assets
+  - task_signature
+  - prompt_grounding
+  - prompt_grounding_summary
+  - resolved_tool_contract
+  - resolved_tool_contract_summary
+  - lane_keys
+  - placeholder_pending_nodes
+  - revision_request
+  - revision_count
+  - current_ast_summary
+  - initial_blueprint
 
 # ---------------------------------------------------------------------------
 # Workflow-level model tier mapping. Uses REAL serving-endpoint identifiers

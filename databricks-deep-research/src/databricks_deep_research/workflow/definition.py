@@ -209,6 +209,12 @@ class WorkflowDefinition(BaseModel):
     models: dict[str, Any] = {}
     required_inputs: list[str] = ["query"]
     output_keys: list[str] = ["output"]
+    # Keys whose dataflow is mediated by the RUNTIME (injected into runtime_context
+    # or consumed by side-effecting tools) rather than the static STATE/POOL graph.
+    # The build-time dataflow checker treats these as both available (a read of one
+    # is not dangling) and consumed (a producer of one is not a dead store). Used by
+    # heavily runtime-context-driven workflows such as the agent designer.
+    runtime_injected_keys: list[str] = []
     token_budget: int = 0
     timeout_seconds: int = 1800
     run_as: Literal["caller"] | ServicePrincipalRunAs = Field(default="caller")

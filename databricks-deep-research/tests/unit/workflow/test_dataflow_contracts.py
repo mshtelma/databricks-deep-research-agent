@@ -309,3 +309,26 @@ def test_dot_path_condition_key_resolves_to_root() -> None:
     )
     defn = _defn(_seq("root", [loop]), output_keys=("gate_result",))
     assert dangling_reads(defn) == []
+
+
+def test_runtime_injected_keys_seed_reads_and_exempt_producers() -> None:
+    # A read of a declared runtime-injected key is not dangling; a producer of one
+    # (consumed via the runtime, e.g. designer 'initial_blueprint') is not a dead
+    # store. Models the agent-designer workflow's runtime-context dataflow.
+    root = _seq(
+        "root",
+        [
+            _agent("a", input_keys=("query", "injected_ctx"), output_key="findings"),
+            _agent("b", input_keys=("query",), output_key="side_effect_out"),
+        ],
+    )
+    defn = WorkflowDefinition(
+        id="t",
+        name="t",
+        root=root,
+        required_inputs=["query"],
+        output_keys=["findings"],
+        runtime_injected_keys=["injected_ctx", "side_effect_out"],
+    )
+    assert dangling_reads(defn) == []
+    assert not any("side_effect_out" in d.message for d in detect_dead_stores(defn))
