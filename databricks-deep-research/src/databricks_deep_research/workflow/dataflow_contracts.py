@@ -104,11 +104,18 @@ def effective_reads(cfg: AgentNodeConfig) -> set[str]:
 def _condition_keys(
     cond: StateCondition | LLMCondition | CompositeCondition,
 ) -> set[str]:
-    """State keys a condition reads (mirrors condition_contracts._validate_condition)."""
+    """State ROOT keys a condition reads.
+
+    Dot-path keys (e.g. ``gate_result.status``) resolve to their root binding
+    (``gate_result``); the trailing segments are field access on that binding's
+    schema, validated by ``condition_contracts._resolve_condition_path`` — they
+    are NOT separate state keys. Pass A only needs root existence, so reduce every
+    condition key to its first dot-segment.
+    """
     if isinstance(cond, StateCondition):
-        return {cond.key}
+        return {cond.key.split(".", 1)[0]}
     if isinstance(cond, LLMCondition):
-        return set(_renderer.extract_variables(cond.prompt_template))
+        return {v.split(".", 1)[0] for v in _renderer.extract_variables(cond.prompt_template)}
     keys: set[str] = set()
     for child in cond.conditions:
         keys |= _condition_keys(child)

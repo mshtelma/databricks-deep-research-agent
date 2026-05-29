@@ -287,3 +287,25 @@ def test_loop_carried_read_is_not_dangling() -> None:
     # 'carry' is produced by stepB but read by the earlier stepA — loop-carried,
     # so the 2-pass fixpoint must NOT flag it dangling.
     assert not any("carry" in d for d in dangling_reads(defn))
+
+
+def test_dot_path_condition_key_resolves_to_root() -> None:
+    # A loop until-condition reads 'gate_result.status'; the root 'gate_result' IS
+    # produced by a body node. The dot-path must resolve to the root binding
+    # (mirrors condition_contracts._resolve_condition_path), NOT be flagged dangling.
+    loop = WorkflowNode(
+        id="loop",
+        type=NodeType.loop,
+        label="loop",
+        config={
+            "until": {
+                "type": "state",
+                "key": "gate_result.status",
+                "operator": "eq",
+                "value": "ok",
+            }
+        },
+        children=[_agent("gate", input_keys=("query",), output_key="gate_result")],
+    )
+    defn = _defn(_seq("root", [loop]), output_keys=("gate_result",))
+    assert dangling_reads(defn) == []
