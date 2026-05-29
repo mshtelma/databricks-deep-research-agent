@@ -206,7 +206,12 @@ def _resolve_pae(node: WorkflowNode, visible: set[str], dangling: list[str]) -> 
             )
     inner = set(visible) | {planner.output_key, cfg.item_state_key}
     if cfg.body is not None:
-        inner |= _resolve(cfg.body, inner, dangling)
+        # 2-pass loop-carry: the body re-runs per item, so its outputs carry across
+        # iterations. Pass 1 collects body-produced keys (throwaway sink); pass 2
+        # resolves the body's reads against the fixpoint.
+        body_sink: list[str] = []
+        inner |= _resolve(cfg.body, inner, body_sink)
+        _resolve(cfg.body, inner, dangling)
     exported = {planner.output_key}
     if cfg.evaluator is not None:
         evaluator = AgentNodeConfig(**cfg.evaluator)
@@ -220,18 +225,23 @@ def _resolve_pae(node: WorkflowNode, visible: set[str], dangling: list[str]) -> 
 
 
 def _resolve_loop(node: WorkflowNode, visible: set[str], dangling: list[str]) -> set[str]:
-    """Single forward pass (Phase 2 upgrades this to a 2-pass loop-carry fixpoint).
-    A loop ``until`` condition reads state as control; a dangling control read here
-    is surfaced like any other dangling read.
+    """2-pass loop-carry fixpoint: a loop body may read a key a *later* node (or a
+    later iteration) produces. Pass 1 collects all body-produced keys into a
+    throwaway sink; pass 2 resolves reads against ``visible`` ∪ that fixpoint.
     """
-    local = set(visible)
+    sink: list[str] = []
+    produced: set[str] = set()
+    scratch = set(visible)
+    for child in node.children:
+        child_exports = _resolve(child, scratch, sink)
+        produced |= child_exports
+        scratch |= child_exports
+    carry_visible = set(visible) | produced
     exported: set[str] = set()
     for child in node.children:
-        child_exports = _resolve(child, local, dangling)
-        local |= child_exports
-        exported |= child_exports
+        exported |= _resolve(child, carry_visible, dangling)
     for key in _condition_keys(LoopNodeConfig(**node.config).until):
-        if key not in local:
+        if key not in carry_visible:
             dangling.append(
                 f"loop '{node.id}': until-condition reads '{key}' with no producer"
             )
@@ -243,11 +253,123 @@ def _resolve_loop(node: WorkflowNode, visible: set[str], dangling: list[str]) ->
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class Producer:
+    """A value produced by a node on a channel (used only by Pass B)."""
+
+    key: str
+    channel: Literal["state", "pool"]
+    node_id: str
+
+
+def control_consumed_keys(definition: WorkflowDefinition) -> set[str]:
+    """Keys consumed as CONTROL (RUNTIME-RETURN + condition channels): a
+    plan_and_execute evaluator's output_key (the loop branches on the returned
+    decision), loop ``until`` keys, and conditional branch keys.
+    """
+    keys: set[str] = set()
+    _walk_control(definition.root, keys)
+    return keys
+
+
+def _walk_control(node: WorkflowNode, keys: set[str]) -> None:
+    if node.type == NodeType.plan_and_execute:
+        cfg = PlanAndExecuteNodeConfig(**node.config)
+        if cfg.evaluator is not None:
+            keys.add(AgentNodeConfig(**cfg.evaluator).output_key)
+        if cfg.body is not None:
+            _walk_control(cfg.body, keys)
+    elif node.type == NodeType.loop:
+        keys |= _condition_keys(LoopNodeConfig(**node.config).until)
+    elif node.type == NodeType.conditional:
+        for branch in ConditionalNodeConfig(**node.config).conditions:
+            keys |= _condition_keys(branch.condition)
+    for child in node.children:
+        _walk_control(child, keys)
+
+
+def _collect_producers_reads(
+    definition: WorkflowDefinition,
+) -> tuple[list[Producer], set[str], set[str]]:
+    """One walk gathering producers + reads across STATE and POOL (reads are flat
+    key-sets here). STATE producers = agent/tool/PAE-slot output_key; POOL
+    producers = pool_writes pools. STATE reads = effective_reads ∪ tool
+    input_mapping values ∪ condition keys; POOL reads = pool_inject pools.
+    """
+    producers: list[Producer] = []
+    state_reads: set[str] = set()
+    pool_reads: set[str] = set()
+
+    def walk(node: WorkflowNode) -> None:
+        if node.type == NodeType.agent:
+            cfg = AgentNodeConfig(**node.config)
+            if cfg.output_key:
+                producers.append(Producer(cfg.output_key, "state", node.id))
+            state_reads.update(effective_reads(cfg))
+            producers.extend(Producer(pw.pool, "pool", node.id) for pw in cfg.pool_writes)
+            pool_reads.update(pi.pool for pi in cfg.pool_inject)
+        elif node.type == NodeType.tool:
+            cfg_t = ToolNodeConfig(**node.config)
+            if cfg_t.output_key:
+                producers.append(Producer(cfg_t.output_key, "state", node.id))
+            state_reads.update(cfg_t.input_mapping.values())
+        elif node.type == NodeType.plan_and_execute:
+            cfg_p = PlanAndExecuteNodeConfig(**node.config)
+            planner = AgentNodeConfig(**cfg_p.planner)
+            producers.append(Producer(planner.output_key, "state", node.id))
+            state_reads.update(effective_reads(planner))
+            if cfg_p.evaluator is not None:
+                evaluator = AgentNodeConfig(**cfg_p.evaluator)
+                producers.append(Producer(evaluator.output_key, "state", node.id))
+                state_reads.update(effective_reads(evaluator))
+            if cfg_p.body is not None:
+                walk(cfg_p.body)
+        elif node.type == NodeType.conditional:
+            for branch in ConditionalNodeConfig(**node.config).conditions:
+                state_reads.update(_condition_keys(branch.condition))
+        elif node.type == NodeType.loop:
+            state_reads.update(_condition_keys(LoopNodeConfig(**node.config).until))
+        for child in node.children:
+            walk(child)
+
+    walk(definition.root)
+    return producers, state_reads, pool_reads
+
+
 def detect_dead_stores(definition: WorkflowDefinition) -> list[Diagnostic]:
-    """Pass B — produced values consumed by nobody. Implemented in Phase 2
-    (US-DF5); returns no diagnostics until then."""
-    _ = definition
-    return []
+    """Pass B — a producer consumed by NO read on any channel is a dead store
+    (warning). Terminal workflow outputs and pool round-trips are exempt; control
+    consumption (loop/conditional/PAE evaluator) counts as consumption. A dangling
+    *control read* (the error tier) is surfaced by Pass A, not here.
+    """
+    producers, state_reads, pool_reads = _collect_producers_reads(definition)
+    consumed_state = set(state_reads) | control_consumed_keys(definition)
+    consumed_pool = set(pool_reads)
+    terminal = set(definition.output_keys)
+    diagnostics: list[Diagnostic] = []
+    for producer in producers:
+        if producer.channel == "pool":
+            if producer.key not in consumed_pool:
+                diagnostics.append(
+                    Diagnostic(
+                        message=(
+                            f"pool '{producer.key}' (written by '{producer.node_id}') "
+                            "is never injected"
+                        ),
+                        severity="warning",
+                    )
+                )
+        elif producer.key not in terminal and producer.key not in consumed_state:
+            diagnostics.append(
+                Diagnostic(
+                    message=(
+                        f"state '{producer.key}' (produced by '{producer.node_id}') "
+                        "is read by nobody"
+                    ),
+                    severity="warning",
+                )
+            )
+    return diagnostics
 
 
 def validate_dataflow_contracts(
