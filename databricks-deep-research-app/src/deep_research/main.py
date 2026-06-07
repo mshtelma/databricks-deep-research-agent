@@ -179,6 +179,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         "BRAVE_INTER_CALL_JITTER_SECONDS",
         str(app_config.search.brave.inter_call_jitter_seconds),
     )
+    # Same bridge for the framework's DatabricksWebSearchAdapter process-wide
+    # semaphore (built-in web search is a heavy, billed model call).
+    os.environ.setdefault(
+        "DBX_WEBSEARCH_MAX_CONCURRENCY",
+        str(app_config.search.databricks.max_concurrency),
+    )
 
     # Setup tracing (if available)
     try:
@@ -272,6 +278,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception as exc:
             logger.critical("StorageStack startup failed: %s", exc)
             raise
+    else:
+        # The research-session read/write paths (jobs, citations, research,
+        # messages) were migrated to the event-sourced storage stack, and the
+        # legacy public.* tables are dropped in production. Running with
+        # STORAGE_SERVICE_IMPL != "cached" leaves those endpoints pointed at
+        # tables that no longer exist → 500s. Warn loudly (don't hard-fail, so
+        # local setups that recreate the legacy schema can still boot).
+        logger.warning(
+            "LEGACY_MODE_UNSUPPORTED_FOR_RESEARCH storage_service_impl=%s: "
+            "jobs/citations/research/messages require the storage stack; the "
+            "legacy public.* tables are dropped in production and these "
+            "endpoints will fail unless those tables exist locally.",
+            settings.storage_service_impl,
+        )
 
     # Initialize background job manager
     from deep_research.db.session import get_session_maker

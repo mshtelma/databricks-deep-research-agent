@@ -88,12 +88,13 @@ Defines how a tool should be queried and how its results should be interpreted. 
 
 | Value | Description |
 |-------|-------------|
-| `web` | Keyword/BM25 search (Brave, Google) -- synthetic relevance scores |
+| `web` | Keyword/BM25 search via any `SearchClient` (Databricks built-in web search, Brave, or Jina) -- synthetic relevance scores. See [Search Providers](../guides/search-providers.md). |
 | `vector_index` | Semantic embedding queries -- trusts upstream `relevance_score` |
 | `sql_analytics` | NL-to-SQL (Genie) -- structured tabular results |
 | `qa_assistant` | NL question to NL answer (Knowledge Assistant, endpoints) -- prose answers |
 | `file` | Keyword search over uploaded files |
 | `builtin` | Framework internals (pool tools, crawl) -- not a data source |
+| `text_table` | Structured rows from a bound Delta table, navigated via the `table_*` tools. See [SQL / Table Tools](../guides/sql-table-tools.md). |
 
 ### ToolKind
 
@@ -107,9 +108,15 @@ Well-known tool kinds for YAML `tools:` declarations. Maps 1:1 with concrete too
 | `vector_search` | `vector_index` |
 | `genie` | `sql_analytics` |
 | `knowledge_assistant` | `qa_assistant` |
+| `table_discovery` | `text_table` |
+| `table_search` | `text_table` |
+| `table_read` | `text_table` |
+| `table_neighbors` | `text_table` |
+| `table_load` | `text_table` |
+| `table_aggregate` | `text_table` |
 | `custom` | `builtin` (default for unknown kinds) |
 
-The mapping is performed by `tool_kind_to_source_kind(kind)`, which returns `"builtin"` for unknown kinds.
+The mapping is performed by `tool_kind_to_source_kind(kind)`, which returns `"builtin"` for unknown kinds. The `table_*` family is documented in [SQL / Table Tools](../guides/sql-table-tools.md).
 
 ## URL Registry
 
@@ -210,7 +217,7 @@ Runtime dependencies available to factories at tool creation time. Fields are op
 |-------|------|-------------|
 | `workspace_client` | `Any \| None` | `databricks.sdk.WorkspaceClient` for Databricks API calls |
 | `user_token` | `str \| None` | OBO token for authenticated calls |
-| `search_client` | `Any \| None` | Search client (e.g., Brave) for `web_search` |
+| `search_client` | `Any \| None` | Any `SearchClient` backend (databricks / brave / jina) for `web_search` -- see [Search Providers](../guides/search-providers.md) |
 | `crawler` | `Any \| None` | Content crawler for `web_crawl` |
 | `file_index` | `Any \| None` | File index for `file_search` |
 | `extras` | `dict[str, Any]` | App-specific dependencies |
@@ -237,7 +244,7 @@ A Pydantic model from the YAML `tools:` section that feeds into factory creation
 
 | Tool | Kind | Source Kind | Required Config | Description |
 |------|------|-------------|-----------------|-------------|
-| web_search | `web_search` | `web` | `BRAVE_API_KEY` env var | Brave Search API |
+| web_search | `web_search` | `web` | a `SearchClient` (provider-dependent) | Web search via the configured provider (databricks / brave / jina) |
 | web_crawl | `web_crawl` | `builtin` | -- | trafilatura HTML extraction via httpx |
 | file_search | `file_search` | `file` | `file_index` in context | Search uploaded files |
 | vector_search | `vector_search` | `vector_index` | `index_name` in config | UC Vector Search index |
@@ -282,5 +289,7 @@ Return to agent with [idx] references  -- LLM sees indices, not URLs
 
 - [Agent System](agent-system.md) -- How agents call tools
 - [Builtin Tools Guide](../guides/builtin-tools.md)
+- [Search Providers](../guides/search-providers.md)
+- [SQL / Table Tools](../guides/sql-table-tools.md)
 - [Custom Tools Guide](../guides/custom-tools.md)
 - [Tool Protocol Reference](../reference/tool-protocol-reference.md)

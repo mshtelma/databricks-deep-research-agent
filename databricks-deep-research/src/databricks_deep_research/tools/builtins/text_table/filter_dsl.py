@@ -163,6 +163,62 @@ OrFilter.model_rebuild(_types_namespace=_ns)
 NotFilter.model_rebuild(_types_namespace=_ns)
 
 # ---------------------------------------------------------------------------
+# Input coercion + tool-schema advertisement
+# ---------------------------------------------------------------------------
+
+# Recognized top-level keys for the flat filter DSL.
+_FLAT_OPERATOR_KEYS: frozenset[str] = frozenset(
+    {"eq", "in_columns", "gt", "gte", "lt", "lte", "ne", "is_null", "is_not_null"}
+)
+# Recognized composite operators.
+_COMPOSITE_KEYS: frozenset[str] = frozenset({"and", "or", "not"})
+
+
+def coerce_flat_filter_shape(raw: dict[str, Any]) -> dict[str, Any]:
+    """Coerce a bare ``{column: value}`` mapping into ``{"eq": {...}}``.
+
+    LLMs frequently emit a filter as ``{"document_source": "x.txt"}`` instead of
+    the DSL shape ``{"eq": {"document_source": "x.txt"}}``. When *raw* contains
+    no recognized DSL operator or composite key, every key is treated as an
+    equality predicate. Inputs that already use the DSL are returned unchanged.
+    """
+    if not raw:
+        return raw
+    if set(raw) & (_FLAT_OPERATOR_KEYS | _COMPOSITE_KEYS):
+        return raw
+    return {"eq": dict(raw)}
+
+
+# JSON schema advertised to the LLM for the ``where`` tool parameter. Describes
+# the DSL operators explicitly so the model emits the correct shape instead of a
+# bare ``{column: value}`` mapping (which validation would otherwise reject).
+# Intentionally NOT ``additionalProperties: false`` — bare column mappings are
+# accepted and coerced to ``eq`` by ``coerce_flat_filter_shape``.
+WHERE_PARAM_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "Optional row filter. Use DSL operators, NOT bare column names. "
+        'Exact match: {"eq": {"column": "value"}}. Also gt/gte/lt/lte/ne, '
+        'each {"column": value}. in_columns/is_null/is_not_null take a list '
+        'of column names. Compose with {"and": [...]}, {"or": [...]}, '
+        '{"not": {...}}. A bare {"column": "value"} mapping is also accepted '
+        "and treated as eq."
+    ),
+    "properties": {
+        "eq": {"type": "object", "description": "Exact-match {column: value}."},
+        "ne": {"type": "object", "description": "Not-equal {column: value}."},
+        "gt": {"type": "object", "description": "Greater-than {column: value}."},
+        "gte": {"type": "object", "description": "Greater-or-equal {column: value}."},
+        "lt": {"type": "object", "description": "Less-than {column: value}."},
+        "lte": {"type": "object", "description": "Less-or-equal {column: value}."},
+        "in_columns": {"type": "array", "items": {"type": "string"}},
+        "is_null": {"type": "array", "items": {"type": "string"}},
+        "is_not_null": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # SQL compiler
 # ---------------------------------------------------------------------------
 

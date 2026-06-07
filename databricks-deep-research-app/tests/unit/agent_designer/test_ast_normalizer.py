@@ -15,6 +15,7 @@ import pytest
 
 from deep_research.agent_designer.ast_normalizer import (
     NormalizationFix,
+    apply_web_search_provider_defaults,
     normalize_ast,
 )
 from deep_research.agent_designer.validation_helpers import _quality_advice
@@ -1114,3 +1115,269 @@ class TestCombinedDefects:
         fix = fixes[0]
         d = fix.to_dict()
         assert set(d.keys()) == {"kind", "path", "before", "after", "rationale"}
+
+
+# ---------------------------------------------------------------------------
+# web_search_provider — stamp the configured search backend onto web tools
+# ---------------------------------------------------------------------------
+
+
+def _fake_search_config(provider: str, *, endpoint: str = "databricks-gpt-5",
+                        timeout: float = 90.0) -> Any:
+    """Stand-in for ``get_app_config()`` exposing only ``.search``."""
+    from types import SimpleNamespace
+
+    from deep_research.core.app_config import DatabricksSearchConfig, SearchConfig
+
+    return SimpleNamespace(
+        search=SearchConfig(
+            provider=provider,  # type: ignore[arg-type]
+            databricks=DatabricksSearchConfig(endpoint=endpoint, timeout_seconds=timeout),
+        )
+    )
+
+
+def _web_tools_ast() -> dict[str, Any]:
+    return {
+        "tools": [
+            {"name": "web_research", "kind": "web_research",
+             "config": {"total_results": 10, "auto_fetch_top_k": 5}},
+            {"name": "web_search", "kind": "web_search", "config": {}},
+            {"name": "web_crawl", "kind": "web_crawl", "config": {}},
+            {"name": "reader", "kind": "table_read", "config": {}},
+        ]
+    }
+
+
+class TestWebSearchProviderStamp:
+    """``_normalize_web_search_provider`` fills the endpoint for EXPLICIT databricks
+    web tools; inherited (blank-provider) tools are left untouched so they keep
+    following the workspace default at runtime (no over-pinning on save)."""
+
+    def _patch(self, monkeypatch: pytest.MonkeyPatch, provider: str, **kw: Any) -> None:
+        monkeypatch.setattr(
+            "deep_research.agent_designer.ast_normalizer.get_app_config",
+            lambda: _fake_search_config(provider, **kw),
+        )
+
+    def _by_name(self, ast: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {t["name"]: t for t in ast["tools"]}
+
+    def test_brave_default_is_noop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, "brave")
+        out, fixes = normalize_ast(_web_tools_ast())
+        tools = self._by_name(out)
+        assert "provider" not in tools["web_research"]["config"]
+        assert "provider" not in tools["web_search"]["config"]
+        assert "web_search_provider" not in _fixes_by_kind(fixes)
+
+    def test_inherited_under_global_databricks_is_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Inherited (blank-provider) web tools are NEVER stamped/filled, even when
+        # the workspace default is databricks — they keep inheriting at runtime so
+        # app.yaml's provider/endpoint stays a live lever (no over-pinning on save).
+        self._patch(monkeypatch, "databricks", endpoint="databricks-gpt-5", timeout=90.0)
+        out, fixes = normalize_ast(_web_tools_ast())
+        tools = self._by_name(out)
+        for kind in ("web_research", "web_search"):
+            cfg = tools[kind]["config"]
+            assert "provider" not in cfg
+            assert "model" not in cfg
+        # prior config keys preserved
+        assert tools["web_research"]["config"]["total_results"] == 10
+        assert tools["web_crawl"]["config"] == {}
+        assert "web_search_provider" not in _fixes_by_kind(fixes)
+
+    def test_inherited_under_global_jina_is_noop(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same for a global jina default: inherited tools stay provider-absent.
+        self._patch(monkeypatch, "jina")
+        out, _ = normalize_ast(_web_tools_ast())
+        cfg = self._by_name(out)["web_research"]["config"]
+        assert "provider" not in cfg
+        assert "model" not in cfg
+
+    def test_respects_explicit_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._patch(monkeypatch, "databricks")
+        ast = _web_tools_ast()
+        ast["tools"][0]["config"]["provider"] = "brave"  # web_research pinned
+        out, _ = normalize_ast(ast)
+        assert self._by_name(out)["web_research"]["config"]["provider"] == "brave"
+
+    def test_per_tool_databricks_while_global_brave(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Headline per-tool behavior: one tool pins databricks while the workspace
+        # default stays brave. The pinned tool has its endpoint/tuning filled;
+        # sibling tools that inherit brave are left untouched (no early return).
+        self._patch(monkeypatch, "brave")
+        ast = _web_tools_ast()
+        ast["tools"][1]["config"]["provider"] = "databricks"  # web_search pinned
+        out, fixes = normalize_ast(ast)
+        tools = self._by_name(out)
+        ws = tools["web_search"]["config"]
+        assert ws["provider"] == "databricks"
+        assert ws["model"] == "databricks-gpt-5"  # filled from the app default
+        assert "timeout_seconds" in ws and "resolve_redirects" in ws
+        # sibling web_research inherits the brave global → left provider-absent
+        assert "provider" not in tools["web_research"]["config"]
+        assert len(_fixes_by_kind(fixes)["web_search_provider"]) == 1
+
+    def test_per_tool_databricks_floors_max_results_to_total_results(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # web_research passes total_results as the search count; the databricks
+        # max_results floor must rise to it so results are not silently truncated.
+        self._patch(monkeypatch, "brave")
+        ast = {
+            "tools": [
+                {
+                    "name": "wr",
+                    "kind": "web_research",
+                    "config": {"provider": "databricks", "total_results": 18},
+                }
+            ]
+        }
+        out, _ = normalize_ast(ast)
+        assert out["tools"][0]["config"]["max_results"] == 18
+
+    def test_per_tool_brave_overrides_global_databricks(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A tool can pin brave even when the workspace default is databricks; it
+        # then takes no databricks tuning.
+        self._patch(monkeypatch, "databricks")
+        ast = _web_tools_ast()
+        ast["tools"][1]["config"]["provider"] = "brave"  # web_search pinned brave
+        out, _ = normalize_ast(ast)
+        ws = self._by_name(out)["web_search"]["config"]
+        assert ws["provider"] == "brave"
+        assert "model" not in ws
+
+    def test_explicit_databricks_values_preserved(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An intentional model / resolve_redirects=False must survive the fill
+        # (setdefault never overwrites a present key, including a falsy one).
+        self._patch(monkeypatch, "brave")
+        ast = {
+            "tools": [
+                {
+                    "name": "ws",
+                    "kind": "web_search",
+                    "config": {
+                        "provider": "databricks",
+                        "model": "custom-endpoint",
+                        "resolve_redirects": False,
+                        "timeout_seconds": 12.0,
+                    },
+                }
+            ]
+        }
+        out, _ = normalize_ast(ast)
+        cfg = out["tools"][0]["config"]
+        assert cfg["model"] == "custom-endpoint"
+        assert cfg["resolve_redirects"] is False
+        assert cfg["timeout_seconds"] == 12.0
+
+    def test_per_tool_jina_while_global_brave(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._patch(monkeypatch, "brave")
+        ast = _web_tools_ast()
+        ast["tools"][1]["config"]["provider"] = "jina"  # web_search pinned
+        out, _ = normalize_ast(ast)
+        tools = self._by_name(out)
+        assert tools["web_search"]["config"]["provider"] == "jina"
+        assert "model" not in tools["web_search"]["config"]
+        assert "provider" not in tools["web_research"]["config"]
+
+
+class TestApplyWebSearchProviderDefaults:
+    """The shared dict-level helper used by the normalizer AND the agent-save path.
+
+    Same fill semantics as ``_normalize_web_search_provider`` but returns the
+    per-tool change tuples instead of recording fixes, so a UI save (which bypasses
+    the full normalizer) can persist a self-describing databricks web tool.
+    """
+
+    def _cfg(self, provider: str = "brave", endpoint: str = "databricks-gpt-5") -> Any:
+        from deep_research.core.app_config import DatabricksSearchConfig, SearchConfig
+
+        return SearchConfig(
+            provider=provider,
+            databricks=DatabricksSearchConfig(endpoint=endpoint),
+        )
+
+    def test_databricks_fills_model_tuning_and_floors_max_results(self) -> None:
+        defn = {
+            "tools": [
+                {"name": "wr", "kind": "web_research",
+                 "config": {"provider": "databricks", "total_results": 12}},
+            ]
+        }
+        changes = apply_web_search_provider_defaults(defn, search_cfg=self._cfg())
+
+        assert len(changes) == 1
+        idx, before, after = changes[0]
+        assert idx == 0
+        assert "model" not in before
+        assert after["model"] == "databricks-gpt-5"
+        cfg = defn["tools"][0]["config"]
+        assert cfg["model"] == "databricks-gpt-5"
+        assert cfg["max_results"] == 12  # floored to total_results
+        assert "timeout_seconds" in cfg and "resolve_redirects" in cfg
+
+    def test_inherited_global_databricks_is_noop(self) -> None:
+        # Blank-provider tools are untouched even when the global default is
+        # databricks — they inherit at runtime; nothing is persisted/stamped.
+        defn = {"tools": [{"name": "ws", "kind": "web_search", "config": {}}]}
+        changes = apply_web_search_provider_defaults(
+            defn, search_cfg=self._cfg(provider="databricks")
+        )
+        assert changes == []
+        assert defn["tools"][0]["config"] == {}  # untouched
+
+    def test_inherited_blank_provider_is_noop_default_cfg(self) -> None:
+        # Same with the real app config (now databricks-default): a blank-provider
+        # tool must not be mutated by the save path.
+        defn = {"tools": [{"name": "ws", "kind": "web_search", "config": {}}]}
+        assert apply_web_search_provider_defaults(defn) == []
+        assert defn["tools"][0]["config"] == {}
+
+    def test_brave_jina_and_non_web_are_noop(self) -> None:
+        defn = {
+            "tools": [
+                {"name": "ws", "kind": "web_search", "config": {"provider": "brave"}},
+                {"name": "wj", "kind": "web_research", "config": {"provider": "jina"}},
+                {"name": "wc", "kind": "web_crawl", "config": {}},
+                {"name": "r", "kind": "table_read", "config": {}},
+            ]
+        }
+        assert apply_web_search_provider_defaults(defn, search_cfg=self._cfg()) == []
+
+    def test_explicit_model_preserved(self) -> None:
+        defn = {
+            "tools": [
+                {"name": "ws", "kind": "web_search",
+                 "config": {"provider": "databricks", "model": "custom"}},
+            ]
+        }
+        apply_web_search_provider_defaults(defn, search_cfg=self._cfg())
+        assert defn["tools"][0]["config"]["model"] == "custom"
+
+    def test_idempotent(self) -> None:
+        defn = {
+            "tools": [
+                {"name": "ws", "kind": "web_search", "config": {"provider": "databricks"}},
+            ]
+        }
+        first = apply_web_search_provider_defaults(defn, search_cfg=self._cfg())
+        assert len(first) == 1
+        second = apply_web_search_provider_defaults(defn, search_cfg=self._cfg())
+        assert second == []
+
+    def test_missing_tools_key_is_noop(self) -> None:
+        assert apply_web_search_provider_defaults({}, search_cfg=self._cfg()) == []

@@ -7,7 +7,7 @@
  *   POST /api/v1/agent-designer/chat      — SSE stream of DesignerSSEEvents
  */
 
-import { ApiError } from './client'
+import { ApiError, fetchText, throwForErrorResponse } from './client'
 import type { AST } from '@/types/ast'
 import type {
   RegistryResponse,
@@ -17,6 +17,7 @@ import type {
   DesignerAsset,
   DesignerResource,
   DesignerResourcesResponse,
+  WorkflowSummary,
 } from '../types/agentDesigner'
 
 export type {
@@ -121,6 +122,53 @@ export async function validateWorkflow(
   }
 
   return response.json() as Promise<ValidateResponse>
+}
+
+// ---------------------------------------------------------------------------
+// YAML import / export
+// ---------------------------------------------------------------------------
+
+export interface ImportYamlResponse {
+  definition: AST
+  workflow_summary: WorkflowSummary
+}
+
+/**
+ * Validate a raw YAML workflow document (structural + version + safe-parse).
+ * Does NOT persist — the caller chains the returned `definition` into create.
+ *
+ * The body is the raw YAML string with `Content-Type: text/yaml` — NOT JSON.
+ *
+ * @throws {import('./client').YamlImportError} on safe-parse, registry_version,
+ *   structural, or oversize failures (inspect `.errors`).
+ */
+export async function importYaml(yamlText: string): Promise<ImportYamlResponse> {
+  const response = await fetch(`${API_BASE_URL}/agent-designer/import-yaml`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/yaml' },
+    body: yamlText,
+  })
+  if (!response.ok) {
+    await throwForErrorResponse(response)
+  }
+  return response.json() as Promise<ImportYamlResponse>
+}
+
+/**
+ * Serialize an in-memory workflow AST to a YAML document (text/yaml).
+ * Used to export the live editor canvas, including unsaved / brand-new agents.
+ *
+ * @throws {import('./client').YamlImportError} when the AST fails framework
+ *   validation (HTTP 400) so we never download an un-importable document.
+ */
+export async function exportYamlFromDefinition(
+  definition: AST | Record<string, unknown>,
+): Promise<string> {
+  return fetchText('/agent-designer/export-yaml', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ definition }),
+  })
 }
 
 // ---------------------------------------------------------------------------

@@ -159,7 +159,7 @@ For EVERY claim you make:
 
 ### Claim Types
 - **Fact Claims**: Verifiable source-grounded statements with inline citations
-- **Numeric Claims**: Statistics, values, metrics [1] - ensure exact match with source
+- **Numeric Claims**: Statistics, values, metrics [1] - ensure exact match with source, and state the value's unit of measure or currency exactly as the source expresses it (e.g. `$3.2 billion`, `15%`, `1,200 units`) — never a bare number
 - **Analysis Blocks**: Use `<analysis>...</analysis>` only for interpretation of already-established cited facts
 - **Free Blocks**: Use `<free>...</free>` ONLY for markdown headings (## or ###) and single-sentence transitions between sections — NOTHING else
 
@@ -181,6 +181,7 @@ Only use a markdown table if the query explicitly calls for tabular comparison.
 ### What NOT to Do
 - NEVER make claims without citing evidence
 - NEVER synthesize numbers not in the evidence
+- NEVER present a numeric value without its unit or currency, and NEVER use a source's internal field or column identifier (e.g. a raw column label) as the value's meaning — translate it into what it represents
 - NEVER paraphrase in a way that changes meaning
 - NEVER cite evidence that doesn't support your claim
 - NEVER add editorial framing like "strong foundation", "healthy performance", or "resilience"
@@ -255,6 +256,7 @@ For comparative data, use markdown tables:
 ### What TO Do
 - Write for readability first, citations second
 - Cite specific facts, numbers, and claims that need attribution
+- Always state a numeric value's unit of measure or currency as the source expresses it (e.g. `$3.2 billion`, `15%`); never present a bare number or use a source's internal field/column identifier as its meaning
 - Let prose flow naturally between cited and non-cited material
 - Use all available evidence to build comprehensive coverage
 

@@ -19,6 +19,8 @@ locally in ``dataflow_contracts._resolve_pae`` rather than seeded globally.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from databricks_deep_research.workflow.state import _RUNTIME_DERIVED_KEYS
 
 # Harness-injected template variables (mirror of the app's _RUNTIME_TEMPLATE_KEYS
@@ -83,3 +85,15 @@ _ROOT_KEYS: frozenset[str] = frozenset({"query"})
 RUNTIME_INJECTED_KEYS: frozenset[str] = (
     _ROOT_KEYS | _RUNTIME_DERIVED_KEYS | _HARNESS_TEMPLATE_KEYS | _RUNNER_BOOKKEEPING_KEYS
 )
+
+
+def runtime_seed_keys(declared_injected: Iterable[str] = ()) -> set[str]:
+    """Always-available, runtime-mediated state keys (beyond ``required_inputs``).
+
+    The union of a workflow's per-instance ``runtime_injected_keys`` and the
+    framework-global :data:`RUNTIME_INJECTED_KEYS` registry. Shared by both
+    build-time validators — ``dataflow_contracts`` (Pass A seed) and
+    ``condition_contracts`` (root scope seed) — so their notions of "available
+    before any node runs" cannot drift apart.
+    """
+    return set(declared_injected) | set(RUNTIME_INJECTED_KEYS)

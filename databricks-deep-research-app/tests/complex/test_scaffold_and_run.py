@@ -17,10 +17,13 @@ Run with:
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
+import tempfile
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -59,6 +62,7 @@ from deep_research.agent_designer.tool_contract import (
     project_resolved_tool_contract,
     sanitized_resolved_tool_contract_summary,
 )
+from deep_research.core.app_config import DEFAULT_CONFIG_PATH, clear_config_cache
 from deep_research.services.discovery_service import DiscoveryService
 from deep_research.services.llm.client import LLMClient
 
@@ -71,6 +75,69 @@ _ENV_REF_RE = re.compile(r"^\$\{([A-Z0-9_]+)\}$")
 
 def _load_cases() -> list[dict[str, Any]]:
     return yaml.safe_load(_FIXTURE.read_text())["cases"]
+
+
+@contextlib.contextmanager
+def _maybe_override_app_search(case: dict[str, Any]) -> Iterator[None]:
+    """Point app config at a copy of app.yaml with the case's web-search
+    provider override, so the designer stamps it onto the web tools it generates
+    (``ast_normalizer._normalize_web_search_provider``). No-op unless the case
+    sets ``app_search_provider``. Restores the prior env + config cache on exit.
+    """
+    provider = case.get("app_search_provider")
+    if not provider:
+        yield
+        return
+
+    base = yaml.safe_load(Path(DEFAULT_CONFIG_PATH).read_text())
+    search = base.setdefault("search", {})
+    search["provider"] = provider
+    if provider == "databricks":
+        db = search.setdefault("databricks", {})
+        if case.get("app_search_endpoint"):
+            db["endpoint"] = case["app_search_endpoint"]
+        if case.get("app_search_timeout") is not None:
+            db["timeout_seconds"] = case["app_search_timeout"]
+
+    fd, tmp_path = tempfile.mkstemp(suffix=".app.yaml")
+    os.close(fd)
+    Path(tmp_path).write_text(yaml.safe_dump(base))
+    prev = os.environ.get("APP_CONFIG_PATH")
+    os.environ["APP_CONFIG_PATH"] = tmp_path
+    clear_config_cache()
+    logger.warning(
+        "SCAFFOLD_APP_SEARCH_OVERRIDE provider=%s endpoint=%s timeout=%s",
+        provider,
+        search.get("databricks", {}).get("endpoint"),
+        search.get("databricks", {}).get("timeout_seconds"),
+    )
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("APP_CONFIG_PATH", None)
+        else:
+            os.environ["APP_CONFIG_PATH"] = prev
+        clear_config_cache()
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_path)
+
+
+def _assert_web_tools_use_provider(ast: dict[str, Any], provider: str) -> None:
+    """Every declared web_search/web_research tool must carry the expected
+    provider — proof the designer stamped the configured backend."""
+    web = [
+        t
+        for t in ast.get("tools", [])
+        if isinstance(t, dict) and t.get("kind") in {"web_search", "web_research"}
+    ]
+    assert web, "designer declared no web_search/web_research tool to stamp"
+    for tool in web:
+        cfg = tool.get("config") or {}
+        assert cfg.get("provider") == provider, (
+            f"web tool {tool.get('name')!r} provider={cfg.get('provider')!r} "
+            f"!= expected {provider!r} (designer stamp did not fire)"
+        )
 
 
 @pytest.mark.asyncio
@@ -488,18 +555,21 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
         ast: dict[str, Any] | None = None
         designer_events: list[Any] = []
         t0 = time.monotonic()
-        async for ev in orchestrator.run_turn(
-            messages=messages,
-            current_ast=None,
-            session_id=f"scaffold-and-run-{case['id']}",
-            user_token="local-test-token",
-            current_user_id="local-test-user",
-            assets=assets,
-        ):
-            designer_events.append(ev)
-            append_jsonl(designer_events_path, ev)
-            if isinstance(ev, MutationProposedEvent):
-                ast = ev.new_ast
+        # Apply the per-case web-search provider override for the designer turn so
+        # the normalizer stamps the chosen backend onto the generated web tools.
+        with _maybe_override_app_search(case):
+            async for ev in orchestrator.run_turn(
+                messages=messages,
+                current_ast=None,
+                session_id=f"scaffold-and-run-{case['id']}",
+                user_token="local-test-token",
+                current_user_id="local-test-user",
+                assets=assets,
+            ):
+                designer_events.append(ev)
+                append_jsonl(designer_events_path, ev)
+                if isinstance(ev, MutationProposedEvent):
+                    ast = ev.new_ast
         designer_wall = time.monotonic() - t0
 
         assert ast is not None, (
@@ -513,6 +583,11 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
         # Persist the AST in two forms
         write_json(run_dir / "designer" / "workflow.json", ast)
         write_yaml(run_dir / "designer" / "workflow.yaml", ast)
+
+        # When the case forces a web-search provider, confirm the designer
+        # stamped it onto the generated web tools (the runner then uses it).
+        if case.get("app_search_provider"):
+            _assert_web_tools_use_provider(ast, case["app_search_provider"])
 
         # Validation + advice (private helpers from orchestrator)
         validation_errors, workflow_summary = _validate_ast(ast)
@@ -660,6 +735,20 @@ async def test_scaffold_and_run(case: dict[str, Any]) -> None:
     output = result.output or ""
     for term in case.get("expected_answer_terms", []):
         assert term in output, f"expected answer term {term!r} not found in output"
+    # Each group is satisfied if ANY of its terms appears; ALL groups must be
+    # satisfied. Robust to phrasing variance (mirrors expected_runtime_any_*).
+    for group in case.get("expected_answer_term_groups", []):
+        assert any(term in output for term in group), (
+            f"none of answer-term group {group!r} found in output"
+        )
+
+    # Phrasing-robust proof the search backend returned cited sources (the core
+    # signal for web-search provider cases — avoids brittle answer-term gates).
+    min_sources = case.get("expected_min_source_count")
+    if min_sources is not None:
+        assert len(result.sources or []) >= min_sources, (
+            f"expected >= {min_sources} cited sources, got {len(result.sources or [])}"
+        )
 
     # ── Summary ──────────────────────────────────────────────────────────────
     write_summary_md(

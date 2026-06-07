@@ -173,6 +173,10 @@ research_types:
 
 # Search configuration
 search:
+  # Test isolation: pin Brave so the unit/integration suite never makes billed
+  # Databricks built-in-search generations. The PRODUCT default is databricks
+  # (see config/app.yaml); provider selection has dedicated unit-test coverage.
+  provider: brave
   brave:
     requests_per_second: 1.0
     default_result_count: 5      # Fewer results

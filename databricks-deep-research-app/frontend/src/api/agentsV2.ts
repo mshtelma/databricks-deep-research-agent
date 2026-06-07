@@ -9,7 +9,7 @@
  *   DELETE /api/v1/agents-v2/{id}  — delete  (204)
  */
 
-import { ApiError } from './client'
+import { ApiError, fetchText, unwrapDetail } from './client'
 import type {
   AgentV2ListResponse,
   AgentV2Response,
@@ -43,6 +43,29 @@ export class EtagConflictError extends Error {
   ) {
     super(message)
     this.name = 'EtagConflictError'
+  }
+}
+
+/** Save-time LLM critic verdict payload (subset; backend CritiqueResult). */
+export interface CritiqueResult {
+  verdict: string
+  summary?: string
+  [key: string]: unknown
+}
+
+/**
+ * Thrown by {@link createAgentV2} when the save-time critic returns
+ * `verdict=fail` (HTTP 422) and `force` was not set. Retry with
+ * `{ force: true }` to save anyway. Note: `force` bypasses ONLY the critic —
+ * it does not bypass structural/semantic validation.
+ */
+export class AgentCriticError extends ApiError {
+  constructor(
+    public readonly critique: CritiqueResult | null,
+    message = 'Workflow critic flagged this agent as not answering the request',
+  ) {
+    super(422, 'CRITIC_FAIL', message, critique ? { critique } : undefined)
+    this.name = 'AgentCriticError'
   }
 }
 
@@ -145,20 +168,6 @@ async function readErrorBody(response: Response): Promise<unknown> {
   }
 }
 
-function unwrapDetail(body: unknown): unknown {
-  if (body && typeof body === 'object') {
-    const obj = body as { detail?: unknown; message?: unknown; code?: unknown }
-    // FastAPI default: { detail: <object> }
-    if ('detail' in obj && obj.detail !== undefined) return obj.detail
-    // App's http_exception_handler wrap (core/exceptions.py:406-414):
-    // { code: "HTTP_ERROR", message: <object> }
-    if (obj.code === 'HTTP_ERROR' && obj.message && typeof obj.message === 'object') {
-      return obj.message
-    }
-  }
-  return body
-}
-
 function errorMessageFromDetail(detail: unknown, fallback: string): string {
   if (typeof detail === 'string' && detail.trim()) return detail
   if (detail && typeof detail === 'object') {
@@ -199,17 +208,67 @@ export async function getAgentV2WithEtag(
   return { agent, etag }
 }
 
-/** Create a new agent. Returns the created agent and its initial ETag. */
+export interface CreateAgentV2Options {
+  /** Bypass the save-time LLM critic verdict=fail gate (does NOT bypass validation). */
+  force?: boolean
+}
+
+/**
+ * Create a new agent. Returns the created agent and its initial ETag.
+ *
+ * @throws {AgentCriticError} on HTTP 422 critic `verdict=fail` (unless `force`).
+ * @throws {ApiError} for other failures (incl. structural/semantic 422s).
+ */
 export async function createAgentV2(
-  req: CreateAgentV2Request
+  req: CreateAgentV2Request,
+  options: CreateAgentV2Options = {},
 ): Promise<{ agent: AgentV2Response; etag: string | null }> {
-  const { response, etag } = await rawFetch('/agents-v2', {
+  const endpoint = `/agents-v2${options.force ? '?force=true' : ''}`
+  const { response, etag } = await rawFetch(endpoint, {
     method: 'POST',
     body: JSON.stringify(req),
   })
-  await throwOnError(response)
+
+  if (!response.ok) {
+    // Read the body ONCE; route the critic 422 to a typed error, everything
+    // else (incl. Pydantic semantic-validation 422s) to a generic ApiError.
+    const body = await readErrorBody(response)
+    const detail = unwrapDetail(body)
+    if (
+      response.status === 422 &&
+      detail &&
+      typeof detail === 'object' &&
+      'critique' in (detail as Record<string, unknown>)
+    ) {
+      const d = detail as { message?: string; critique?: CritiqueResult }
+      throw new AgentCriticError(
+        d.critique ?? null,
+        typeof d.message === 'string' ? d.message : undefined,
+      )
+    }
+    throw new ApiError(
+      response.status,
+      'HTTP_ERROR',
+      errorMessageFromDetail(detail, 'Failed to create agent'),
+      detail && typeof detail === 'object' ? (detail as Record<string, unknown>) : undefined,
+    )
+  }
+
   const agent = (await response.json()) as AgentV2Response
   return { agent, etag }
+}
+
+/** Return the AgentCriticError if `error` is one, else null. */
+export function parseAgentCriticError(error: unknown): AgentCriticError | null {
+  return error instanceof AgentCriticError ? error : null
+}
+
+/**
+ * Export an agent's WorkflowDefinition as a YAML document (text/yaml).
+ * Owner-scoped server-side: a non-visible agent yields 404.
+ */
+export async function exportAgentYaml(id: string): Promise<string> {
+  return fetchText(`/agents-v2/${id}/yaml`)
 }
 
 /**

@@ -6,6 +6,7 @@ not need to import from the API layer.
 """
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from databricks_deep_research.agents.config import (
@@ -21,7 +22,11 @@ from databricks_deep_research.workflow.definition import NodeType
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from deep_research.core.app_config import get_app_config
+from deep_research.core.app_config import (
+    DEFAULT_SEARCH_PROVIDER,
+    SEARCH_PROVIDERS,
+    get_app_config,
+)
 
 # Per-NodeType metadata; the editor uses this to populate the palette.
 NODE_TYPE_META: dict[str, dict[str, Any]] = {
@@ -564,6 +569,18 @@ def _plan_and_execute_config_schema() -> dict[str, Any]:
     return schema
 
 
+def _subworkflow_config_schema() -> dict[str, Any]:
+    """Return SubworkflowNodeConfig JSON schema without the internal ``inline``
+    field. ``inline`` holds a compiler-embedded sub-workflow dump (set by
+    api/compile.py when a SubAgent compiles to a subworkflow node); it is not a
+    user-editable inspector field, so it is omitted from the Designer UI schema."""
+    schema = SubworkflowNodeConfig.model_json_schema()
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        properties.pop("inline", None)
+    return schema
+
+
 def node_types_payload() -> list[dict[str, Any]]:
     """Build the node-type entries for the registry endpoint and the
     list_node_types chat tool. config_schema is pulled live via Pydantic.
@@ -576,6 +593,8 @@ def node_types_payload() -> list[dict[str, Any]]:
             config_schema = _agent_config_schema()
         elif nt is NodeType.plan_and_execute:
             config_schema = _plan_and_execute_config_schema()
+        elif nt is NodeType.subworkflow:
+            config_schema = _subworkflow_config_schema()
         elif config_model is not None:
             config_schema = config_model.model_json_schema()
         else:
@@ -596,6 +615,108 @@ def node_types_payload() -> list[dict[str, Any]]:
     return out
 
 
+# Web-search tool kinds whose backend is provider-selectable. Mirrors
+# ``ast_normalizer._WEB_PROVIDER_TOOL_KINDS``; ``web_crawl`` is excluded — it
+# fetches a given URL and has no search provider.
+_WEB_PROVIDER_TOOL_KINDS: frozenset[str] = frozenset({"web_search", "web_research"})
+
+
+def _web_provider_properties() -> dict[str, dict[str, Any]]:
+    """Per-tool web-search provider fields for web_search / web_research.
+
+    These render in the designer inspector via ``SchemaField`` (``enum`` →
+    dropdown, ``number`` → number input, ``boolean`` → checkbox). None carry a
+    JSON ``default`` so a freshly-added tool stays provider-absent — i.e. it
+    inherits the workspace ``search.provider`` until explicitly overridden. The
+    databricks-only knobs are flagged in their descriptions (SchemaField has no
+    conditional rendering, so they show for every provider).
+    """
+    search_cfg = get_app_config().search
+    default_provider = getattr(search_cfg, "provider", DEFAULT_SEARCH_PROVIDER)
+    default_endpoint = getattr(search_cfg.databricks, "endpoint", "")
+    # Ordered options for the per-family endpoint dropdown, sourced from
+    # ``search.databricks.endpoints_by_family``. Uses ``x-enumOptions`` (NOT a
+    # JSON-schema ``enum``) so the generic enum validator never rejects a custom
+    # endpoint that isn't in the workspace list, while the designer still gets a
+    # grouped/labeled dropdown. No "inherit" entry (Radix forbids an empty Item
+    # value, matching the provider field): an unset endpoint inherits the default.
+    endpoints_by_family = getattr(search_cfg.databricks, "endpoints_by_family", {})
+    family_display = {"openai": "OpenAI", "gemini": "Gemini"}
+    model_options: list[dict[str, str]] = []
+    for family, endpoints in (endpoints_by_family or {}).items():
+        group = family_display.get(str(family).lower(), str(family).capitalize())
+        for endpoint in endpoints or []:
+            model_options.append({"value": str(endpoint), "label": str(endpoint), "group": group})
+    return {
+        "provider": {
+            "type": "string",
+            "enum": list(SEARCH_PROVIDERS),
+            "title": "Search Provider",
+            "description": (
+                f"Web-search backend for this tool. Blank inherits the workspace "
+                f"default ('{default_provider}'). 'databricks' uses model-serving "
+                "built-in web search; 'brave'/'jina' are external search APIs."
+            ),
+        },
+        "model": {
+            "type": "string",
+            "x-enumOptions": model_options,
+            "title": "Search Endpoint",
+            "description": (
+                "databricks provider only — serving endpoint that runs the "
+                f"search. Blank inherits the workspace default ('{default_endpoint}'). "
+                "Choosing an endpoint also fixes its model family."
+            ),
+        },
+        "model_family": {
+            "type": "string",
+            "enum": ["openai", "gemini"],
+            "title": "Model Family",
+            "description": (
+                "databricks provider only — auto-detected from the endpoint name "
+                "when blank."
+            ),
+        },
+        "timeout_seconds": {
+            "type": "number",
+            "minimum": 1,
+            "title": "Search Timeout (s)",
+            "description": (
+                "databricks provider only — per-call search timeout. Raise for "
+                "agentic endpoints such as gpt-5."
+            ),
+        },
+        "resolve_redirects": {
+            "type": "boolean",
+            "title": "Resolve Redirect URLs",
+            "description": (
+                "databricks provider only — resolve Gemini grounding-redirect URLs "
+                "to canonical publisher URLs (no-op for OpenAI endpoints)."
+            ),
+        },
+    }
+
+
+def _with_web_provider_fields(config_schema: Any) -> dict[str, Any]:
+    """Return a deep copy of ``config_schema`` with the provider fields merged in.
+
+    Deep-copies first so the module-level ``_TOOL_KIND_META`` is never mutated
+    across requests. Uses ``setdefault`` so an explicit per-kind property of the
+    same name (none today) is never clobbered.
+    """
+    merged: dict[str, Any] = (
+        copy.deepcopy(config_schema) if isinstance(config_schema, dict) else {}
+    )
+    merged.setdefault("type", "object")
+    props = merged.get("properties")
+    if not isinstance(props, dict):
+        props = {}
+        merged["properties"] = props
+    for key, prop in _web_provider_properties().items():
+        props.setdefault(key, prop)
+    return merged
+
+
 def tool_kinds_payload() -> list[dict[str, Any]]:
     """Enumerate supported tool kinds with editor metadata.
 
@@ -612,12 +733,17 @@ def tool_kinds_payload() -> list[dict[str, Any]]:
         if k is ToolKind.custom:
             continue
         meta = _TOOL_KIND_META.get(k.value, {})
+        config_schema = meta.get("config_schema", _EMPTY_SCHEMA)
+        if k.value in _WEB_PROVIDER_TOOL_KINDS:
+            # Merge the per-tool provider dropdown + databricks knobs (deep-copied
+            # so the static _TOOL_KIND_META is never mutated).
+            config_schema = _with_web_provider_fields(config_schema)
         payload.append({
             "kind": k.value,
             "label": k.value.replace("_", " ").title(),
             "icon": "tool",
             "layer": meta.get("layer", "D"),
-            "config_schema": meta.get("config_schema", _EMPTY_SCHEMA),
+            "config_schema": config_schema,
             "discoverable": bool(meta.get("discoverable", False)),
             "discovery_path": meta.get("discovery_path"),
         })

@@ -79,6 +79,16 @@ class Settings(BaseSettings):
     # infrastructure stalls.
     db_command_timeout: float | None = 60.0
 
+    # Lakebase connection-birth auth retry. A freshly-minted OAuth database
+    # credential can be transiently rejected ("password authentication failed")
+    # by the PgBouncer/databricks_auth layer for a few seconds until it
+    # propagates. We retry the SAME token with bounded exponential backoff at
+    # connection creation instead of force-minting a new token (which would hit
+    # the same race) and 500-ing the request. Defaults total ≈ 3.75s worst case.
+    lakebase_auth_retry_attempts: int = 5
+    lakebase_auth_retry_base_delay_s: float = 0.25
+    lakebase_auth_retry_max_delay_s: float = 2.0
+
     # --- Storage backend (chat-document architecture) -----------------
     # Axes are orthogonal:
     #   * storage_backend chooses the wire (lakebase / sql_warehouse / fake).

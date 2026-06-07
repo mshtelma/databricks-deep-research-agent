@@ -308,6 +308,11 @@ targets:
       profile: ais
     variables:
       resource_suffix: "ais"
+      # Pinned SQL Warehouse for text-table tools (Serverless Starter).
+      # Read by `make deploy`/`app-deploy` and passed to preflight via
+      # --storage-warehouse-id so the full deploy no longer depends on
+      # auto-discovering a single STARTED warehouse.
+      storage_warehouse_id: "d837825f69a03500"
     resources:
       postgres_projects:
         deep_research_project:
@@ -322,6 +327,7 @@ targets:
       profile: ais
     variables:
       resource_suffix: "e2e"
+      storage_warehouse_id: "d837825f69a03500"
     resources:
       postgres_projects:
         deep_research_project:
@@ -336,6 +342,7 @@ targets:
       profile: ais
     variables:
       resource_suffix: "local"
+      storage_warehouse_id: "d837825f69a03500"
     resources:
       postgres_projects:
         deep_research_project:

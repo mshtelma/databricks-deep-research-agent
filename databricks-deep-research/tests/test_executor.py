@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from unittest.mock import patch
 
@@ -74,6 +75,74 @@ def _make_definition(root: WorkflowNode) -> WorkflowDefinition:
         name="Test Workflow",
         root=root,
     )
+
+
+class TestStructuredOutputSerialization:
+    """``WorkflowCompletedEvent.final_report`` must be valid JSON for
+    structured-output deliverables, so the persisted ``message.content`` is
+    parseable by the frontend's structured-output renderer.
+
+    Regression: a dict report (what plugin assembler nodes write to
+    ``state['report']``) was serialized via ``str()`` → a Python ``repr`` with
+    single quotes → the frontend's ``JSON.parse(content)`` threw → the rich
+    spec renderer never fired and the chat showed raw text.
+    """
+
+    async def _completed_for_report(self, report: Any) -> WorkflowCompletedEvent:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
+            # The real harness writes the agent output into state; mirror that so
+            # the completion step reads ``state["report"]``.
+            st = kwargs.get("state")
+            if st is not None:
+                st.append(node_id, "report", report)
+            return AgentOutput(content=report, output_key="report", events=[])
+
+        root = WorkflowNode(
+            id="assembler",
+            type=NodeType.agent,
+            label="assembler",
+            config={"subtype": "researcher", "output_key": "report"},
+        )
+        executor = WorkflowExecutor(_make_definition(root), _mock_llm_client())
+        state = WorkflowState(query="test")
+        with patch(
+            "databricks_deep_research.workflow.executor.execute_agent",
+            side_effect=fake_execute_agent,
+        ):
+            events = await _collect_events(executor, state)
+        completed = _events_of_type(events, WorkflowCompletedEvent)
+        assert completed, "expected a WorkflowCompletedEvent"
+        return completed[-1]  # type: ignore[return-value]
+
+    @pytest.mark.asyncio
+    async def test_dict_report_with_output_type_serializes_as_json(self) -> None:
+        report = {"output_type": "account_intel", "account_name": "Acme", "id": "abc"}
+        evt = await self._completed_for_report(report)
+        # Must round-trip as JSON (double-quoted), not a Python repr.
+        parsed = json.loads(evt.final_report)  # type: ignore[attr-defined]
+        assert parsed["output_type"] == "account_intel"
+        assert parsed["account_name"] == "Acme"
+        assert evt.structured_output == report  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_basemodel_report_serializes_as_json(self) -> None:
+        from pydantic import BaseModel
+
+        class _Out(BaseModel):
+            output_type: str = "demo"
+            title: str = "T"
+
+        evt = await self._completed_for_report(_Out())
+        parsed = json.loads(evt.final_report)  # type: ignore[attr-defined]
+        assert parsed["output_type"] == "demo"
+        assert evt.structured_output == {"output_type": "demo", "title": "T"}  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_plain_markdown_report_passthrough(self) -> None:
+        evt = await self._completed_for_report("# Report\n\nbody")
+        # Non-structured string reports stay as-is; no structured_output.
+        assert evt.final_report == "# Report\n\nbody"  # type: ignore[attr-defined]
+        assert evt.structured_output is None  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
 # Sequence

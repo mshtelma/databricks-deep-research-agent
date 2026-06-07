@@ -35,6 +35,7 @@ from deep_research.storage.documents import (
     ChatMeta,
     ChatState,
     PrepJobDocument,
+    ResearchSessionState,
     UserDocument,
 )
 
@@ -661,6 +662,212 @@ class LakebaseBackend:
         except Exception as exc:
             wrapped = await _wrap_error_with_auth_refresh(exc)
             raise wrapped from exc
+
+    # -- Research session queries ------------------------------------
+    #
+    # Backed by ``chat_state.state.research_sessions`` JSONB array. The
+    # legacy ``research_sessions`` table was dropped during the
+    # cached-storage migration; these methods operate exclusively on
+    # JSONB to preserve a single source of truth.
+
+    async def count_active_research_sessions(self, user_id: str) -> int:
+        self._ensure_open()
+        sql = (
+            f"SELECT count(*) "
+            f"FROM {self._ns}.chat_meta cm "
+            f"JOIN {self._ns}.chat_state cs USING (chat_id) "
+            f"WHERE cm.user_id = :uid "
+            f"  AND cm.deleted_at IS NULL "
+            f"  AND EXISTS ("
+            f"    SELECT 1 FROM jsonb_array_elements(cs.state -> 'research_sessions') AS rs "
+            f"    WHERE rs ->> 'status' = 'in_progress'"
+            f"  )"
+        )
+        try:
+            async with self._sm() as session:
+                row = await session.execute(text(sql), {"uid": user_id})
+                return int(row.scalar() or 0)
+        except Exception as exc:
+            raise _wrap_error(exc) from exc
+
+    async def mark_stale_research_sessions_failed(
+        self,
+        cutoff: datetime,
+        exclude_session_ids: Sequence[UUID],
+    ) -> int:
+        self._ensure_open()
+        # ``rs ->> 'id'`` returns text; compare against text-cast UUIDs to
+        # avoid cross-type ANY array comparison surprises.
+        exclude_ids_text = [str(sid) for sid in exclude_session_ids]
+        # Single transactional UPDATE: re-aggregate the array, flipping
+        # in_progress entries whose last_heartbeat is older than cutoff
+        # (or NULL) and whose id is NOT in exclude_session_ids. The
+        # WHERE pre-filter guarantees we only touch chats that have at
+        # least one in_progress session — exact match on the JSONB
+        # contains operator is index-friendly. Returns count of CHATS
+        # whose state row was rewritten (a coarse proxy for sessions
+        # marked failed; the cleanup logger emits this as the action
+        # count and the recurring task tolerates over-counting).
+        sql = (
+            f"UPDATE {self._ns}.chat_state cs "
+            f"SET state = jsonb_set("
+            f"  cs.state,"
+            f"  '{{research_sessions}}',"
+            f"  COALESCE("
+            f"    ("
+            f"      SELECT jsonb_agg("
+            f"        CASE"
+            f"          WHEN rs ->> 'status' = 'in_progress'"
+            f"               AND ("
+            f"                 (rs ->> 'last_heartbeat') IS NULL"
+            f"                 OR (rs ->> 'last_heartbeat')::timestamptz < :cutoff"
+            f"               )"
+            f"               AND NOT ((rs ->> 'id') = ANY(CAST(:exclude_ids AS text[])))"
+            f"            THEN rs || jsonb_build_object("
+            f"              'status', 'failed',"
+            f"              'completed_at', to_jsonb(now())"
+            f"            )"
+            f"          ELSE rs"
+            f"        END"
+            f"      )"
+            f"      FROM jsonb_array_elements(cs.state -> 'research_sessions') AS rs"
+            f"    ),"
+            f"    '[]'::jsonb"
+            f"  ),"
+            f"  false"
+            f") "
+            f"WHERE cs.state ? 'research_sessions' "
+            f"  AND cs.state -> 'research_sessions' @> '[{{\"status\":\"in_progress\"}}]'"
+        )
+        try:
+            async with self._sm() as session, session.begin():
+                result = await session.execute(
+                    text(sql),
+                    {"cutoff": cutoff, "exclude_ids": exclude_ids_text},
+                )
+                return int(result.rowcount or 0)
+        except Exception as exc:
+            raise _wrap_error(exc) from exc
+
+    async def list_user_jobs(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[tuple[UUID, ResearchSessionState]]:
+        self._ensure_open()
+        # CROSS JOIN LATERAL unnests the array; the optional status
+        # predicate is bound rather than interpolated so a NULL status
+        # passes the check via :status IS NULL. The ::text casts let
+        # asyncpg's prepared-statement type inference resolve $status
+        # — without them, `$N IS NULL OR x = $N` is ambiguous at PREPARE
+        # time and asyncpg raises AmbiguousParameterError.
+        sql = (
+            f"SELECT cs.chat_id, rs.value AS session_obj "
+            f"FROM {self._ns}.chat_meta cm "
+            f"JOIN {self._ns}.chat_state cs USING (chat_id) "
+            f"CROSS JOIN LATERAL jsonb_array_elements(cs.state -> 'research_sessions') AS rs(value) "
+            f"WHERE cm.user_id = :uid "
+            f"  AND cm.deleted_at IS NULL "
+            f"  AND (CAST(:status AS text) IS NULL OR rs.value ->> 'status' = CAST(:status AS text)) "
+            f"ORDER BY (rs.value ->> 'started_at')::timestamptz DESC "
+            f"LIMIT :limit"
+        )
+        try:
+            async with self._sm() as session:
+                rows = (
+                    await session.execute(
+                        text(sql),
+                        {"uid": user_id, "status": status, "limit": int(limit)},
+                    )
+                ).all()
+        except Exception as exc:
+            raise _wrap_error(exc) from exc
+        out: list[tuple[UUID, ResearchSessionState]] = []
+        for row in rows:
+            session_obj = row.session_obj
+            if isinstance(session_obj, str):
+                session_obj = json.loads(session_obj)
+            out.append((row.chat_id, ResearchSessionState.model_validate(session_obj)))
+        return out
+
+    async def get_active_session_for_chat(
+        self,
+        chat_id: UUID,
+        user_id: str,
+    ) -> ResearchSessionState | None:
+        self._ensure_open()
+        sql = (
+            f"SELECT rs.value AS session_obj "
+            f"FROM {self._ns}.chat_meta cm "
+            f"JOIN {self._ns}.chat_state cs USING (chat_id) "
+            f"CROSS JOIN LATERAL jsonb_array_elements(cs.state -> 'research_sessions') AS rs(value) "
+            f"WHERE cm.user_id = :uid "
+            f"  AND cm.deleted_at IS NULL "
+            f"  AND cs.chat_id = :cid "
+            f"  AND rs.value ->> 'status' = 'in_progress' "
+            f"ORDER BY (rs.value ->> 'started_at')::timestamptz DESC "
+            f"LIMIT 1"
+        )
+        try:
+            async with self._sm() as session:
+                row = (
+                    await session.execute(
+                        text(sql), {"cid": chat_id, "uid": user_id}
+                    )
+                ).first()
+        except Exception as exc:
+            raise _wrap_error(exc) from exc
+        if row is None:
+            return None
+        session_obj = row.session_obj
+        if isinstance(session_obj, str):
+            session_obj = json.loads(session_obj)
+        return ResearchSessionState.model_validate(session_obj)
+
+    async def write_research_session_heartbeat(
+        self,
+        chat_id: UUID,
+        session_id: UUID,
+        ts: datetime,
+    ) -> None:
+        self._ensure_open()
+        # Single-statement update: re-aggregate the chat's
+        # research_sessions array, attaching last_heartbeat=ts to the
+        # entry whose id matches session_id. Bypasses the WriteQueue;
+        # this is on the heartbeat hot path.
+        sql = (
+            f"UPDATE {self._ns}.chat_state cs "
+            f"SET state = jsonb_set("
+            f"  cs.state,"
+            f"  '{{research_sessions}}',"
+            f"  COALESCE("
+            f"    ("
+            f"      SELECT jsonb_agg("
+            f"        CASE"
+            f"          WHEN (rs ->> 'id') = :sid::text"
+            f"            THEN rs || jsonb_build_object('last_heartbeat', to_jsonb(:ts::timestamptz))"
+            f"          ELSE rs"
+            f"        END"
+            f"      )"
+            f"      FROM jsonb_array_elements(cs.state -> 'research_sessions') AS rs"
+            f"    ),"
+            f"    '[]'::jsonb"
+            f"  ),"
+            f"  false"
+            f") "
+            f"WHERE cs.chat_id = :cid "
+            f"  AND cs.state ? 'research_sessions'"
+        )
+        try:
+            async with self._sm() as session, session.begin():
+                await session.execute(
+                    text(sql),
+                    {"cid": chat_id, "sid": str(session_id), "ts": ts},
+                )
+        except Exception as exc:
+            raise _wrap_error(exc) from exc
 
     # -- List tables --------------------------------------------------
 

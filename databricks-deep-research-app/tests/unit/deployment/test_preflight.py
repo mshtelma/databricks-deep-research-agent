@@ -19,6 +19,7 @@ from deep_research.deployment.preflight import (
     assert_no_drift,
     assert_no_pending_sentinels,
     diff_resources,
+    resolve_warehouse_id_or_fail,
 )
 
 # ---- assert_no_pending_sentinels --------------------------------------------
@@ -440,3 +441,108 @@ def test_assert_no_drift_passes_when_aligned(
         app_name="deep-research-agent-ais",
         bundle_tf_json=path,
     )
+
+
+# ---- resolve_warehouse_id_or_fail (precedence) ------------------------------
+
+
+class _ExplodingClient:
+    """WorkspaceClient stand-in that fails if auto-discovery is reached."""
+
+    def __init__(self, profile: str) -> None:  # noqa: D401 - test double
+        raise AssertionError(
+            "warehouse auto-discovery should not run when an earlier "
+            "resolution source already provided the id"
+        )
+
+
+def _started_warehouse_client(warehouse_id: str) -> type:
+    """Build a WorkspaceClient stand-in exposing one STARTED warehouse."""
+
+    class _Client:
+        def __init__(self, profile: str) -> None:
+            self.warehouses = SimpleNamespace(
+                list=lambda: [
+                    SimpleNamespace(
+                        id=warehouse_id,
+                        name="serverless-starter",
+                        state=SimpleNamespace(value="RUNNING"),
+                    )
+                ]
+            )
+
+    return _Client
+
+
+def _clear_warehouse_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("STORAGE_WAREHOUSE_ID", raising=False)
+    monkeypatch.delenv("TABLE_TOOLS_WAREHOUSE_ID", raising=False)
+
+
+def test_resolve_uses_pinned_when_env_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_warehouse_env(monkeypatch)
+    monkeypatch.setattr(
+        "deep_research.deployment.preflight.WorkspaceClient", _ExplodingClient
+    )
+    result = resolve_warehouse_id_or_fail(
+        profile="ais", target="ais", pinned_warehouse_id="d837825f69a03500"
+    )
+    assert result == {"storage_warehouse_id": "d837825f69a03500"}
+
+
+def test_resolve_storage_env_wins_over_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_warehouse_env(monkeypatch)
+    monkeypatch.setenv("STORAGE_WAREHOUSE_ID", "env-wh")
+    monkeypatch.setattr(
+        "deep_research.deployment.preflight.WorkspaceClient", _ExplodingClient
+    )
+    result = resolve_warehouse_id_or_fail(
+        profile="ais", target="ais", pinned_warehouse_id="pinned-wh"
+    )
+    assert result == {"storage_warehouse_id": "env-wh"}
+
+
+def test_resolve_table_tools_env_wins_over_pinned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_warehouse_env(monkeypatch)
+    monkeypatch.setenv("TABLE_TOOLS_WAREHOUSE_ID", "tt-wh")
+    monkeypatch.setattr(
+        "deep_research.deployment.preflight.WorkspaceClient", _ExplodingClient
+    )
+    result = resolve_warehouse_id_or_fail(
+        profile="ais", target="ais", pinned_warehouse_id="pinned-wh"
+    )
+    assert result == {"storage_warehouse_id": "tt-wh"}
+
+
+def test_resolve_pending_pin_falls_through_to_autodiscovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_warehouse_env(monkeypatch)
+    monkeypatch.setattr(
+        "deep_research.deployment.preflight.WorkspaceClient",
+        _started_warehouse_client("discovered-wh"),
+    )
+    result = resolve_warehouse_id_or_fail(
+        profile="ais", target="ais", pinned_warehouse_id="pending"
+    )
+    assert result == {"storage_warehouse_id": "discovered-wh"}
+
+
+def test_resolve_empty_pin_falls_through_to_autodiscovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_warehouse_env(monkeypatch)
+    monkeypatch.setattr(
+        "deep_research.deployment.preflight.WorkspaceClient",
+        _started_warehouse_client("discovered-wh"),
+    )
+    result = resolve_warehouse_id_or_fail(
+        profile="ais", target="ais", pinned_warehouse_id=""
+    )
+    assert result == {"storage_warehouse_id": "discovered-wh"}

@@ -34,9 +34,10 @@ import {
   getRevision,
   EtagConflictError,
 } from '@/api/agentsV2';
-import { getRegistry, validateWorkflow } from '@/api/agentDesigner';
+import { getRegistry, validateWorkflow, exportYamlFromDefinition } from '@/api/agentDesigner';
 import { useAgentEditorStore } from '@/stores/agentEditorStore';
 import { buildDesignerSavePayload } from '@/lib/agentDesignerSave';
+import { slugifyFilename } from '@/lib/download';
 import { AppShell } from '@/components/layout/AppShell';
 import { ErrorBoundary } from '@/components/common/ErrorBoundary';
 import { BlockEditor } from '@/components/agentDesigner/BlockEditor';
@@ -50,6 +51,7 @@ import {
 } from '@/components/agentDesigner/deploy';
 import { RevisionList } from '@/components/agentDesigner/RevisionList';
 import { RevisionPreview } from '@/components/agentDesigner/RevisionPreview';
+import { ExportYamlMenu } from '@/components/agentDesigner/ExportYamlMenu';
 import type { DeploymentResponse } from '@/types/deployment';
 import * as clientMetrics from '@/lib/clientMetrics';
 import { createDraftWorkflow, isWorkflowEmpty } from '@/lib/workflowAst';
@@ -187,6 +189,22 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
   const agentIdShort = !isNew && agentQuery.data?.agent.id
     ? agentQuery.data.agent.id.slice(0, 16)
     : 'new-draft';
+
+  // Export the LIVE canvas (including unsaved edits and brand-new agents) as
+  // YAML. Uses the SAME buildDesignerSavePayload transform as Save, so the
+  // exported document matches what would be persisted for an equal canvas.
+  const exportFilename = slugifyFilename(agentName || 'agent', 'yaml');
+  const handleExportYaml = React.useCallback((): Promise<string> => {
+    if (!ast) return Promise.reject(new Error('No workflow canvas to export'));
+    const { definition } = buildDesignerSavePayload(ast, {
+      isNew,
+      localName,
+      agentName,
+      localDescription,
+      agentDescription,
+    });
+    return exportYamlFromDefinition(definition);
+  }, [ast, isNew, localName, agentName, localDescription, agentDescription]);
 
   // -------------------------------------------------------------------------
   // Save mutation
@@ -620,6 +638,11 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
             >
               <Save size={13} /> {saveMutation.isPending ? 'Saving…' : 'Save'}
             </button>
+            <ExportYamlMenu
+              getYaml={handleExportYaml}
+              filename={exportFilename}
+              disabled={!ast}
+            />
             {!isNew && (
               <button
                 type="button"

@@ -40,6 +40,7 @@ def _agent_revision(
     *,
     custom_tool: bool = False,
     web_search: bool = False,
+    web_search_provider: str | None = None,
     table_tools: bool = False,
 ) -> tuple[MagicMock, MagicMock]:
     agent = MagicMock(id=uuid4(), name="Deep Research Agent")
@@ -47,7 +48,12 @@ def _agent_revision(
     if custom_tool:
         tools.append({"name": "mytool", "kind": "custom", "config": {}})
     if web_search:
-        tools.append({"name": "web_search", "kind": "web_search", "config": {}})
+        ws_config: dict[str, object] = {}
+        # No provider = inherit the workspace default (databricks); an explicit
+        # provider pins the backend (e.g. "brave" needs a secret binding).
+        if web_search_provider:
+            ws_config["provider"] = web_search_provider
+        tools.append({"name": "web_search", "kind": "web_search", "config": ws_config})
     if table_tools:
         tools.extend(
             [
@@ -216,7 +222,9 @@ class TestValidate:
         assert any("SQL Warehouse id" in e.message for e in result.errors)
 
     @pytest.mark.asyncio
-    async def test_web_search_uses_default_brave_secret_config(self) -> None:
+    async def test_inherited_web_search_validates_without_brave_secret(self) -> None:
+        # A web tool with no explicit provider inherits the default (databricks)
+        # and so does NOT require a Brave secret binding — validation passes.
         translator = ShellAppExporter()
         agent, revision = _agent_revision(web_search=True)
         result = await translator.validate(agent, revision, _valid_config())
@@ -435,9 +443,10 @@ class TestTranslate:
         assert "appendActivity(eventName, payload)" in html
 
     @pytest.mark.asyncio
-    async def test_web_search_bundle_binds_brave_secret(self) -> None:
+    async def test_explicit_brave_web_search_bundle_binds_brave_secret(self) -> None:
+        # Only a web tool that EXPLICITLY pins provider: brave binds the secret.
         translator = ShellAppExporter()
-        agent, revision = _agent_revision(web_search=True)
+        agent, revision = _agent_revision(web_search=True, web_search_provider="brave")
         artifact = await translator.translate(agent, revision, _valid_config())
         with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
             databricks_yml = zf.read("databricks.yml").decode("utf-8")
@@ -450,6 +459,22 @@ class TestTranslate:
         assert "key: 'BRAVE_API_KEY'" in databricks_yml
         assert "BRAVE_API_KEY" in app_yaml
         assert "valueFrom: 'brave-api-key'" in app_yaml
+        assert artifact.metadata["requires_web_search"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_inherited_web_search_bundle_does_not_bind_brave_secret(self) -> None:
+        # A web tool with no explicit provider uses the default Databricks search
+        # → it is still a web tool (requires_web_search=true) but binds NO Brave
+        # secret (don't assume a Brave subscription).
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision(web_search=True)  # no provider = inherit
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            databricks_yml = zf.read("databricks.yml").decode("utf-8")
+            app_yaml = zf.read("app.yaml").decode("utf-8")
+
+        assert "BRAVE_API_KEY" not in databricks_yml
+        assert "BRAVE_API_KEY" not in app_yaml
         assert artifact.metadata["requires_web_search"] == "true"
 
     @pytest.mark.asyncio

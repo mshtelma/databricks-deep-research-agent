@@ -48,6 +48,7 @@ pytestmark = pytest.mark.skipif(
 import yaml as yaml_module  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+from deep_research.agent_designer.registry import REGISTRY_VERSION  # noqa: E402
 from deep_research.core.auth import UserIdentity  # noqa: E402
 from deep_research.db.session import get_db  # noqa: E402
 from deep_research.main import app  # noqa: E402
@@ -209,7 +210,7 @@ def user_a_client(db_session: Any) -> Generator[TestClient, None, None]:
 
 _IMPORT_YAML_BYTES = yaml_module.safe_dump(
     {
-        "registry_version": "1.0",
+        "registry_version": REGISTRY_VERSION,
         **_BASE_DEFINITION,
     },
     sort_keys=True,
@@ -332,8 +333,9 @@ def test_v15_full_release_chain(
     assert "text/yaml" in content_type, f"expected text/yaml, got: {content_type!r}"
     exported_yaml_text: str = resp.text
     parsed = yaml_module.safe_load(exported_yaml_text)
-    assert parsed.get("registry_version") == "1.0", (
-        f"registry_version must be '1.0', got {parsed.get('registry_version')!r}"
+    assert parsed.get("registry_version") == REGISTRY_VERSION, (
+        f"registry_version must be {REGISTRY_VERSION!r}, got "
+        f"{parsed.get('registry_version')!r}"
     )
 
     # ------------------------------------------------------------------

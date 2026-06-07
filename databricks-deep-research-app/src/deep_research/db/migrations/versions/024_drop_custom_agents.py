@@ -29,22 +29,18 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    """Drop agent_preset_steps (child) then custom_agents (parent)."""
-    # Drop agent_preset_steps indexes
-    op.drop_index("idx_agent_preset_steps_agent_order", table_name="agent_preset_steps")
-    op.drop_index("idx_agent_preset_steps_agent", table_name="agent_preset_steps")
+    """Drop agent_preset_steps (child) then custom_agents (parent).
 
-    # Drop agent_preset_steps table
-    op.drop_table("agent_preset_steps")
-
-    # Drop custom_agents indexes
-    op.drop_index("uq_custom_agents_owner_name", table_name="custom_agents")
-    op.drop_index("idx_custom_agents_owner_visibility", table_name="custom_agents")
-    op.drop_index("idx_custom_agents_visibility", table_name="custom_agents")
-    op.drop_index("idx_custom_agents_owner", table_name="custom_agents")
-
-    # Drop custom_agents table
-    op.drop_table("custom_agents")
+    Idempotent: these tables may already have been removed out-of-band by
+    scripts/cleanup_legacy_tables.sql (legacy public.* decommission), which keeps
+    alembic_version stamped < 024, so this migration can be replayed against a DB
+    where the tables are already gone. DROP TABLE ... CASCADE removes the
+    dependent indexes/constraints, matching the cleanup script's IF EXISTS idiom.
+    """
+    # Child first (FK -> custom_agents), then parent. CASCADE drops the
+    # dependent indexes, so explicit DROP INDEX statements are unnecessary.
+    op.execute("DROP TABLE IF EXISTS agent_preset_steps CASCADE")
+    op.execute("DROP TABLE IF EXISTS custom_agents CASCADE")
 
 
 def downgrade() -> None:

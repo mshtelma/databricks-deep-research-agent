@@ -324,3 +324,71 @@ class TestRestoreChat:
         response = client.post(f"/api/v1/chats/{uuid4()}/restore")
 
         assert response.status_code == 404
+
+
+class TestResearchSessionInlineFromCachedView:
+    """Guard the /chats/{id}/full inline-session builder against the cached
+    session view's shape.
+
+    Regression: once messages are linked to their research session, get_chat_full
+    builds a ResearchSessionInline from the CACHED view (_state_session_to_view),
+    which emits query_classification={}, plan={}, plan_iterations=None. Passing
+    those straight to the typed sub-models raised a pydantic ValidationError that
+    500'd the whole endpoint -> "nothing renders". The builder must coerce them
+    and never crash the render.
+    """
+
+    @staticmethod
+    def _cached_session_view(**overrides):
+        """Mirror services/cached/chat._state_session_to_view's output shape."""
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
+
+        base = {
+            "id": uuid4(),
+            "message_id": uuid4(),
+            "status": "completed",
+            "plan": {},
+            "observations": {},
+            "query_classification": {},
+            "verification_data": {"claims": [{"citation_key": "1"}]},
+            "current_step_index": 0,
+            "plan_iterations": None,
+            "started_at": datetime.now(UTC),
+            "completed_at": datetime.now(UTC),
+            "sources": [],
+            "reasoning_steps": [],
+            "current_agent": None,
+            "research_depth": "auto",
+            "query": None,
+            "query_mode": None,
+        }
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def test_empty_dicts_coerce_to_none_and_session_survives(self) -> None:
+        from deep_research.api.v1.chats import _research_session_inline
+
+        rs = self._cached_session_view()
+        result = _research_session_inline(rs, [])
+
+        assert result is not None, "empty plan/classification must not nuke the session"
+        assert result.query_classification is None
+        assert result.plan is None
+        assert result.plan_iterations == 0
+
+    def test_malformed_nonempty_plan_falls_back_but_keeps_session(self) -> None:
+        from deep_research.api.v1.chats import _research_session_inline
+
+        # A non-empty but schema-invalid plan/classification must not crash the
+        # endpoint; the builder retries without them so the session (and the
+        # frontend citation gate keyed on !!researchSession) survives.
+        rs = self._cached_session_view(
+            plan={"unexpected": "shape"},
+            query_classification={"garbage": True},
+        )
+        result = _research_session_inline(rs, [])
+
+        assert result is not None
+        assert result.plan is None
+        assert result.query_classification is None

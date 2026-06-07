@@ -577,8 +577,17 @@ class WorkflowExecutor:
             structured = None
             if isinstance(report_value, BaseModel):
                 structured = report_value.model_dump(mode="json")
+                final_report_text = report_value.model_dump_json()
             elif isinstance(report_value, dict) and report_value.get("output_type"):
+                # A structured-output deliverable (e.g. a plugin assembler node) writes
+                # a dict carrying ``output_type``. Serialize it as JSON — NOT ``str()``
+                # (a Python repr with single quotes) — so the persisted message.content
+                # is parseable by the frontend's structured-output renderer instead of
+                # degrading to raw text. Mirrors the ``structured`` capture just above.
                 structured = report_value
+                final_report_text = json.dumps(report_value, default=str)
+            else:
+                final_report_text = str(report_value or "")
 
             yield self._emit(WorkflowCompletedEvent(
                 node_id=self._defn.root.id,
@@ -586,7 +595,7 @@ class WorkflowExecutor:
                 workflow_id=self._defn.id,
                 duration_ms=elapsed_ms,
                 total_tokens=self._total_tokens,
-                final_report=report_value.model_dump_json() if isinstance(report_value, BaseModel) else str(report_value or ""),
+                final_report=final_report_text,
                 structured_output=structured,
                 total_sources=total_sources,
                 total_steps_executed=self._workflow_total_steps_executed,

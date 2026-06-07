@@ -286,23 +286,29 @@ def test_registry_version_mismatch_returns_400() -> None:
     assert errors[0]["kind"] == "registry_version_mismatch"
     assert REGISTRY_VERSION in errors[0]["message"]
     assert "0.0.0" in errors[0]["message"]
+    # Actionable guidance: tells the importer how to proceed.
+    assert "remove the registry_version line" in errors[0]["message"]
 
 
 # ---------------------------------------------------------------------------
-# 9. Missing registry_version → 400 registry_version_mismatch
+# 9. Missing registry_version → accepted as raw framework YAML (200)
 # ---------------------------------------------------------------------------
 
-def test_missing_registry_version_returns_400() -> None:
-    """YAML without a ``registry_version`` field returns 400 mismatch."""
+def test_missing_registry_version_is_accepted() -> None:
+    """YAML without a ``registry_version`` envelope imports as raw framework YAML.
+
+    Absent (or null) ``registry_version`` is treated as the current version so
+    hand-written framework workflows and legacy pre-envelope exports import
+    without edits.  A present-but-different value is still rejected (test 8).
+    """
     doc: dict[str, Any] = dict(_VALID_DEFINITION)  # no registry_version key
     no_version_yaml = yaml.safe_dump(doc).encode()
     with _noauth_client() as client:
         resp = client.post(_URL, content=no_version_yaml)
-    assert resp.status_code == 400, resp.text
-    errors = resp.json()["message"]["errors"]
-    assert errors[0]["kind"] == "registry_version_mismatch"
-    # received should show None
-    assert "None" in errors[0]["message"]
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["definition"]["id"] == _VALID_DEFINITION["id"]
+    assert "registry_version" not in body["definition"]
 
 
 # ---------------------------------------------------------------------------

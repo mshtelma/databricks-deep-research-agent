@@ -257,6 +257,7 @@ def resolve_warehouse_id_or_fail(
     *,
     profile: str,
     target: str = "",
+    pinned_warehouse_id: str = "",
 ) -> dict[str, str]:
     """Resolve ``storage_warehouse_id`` for the deploy.
 
@@ -265,7 +266,11 @@ def resolve_warehouse_id_or_fail(
     1. Explicit env var ``STORAGE_WAREHOUSE_ID`` (CI / per-developer override).
     2. Explicit env var ``TABLE_TOOLS_WAREHOUSE_ID`` (legacy alias used by
        ``workflow_runner_factory._resolve_table_warehouse_id``).
-    3. ``WorkspaceClient(profile=profile).warehouses.list()`` — pick the
+    3. ``pinned_warehouse_id`` — the target-pinned ``storage_warehouse_id``
+       bundle var from ``databricks.yml`` (passed via ``--storage-warehouse-id``
+       by the Makefile). The literal ``"pending"`` default and empty strings are
+       ignored so unpinned targets fall through to auto-discovery.
+    4. ``WorkspaceClient(profile=profile).warehouses.list()`` — pick the
        single ``STARTED`` warehouse, else raise with the candidate list so
        the operator can pin one in the bundle.
 
@@ -277,6 +282,10 @@ def resolve_warehouse_id_or_fail(
     )
     if env_id:
         return {"storage_warehouse_id": env_id}
+
+    pinned = pinned_warehouse_id.strip()
+    if pinned and pinned != "pending":
+        return {"storage_warehouse_id": pinned}
 
     try:
         client = WorkspaceClient(profile=profile)
@@ -439,6 +448,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=os.environ.get("LAKEBASE_DATABASE", "deep_research"),
     )
     parser.add_argument(
+        "--storage-warehouse-id",
+        default="",
+        help=(
+            "Target-pinned storage_warehouse_id from databricks.yml "
+            "(`targets.<target>.variables.storage_warehouse_id`). Used as a "
+            "resolution source after env vars and before warehouse "
+            "auto-discovery. The literal 'pending' default is ignored."
+        ),
+    )
+    parser.add_argument(
         "--app-name",
         default=None,
         help=(
@@ -472,6 +491,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         warehouse_vars = resolve_warehouse_id_or_fail(
             profile=args.profile,
             target=args.target,
+            pinned_warehouse_id=args.storage_warehouse_id,
         )
         bundle_vars = {**bundle_vars, **warehouse_vars}
         assert_no_pending_sentinels(bundle_vars)

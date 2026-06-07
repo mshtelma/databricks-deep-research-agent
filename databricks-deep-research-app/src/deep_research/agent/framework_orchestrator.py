@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
 import traceback
 from collections.abc import AsyncGenerator, Callable
@@ -97,6 +98,18 @@ except ImportError:
     PluginManager = None  # type: ignore[misc, assignment]
 
 logger = logging.getLogger(__name__)
+
+
+class MissingOBOTokenError(RuntimeError):
+    """Raised when a Databricks-bound workflow runs under the Apps runtime
+    without an on-behalf-of user token.
+
+    Surfaced to the caller as a streamed error (via the orchestrator's
+    error handler) so the request fails fast with a clear message instead
+    of silently running every Databricks tool as the app service principal
+    and returning UC permission errors / empty results.
+    """
+
 
 # Regex matching [N] numeric citation markers produced by the framework synthesizer.
 # Captures the integer N.  Matches [1], [12], [1][2], etc.
@@ -282,6 +295,126 @@ def _apply_runtime_overlays_to_workflow(
         agent_config["output_schema"] = schema
 
     _visit_workflow_agent_configs(workflow_def, maybe_enable_reclaim)
+    return workflow_def
+
+
+def _tool_names_with_explicit_provider(workflow_def: WorkflowDefinition) -> set[str]:
+    """Tool names whose YAML declaration sets an explicit ``config.provider``.
+
+    Such tools must resolve via the factory chain (honoring the declared provider)
+    rather than being shadowed by an auto-injected resolver override —
+    ``ToolResolver.resolve()`` checks overrides BEFORE declarations, so without this
+    a per-workflow ``provider: databricks`` on ``web_search`` would be silently
+    ignored in favor of the app-default backend.
+    """
+    names: set[str] = set()
+    for tool in workflow_def.tools or []:
+        config = getattr(tool, "config", None)
+        if isinstance(config, dict) and config.get("provider"):
+            names.add(tool.name)
+    return names
+
+
+# Web-search tool kinds whose backend is provider-selectable. Mirrors
+# ``ast_normalizer._WEB_PROVIDER_TOOL_KINDS`` / ``registry._WEB_PROVIDER_TOOL_KINDS``.
+_WEB_PROVIDER_TOOL_KINDS: frozenset[str] = frozenset({"web_search", "web_research"})
+
+
+def _fill_databricks_tool_defaults(
+    workflow_def: WorkflowDefinition | None, search_cfg: Any
+) -> None:
+    """Fill app-config Databricks defaults onto per-tool databricks web tools.
+
+    Runs on EVERY app execution (main chat + UI-saved + hand-written YAML), not
+    only designer-normalized ASTs — a pure UI save bypasses ``normalize_ast``, so
+    without this a ``provider: databricks`` web tool that omits ``model`` would
+    reach the factory with no serving endpoint and raise. For a web tool whose
+    effective provider is databricks (explicit ``config.provider == 'databricks'``
+    or absent while the global default is databricks), the ``search.databricks``
+    endpoint/tuning is filled in when absent. Idempotent on configs the designer
+    normalizer already filled.
+    """
+    if workflow_def is None:
+        return
+    from deep_research.core.app_config import (
+        DEFAULT_SEARCH_PROVIDER,
+        fill_databricks_search_defaults,
+        resolve_effective_provider,
+    )
+
+    global_provider = getattr(search_cfg, "provider", DEFAULT_SEARCH_PROVIDER)
+    for tool in workflow_def.tools or []:
+        if getattr(tool, "kind", None) not in _WEB_PROVIDER_TOOL_KINDS:
+            continue
+        config = getattr(tool, "config", None)
+        if not isinstance(config, dict):
+            continue
+        effective = resolve_effective_provider(config.get("provider"), global_provider)
+        if effective != "databricks":
+            continue
+        min_results = 0
+        for count_key in ("total_results", "max_results"):
+            raw = config.get(count_key)
+            if isinstance(raw, int) and raw > min_results:
+                min_results = raw
+        if fill_databricks_search_defaults(
+            config, search_cfg.databricks, min_results=min_results
+        ):
+            logger.info(
+                "FWK_DBX_SEARCH_DEFAULTS tool=%s model=%s",
+                getattr(tool, "name", "?"),
+                config.get("model"),
+            )
+        # Tripwire: a model_family that contradicts the (now-resolved) endpoint
+        # is a guaranteed 400 (e.g. openai family on a Gemini endpoint => OpenAI
+        # Responses API on a Gemini serving endpoint). Save-time validation
+        # blocks newly-authored ones; this catches legacy / hand-written-YAML /
+        # API-imported configs. Shout loudly — built-in search would otherwise
+        # silently return zero results for every query.
+        model = config.get("model")
+        family = config.get("model_family")
+        if isinstance(model, str) and model and isinstance(family, str) and family:
+            detected = search_cfg.databricks.family_for_endpoint(model)
+            if detected is not None and detected != family:
+                logger.error(
+                    "DBX_SEARCH_FAMILY_ENDPOINT_MISMATCH tool=%s endpoint=%s "
+                    "declared_family=%s detected_family=%s — built-in web search "
+                    "will fail (wrong API for this endpoint); clear model_family "
+                    "or choose a matching endpoint.",
+                    getattr(tool, "name", "?"),
+                    model,
+                    family,
+                    detected,
+                )
+
+
+async def _resolve_and_prepare_workflow_def(
+    workflow_def: WorkflowDefinition | None,
+    config: OrchestrationConfig,
+    user_id: str | None,
+    db: Any,
+    tool_names: list[str],
+    plugin_manager: Any,
+    search_cfg: Any,
+) -> WorkflowDefinition:
+    """Resolve the workflow definition and prepare it for tool resolution.
+
+    Single owner of the resolve → runtime-overlay → source-scope →
+    databricks-fill sequence. The databricks web-search fill MUST stay coupled
+    to resolution here: a designer/UI-saved (agent-v2) workflow whose web tool
+    pins ``provider: databricks`` but omits ``model`` only becomes
+    self-describing once resolved. Filling before the workflow is bound (while
+    it is ``None``) is a silent no-op, and the tool then crashes construction
+    with 'requires a serving endpoint'.
+    """
+    if workflow_def is None:
+        workflow_def = (
+            await _resolve_agent_v2_workflow(config, user_id, db)
+            or _resolve_workflow(config, tool_names, plugin_manager)
+        )
+    workflow_def = _apply_runtime_overlays_to_workflow(workflow_def, config)
+    workflow_def = _apply_source_scope_to_workflow_declarations(workflow_def, config)
+    _fill_databricks_tool_defaults(workflow_def, search_cfg)
     return workflow_def
 
 
@@ -631,6 +764,11 @@ async def stream_workflow_via_framework(
                     type(config.domain_filter).__name__ if config.domain_filter else "None",
                 )
 
+                from deep_research.core.app_config import (
+                    get_app_config as _get_app_cfg,
+                )
+
+                _search_cfg = _get_app_cfg().search
                 framework_tools = await create_framework_tools(
                     brave_client=brave_client,
                     crawler=crawler,
@@ -642,6 +780,12 @@ async def stream_workflow_via_framework(
                     file_search_tool=file_search_tool,
                     chat_id=chat_id,
                     user_id=user_id,
+                    # Central provider selection (brave default). The Databricks
+                    # built-in-search adapter reuses the framework LLM client's
+                    # serving-endpoints connection.
+                    search_provider=_search_cfg.provider,
+                    llm_client=framework_llm,
+                    databricks_search_cfg=_search_cfg.databricks,
                 )
 
                 # Register chat-memory tools when memory has any content.
@@ -728,13 +872,18 @@ async def stream_workflow_via_framework(
                             tool_names,
                         )
 
-                if workflow_def is None:
-                    workflow_def = (
-                        await _resolve_agent_v2_workflow(config, user_id, db)
-                        or _resolve_workflow(config, tool_names, plugin_manager)
-                    )
-                workflow_def = _apply_runtime_overlays_to_workflow(workflow_def, config)
-                workflow_def = _apply_source_scope_to_workflow_declarations(workflow_def, config)
+                # Resolve + prepare the workflow definition in one place so the
+                # databricks web-search fill stays coupled to resolution — filling
+                # before workflow_def is bound is a silent no-op (see the helper).
+                workflow_def = await _resolve_and_prepare_workflow_def(
+                    workflow_def,
+                    config,
+                    user_id,
+                    db,
+                    tool_names,
+                    plugin_manager,
+                    _search_cfg,
+                )
 
                 logger.info(
                     "FWK_WORKFLOW_TRANSLATED workflow_id=%s tool_names=%s",
@@ -745,6 +894,14 @@ async def stream_workflow_via_framework(
                 # Build the shared WorkflowRunner (single execution code path
                 # for all app entry points — see workflow_runner_factory.py
                 # for the project convention).
+                # Fail closed (host policy): under the Databricks Apps runtime,
+                # a workflow that declares Databricks-bound tools MUST run on
+                # behalf of the user. Without an OBO token every Databricks
+                # tool falls back to the app service principal and hits UC
+                # permission errors, so reject the request with a clear error
+                # rather than returning a silently-degraded report. Local dev
+                # (no DATABRICKS_APP_NAME) and web-only workflows are exempt.
+                from databricks_deep_research import workflow_requires_databricks
                 from databricks_deep_research.tools.factories.builtin import (
                     BuiltinToolFactory,
                 )
@@ -754,6 +911,21 @@ async def stream_workflow_via_framework(
                 from databricks_deep_research.tools.resolver import (
                     ToolResolver,
                 )
+
+                if (
+                    os.environ.get("DATABRICKS_APP_NAME")
+                    and (config is None or not config.user_token)
+                    and workflow_def is not None
+                    and workflow_requires_databricks(workflow_def)
+                ):
+                    raise MissingOBOTokenError(
+                        "This workflow needs your Databricks identity to query "
+                        "its data sources, but no user token "
+                        "(x-forwarded-access-token) reached the server. Open the "
+                        "app from the Databricks Apps page so your identity is "
+                        "forwarded, or include your OBO token when calling the "
+                        "API directly."
+                    )
 
                 _ws_client = None
                 if workflow_def.tools:
@@ -797,7 +969,21 @@ async def stream_workflow_via_framework(
                     "present" if _ws_client else "MISSING",
                     len(framework_tools),
                 )
+                # Precedence guard: a per-workflow tool declaration that sets an
+                # explicit ``config.provider`` (e.g. web_search with
+                # provider: databricks) must win over the auto-injected backend.
+                # Resolver overrides are checked BEFORE YAML declarations, so we
+                # skip overriding those names and let the factory build them.
+                _declared_provider_tools = _tool_names_with_explicit_provider(
+                    workflow_def
+                )
                 for tool in framework_tools:
+                    if tool.definition.name in _declared_provider_tools:
+                        logger.info(
+                            "FWK_OVERRIDE_SKIP tool=%s reason=workflow_declares_provider",
+                            tool.definition.name,
+                        )
+                        continue
                     tool_resolver.override(tool.definition.name, tool)
 
                 # Pre-execution guard — fail before LLM tokens are spent.

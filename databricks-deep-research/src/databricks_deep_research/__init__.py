@@ -30,30 +30,6 @@ Builtin tools::
 # Errors
 # Register builtin subtypes (side-effect import)
 import databricks_deep_research.agents.builtins  # noqa: F401
-from databricks_deep_research.errors import (
-    NodeBudgetExceededError,
-    TokenBudgetExceededError,
-    WorkflowCancelledError,
-    WorkflowError,
-    WorkflowValidationError,
-)
-
-# Events
-from databricks_deep_research.events.types import (
-    FrameworkEvent,
-    StreamEvent,
-)
-
-# LLM client
-from databricks_deep_research.llm.client import (
-    FrameworkLLMClient,
-    LLMResponse,
-    ModelTier,
-    ModelTierConfig,
-    ToolCall,
-    parse_model_config,
-)
-from databricks_deep_research.runner import WorkflowResult, WorkflowRunner
 
 # Python authoring API (Phases 1 + 2)
 from databricks_deep_research.api import (
@@ -102,9 +78,44 @@ from databricks_deep_research.api import (
     write_todos_tool,
 )
 
+# Reusable Databricks OBO/SP tool wiring (shared by every host app)
+from databricks_deep_research.core.databricks_auth import (
+    build_obo_workspace_client,
+    resolve_workspace_client,
+)
+from databricks_deep_research.errors import (
+    NodeBudgetExceededError,
+    TokenBudgetExceededError,
+    WorkflowCancelledError,
+    WorkflowError,
+    WorkflowValidationError,
+)
+
+# Events
+from databricks_deep_research.events.types import (
+    FrameworkEvent,
+    StreamEvent,
+)
+
+# LLM client
+from databricks_deep_research.llm.client import (
+    FrameworkLLMClient,
+    LLMResponse,
+    ModelTier,
+    ModelTierConfig,
+    ToolCall,
+    parse_model_config,
+)
+from databricks_deep_research.runner import WorkflowResult, WorkflowRunner
+from databricks_deep_research.tools.builtins.databricks_runner import (
+    build_databricks_workflow_runner,
+    workflow_requires_databricks,
+)
+
 # Tool protocol
 from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.tools.protocol import (
+    DATABRICKS_BOUND_TOOL_KINDS,
     RegisteredTable,
     ResearchTool,
     TableRegistry,
@@ -166,6 +177,12 @@ __all__ = [
     "ToolResult",
     "ToolFactoryContext",
     "required_ctx_fields_for_kind",
+    # Databricks OBO/SP tool wiring (reusable by host apps)
+    "build_databricks_workflow_runner",
+    "build_obo_workspace_client",
+    "resolve_workspace_client",
+    "workflow_requires_databricks",
+    "DATABRICKS_BOUND_TOOL_KINDS",
     # Loader
     "load_workflow",
     "load_workflow_from_dict",

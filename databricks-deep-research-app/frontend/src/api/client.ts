@@ -88,6 +88,135 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
   return response.json()
 }
 
+// ---------------------------------------------------------------------------
+// Shared error-shape + text-fetch helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Unwrap the app's HTTP error envelope to the underlying detail object.
+ *
+ * The backend wraps every HTTPException as `{ code: 'HTTP_ERROR', message: <detail> }`
+ * (core/exceptions.py::http_exception_handler); FastAPI's own default is
+ * `{ detail: <detail> }`. Returns the inner detail for either shape.
+ */
+export function unwrapDetail(body: unknown): unknown {
+  if (body && typeof body === 'object') {
+    const obj = body as { detail?: unknown; message?: unknown; code?: unknown }
+    if ('detail' in obj && obj.detail !== undefined) return obj.detail
+    if (obj.code === 'HTTP_ERROR' && obj.message && typeof obj.message === 'object') {
+      return obj.message
+    }
+  }
+  return body
+}
+
+/** One structured validation error from the YAML import/export + validate endpoints. */
+export interface YamlFieldError {
+  path: string | null
+  kind: string
+  message: string
+}
+
+/**
+ * Thrown when the server rejects a YAML document with a structured
+ * `{ errors: [...] }` body (safe-parse failure, registry_version mismatch,
+ * structural/AST error, oversize).
+ */
+export class YamlImportError extends ApiError {
+  constructor(
+    public readonly errors: YamlFieldError[],
+    status: number,
+    message?: string,
+  ) {
+    super(
+      status,
+      'YAML_IMPORT_ERROR',
+      message ?? errors[0]?.message ?? 'YAML validation failed',
+      { errors },
+    )
+    this.name = 'YamlImportError'
+  }
+}
+
+function extractYamlErrors(detail: unknown): YamlFieldError[] | null {
+  if (
+    detail &&
+    typeof detail === 'object' &&
+    Array.isArray((detail as { errors?: unknown }).errors)
+  ) {
+    const raw = (detail as { errors: unknown[] }).errors
+    return raw.map((e) => {
+      const o = (e ?? {}) as Record<string, unknown>
+      return {
+        path: typeof o.path === 'string' ? o.path : null,
+        kind: typeof o.kind === 'string' ? o.kind : 'schema_error',
+        message: typeof o.message === 'string' ? o.message : 'Invalid document',
+      }
+    })
+  }
+  return null
+}
+
+/**
+ * Read a non-OK response and throw the appropriate typed error.
+ *
+ * A structured `{ errors: [...] }` detail becomes a {@link YamlImportError};
+ * anything else becomes a generic {@link ApiError}. Always throws (return type
+ * `never`); shared by `fetchText` and the YAML import client.
+ */
+export async function throwForErrorResponse(response: Response): Promise<never> {
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    body = { message: response.statusText }
+  }
+  const detail = unwrapDetail(body)
+  const yamlErrors = extractYamlErrors(detail)
+  if (yamlErrors) {
+    throw new YamlImportError(yamlErrors, response.status)
+  }
+  const message =
+    typeof detail === 'string'
+      ? detail
+      : (detail as { message?: string } | null)?.message ?? 'Request failed'
+  throw new ApiError(response.status, 'HTTP_ERROR', message)
+}
+
+/**
+ * Fetch an endpoint that returns a `text/*` body (e.g. YAML export).
+ *
+ * On non-OK responses throws via {@link throwForErrorResponse}. Mirrors the
+ * timeout/abort handling of `request`.
+ */
+export async function fetchText(
+  endpoint: string,
+  init: RequestInit & { timeout?: number } = {},
+): Promise<string> {
+  const { timeout = DEFAULT_TIMEOUT_MS, ...fetchInit } = init
+  const url = `${API_BASE_URL}${endpoint}`
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), timeout)
+  let response: Response
+  try {
+    response = await fetch(url, { ...fetchInit, signal: controller.signal })
+  } catch (error) {
+    clearTimeout(timeoutId)
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new ApiError(0, 'TIMEOUT', `Request timed out after ${timeout}ms`)
+    }
+    throw error
+  } finally {
+    clearTimeout(timeoutId)
+  }
+
+  if (!response.ok) {
+    await throwForErrorResponse(response)
+  }
+
+  return response.text()
+}
+
 // Chats API
 export const chatsApi = {
   list: (params?: { status?: string; search?: string; limit?: number; offset?: number }) =>

@@ -66,7 +66,7 @@ check_untyped_defs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["bm25s.*", "numpy", "numpy.*", "mlflow", "mlflow.*", "databricks.*", "json_repair"]
+module = ["bm25s.*", "numpy", "numpy.*", "mlflow", "mlflow.*", "databricks.*", "json_repair", "bs4"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -336,7 +336,7 @@ result formatting:
 
 | Value | Use case | Example tools |
 |-------|----------|---------------|
-| `web` | Keyword / BM25 search | Brave, Google |
+| `web` | Keyword / BM25 search | `web_search` over any `SearchClient` backend (databricks / brave / jina) |
 | `vector_index` | Semantic embedding queries | Databricks Vector Search |
 | `sql_analytics` | NL-to-SQL | Genie |
 | `qa_assistant` | NL question to NL answer | Knowledge Assistant |
@@ -353,13 +353,15 @@ a required dependency is missing.
 |-------|------|-------------|
 | `workspace_client` | `Any \| None` | Databricks `WorkspaceClient` |
 | `user_token` | `str \| None` | OBO token for authenticated calls |
-| `search_client` | `Any \| None` | `SearchClient` protocol (for web search) |
+| `search_client` | `Any \| None` | `SearchClient` protocol (for web search) -- any backend: databricks / brave / jina (see [Search Providers](search-providers.md)) |
 | `crawler` | `Any \| None` | `ContentCrawler` protocol (for web crawl) |
 | `file_index` | `Any \| None` | `FileIndex` for file search |
 | `extras` | `dict[str, Any]` | App-specific dependencies |
 
-Use `ToolFactoryContext.from_defaults()` for auto-detection of workspace client
-and Brave search credentials from environment variables.
+Use `ToolFactoryContext.from_defaults()` for auto-detection of the workspace
+client and a web-search `SearchClient` from environment variables (it builds a
+Brave adapter when `BRAVE_API_KEY` is set; other backends -- databricks / jina --
+are selected per tool, see [Search Providers](search-providers.md)).
 
 ## Best Practices
 
@@ -392,4 +394,5 @@ and Brave search credentials from environment variables.
 
 - [Tool System](../concepts/tool-system.md)
 - [Builtin Tools](builtin-tools.md)
+- [Search Providers](search-providers.md) -- web_search backends (databricks / brave / jina)
 - [Tool Protocol Reference](../reference/tool-protocol-reference.md)

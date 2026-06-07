@@ -45,6 +45,7 @@ When comparative data is requested, use proper markdown tables:
 - No "it's important to note" or similar filler
 - Skip obvious caveats (e.g., "more research needed")
 - Cite after the claim, not before: "Fact X [Source]"
+- State the unit of measure or currency for every numeric value (e.g., "$3.2 billion", "15%"); never give a bare number or echo a source's raw column label as the answer
 - NO meta-commentary about the report itself
 - NO offers for follow-up work ("I can also...", "Would you like...")
 - NO conversational endings or invitations for clarification

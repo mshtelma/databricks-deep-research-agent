@@ -34,6 +34,7 @@ from databricks_deep_research.events.types import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from databricks_deep_research.llm.budget import estimate_message_tokens
 from databricks_deep_research.llm.client import FrameworkLLMClient, LLMResponse, ToolCall
 from databricks_deep_research.tools.protocol import ResearchTool, ToolContext
 from databricks_deep_research.tracing import trace_span
@@ -757,6 +758,17 @@ class ReactLoop:
                     }
                 else:
                     self._active_tool_names = None  # None = all tools allowed
+
+                # Diagnostic: estimated prompt size per ReAct iteration, so
+                # cross-iteration growth is reconstructable from logs.
+                logger.info(
+                    "REACT_PRECALL node=%s call=%d est_prompt_tokens=%d "
+                    "messages=%d tools=%d",
+                    self._node_id, call_count,
+                    estimate_message_tokens(messages, active_tool_defs),
+                    len(messages),
+                    len(active_tool_defs) if active_tool_defs else 0,
+                )
 
                 # LLM call
                 if self._stream and call_count == 0 and not first_turn_retried:

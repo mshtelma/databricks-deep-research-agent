@@ -74,9 +74,12 @@ interface UseCitationsReturn {
  * Converts snake_case keys from Python API to camelCase for TypeScript.
  */
 async function fetchMessageClaims(
-  messageId: string
+  messageId: string,
+  chatId: string
 ): Promise<MessageClaimsResponse> {
-  const response = await fetch(`${API_BASE_URL}/messages/${messageId}/claims`);
+  const response = await fetch(
+    `${API_BASE_URL}/messages/${messageId}/claims?chat_id=${encodeURIComponent(chatId)}`
+  );
   if (!response.ok) {
     throw new Error(`Failed to fetch claims: ${response.statusText}`);
   }
@@ -86,6 +89,7 @@ async function fetchMessageClaims(
 
 export function useCitations(
   messageId: string | null,
+  chatId: string | null,
   options: UseCitationsOptions = {}
 ): UseCitationsReturn {
   const { onVerificationUpdate } = options;
@@ -111,12 +115,12 @@ export function useCitations(
     error,
     refetch,
   } = useQuery({
-    queryKey: ['messageClaims', messageId],
+    queryKey: ['messageClaims', messageId, chatId],
     queryFn: async () => {
-      const result = await fetchMessageClaims(messageId!);
+      const result = await fetchMessageClaims(messageId!, chatId!);
       return result;
     },
-    enabled: !!messageId,
+    enabled: !!messageId && !!chatId,
     staleTime: 30000, // 30 seconds
     // Poll every 3s while claims are empty, stop when claims arrive or max retries reached
     refetchInterval: (query) => {

@@ -18,6 +18,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from deep_research.core.app_config import (
+    fill_databricks_search_defaults,
+    get_app_config,
+)
+
 # ---------------------------------------------------------------------------
 # Public types
 # ---------------------------------------------------------------------------
@@ -525,6 +530,95 @@ def _normalize_tool_kinds(ast: dict[str, Any], ctx: _NormalizerContext) -> None:
             rationale=(
                 f"'{kind}' is an alias; rewriting to canonical "
                 f"framework kind '{canonical}'."
+            ),
+        )
+
+
+# Web-search tool kinds whose backend is provider-selectable. ``web_crawl`` is
+# excluded — it fetches a given URL and has no search provider.
+_WEB_PROVIDER_TOOL_KINDS: frozenset[str] = frozenset({"web_search", "web_research"})
+
+
+def apply_web_search_provider_defaults(
+    definition: dict[str, Any],
+    *,
+    search_cfg: Any | None = None,
+) -> list[tuple[int, dict[str, Any], dict[str, Any]]]:
+    """Make web tools that EXPLICITLY pin ``provider: databricks`` self-describing,
+    in place, on a raw definition dict.
+
+    Persistence stores only EXPLICIT per-tool intent. A tool that leaves
+    ``config.provider`` blank is left **byte-for-byte untouched** so it keeps
+    INHERITING the workspace ``search.provider`` (and the ``search.databricks``
+    endpoint) at runtime — i.e. ``app.yaml`` stays a live global lever and the
+    designer never silently bakes the current default into a saved definition.
+    For a tool that explicitly selects ``databricks`` but omits the serving
+    endpoint / tuning, those keys are filled from the ``search.databricks`` block
+    when absent — so the explicit choice is self-describing and the adapter's
+    ``max_results`` does not silently truncate a ``web_research`` lane's
+    ``total_results``. Explicit ``brave``/``jina`` tools have nothing to fill and
+    are left untouched.
+
+    Shared by the designer normalizer (records the diffs as fixes) and the
+    agent-save path (discards them) so a ``provider: databricks`` web tool
+    persisted via the UI — which bypasses the full normalizer — is still
+    self-describing. Returns ``(tool_index, before_config, after_config)`` for each
+    tool actually mutated. ``search_cfg`` defaults to the app config's ``search``
+    block; a config-read failure yields no changes.
+    """
+    tools = definition.get("tools")
+    if not isinstance(tools, list):
+        return []
+    if search_cfg is None:
+        try:
+            search_cfg = get_app_config().search
+        except Exception:  # pragma: no cover - defensive: config unreadable
+            return []
+
+    changes: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    for idx, tool in enumerate(tools):
+        if not isinstance(tool, dict) or tool.get("kind") not in _WEB_PROVIDER_TOOL_KINDS:
+            continue
+        config = tool.get("config")
+        # Only an EXPLICIT per-tool databricks selection is filled. Blank/absent
+        # provider (inherit) and explicit brave/jina are left untouched so the
+        # global default + endpoint stay a live runtime lever.
+        if not isinstance(config, dict) or config.get("provider") != "databricks":
+            continue
+        before = copy.deepcopy(config)
+        # web_research passes total_results as the search count; floor the
+        # adapter's max_results so it is not capped below the requested count.
+        min_results = 0
+        for count_key in ("total_results", "max_results"):
+            raw = config.get(count_key)
+            if isinstance(raw, int) and raw > min_results:
+                min_results = raw
+        fill_databricks_search_defaults(
+            config, search_cfg.databricks, min_results=min_results
+        )
+        if config != before:
+            changes.append((idx, before, copy.deepcopy(config)))
+    return changes
+
+
+def _normalize_web_search_provider(ast: dict[str, Any], ctx: _NormalizerContext) -> None:
+    """Fill the Databricks endpoint/tuning onto web tools that explicitly pin
+    ``provider: databricks`` and record each as a normalization fix.
+
+    Thin recording wrapper over :func:`apply_web_search_provider_defaults` (see it
+    for semantics): inherited (blank-provider) tools are intentionally left
+    untouched so they keep following the workspace default + endpoint at runtime.
+    """
+    for idx, before, after in apply_web_search_provider_defaults(ast):
+        tool = ast["tools"][idx]
+        ctx.record(
+            kind="web_search_provider",
+            path=f"tools.{idx}.config",
+            before=before,
+            after=after,
+            rationale=(
+                f"Filled Databricks search endpoint/tuning for explicit provider "
+                f"'databricks' on '{tool.get('name') or tool.get('kind')}'."
             ),
         )
 
@@ -1433,6 +1527,7 @@ def normalize_ast(
     _normalize_subtypes(new_ast, ctx)
     _normalize_model_tiers(new_ast, ctx)
     _normalize_tool_kinds(new_ast, ctx)
+    _normalize_web_search_provider(new_ast, ctx)
     _normalize_pool_specs(new_ast, ctx)
     _auto_declare_pools(new_ast, ctx)
     _lift_config_error_handling(new_ast, ctx)

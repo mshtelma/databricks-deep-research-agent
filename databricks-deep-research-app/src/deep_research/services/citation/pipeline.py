@@ -31,7 +31,6 @@ from deep_research.agent.state import ClaimInfo, EvidenceInfo, ResearchState, So
 if TYPE_CHECKING:
     from deep_research.agent.nodes.react_synthesizer import ParsedContent
     from deep_research.agent.tools.web_crawler import WebCrawler
-    from deep_research.services.search.brave import BraveSearchClient
 from deep_research.core.app_config import (
     CitationVerificationConfig,
     GenerationMode,
@@ -48,6 +47,7 @@ from deep_research.services.citation.evidence_selector import EvidencePreSelecto
 from deep_research.services.citation.isolated_verifier import IsolatedVerifier
 from deep_research.services.citation.numeric_verifier import NumericVerifier
 from deep_research.services.citation.verification_retriever import (
+    ExternalSearchClient,
     NewExternalEvidence,
     VerificationRetrievalMetrics,
     VerificationRetriever,
@@ -99,8 +99,10 @@ class CitationVerificationPipeline:
         self,
         llm: LLMClient,
         depth: str | None = None,
-        brave_client: BraveSearchClient | None = None,
+        search_client: ExternalSearchClient | None = None,
         web_crawler: WebCrawler | None = None,
+        *,
+        brave_client: ExternalSearchClient | None = None,
     ):
         """Initialize the pipeline with LLM client.
 
@@ -108,12 +110,15 @@ class CitationVerificationPipeline:
             llm: LLM client for all stages.
             depth: Research depth (light/medium/extended) for per-depth config.
                    If None, uses global citation_verification config.
-            brave_client: Optional Brave Search client for Stage 7 external search.
+            search_client: Provider-selected external web-search client for
+                Stage 7 (any ``ExternalSearchClient``). Stage 7 stays off unless
+                this and ``web_crawler`` are both supplied.
             web_crawler: Optional web crawler for Stage 7 external search.
+            brave_client: Deprecated alias for ``search_client`` (back-compat).
         """
         self.llm = llm
         self.depth = depth
-        self.brave_client = brave_client
+        self.search_client = search_client or brave_client
         self.web_crawler = web_crawler
 
         # Get config: per-depth if specified, otherwise global
@@ -143,7 +148,7 @@ class CitationVerificationPipeline:
         if self._verification_retriever is None:
             self._verification_retriever = VerificationRetriever(
                 llm=self.llm,
-                brave_client=self.brave_client,
+                search_client=self.search_client,
                 web_crawler=self.web_crawler,
                 config=self.config.verification_retrieval,
             )

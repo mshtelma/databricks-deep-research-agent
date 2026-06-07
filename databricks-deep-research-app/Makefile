@@ -256,10 +256,10 @@ test-scaffold-and-run:
 			echo "Scaffold-and-Run log: $$log_file"; \
 			echo "Started: $$(date "+%Y-%m-%dT%H:%M:%S%z")"; \
 			echo "Target: $(DEV_TARGET) (env: ../.env + ../.env.$(DEV_TARGET))"; \
-			echo "Command: MLFLOW_ENABLED=false uv run pytest tests/complex/test_scaffold_and_run.py -v -s --tb=short --timeout=1800 --log-cli-level=INFO $(if $(CASE),-k $(CASE),)"; \
+			echo "Command: MLFLOW_ENABLED=true uv run pytest tests/complex/test_scaffold_and_run.py -v -s --tb=short --timeout=1800 --log-cli-level=INFO $(if $(CASE),-k $(CASE),)"; \
 			echo ""; \
 			$(call load-env,$(DEV_TARGET)); \
-			MLFLOW_ENABLED=false \
+			MLFLOW_ENABLED=true \
 			uv run pytest tests/complex/test_scaffold_and_run.py -v -s --tb=short --timeout=1800 --log-cli-level=INFO \
 				$(if $(CASE),-k $(CASE),); \
 			status=$$?; \
@@ -509,6 +509,34 @@ db-migrate-remote:
 	@echo "Migrations complete!"
 	@echo "Note: storage schema (deep_research_state) is created by the app"
 	@echo "      service principal at lifespan, not by this target."
+
+# Drop the legacy normalized public.* tables superseded by the storage stack.
+# Usage: make db-drop-legacy TARGET=dev   (or TARGET=ais)
+# RUN ONLY after the migrated binary (storage-stack jobs/citations/research/
+# messages) is deployed to the target. The script refuses to drop a non-empty
+# table and keeps agents_v2/agent_revisions/custom_tool_defs/agent_deployments/
+# users/user_preferences/alembic_version.
+db-drop-legacy:
+	@echo "Dropping legacy public.* tables on deployed Lakebase (target: $(TARGET))..."
+	@read -p "The migrated binary MUST already be deployed to '$(TARGET)'. Type 'yes' to continue: " confirm; \
+	[ "$$confirm" = "yes" ] || { echo "Aborted."; exit 1; }
+	@PROFILE=$$(uv run python3 -c "import yaml,sys;cfg=yaml.safe_load(open('databricks.yml'));t=cfg.get('targets',{}).get('$(TARGET)');sys.exit(1) if not t else print(t['workspace']['profile'])" 2>/dev/null) || \
+		{ echo "ERROR: Unknown target '$(TARGET)'."; exit 1; }; \
+	RESOURCE_SUFFIX=$$(uv run python3 -c "import yaml;cfg=yaml.safe_load(open('databricks.yml'));print(cfg['targets']['$(TARGET)']['variables']['resource_suffix'])" 2>/dev/null); \
+	PROJECT_ID="deep-research-$$RESOURCE_SUFFIX"; \
+	ENDPOINT_NAME=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" uv run python -c \
+		"from deep_research.deployment import discover_autoscaling_endpoint; print(discover_autoscaling_endpoint('$$PROJECT_ID'))" 2>/dev/null); \
+	if [ -n "$$ENDPOINT_NAME" ]; then \
+		echo "Backend: Autoscaling (ENDPOINT_NAME=$$ENDPOINT_NAME)"; \
+		DATABRICKS_CONFIG_PROFILE="$$PROFILE" ENDPOINT_NAME="$$ENDPOINT_NAME" LAKEBASE_INSTANCE_NAME="" \
+		uv run python scripts/run_sql_file.py scripts/cleanup_legacy_tables.sql; \
+	else \
+		INSTANCE_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.database_instances.deep_research_lakebase.name // empty'); \
+		echo "Backend: Provisioned (LAKEBASE_INSTANCE_NAME=$$INSTANCE_NAME)"; \
+		DATABRICKS_CONFIG_PROFILE="$$PROFILE" LAKEBASE_INSTANCE_NAME="$$INSTANCE_NAME" \
+		uv run python scripts/run_sql_file.py scripts/cleanup_legacy_tables.sql; \
+	fi
+	@echo "Legacy table cleanup complete."
 
 # =============================================================================
 # E2E Testing with Playwright
@@ -804,12 +832,14 @@ deploy: build requirements
 	else \
 		echo "  Drift check skipped (no prior bundle.tf.json or app yet — first deploy on this host)"; \
 	fi; \
+	PINNED_WH=$$(uv run python3 -c "import yaml;c=yaml.safe_load(open('databricks.yml'));print(c['targets']['$(TARGET)'].get('variables',{}).get('storage_warehouse_id',''))" 2>/dev/null); \
 	BUNDLE_VAR_ARGS=$$(DATABRICKS_CONFIG_PROFILE="$$PROFILE" ENDPOINT_NAME="$$ENDPOINT_NAME" LAKEBASE_DATABASE=deep_research \
 		uv run python -m deep_research.deployment.preflight \
 			--target $(TARGET) \
 			--profile "$$PROFILE" \
 			--endpoint-name "$$ENDPOINT_NAME" \
 			--database-name "deep_research" \
+			--storage-warehouse-id "$$PINNED_WH" \
 			$$PREFLIGHT_DRIFT_ARGS) \
 		|| { echo "ERROR: Preflight failed. See messages above."; exit 1; }; \
 	echo "  Resolved: $$BUNDLE_VAR_ARGS"; \
@@ -903,6 +933,7 @@ app-deploy: $(if $(BUILD),build requirements,)
 	LAKEBASE_DB="$${LAKEBASE_DATABASE:-deep_research}"; \
 	echo ""; \
 	echo "Step 1/4: Resolving DAB postgres + warehouse binding vars (preflight)..."; \
+	PINNED_WH=$$(uv run python3 -c "import yaml;c=yaml.safe_load(open('databricks.yml'));print(c['targets']['$(TARGET)'].get('variables',{}).get('storage_warehouse_id',''))" 2>/dev/null); \
 	STORAGE_WAREHOUSE_ID="$${STORAGE_WAREHOUSE_ID:-}" \
 	BUNDLE_VAR_ARGS=$$(DATABRICKS_CONFIG_PROFILE="$$DATABRICKS_CONFIG_PROFILE" \
 		ENDPOINT_NAME="$$ENDPOINT_NAME" LAKEBASE_DATABASE="$$LAKEBASE_DB" \
@@ -911,7 +942,8 @@ app-deploy: $(if $(BUILD),build requirements,)
 			--target $(TARGET) \
 			--profile "$$DATABRICKS_CONFIG_PROFILE" \
 			--endpoint-name "$$ENDPOINT_NAME" \
-			--database-name "$$LAKEBASE_DB") \
+			--database-name "$$LAKEBASE_DB" \
+			--storage-warehouse-id "$$PINNED_WH") \
 		|| { echo "ERROR: Preflight failed (could not resolve postgres or warehouse vars). See messages above."; exit 1; }; \
 	echo "  Resolved: $$BUNDLE_VAR_ARGS"; \
 	case "$$BUNDLE_VAR_ARGS" in *pending*) echo "ERROR: bundle vars resolved to 'pending'."; exit 1;; esac; \

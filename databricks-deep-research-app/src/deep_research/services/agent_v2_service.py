@@ -21,6 +21,9 @@ from sqlalchemy import exists, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deep_research.agent_designer.ast_normalizer import (
+    apply_web_search_provider_defaults,
+)
 from deep_research.agent_designer.catalog_service import CatalogService
 from deep_research.models.agent_deployment import (
     MAX_CLEANUP_ATTEMPTS,
@@ -138,6 +141,11 @@ class AgentV2Service:
     async def create(self, owner_id: str, request: CreateAgentV2Request) -> AgentV2:
         now = datetime.now(UTC)
         definition = CatalogService().materialize_for_save(request.definition)
+        # Fill databricks web-search defaults (e.g. the serving endpoint) so an agent
+        # saved via the UI inspector — which bypasses the designer normalizer —
+        # persists a self-describing tool, not a provider:databricks tool missing
+        # `model` that fails at tool construction.
+        apply_web_search_provider_defaults(definition)
         etag = _compute_etag(definition, now)
         agent = AgentV2(
             id=uuid4(),
@@ -198,10 +206,15 @@ class AgentV2Service:
         if request.visibility is not None:
             agent.visibility = request.visibility
         if request.definition is not None:
-            agent.definition = CatalogService().materialize_for_save(
+            definition = CatalogService().materialize_for_save(
                 request.definition,
                 previous=agent.definition,
             )
+            # Fill databricks web-search defaults so a UI save (which bypasses the
+            # designer normalizer) persists a self-describing tool; reassign after the
+            # in-place fill so the JSON column is marked dirty for the flush.
+            apply_web_search_provider_defaults(definition)
+            agent.definition = definition
 
         agent.updated_at = datetime.now(UTC)
         agent.etag = _compute_etag(agent.definition, agent.updated_at)

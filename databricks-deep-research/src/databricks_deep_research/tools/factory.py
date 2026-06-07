@@ -36,6 +36,12 @@ class ToolFactoryContext:
     workspace_client: Any | None = None  # databricks.sdk.WorkspaceClient
     user_token: str | None = None  # OBO token for authenticated calls
     search_client: Any | None = None  # SearchClient protocol (web_search)
+    # () -> AsyncOpenAI authenticated as the app / service principal and pointed
+    # at {host}/serving-endpoints. Used for model-serving calls (Databricks
+    # built-in web search), which run as the app — NOT the OBO user
+    # (``user_token``), which is reserved for user-scoped data tools and need not
+    # carry the ``model-serving`` scope the foundation-model passthrough requires.
+    serving_client_provider: Any | None = None
     crawler: Any | None = None  # ContentCrawler protocol (web_crawl)
     file_index: Any | None = None  # FileIndex for file_search
     # text_table dependencies — wired together once per app boot and

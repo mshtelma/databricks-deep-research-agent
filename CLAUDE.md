@@ -398,6 +398,105 @@ the synthesizer emits the LLM-written report with a `> ⚠️ Grounding warning`
 banner instead of the canned "Insufficient Evidence" template. Set to `false`
 to revert to the legacy hard-fail behavior.
 
+### Search Providers
+The builtin `web_search` tool's backend is selected by `search.provider` in
+`app.yaml` (default `databricks` — works out-of-the-box on a Databricks workspace
+with NO external search subscription; **Brave is opt-in and never assumed/required**).
+All providers implement the framework `SearchClient` protocol and feed the same
+pool → crawl → citation pipeline.
+
+| Provider | Backend | Notes |
+|----------|---------|-------|
+| `databricks` (default) | Model-serving **built-in web search** | A *billed model generation* per query (latency/cost ≫ Brave; ~8–16 billed searches per deep-research run). Pay-per-token endpoints only; unavailable on provisioned-throughput / HIPAA-BAA / cross-region-disabled workspaces (set `provider: brave`/`jina` there). |
+| `brave` (opt-in) | Brave Web Search API | Fast REST search; needs `BRAVE_API_KEY`. |
+| `jina` (opt-in) | Jina Search API | Returns full page content; `JINA_API_KEY` optional. |
+
+`databricks` provider (`config/app.yaml` → `search.databricks`):
+- **Gemini endpoint** (`databricks-gemini-3-1-flash-lite`, default) — native
+  `generateContent` grounding; single fast call; redirect URLs auto-resolved to
+  canonical. **OpenAI endpoint** (`databricks-gpt-5`) — Responses API; direct URLs +
+  real titles, but agentic/slower (can exceed the `web_search`-mode timeout).
+- Family auto-detected from the endpoint name (override via `model_family`).
+- Reuses the framework LLM client's serving-endpoints connection (OBO identity).
+- Concurrency capped by env `DBX_WEBSEARCH_MAX_CONCURRENCY` (from `search.databricks.max_concurrency`).
+- Implementation: `databricks-deep-research/.../tools/builtins/databricks_web_search.py`.
+
+**Provider precedence (high → low):** per-tool `config.provider` → global
+`app.yaml search.provider` → built-in `databricks` (`DEFAULT_SEARCH_PROVIDER` in
+`core/app_config.py`, the single source; `resolve_effective_provider` centralizes
+the rule). A web tool with **no** `provider` **inherits at runtime** (never
+stamped/baked on save), so changing `app.yaml search.provider` /
+`search.databricks.endpoint` re-points every inheriting agent — a live global
+lever. databricks sub-config (`model`/`model_family`/`timeout_seconds`/`max_results`/
+`resolve_redirects`): explicit per-tool value → else `search.databricks` defaults
+(auto-filled) → else framework defaults.
+
+**Per-tool provider — three authoring surfaces:**
+- *YAML* — set `config.provider` (and for databricks `config.model`/tuning) on a
+  `web_search`/`web_research` decl. Honored by the framework factory
+  (`_resolve_search_provider`); the app-side precedence guard
+  `framework_orchestrator._tool_names_with_explicit_provider` stops the auto-injected
+  global tool from shadowing it.
+- *Designer UI inspector* — `agent_designer/registry._web_provider_properties` merges a
+  `provider` dropdown + databricks knobs into the `web_search`/`web_research`
+  `config_schema`; `SchemaField` renders them with **no React change**. New tools start
+  `provider`-absent (= inherit) because `frontend/src/lib/jsonSchema.defaultConfigForSchema`
+  seeds only explicit-default/required fields.
+- *Designer chat* — the architect (`designer_architect.yaml`) sets `config.provider` per
+  lane/tool only when the user asks for a specific backend; otherwise omits it (inherit).
+
+**How the default reaches tools:**
+- *Inherited tools (no per-tool `provider`)* use `ctx.search_client`, set by
+  `workflow_runner_factory._apply_default_search_client` to the global-provider
+  backend (databricks by default, via the shared `tool_adapter._build_web_search_client`).
+  This single point covers every entry path (main-chat, agent-serving, designer),
+  because the framework factory's no-provider branch reads `ctx.search_client`.
+  Inherited config is **never** stamped/baked, keeping the app.yaml lever live.
+- *Explicit per-tool `databricks`* is made self-describing (endpoint/tuning filled
+  from `search.databricks`; `max_results` floored to `web_research`'s `total_results`)
+  at persist time (`ast_normalizer.apply_web_search_provider_defaults`, shared by the
+  designer normalizer + agent-save — **explicit-databricks only, never inherited**)
+  and as a runtime net (`framework_orchestrator._fill_databricks_tool_defaults`). Both
+  reuse `core/app_config.fill_databricks_search_defaults`. Explicit `brave`/`jina` are
+  left untouched.
+- *Deploy (shell-app)* binds the Brave secret only when a web tool **explicitly**
+  pins `provider: brave` (`shell_app._definition_uses_brave_web_search`;
+  `databricks.yml.j2` / `app.yaml` gate the secret on `brave_secret_scope`), so a
+  default (databricks) shell-app needs no Brave secret.
+
+Design-time validation: `semantic_validation` rejects an out-of-enum
+`provider`/`model_family`; the framework `_resolve_search_provider` is the runtime
+backstop. Exercised by `test_app_config`, `test_ast_normalizer`,
+`test_workflow_runner_factory_search_client`, `test_shell_app_exporter`,
+`test_provider_agnostic_retriever`, `test_registry_web_provider`,
+`test_tool_config_enum_validation`, and `investment_research_databricks_*`
+scaffold-and-run cases.
+
+**Domain allowlist push-down (added 2026-06-07).** A per-agent INCLUDE allowlist
+(`DomainFilterConfig`) used to be enforced ONLY post-hoc — the grounded LLM searched the
+open web and the filter dropped everything off-domain, so allowlists often returned zero
+sources. Now the allowlist is also pushed into the engine:
+- **OpenAI** (`databricks-gpt-5*`, Responses API): `tools=[{"type":"web_search","filters":
+  {"allowed_domains":[…]}}]` — bare domains, subdomains auto-included. Verified honored +
+  confined on AIS. **All-or-nothing**: pushed only if every pattern reduces to a bare
+  registrable domain (≥2 labels) within the limit (`*.gov`/`news.*`/over-limit ⇒ no push,
+  fall back to hint+post-hoc). Graceful per-run fallback: a 400 on `filters` latches it off
+  and retries without (so an unsupporting proxy degrades, never hard-fails).
+- **Both families**: a *soft* domain scope hint is appended to the search instruction
+  (Gemini's only lever; lists raw patterns incl. wildcards). Hard enforcement is the engine
+  filter or the post-hoc `url_allowed` — never the instruction text (avoids self-censoring
+  to zero).
+- **Subdomain-inclusive matching**: a bare `reuters.com` now also matches `www.reuters.com`
+  in BOTH matchers (`domain_filter.match_domain_pattern`, `web_search._domain_matches`) —
+  aligns post-hoc with OpenAI's subdomain semantics; affects all providers + exclude mode.
+- Gate: `search.databricks.push_allowed_domains` (default `true`); EXCLUDE mode and Gemini
+  are unaffected by the gate. Wired in `tool_adapter._build_web_search_client`
+  (`_allowlist_patterns`) + `factories/builtin._build_databricks_search_provider`; derived in
+  `databricks_web_search._pushable_allowed_domains` / `_domain_scope_clause`. The per-agent
+  filter reaches runtime via the `framework_orchestrator` ToolResolver override (shadows the
+  factory's shared `ctx.search_client`). Exercised by `test_databricks_web_search`,
+  `test_domain_filter`, `test_tool_adapter_provider`, `test_app_config`.
+
 ### Query Modes
 - `simple` — Direct LLM response, no research
 - `web_search` — Lightweight pipeline: 2-5 sources, 15-20s timeout, falls back to simple on timeout

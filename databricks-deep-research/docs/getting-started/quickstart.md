@@ -13,7 +13,7 @@ export DATABRICKS_HOST="https://your-workspace.databricks.com"
 export DATABRICKS_TOKEN="your-token"
 # OR
 export OPENAI_API_KEY="your-key"  # for standalone OpenAI usage
-export BRAVE_API_KEY="your-brave-key"  # for web search
+export BRAVE_API_KEY="your-brave-key"  # only when using the Brave web-search backend (databricks/brave/jina) — see guides/search-providers.md
 ```
 
 ## Option 1: Run a Built-in Workflow (3 lines)

@@ -5,6 +5,7 @@ import os
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Any, Final, Literal, get_args
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -293,6 +294,80 @@ class BraveSearchConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class DatabricksSearchConfig(BaseModel):
+    """Configuration for Databricks built-in web search (model-serving grounding).
+
+    Built-in search is a *billed model generation* per query (latency/cost far
+    exceeds a search REST API), available only on **pay-per-token** endpoints and
+    unavailable on provisioned-throughput / HIPAA-BAA / cross-region-disabled
+    workspaces. Used only when ``SearchConfig.provider == "databricks"``.
+    """
+
+    # Serving endpoint that performs the search. Gemini (single fast call) is the
+    # default; gpt-5 (OpenAI Responses) returns direct URLs but is slower/agentic.
+    endpoint: str = Field(default="databricks-gemini-3-1-flash-lite")
+    # "openai" | "gemini"; auto-detected from the endpoint name when omitted.
+    model_family: str | None = Field(default=None)
+    max_results: int = Field(default=10, ge=1, le=20)
+    # Process-wide cap on concurrent built-in-search generations (heavy calls).
+    max_concurrency: int = Field(default=4, ge=1, le=32)
+    timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    # Resolve Gemini grounding-redirect URLs to canonical publisher URLs (no-op
+    # for the OpenAI path, which already returns direct URLs).
+    resolve_redirects: bool = Field(default=True)
+    # Push a per-agent INCLUDE-mode allowlist into the OpenAI Responses web_search
+    # ``filters.allowed_domains`` (bare domains; OpenAI endpoints only; subdomains
+    # auto-included). When False, allowlists rely on the instruction hint + post-hoc
+    # URL filter. No effect on Gemini (no API knob) or on exclude mode.
+    push_allowed_domains: bool = Field(default=True)
+    # Selectable built-in-search endpoints per model family — the single source
+    # for (a) the family→default endpoint (first entry = cheapest/default), (b)
+    # the designer's per-family endpoint dropdown, and (c) endpoint→family lookup
+    # in validation. Only list endpoints that support built-in web search; adding
+    # a custom one here makes it selectable in the designer and family-mapped.
+    endpoints_by_family: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "gemini": ["databricks-gemini-3-1-flash-lite"],
+            "openai": ["databricks-gpt-5-mini", "databricks-gpt-5"],
+        }
+    )
+
+    model_config = {"frozen": True}
+
+    def default_endpoint_for_family(self, family: str | None) -> str:
+        """Cheapest/default endpoint for *family*; the global default otherwise.
+
+        Keeps the endpoint consistent with a declared ``model_family`` so a tool
+        that pins the family but omits the endpoint never inherits the global
+        (possibly different-family) endpoint — the exact mismatch that drives the
+        OpenAI Responses API onto a Gemini endpoint (a hard 400).
+        """
+        if isinstance(family, str):
+            endpoints = self.endpoints_by_family.get(family)
+            if endpoints:
+                return endpoints[0]
+        return self.endpoint
+
+    def family_for_endpoint(self, endpoint: str) -> str | None:
+        """Infer the model family of a serving endpoint, or ``None`` if unknown.
+
+        Prefers the explicit :attr:`endpoints_by_family` mapping, then falls back
+        to the endpoint-name heuristic (mirrors the framework adapter's private
+        ``_detect_family`` in ``tools/builtins/databricks_web_search.py`` but
+        returns ``None`` instead of raising on an undetectable name, so callers
+        can choose to trust an explicit family for custom endpoints).
+        """
+        for fam, endpoints in self.endpoints_by_family.items():
+            if endpoint in endpoints:
+                return fam
+        name = endpoint.lower()
+        if "gemini" in name:
+            return "gemini"
+        if any(token in name for token in ("gpt", "openai", "o1", "o3")):
+            return "openai"
+        return None
+
+
 class DomainFilterConfig(BaseModel):
     """Configuration for per-agent domain handling.
 
@@ -357,13 +432,94 @@ class DomainFilterConfig(BaseModel):
         return bool(self.preferred_domains) or bool(self.deprecated_domains)
 
 
+# Out-of-the-box web-search provider. Databricks model-serving built-in web
+# search is the default so research works on a Databricks workspace with NO
+# external search subscription; "brave"/"jina" are opt-in external APIs that
+# require their own API key. Single source of truth for the default — reused by
+# the Field default below and every defensive fallback so they cannot drift.
+DEFAULT_SEARCH_PROVIDER: Final = "databricks"
+
+
 class SearchConfig(BaseModel):
     """Configuration for search services."""
 
+    # Active web-search provider for the builtin web_search tool. "databricks"
+    # (default) uses model-serving built-in web search; "brave"/"jina" are opt-in
+    # external search APIs (each needs a key). Per-workflow YAML / per-agent
+    # designer config can still override via the web tool's config.provider.
+    provider: Literal["databricks", "brave", "jina"] = Field(
+        default=DEFAULT_SEARCH_PROVIDER
+    )
     brave: BraveSearchConfig = Field(default_factory=BraveSearchConfig)
+    databricks: DatabricksSearchConfig = Field(default_factory=DatabricksSearchConfig)
     domain_filter: DomainFilterConfig = Field(default_factory=DomainFilterConfig)
 
     model_config = {"frozen": True}
+
+
+# Supported web-search providers, derived from the SearchConfig.provider Literal
+# so the agent-designer registry enum and any other consumer cannot drift from
+# the canonical set. Order follows the Literal declaration (databricks first =
+# the default provider).
+SEARCH_PROVIDERS: tuple[str, ...] = get_args(
+    SearchConfig.model_fields["provider"].annotation
+)
+
+
+def resolve_effective_provider(
+    tool_provider: object, global_provider: str | None = None
+) -> str:
+    """Resolve a web tool's effective search provider.
+
+    Precedence (high → low): a non-empty per-tool ``config.provider`` wins; else
+    the workspace ``search.provider`` (``global_provider``); else the built-in
+    :data:`DEFAULT_SEARCH_PROVIDER`. Centralizes the precedence rule so the
+    orchestrator runtime fill and the designer normalizer cannot disagree.
+    """
+    if isinstance(tool_provider, str) and tool_provider:
+        return tool_provider
+    if isinstance(global_provider, str) and global_provider:
+        return global_provider
+    return DEFAULT_SEARCH_PROVIDER
+
+
+def fill_databricks_search_defaults(
+    config: dict[str, Any],
+    db: DatabricksSearchConfig,
+    *,
+    min_results: int = 0,
+) -> bool:
+    """Fill ABSENT Databricks built-in web-search keys from the app defaults.
+
+    Used by both the designer normalizer and the app orchestrator so a web tool
+    that selects ``provider: databricks`` without spelling out the endpoint /
+    tuning inherits the workspace ``search.databricks`` block. Only fills keys
+    that are absent — it never overwrites an explicit per-tool value (including a
+    deliberate ``resolve_redirects: false`` or a smaller ``timeout_seconds``).
+
+    ``min_results`` raises the ``max_results`` floor: ``web_research`` passes its
+    ``total_results`` as the search ``count``, and the adapter caps the returned
+    count at ``max_results`` — so without this floor a ``total_results: 20`` tool
+    would be silently truncated to the default ``max_results`` (10).
+
+    Returns ``True`` if it mutated ``config``.
+    """
+    before = dict(config)
+    # Resolve the endpoint CONSISTENTLY with any declared family: a tool that
+    # pins ``model_family`` but omits ``model`` gets THAT family's default
+    # endpoint, not the global (possibly different-family) default. Without this,
+    # ``model_family: openai`` + the global Gemini endpoint => OpenAI Responses
+    # API on a Gemini endpoint => hard 400 and zero search results.
+    if "model" not in config:
+        config["model"] = db.default_endpoint_for_family(config.get("model_family"))
+    if db.model_family is not None:
+        config.setdefault("model_family", db.model_family)
+    config.setdefault("timeout_seconds", db.timeout_seconds)
+    config.setdefault("resolve_redirects", db.resolve_redirects)
+    config.setdefault("push_allowed_domains", db.push_allowed_domains)
+    if "max_results" not in config:
+        config["max_results"] = max(db.max_results, min_results)
+    return config != before
 
 
 class TruncationConfig(BaseModel):

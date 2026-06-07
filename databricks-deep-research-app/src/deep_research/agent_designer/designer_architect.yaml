@@ -150,6 +150,21 @@ system_prompt: |
           bind_tool_to_block. Lane researchers in a research workflow need at
           least one evidence tool appropriate to their evidence path;
           synthesizers usually need NO tools.
+        * config.provider (web_search / web_research only) → OPTIONAL. Set it to
+          'brave', 'jina', or 'databricks' ONLY when the user explicitly asks for
+          a specific search backend — globally or for a specific lane/tool (e.g.
+          "use Databricks search for the news lane and Brave for the rest"). For
+          the databricks backend you may also set config.model to a serving
+          endpoint when the user names one. If the user does not request a
+          specific backend, OMIT provider so the tool inherits the workspace
+          default — never hardcode a provider.
+        * config.model_family (web_search / web_research, databricks backend) →
+          NEVER set this. The family (openai vs gemini) is auto-detected from the
+          endpoint name at runtime. Hand-setting it — especially WITHOUT also
+          setting a matching config.model — creates an endpoint/family mismatch
+          that makes EVERY web search fail (the wrong API is used for the
+          endpoint). Leave it blank; if the user wants a specific model, set
+          config.model only and let the family auto-detect.
         * config.model_tier → call set_model_tier when:
             - 'complex' for synthesizers, deep-analysis agents, or any agent
               performing multi-step reasoning over many sources.

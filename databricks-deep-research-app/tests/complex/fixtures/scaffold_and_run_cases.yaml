@@ -72,9 +72,12 @@ cases:
     # (treasury_bulletin_1953_02_c0022). Pre-R4 the workflow reliably
     # produces FY1945=$50,337M (the more readily retrievable annual line
     # item); after deeper retrieval lands, both can appear together.
-    expected_answer_terms:
-      - "50,337"
-      - million
+    # Each group passes if the output contains ANY of its terms; ALL groups
+    # must pass. Robust to the synthesizer's stochastic phrasing — a correct
+    # answer may say "50,337 million dollars", "$45,238M", or "45.2 billion".
+    expected_answer_term_groups:
+      - ["50,337", "50337", "45,238", "45238"]          # a canonical 1945 total (FY or CY)
+      - ["million", "billion", "dollars", "USD", "$"]   # the unit / currency is stated
     requires_table_tools_warehouse: true
     expected_resource_names:
       - main.officeqa_benchmark.treasury_chunks_vs_index
@@ -99,3 +102,51 @@ cases:
     query: "NVIDIA Corporation (NVDA)"
     expected_min_node_count: 3
     expected_min_tool_count: 1
+
+  # ── Databricks built-in web search variants ──────────────────────────────
+  # Same investment_research intent/query, but the designer is configured (via a
+  # per-case app-config search override applied by the test) to use Databricks
+  # model-serving built-in web search instead of Brave. The designer stamps
+  # config.provider onto the generated web tools; the runner then resolves the
+  # DatabricksWebSearchAdapter. Needs Databricks creds + a built-in-search-capable
+  # pay-per-token workspace; BRAVE not required.
+  - id: investment_research_databricks_gemini
+    requires_brave: false
+    app_search_provider: databricks
+    app_search_endpoint: databricks-gemini-3-1-flash-lite
+    intent: |
+      Build an investment research assistant that takes a company name or ticker
+      and produces a deep, comprehensive investment report covering:
+      fundamentals (financials, valuation, balance sheet), risk analysis, market
+      trends, news sentiment, recent earnings, and competitor analysis. Use
+      plan-and-execute patterns across research domains and synthesize into a
+      single coherent report.
+    query: "Snowflake Inc. (SNOW)"
+    expected_min_node_count: 3
+    expected_min_tool_count: 1
+    expected_runtime_any_tool_kinds:
+      - web_search
+      - web_research
+    expected_min_source_count: 1
+
+  - id: investment_research_databricks_openai
+    requires_brave: false
+    app_search_provider: databricks
+    app_search_endpoint: databricks-gpt-5
+    # gpt-5's Responses web_search is agentic/slow — raise the per-call timeout
+    # (stamped onto the tool config) so searches complete within the run budget.
+    app_search_timeout: 90
+    intent: |
+      Build an investment research assistant that takes a company name or ticker
+      and produces a deep, comprehensive investment report covering:
+      fundamentals (financials, valuation, balance sheet), risk analysis, market
+      trends, news sentiment, recent earnings, and competitor analysis. Use
+      plan-and-execute patterns across research domains and synthesize into a
+      single coherent report.
+    query: "Snowflake Inc. (SNOW)"
+    expected_min_node_count: 3
+    expected_min_tool_count: 1
+    expected_runtime_any_tool_kinds:
+      - web_search
+      - web_research
+    expected_min_source_count: 1

@@ -45,7 +45,7 @@ from databricks_deep_research.workflow.definition import (
     WorkflowDefinition,
     WorkflowNode,
 )
-from databricks_deep_research.workflow.runtime_keys import RUNTIME_INJECTED_KEYS
+from databricks_deep_research.workflow.runtime_keys import runtime_seed_keys
 
 _renderer = SafeTemplateRenderer()
 
@@ -130,11 +130,7 @@ def dangling_reads(definition: WorkflowDefinition) -> list[str]:
     global (Pass B), not lexically scoped here.
     """
     dangling: list[str] = []
-    seed = (
-        set(definition.required_inputs)
-        | set(definition.runtime_injected_keys)
-        | set(RUNTIME_INJECTED_KEYS)
-    )
+    seed = set(definition.required_inputs) | runtime_seed_keys(definition.runtime_injected_keys)
     _resolve(definition.root, seed, dangling)
     return dangling
 

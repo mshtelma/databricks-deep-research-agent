@@ -231,6 +231,12 @@ class SubworkflowNodeConfig(BaseModel):
     output_mapping: dict[str, str] = Field(default_factory=dict)
     output_key: str = "subworkflow_result"
     pool_mode: str = "inherit"  # inherit, isolate, merge
+    # Self-contained embedded sub-workflow: a WorkflowDefinition dump produced by
+    # api/compile.py when a SubAgent is compiled to a subworkflow node. Typed as a
+    # raw dict to decouple this config from re-validating the nested definition on
+    # every load; the P2 subworkflow executor parses it via
+    # WorkflowDefinition.model_validate(...) once subworkflow execution lands.
+    inline: dict[str, Any] | None = None
 
 
 class PlanAndExecuteNodeConfig(BaseModel):

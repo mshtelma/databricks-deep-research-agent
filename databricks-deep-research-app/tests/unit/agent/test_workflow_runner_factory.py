@@ -62,6 +62,14 @@ class TestBuildAppWorkflowRunner:
         startup — the desired behavior (vs the historical silent
         Insufficient-Evidence pattern)."""
         monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+        # Pin the global provider to brave so the default-search-client wiring is
+        # a no-op; this test exercises the brave-no-key path. (The databricks
+        # default's ctx.search_client behavior is covered separately in
+        # test_workflow_runner_factory_search_client.py.)
+        monkeypatch.setattr(
+            "deep_research.core.app_config.get_app_config",
+            lambda: SimpleNamespace(search=SimpleNamespace(provider="brave")),
+        )
         runner = build_app_workflow_runner(
             llm_client=_fake_llm(), workspace_client=None, user_token=None,
         )
@@ -75,6 +83,11 @@ class TestBuildAppWorkflowRunner:
         """BRAVE_API_KEY='' (empty string) is treated like missing — defensive
         check because secret scopes sometimes round-trip to empty strings."""
         monkeypatch.setenv("BRAVE_API_KEY", "")
+        # Brave-path test: pin provider so the default (databricks) wiring no-ops.
+        monkeypatch.setattr(
+            "deep_research.core.app_config.get_app_config",
+            lambda: SimpleNamespace(search=SimpleNamespace(provider="brave")),
+        )
         runner = build_app_workflow_runner(
             llm_client=_fake_llm(), workspace_client=None, user_token=None,
         )
@@ -84,16 +97,18 @@ class TestBuildAppWorkflowRunner:
 
     def test_workspace_client_preserved(self) -> None:
         """Caller's explicit workspace_client is preserved verbatim — must NOT
-        be replaced by from_defaults's auto-detection branch."""
+        be replaced by from_defaults's auto-detection branch. (When a user
+        token IS present, an OBO client is derived from it instead — that path
+        is covered by TestOBOResolution.)"""
         sentinel = object()
         runner = build_app_workflow_runner(
             llm_client=_fake_llm(),
             workspace_client=sentinel,  # type: ignore[arg-type]
-            user_token="obo-token-xyz",
+            user_token=None,
         )
         ctx = runner.factory_context
         assert ctx.workspace_client is sentinel
-        assert ctx.user_token == "obo-token-xyz"
+        assert ctx.user_token is None
 
     def test_returns_fresh_runner_per_call(self) -> None:
         """Each call returns an independent WorkflowRunner — the runner is
@@ -150,7 +165,7 @@ class TestBuildAppWorkflowRunner:
         runner = build_app_workflow_runner(
             llm_client=_fake_llm(),
             workspace_client=workspace_client,  # type: ignore[arg-type]
-            user_token="obo-token",
+            user_token=None,
         )
 
         ctx = runner.factory_context
@@ -241,6 +256,14 @@ class TestAssertRuntimeCanSatisfyWorkflows:
         helper must raise listing the missing field, the blocked kind, and
         the BRAVE-key remediation hint."""
         monkeypatch.delenv("BRAVE_API_KEY", raising=False)
+        # Pin provider to brave so no default search_client is wired — this test
+        # exercises the boot guard's "search_client missing" path. (Under the
+        # databricks default the backend IS present, so the guard would not fire
+        # — that positive case is covered by the search-client factory tests.)
+        monkeypatch.setattr(
+            "deep_research.core.app_config.get_app_config",
+            lambda: SimpleNamespace(search=SimpleNamespace(provider="brave")),
+        )
         runner = build_app_workflow_runner(
             llm_client=_fake_llm(),
             workspace_client=None,
@@ -343,7 +366,7 @@ class TestTextTableWiringIncompleteWarning:
             runner = build_app_workflow_runner(
                 llm_client=_fake_llm(),
                 workspace_client=workspace_client,  # type: ignore[arg-type]
-                user_token="t",
+                user_token=None,
             )
         assert any(
             "TEXT_TABLE_WIRING_INCOMPLETE" in rec.message
@@ -434,3 +457,54 @@ class TestAntiRegressionLint:
             "build_app_workflow_runner(...) instead. Offenders:\n"
             + "\n".join(offenders)
         )
+
+
+class TestOBOResolution:
+    """``build_app_workflow_runner`` must bake an OBO client when a user token
+    is present so Databricks tools run AS THE USER (the 2026-05-30 fix for the
+    main-UI failure where table reads ran as the app SP and were denied)."""
+
+    def _sp(self, host: str = "https://wsp.example.databricks.com") -> MagicMock:
+        sp = MagicMock(name="sp_client")
+        sp.config.host = host
+        return sp
+
+    def test_obo_client_baked_into_table_executor_when_token_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from databricks_deep_research.core import databricks_auth
+
+        monkeypatch.setenv("TABLE_TOOLS_WAREHOUSE_ID", "wh-test")
+        sp = self._sp()
+        obo = MagicMock(name="obo_client")
+        monkeypatch.setattr(
+            databricks_auth, "WorkspaceClient", MagicMock(return_value=obo)
+        )
+        runner = build_app_workflow_runner(
+            llm_client=_fake_llm(), workspace_client=sp, user_token="user-tok"
+        )
+        ctx = runner.factory_context
+        assert ctx.workspace_client is obo
+        assert ctx.user_token == "user-tok"
+        # The text-table SQL executor — the tool that was denied in prod —
+        # now runs statements through the OBO (user) client.
+        assert ctx.sql_executor is not None
+        assert ctx.sql_executor._workspace_client is obo
+
+    def test_sp_client_used_when_no_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from databricks_deep_research.core import databricks_auth
+
+        monkeypatch.setenv("TABLE_TOOLS_WAREHOUSE_ID", "wh-test")
+        sp = self._sp()
+        wc = MagicMock(name="WorkspaceClient")
+        monkeypatch.setattr(databricks_auth, "WorkspaceClient", wc)
+        runner = build_app_workflow_runner(
+            llm_client=_fake_llm(), workspace_client=sp, user_token=None
+        )
+        wc.assert_not_called()
+        ctx = runner.factory_context
+        assert ctx.workspace_client is sp
+        assert ctx.sql_executor is not None
+        assert ctx.sql_executor._workspace_client is sp

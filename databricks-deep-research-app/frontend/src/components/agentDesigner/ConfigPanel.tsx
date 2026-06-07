@@ -446,6 +446,9 @@ function ToolsBindingForm({
   const [catalogDraft, setCatalogDraft] = React.useState('');
   const [probeSamples, setProbeSamples] = React.useState<ProbeSample[]>([]);
   const [catalogError, setCatalogError] = React.useState<string | null>(null);
+  // Which declared tool (if any) is expanded for inline config editing in this tab.
+  const [editingToolName, setEditingToolName] = React.useState<string | null>(null);
+  const editingTool = declaredTools.find((tool) => tool.name === editingToolName) ?? null;
   const extras =
     _block.config && typeof _block.config['extras'] === 'object' && _block.config['extras'] !== null
       ? (_block.config['extras'] as Record<string, unknown>)
@@ -462,6 +465,19 @@ function ToolsBindingForm({
       setCatalogDraft(catalogText);
     }
   }, [catalogEditing, catalogText]);
+
+  // Close the inline tool editor if its tool was removed/renamed elsewhere, or
+  // when a different node is selected. ConfigPanel reads selection from the
+  // store (not props), so this component is NOT remounted on node switch —
+  // local state must be reset deliberately.
+  React.useEffect(() => {
+    if (editingToolName && !declaredTools.some((tool) => tool.name === editingToolName)) {
+      setEditingToolName(null);
+    }
+  }, [declaredTools, editingToolName]);
+  React.useEffect(() => {
+    setEditingToolName(null);
+  }, [selectedPath]);
 
   const toggleBinding = (name: string) => {
     const store = useAgentEditorStore.getState();
@@ -524,7 +540,9 @@ function ToolsBindingForm({
   return (
     <div>
       <div className="mb-2.5 text-[11px] text-db-gray-text">
-        Tools the agent can call during its ReAct loop. Click to bind/unbind.
+        Tools the agent can call during its ReAct loop. Click a tool to bind/unbind, or the
+        pencil to edit its config. Edits apply to the shared workflow tool — every agent bound
+        to it sees the change.
       </div>
       {declaredTools.length === 0 ? (
         <div className="rounded-db-md border border-dashed border-db-gray-lines p-4 text-center text-[12px] leading-[1.55] text-db-gray-text">
@@ -546,35 +564,65 @@ function ToolsBindingForm({
             const bound = boundToolNames.includes(decl.name);
             const kind = findToolKind(registry, decl.kind);
             const requiresApproval = toolRequiresApproval(decl);
+            const editing = editingToolName === decl.name;
             return (
-              <button
-                type="button"
+              // Row is a <div> (not a <button>) so it can hold two sibling
+              // buttons: the bind toggle and the inline-config edit toggle.
+              <div
                 key={decl.name}
-                onClick={() => toggleBinding(decl.name)}
-                className={`flex items-center gap-2 rounded-db-md border px-2 py-1.5 text-left transition-colors ${
-                  bound
+                className={`flex items-center gap-1 rounded-db-md border pr-1 transition-colors ${
+                  bound || editing
                     ? 'border-db-navy-300 bg-db-oat-medium'
                     : 'border-transparent hover:bg-db-oat-light'
                 }`}
               >
-                <LayerChip layer={kind?.layer ?? 'A'} />
-                <Wrench size={14} className="text-db-navy-800" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-db-mono text-[12px] font-medium text-db-navy-800">
-                    {decl.name}
+                <button
+                  type="button"
+                  onClick={() => toggleBinding(decl.name)}
+                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
+                >
+                  <LayerChip layer={kind?.layer ?? 'A'} />
+                  <Wrench size={14} className="text-db-navy-800" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-db-mono text-[12px] font-medium text-db-navy-800">
+                      {decl.name}
+                    </div>
+                    {kind?.label && (
+                      <div className="truncate text-[10px] text-db-gray-text">{kind.label}</div>
+                    )}
                   </div>
-                  {kind?.label && (
-                    <div className="truncate text-[10px] text-db-gray-text">{kind.label}</div>
+                  {requiresApproval && <Lock size={11} className="text-db-yellow-700" />}
+                  {bound && (
+                    <Check size={12} className="text-db-green-700" strokeWidth={2.5} />
                   )}
-                </div>
-                {requiresApproval && <Lock size={11} className="text-db-yellow-700" />}
-                {bound && (
-                  <Check size={12} className="text-db-green-700" strokeWidth={2.5} />
-                )}
-              </button>
+                </button>
+                <button
+                  type="button"
+                  aria-label="Edit tool config"
+                  aria-expanded={editing}
+                  title="Edit tool config"
+                  onClick={() =>
+                    setEditingToolName((prev) => (prev === decl.name ? null : decl.name))
+                  }
+                  className={`rounded p-1 transition-colors hover:bg-db-oat-light ${
+                    editing ? 'text-db-navy-800' : 'text-db-gray-text'
+                  }`}
+                >
+                  <Pencil size={12} />
+                </button>
+              </div>
             );
           })}
         </div>
+      )}
+      {editingTool && (
+        <ToolDeclarationEditor
+          key={editingTool.name}
+          tool={editingTool}
+          registry={registry}
+          onRename={setEditingToolName}
+          onClose={() => setEditingToolName(null)}
+        />
       )}
       <button
         type="button"

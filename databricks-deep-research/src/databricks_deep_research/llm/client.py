@@ -14,14 +14,16 @@ import os
 import random
 import time
 from collections.abc import AsyncGenerator, Callable
-from datetime import UTC, datetime
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
 from openai import APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
 
+from databricks_deep_research.errors import ContextWindowExceededError
 from databricks_deep_research.events.types import ModelCallEvent, StreamEvent
+from databricks_deep_research.llm.budget import estimate_message_tokens
 from databricks_deep_research.tracing import get_current_span
 
 logger = logging.getLogger(__name__)
@@ -128,6 +130,14 @@ class ModelTierConfig:
     tokens_per_minute: int = 0  # 0 = unlimited
     max_retries: int = 3  # Max retry attempts for rate limits / transient errors
     retry_base_backoff: float = 2.0  # Base seconds for exponential backoff
+    # Per-endpoint context window (tokens) for this tier's endpoints.
+    # endpoint identifier -> max_context_window. 0/absent = unknown.
+    endpoint_context_windows: dict[str, int] = field(default_factory=dict)
+    # Behavior when no available endpoint can fit the prompt even after
+    # escalating to the largest known window: "truncate" (default — shrink the
+    # prompt to the largest window and warn) or "fail" (raise
+    # ContextWindowExceededError).
+    on_context_overflow: Literal["truncate", "fail"] = "truncate"
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +171,12 @@ def parse_model_config(
                     f"Invalid rotation_strategy '{strategy}' for tier '{tier}'. "
                     f"Valid: {', '.join(sorted(_VALID_STRATEGIES))}"
                 )
+            overflow = value.get("on_context_overflow", "truncate")
+            if overflow not in ("truncate", "fail"):
+                raise ValueError(
+                    f"Invalid on_context_overflow '{overflow}' for tier "
+                    f"'{tier}'. Valid: truncate, fail"
+                )
             result[tier] = ModelTierConfig(
                 endpoints=value["endpoints"],
                 fallback_on_429=value.get("fallback_on_429", True),
@@ -168,6 +184,10 @@ def parse_model_config(
                 tokens_per_minute=value.get("tokens_per_minute", 0),
                 max_retries=value.get("max_retries", 3),
                 retry_base_backoff=float(value.get("retry_base_backoff", 2.0)),
+                endpoint_context_windows=dict(
+                    value.get("endpoint_context_windows", {})
+                ),
+                on_context_overflow=overflow,
             )
         else:
             raise ValueError(
@@ -182,6 +202,81 @@ def parse_model_config(
 # ---------------------------------------------------------------------------
 
 _DEFAULT_ESTIMATED_TOKENS = 4096
+# Output tokens to reserve when the caller does not specify max_tokens, used
+# only for the context-window fit check (not sent to the API).
+_DEFAULT_OUTPUT_RESERVE = 4096
+# Headroom for tokenization variance + system framing on the fit check.
+_CONTEXT_SAFETY_MARGIN = 1024
+
+
+def _truncate_messages_to_tokens(
+    messages: list[dict[str, Any]], max_input_tokens: int
+) -> list[dict[str, Any]]:
+    """Shrink *messages* to fit within *max_input_tokens* (best-effort).
+
+    Last-resort path when no endpoint can hold the prompt. Strategy:
+
+    1. Always keep system messages and the final message.
+    2. Keep the longest possible suffix of the remaining conversation that
+       fits the budget, dropping from the OLDEST non-system message inward.
+    3. Never begin the kept suffix on an orphan ``tool`` message (it would lack
+       the preceding assistant ``tool_calls`` and the API would reject it).
+    4. If even the minimal kept set overflows, hard-truncate message contents.
+
+    Returns a new list; the input is not mutated.
+    """
+    if max_input_tokens <= 0:
+        max_input_tokens = 1
+
+    system_msgs = [m for m in messages if m.get("role") == "system"]
+    rest = [m for m in messages if m.get("role") != "system"]
+    if not rest:
+        return list(messages)
+
+    # Grow a suffix from the end until adding the next-oldest would overflow.
+    kept_rest: list[dict[str, Any]] = []
+    for msg in reversed(rest):
+        candidate = [msg, *kept_rest]
+        if (
+            estimate_message_tokens([*system_msgs, *candidate]) <= max_input_tokens
+            or not kept_rest
+        ):
+            kept_rest = candidate
+        else:
+            break
+
+    # Don't start on an orphan tool message.
+    while kept_rest and kept_rest[0].get("role") == "tool":
+        kept_rest = kept_rest[1:]
+    if not kept_rest:
+        kept_rest = [rest[-1]]
+
+    result = [*system_msgs, *kept_rest]
+
+    # If still over budget, hard-truncate the largest string contents. Reserve
+    # for per-message framing overhead + the truncation marker so the
+    # post-truncation estimate actually lands under budget.
+    if estimate_message_tokens(result) > max_input_tokens:
+        marker = "\n...[truncated to fit context window]"
+        reserve = len(result) * 16 + len(marker)
+        budget_chars = max(1, max_input_tokens * 4 - reserve)
+        running = 0
+        clipped: list[dict[str, Any]] = []
+        for msg in result:
+            content = msg.get("content")
+            if isinstance(content, str):
+                remaining = max(0, budget_chars - running)
+                if len(content) > remaining:
+                    new_msg = dict(msg)
+                    new_msg["content"] = content[:remaining] + marker
+                    clipped.append(new_msg)
+                    running = budget_chars
+                    continue
+                running += len(content)
+            clipped.append(msg)
+        result = clipped
+
+    return result
 
 
 class FrameworkLLMClient:
@@ -199,6 +294,7 @@ class FrameworkLLMClient:
         *,
         embedding_model: str | None = None,
         client_provider: Callable[[], AsyncOpenAI] | None = None,
+        endpoint_registry: dict[str, int] | None = None,
     ) -> None:
         self._client = openai_client
         self._client_provider = client_provider
@@ -207,6 +303,16 @@ class FrameworkLLMClient:
         self._endpoint_health: dict[str, EndpointHealth] = {}
         self._round_robin_index: dict[str, int] = {}
         self._closed = False
+        # endpoint identifier -> max_context_window (tokens). Used by
+        # context-window-aware escalation to reach ANY known endpoint —
+        # including ones referenced by no tier (e.g. a large-window model
+        # reserved for overflow). Backfilled from each tier's window map so a
+        # registry is never required for tier endpoints to be window-aware.
+        self._endpoint_registry: dict[str, int] = dict(endpoint_registry or {})
+        for _cfg in model_mapping.values():
+            if isinstance(_cfg, ModelTierConfig):
+                for _ep, _win in _cfg.endpoint_context_windows.items():
+                    self._endpoint_registry.setdefault(_ep, _win)
 
     # -- Properties ---------------------------------------------------------
 
@@ -379,6 +485,7 @@ class FrameworkLLMClient:
             model_mapping=merged,
             embedding_model=self._embedding_model,
             client_provider=self._client_provider,
+            endpoint_registry=self._endpoint_registry,
         )
 
     # -- Model resolution ---------------------------------------------------
@@ -441,8 +548,15 @@ class FrameworkLLMClient:
         # All unhealthy -- return first and hope for the best.
         return endpoints[0]
 
-    def _find_fallback(self, tier: str, failed_endpoint: str) -> str | None:
-        """Find a fallback endpoint after 429/failure on the primary."""
+    def _find_fallback(
+        self, tier: str, failed_endpoint: str, required_total: int = 0
+    ) -> str | None:
+        """Find a fallback endpoint after 429/failure on the primary.
+
+        When *required_total* > 0, candidates whose context window is known to
+        be smaller than the prompt are skipped — otherwise a 429-fallback could
+        drop into a too-small sibling and re-trigger a 400 "prompt too long".
+        """
         cfg = self._models.get(tier)
         if cfg is None or isinstance(cfg, str):
             return None
@@ -451,12 +565,175 @@ class FrameworkLLMClient:
         for ep in cfg.endpoints:
             if ep == failed_endpoint:
                 continue
+            if required_total > 0 and not self._window_fits(ep, required_total):
+                continue
             health = self._get_health(ep)
             if health.can_handle_request(
                 _DEFAULT_ESTIMATED_TOKENS, cfg.tokens_per_minute
             ):
                 return ep
         return None
+
+    # -- Context-window-aware escalation ------------------------------------
+
+    def _window_of(self, endpoint: str) -> int:
+        """Return the known context window for *endpoint*, or 0 if unknown."""
+        return self._endpoint_registry.get(endpoint, 0)
+
+    def _window_fits(self, endpoint: str, required_total: int) -> bool:
+        """Whether *endpoint*'s known window can hold *required_total* tokens.
+
+        Endpoints with an unknown window (0) are treated as NOT a safe
+        escalation target — we never knowingly route a large prompt into a
+        model whose capacity we cannot verify.
+        """
+        window = self._window_of(endpoint)
+        return window >= required_total if window > 0 else False
+
+    def _select_context_fit_endpoint(
+        self, tier: str, required_total: int
+    ) -> tuple[str, str | None]:
+        """Select an endpoint whose context window fits *required_total*.
+
+        Returns ``(chosen_endpoint, escalated_from)`` where ``escalated_from``
+        is ``None`` when the normally-selected endpoint already fits.
+
+        Selection order:
+          1. The normally-selected (health/TPM-aware) primary, if it fits.
+          2. Other endpoints of the CURRENT tier that fit, in priority order.
+          3. The smallest-window endpoint across ALL known endpoints that fits.
+
+        When nothing fits, returns ``(primary, None)`` — the caller decides
+        whether to truncate or fail.
+        """
+        primary = self._select_endpoint(tier)
+        # Unknown primary window (0) → cannot prove it overflows; leave as-is.
+        primary_window = self._window_of(primary)
+        if primary_window <= 0 or primary_window >= required_total:
+            return primary, None
+
+        cfg = self._models.get(tier)
+        if isinstance(cfg, ModelTierConfig):
+            for ep in cfg.endpoints:
+                if ep == primary:
+                    continue
+                if self._window_fits(ep, required_total) and self._get_health(
+                    ep
+                ).can_handle_request(_DEFAULT_ESTIMATED_TOKENS, cfg.tokens_per_minute):
+                    return ep, primary
+
+        # Global escalation: smallest fitting window across all endpoints.
+        fitting = sorted(
+            (
+                ep
+                for ep in self._endpoint_registry
+                if self._window_fits(ep, required_total)
+            ),
+            key=self._window_of,
+        )
+        for ep in fitting:
+            if self._get_health(ep).can_handle_request(_DEFAULT_ESTIMATED_TOKENS, 0):
+                return ep, primary
+
+        return primary, None
+
+    def _largest_known_endpoint(self) -> tuple[str, int]:
+        """Return the (endpoint, window) with the largest known window.
+
+        Returns ``("", 0)`` when no endpoint windows are known.
+        """
+        best_ep = ""
+        best_win = 0
+        for ep, win in self._endpoint_registry.items():
+            if win > best_win:
+                best_ep, best_win = ep, win
+        return best_ep, best_win
+
+    def _resolve_for_context(
+        self,
+        tier_str: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        max_tokens: int | None,
+        *,
+        structured_output: type | None = None,
+    ) -> tuple[str, list[dict[str, Any]], int]:
+        """Pick an endpoint that fits the prompt, escalating/truncating as needed.
+
+        Returns ``(model_name, messages, required_total)``. ``messages`` may be a
+        truncated copy when no endpoint can fit and the overflow policy is
+        ``truncate``. Raises :class:`ContextWindowExceededError` when no endpoint
+        fits and the policy is ``fail``.
+        """
+        est_input = estimate_message_tokens(messages, tools)
+        if structured_output is not None:
+            try:
+                schema = structured_output.model_json_schema()  # type: ignore[attr-defined]
+                est_input += len(str(schema)) // 4
+            except Exception:  # pragma: no cover - schema introspection best-effort
+                pass
+        output_reserve = max_tokens or _DEFAULT_OUTPUT_RESERVE
+        required_total = est_input + output_reserve + _CONTEXT_SAFETY_MARGIN
+
+        model_name, escalated_from = self._select_context_fit_endpoint(
+            tier_str, required_total
+        )
+        if escalated_from is not None:
+            logger.warning(
+                "LLM_CONTEXT_ESCALATION tier=%s from=%s from_window=%d to=%s "
+                "to_window=%d est_input=%d output_reserve=%d safety_margin=%d "
+                "required_total=%d reason=context_overflow",
+                tier_str, escalated_from, self._window_of(escalated_from),
+                model_name, self._window_of(model_name), est_input,
+                output_reserve, _CONTEXT_SAFETY_MARGIN, required_total,
+            )
+            span = get_current_span()
+            if span is not None:
+                span.set_attributes({
+                    "llm.context.escalated_from": escalated_from,
+                    "llm.context.escalated_to": model_name,
+                    "llm.context.required_tokens": required_total,
+                })
+            return model_name, messages, required_total
+
+        # No escalation chosen. Either the primary fits, or nothing fits.
+        primary_window = self._window_of(model_name)
+        if primary_window <= 0 or primary_window >= required_total:
+            return model_name, messages, required_total
+
+        # Nothing fits — apply the configured overflow policy.
+        cfg = self._models.get(tier_str)
+        policy = (
+            cfg.on_context_overflow if isinstance(cfg, ModelTierConfig) else "truncate"
+        )
+        largest_ep, largest_win = self._largest_known_endpoint()
+        if policy == "fail":
+            logger.error(
+                "LLM_CONTEXT_OVERFLOW_FATAL tier=%s required_total=%d "
+                "largest_endpoint=%s largest_window=%d",
+                tier_str, required_total, largest_ep, largest_win,
+            )
+            raise ContextWindowExceededError(
+                required_total,
+                largest_win,
+                tried=sorted(self._endpoint_registry.items()),
+            )
+
+        # Last resort: route to the largest-window endpoint and truncate to fit.
+        target_ep = largest_ep or model_name
+        target_win = largest_win or primary_window
+        n_before = len(messages)
+        truncated = _truncate_messages_to_tokens(
+            messages, max(1, target_win - output_reserve - _CONTEXT_SAFETY_MARGIN)
+        )
+        logger.warning(
+            "LLM_CONTEXT_OVERFLOW_TRUNCATE tier=%s required_total=%d "
+            "target_endpoint=%s target_window=%d messages_before=%d "
+            "messages_after=%d est_after=%d",
+            tier_str, required_total, target_ep, target_win, n_before,
+            len(truncated), estimate_message_tokens(truncated, tools),
+        )
+        return target_ep, truncated, required_total
 
     # -- Embeddings ---------------------------------------------------------
 
@@ -547,7 +824,11 @@ class FrameworkLLMClient:
                     max_retries,
                 )
             except APIStatusError as exc:
-                if exc.status_code == 403 and self._client_provider is not None:
+                # An expired/invalid OAuth bearer surfaces as either 401
+                # (Unauthorized) or 403 (Forbidden) depending on the serving
+                # edge — refresh on BOTH, not just 403, otherwise token expiry
+                # blocks every call until the app is redeployed.
+                if exc.status_code in (401, 403) and self._client_provider is not None:
                     # Token may have been invalidated — refresh and retry ONCE
                     logger.warning(
                         "LLM_AUTH_REFRESH_RETRY status=%d attempt=%d",
@@ -558,10 +839,11 @@ class FrameworkLLMClient:
                     if attempt == 0:
                         continue
                     raise
-                if exc.status_code == 403:
+                if exc.status_code in (401, 403):
                     logger.error(
-                        "LLM_TOKEN_EXPIRED_NO_PROVIDER status=403 "
-                        "hint=configure WorkspaceClient or set DATABRICKS_TOKEN env var"
+                        "LLM_TOKEN_EXPIRED_NO_PROVIDER status=%d "
+                        "hint=configure WorkspaceClient or set DATABRICKS_TOKEN env var",
+                        exc.status_code,
                     )
                 if exc.status_code < 500:
                     raise  # Client errors (4xx) are never transient.
@@ -685,7 +967,17 @@ class FrameworkLLMClient:
         5. Mark endpoints healthy/unhealthy based on success/failure.
         """
         tier_str = tier.value if isinstance(tier, ModelTier) else tier
-        model_name = self.resolve_model(tier_str)
+        # Context-window-aware selection: escalate to a larger-window endpoint
+        # (or truncate as a last resort) when the prompt would overflow the
+        # normally-selected model. ``messages`` may be replaced with a
+        # truncated copy.
+        model_name, messages, required_total = self._resolve_for_context(
+            tier_str,
+            messages,
+            tools,
+            max_tokens,
+            structured_output=structured_output,
+        )
 
         logger.info(
             "FWK_LLM_CALL tier=%s model=%s base_url=%s token_prefix=%s has_tools=%s structured=%s",
@@ -789,7 +1081,9 @@ class FrameworkLLMClient:
                     model_name,
                     tier_str,
                 )
-                fallback = self._find_fallback(tier_str, model_name)
+                fallback = self._find_fallback(
+                    tier_str, model_name, required_total
+                )
                 if fallback is not None:
                     logger.info(
                         "LLM_FALLBACK from=%s to=%s tier=%s",
@@ -841,7 +1135,11 @@ class FrameworkLLMClient:
         completed tool calls.
         """
         tier_str = tier.value if isinstance(tier, ModelTier) else tier
-        model_name = self.resolve_model(tier_str)
+        # Context-window-aware selection (mirrors complete()). Raises/truncates
+        # BEFORE opening the stream — a 400 mid-open is not cleanly recoverable.
+        model_name, messages, required_total = self._resolve_for_context(
+            tier_str, messages, tools, max_tokens
+        )
         cfg = self._models.get(tier_str)
         is_tier_config = isinstance(cfg, ModelTierConfig)
 
@@ -884,7 +1182,9 @@ class FrameworkLLMClient:
             if is_tier_config:
                 health = self._get_health(model_name)
                 health.mark_failure(rate_limited=True)
-                fallback = self._find_fallback(tier_str, model_name)
+                fallback = self._find_fallback(
+                    tier_str, model_name, required_total
+                )
                 if fallback is not None:
                     logger.info(
                         "LLM_STREAM_FALLBACK from=%s to=%s", model_name, fallback

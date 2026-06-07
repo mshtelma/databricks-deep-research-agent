@@ -16,7 +16,7 @@ Dependencies are constructor-injected -- the tool constructor receives clients, 
 
 ## 1. `web_search`
 
-Search the web using the Brave Search API. Returns numbered results with titles and snippets. Discovered URLs are registered in the shared `UrlRegistry` so downstream tools (like `web_crawl`) can resolve integer indices back to URLs without the LLM ever seeing raw URLs.
+Search the web through the configured search provider (Databricks built-in web search by default in the app; Brave or Jina also supported -- see [Search Providers](search-providers.md)). Returns numbered results with titles and snippets. Discovered URLs are registered in the shared `UrlRegistry` so downstream tools (like `web_crawl`) can resolve integer indices back to URLs without the LLM ever seeing raw URLs.
 
 | Property | Value |
 |----------|-------|
@@ -67,7 +67,7 @@ tools:
 
 ### Search Client: BraveSearchAdapter
 
-The framework ships `BraveSearchAdapter` (`tools.builtins.brave_search`) as the default `SearchClient` implementation for `WebSearchTool`. It wraps the Brave Web Search API with `httpx`.
+`BraveSearchAdapter` (`tools.builtins.brave_search`) is one of the shipped `SearchClient` backends for `WebSearchTool`. It wraps the Brave Web Search API with `httpx`. The framework package auto-creates it when `BRAVE_API_KEY` is set; the app defaults to Databricks built-in web search instead. See [Search Providers](search-providers.md) for the full backend list and precedence rules.
 
 ```python
 from databricks_deep_research.tools.builtins.brave_search import BraveSearchAdapter
@@ -379,6 +379,23 @@ tools:
 
 ---
 
+## The `table_*` Tool Family
+
+Beyond the six tools above, the framework ships a family of **table tools** for structured research directly over the rows of a bound Delta table -- the "the answer is a cell, a row, or a group total in this table" use case, without natural-language-to-SQL. All six kinds map to `SourceKind.text_table` and are backed by the `tools/builtins/text_table/` package. They are Databricks-bound (need a workspace client + SQL warehouse), so an OBO user identity is required in a deployed app.
+
+| ToolKind | Class | Purpose |
+|----------|-------|---------|
+| `table_discovery` | `TableDiscoveryTool` | List exposed tables; register DISCOVERED bindings. |
+| `table_search` | `TableSearchTool` | Substring (`LIKE`) search over a binding's content column. |
+| `table_read` | `TableReadTool` | Filter / project / order / paginate rows. |
+| `table_neighbors` | `TableNeighborsTool` | Sibling rows around an anchor by partition + order. |
+| `table_load` | `TableLoadTool` | Materialize specific row(s) into the compute namespace. |
+| `table_aggregate` | `TableAggregateTool` | `count`/`sum`/`avg`/`min`/`max` with optional `GROUP BY`. |
+
+See [SQL / Table Tools](sql-table-tools.md) for full parameters and the `text_table` internals.
+
+---
+
 ## Declaring Tools in YAML
 
 Tools are declared in the top-level `tools:` section of a workflow YAML file. Agent nodes reference tools by name.
@@ -461,10 +478,18 @@ The framework maps each `ToolKind` to a `SourceKind` that controls query generat
 | `vector_search` | `vector_index` | Semantic embedding queries |
 | `genie` | `sql_analytics` | NL-to-SQL, structured tabular results |
 | `knowledge_assistant` | `qa_assistant` | NL question to NL answer |
+| `table_discovery` | `text_table` | List/register bound Delta tables |
+| `table_search` | `text_table` | Substring search over a content column |
+| `table_read` | `text_table` | Filter / project / paginate rows |
+| `table_neighbors` | `text_table` | Sibling rows around an anchor |
+| `table_load` | `text_table` | Materialize rows for downstream compute |
+| `table_aggregate` | `text_table` | Aggregations with optional `GROUP BY` |
 
 ## See Also
 
 - [Tool System](../concepts/tool-system.md)
+- [Search Providers](search-providers.md)
+- [SQL / Table Tools](sql-table-tools.md)
 - [Custom Tools](custom-tools.md)
 - [Enterprise Data Sources](enterprise-data-sources.md)
 - [Tool Protocol Reference](../reference/tool-protocol-reference.md)

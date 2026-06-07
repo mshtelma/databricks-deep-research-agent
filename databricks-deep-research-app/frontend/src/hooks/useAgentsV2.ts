@@ -80,9 +80,9 @@ export function useCreateAgentV2() {
   return useMutation<
     { agent: AgentV2Response; etag: string | null },
     ApiError,
-    CreateAgentV2Request
+    CreateAgentV2Request & { force?: boolean }
   >({
-    mutationFn: (req) => createAgentV2(req),
+    mutationFn: ({ force, ...req }) => createAgentV2(req, { force }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: agentsV2Keys.list() })
     },

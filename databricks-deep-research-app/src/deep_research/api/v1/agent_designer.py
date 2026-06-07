@@ -28,7 +28,7 @@ from databricks_deep_research.tools.protocol import ToolContext
 from databricks_deep_research.workflow.definition import ToolDeclaration
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -56,6 +56,7 @@ from deep_research.agent_designer.semantic_validation import (
     semantic_validation_errors,
 )
 from deep_research.agent_designer.tool_probe import ProbeConfig, ProbeOrchestrator
+from deep_research.agent_designer.yaml_export import serialize_to_yaml
 from deep_research.agent_designer.yaml_import import YamlImportError, parse_and_validate_yaml
 from deep_research.core.app_config import get_app_config
 from deep_research.db.session import get_db
@@ -64,6 +65,7 @@ from deep_research.models.agent_v2 import CustomToolDef
 from deep_research.observability.agent_designer_metrics import (
     record_registry_fetch,
     record_validation_error,
+    record_yaml_export_ms,
     record_yaml_import_outcome,
 )
 from deep_research.services.agent_v2_service import AgentV2Service
@@ -676,7 +678,8 @@ async def import_yaml(request: Request, _user: CurrentUser) -> ImportYamlRespons
     The endpoint:
     1. Enforces a size limit (default 256 KiB).
     2. Parses the body via ``yaml.safe_load`` (never ``yaml.load``).
-    3. Checks the ``registry_version`` field against the current registry.
+    3. Checks the ``registry_version`` field against the current registry when
+       present (an absent/null field is accepted as the current version).
     4. Re-validates the AST via ``load_workflow_from_dict`` — the canonical
        framework validator.
 
@@ -716,6 +719,52 @@ async def import_yaml(request: Request, _user: CurrentUser) -> ImportYamlRespons
         source_count=0,
     )
     return ImportYamlResponse(definition=definition, workflow_summary=summary)
+
+
+# ---------- /export-yaml ----------
+
+
+class ExportYamlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    definition: dict[str, Any]
+
+
+@router.post("/export-yaml", response_class=PlainTextResponse)
+async def export_yaml(req: ExportYamlRequest, _user: CurrentUser) -> PlainTextResponse:
+    """Serialise an arbitrary (in-memory) workflow AST to a deterministic YAML document.
+
+    This is the symmetric counterpart of ``/import-yaml`` and lets the designer
+    editor export exactly what is on the canvas — including unsaved edits and
+    brand-new agents that have no persisted row yet.  (Saved agents are exported
+    via ``GET /agents-v2/{id}/yaml``; both paths funnel through the same
+    ``serialize_to_yaml`` so identical ASTs yield byte-identical YAML.)
+
+    The AST is re-validated through the canonical framework loader BEFORE
+    serialisation so we never emit a document that cannot re-import.  No data is
+    persisted.  Returns ``Content-Type: text/yaml`` with ``registry_version``
+    pinned at the top.
+    """
+    _t0 = time.monotonic()
+    try:
+        # Validate only — do NOT mutate; serialise the original dict so output
+        # matches GET /agents-v2/{id}/yaml for an equal definition.
+        load_workflow_from_dict(req.definition)
+    except Exception as exc:  # noqa: BLE001 — surface any loader failure as 400
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "errors": [
+                    {
+                        "path": None,
+                        "kind": "schema_error",
+                        "message": f"AST validation failed: {exc}",
+                    }
+                ]
+            },
+        ) from exc
+    body = serialize_to_yaml(req.definition)
+    record_yaml_export_ms((time.monotonic() - _t0) * 1000)
+    return PlainTextResponse(content=body, media_type="text/yaml")
 
 
 # ---------- /chat ----------

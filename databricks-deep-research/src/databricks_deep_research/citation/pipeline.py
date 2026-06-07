@@ -51,6 +51,7 @@ from databricks_deep_research.citation.config import (
     ClaimDisposition,
     SynthesisMode,
 )
+from databricks_deep_research.citation.numeric_verifier import is_exact_numeric_match
 from databricks_deep_research.citation.types import (
     AnalysisSummaryInfo,
     ClaimInfo,
@@ -156,6 +157,34 @@ def _counter_dict(values: list[str]) -> dict[str, int]:
 
 _NUMERIC_PROMOTION_MIN_CONFIDENCE = 0.9
 
+# HIGH_ABSTAIN_RATE observability: an abstain ratio is only a meaningful signal
+# across a batch large enough for the ratio to mean something. Below this floor
+# (e.g. single-claim capability probes that legitimately abstain) the warning is
+# suppressed so it does not cry wolf at 1/1 = 100%.
+_HIGH_ABSTAIN_MIN_CLAIMS = 5
+_HIGH_ABSTAIN_RATE_THRESHOLD = 0.10
+
+
+def _warn_if_high_abstain(claims: list[ClaimInfo]) -> None:
+    """Warn on a high abstain rate, but only across a batch large enough for the
+    ratio to be meaningful.
+
+    Single-claim batches (e.g. capability probes that verify one synthetic claim
+    at a time) legitimately abstain and would otherwise trip this warning at
+    1/1 = 100%. A rate over a sub-threshold sample carries no signal, so stay
+    silent there.
+    """
+    if len(claims) < _HIGH_ABSTAIN_MIN_CLAIMS:
+        return
+    abstained = sum(1 for c in claims if c.abstained)
+    if abstained / len(claims) > _HIGH_ABSTAIN_RATE_THRESHOLD:
+        logger.warning(
+            "HIGH_ABSTAIN_RATE rate=%.1f%% abstained=%d total=%d",
+            abstained / len(claims) * 100,
+            abstained,
+            len(claims),
+        )
+
 
 def _should_promote_numeric_verdict(
     verdict: str | None,
@@ -181,6 +210,22 @@ def _should_promote_numeric_verdict(
     if not numeric_result.get("overall_match"):
         return False
     return float(numeric_result.get("confidence") or 0.0) >= min_confidence
+
+
+# Ordering of verdicts from strongest support to weakest. Used by numeric
+# evidence recovery to ensure re-verification against a better source can only
+# *upgrade* a claim's standing, never downgrade it.
+_VERDICT_RANK: dict[str, int] = {
+    VerificationVerdict.SUPPORTED.value: 3,
+    VerificationVerdict.PARTIAL.value: 2,
+    VerificationVerdict.UNSUPPORTED.value: 1,
+    VerificationVerdict.CONTRADICTED.value: 0,
+}
+
+
+def _verdict_rank(verdict: str | None) -> int:
+    """Support-strength rank for *verdict* (higher = more supported)."""
+    return _VERDICT_RANK.get(verdict or "", 0)
 
 
 def _evidence_info_from_ranked(ranked: RankedEvidence) -> EvidenceInfo:
@@ -881,6 +926,48 @@ class CitationVerificationPipeline:
             source_pool_index=evidences[0].source_pool_index,
         )
 
+    def _recover_numeric_evidence_from_pool(
+        self,
+        claim_text: str,
+        cited_evidence: RankedEvidence | None,
+    ) -> RankedEvidence | None:
+        """Find a pool span that contains the claim's exact figure(s).
+
+        The synthesizer sometimes cites a numeric claim to a span that does not
+        contain the figure (e.g. a vector "Entities:" metadata chunk) while the
+        actual cell lives in a structured table-read span elsewhere in the pool.
+        When the cited evidence cannot corroborate the number, search the full
+        Stage-1 evidence pool for a span that does, preferring corpus / structured
+        sources. Returns the best candidate or ``None``.
+
+        Generic across source kinds: ranks only on exact numeric match +
+        ``source_kind`` (corpus/structured) + numeric-content + relevance -- no
+        domain, table, or corpus identifiers.
+        """
+        pool = self.last_evidence_pool
+        if not pool:
+            return None
+        cited_quote = cited_evidence.quote_text if cited_evidence else ""
+        candidates = [
+            evidence
+            for evidence in pool
+            if evidence.quote_text
+            and evidence.quote_text != cited_quote
+            and is_exact_numeric_match(claim_text, evidence.quote_text)
+        ]
+        if not candidates:
+            return None
+
+        def _rank(evidence: RankedEvidence) -> tuple[int, int, float]:
+            return (
+                1 if is_corpus_source_value(evidence.source_kind) else 0,
+                1 if evidence.has_numeric_content else 0,
+                evidence.relevance_score or 0.0,
+            )
+
+        candidates.sort(key=_rank, reverse=True)
+        return candidates[0]
+
     def _link_analysis_claims(self, claims: list[ClaimInfo]) -> None:
         """Link analysis claims to nearby fact claims they interpret."""
         fact_indices = [
@@ -1051,6 +1138,7 @@ class CitationVerificationPipeline:
         analysis_evidences: list[RankedEvidence] = []
         numeric_result: dict[str, Any] = {}
         used_quick = False
+        numeric_recovered = False
         evidence_match_score = 0.0
         verification_started = time.monotonic()
         logger.debug(
@@ -1148,6 +1236,65 @@ class CitationVerificationPipeline:
                     claim,
                     verification_evidence,
                 )
+                # Pool-wide evidence recovery: when the cited evidence does not
+                # contain the claim's figure, the NLI/numeric verdict was formed
+                # against the wrong span (e.g. a vector "Entities:" metadata chunk
+                # while the cell lives in a structured table read). Re-verify
+                # against a figure-bearing pool source and adopt the result only
+                # if it ranks strictly better -- never downgrade. Fixes false
+                # unsupported/contradicted verdicts on in-corpus table numbers.
+                cited_has_figure = bool(
+                    verification_evidence
+                    and is_exact_numeric_match(
+                        verification_text, verification_evidence.quote_text
+                    )
+                )
+                if result.verdict != VerificationVerdict.SUPPORTED and not cited_has_figure:
+                    recovered = self._recover_numeric_evidence_from_pool(
+                        verification_text, verification_evidence
+                    )
+                    if recovered is not None:
+                        recovered_nli = await self.verifier.verify_with_isolation(
+                            claim_text=verification_text,
+                            evidence=recovered,
+                            use_quick_verification=False,
+                        )
+                        recovered_numeric = await self._verify_numeric_claim(
+                            claim, recovered
+                        )
+                        effective_verdict = recovered_nli.verdict.value
+                        if _should_promote_numeric_verdict(
+                            effective_verdict,
+                            recovered_numeric,
+                            enabled=self.config.numeric_match_promotes_verdict,
+                        ):
+                            effective_verdict = VerificationVerdict.SUPPORTED.value
+                        if _verdict_rank(effective_verdict) > _verdict_rank(
+                            result.verdict.value
+                        ):
+                            logger.info(
+                                "NUMERIC_EVIDENCE_RECOVERED claim_index=%d "
+                                "from_verdict=%s to_verdict=%s recovered_source_kind=%s "
+                                "recovered_pool_index=%s claim=%s",
+                                claim_index,
+                                result.verdict.value,
+                                effective_verdict,
+                                recovered.source_kind,
+                                recovered.source_pool_index,
+                                _truncate(verification_text, 60),
+                            )
+                            result = recovered_nli
+                            numeric_result = recovered_numeric
+                            verification_evidence = recovered
+                            evidence_match_score = self._score_claim_evidence_text(
+                                verification_text, recovered.quote_text
+                            )
+                            numeric_recovered = True
+                            claim.evidence = _evidence_info_from_ranked(recovered)
+                            claim.evidences = [claim.evidence]
+                            self._refresh_claim_citation_keys(
+                                claim, self.last_evidence_pool
+                            )
                 if numeric_result:
                     claim.verification_method = VerificationMethod.NUMERIC_QA.value
 
@@ -1208,6 +1355,7 @@ class CitationVerificationPipeline:
                     "claim_role": claim.claim_role,
                     "verification_method": claim.verification_method or "",
                     "numeric_promoted": numeric_promoted,
+                    "numeric_recovered": numeric_recovered,
                 },
             )
         ]
@@ -1379,13 +1527,8 @@ class CitationVerificationPipeline:
                 for event in events:
                     yield event
 
-            # Observability: warn on high abstain rate
-            abstained = sum(1 for c in claims if c.abstained)
-            if claims and abstained / len(claims) > 0.10:
-                logger.warning(
-                    "HIGH_ABSTAIN_RATE rate=%.1f%% abstained=%d total=%d",
-                    abstained / len(claims) * 100, abstained, len(claims),
-                )
+            # Observability: warn on high abstain rate (no-op for tiny batches).
+            _warn_if_high_abstain(claims)
         finally:
             self._active_claims_context = []
 

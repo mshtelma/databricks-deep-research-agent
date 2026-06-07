@@ -11,6 +11,7 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ConfigPanel } from '../ConfigPanel';
+import { SchemaField } from '../SchemaField';
 import { useAgentEditorStore, initialState } from '@/stores/agentEditorStore';
 import { createDraftWorkflow } from '@/lib/workflowAst';
 import { listDesignerResources, startDesignerSqlWarehouse } from '@/api/agentDesigner';
@@ -156,6 +157,22 @@ const FIXTURE_REGISTRY: RegistryResponse = {
         required: ['warehouse_id'],
       },
     },
+    {
+      kind: 'web_search',
+      label: 'Web Search',
+      icon: 'tool',
+      config_schema: {
+        type: 'object',
+        properties: {
+          provider: {
+            type: 'string',
+            enum: ['brave', 'jina', 'databricks'],
+            title: 'Search Provider',
+          },
+          model: { type: 'string', title: 'Search Endpoint' },
+        },
+      },
+    },
   ],
   model_tiers: [],
   version: '1.0',
@@ -263,6 +280,65 @@ describe('ConfigPanel', () => {
     updateSpy.mockRestore();
   });
 
+  function astWithWebSearch(boundTools: string[]): AST {
+    return {
+      ...createDraftWorkflow('Test Workflow'),
+      tools: [{ kind: 'web_search', name: 'web_search', config: {} }],
+      root: {
+        id: 'root-id',
+        type: 'sequence',
+        label: 'root',
+        config: {},
+        children: [
+          {
+            id: 'agent-1',
+            type: 'agent',
+            label: 'My Agent',
+            config: { tools: boundTools },
+            children: [],
+          },
+        ],
+      },
+    };
+  }
+
+  it('edits a declared tool inline from the agent Tools tab', () => {
+    useAgentEditorStore.setState({ ast: astWithWebSearch([]), selectedPath: 'root.children.0' });
+    const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateTool');
+
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+    // Switch to the agent's Tools tab.
+    fireEvent.click(screen.getByRole('button', { name: /tools/i }));
+    // Editor is closed until the pencil is clicked.
+    expect(screen.queryByText('Search Provider')).not.toBeInTheDocument();
+    // Open the inline editor for the web_search tool.
+    fireEvent.click(screen.getByRole('button', { name: /edit tool config/i }));
+    // Provider dropdown + the rest of the tool config render inline, in this tab.
+    expect(screen.getByText('Search Provider')).toBeInTheDocument();
+    // A plain field edit persists through the same store path as the
+    // Workspace-tools editor (Radix Select can't be driven via fireEvent.change).
+    fireEvent.change(screen.getByRole('textbox', { name: /search endpoint/i }), {
+      target: { value: 'databricks-gpt-5' },
+    });
+    expect(updateSpy).toHaveBeenCalledWith('web_search', {
+      config: { model: 'databricks-gpt-5' },
+    });
+    updateSpy.mockRestore();
+  });
+
+  it('row click toggles binding without opening the inline editor', () => {
+    useAgentEditorStore.setState({ ast: astWithWebSearch([]), selectedPath: 'root.children.0' });
+    const bindSpy = vi.spyOn(useAgentEditorStore.getState(), 'bindToolToBlock');
+
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+    fireEvent.click(screen.getByRole('button', { name: /tools/i }));
+    // Clicking the tool row body binds it and must NOT open the config editor.
+    fireEvent.click(screen.getByText('web_search'));
+    expect(bindSpy).toHaveBeenCalledWith('root.children.0', 'web_search');
+    expect(screen.queryByText('Search Provider')).not.toBeInTheDocument();
+    bindSpy.mockRestore();
+  });
+
   it('starts a stopped SQL warehouse when selected for a table tool', async () => {
     vi.mocked(listDesignerResources).mockResolvedValueOnce({
       resources: [
@@ -362,6 +438,40 @@ describe('ConfigPanel', () => {
     const trigger = screen.getByRole('combobox', { name: /mode/i });
     expect(trigger).toBeInTheDocument();
     expect(trigger).toHaveTextContent('react');
+  });
+
+  it('renders x-enumOptions as a labeled endpoint dropdown (not free text)', () => {
+    const onChange = vi.fn();
+    renderWithQuery(
+      <SchemaField
+        name="model"
+        schema={{
+          type: 'string',
+          title: 'Search Endpoint',
+          'x-enumOptions': [
+            {
+              value: 'databricks-gemini-3-1-flash-lite',
+              label: 'databricks-gemini-3-1-flash-lite',
+              group: 'Gemini',
+            },
+            {
+              value: 'databricks-gpt-5-mini',
+              label: 'databricks-gpt-5-mini',
+              group: 'OpenAI',
+            },
+          ],
+        }}
+        value="databricks-gpt-5-mini"
+        onChange={onChange}
+      />,
+    );
+    // Rendered as a Radix Select (combobox) showing the selected endpoint —
+    // NOT a free-text input, so the family can't drift from the endpoint.
+    const trigger = screen.getByRole('combobox', { name: /search endpoint/i });
+    expect(trigger).toHaveTextContent('databricks-gpt-5-mini');
+    expect(
+      screen.queryByRole('textbox', { name: /search endpoint/i }),
+    ).not.toBeInTheDocument();
   });
 
   it('calls store.updateBlock when a text input is edited', () => {

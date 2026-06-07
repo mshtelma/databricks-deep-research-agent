@@ -171,6 +171,7 @@ class ResearchSessionState(BaseModel):
     current_step: int = 0
     started_at: datetime = Field(default_factory=_utcnow)
     completed_at: datetime | None = None
+    last_heartbeat: datetime | None = None
 
     # Legacy chats were persisted with plan/verification_data=None because the
     # SQL ResearchSession model columns are nullable and the complete-path

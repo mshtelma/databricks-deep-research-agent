@@ -70,7 +70,7 @@ root:
       config:
         until:
           type: state
-          key: report
+          key: output
           operator: exists
         max_iterations: 3
       children:

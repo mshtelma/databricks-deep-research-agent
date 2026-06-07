@@ -28,11 +28,22 @@ export function defaultValueForSchema(schema: Record<string, unknown>): unknown 
 export function defaultConfigForSchema(
   schema: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> {
+  // Seed an initial value ONLY for fields that declare an explicit `default`
+  // or are `required`. Optional fields without a default are left absent, so
+  // "unset" stays distinguishable from a zero-value: a blank `provider` means
+  // "inherit the workspace default", and an absent `resolve_redirects` is filled
+  // from app config at run time rather than pinned to `false`. (Previously every
+  // property was seeded with a type zero-value — '', 0, false — which polluted
+  // the config and defeated absent-key defaulting downstream.)
   const config: Record<string, unknown> = {};
+  const required = new Set(schemaRequiredKeys(schema));
   for (const [key, propertySchema] of Object.entries(schemaProperties(schema))) {
-    const defaultValue = defaultValueForSchema(propertySchema);
-    if (defaultValue !== undefined) {
-      config[key] = defaultValue;
+    if (!('default' in propertySchema) && !required.has(key)) {
+      continue;
+    }
+    const value = defaultValueForSchema(propertySchema);
+    if (value !== undefined) {
+      config[key] = value;
     }
   }
   return config;

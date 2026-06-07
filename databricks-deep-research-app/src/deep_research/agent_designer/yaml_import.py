@@ -7,8 +7,10 @@ point for any externally-supplied YAML.  It enforces:
 2. Safe parsing — only ``yaml.safe_load`` is ever used; ``yaml.load`` is
    never called so that !!python/object gadgets cannot reach the evaluator.
 3. Top-level mapping check — the parsed value must be a dict.
-4. Registry-version pinning — the ``registry_version`` field must match
-   :data:`~deep_research.agent_designer.registry.REGISTRY_VERSION`.
+4. Registry-version pinning — when present, the ``registry_version`` field must
+   match :data:`~deep_research.agent_designer.registry.REGISTRY_VERSION`; an
+   absent (or null) field is accepted and treated as the current version so raw
+   framework YAML and legacy pre-envelope exports import cleanly.
 5. Canonical AST re-validation via
    :func:`databricks_deep_research.load_workflow_from_dict` — every imported
    AST is passed through the same validator that the /validate endpoint uses.
@@ -62,7 +64,8 @@ def parse_and_validate_yaml(body: bytes) -> dict[str, Any]:
     1. Size check against ``AGENT_DESIGNER_YAML_MAX_BYTES`` (default 256 KiB).
     2. Safe YAML parsing via ``yaml.safe_load`` — never ``yaml.load``.
     3. Top-level mapping assertion.
-    4. ``registry_version`` field extraction and version-pinning check.
+    4. ``registry_version`` extraction — absent/null is accepted as the current
+       version; a present-but-different value is rejected.
     5. AST re-validation via :func:`load_workflow_from_dict`.
 
     Args:
@@ -100,12 +103,19 @@ def parse_and_validate_yaml(body: bytes) -> dict[str, Any]:
             "YAML body must be a mapping at top level",
         )
 
-    # Extract and validate registry version before passing to AST loader.
+    # Registry-version handling (extract before passing to the AST loader):
+    #   • absent / null      → accept, treat as the current registry version, so
+    #     raw framework YAML and legacy pre-envelope exports import without edits.
+    #   • present & equal    → accept.
+    #   • present & different → reject with an actionable message.
     received_version: object = parsed.pop("registry_version", None)
-    if received_version != REGISTRY_VERSION:
+    if received_version is not None and received_version != REGISTRY_VERSION:
         raise YamlImportError(
             "registry_version_mismatch",
-            f"expected {REGISTRY_VERSION}, received {received_version}",
+            f"document was built for registry_version {received_version!r}, but "
+            f"this workspace requires {REGISTRY_VERSION!r}. Re-export the agent "
+            f"from this workspace, or remove the registry_version line to import "
+            f"it as a raw framework workflow.",
         )
 
     # Canonical AST re-validation — MUST happen before any persistence.

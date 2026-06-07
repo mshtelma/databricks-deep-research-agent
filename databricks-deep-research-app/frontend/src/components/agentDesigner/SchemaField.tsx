@@ -114,6 +114,12 @@ export function SchemaField({
   const xWidget = schema['x-widget'];
   const schemaType = schema['type'] as string | undefined;
   const enumValues = schema['enum'];
+  // Optional ordered dropdown options with labels + group headers (powers the
+  // per-family search-endpoint picker). Distinct from JSON-schema ``enum`` so a
+  // stored value outside the list (e.g. a custom endpoint) is never rejected.
+  const enumOptions = schema['x-enumOptions'] as
+    | Array<{ value: string; label?: string; group?: string }>
+    | undefined;
 
   // Sanitize name for use as HTML id (replace characters invalid in ids)
   const fieldId = `schema-field-${name.replace(/[^a-zA-Z0-9_-]/g, '_')}`;
@@ -135,7 +141,7 @@ export function SchemaField({
     | 'prompt'
     | 'resource-select';
 
-  if (Array.isArray(enumValues)) {
+  if (Array.isArray(enumValues) || Array.isArray(enumOptions)) {
     widgetKind = 'select';
   } else if (xWidget !== undefined) {
     const w = String(xWidget);
@@ -203,8 +209,33 @@ export function SchemaField({
   }
 
   if (widgetKind === 'select') {
-    const opts = (enumValues as unknown[]).map(String);
+    type SelectOpt = { value: string; label: string; group?: string };
+    const baseOpts: SelectOpt[] = Array.isArray(enumOptions)
+      ? enumOptions.map((o) => ({
+          value: String(o.value),
+          label: o.label !== undefined ? String(o.label) : String(o.value),
+          group: o.group !== undefined ? String(o.group) : undefined,
+        }))
+      : (enumValues as unknown[]).map((v) => ({ value: String(v), label: String(v) }));
     const currentVal = value !== undefined && value !== null ? String(value) : '';
+    // Preserve a stored value that isn't among the configured options (e.g. a
+    // custom endpoint) so the trigger shows it instead of going blank.
+    const opts: SelectOpt[] =
+      currentVal && !baseOpts.some((o) => o.value === currentVal)
+        ? [{ value: currentVal, label: currentVal }, ...baseOpts]
+        : baseOpts;
+    const currentLabel = opts.find((o) => o.value === currentVal)?.label ?? currentVal;
+    // Partition into consecutive groups so options sharing a `group` render
+    // under one header; ungrouped options (the common case) render headerless.
+    const groups: Array<{ group?: string; items: SelectOpt[] }> = [];
+    for (const opt of opts) {
+      const last = groups[groups.length - 1];
+      if (last && last.group === opt.group) {
+        last.items.push(opt);
+      } else {
+        groups.push({ group: opt.group, items: [opt] });
+      }
+    }
     return (
       <div className="mb-3.5">
         <label htmlFor={fieldId} className={LABEL_CLASS}>
@@ -218,7 +249,7 @@ export function SchemaField({
             aria-label={label}
           >
             <SelectPrimitive.Value placeholder="Select…">
-              {currentVal || 'Select…'}
+              {currentLabel || 'Select…'}
             </SelectPrimitive.Value>
             <SelectPrimitive.Icon className="ml-2 text-db-gray-text">
               <ChevronDown size={14} />
@@ -227,14 +258,23 @@ export function SchemaField({
           <SelectPrimitive.Portal>
             <SelectPrimitive.Content className="z-50 min-w-[8rem] overflow-hidden rounded-db-md border border-db-gray-lines bg-white font-db-sans shadow-db-md">
               <SelectPrimitive.Viewport className="p-1">
-                {opts.map((opt) => (
-                  <SelectPrimitive.Item
-                    key={opt}
-                    value={opt}
-                    className="relative flex cursor-pointer select-none items-center rounded px-2 py-1.5 text-[13px] text-db-navy-800 outline-none transition-colors hover:bg-db-oat-medium focus:bg-db-oat-medium"
-                  >
-                    <SelectPrimitive.ItemText>{opt}</SelectPrimitive.ItemText>
-                  </SelectPrimitive.Item>
+                {groups.map((g, gi) => (
+                  <SelectPrimitive.Group key={gi}>
+                    {g.group ? (
+                      <SelectPrimitive.Label className="px-2 py-1 text-[11px] font-semibold uppercase tracking-wide text-db-gray-text">
+                        {g.group}
+                      </SelectPrimitive.Label>
+                    ) : null}
+                    {g.items.map((opt) => (
+                      <SelectPrimitive.Item
+                        key={opt.value}
+                        value={opt.value}
+                        className="relative flex cursor-pointer select-none items-center rounded px-2 py-1.5 text-[13px] text-db-navy-800 outline-none transition-colors hover:bg-db-oat-medium focus:bg-db-oat-medium"
+                      >
+                        <SelectPrimitive.ItemText>{opt.label}</SelectPrimitive.ItemText>
+                      </SelectPrimitive.Item>
+                    ))}
+                  </SelectPrimitive.Group>
                 ))}
               </SelectPrimitive.Viewport>
             </SelectPrimitive.Content>

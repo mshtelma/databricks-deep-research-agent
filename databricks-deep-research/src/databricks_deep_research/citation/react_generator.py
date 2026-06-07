@@ -62,6 +62,7 @@ For each fact you want to include:
 Everything that comes from sources MUST be cited.
 Use for: Specific facts, dates, statistics, numbers, claims from sources.
 MUST immediately follow read_snippet. Key must match the citation key from tool result.
+For numeric values, state the unit of measure or currency exactly as the source expresses it (e.g. `$3.2 billion`, `15%`, `1,200 units`); never write a bare number, and never use a source's internal field or column identifier (e.g. a raw column label) as the value's meaning.
 Example: <cite key="Arxiv">GPT-4 achieves 86.4% accuracy on MMLU.</cite>
 
 ### <analysis>text</analysis> - AUTHOR'S ANALYSIS (No citation, but must be grounded)

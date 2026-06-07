@@ -38,6 +38,7 @@ from fastapi.testclient import TestClient
 # via dependency override; they do NOT go through the storage stack.
 os.environ.setdefault("STORAGE_SERVICE_IMPL", "sqlalchemy_legacy")
 
+from deep_research.agent_designer.registry import REGISTRY_VERSION  # noqa: E402
 from deep_research.core.auth import UserIdentity  # noqa: E402
 from deep_research.db.session import get_db  # noqa: E402
 from deep_research.main import app  # noqa: E402
@@ -261,7 +262,12 @@ def test_export_returns_text_yaml_content_type(user_a_client: TestClient) -> Non
 @_DB_SKIP
 @pytest.mark.integration
 def test_export_includes_registry_version(user_a_client: TestClient) -> None:
-    """Parsed YAML from GET /{id}/yaml contains registry_version: '1.0'."""
+    """Parsed YAML from GET /{id}/yaml pins the CURRENT REGISTRY_VERSION.
+
+    Regression guard: the export default MUST equal the constant the importer
+    checks (``REGISTRY_VERSION``).  Previously export hardcoded ``"1.0"`` while
+    import required ``"1.0.0"``, so every round-trip failed.
+    """
     agent_id = _create_agent(user_a_client)
 
     resp = user_a_client.get(f"/api/v1/agents-v2/{agent_id}/yaml")
@@ -269,8 +275,8 @@ def test_export_includes_registry_version(user_a_client: TestClient) -> None:
 
     parsed = yaml.safe_load(resp.text)
     assert "registry_version" in parsed, "registry_version key must be present"
-    assert parsed["registry_version"] == "1.0", (
-        f"expected '1.0', got {parsed['registry_version']!r}"
+    assert parsed["registry_version"] == REGISTRY_VERSION, (
+        f"expected {REGISTRY_VERSION!r}, got {parsed['registry_version']!r}"
     )
 
 
@@ -347,6 +353,35 @@ def test_export_owner_scoping(
     assert resp.status_code == 404, (
         f"expected 404 for cross-user access, got {resp.status_code}: {resp.text}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 5b. True round-trip: exported bytes are accepted by POST /import-yaml
+# ---------------------------------------------------------------------------
+
+@_DB_SKIP
+@pytest.mark.integration
+def test_exported_yaml_reimports_cleanly(user_a_client: TestClient) -> None:
+    """GET /{id}/yaml output POSTed verbatim to /import-yaml returns 200.
+
+    This is the regression the prior suite was missing: export and import each
+    had their own test, but none exercised the actual export→import path that a
+    user performs.  Before the registry_version fix this returned 400
+    (registry_version_mismatch).
+    """
+    agent_id = _create_agent(user_a_client)
+
+    yaml_resp = user_a_client.get(f"/api/v1/agents-v2/{agent_id}/yaml")
+    assert yaml_resp.status_code == 200, yaml_resp.text
+
+    import_resp = user_a_client.post(
+        "/api/v1/agent-designer/import-yaml",
+        content=yaml_resp.text.encode("utf-8"),
+        headers={"Content-Type": "text/yaml"},
+    )
+    assert import_resp.status_code == 200, import_resp.text
+    body = import_resp.json()
+    assert "definition" in body and "workflow_summary" in body
 
 
 # ---------------------------------------------------------------------------

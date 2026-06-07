@@ -5,7 +5,7 @@
 ## Overview
 The framework needs credentials for two things:
 1. **LLM calls** — via AsyncOpenAI client (Databricks Model Serving or OpenAI directly)
-2. **Tool execution** — Brave API key for web search, Databricks workspace for enterprise tools
+2. **Tool execution** — a web search backend (`databricks` built-in / Brave / Jina; `BRAVE_API_KEY` only for the Brave backend — see [Search Providers](../guides/search-providers.md)), Databricks workspace for enterprise tools
 
 ## Databricks Model Serving (Recommended)
 ```python
@@ -91,7 +91,7 @@ The user_token propagates through WorkflowState to enterprise tools (vector_sear
 ## Tool Credentials
 | Tool | Credential | Environment Variable |
 |------|-----------|---------------------|
-| web_search | Brave API key | `BRAVE_API_KEY` |
+| web_search | Web search backend (`databricks` built-in / Brave / Jina) — `BRAVE_API_KEY` only for the Brave backend (see [Search Providers](../guides/search-providers.md)) | `BRAVE_API_KEY` (Brave backend only) |
 | web_crawl | None (public URLs) | — |
 | vector_search | Databricks token / OBO | `DATABRICKS_TOKEN` |
 | genie | Databricks token / OBO | `DATABRICKS_TOKEN` |

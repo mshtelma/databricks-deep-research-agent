@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from deep_research.agent_designer.registry import tool_kinds_payload
+from deep_research.core.app_config import get_app_config
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,65 @@ def semantic_validation_errors(
                         path=f"tools[{idx}].config.{field}",
                     )
                 )
+        # Generic enum validation: any config key whose schema property declares
+        # a non-empty ``enum`` must hold a member value when set. Catches a
+        # typo'd ``provider`` / ``model_family`` at design time (the framework's
+        # runtime ValueError is the backstop). Lenient by design: absent or blank
+        # values are skipped — they inherit the workspace default downstream.
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for prop_name, prop_schema in properties.items():
+                if not isinstance(prop_schema, dict):
+                    continue
+                allowed = prop_schema.get("enum")
+                if not isinstance(allowed, list) or not allowed:
+                    continue
+                value = config.get(prop_name)
+                if value is None or (isinstance(value, str) and not value.strip()):
+                    continue
+                if value not in allowed:
+                    errors.append(
+                        SemanticValidationError(
+                            message=(
+                                f"Tool '{name or idx}' config.{prop_name} must be "
+                                f"one of {allowed}; got {value!r}."
+                            ),
+                            path=f"tools[{idx}].config.{prop_name}",
+                            kind="schema",
+                        )
+                    )
+
+        # Cross-field guard: an explicit ``model_family`` that contradicts an
+        # explicit ``model`` endpoint is a guaranteed runtime failure — e.g.
+        # family=openai on a Gemini endpoint drives the OpenAI Responses API
+        # onto a Gemini serving endpoint => HTTP 400 => every search returns
+        # zero results. Block the save loudly. Fires only when BOTH are set and
+        # the endpoint's family is detectable AND differs; family-only,
+        # endpoint-only, and custom/undetectable-endpoint configs all pass.
+        if kind in ("web_search", "web_research"):
+            model = config.get("model")
+            family = config.get("model_family")
+            if (
+                isinstance(model, str)
+                and model.strip()
+                and isinstance(family, str)
+                and family.strip()
+            ):
+                detected = get_app_config().search.databricks.family_for_endpoint(model)
+                if detected is not None and detected != family:
+                    errors.append(
+                        SemanticValidationError(
+                            message=(
+                                f"Tool '{name or idx}' config.model_family "
+                                f"'{family}' contradicts endpoint '{model}' "
+                                f"(detected family '{detected}'). Set "
+                                f"model_family to '{detected}', clear it to "
+                                f"auto-detect, or choose a '{family}' endpoint."
+                            ),
+                            path=f"tools[{idx}].config.model_family",
+                            kind="schema",
+                        )
+                    )
 
     def validate_agent_tools(config: dict[str, Any], path: str) -> None:
         raw_tools = config.get("tools", [])

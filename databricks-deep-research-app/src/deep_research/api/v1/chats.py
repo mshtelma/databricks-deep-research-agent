@@ -1,11 +1,14 @@
 """Chat endpoints."""
 
 import json as json_module
+import logging
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Cookie, Depends, Query, Request, Response
 from fastapi.responses import PlainTextResponse
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.api.v1.utils.transformers import (
@@ -38,9 +41,51 @@ from deep_research.schemas.session import IncognitoChatListResponse, IncognitoSe
 from deep_research.services._protocols import IChatService, IExportService, ISessionService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Cookie name for incognito session
 INCOGNITO_SESSION_COOKIE = "incognito_session"
+
+
+def _research_session_inline(
+    rs: Any, sources: list[SourceResponse]
+) -> ResearchSessionInline | None:
+    """Build a ``ResearchSessionInline`` from an ORM or cached-view session.
+
+    The cached session view (``services/cached/chat._state_session_to_view``)
+    emits empty dicts / ``None`` for fields that ``ResearchSessionInline`` types
+    as sub-models (``query_classification``, ``plan``) or a required int
+    (``plan_iterations``). Coerce empty → ``None`` and non-int → ``0``; if a
+    *non-empty but malformed* plan/classification still fails validation, retry
+    without them so the session (and its sources + the frontend citation gate
+    that keys on ``!!m.researchSession``) survives. Only return ``None`` if even
+    the minimal session is invalid — so a malformed session can NEVER 500 the
+    whole ``/chats/{id}/full`` render, and inline claims still resolve.
+    """
+    raw_iters = getattr(rs, "plan_iterations", None)
+    common: dict[str, Any] = {
+        "id": rs.id,
+        "research_depth": rs.research_depth,
+        "reasoning_steps": getattr(rs, "reasoning_steps", None) or [],
+        "status": rs.status,
+        "current_agent": getattr(rs, "current_agent", None),
+        "current_step_index": getattr(rs, "current_step_index", None),
+        "plan_iterations": raw_iters if isinstance(raw_iters, int) else 0,
+        "started_at": rs.started_at,
+        "completed_at": getattr(rs, "completed_at", None),
+        "sources": sources,
+    }
+    raw_qc = getattr(rs, "query_classification", None) or None
+    raw_plan = getattr(rs, "plan", None) or None
+    for qc, plan in ((raw_qc, raw_plan), (None, None)):
+        try:
+            return ResearchSessionInline(query_classification=qc, plan=plan, **common)
+        except PydanticValidationError:
+            continue
+    logger.warning(
+        "CHAT_FULL_SESSION_INLINE_SKIPPED session=%s", str(getattr(rs, "id", "?"))[:8]
+    )
+    return None
 
 
 def _chat_to_response(chat: "object") -> ChatResponse:
@@ -296,20 +341,7 @@ async def get_chat_full(
                 )
                 for s in (rs.sources or [])
             ]
-            session_schema = ResearchSessionInline(
-                id=rs.id,
-                query_classification=rs.query_classification,
-                research_depth=rs.research_depth,
-                reasoning_steps=rs.reasoning_steps or [],
-                status=rs.status,
-                current_agent=rs.current_agent,
-                plan=rs.plan,
-                current_step_index=rs.current_step_index,
-                plan_iterations=rs.plan_iterations,
-                started_at=rs.started_at,
-                completed_at=rs.completed_at,
-                sources=sources,
-            )
+            session_schema = _research_session_inline(rs, sources)
 
             # Pre-parse claims using existing JSONB transformers
             verification_data = getattr(rs, "verification_data", None)

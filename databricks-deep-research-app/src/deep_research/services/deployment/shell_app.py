@@ -260,6 +260,26 @@ def _definition_uses_web_search(definition: dict[str, Any]) -> bool:
     return _walk(definition)
 
 
+def _definition_uses_brave_web_search(definition: dict[str, Any]) -> bool:
+    """Return True when a declared web tool EXPLICITLY selects the Brave provider.
+
+    The Brave secret binding is required only when a tool pins
+    ``config.provider: brave`` — web tools that omit a provider inherit the
+    shell-app's default (Databricks built-in search, which needs no key), and
+    ``jina``/``databricks`` need no Brave secret either. Keeps shell-app
+    deployments from demanding a Brave subscription that most workspaces lack.
+    """
+    for tool in definition.get("tools", []) or []:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("kind") not in ("web_search", "web_research"):
+            continue
+        config = tool.get("config")
+        if isinstance(config, dict) and config.get("provider") == "brave":
+            return True
+    return False
+
+
 def _definition_requires_sql_warehouse(definition: dict[str, Any]) -> bool:
     """Return True when declared tools need text-table SQL execution."""
     for tool in definition.get("tools", []) or []:
@@ -444,7 +464,7 @@ class ShellAppExporter:
         # is a JSONB dict at this point (see AgentV2 model). The 'tools' key
         # is the top-level tool list; each entry has a 'kind' string field.
         definition = revision.definition or {}
-        uses_web_search = _definition_uses_web_search(definition)
+        uses_brave = _definition_uses_brave_web_search(definition)
         requires_sql_warehouse = _definition_requires_sql_warehouse(definition)
         storage_warehouse_id = _resolve_storage_warehouse_id(config)
         for tool in definition.get("tools", []) or []:
@@ -461,17 +481,19 @@ class ShellAppExporter:
                     )
                 )
 
-        if uses_web_search:
+        if uses_brave:
             scope, key = _resolve_brave_secret_config(config, include_defaults=True)
             if not scope or not key:
                 errors.append(
                     ValidationError(
                         message=(
-                            "Shell-app workflows using web_search require a "
-                            "Databricks secret binding for BRAVE_API_KEY. Set "
-                            "brave_secret_scope/brave_secret_key or configure "
+                            "Shell-app workflows with a web tool that pins "
+                            "provider: brave require a Databricks secret binding "
+                            "for BRAVE_API_KEY. Set brave_secret_scope/"
+                            "brave_secret_key or configure "
                             "DEPLOY_HERE_BRAVE_SECRET_SCOPE and "
-                            "DEPLOY_HERE_BRAVE_SECRET_KEY."
+                            "DEPLOY_HERE_BRAVE_SECRET_KEY — or drop the explicit "
+                            "provider to use the default Databricks web search."
                         ),
                         path="config.brave_secret_scope",
                     )
@@ -515,10 +537,13 @@ class ShellAppExporter:
         target: str = config.get("target", "dev")
         definition = revision.definition or {}
         uses_web_search = _definition_uses_web_search(definition)
+        uses_brave = _definition_uses_brave_web_search(definition)
         requires_sql_warehouse = _definition_requires_sql_warehouse(definition)
+        # Only wire the Brave secret env when a web tool explicitly pins
+        # provider: brave; the default Databricks search needs no key.
         brave_secret_scope, brave_secret_key = _resolve_brave_secret_config(
             config,
-            include_defaults=uses_web_search,
+            include_defaults=uses_brave,
         )
         storage_warehouse_id = _resolve_storage_warehouse_id(config)
 

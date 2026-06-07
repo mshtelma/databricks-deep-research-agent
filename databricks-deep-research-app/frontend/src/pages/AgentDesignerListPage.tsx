@@ -9,8 +9,11 @@
 import * as React from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AppShell } from '@/components/layout/AppShell'
-import { parseAgentDeleteError } from '@/api/agentsV2'
+import { parseAgentDeleteError, exportAgentYaml } from '@/api/agentsV2'
 import { useAgentsV2List, useDeleteAgentV2 } from '@/hooks/useAgentsV2'
+import { useYamlExport } from '@/hooks/useYamlExport'
+import { slugifyFilename } from '@/lib/download'
+import { ImportYamlDialog } from '@/components/agentDesigner/ImportYamlDialog'
 import type { AgentV2Summary, AgentVisibility } from '@/types/agentDesigner'
 
 // ---------------------------------------------------------------------------
@@ -170,6 +173,10 @@ function AgentCard({ agent, onOpen, onDeleteRequest }: AgentCardProps) {
   const meta = VISIBILITY_META[agent.visibility] ?? VISIBILITY_META.private
   const [showMenu, setShowMenu] = React.useState(false)
   const menuRef = React.useRef<HTMLDivElement>(null)
+  const { download: downloadYaml, copy: copyYaml } = useYamlExport(
+    () => exportAgentYaml(agent.id),
+    slugifyFilename(agent.name, 'yaml'),
+  )
 
   React.useEffect(() => {
     if (!showMenu) return
@@ -234,6 +241,26 @@ function AgentCard({ agent, onOpen, onDeleteRequest }: AgentCardProps) {
                 className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[13px] font-medium text-db-navy-800 transition-colors hover:bg-db-oat-medium"
               >
                 Open
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMenu(false)
+                  void downloadYaml()
+                }}
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[13px] font-medium text-db-navy-800 transition-colors hover:bg-db-oat-medium"
+              >
+                Export YAML
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowMenu(false)
+                  void copyYaml()
+                }}
+                className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-[13px] font-medium text-db-navy-800 transition-colors hover:bg-db-oat-medium"
+              >
+                Copy YAML
               </button>
               <div className="my-1 h-px bg-db-gray-lines" />
               <button
@@ -352,6 +379,7 @@ export function AgentDesignerListPage() {
   const [deleteError, setDeleteError] = React.useState<unknown>(null)
   const [search, setSearch] = React.useState('')
   const [view, setView] = React.useState<ViewMode>('grid')
+  const [importOpen, setImportOpen] = React.useState(false)
 
   const handleOpen = (id: string) => {
     void navigate(`/designer/${id}`)
@@ -404,9 +432,9 @@ export function AgentDesignerListPage() {
         <div className="ml-auto flex items-center gap-2.5">
           <button
             type="button"
-            disabled
-            title="Import — coming soon"
-            className="inline-flex items-center gap-1.5 rounded-db-md border border-db-gray-lines bg-white px-3 py-1.5 text-[13px] font-medium text-db-navy-800 opacity-55"
+            onClick={() => setImportOpen(true)}
+            title="Create a new agent from a YAML definition"
+            className="inline-flex items-center gap-1.5 rounded-db-md border border-db-gray-lines bg-white px-3 py-1.5 text-[13px] font-medium text-db-navy-800 transition-colors hover:border-db-navy-300 hover:bg-db-oat-medium"
           >
             <FileIcon className="h-3.5 w-3.5" /> Import
           </button>
@@ -598,6 +626,8 @@ export function AgentDesignerListPage() {
           }}
         />
       )}
+
+      <ImportYamlDialog open={importOpen} onClose={() => setImportOpen(false)} />
     </AppShell>
   )
 }

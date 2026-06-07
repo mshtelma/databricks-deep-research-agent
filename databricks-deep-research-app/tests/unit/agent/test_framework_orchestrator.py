@@ -20,6 +20,7 @@ from deep_research.agent.framework_orchestrator import (
     _apply_source_scope_to_workflow_declarations,
     _build_state_proxy,
     _extract_verification_from_framework_state,
+    _fill_databricks_tool_defaults,
     _load_enterprise_tools,
     _load_existing_sources,
     _load_file_search_tool,
@@ -27,6 +28,7 @@ from deep_research.agent.framework_orchestrator import (
     _safe_uuid,
     _to_sse_event,
     _to_uuid,
+    _tool_names_with_explicit_provider,
     stream_research_via_framework,
 )
 from deep_research.schemas.streaming import (
@@ -178,6 +180,142 @@ def test_source_scope_filters_saved_workflow_tool_declarations() -> None:
 
     assert updated.tools == []
     assert updated.root.children[0].config["tools"] == []
+
+
+def test_tool_names_with_explicit_provider_detects_declared_provider() -> None:
+    """A web_search declaration with config.provider must be flagged so the
+    auto-injected resolver override does not shadow it."""
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    workflow = _workflow_dict()
+    workflow["tools"] = [
+        {"name": "web_search", "kind": "web_search",
+         "config": {"provider": "databricks", "model": "databricks-gpt-5"}},
+        {"name": "web_crawl", "kind": "web_crawl", "config": {}},
+    ]
+    workflow["root"]["children"][0]["config"]["tools"] = ["web_search", "web_crawl"]
+    definition = load_workflow_from_dict(workflow)
+
+    assert _tool_names_with_explicit_provider(definition) == {"web_search"}
+
+
+def test_tool_names_with_explicit_provider_empty_when_none_declared() -> None:
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    workflow = _workflow_dict()
+    workflow["tools"] = [{"name": "web_search", "kind": "web_search", "config": {}}]
+    definition = load_workflow_from_dict(workflow)
+
+    assert _tool_names_with_explicit_provider(definition) == set()
+
+
+def test_fill_databricks_tool_defaults_fills_per_tool_databricks() -> None:
+    """A per-tool provider:databricks web tool missing model inherits the app
+    defaults at run time — covers UI-only saves that bypass normalize_ast."""
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    from deep_research.core.app_config import DatabricksSearchConfig, SearchConfig
+
+    workflow = _workflow_dict()
+    workflow["tools"] = [
+        {"name": "web_search", "kind": "web_search",
+         "config": {"provider": "databricks"}},
+    ]
+    workflow["root"]["children"][0]["config"]["tools"] = ["web_search"]
+    definition = load_workflow_from_dict(workflow)
+    search_cfg = SearchConfig(
+        provider="brave",
+        databricks=DatabricksSearchConfig(endpoint="databricks-gpt-5"),
+    )
+
+    _fill_databricks_tool_defaults(definition, search_cfg)
+
+    cfg = definition.tools[0].config
+    assert cfg["model"] == "databricks-gpt-5"
+    assert "timeout_seconds" in cfg and "resolve_redirects" in cfg
+
+
+def test_fill_databricks_tool_defaults_skips_non_databricks() -> None:
+    """brave/jina web tools and non-web tools are left untouched."""
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    from deep_research.core.app_config import SearchConfig
+
+    workflow = _workflow_dict()
+    workflow["tools"] = [
+        {"name": "web_search", "kind": "web_search", "config": {"provider": "jina"}},
+        {"name": "wc", "kind": "web_crawl", "config": {}},
+    ]
+    workflow["root"]["children"][0]["config"]["tools"] = ["web_search", "wc"]
+    definition = load_workflow_from_dict(workflow)
+
+    _fill_databricks_tool_defaults(definition, SearchConfig(provider="brave"))
+
+    assert definition.tools[0].config == {"provider": "jina"}
+    assert definition.tools[1].config == {}
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_prepare_fills_databricks_web_tool_for_agent_v2() -> None:
+    """Regression for the production crash: a designer-saved (agent-v2) workflow
+    whose web tool pins provider=databricks but omits model must get the model
+    filled by ``_resolve_and_prepare_workflow_def``. That helper couples the fill
+    to resolution; the original bug filled before the workflow was resolved
+    (workflow_def=None → silent no-op), so the tool later crashed construction
+    with 'requires a serving endpoint'."""
+    from deep_research.agent.framework_orchestrator import (
+        _resolve_and_prepare_workflow_def,
+    )
+    from deep_research.core.app_config import DatabricksSearchConfig, SearchConfig
+
+    agent_id = uuid4()
+    workflow = _workflow_dict()
+    workflow["tools"] = [
+        {"name": "web_research", "kind": "web_research",
+         "config": {"provider": "databricks"}},
+    ]
+    workflow["root"]["children"][0]["config"]["tools"] = ["web_research"]
+
+    class _FakeAgentV2Service:
+        def __init__(self, session: object) -> None:
+            self.session = session
+
+        async def get_for_user(self, requested_id: UUID, user_id: str) -> object:
+            return SimpleNamespace(definition=workflow)
+
+    config = _mock_config(agent_id=str(agent_id), verify_sources=False)
+    search_cfg = SearchConfig(
+        provider="brave",
+        databricks=DatabricksSearchConfig(endpoint="databricks-gemini-3-1-flash-lite"),
+    )
+
+    with patch(
+        "deep_research.services.agent_v2_service.AgentV2Service", _FakeAgentV2Service
+    ):
+        prepared = await _resolve_and_prepare_workflow_def(
+            None, config, "user-1", object(), [], None, search_cfg,
+        )
+
+    cfg = prepared.tools[0].config
+    assert cfg["provider"] == "databricks"
+    assert cfg["model"] == "databricks-gemini-3-1-flash-lite"
+    assert "timeout_seconds" in cfg and "resolve_redirects" in cfg
+
+
+def test_fill_databricks_tool_defaults_noop_on_none() -> None:
+    """Documents the trap behind the production crash: filling before the
+    workflow is resolved (workflow_def=None) is a no-op — hence the fill lives
+    inside ``_resolve_and_prepare_workflow_def``, after resolution."""
+    from deep_research.core.app_config import DatabricksSearchConfig, SearchConfig
+
+    # Must simply return without raising.
+    _fill_databricks_tool_defaults(
+        None,
+        SearchConfig(
+            provider="databricks",
+            databricks=DatabricksSearchConfig(endpoint="databricks-gpt-5"),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -51,7 +51,11 @@ import os
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
-from databricks_deep_research import WorkflowRunner, required_ctx_fields_for_kind
+from databricks_deep_research import (
+    WorkflowRunner,
+    required_ctx_fields_for_kind,
+    resolve_workspace_client,
+)
 from databricks_deep_research.tools.builtins.text_table import (
     BindingInfo,
     wire_statement_execution_text_table_context,
@@ -172,6 +176,67 @@ def assert_runtime_can_satisfy_workflows(
     raise RuntimeError("\n".join(lines))
 
 
+def _apply_default_search_client(
+    ctx: ToolFactoryContext, llm_client: FrameworkLLMClient | None
+) -> None:
+    """Point ``ctx.search_client`` at the workspace-default search backend.
+
+    Tools that omit ``config.provider`` inherit ``ctx.search_client`` in the
+    builtin tool factory (its no-provider branch). ``from_defaults`` seeds that
+    field from ``BRAVE_API_KEY`` (or ``None``). When the workspace
+    ``search.provider`` is ``databricks`` we replace it with the model-serving
+    built-in-search adapter (reusing the central :func:`_build_web_search_client`)
+    so inherited per-agent web tools use Databricks built-in search with **no**
+    Brave key assumed. Any other provider — or an un-buildable adapter (e.g. no
+    ``llm_client``) — leaves the ``from_defaults`` value untouched. Explicit
+    per-tool providers are unaffected: they build via ``_resolve_search_provider``,
+    not ``ctx.search_client``.
+    """
+    from deep_research.agent.adapters.tool_adapter import _build_web_search_client
+    from deep_research.core.app_config import get_app_config
+
+    try:
+        search_cfg = get_app_config().search
+    except Exception:  # pragma: no cover - defensive: config unreadable
+        return
+    if getattr(search_cfg, "provider", None) != "databricks":
+        return
+    client = _build_web_search_client(
+        search_provider="databricks",
+        brave_client=None,
+        domain_filter_config=None,
+        llm_client=llm_client,
+        databricks_search_cfg=search_cfg.databricks,
+    )
+    if client is not None:
+        ctx.search_client = client
+        logger.info(
+            "FWK_CTX_SEARCH_CLIENT provider=databricks endpoint=%s",
+            getattr(search_cfg.databricks, "endpoint", "?"),
+        )
+
+
+def _apply_serving_client_provider(
+    ctx: ToolFactoryContext, llm_client: FrameworkLLMClient | None
+) -> None:
+    """Point ``ctx.serving_client_provider`` at the app's SP serving client.
+
+    Databricks built-in web search is a model-serving call over the PUBLIC web,
+    so it authenticates as the app / service principal — the SAME identity every
+    LLM call already uses — never the OBO user (``ctx.user_token``), which is
+    reserved for user-scoped data tools and does not carry the ``model-serving``
+    passthrough scope. Set provider-agnostically (not gated on the global
+    ``search.provider``) so an explicit per-tool ``provider: databricks`` is
+    covered even when the workspace default is brave/jina. The framework's
+    databricks search factory consumes ``serving_client_provider``; the inherited
+    default path already builds from this same SP client.
+    """
+    if llm_client is None:  # pragma: no cover - defensive; the runner always has one
+        return
+    ctx.serving_client_provider = lambda: llm_client.openai_client
+    logger.info("FWK_CTX_SERVING_CLIENT identity=sp source=llm_client")
+
+
 def build_app_workflow_runner(
     *,
     llm_client: FrameworkLLMClient,
@@ -214,18 +279,33 @@ def build_app_workflow_runner(
         Callers should construct a new runner per request — the framework
         runner is documented as not thread-safe.
     """
+    # Resolve OBO-vs-SP ONCE, here, via the framework's shared helper, so
+    # EVERY Databricks tool (table_*, vector_search, genie,
+    # knowledge_assistant, table_discovery) and the discovery client_factory
+    # below run under one identity: the calling user when an OBO token is
+    # present, the service principal otherwise. Previously the caller passed
+    # the SP client and the OBO token was dropped, so UC-gated tools silently
+    # ran as the SP and hit permission errors on user-owned data.
+    workspace_client = resolve_workspace_client(
+        sp_client=workspace_client, user_token=user_token
+    )
     ctx = ToolFactoryContext.from_defaults(
         workspace_client=workspace_client,
         user_token=user_token,
     )
+    # Default web-search backend for tools that DON'T pin an explicit provider:
+    # follow the workspace ``search.provider`` (Databricks built-in search by
+    # default) instead of the Brave adapter ``from_defaults`` seeds. Runs before
+    # the context-built log below so it reflects the final ``search_client``.
+    _apply_default_search_client(ctx, llm_client)
+    _apply_serving_client_provider(ctx, llm_client)
 
     # The discovery adapter pairs static designer bindings with optional
-    # UC catalog scopes. ``ctx.workspace_client`` already carries the
-    # OBO-authenticated client (auto-detected or caller-supplied), so we
-    # wrap it as a stable factory; the adapter ignores the per-call
-    # ``user_token`` it receives because auth is already baked into the
-    # client. When no client is available the adapter falls back to
-    # static bindings only.
+    # UC catalog scopes. ``ctx.workspace_client`` now carries the resolved
+    # (OBO when a token was supplied) client, so we wrap it as a stable
+    # factory; the adapter ignores the per-call ``user_token`` it receives
+    # because auth is already baked into the client. When no client is
+    # available the adapter falls back to static bindings only.
     client_factory = (
         workspace_client_factory_from(ctx.workspace_client)
         if ctx.workspace_client is not None
@@ -245,11 +325,12 @@ def build_app_workflow_runner(
     )
 
     logger.info(
-        "TOOL_FACTORY_CONTEXT_BUILT workspace_client=%s search_client=%s "
+        "TOOL_FACTORY_CONTEXT_BUILT workspace_client=%s auth=%s search_client=%s "
         "brave_key=%s jina_key=%s user_token=%s table_registry=present "
         "table_discovery_provider=present table_static_bindings=%d "
         "table_uc_scopes=%d table_sql_executor=%s table_schema_cache=%s",
         "present" if ctx.workspace_client else "MISSING",
+        "obo" if user_token else "sp",
         "present" if ctx.search_client else "MISSING",
         "present" if ctx.api_keys.get("brave") else "MISSING",
         "present" if ctx.api_keys.get("jina") else "MISSING",

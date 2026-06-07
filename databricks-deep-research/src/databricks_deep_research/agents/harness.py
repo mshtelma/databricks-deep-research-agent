@@ -66,6 +66,7 @@ from databricks_deep_research.events.types import (
     AgentOutputEvent,
     StreamEvent,
 )
+from databricks_deep_research.llm.budget import estimate_message_tokens
 from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.memory import (
     CHAT_MEMORY_APPENDIX_STATE_KEY,
@@ -501,6 +502,28 @@ async def execute_agent(
 
         # -- 2. Build messages ---------------------------------------------------
         messages = _build_messages(agent_input)
+
+        # Diagnostic: full prompt-composition breakdown so an over-context
+        # prompt can be reconstructed from logs — which channel (user template,
+        # injected pools, conversation history, tool schemas) drove the size.
+        conv_history = agent_input.conversation_history
+        conv_chars = sum(len(str(m.get("content") or "")) for m in conv_history)
+        pool_chars = {
+            name: len(section.rendered_text or "")
+            for name, section in agent_input.pool_sections.items()
+        }
+        logger.info(
+            "AGENT_PROMPT_COMPOSITION node=%s subtype=%s est_prompt_tokens=%d "
+            "messages=%d system_chars=%d user_chars=%d conv_msgs=%d "
+            "conv_chars=%d pool_chars=%s tool_count=%d",
+            node_id, config.subtype,
+            estimate_message_tokens(messages),
+            len(messages),
+            len(agent_input.system_prompt or ""),
+            len(agent_input.user_prompt or ""),
+            len(conv_history), conv_chars,
+            pool_chars, len(tools),
+        )
 
         # -- 3. Execute (simple or ReAct) ----------------------------------------
         events: list[StreamEvent] = []

@@ -260,6 +260,12 @@ class CachedChatService(_CachedServiceBase, IChatService):
         sources = [_state_source_to_view(s) for s in doc.state.sources]
         research_sessions = [_state_session_to_view(rs) for rs in doc.state.research_sessions]
 
+        # Link each message to its research session so the /full endpoint can
+        # surface inline claims/verification_data. Without this, every message
+        # view keeps research_session=None and chats.py emits claims=[] for all
+        # messages — every citation renders grey (see _link_sessions_to_messages).
+        _link_sessions_to_messages(messages, research_sessions)
+
         # Patch view.messages so that `chat.messages` in chats.py works
         view.messages = messages
         view.sources = sources
@@ -657,3 +663,51 @@ def _state_session_to_view(rs: Any) -> Any:
         query=None,
         query_mode=None,
     )
+
+
+def _session_supersedes(candidate: Any, incumbent: Any) -> bool:
+    """True if ``candidate`` should replace ``incumbent`` as a message's session.
+
+    Ranking: a session carrying ``verification_data`` wins over one without;
+    ties break on the latest ``started_at``. This makes a regenerated/completed
+    answer win over an earlier empty or in-progress attempt for the same message.
+    """
+    cand_has = bool(getattr(candidate, "verification_data", None))
+    inc_has = bool(getattr(incumbent, "verification_data", None))
+    if cand_has != inc_has:
+        return cand_has
+    cand_ts = getattr(candidate, "started_at", None)
+    inc_ts = getattr(incumbent, "started_at", None)
+    if cand_ts is None:
+        return False
+    if inc_ts is None:
+        return True
+    return bool(cand_ts > inc_ts)
+
+
+def _link_sessions_to_messages(messages: list[Any], research_sessions: list[Any]) -> None:
+    """Attach each message's ``research_session`` in place, by ``message_id``.
+
+    ``_state_msg_to_view`` starts every message view with
+    ``research_session=None`` ("linked separately"); the ``/chats/{id}/full``
+    endpoint (``api/v1/chats.py``) reads claims and verification data
+    EXCLUSIVELY from ``msg.research_session``. Without this link every message
+    surfaces ``claims=[]`` and all citations render grey — and the frontend
+    never fires ``/messages/{id}/claims`` either, because its
+    ``latestAgentMessageIdForCitations`` gate requires ``m.researchSession``.
+
+    When more than one session targets the same message (e.g. a regenerated
+    answer), the highest-ranked session wins (see ``_session_supersedes``).
+    """
+    by_message: dict[Any, Any] = {}
+    for rs in research_sessions:
+        message_id = getattr(rs, "message_id", None)
+        if message_id is None:
+            continue
+        incumbent = by_message.get(message_id)
+        if incumbent is None or _session_supersedes(rs, incumbent):
+            by_message[message_id] = rs
+    for msg in messages:
+        linked = by_message.get(getattr(msg, "id", None))
+        if linked is not None:
+            msg.research_session = linked

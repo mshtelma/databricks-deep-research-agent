@@ -25,7 +25,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.core.app_config import get_app_config
@@ -36,6 +35,7 @@ if TYPE_CHECKING:
     from deep_research.agent.tools.web_crawler import WebCrawler
     from deep_research.services.llm.client import LLMClient
     from deep_research.services.search.brave import BraveSearchClient
+    from deep_research.storage.documents import ResearchSessionState
 
 logger = get_logger(__name__)
 
@@ -75,7 +75,7 @@ class JobManager:
         """Initialize the job manager."""
         self._active_tasks: dict[UUID, asyncio.Task[None]] = {}
         self._worker_id = f"{os.getpid()}-{uuid4().hex[:8]}"
-        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._cleanup_task: asyncio.Task[None] | None = None
         self._running = False
         # Optional; populated in `main.py` lifespan when cached storage is on.
         # Threaded into `stream_research(..., storage_stack=...)` per job so
@@ -114,11 +114,11 @@ class JobManager:
         self._session_maker = session_maker
         logger.info("JOB_MANAGER_STARTING", worker_id=self._worker_id)
 
-        # Start heartbeat loop
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-
-        # Clean up interrupted jobs
+        # Clean up interrupted jobs from prior runs, then start the recurring
+        # cleanup loop (replaces the legacy heartbeat loop; _active_tasks is the
+        # liveness signal — see _cleanup_interrupted_jobs).
         await self._cleanup_interrupted_jobs()
+        self._cleanup_task = asyncio.create_task(self._recurring_cleanup_loop())
 
         logger.info("JOB_MANAGER_STARTED", worker_id=self._worker_id)
 
@@ -136,11 +136,11 @@ class JobManager:
         logger.info("JOB_MANAGER_STOPPING", worker_id=self._worker_id, active_jobs=len(self._active_tasks))
         self._running = False
 
-        # Cancel heartbeat
-        if self._heartbeat_task:
-            self._heartbeat_task.cancel()
+        # Cancel the recurring cleanup loop
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._heartbeat_task
+                await self._cleanup_task
 
         # Cancel all active tasks
         for task in self._active_tasks.values():
@@ -454,55 +454,47 @@ class JobManager:
         self,
         user_id: str,
         status: str | None,
-        db: AsyncSession,
+        db: AsyncSession | None = None,  # noqa: ARG002  # kept for signature back-compat
         limit: int = 50,
     ) -> list[ResearchSession]:
-        """Get jobs for a user, optionally filtered by status.
+        """Return research sessions for a user, optionally filtered by status.
 
-        Args:
-            user_id: User to get jobs for.
-            status: Optional status filter (in_progress, completed, failed, cancelled).
-            db: Database session.
-            limit: Maximum number of jobs to return.
-
-        Returns:
-            List of ResearchSession objects.
+        Reads from the storage stack (``chat_state.state.research_sessions``)
+        — never the legacy ``research_sessions`` table. Returns in-memory
+        ``ResearchSession`` DTOs (no SQL identity) for response back-compat.
         """
-        stmt = select(ResearchSession).where(ResearchSession.user_id == user_id)
-
-        if status:
-            stmt = stmt.where(ResearchSession.status == status)
-
-        stmt = stmt.order_by(ResearchSession.created_at.desc()).limit(limit)
-        result = await db.execute(stmt)
-        return list(result.scalars().all())
+        if self._storage_stack is None:
+            raise RuntimeError(
+                "JobManager.get_user_jobs requires a StorageStack; "
+                "call set_storage_stack() in app lifespan."
+            )
+        pairs = await self._storage_stack.backend.list_user_jobs(
+            user_id, status=status, limit=limit
+        )
+        return [_session_state_to_orm(chat_id, rs, user_id) for chat_id, rs in pairs]
 
     async def get_chat_active_job(
         self,
         chat_id: UUID,
         user_id: str,
-        db: AsyncSession,
+        db: AsyncSession | None = None,  # noqa: ARG002  # kept for signature back-compat
     ) -> ResearchSession | None:
-        """Get the active job for a specific chat.
+        """Return the active research session for a chat, or None.
 
-        Args:
-            chat_id: Chat to check.
-            user_id: User (for security).
-            db: Database session.
-
-        Returns:
-            Active ResearchSession if one exists, None otherwise.
+        Reads from the storage stack; ``user_id`` scopes the lookup for
+        ownership.
         """
-        stmt = (
-            select(ResearchSession)
-            .where(ResearchSession.chat_id == chat_id)
-            .where(ResearchSession.user_id == user_id)
-            .where(ResearchSession.status == ResearchStatus.IN_PROGRESS)
-            .order_by(ResearchSession.created_at.desc())
-            .limit(1)
+        if self._storage_stack is None:
+            raise RuntimeError(
+                "JobManager.get_chat_active_job requires a StorageStack; "
+                "call set_storage_stack() in app lifespan."
+            )
+        rs = await self._storage_stack.backend.get_active_session_for_chat(
+            chat_id, user_id
         )
-        result = await db.execute(stmt)
-        return result.scalar_one_or_none()
+        if rs is None:
+            return None
+        return _session_state_to_orm(chat_id, rs, user_id)
 
     async def _run_job(
         self,
@@ -986,138 +978,116 @@ class JobManager:
         finally:
             self._active_tasks.pop(session_id, None)
 
-    async def _heartbeat_loop(self) -> None:
-        """Update heartbeat for all active jobs.
+    async def _recurring_cleanup_loop(self) -> None:
+        """Run ``_cleanup_interrupted_jobs`` every 5 minutes while running.
 
-        Runs every heartbeat_interval_seconds while the manager is running.
-        Updates the last_heartbeat timestamp for all jobs owned by this worker.
-
-        Note: We call get_session_maker() directly instead of using the cached
-        self._session_maker to ensure OAuth token refresh is triggered. The
-        token refresh logic in get_session_maker() -> get_engine() checks for
-        expired tokens and recreates the engine if needed.
+        Replaces the legacy ``_heartbeat_loop`` (which wrote ``last_heartbeat``
+        to the now-dropped ``research_sessions`` table). The ``_active_tasks``
+        dict on this worker is the canonical liveness signal; the periodic
+        cleanup is a safety net for sessions that fail to self-clean.
         """
-        from deep_research.db.session import get_session_maker
-
+        interval = 300  # 5 minutes
         while self._running:
             try:
-                await asyncio.sleep(_get_heartbeat_interval())
-
-                if not self._active_tasks:
-                    continue
-
-                # Use fresh session maker to trigger token refresh check
-                session_maker = get_session_maker()
-                async with session_maker() as db:
-                    await db.execute(
-                        update(ResearchSession)
-                        .where(ResearchSession.id.in_(list(self._active_tasks.keys())))
-                        .values(last_heartbeat=datetime.now(UTC))
-                    )
-                    await db.commit()
-
-                logger.debug(
-                    "HEARTBEAT_UPDATED",
-                    worker_id=self._worker_id,
-                    job_count=len(self._active_tasks),
-                )
-
+                await asyncio.sleep(interval)
+                if not self._running:
+                    break
+                await self._cleanup_interrupted_jobs()
             except asyncio.CancelledError:
                 break
-            except Exception as e:
+            except Exception as exc:  # noqa: BLE001
                 logger.error(
-                    "HEARTBEAT_ERROR",
-                    error=str(e),
+                    "RECURRING_CLEANUP_ERROR",
+                    worker_id=self._worker_id,
+                    error=str(exc)[:200],
                 )
 
     async def _cleanup_interrupted_jobs(self) -> None:
-        """Clean up jobs interrupted by previous app restart.
+        """Mark stale ``in_progress`` research sessions ``failed`` via the backend.
 
-        Finds jobs with:
-        - status = in_progress
-        - last_heartbeat older than zombie_threshold_seconds (or NULL)
-
-        These jobs were running when the app restarted and need cleanup.
-
-        Gracefully skips cleanup if database schema is not yet initialized
-        (e.g., migrations haven't run). This is expected during two-phase
-        deployment where the app starts before migrations complete.
+        A session is stale when its ``last_heartbeat`` is older than
+        ``_get_zombie_threshold()`` (or NULL) AND its id is NOT in
+        ``self._active_tasks`` (not running on this worker). Runs once at
+        startup and every 5 minutes. Operates on the storage stack's
+        ``chat_state`` JSONB — never the legacy ``research_sessions`` table.
         """
-        from sqlalchemy.exc import ProgrammingError
-
-        from deep_research.db.session import get_session_maker
-
+        if self._storage_stack is None:
+            logger.warning(
+                "CLEANUP_SKIPPED_NO_STORAGE_STACK", worker_id=self._worker_id
+            )
+            return
         cutoff = datetime.now(UTC) - timedelta(seconds=_get_zombie_threshold())
-
+        exclude_ids = list(self._active_tasks.keys())
         try:
-            # Use fresh session maker to trigger token refresh check
-            session_maker = get_session_maker()
-            async with session_maker() as db:
-                stmt = (
-                    select(ResearchSession)
-                    .where(ResearchSession.status == ResearchStatus.IN_PROGRESS)
-                    .where(
-                        (ResearchSession.last_heartbeat < cutoff)
-                        | (ResearchSession.last_heartbeat.is_(None))
-                    )
-                )
-                result = await db.execute(stmt)
-                interrupted = list(result.scalars().all())
-
-                if not interrupted:
-                    logger.info("CLEANUP_NO_INTERRUPTED_JOBS")
-                    return
-
-                logger.info(
-                    "CLEANUP_FOUND_INTERRUPTED_JOBS",
-                    count=len(interrupted),
-                )
-
-                for session in interrupted:
-                    # For now, mark as failed
-                    # Future: could resume from execution_state if available
-                    session.status = ResearchStatus.FAILED
-                    session.error_message = "Job interrupted by app restart"
-                    session.completed_at = datetime.now(UTC)
-
-                    logger.info(
-                        "CLEANUP_JOB_MARKED_FAILED",
-                        session_id=str(session.id),
-                        user_id=session.user_id,
-                    )
-
-                await db.commit()
-        except ProgrammingError as e:
-            if "UndefinedTableError" in str(e):
-                logger.warning(
-                    "CLEANUP_SKIPPED_SCHEMA_NOT_READY",
-                    error=str(e)[:200],
-                    detail="Database schema not initialized. "
-                    "Run migrations: make db-migrate-remote TARGET=<target>",
-                )
-                return
-            raise
+            marked = await self._storage_stack.backend.mark_stale_research_sessions_failed(
+                cutoff=cutoff,
+                exclude_session_ids=exclude_ids,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "CLEANUP_ERROR", worker_id=self._worker_id, error=str(exc)[:200]
+            )
+            return
+        if marked > 0:
+            logger.info(
+                "CLEANUP_MARKED_STALE_SESSIONS",
+                worker_id=self._worker_id,
+                count=marked,
+                cutoff=cutoff.isoformat(),
+            )
+        else:
+            logger.info("CLEANUP_NO_STALE_SESSIONS", worker_id=self._worker_id)
 
     async def _count_user_active_jobs(
         self,
         user_id: str,
-        db: AsyncSession,
+        db: AsyncSession | None = None,  # noqa: ARG002  # kept for signature back-compat
     ) -> int:
-        """Count active jobs for a user.
-
-        Args:
-            user_id: User to count jobs for.
-            db: Database session.
-
-        Returns:
-            Number of in_progress jobs for the user.
-        """
-        result = await db.scalar(
-            select(func.count(ResearchSession.id))
-            .where(ResearchSession.user_id == user_id)
-            .where(ResearchSession.status == ResearchStatus.IN_PROGRESS)
+        """Count active research sessions for a user via the storage backend."""
+        if self._storage_stack is None:
+            raise RuntimeError(
+                "JobManager._count_user_active_jobs requires a StorageStack; "
+                "call set_storage_stack() in app lifespan."
+            )
+        return await self._storage_stack.backend.count_active_research_sessions(
+            user_id
         )
-        return result or 0
+
+
+def _parse_research_status(value: str) -> ResearchStatus:
+    """Parse a status string to ``ResearchStatus``; unknown → FAILED (defensive)."""
+    try:
+        return ResearchStatus(value)
+    except ValueError:
+        logger.warning("UNKNOWN_RESEARCH_STATUS", status=value)
+        return ResearchStatus.FAILED
+
+
+def _session_state_to_orm(
+    chat_id: UUID,
+    rs: ResearchSessionState,
+    user_id: str,
+) -> ResearchSession:
+    """Build an in-memory ``ResearchSession`` from a JSONB ``ResearchSessionState``.
+
+    ``ResearchSession`` is used as a data carrier only (no SQL identity); callers
+    must not pass it to a DB session. Fields absent from the JSONB state
+    (``query``/``query_mode``/``research_depth``) default safely — job
+    list/count responses do not depend on them.
+    """
+    return ResearchSession(
+        id=rs.id,
+        message_id=rs.message_id,
+        chat_id=chat_id,
+        user_id=user_id,
+        query="",
+        query_mode="deep_research",
+        research_depth="auto",
+        status=_parse_research_status(rs.status),
+        last_heartbeat=rs.last_heartbeat,
+        started_at=rs.started_at,
+        completed_at=rs.completed_at,
+    )
 
 
 # Global instance (initialized in main.py)

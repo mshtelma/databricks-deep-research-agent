@@ -115,6 +115,7 @@ class AutoscalingCredentialProvider(BaseLakebaseCredentialProvider):
             token=cred_response.token,
             username=username,
             expires_at=expires_at,
+            issued_at=now_utc,
         )
 
     def _extract_username(
@@ -174,11 +175,14 @@ class AutoscalingCredentialProvider(BaseLakebaseCredentialProvider):
             cred.username,
             claims,
         )
+        now_utc = datetime.now(UTC)
+        cred_age = cred.age_s
         logger.warning(
             "AUTOSCALING_DB_AUTH_FAILURE_DIAGNOSTIC backend=autoscaling "
             "endpoint=%s username_source=%s username=%s token_sub=%s "
             "token_client_id=%s token_aud=%s token_iss=%s token_exp=%s "
-            "token_expires_in_s=%s username_matches_sub=%s exc_class=%s error=%s",
+            "token_expires_in_s=%s token_iat=%s token_nbf=%s token_age_s=%s "
+            "cred_age_s=%s username_matches_sub=%s exc_class=%s error=%s",
             self._endpoint_name,
             username_source,
             self._redact_identity(cred.username),
@@ -187,7 +191,11 @@ class AutoscalingCredentialProvider(BaseLakebaseCredentialProvider):
             self._redact_claim(claims.get("aud")),
             self._redact_claim(claims.get("iss")),
             claims.get("exp"),
-            self._token_expires_in_s(claims, datetime.now(UTC)),
+            self._token_expires_in_s(claims, now_utc),
+            self._claim_epoch(claims, "iat"),
+            self._claim_epoch(claims, "nbf"),
+            self._token_age_s(claims, now_utc),
+            f"{cred_age:.1f}" if cred_age is not None else None,
             self._username_matches_sub(cred.username, claims),
             type(exc).__name__,
             self._sanitize_auth_error(exc, cred.username, claims),
@@ -206,6 +214,7 @@ class AutoscalingCredentialProvider(BaseLakebaseCredentialProvider):
             "AUTOSCALING_CREDENTIAL_DIAGNOSTIC backend=autoscaling endpoint=%s "
             "username_source=%s username=%s token_sub=%s token_client_id=%s "
             "token_aud=%s token_iss=%s token_exp=%s token_expires_in_s=%s "
+            "token_iat=%s token_nbf=%s token_age_s=%s "
             "username_matches_sub=%s token_length=%s",
             self._endpoint_name,
             username_source,
@@ -216,9 +225,41 @@ class AutoscalingCredentialProvider(BaseLakebaseCredentialProvider):
             self._redact_claim(claims.get("iss")),
             claims.get("exp"),
             self._token_expires_in_s(claims, now_utc),
+            self._claim_epoch(claims, "iat"),
+            self._claim_epoch(claims, "nbf"),
+            self._token_age_s(claims, now_utc),
             self._username_matches_sub(username, claims),
             f"len={len(token)}",
         )
+
+    def log_endpoint_state_diagnostics(self) -> None:
+        """Best-effort log of the Autoscaling endpoint's current state.
+
+        Called after an auth failure to test the "transient endpoint event"
+        hypothesis: if ``current_state`` is not ACTIVE (or ``update_time`` is
+        very recent) when tokens are being rejected, the failure correlates
+        with an endpoint maintenance/restart rather than a token race. Fully
+        non-fatal — any SDK error is swallowed so this never blocks the
+        request or connection path.
+        """
+        try:
+            client = self._get_workspace_client()
+            ep = client.postgres.get_endpoint(name=self._endpoint_name)  # type: ignore[attr-defined]
+            status = getattr(ep, "status", None)
+            logger.warning(
+                "AUTOSCALING_ENDPOINT_STATE_DIAGNOSTIC endpoint=%s current_state=%s "
+                "disabled=%s update_time=%s",
+                self._endpoint_name,
+                getattr(status, "current_state", None),
+                getattr(status, "disabled", None),
+                getattr(ep, "update_time", None),
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostic must never raise
+            logger.warning(
+                "AUTOSCALING_ENDPOINT_STATE_DIAGNOSTIC_FAILED endpoint=%s exc_class=%s",
+                self._endpoint_name,
+                type(exc).__name__,
+            )
 
     @staticmethod
     def _decode_token_claims(token: str) -> dict[str, Any]:
@@ -310,6 +351,32 @@ class AutoscalingCredentialProvider(BaseLakebaseCredentialProvider):
         if isinstance(exp, int | float):
             return int(exp - now_utc.timestamp())
         return None
+
+    @staticmethod
+    def _claim_epoch(claims: Mapping[str, Any], name: str) -> int | None:
+        value = claims.get(name)
+        if isinstance(value, int | float):
+            return int(value)
+        return None
+
+    @classmethod
+    def _token_age_s(
+        cls,
+        claims: Mapping[str, Any],
+        now_utc: datetime,
+    ) -> int | None:
+        """Seconds between the token's ``iat`` claim and now.
+
+        A near-zero age at the moment Lakebase rejects the token with
+        "password authentication failed" is the fingerprint of a
+        freshly-minted-credential propagation race (PgBouncer /
+        databricks_auth eventual consistency) — as opposed to an expired
+        or structurally invalid token. Returns None if ``iat`` is absent.
+        """
+        iat = cls._claim_epoch(claims, "iat")
+        if iat is None:
+            return None
+        return int(now_utc.timestamp() - iat)
 
     @classmethod
     def _username_matches_sub(

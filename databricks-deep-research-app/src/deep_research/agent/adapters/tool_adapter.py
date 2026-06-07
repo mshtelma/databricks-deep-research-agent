@@ -8,6 +8,7 @@ implementations once per workflow execution, injecting all dependencies
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from databricks_deep_research.tools.builtins.web_search import SearchResult
@@ -17,6 +18,8 @@ from databricks_deep_research.tools.protocol import (
     ToolDefinition,
     ToolResult,
 )
+
+from deep_research.core.app_config import DEFAULT_SEARCH_PROVIDER
 
 logger = logging.getLogger(__name__)
 
@@ -322,6 +325,95 @@ class BraveSearchAdapter:
         ]
 
 
+def _domain_predicate(domain_filter_config: Any | None) -> Callable[[str], bool] | None:
+    """Build a url-allow predicate from a per-agent ``DomainFilterConfig`` (or None).
+
+    Returns ``None`` when there is no active filter so the search backend skips the
+    extra check entirely. Mirrors the per-agent filtering the Brave path applies.
+    """
+    if domain_filter_config is None:
+        return None
+    from deep_research.services.search.domain_filter import DomainFilter
+
+    flt = DomainFilter(domain_filter_config)
+    if not getattr(flt, "is_active", False):
+        return None
+    return lambda url: bool(flt.is_allowed(url).allowed)
+
+
+def _allowlist_patterns(domain_filter_config: Any | None) -> list[str]:
+    """Raw INCLUDE patterns to forward for allowlist push-down, or ``[]``.
+
+    Only INCLUDE / BOTH modes carry an allowlist; EXCLUDE-only returns ``[]`` (a
+    blocklist is enforced solely by the post-hoc ``_domain_predicate``). The framework
+    adapter reduces these to the pushable bare-domain subset (all-or-nothing) and builds
+    the soft instruction hint, so the app just forwards the configured include patterns.
+    """
+    if domain_filter_config is None:
+        return []
+    from deep_research.core.app_config import DomainFilterMode
+
+    if getattr(domain_filter_config, "mode", None) not in (
+        DomainFilterMode.INCLUDE,
+        DomainFilterMode.BOTH,
+    ):
+        return []
+    return [str(d) for d in (getattr(domain_filter_config, "include_domains", []) or [])]
+
+
+def _build_web_search_client(
+    *,
+    search_provider: str,
+    brave_client: Any | None,
+    domain_filter_config: Any | None,
+    llm_client: Any | None,
+    databricks_search_cfg: Any | None,
+) -> Any | None:
+    """Select and build the web-search ``SearchClient`` backend for *search_provider*.
+
+    ``databricks`` builds the framework's built-in-web-search adapter (reusing the
+    framework LLM client's serving-endpoints connection); any other value (or a
+    misconfigured ``databricks``) falls back to the Brave adapter. Returns ``None``
+    when no backend can be built (e.g. no Brave client and not databricks).
+    """
+    if search_provider == "databricks":
+        if llm_client is None or databricks_search_cfg is None:
+            logger.warning(
+                "WEB_SEARCH_DATABRICKS_MISCONFIGURED has_llm_client=%s has_cfg=%s — "
+                "falling back to Brave",
+                llm_client is not None, databricks_search_cfg is not None,
+            )
+        else:
+            from databricks_deep_research.tools.builtins.databricks_web_search import (
+                build_databricks_web_search_adapter,
+            )
+
+            logger.info(
+                "WEB_SEARCH_PROVIDER provider=databricks endpoint=%s",
+                databricks_search_cfg.endpoint,
+            )
+            return build_databricks_web_search_adapter(
+                client_provider=lambda: llm_client.openai_client,
+                model=databricks_search_cfg.endpoint,
+                model_family=databricks_search_cfg.model_family,
+                max_results=databricks_search_cfg.max_results,
+                timeout_seconds=databricks_search_cfg.timeout_seconds,
+                resolve_redirects=databricks_search_cfg.resolve_redirects,
+                url_allowed=_domain_predicate(domain_filter_config),
+                restrict_to_domains=_allowlist_patterns(domain_filter_config),
+                push_allowed_domains=getattr(
+                    databricks_search_cfg, "push_allowed_domains", True
+                ),
+            )
+
+    # Default / fallback: Brave (the app's BraveSearchClient wrapped to the protocol).
+    if brave_client is not None:
+        return BraveSearchAdapter(
+            client=brave_client, domain_filter_config=domain_filter_config,
+        )
+    return None
+
+
 async def create_framework_tools(
     *,
     brave_client: Any | None = None,
@@ -332,6 +424,9 @@ async def create_framework_tools(
     file_search_tool: Any | None = None,
     chat_id: str | None = None,
     user_id: str | None = None,
+    search_provider: str = DEFAULT_SEARCH_PROVIDER,
+    llm_client: Any | None = None,
+    databricks_search_cfg: Any | None = None,
 ) -> list[ResearchTool]:
     """Create framework tools once per workflow execution.
 
@@ -353,20 +448,23 @@ async def create_framework_tools(
     """
     tools: list[ResearchTool] = []
 
-    # Web search tool
-    if brave_client is not None:
+    # Web search tool — provider-selected backend (brave default, or Databricks
+    # model-serving built-in web search). Both wrap the framework WebSearchTool,
+    # which owns URL-registry, domain filtering, and content truncation.
+    web_search_client = _build_web_search_client(
+        search_provider=search_provider,
+        brave_client=brave_client,
+        domain_filter_config=domain_filter_config,
+        llm_client=llm_client,
+        databricks_search_cfg=databricks_search_cfg,
+    )
+    if web_search_client is not None:
         try:
             from databricks_deep_research.tools.builtins.web_search import (
                 WebSearchTool,
             )
 
-            adapted_client = BraveSearchAdapter(
-                client=brave_client,
-                domain_filter_config=domain_filter_config,
-            )
-            tools.append(WebSearchTool(
-                search_client=adapted_client,
-            ))
+            tools.append(WebSearchTool(search_client=web_search_client))
         except ImportError:
             logger.warning("WEB_SEARCH_TOOL_UNAVAILABLE (missing httpx)")
 

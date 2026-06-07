@@ -361,11 +361,19 @@ class LLMClient:
         endpoint: ModelEndpoint,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        *,
+        force_tool_use: bool = False,
     ) -> dict[str, Any]:
         """Merge role and endpoint configuration.
 
         Note: Some models (e.g., GPT-5) don't support temperature parameter.
         The supports_temperature flag controls whether it's included.
+
+        Args:
+            force_tool_use: True when the request will force tool use (Claude
+                structured output is implemented by the Databricks gateway as a
+                forced tool call). The gateway rejects thinking + forced tool
+                use, so thinking is suppressed for these calls.
         """
         config: dict[str, Any] = {
             "max_tokens": max_tokens or endpoint.max_tokens or role.max_tokens,
@@ -389,6 +397,13 @@ class LLMClient:
         if _is_claude_endpoint(endpoint):
             # Claude: NONE/MINIMAL → no thinking (too small to be useful)
             if effective_effort in (ReasoningEffort.NONE, ReasoningEffort.MINIMAL):
+                return config
+
+            # Databricks implements Claude json_schema structured output as a
+            # forced tool call; the gateway rejects thinking + forced tool use
+            # (400 "Thinking may not be enabled when tool_choice forces tool
+            # use"). Drop thinking for these calls — structured output wins.
+            if force_tool_use:
                 return config
 
             # Resolve budget: explicit override → tier default
@@ -642,7 +657,13 @@ class LLMClient:
             health = self._get_health(endpoint.id)
         else:
             endpoint, health = self._select_endpoint(role, estimated_tokens)
-        config = self._merge_config(role, endpoint, temperature, max_tokens)
+        # Mirror the response_format condition below (structured output is only
+        # emitted when the endpoint supports it). On Claude that becomes a forced
+        # tool call, which is incompatible with thinking — so suppress thinking.
+        will_force_tool = structured_output is not None and endpoint.supports_structured_output
+        config = self._merge_config(
+            role, endpoint, temperature, max_tokens, force_tool_use=will_force_tool
+        )
 
         # Log the request
         log_llm_request(

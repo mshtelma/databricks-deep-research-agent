@@ -77,6 +77,28 @@ class ToolKind(StrEnum):
     custom = "custom"
 
 
+# Tool kinds that reach UC-gated Databricks resources and therefore need a
+# user identity (OBO) to behave correctly in a deployed app — running them as
+# the service principal silently yields permission errors / empty results.
+# Hosts gate "fail closed when OBO is missing" on this set
+# (see ``workflow_requires_databricks``). Web/file/custom kinds are excluded.
+DATABRICKS_BOUND_TOOL_KINDS: frozenset[str] = frozenset(
+    {
+        ToolKind.vector_search,
+        ToolKind.genie,
+        ToolKind.knowledge_assistant,
+        ToolKind.table_discovery,
+        ToolKind.table_search,
+        ToolKind.table_read,
+        ToolKind.table_neighbors,
+        ToolKind.table_load,
+        ToolKind.table_aggregate,
+        ToolKind.compute,
+        ToolKind.compute_namespace,
+    }
+)
+
+
 _TOOL_KIND_TO_SOURCE_KIND: dict[str, str] = {
     ToolKind.web_search: SourceKind.web,
     ToolKind.web_crawl: SourceKind.builtin,
@@ -223,7 +245,10 @@ class UrlRegistry:
 
     __slots__ = ("_urls", "_url_to_index", "_url_failures", "_domain_failure_counts", "_domain_failure_classes")
 
-    _DOMAIN_SUPPRESSION_THRESHOLD = 2
+    # Failures per domain before crawls of that domain are suppressed for the run.
+    # Raised 2->4 so a couple of transient failures (one 403, one boilerplate page)
+    # don't disable a whole domain whose other URLs may extract fine.
+    _DOMAIN_SUPPRESSION_THRESHOLD = 4
 
     def __init__(self) -> None:
         self._urls: list[str] = []

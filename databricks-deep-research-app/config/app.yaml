@@ -351,6 +351,15 @@ research_types:
 
 # Search configuration
 search:
+  # Active web-search provider for the builtin web_search tool:
+  #   databricks (default) | brave | jina.
+  # databricks = model-serving built-in web search; works out-of-the-box on a
+  # Databricks workspace with NO external search subscription. brave/jina are
+  # opt-in external search APIs and each require their own API key.
+  # A per-workflow / custom-agent YAML (or the designer per-agent inspector) can
+  # override via the web tool's config.provider without changing this default.
+  provider: databricks
+
   brave:
     requests_per_second: 1.0
     default_result_count: 10
@@ -362,6 +371,43 @@ search:
     max_concurrency: 10
     # 429 retry attempts (with exponential backoff + jitter).
     max_retries: 3
+
+  # Databricks built-in web search — the DEFAULT provider (above).
+  # WARNING: each query is a BILLED model generation — latency & cost far exceed
+  # a search REST API. Available only on pay-per-token endpoints; unavailable on
+  # provisioned-throughput, HIPAA/BAA, or cross-region-disabled workspaces (set
+  # `provider: brave` or `jina` on such workspaces).
+  databricks:
+    # The serving endpoint = how you choose gemini vs openai:
+    #   - Gemini (databricks-gemini-3-1-flash-lite, default): one fast call.
+    #   - OpenAI (databricks-gpt-5): direct URLs + real titles, but slower/agentic
+    #     (can exceed the web_search-mode timeout — raise timeout_seconds for it).
+    endpoint: databricks-gemini-3-1-flash-lite
+    # endpoint: databricks-gpt-5
+    # model_family: gemini          # openai|gemini; auto-detected from endpoint name
+    max_results: 10
+    # Process-wide cap on concurrent built-in-search generations (heavy calls).
+    # Override at runtime via env DBX_WEBSEARCH_MAX_CONCURRENCY.
+    max_concurrency: 4
+    timeout_seconds: 30
+    # Resolve Gemini grounding-redirect URLs to canonical publisher URLs.
+    resolve_redirects: true
+    # Push a per-agent INCLUDE-mode allowlist into the OpenAI Responses web_search
+    # filter (bare domains; OpenAI endpoints only; subdomains auto-included). Gemini
+    # and exclude mode are unaffected (no API knob). Set false to rely only on the
+    # instruction hint + post-hoc URL filter.
+    push_allowed_domains: true
+    # Selectable built-in-search endpoints per model family. The FIRST entry per
+    # family is the cheapest/default used when a web tool pins `model_family` but
+    # omits the endpoint. Also powers the designer's per-family endpoint dropdown
+    # and endpoint↔family validation. Only list endpoints that support built-in
+    # web search; add a custom one here to make it selectable + family-mapped.
+    endpoints_by_family:
+      gemini:
+        - databricks-gemini-3-1-flash-lite
+      openai:
+        - databricks-gpt-5-mini
+        - databricks-gpt-5
 
   # Domain whitelist/blacklist filtering
   # Supports wildcard patterns: *.gov, *.edu, news.*, *.example.*

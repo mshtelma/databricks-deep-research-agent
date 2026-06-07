@@ -23,6 +23,19 @@ class LakebaseCredential:
     token: str
     username: str
     expires_at: datetime
+    # Wall-clock time this credential was minted. Used purely for diagnostics:
+    # a Lakebase "password authentication failed" on a credential whose
+    # ``age_s`` is near zero points at a freshly-minted-token propagation race
+    # (PgBouncer / databricks_auth eventual consistency) rather than expiry.
+    # Optional so providers that do not set it (or older call sites) still work.
+    issued_at: datetime | None = None
+
+    @property
+    def age_s(self) -> float | None:
+        """Seconds since this credential was minted, or None if unknown."""
+        if self.issued_at is None:
+            return None
+        return (datetime.now(UTC) - self.issued_at).total_seconds()
 
     @property
     def is_expired(self) -> bool:

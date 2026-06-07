@@ -79,6 +79,12 @@ def match_domain_pattern(domain: str, pattern: str) -> bool:
         if domain == prefix or domain.startswith(prefix + "."):
             return True
 
+    # Bare multi-label pattern is subdomain-inclusive: "reuters.com" also matches
+    # "www.reuters.com" and other subdomains. Aligns with OpenAI allowed_domains
+    # (auto-includes subdomains) and user intuition. Wildcard patterns are handled above.
+    if "." in pattern and "*" not in pattern and domain.endswith("." + pattern):
+        return True
+
     # General fnmatch for complex patterns like *.example.*
     return fnmatch.fnmatch(domain, pattern)
 

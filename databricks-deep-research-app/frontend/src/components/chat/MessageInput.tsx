@@ -11,6 +11,7 @@ import { useQueryMode, useSourceScope } from '@/hooks';
 import { useDiscoveredSources, useRefreshDiscovery } from '@/hooks/useDiscoveredSources';
 import { useFileUpload } from '@/hooks/useFileUpload';
 import { useAgentsV2List } from '@/hooks/useAgentsV2';
+import { ComponentRegistry } from '@/core/plugins';
 import type { AvailableSource } from '@/types/dataSources';
 import type { CustomAgentSummary } from '@/types/customAgents';
 import type { AgentV2Summary } from '@/types/agentDesigner';
@@ -140,6 +141,22 @@ export function MessageInput({
     !effectiveShowVerifySources
       ? (inputConfig?.defaultVerifySources ?? true)
       : false
+  );
+
+  // Deliverable (output type) selection. Sourced from the registered output
+  // renderers (plugin-provided), so the dropdown lists exactly the structured
+  // deliverables this deployment can produce. Internal/default renderers are
+  // excluded; the selector only shows when there's an actual choice (>= 2).
+  const deliverableOptions = React.useMemo(
+    () =>
+      ComponentRegistry.listOutputTypes()
+        .filter((t) => !t.startsWith('__') && t !== 'synthesis_report')
+        .map((t) => ({ value: t, label: ComponentRegistry.getRenderer(t)?.displayName ?? t })),
+    []
+  );
+  const showDeliverableSelector = deliverableOptions.length >= 2;
+  const [selectedOutputType, setSelectedOutputType] = React.useState<string | undefined>(
+    () => inputConfig?.defaultOutputType
   );
 
   // State for source browser modal
@@ -392,7 +409,7 @@ export function MessageInput({
         queryMode,
         researchDepth,
         verifySources,
-        outputType: inputConfig?.defaultOutputType,
+        outputType: selectedOutputType ?? inputConfig?.defaultOutputType,
         sourceScope: shouldShowSourceScope ? sourceScope : undefined,
         enabledSources: enabledSourceIds,
         disabledSources: disabledSourceIds,
@@ -497,6 +514,25 @@ export function MessageInput({
               className="h-3.5 w-3.5 rounded border-input cursor-pointer accent-primary"
             />
             <span>Verify sources</span>
+          </label>
+        )}
+        {/* Deliverable selector — choose the structured output type when >1 exists */}
+        {showDeliverableSelector && (
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground select-none">
+            <span>Deliverable</span>
+            <select
+              data-testid="deliverable-selector"
+              value={selectedOutputType ?? deliverableOptions[0]?.value ?? ''}
+              onChange={(e) => setSelectedOutputType(e.target.value)}
+              disabled={disabled || isLoading}
+              className="bg-background border border-input rounded px-1.5 py-1 text-xs cursor-pointer"
+            >
+              {deliverableOptions.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
           </label>
         )}
         {/* Agent selector (deep_research mode) */}

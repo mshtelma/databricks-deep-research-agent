@@ -8,19 +8,23 @@ from unittest.mock import patch
 import pytest
 
 from deep_research.core.app_config import (
+    SEARCH_PROVIDERS,
     AgentsConfig,
     AppConfig,
     BraveSearchConfig,
     CoordinatorConfig,
+    DatabricksSearchConfig,
     EndpointConfig,
     ModelRoleConfig,
     PlannerConfig,
     ReasoningEffort,
     ResearcherConfig,
+    SearchConfig,
     SelectionStrategy,
     SynthesizerConfig,
     TruncationConfig,
     clear_config_cache,
+    fill_databricks_search_defaults,
     get_app_config,
     get_default_config,
     load_app_config,
@@ -160,6 +164,161 @@ class TestSearchConfig:
         # Invalid value
         with pytest.raises(ValueError):
             BraveSearchConfig(freshness="invalid")
+
+    def test_default_provider_is_databricks(self) -> None:
+        """Default provider is Databricks built-in search (Brave is opt-in)."""
+        sc = SearchConfig()
+        assert sc.provider == "databricks"
+        assert isinstance(sc.databricks, DatabricksSearchConfig)
+        assert sc.databricks.endpoint
+        assert sc.databricks.resolve_redirects is True
+
+    def test_resolve_effective_provider_precedence(self) -> None:
+        """Per-tool provider wins; blank inherits the global; else the default."""
+        from deep_research.core.app_config import (
+            DEFAULT_SEARCH_PROVIDER,
+            resolve_effective_provider,
+        )
+
+        assert DEFAULT_SEARCH_PROVIDER == "databricks"
+        # Explicit per-tool provider wins over the global default.
+        assert resolve_effective_provider("brave", "databricks") == "brave"
+        assert resolve_effective_provider("jina", "brave") == "jina"
+        # Blank / empty / None inherits the workspace global.
+        assert resolve_effective_provider(None, "brave") == "brave"
+        assert resolve_effective_provider("", "databricks") == "databricks"
+        # No global supplied → built-in default.
+        assert resolve_effective_provider(None, None) == "databricks"
+        assert resolve_effective_provider(None) == "databricks"
+
+    def test_provider_rejects_unknown_value(self) -> None:
+        with pytest.raises(ValueError):
+            SearchConfig(provider="bing")  # type: ignore[arg-type]
+
+    def test_databricks_provider_parses(self) -> None:
+        sc = SearchConfig(
+            provider="databricks",
+            databricks={"endpoint": "databricks-gpt-5", "max_results": 5,
+                        "timeout_seconds": 45},
+        )
+        assert sc.provider == "databricks"
+        assert sc.databricks.endpoint == "databricks-gpt-5"
+        assert sc.databricks.max_results == 5
+        assert sc.databricks.timeout_seconds == 45
+
+    def test_search_providers_is_canonical_and_derived(self) -> None:
+        """SEARCH_PROVIDERS mirrors the provider Literal (single source)."""
+        from typing import get_args
+
+        assert set(SEARCH_PROVIDERS) == {"brave", "jina", "databricks"}
+        assert set(SEARCH_PROVIDERS) == set(
+            get_args(SearchConfig.model_fields["provider"].annotation)
+        )
+        assert SEARCH_PROVIDERS[0] == "databricks"  # default first
+
+    def test_fill_databricks_defaults_fills_absent(self) -> None:
+        db = DatabricksSearchConfig(endpoint="databricks-gpt-5")
+        cfg: dict[str, object] = {}
+        changed = fill_databricks_search_defaults(cfg, db, min_results=15)
+        assert changed is True
+        assert cfg["model"] == "databricks-gpt-5"
+        assert cfg["timeout_seconds"] == db.timeout_seconds
+        assert cfg["resolve_redirects"] is True
+        assert cfg["push_allowed_domains"] is True
+        assert cfg["max_results"] == 15  # min_results floor applied
+
+    def test_fill_databricks_defaults_preserves_present_values(self) -> None:
+        """Present keys (incl. falsy resolve_redirects=False / small max_results)
+        are never overwritten — proves the absent-only contract."""
+        db = DatabricksSearchConfig()
+        cfg = {
+            "model": "x",
+            "resolve_redirects": False,
+            "timeout_seconds": 5.0,
+            "max_results": 3,
+            "push_allowed_domains": False,
+        }
+        changed = fill_databricks_search_defaults(cfg, db, min_results=99)
+        assert changed is False
+        assert cfg == {
+            "model": "x",
+            "resolve_redirects": False,
+            "timeout_seconds": 5.0,
+            "max_results": 3,
+            "push_allowed_domains": False,
+        }
+
+    def test_fill_databricks_defaults_max_results_floor(self) -> None:
+        db = DatabricksSearchConfig(max_results=10)
+        cfg: dict[str, object] = {}
+        fill_databricks_search_defaults(cfg, db, min_results=5)
+        assert cfg["max_results"] == 10  # max(app default 10, floor 5)
+
+    def test_push_allowed_domains_default_true(self) -> None:
+        assert DatabricksSearchConfig().push_allowed_domains is True
+
+    def test_fill_databricks_defaults_preserves_push_flag_false(self) -> None:
+        db = DatabricksSearchConfig()
+        cfg: dict[str, object] = {"push_allowed_domains": False}
+        fill_databricks_search_defaults(cfg, db)
+        assert cfg["push_allowed_domains"] is False
+
+    def test_endpoints_by_family_default(self) -> None:
+        """Per-family endpoint map: first entry is the cheapest/default."""
+        db = DatabricksSearchConfig()
+        assert (
+            db.endpoints_by_family["gemini"][0] == "databricks-gemini-3-1-flash-lite"
+        )
+        assert db.endpoints_by_family["openai"][0] == "databricks-gpt-5-mini"
+
+    def test_default_endpoint_for_family(self) -> None:
+        db = DatabricksSearchConfig()
+        assert db.default_endpoint_for_family("openai") == "databricks-gpt-5-mini"
+        assert (
+            db.default_endpoint_for_family("gemini")
+            == "databricks-gemini-3-1-flash-lite"
+        )
+        # Unknown family / None falls back to the global default endpoint.
+        assert db.default_endpoint_for_family(None) == db.endpoint
+        assert db.default_endpoint_for_family("anthropic") == db.endpoint
+
+    def test_family_for_endpoint(self) -> None:
+        db = DatabricksSearchConfig()
+        # Mapped endpoints resolve via the explicit map.
+        assert db.family_for_endpoint("databricks-gemini-3-1-flash-lite") == "gemini"
+        assert db.family_for_endpoint("databricks-gpt-5-mini") == "openai"
+        # Unmapped endpoints resolve via the name heuristic.
+        assert db.family_for_endpoint("some-custom-gpt-4o") == "openai"
+        assert db.family_for_endpoint("vendor-gemini-x") == "gemini"
+        # Undetectable names return None (caller trusts an explicit family).
+        assert db.family_for_endpoint("acme-search-v2") is None
+
+    def test_fill_family_only_uses_family_default_endpoint(self) -> None:
+        """A tool that pins model_family but omits the endpoint gets THAT
+        family's default endpoint — not the global (Gemini) default. This is
+        the fix for the openai-family-on-a-Gemini-endpoint 400."""
+        db = DatabricksSearchConfig()  # global endpoint = gemini-lite
+        cfg: dict[str, object] = {"provider": "databricks", "model_family": "openai"}
+        fill_databricks_search_defaults(cfg, db)
+        assert cfg["model"] == "databricks-gpt-5-mini"
+        assert cfg["model_family"] == "openai"
+
+    def test_fill_no_family_uses_global_endpoint(self) -> None:
+        db = DatabricksSearchConfig()
+        cfg: dict[str, object] = {"provider": "databricks"}
+        fill_databricks_search_defaults(cfg, db)
+        assert cfg["model"] == db.endpoint  # gemini-lite global default
+
+    def test_fill_explicit_model_not_overwritten(self) -> None:
+        """An explicit (even contradictory) endpoint is preserved — design-time
+        validation, not the fill, rejects a mismatch."""
+        db = DatabricksSearchConfig()
+        cfg: dict[str, object] = {
+            "model": "databricks-gemini-3-1-flash-lite",
+            "model_family": "openai",
+        }
+        fill_databricks_search_defaults(cfg, db)
+        assert cfg["model"] == "databricks-gemini-3-1-flash-lite"
 
 
 class TestTruncationConfig:

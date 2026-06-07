@@ -26,7 +26,7 @@ env:
     value: '{{ agent_name }}'
   - name: DR_REVISION_ID
     value: '{{ revision_id }}'
-{% if requires_web_search %}
+{% if brave_secret_scope and brave_secret_key %}
   - name: BRAVE_API_KEY
     valueFrom: '{{ brave_secret_resource_name }}'
 {% endif %}

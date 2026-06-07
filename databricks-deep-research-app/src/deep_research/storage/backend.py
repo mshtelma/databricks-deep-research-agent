@@ -31,6 +31,7 @@ if TYPE_CHECKING:
         ChatDocument,
         ChatMeta,
         PrepJobDocument,
+        ResearchSessionState,
         UserDocument,
     )
 
@@ -229,6 +230,84 @@ class StorageBackend(Protocol):
 
         Heartbeats must never be deferred by flush backlog or the zombie
         detector will false-positive. See plan section "Concurrency model".
+        """
+        ...
+
+    # -- Research session queries (JSONB-backed) -----------------------
+    #
+    # All operate on the JSONB array at ``chat_state.state.research_sessions``;
+    # the legacy ``research_sessions`` table was dropped during the
+    # cached-storage migration, so these are the only read/write path.
+
+    async def count_active_research_sessions(self, user_id: str) -> int:
+        """Count chats with >= 1 ``in_progress`` research session for a user.
+
+        Mirrors the legacy per-user concurrency-limit count. Counts *chats*,
+        not session rows (a chat with two in-progress sessions counts once).
+        Single statement on both backends.
+        """
+        ...
+
+    async def list_user_jobs(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[tuple[UUID, ResearchSessionState]]:
+        """Return ``(chat_id, session)`` tuples for a user, newest first.
+
+        Replaces ``select(ResearchSession).where(user_id=?)`` in
+        ``JobManager.get_user_jobs``. Returns ``chat_id`` alongside each
+        session because ``ResearchSessionState`` does not carry ``chat_id`` /
+        ``user_id`` (they live on the parent chat document) and the UI needs
+        ``chat_id`` to navigate. Orders by ``started_at`` descending.
+        """
+        ...
+
+    async def get_active_session_for_chat(
+        self,
+        chat_id: UUID,
+        user_id: str,
+    ) -> ResearchSessionState | None:
+        """Return the in-progress research session for a chat, or None.
+
+        Replaces ``JobManager.get_chat_active_job``. At most one in-progress
+        session per chat by construction; on a write race, returns the most
+        recently started.
+        """
+        ...
+
+    async def mark_stale_research_sessions_failed(
+        self,
+        cutoff: datetime,
+        exclude_session_ids: Sequence[UUID],
+    ) -> int:
+        """Mark stuck ``in_progress`` sessions ``failed``; return rows touched.
+
+        A session is stuck when its ``last_heartbeat`` is older than
+        ``cutoff`` (or NULL) AND its ``id`` is not in ``exclude_session_ids``
+        (the sessions running on the calling worker). Used by the recurring
+        cleanup + startup sweep.
+
+        Lakebase: single transactional ``jsonb_set`` UPDATE (atomic).
+        SQL Warehouse: read-transform-write (non-atomic for array mutation;
+        mitigated by the cutoff + exclude-list).
+        """
+        ...
+
+    async def write_research_session_heartbeat(
+        self,
+        chat_id: UUID,
+        session_id: UUID,
+        ts: datetime,
+    ) -> None:
+        """Direct single-statement heartbeat; bypasses the WriteQueue.
+
+        Sets ``last_heartbeat=ts`` on the ``research_sessions`` entry whose
+        ``id`` matches ``session_id`` within ``chat_id``. Must never be
+        deferred or ``mark_stale_research_sessions_failed`` will
+        false-positive. Distinct from ``write_prep_heartbeat`` (prep_jobs).
         """
         ...
 

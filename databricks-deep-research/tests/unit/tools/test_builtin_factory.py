@@ -565,3 +565,47 @@ class TestBuiltinFactoryNoLegacyKinds:
             ctx = ToolFactoryContext()
             with pytest.raises(ValueError, match=f"Unsupported kind: {kind}"):
                 await factory.create(decl, ctx)
+
+
+class TestDatabricksSearchProviderIdentity:
+    """Built-in web search authenticates as the app/SP serving client, NOT the
+    OBO ``user_token`` — model serving runs as the app, and the OBO token need
+    not carry the ``model-serving`` foundation-model passthrough scope."""
+
+    def test_prefers_serving_client_provider_over_obo(self) -> None:
+        from databricks_deep_research.tools.factories.builtin import (
+            _build_databricks_search_provider,
+        )
+
+        sp_client = object()  # sentinel SP serving client
+        ctx = ToolFactoryContext(
+            user_token="obo-token-must-be-ignored",
+            serving_client_provider=lambda: sp_client,
+        )
+        adapter = _build_databricks_search_provider(
+            ctx, {"model": "databricks-gemini-3-1-flash-lite"}
+        )
+        assert adapter._client_provider() is sp_client
+
+    def test_falls_back_to_workspace_client(self) -> None:
+        from databricks_deep_research.tools.factories.builtin import (
+            _build_databricks_search_provider,
+        )
+
+        ws = MagicMock()
+        ws.config.host = "https://example.cloud.databricks.com"
+        ws.config.authenticate.return_value = {"Authorization": "Bearer sp-from-ws"}
+        ctx = ToolFactoryContext(workspace_client=ws)  # no serving_client_provider
+        adapter = _build_databricks_search_provider(ctx, {"model": "databricks-gpt-5"})
+        assert adapter._client_provider().api_key == "sp-from-ws"
+
+    def test_raises_without_serving_provider_or_workspace_client(self) -> None:
+        from databricks_deep_research.tools.factories.builtin import (
+            _build_databricks_search_provider,
+        )
+
+        ctx = ToolFactoryContext()  # neither serving_client_provider nor workspace_client
+        with pytest.raises(
+            ValueError, match="serving_client_provider or workspace_client"
+        ):
+            _build_databricks_search_provider(ctx, {"model": "databricks-gpt-5"})

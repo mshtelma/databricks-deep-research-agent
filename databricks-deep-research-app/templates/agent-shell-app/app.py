@@ -25,6 +25,8 @@ from databricks_deep_research import (
     FrameworkLLMClient,
     ToolFactoryContext,
     WorkflowRunner,
+    build_databricks_workflow_runner,
+    workflow_requires_databricks,
 )
 from databricks_deep_research.events.types import ToolResultEvent
 from databricks_deep_research.tools.builtins.text_table import (
@@ -270,45 +272,14 @@ _factory_context = ToolFactoryContext.from_defaults(
 )
 _wire_text_table_context(_factory_context)
 
-# Tool kinds that require a Databricks WorkspaceClient to construct. Mirrors
-# the ToolKind enum at
-# databricks-deep-research/src/databricks_deep_research/tools/protocol.py:54
-# (kept inline because the template ships without an explicit dep on the
-# enum). Any workflow declaring one of these kinds MUST receive a user
-# OBO token in the deployed-app surface — otherwise the constructed tool
-# will silently use the app SP and any UC-gated resource returns empty.
-_DATABRICKS_BOUND_TOOL_KINDS: frozenset[str] = frozenset(
-    {
-        "vector_search",
-        "genie",
-        "knowledge_assistant",
-        "table_discovery",
-        "table_search",
-        "table_read",
-        "table_neighbors",
-        "table_load",
-        "table_aggregate",
-        "compute",
-        "compute_namespace",
-    }
-)
-
-
-def _workflow_requires_databricks(definition: dict[str, Any]) -> bool:
-    """Return True iff any top-level tool declaration is Databricks-bound."""
-    tools = definition.get("tools") or []
-    if not isinstance(tools, list):
-        return False
-    for tool in tools:
-        if not isinstance(tool, dict):
-            continue
-        kind = tool.get("kind")
-        if isinstance(kind, str) and kind in _DATABRICKS_BOUND_TOOL_KINDS:
-            return True
-    return False
-
-
-_WORKFLOW_REQUIRES_DATABRICKS = _workflow_requires_databricks(_DEFINITION_DICT)
+# Whether this workflow declares any Databricks-bound tool (vector_search,
+# Genie, table_*, compute, ...). Uses the framework's authoritative kind set
+# + helper (workflow_requires_databricks / DATABRICKS_BOUND_TOOL_KINDS) so the
+# shell-app and the main app stay in lockstep — no inline copy to drift. Gates
+# the fail-closed OBO check in ``/api/chat``: a Databricks-bound workflow with
+# no user OBO token would otherwise run every tool as the app SP and return UC
+# permission errors / empty results.
+_WORKFLOW_REQUIRES_DATABRICKS = workflow_requires_databricks(_DEFINITION)
 
 # Databricks Apps runtime sets DATABRICKS_APP_NAME. Local `uv run uvicorn`
 # does not. We only fail-closed on missing OBO when both: the runtime is
@@ -321,20 +292,13 @@ _IS_DATABRICKS_APPS_RUNTIME = bool(os.environ.get("DATABRICKS_APP_NAME"))
 def _build_per_request_runner(user_token: str | None) -> WorkflowRunner:
     """Build a fresh WorkflowRunner whose ToolFactoryContext is OBO-bound.
 
-    Pattern mirrors
-    ``deep_research.agent.workflow_runner_factory.build_app_workflow_runner``
-    inline (the shell-app template ships without the main app's package).
-
-    The user's OAuth access token from ``x-forwarded-access-token`` is used
-    directly as a **static bearer token** via ``auth_type="pat"`` — this is
-    NOT an OAuth exchange. We force the SDK to the token-auth path
-    explicitly so it cannot fall back to env OAuth-M2M (which would
-    otherwise auto-select the app SP credentials and silently lose OBO).
-
-    Downstream factories (``DatabricksToolFactory`` etc.) then build VS /
-    Genie / endpoint tools that query Databricks as the calling user —
-    which is the only way UC-gated resources (vector indexes, Genie
-    spaces) become reachable in the deployed shell app.
+    Delegates to the framework's ``build_databricks_workflow_runner`` so the
+    shell-app and the main app share ONE tool-wiring implementation. The
+    user's ``x-forwarded-access-token`` is used as a static bearer token via
+    ``auth_type="pat"`` (inside the framework helper), so downstream factories
+    build VS / Genie / table / endpoint tools that query Databricks as the
+    calling user — the only way UC-gated resources become reachable in the
+    deployed shell app.
 
     When ``user_token`` is missing, the runner falls back to the app SP.
     The ``/api/chat`` handler refuses to call this path under the Apps
@@ -342,20 +306,16 @@ def _build_per_request_runner(user_token: str | None) -> WorkflowRunner:
     ``_IS_DATABRICKS_APPS_RUNTIME`` + ``_WORKFLOW_REQUIRES_DATABRICKS``),
     so the SP fallback only applies to local-dev and purely-web workflows.
     """
-    workspace_client: WorkspaceClient | None
-    if user_token and _SP_HOST:
-        workspace_client = WorkspaceClient(
-            host=_SP_HOST, token=user_token, auth_type="pat"
-        )
-    else:
-        workspace_client = _SP_WORKSPACE_CLIENT
-    ctx = ToolFactoryContext.from_defaults(
-        workspace_client=workspace_client,
+    # Delegates to the framework's shared builder so the shell-app and the
+    # main app use ONE implementation: OBO when a user token is present
+    # (built with auth_type="pat" inside the helper), the app SP otherwise.
+    return build_databricks_workflow_runner(
+        llm_client=_llm_client,
+        sp_workspace_client=_SP_WORKSPACE_CLIENT,
         user_token=user_token,
+        warehouse_id=_resolve_table_warehouse_id(),
         brave_api_key=_BRAVE_API_KEY,
     )
-    _wire_text_table_context(ctx)
-    return WorkflowRunner(llm_client=_llm_client, factory_context=ctx)
 
 
 def _declared_tool_names(definition: dict[str, Any]) -> list[str]:

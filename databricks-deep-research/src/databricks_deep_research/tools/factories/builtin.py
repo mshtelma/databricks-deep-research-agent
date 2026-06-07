@@ -28,7 +28,7 @@ _FUNCTIONAL_TABLE_KINDS = frozenset({
     "table_aggregate",
 })
 
-_SEARCH_PROVIDERS = frozenset({"brave", "jina"})
+_SEARCH_PROVIDERS = frozenset({"brave", "jina", "databricks"})
 _CRAWL_PROVIDERS = frozenset({"jina"})
 
 
@@ -234,8 +234,17 @@ def _ensure_declared_table_binding(
     return cast(str, canonical_name)
 
 
-def _resolve_search_provider(provider: str, ctx: ToolFactoryContext) -> Any:
-    """Create a SearchClient for the named provider."""
+def _resolve_search_provider(
+    provider: str,
+    ctx: ToolFactoryContext,
+    config: Mapping[str, Any] | None = None,
+) -> Any:
+    """Create a SearchClient for the named provider.
+
+    ``config`` is the tool declaration's ``config`` block — used by providers that
+    need per-tool settings (e.g. ``databricks`` reads ``model``/``model_family``).
+    """
+    config = config or {}
     if provider == "brave":
         api_key = ctx.api_keys.get("brave") or os.environ.get("BRAVE_API_KEY")
         if not api_key:
@@ -257,9 +266,96 @@ def _resolve_search_provider(provider: str, ctx: ToolFactoryContext) -> Any:
 
         return JinaSearchAdapter(api_key=api_key)
 
+    if provider == "databricks":
+        return _build_databricks_search_provider(ctx, config)
+
     raise ValueError(
         f"Unknown search provider: {provider!r}. "
         f"Supported: {sorted(_SEARCH_PROVIDERS)}"
+    )
+
+
+def _build_databricks_search_provider(
+    ctx: ToolFactoryContext, config: Mapping[str, Any]
+) -> Any:
+    """Build a :class:`DatabricksWebSearchAdapter` from factory context + config.
+
+    Built-in web search is a model-serving call over the PUBLIC web, so it runs
+    as the app / service-principal identity (the same one the LLM calls use) —
+    NOT the OBO user (``ctx.user_token``), which is reserved for user-scoped data
+    tools and need not carry the ``model-serving`` scope the foundation-model
+    passthrough requires. Prefer ``ctx.serving_client_provider`` (the app's SP
+    serving client); fall back to a ``ctx.workspace_client``-derived client for
+    framework-only callers that don't set one. Endpoint comes from
+    ``config['model']`` or the ``DATABRICKS_WEB_SEARCH_ENDPOINT`` env var.
+    """
+    model = config.get("model") or os.environ.get("DATABRICKS_WEB_SEARCH_ENDPOINT")
+    if not model:
+        raise ValueError(
+            "Databricks built-in web search requires a serving endpoint: set "
+            "config['model'] on the web_search tool or DATABRICKS_WEB_SEARCH_ENDPOINT"
+        )
+
+    serving_provider = ctx.serving_client_provider
+    if serving_provider is not None:
+        # App-supplied SP serving client (model serving runs as the app, not OBO).
+        client_provider = serving_provider
+    else:
+        ws = ctx.workspace_client
+        if ws is None:
+            raise ValueError(
+                "Databricks built-in web search requires a serving client: set "
+                "ToolFactoryContext.serving_client_provider or workspace_client"
+            )
+        user_token = ctx.user_token
+        cached: dict[str, Any] = {}
+
+        def _client_provider() -> Any:
+            # Reuse one AsyncOpenAI for the request lifetime (token is fixed per
+            # request — OBO token, or an SDK-minted SP token valid well past a run).
+            if "client" not in cached:
+                from openai import AsyncOpenAI
+
+                host = (getattr(ws.config, "host", "") or "").rstrip("/")
+                if user_token:
+                    token = user_token
+                else:
+                    headers = ws.config.authenticate() or {}
+                    token = (headers.get("Authorization", "") or "").removeprefix("Bearer ").strip()
+                cached["client"] = AsyncOpenAI(
+                    api_key=token, base_url=f"{host}/serving-endpoints"
+                )
+            return cached["client"]
+
+        client_provider = _client_provider
+
+    from databricks_deep_research.tools.builtins.databricks_web_search import (
+        build_databricks_web_search_adapter,
+    )
+
+    domain_filter = config.get("domain_filter")
+    url_allowed = None
+    restrict_to_domains: list[str] | None = None
+    if domain_filter:
+        from databricks_deep_research.tools.builtins.web_search import _domain_matches
+
+        _df = list(domain_filter)
+        url_allowed = lambda u: _domain_matches(u, _df)  # noqa: E731
+        # The flat ``domain_filter`` list is an allowlist (``_domain_matches`` semantics),
+        # so forward it for the allowlist push-down too. The adapter reduces it to the
+        # pushable bare-domain subset (all-or-nothing) and keeps url_allowed authoritative.
+        restrict_to_domains = _df
+
+    return build_databricks_web_search_adapter(
+        client_provider=client_provider,
+        model=model,
+        model_family=config.get("model_family"),
+        max_results=config.get("max_results", 10),
+        timeout_seconds=config.get("timeout_seconds", 30.0),
+        resolve_redirects=config.get("resolve_redirects", True),
+        url_allowed=url_allowed,
+        restrict_to_domains=restrict_to_domains,
+        push_allowed_domains=config.get("push_allowed_domains", True),
     )
 
 
@@ -468,7 +564,7 @@ class BuiltinToolFactory:
                     )
                 search_client = ctx.search_client
             else:
-                search_client = _resolve_search_provider(provider, ctx)
+                search_client = _resolve_search_provider(provider, ctx, decl.config)
 
             from databricks_deep_research.tools.builtins.web_search import WebSearchTool
 
@@ -512,7 +608,7 @@ class BuiltinToolFactory:
                     )
                 search_client = ctx.search_client
             else:
-                search_client = _resolve_search_provider(provider, ctx)
+                search_client = _resolve_search_provider(provider, ctx, decl.config)
 
             crawl_provider = decl.config.get("crawl_provider")
             if crawl_provider is not None:
