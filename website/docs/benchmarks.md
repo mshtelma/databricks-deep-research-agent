@@ -14,46 +14,64 @@ targeting capabilities that simple RAG cannot handle:
 - Correct period and edition selection across document revisions
 - Currency conversions requiring external data
 
-Questions often hinge on subtle distinctions between fiscal and calendar years,
-document revisions, and hierarchical table structures.
+Every question is graded **hard**: answers hinge on subtle distinctions between
+fiscal and calendar years, document revisions published months apart, and table
+hierarchies where the wrong row is one cell from the right one.
+
+## How we ran it
+
+We evaluate against the **Databricks-parsed edition** of the bulletins. The source
+documents are ingested into Unity Catalog as Delta tables and a Databricks Vector
+Search index, and every answer is grounded **entirely through Databricks
+retrieval** — Vector Search over the parsed text, structured table/SQL tools over
+the extracted tables, and a calculator. **No web search is used**: this is a
+closed-corpus test over governed data, exactly the pattern for enterprise
+deployments on Databricks.
+
+| | |
+|--|--|
+| **Benchmark** | OfficeQA — full 133-question set ([databricks/officeqa](https://github.com/databricks/officeqa)) |
+| **Model** | Claude Opus 4.6, via the Databricks Foundation Model API |
+| **Retrieval** | Databricks Vector Search + structured table tools — no web search |
+| **Scoring** | OfficeQA's official reward function: exact match, plus ±1% / ±5% numeric tolerance |
 
 ## Results
 
-Across **three full runs** of the complete 133-question benchmark (April 2026, Claude
-Opus 4.6 via the Databricks Foundation Model API) — with **zero errors and zero
-timeouts**:
+Our best workflow configuration on the full 133-question set:
 
 <div class="dr-stats">
   <div class="dr-stat">
-    <div class="dr-stat__value">54.9%</div>
-    <div class="dr-stat__label">avg exact match &middot; peak 57.9%</div>
+    <div class="dr-stat__value">55.6%</div>
+    <div class="dr-stat__label">exact match</div>
   </div>
   <div class="dr-stat">
     <div class="dr-stat__value">69.2%</div>
-    <div class="dr-stat__label">within 1% tolerance &middot; peak 72.2%</div>
+    <div class="dr-stat__label">within 1% tolerance</div>
   </div>
   <div class="dr-stat">
-    <div class="dr-stat__value">73.2%</div>
-    <div class="dr-stat__label">within 5% tolerance &middot; peak 75.2%</div>
+    <div class="dr-stat__value">73.7%</div>
+    <div class="dr-stat__label">within 5% tolerance</div>
   </div>
 </div>
 
-| Metric | Average | Best run |
-|--------|---------|----------|
-| Exact match | 54.9% | 57.9% |
-| Accuracy (±1% fuzzy tolerance) | 69.2% | 72.2% |
-| Accuracy (±5% fuzzy tolerance) | 73.2% | 75.2% |
+| Metric | Accuracy |
+|--------|---------:|
+| Exact match | 55.6% (74 / 133) |
+| Within ±1% tolerance | 69.2% (92 / 133) |
+| Within ±5% tolerance | 73.7% (98 / 133) |
 
-These are not cherry-picked — they are the average across three independent runs on the
-full benchmark. The variance between runs (52.6%–57.9% exact match) reflects the
-inherent non-determinism of multi-step agentic reasoning, and even the lowest run
-exceeds 50% exact match.
+Accuracy is measured over the **entire 133-question set** — any question the agent
+cannot answer counts as wrong, so the numbers are not inflated by dropping hard
+cases. The workflow (`workflow-v83-hybrid.yaml`) and scorer live under
+[`benchmarks/officeqa/`](https://github.com/mshtelma/databricks-deep-research-agent/tree/main/benchmarks/officeqa),
+which documents these results in full.
 
 ## Why it matters
 
-Achieving majority accuracy on **exact numerical extraction** — not just "close enough"
-text generation — demonstrates analytical depth well beyond traditional RAG. The
-workflow behind these numbers was refined over 20 iterations, each informed by
-systematic failure analysis and root-cause categorization.
+OfficeQA is scored on **exact numerical extraction** — a single wrong row, edition,
+or unit counts as a miss, so fluent-but-wrong answers earn no credit. That makes the
+full-set exact-match rate a measure of analytical precision rather than surface
+plausibility. The workflow behind these numbers was refined over many iterations,
+each informed by systematic failure analysis and root-cause categorization.
 
 [How citations are verified :octicons-arrow-right-24:](concepts/citation-pipeline.md){ .md-button }

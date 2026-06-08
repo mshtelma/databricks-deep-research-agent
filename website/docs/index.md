@@ -71,28 +71,25 @@ governance and the whole process streamed live to the UI.
 
 </div>
 
-## Proven on a hard benchmark
+## Measured on a hard benchmark
 
 Evaluated on **OfficeQA**, an adversarial financial QA benchmark built on US
-Treasury Bulletins (697 bulletins, 58,000+ tables). Across three full runs of the
-133-question set with Claude Opus 4.6 — zero errors, zero timeouts:
+Treasury Bulletins (697 bulletins, 58,000+ tables). On the full 133-question set
+with Claude Opus 4.6 — answering **entirely from the Databricks-parsed corpus, with
+no web search**:
 
 <div class="dr-stats">
   <div class="dr-stat">
-    <div class="dr-stat__value">54.9%</div>
-    <div class="dr-stat__label">avg exact match (peak 57.9%)</div>
+    <div class="dr-stat__value">55.6%</div>
+    <div class="dr-stat__label">exact match</div>
   </div>
   <div class="dr-stat">
     <div class="dr-stat__value">69.2%</div>
     <div class="dr-stat__label">within 1% tolerance</div>
   </div>
   <div class="dr-stat">
-    <div class="dr-stat__value">73.2%</div>
+    <div class="dr-stat__value">73.7%</div>
     <div class="dr-stat__label">within 5% tolerance</div>
-  </div>
-  <div class="dr-stat">
-    <div class="dr-stat__value">3&times;</div>
-    <div class="dr-stat__label">independent full runs</div>
   </div>
 </div>
 
