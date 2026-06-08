@@ -4,6 +4,9 @@ version = "0.2.0"
 description = "Composable multi-agent orchestration framework with YAML workflow definitions"
 readme = "README.md"
 requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+]
 dependencies = [
     "openai>=1.10.0",
     "pydantic>=2.0.0",

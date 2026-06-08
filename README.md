@@ -4,9 +4,12 @@
 [![TypeScript](https://img.shields.io/badge/typescript-5.x-blue.svg)](https://www.typescriptlang.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18.x-blue.svg)](https://react.dev/)
-[![License](https://img.shields.io/badge/license-Proprietary-red.svg)]()
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-website-blue.svg)](https://mshtelma.github.io/databricks-deep-research-agent/)
 
 A **uv workspace monorepo** containing two packages: a standalone multi-agent orchestration framework (`databricks-deep-research`) and a production application (`databricks-deep-research-app`) built on it. Features a 5-agent research architecture with a 7-stage citation verification pipeline grounded in peer-reviewed research, deployed on Databricks infrastructure.
+
+> 📖 **[Documentation](https://mshtelma.github.io/databricks-deep-research-agent/)**  ·  🚀 **[Deploy to Databricks](https://mshtelma.github.io/databricks-deep-research-agent/getting-started/deploy/)**  ·  🧩 **[Agent Designer](https://mshtelma.github.io/databricks-deep-research-agent/concepts/agent-designer/)**
 
 ## Key Features
 
@@ -75,7 +78,8 @@ A designed agent deploys to five runtime targets from the same AST: **In-App** (
 | Node.js | 18+ | Frontend build & development |
 | uv | latest | Python package manager |
 | Databricks CLI | latest | Deployment (if deploying to Databricks) |
-| Brave Search API key | optional | Only for `provider: brave`; the default `databricks` provider uses built-in web search (no key) |
+
+> Web search works out of the box via Databricks' built-in search — **no external search key required**. Brave/Jina are opt-in (see [Web Search Providers](https://mshtelma.github.io/databricks-deep-research-agent/guides/web-search-providers/)).
 
 ### Local Development
 
@@ -104,17 +108,16 @@ make prod
 
 ## Databricks Deployment
 
+> 📖 **Full step-by-step guide:** <https://mshtelma.github.io/databricks-deep-research-agent/getting-started/deploy/>
+
 ### One-Command Deployment
 
 ```bash
-# Deploy to dev workspace (includes all setup)
+# Deploy to your workspace (build + Lakebase + migrations + start)
 make deploy TARGET=dev
 
-# BRAVE_SCOPE is optional — only needed if a web tool pins provider: brave:
+# BRAVE_SCOPE is optional — only if a web tool pins provider: brave
 # make deploy TARGET=dev BRAVE_SCOPE=your-secret-scope
-
-# Deploy to production
-make deploy TARGET=ais
 ```
 
 This single command executes the complete 9-step deployment pipeline:
@@ -156,12 +159,9 @@ This single command executes the complete 9-step deployment pipeline:
    databricks auth describe --profile e2-demo-west
    ```
 
-2. **Brave API key in secret scope** *(optional — only when a web tool pins `provider: brave`; the default `databricks` provider needs no secret)*:
+2. **(Optional) Brave API key** — only if you set `provider: brave`. The default `databricks` provider uses built-in web search and needs no key:
    ```bash
-   # Create secret scope (if not exists)
    databricks secrets create-scope your-secret-scope
-
-   # Add Brave API key
    databricks secrets put-secret your-secret-scope BRAVE_API_KEY
    ```
 
@@ -234,9 +234,9 @@ LAKEBASE_DATABASE=deep_research
 # OR Local PostgreSQL (alternative for local dev)
 DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/deep_research
 
-# Web search provider (default: databricks built-in web search — no key needed).
-# BRAVE_API_KEY is only required when using the Brave backend (provider: brave).
-BRAVE_API_KEY=your-brave-api-key
+# Web search: default provider is `databricks` (built-in, no key needed).
+# Only set this when using provider: brave:
+# BRAVE_API_KEY=your-brave-api-key
 
 # Optional
 APP_CONFIG_PATH=config/app.yaml
@@ -248,7 +248,7 @@ LOG_LEVEL=INFO
 Environment variables are configured in `app.yaml` for deployed apps:
 - `LAKEBASE_INSTANCE_NAME` - Instance name for OAuth token generation
 - `LAKEBASE_DATABASE` - Target database name
-- `BRAVE_API_KEY` - Optional; injected from secret scope via `valueFrom` only when using `provider: brave`
+- `BRAVE_API_KEY` - Optional; injected from secret scope only when using `provider: brave`
 - `MLFLOW_TRACKING_URI=databricks` - Automatic tracing
 
 ## Troubleshooting
@@ -293,6 +293,8 @@ make logs TARGET=dev FOLLOW=-f SEARCH="--search ERROR"
 | `scripts/analyze_traces.py` | Analyze MLflow traces |
 
 ## Documentation
+
+📖 **Full documentation site:** <https://mshtelma.github.io/databricks-deep-research-agent/>
 
 ### Framework Documentation
 
@@ -417,6 +419,8 @@ specs/                                  # Feature specifications
 
 ## Contributing
 
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full guide, and [SECURITY.md](./SECURITY.md) to report vulnerabilities.
+
 1. Follow the guidelines in [CLAUDE.md](./CLAUDE.md)
 2. Ensure all tests pass: `make test-all`
 3. Type check: `make typecheck`
@@ -424,4 +428,4 @@ specs/                                  # Feature specifications
 
 ## License
 
-Proprietary
+Licensed under the [Apache License 2.0](LICENSE). Copyright &copy; 2026 the Databricks Deep Research Agent contributors.
