@@ -1,0 +1,112 @@
+site_name: Databricks Deep Research Agent
+site_description: >-
+  A production-ready, multi-agent deep-research application for Databricks —
+  5 collaborating agents, a 7-stage citation verification pipeline, and verified
+  answers over Vector Search, Genie, Delta tables, and the web.
+site_url: https://mshtelma.github.io/databricks-deep-research-agent/
+site_author: Databricks Deep Research Agent contributors
+
+repo_url: https://github.com/mshtelma/databricks-deep-research-agent
+repo_name: mshtelma/databricks-deep-research-agent
+edit_uri: edit/main/website/docs/
+
+docs_dir: docs
+site_dir: site
+
+copyright: Copyright &copy; Databricks Deep Research Agent contributors
+
+theme:
+  name: material
+  custom_dir: overrides
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Inter
+    code: JetBrains Mono
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.footer
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - search.suggest
+    - search.highlight
+    - search.share
+
+extra_css:
+  - assets/extra.css
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/mshtelma/databricks-deep-research-agent
+      name: Source on GitHub
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Overview: getting-started/overview.md
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+  - Concepts:
+      - Architecture: concepts/architecture.md
+      - 5-Agent System: concepts/agents.md
+      - Citation Pipeline: concepts/citation-pipeline.md
+      - Agent Designer: concepts/agent-designer.md
+  - Guides:
+      - Web Search Providers: guides/web-search-providers.md
+      - Configuration: guides/configuration.md
+  - Deploy: deploy.md
+  - Benchmarks: benchmarks.md

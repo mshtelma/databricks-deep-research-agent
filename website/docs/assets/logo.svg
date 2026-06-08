@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none" role="img" aria-label="Deep Research Agent logo">
+  <!-- Magnifier lens over stacked data layers; white glyph for the navy header. -->
+  <circle cx="108" cy="108" r="66" fill="none" stroke="#FFFFFF" stroke-width="18"/>
+  <g stroke="#FFFFFF" stroke-width="12" stroke-linecap="round">
+    <line x1="82" y1="90" x2="134" y2="90"/>
+    <line x1="82" y1="110" x2="126" y2="110"/>
+    <line x1="82" y1="130" x2="118" y2="130"/>
+  </g>
+  <line x1="156" y1="156" x2="214" y2="214" stroke="#FF3621" stroke-width="26" stroke-linecap="round"/>
+</svg>
