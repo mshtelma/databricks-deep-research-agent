@@ -2,10 +2,52 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from databricks_deep_research.errors import TokenBudgetExceededError
+
+# Rough characters-per-token ratio. Matches the app-side convention in
+# ``deep_research.services.llm.truncation.estimate_tokens`` so estimates are
+# consistent across the framework↔app boundary (we cannot import across it —
+# the dependency direction is app → framework).
+_CHARS_PER_TOKEN = 4
+# Per-message overhead (role/format framing) in characters.
+_PER_MESSAGE_OVERHEAD_CHARS = 16
+
+
+def estimate_message_tokens(
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]] | None = None,
+) -> int:
+    """Estimate prompt tokens for an OpenAI-format message list.
+
+    Counts message content (str or multimodal content-parts), tool-call
+    payloads, tool JSON schemas (which are part of the prompt and count against
+    the window), and a small per-message framing overhead. Uses the
+    ~4-chars/token heuristic. Always returns at least 1.
+    """
+    total_chars = 0
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    total_chars += len(str(part.get("text", "")))
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for call in tool_calls:
+                total_chars += len(str(call))
+        total_chars += _PER_MESSAGE_OVERHEAD_CHARS
+    if tools:
+        try:
+            total_chars += len(json.dumps(tools))
+        except (TypeError, ValueError):
+            total_chars += sum(len(str(t)) for t in tools)
+    return max(1, total_chars // _CHARS_PER_TOKEN)
 
 
 @dataclass

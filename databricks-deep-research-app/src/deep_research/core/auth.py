@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from databricks.sdk import WorkspaceClient
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from databricks.sdk.service.iam import User
 
 from deep_research.core.config import get_settings
@@ -97,6 +99,42 @@ def get_user_workspace_client(token: str) -> WorkspaceClient:
     return WorkspaceClient(host=host, token=token, auth_type="pat")
 
 
+async def get_service_principal_workspace_client(
+    sp_id: str,
+    requesting_user_id: str,
+    permissions_check: "Callable[[str, str], Awaitable[bool]] | None" = None,
+) -> WorkspaceClient:
+    """V1.5: Returns a WorkspaceClient authenticated as the given Service Principal.
+
+    SECURITY: enforces CAN_USE_AS permission check BEFORE any tool factory runs.
+
+    Args:
+        sp_id: UUID of the Databricks Service Principal to run as.
+        requesting_user_id: The user ID requesting the SP credential.
+        permissions_check: Optional async callable that verifies the user has
+            CAN_USE_AS permission on the SP. Signature: (user_id, sp_id) -> bool.
+
+    Raises:
+        HTTPException: 403 if permissions_check returns False.
+        NotImplementedError: Always (production SP-auth path not yet wired).
+    """
+    from fastapi import HTTPException
+
+    if permissions_check is not None:
+        ok = await permissions_check(requesting_user_id, sp_id)
+        if not ok:
+            raise HTTPException(
+                status_code=403,
+                detail=f"missing CAN_USE_AS permission for SP {sp_id}",
+            )
+    # Production implementation: use Databricks SDK's SP-auth path here.
+    # For V1.5 the function signature is the contract; downstream callers can mock for tests.
+    raise NotImplementedError(
+        "SP credential resolution requires the Databricks SDK SP-auth path; "
+        "wire to workspace_client.config.authenticate(client_id=sp_id, ...)"
+    )
+
+
 def get_current_user(client: WorkspaceClient) -> UserIdentity:
     """Get current authenticated user from WorkspaceClient.
 
@@ -141,6 +179,19 @@ def extract_obo_token(headers: dict[str, str]) -> str | None:
 
 _cached_workspace_host: str | None = None
 _workspace_host_resolved: bool = False
+
+
+# ----- V1.5 OBO Token Refresh entry point -----
+
+
+async def refresh_user_token(workspace_client: WorkspaceClient, current_token: str) -> str | None:
+    """V1.5 OBO refresh entry point. Wraps services.obo_client.refresh.
+
+    Returns the new token if rotation succeeded, None if disabled, raises on failure.
+    """
+    from deep_research.services.obo_client import refresh as _refresh
+
+    return await _refresh(current_token, workspace_client)
 
 
 def get_workspace_host() -> str | None:

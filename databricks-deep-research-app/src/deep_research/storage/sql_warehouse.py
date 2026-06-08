@@ -22,7 +22,7 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -32,7 +32,6 @@ from deep_research.storage.backend import (
     ConflictError,
     PermanentError,
     SchemaError,
-    StorageBackend,
     TransientError,
 )
 from deep_research.storage.documents import (
@@ -40,6 +39,7 @@ from deep_research.storage.documents import (
     ChatMeta,
     ChatState,
     PrepJobDocument,
+    ResearchSessionState,
     UserDocument,
 )
 from deep_research.storage.observability import get_sink
@@ -47,6 +47,8 @@ from deep_research.storage.param_codec import params as codec_params
 
 if TYPE_CHECKING:  # pragma: no cover
     from databricks.sdk import WorkspaceClient
+
+    from deep_research.storage.cleanup import CleanupStats
 
 logger = logging.getLogger(__name__)
 
@@ -192,10 +194,7 @@ class SQLWarehouseBackend:
             version=int(r["version"]),
         )
         raw_state = r.get("state")
-        if raw_state:
-            state = ChatState.model_validate_json(raw_state)
-        else:
-            state = ChatState()
+        state = ChatState.model_validate_json(raw_state) if raw_state else ChatState()
         return ChatDocument(meta=meta, state=state)
 
     async def write_chat(
@@ -379,10 +378,7 @@ class SQLWarehouseBackend:
                 version=int(r["version"]),
             )
             raw_state = r.get("state")
-            if raw_state:
-                state = ChatState.model_validate_json(raw_state)
-            else:
-                state = ChatState()
+            state = ChatState.model_validate_json(raw_state) if raw_state else ChatState()
             docs.append(ChatDocument(meta=meta, state=state))
         return docs
 
@@ -511,6 +507,205 @@ class SQLWarehouseBackend:
         if result.num_affected_rows is not None and result.num_affected_rows == 0:
             raise PermanentError(f"prep_job {job_id} does not exist")
 
+    # -- Research session queries ------------------------------------
+    #
+    # Backed by ``chat_state.state.research_sessions`` JSON array (the
+    # ``state`` column on Delta is stored as TEXT/JSON-string). All five
+    # methods follow a read-transform pattern: fetch the candidate rows
+    # for the user / chat, parse the ``state`` JSON via
+    # ``ChatState.model_validate_json``, compute the result in Python.
+    # Update methods (``mark_stale_research_sessions_failed``,
+    # ``write_research_session_heartbeat``) then serialize back and
+    # ``MERGE INTO`` ``chat_state``. **Non-atomic for array element
+    # mutation**: a concurrent writer landing between the SELECT and
+    # MERGE may have its update overwritten. Mitigated for cleanup by
+    # the cutoff predicate (only stale sessions are touched) and the
+    # exclude-list (only sessions unknown to this worker). For
+    # heartbeat writes, the race window is short and the heartbeat is
+    # idempotent. See plan v4 ADR pre-mortem S3 + ``project_dual_backend``
+    # memory.
+
+    async def count_active_research_sessions(self, user_id: str) -> int:
+        self._ensure_open()
+        result = await self._execute(
+            "SELECT s.state "
+            "FROM ${ns}.chat_meta m "
+            "JOIN ${ns}.chat_state s USING (chat_id) "
+            "WHERE m.user_id = :uid AND m.deleted_at IS NULL",
+            {"uid": user_id},
+        )
+        count = 0
+        for row in result.rows:
+            raw_state = row.get("state")
+            if not raw_state:
+                continue
+            try:
+                state = ChatState.model_validate_json(raw_state)
+            except Exception:
+                # Defensive: malformed state should not block the count;
+                # the WriteQueue's repair path handles re-serialization.
+                continue
+            if any(rs.status == "in_progress" for rs in state.research_sessions):
+                count += 1
+        return count
+
+    async def mark_stale_research_sessions_failed(
+        self,
+        cutoff: datetime,
+        exclude_session_ids: Sequence[UUID],
+    ) -> int:
+        self._ensure_open()
+        exclude_ids = {str(sid) for sid in exclude_session_ids}
+        # Step 1: fetch candidate rows (any chat with at least one
+        # in_progress session); inexpensive heuristic via LIKE keeps the
+        # candidate set small without requiring server-side JSON parsing.
+        candidates = await self._execute(
+            "SELECT m.chat_id, s.state "
+            "FROM ${ns}.chat_meta m "
+            "JOIN ${ns}.chat_state s USING (chat_id) "
+            "WHERE m.deleted_at IS NULL "
+            "  AND s.state LIKE '%\"status\":\"in_progress\"%'",
+        )
+        chats_modified = 0
+        # Step 2: per-chat parse + mutate + write-back. Each chat is its
+        # own MERGE; failure of one does not block the others.
+        for row in candidates.rows:
+            cid = row.get("chat_id")
+            raw_state = row.get("state")
+            if not raw_state or cid is None:
+                continue
+            try:
+                state = ChatState.model_validate_json(raw_state)
+            except Exception:
+                continue
+            mutated = False
+            for rs in state.research_sessions:
+                if rs.status != "in_progress":
+                    continue
+                if str(rs.id) in exclude_ids:
+                    continue
+                if rs.last_heartbeat is not None and rs.last_heartbeat >= cutoff:
+                    continue
+                rs.status = "failed"
+                rs.completed_at = datetime.now(rs.completed_at.tzinfo if rs.completed_at else None)
+                mutated = True
+            if not mutated:
+                continue
+            await self._execute(
+                "MERGE INTO ${ns}.chat_state t "
+                "USING (SELECT :cid AS chat_id, :state AS state) s "
+                "ON t.chat_id = s.chat_id "
+                "WHEN MATCHED THEN UPDATE SET state = s.state",
+                {"cid": str(cid), "state": state.model_dump_json()},
+            )
+            chats_modified += 1
+        return chats_modified
+
+    async def list_user_jobs(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[tuple[UUID, ResearchSessionState]]:
+        self._ensure_open()
+        result = await self._execute(
+            "SELECT m.chat_id, s.state "
+            "FROM ${ns}.chat_meta m "
+            "JOIN ${ns}.chat_state s USING (chat_id) "
+            "WHERE m.user_id = :uid AND m.deleted_at IS NULL",
+            {"uid": user_id},
+        )
+        rows: list[tuple[UUID, ResearchSessionState]] = []
+        for row in result.rows:
+            cid_raw = row.get("chat_id")
+            raw_state = row.get("state")
+            if not raw_state or cid_raw is None:
+                continue
+            try:
+                state = ChatState.model_validate_json(raw_state)
+            except Exception:
+                continue
+            cid = UUID(cid_raw) if isinstance(cid_raw, str) else cid_raw
+            for rs in state.research_sessions:
+                if status is not None and rs.status != status:
+                    continue
+                rows.append((cid, rs))
+        rows.sort(key=lambda pair: pair[1].started_at, reverse=True)
+        return rows[: int(limit)]
+
+    async def get_active_session_for_chat(
+        self,
+        chat_id: UUID,
+        user_id: str,
+    ) -> ResearchSessionState | None:
+        self._ensure_open()
+        result = await self._execute(
+            "SELECT s.state "
+            "FROM ${ns}.chat_meta m "
+            "JOIN ${ns}.chat_state s USING (chat_id) "
+            "WHERE m.chat_id = :cid AND m.user_id = :uid AND m.deleted_at IS NULL "
+            "LIMIT 1",
+            {"cid": str(chat_id), "uid": user_id},
+        )
+        if not result.rows:
+            return None
+        raw_state = result.rows[0].get("state")
+        if not raw_state:
+            return None
+        try:
+            state = ChatState.model_validate_json(raw_state)
+        except Exception:
+            return None
+        active = [rs for rs in state.research_sessions if rs.status == "in_progress"]
+        if not active:
+            return None
+        active.sort(key=lambda rs: rs.started_at, reverse=True)
+        return active[0]
+
+    async def write_research_session_heartbeat(
+        self,
+        chat_id: UUID,
+        session_id: UUID,
+        ts: datetime,
+    ) -> None:
+        self._ensure_open()
+        # Read-transform-write: the SQL Warehouse equivalent of Lakebase's
+        # in-place jsonb_set. Single-worker race window is acceptable; a
+        # concurrent legitimate writer would land its own write either
+        # before or after this one and the last write wins. Heartbeats
+        # are idempotent — a missed heartbeat is reaped by the next
+        # cleanup cycle.
+        result = await self._execute(
+            "SELECT state FROM ${ns}.chat_state WHERE chat_id = :cid LIMIT 1",
+            {"cid": str(chat_id)},
+        )
+        if not result.rows:
+            return
+        raw_state = result.rows[0].get("state")
+        if not raw_state:
+            return
+        try:
+            state = ChatState.model_validate_json(raw_state)
+        except Exception:
+            return
+        sid_str = str(session_id)
+        mutated = False
+        for rs in state.research_sessions:
+            if str(rs.id) == sid_str:
+                rs.last_heartbeat = ts
+                mutated = True
+                break
+        if not mutated:
+            return
+        await self._execute(
+            "MERGE INTO ${ns}.chat_state t "
+            "USING (SELECT :cid AS chat_id, :state AS state) s "
+            "ON t.chat_id = s.chat_id "
+            "WHEN MATCHED THEN UPDATE SET state = s.state",
+            {"cid": str(chat_id), "state": state.model_dump_json()},
+        )
+
     # -- List tables --------------------------------------------------
 
     async def list_rows(
@@ -617,19 +812,19 @@ class SQLWarehouseBackend:
         self,
         *,
         chat_retention_days: int,
-    ) -> "CleanupStats":
+    ) -> CleanupStats:
         """Delta equivalent of the Lakebase cleanup cascade.
 
         Passes cutoff timestamps as parameters to stay dialect-agnostic and
         avoid Delta interval-literal quirks.
         """
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         from deep_research.storage.cleanup import CleanupStats
 
         self._ensure_open()
         stats = CleanupStats()
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         short_cutoff = now - timedelta(days=1)
         long_cutoff = now - timedelta(days=chat_retention_days)
 
@@ -732,7 +927,7 @@ class SQLWarehouseBackend:
         try:
             response = await asyncio.to_thread(_sync_call)
         except Exception as exc:  # noqa: BLE001
-            raise _wrap_sdk_exception(exc)
+            raise _wrap_sdk_exception(exc) from exc
 
         # Poll until terminal state — yielding to the event loop between polls.
         total_elapsed = asyncio.get_event_loop().time() - started
@@ -756,7 +951,7 @@ class SQLWarehouseBackend:
                     response.statement_id,
                 )
             except Exception as exc:  # noqa: BLE001
-                raise _wrap_sdk_exception(exc)
+                raise _wrap_sdk_exception(exc) from exc
             total_elapsed = asyncio.get_event_loop().time() - started
 
         parsed = _parse_response(response)

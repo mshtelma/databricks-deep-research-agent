@@ -68,15 +68,28 @@ class TestStep3SourceGuard:
             "outer try/except around the completion check must remain"
         )
 
-    def test_heartbeat_loop_unchanged(self) -> None:
-        """Step 3 must not touch the heartbeat loop — the _active_tasks
-        cleanup in _run_job's finally block is still what stops the
-        heartbeat from zombifying. We assert the contract so a future
-        refactor doesn't accidentally break this invariant."""
+    def test_recurring_cleanup_loop_contract(self) -> None:
+        """The legacy ``_heartbeat_loop`` (which wrote ``last_heartbeat`` to the
+        now-dropped ``research_sessions`` table) was replaced by
+        ``_recurring_cleanup_loop``, which periodically runs
+        ``_cleanup_interrupted_jobs``. The ``_active_tasks`` dict (maintained by
+        ``_run_job``'s finally block) is now the per-worker liveness signal /
+        exclude-list for stale-marking, which goes through the storage backend
+        — never ``select(ResearchSession)``. Assert the contract so a future
+        refactor doesn't reintroduce a heartbeat write to the dropped table."""
         from deep_research.services.job_manager import JobManager
 
-        source = inspect.getsource(JobManager._heartbeat_loop)
-        assert "_active_tasks" in source
-        assert "await asyncio.sleep" in source
-        # Empty-dict short-circuit — don't re-open sessions for no-op updates.
-        assert "if not self._active_tasks" in source
+        # The legacy heartbeat loop must be gone (it queried the dropped table).
+        assert not hasattr(JobManager, "_heartbeat_loop"), (
+            "_heartbeat_loop was replaced by _recurring_cleanup_loop; it must "
+            "not write to the dropped research_sessions table."
+        )
+
+        loop_source = inspect.getsource(JobManager._recurring_cleanup_loop)
+        assert "await asyncio.sleep" in loop_source
+        assert "_cleanup_interrupted_jobs" in loop_source
+
+        cleanup_source = inspect.getsource(JobManager._cleanup_interrupted_jobs)
+        assert "_active_tasks" in cleanup_source
+        assert "mark_stale_research_sessions_failed" in cleanup_source
+        assert "select(" not in cleanup_source

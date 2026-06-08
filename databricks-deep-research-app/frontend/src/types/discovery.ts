@@ -14,6 +14,7 @@
 
 export type DataSourceType =
   | 'vector_search'
+  | 'delta_table'
   | 'genie'
   | 'knowledge_assistant'
   | 'web_search'
@@ -186,6 +187,7 @@ export interface UpdateQueryConfigRequest {
 export function getSourceTypeLabel(type: DataSourceType): string {
   const labels: Record<DataSourceType, string> = {
     vector_search: 'Vector Search',
+    delta_table: 'Delta Table',
     genie: 'Genie',
     knowledge_assistant: 'Knowledge Assistant',
     web_search: 'Web Search',
@@ -201,6 +203,7 @@ export function getSourceTypeLabel(type: DataSourceType): string {
 export function getSourceTypeIcon(type: DataSourceType): string {
   const icons: Record<DataSourceType, string> = {
     vector_search: 'database',
+    delta_table: 'table',
     genie: 'sparkles',
     knowledge_assistant: 'user-circle',
     web_search: 'globe',

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, ClassVar, cast
 
+from databricks_deep_research.tools.catalog_types import CatalogCard, SafeProbe
 from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.tools.protocol import ResearchTool
 from databricks_deep_research.workflow.definition import ToolDeclaration
@@ -13,17 +15,236 @@ from databricks_deep_research.workflow.definition import ToolDeclaration
 logger = logging.getLogger(__name__)
 
 _SUPPORTED_KINDS = frozenset({
-    "web_search", "web_crawl", "file_search", "compute", "compute_namespace",
-    "delta_read", "delta_grep", "delta_context", "delta_table_read",
+    "web_search", "web_crawl", "web_research",
+    "file_search", "compute", "compute_namespace",
+    "table_discovery", "table_search", "table_read",
+    "table_neighbors", "table_load", "table_aggregate",
+})
+_FUNCTIONAL_TABLE_KINDS = frozenset({
+    "table_search",
     "table_read",
+    "table_neighbors",
+    "table_load",
+    "table_aggregate",
 })
 
-_SEARCH_PROVIDERS = frozenset({"brave", "jina"})
+_SEARCH_PROVIDERS = frozenset({"brave", "jina", "databricks"})
 _CRAWL_PROVIDERS = frozenset({"jina"})
 
 
-def _resolve_search_provider(provider: str, ctx: ToolFactoryContext) -> Any:
-    """Create a SearchClient for the named provider."""
+def _clean_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _first_config_str(config: Mapping[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        value = _clean_str(config.get(key))
+        if value:
+            return value
+    return None
+
+
+def _roles_from_table_config(config: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Extract a RoleMap-compatible dict from YAML/app declaration config."""
+    raw_roles = config.get("roles")
+    if isinstance(raw_roles, Mapping):
+        return dict(raw_roles)
+
+    field_roles = config.get("field_roles")
+    role_source = field_roles if isinstance(field_roles, Mapping) else config
+    columns = _string_list(config.get("columns"))
+
+    roles: dict[str, Any] = {}
+    id_column = _first_config_str(
+        role_source,
+        "id",
+        "id_column",
+        "primary_key",
+        "pk_column",
+        "primary_key_column",
+    )
+    if id_column is None:
+        id_column = "chunk_id" if "chunk_id" in columns else None
+    content_column = _first_config_str(
+        role_source,
+        "content",
+        "content_column",
+        "text",
+        "body",
+        "structured_json",
+    )
+    order_column = _first_config_str(
+        role_source,
+        "order",
+        "order_column",
+        "order_by",
+        "position_column",
+        "sequence_column",
+    )
+    if order_column is None and "chunk_index" in columns:
+        order_column = "chunk_index"
+    partition_column = _first_config_str(
+        role_source,
+        "partition",
+        "partition_column",
+        "document_column",
+        "source_column",
+        "file_column",
+    )
+    if partition_column is None and "file_name" in columns:
+        partition_column = "file_name"
+    label_column = _first_config_str(role_source, "label", "label_column")
+    type_column = _first_config_str(role_source, "type", "type_column")
+    if type_column is None and "chunk_type" in columns:
+        type_column = "chunk_type"
+    date_column = _first_config_str(role_source, "date", "date_column")
+    if date_column is None and "bulletin_date" in columns:
+        date_column = "bulletin_date"
+
+    for key, value in (
+        ("id", id_column),
+        ("content", content_column),
+        ("order", order_column),
+        ("partition", partition_column),
+        ("label", label_column),
+        ("type", type_column),
+        ("date", date_column),
+    ):
+        if value:
+            roles[key] = value
+
+    if "id" not in roles or "content" not in roles:
+        return None
+    return roles
+
+
+def _structured_passages_from_config(config: Mapping[str, Any]) -> dict[str, str]:
+    raw = config.get("structured_passages")
+    if isinstance(raw, Mapping):
+        return {
+            str(key): str(value)
+            for key, value in raw.items()
+            if str(key).strip() and str(value).strip()
+        }
+    parser = _clean_str(config.get("parser"))
+    type_value = _clean_str(config.get("structured_type")) or _clean_str(
+        config.get("type_value")
+    )
+    if parser and type_value:
+        return {type_value: parser}
+    return {}
+
+
+def _numeric_columns_from_config(config: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(_string_list(config.get("numeric_columns")))
+
+
+def _projection_columns_from_config(config: Mapping[str, Any]) -> list[str] | None:
+    columns = _string_list(config.get("columns"))
+    if not columns or columns == ["*"]:
+        return None
+    return columns
+
+
+def _order_by_from_config(config: Mapping[str, Any]) -> list[str] | None:
+    raw = config.get("order_by")
+    if isinstance(raw, str) and raw.strip():
+        return [raw.strip()]
+    columns = _string_list(raw)
+    return columns or None
+
+
+def _table_fqn_from_decl(decl: ToolDeclaration) -> str | None:
+    return _first_config_str(decl.config, "fqn", "table_name", "full_name")
+
+
+def _table_binding_name_from_decl(decl: ToolDeclaration) -> str:
+    return (
+        _first_config_str(decl.config, "binding", "as_var", "binding_name")
+        or decl.name
+    )
+
+
+def _ensure_declared_table_binding(
+    decl: ToolDeclaration,
+    ctx: ToolFactoryContext,
+) -> str | None:
+    """Register a declaration-local table binding when config names a table.
+
+    Generated app and benchmark workflows historically declare table tools as
+    concrete named tools with ``config.table_name``. The canonical table_*
+    implementation addresses tables through registry bindings, so factory
+    construction bridges that YAML shape into a BOUND binding once per
+    resolver.
+    """
+    fqn = _table_fqn_from_decl(decl)
+    if fqn is None:
+        return None
+    if ctx.table_registry is None:
+        return None
+
+    from databricks_deep_research.tools.builtins.text_table.binding import (
+        BindingInfo,
+        BindingSource,
+    )
+    from databricks_deep_research.tools.builtins.text_table.tools._common import (
+        parse_roles,
+    )
+
+    binding_name = _table_binding_name_from_decl(decl)
+    raw_roles = _roles_from_table_config(decl.config)
+    roles = parse_roles(raw_roles) if raw_roles is not None else None
+
+    source = BindingSource.BOUND if roles is not None else BindingSource.DISCOVERED
+    existing = None
+    if binding_name in ctx.table_registry:
+        existing = ctx.table_registry.get(binding_name)
+    if existing is not None:
+        if existing.fqn == fqn:
+            if existing.roles is None and roles is not None:
+                ctx.table_registry.update_roles(binding_name, roles)
+            return binding_name
+        raise ValueError(
+            f"table binding {binding_name!r} already registered for "
+            f"{existing.fqn!r}; cannot also bind {fqn!r}"
+        )
+
+    info = BindingInfo(
+        name=binding_name,
+        fqn=fqn,
+        source=source,
+        description=decl.description or None,
+        roles=roles,
+        numeric_columns=_numeric_columns_from_config(decl.config),
+        structured_passages=_structured_passages_from_config(decl.config),
+    )
+    if source is BindingSource.BOUND:
+        ctx.table_registry.register_bound(info)
+        return binding_name
+    canonical_name, _warning = ctx.table_registry.register_discovered(info)
+    return cast(str, canonical_name)
+
+
+def _resolve_search_provider(
+    provider: str,
+    ctx: ToolFactoryContext,
+    config: Mapping[str, Any] | None = None,
+) -> Any:
+    """Create a SearchClient for the named provider.
+
+    ``config`` is the tool declaration's ``config`` block — used by providers that
+    need per-tool settings (e.g. ``databricks`` reads ``model``/``model_family``).
+    """
+    config = config or {}
     if provider == "brave":
         api_key = ctx.api_keys.get("brave") or os.environ.get("BRAVE_API_KEY")
         if not api_key:
@@ -45,9 +266,96 @@ def _resolve_search_provider(provider: str, ctx: ToolFactoryContext) -> Any:
 
         return JinaSearchAdapter(api_key=api_key)
 
+    if provider == "databricks":
+        return _build_databricks_search_provider(ctx, config)
+
     raise ValueError(
         f"Unknown search provider: {provider!r}. "
         f"Supported: {sorted(_SEARCH_PROVIDERS)}"
+    )
+
+
+def _build_databricks_search_provider(
+    ctx: ToolFactoryContext, config: Mapping[str, Any]
+) -> Any:
+    """Build a :class:`DatabricksWebSearchAdapter` from factory context + config.
+
+    Built-in web search is a model-serving call over the PUBLIC web, so it runs
+    as the app / service-principal identity (the same one the LLM calls use) —
+    NOT the OBO user (``ctx.user_token``), which is reserved for user-scoped data
+    tools and need not carry the ``model-serving`` scope the foundation-model
+    passthrough requires. Prefer ``ctx.serving_client_provider`` (the app's SP
+    serving client); fall back to a ``ctx.workspace_client``-derived client for
+    framework-only callers that don't set one. Endpoint comes from
+    ``config['model']`` or the ``DATABRICKS_WEB_SEARCH_ENDPOINT`` env var.
+    """
+    model = config.get("model") or os.environ.get("DATABRICKS_WEB_SEARCH_ENDPOINT")
+    if not model:
+        raise ValueError(
+            "Databricks built-in web search requires a serving endpoint: set "
+            "config['model'] on the web_search tool or DATABRICKS_WEB_SEARCH_ENDPOINT"
+        )
+
+    serving_provider = ctx.serving_client_provider
+    if serving_provider is not None:
+        # App-supplied SP serving client (model serving runs as the app, not OBO).
+        client_provider = serving_provider
+    else:
+        ws = ctx.workspace_client
+        if ws is None:
+            raise ValueError(
+                "Databricks built-in web search requires a serving client: set "
+                "ToolFactoryContext.serving_client_provider or workspace_client"
+            )
+        user_token = ctx.user_token
+        cached: dict[str, Any] = {}
+
+        def _client_provider() -> Any:
+            # Reuse one AsyncOpenAI for the request lifetime (token is fixed per
+            # request — OBO token, or an SDK-minted SP token valid well past a run).
+            if "client" not in cached:
+                from openai import AsyncOpenAI
+
+                host = (getattr(ws.config, "host", "") or "").rstrip("/")
+                if user_token:
+                    token = user_token
+                else:
+                    headers = ws.config.authenticate() or {}
+                    token = (headers.get("Authorization", "") or "").removeprefix("Bearer ").strip()
+                cached["client"] = AsyncOpenAI(
+                    api_key=token, base_url=f"{host}/serving-endpoints"
+                )
+            return cached["client"]
+
+        client_provider = _client_provider
+
+    from databricks_deep_research.tools.builtins.databricks_web_search import (
+        build_databricks_web_search_adapter,
+    )
+
+    domain_filter = config.get("domain_filter")
+    url_allowed = None
+    restrict_to_domains: list[str] | None = None
+    if domain_filter:
+        from databricks_deep_research.tools.builtins.web_search import _domain_matches
+
+        _df = list(domain_filter)
+        url_allowed = lambda u: _domain_matches(u, _df)  # noqa: E731
+        # The flat ``domain_filter`` list is an allowlist (``_domain_matches`` semantics),
+        # so forward it for the allowlist push-down too. The adapter reduces it to the
+        # pushable bare-domain subset (all-or-nothing) and keeps url_allowed authoritative.
+        restrict_to_domains = _df
+
+    return build_databricks_web_search_adapter(
+        client_provider=client_provider,
+        model=model,
+        model_family=config.get("model_family"),
+        max_results=config.get("max_results", 10),
+        timeout_seconds=config.get("timeout_seconds", 30.0),
+        resolve_redirects=config.get("resolve_redirects", True),
+        url_allowed=url_allowed,
+        restrict_to_domains=restrict_to_domains,
+        push_allowed_domains=config.get("push_allowed_domains", True),
     )
 
 
@@ -68,6 +376,177 @@ def _resolve_crawl_provider(provider: str, ctx: ToolFactoryContext) -> Any:
 class BuiltinToolFactory:
     """Creates web_search, web_crawl, and file_search tools from declarations."""
 
+    catalog_cards: ClassVar[Mapping[str, CatalogCard]] = {
+        "web_search": CatalogCard(
+            summary="Search the public web and return ranked result snippets with source URLs.",
+            input_prose=(
+                "Provide a search query string. The tool returns the top results "
+                "from the configured provider. Use focused phrasing — keywords or a "
+                "short question — rather than long paragraphs."
+            ),
+            output_prose=(
+                "Returns a list of search results. Each result includes a title, a "
+                "URL, and a content snippet. URLs are registered with the framework "
+                "so the LLM never sees raw URLs; cite results by the index assigned "
+                "in the result block."
+            ),
+        ),
+        "web_crawl": CatalogCard(
+            summary="Fetch the body of a single web page and return cleaned content.",
+            input_prose=(
+                "Provide one URL to crawl. The tool dereferences the URL through the "
+                "configured crawler (httpx + trafilatura by default), strips chrome, "
+                "and returns the main page body."
+            ),
+            output_prose=(
+                "Returns the page's cleaned text content, optionally with extracted "
+                "tables. Long pages are truncated to the configured max_content_length."
+            ),
+        ),
+        "web_research": CatalogCard(
+            summary="Search the web and auto-fetch the top K result bodies in one call.",
+            input_prose=(
+                "Provide a search query string. The tool runs a search, then "
+                "automatically crawls the top K results so the body content arrives "
+                "in the first response — no follow-up crawl required."
+            ),
+            output_prose=(
+                "Returns search results enriched with full page bodies for the top K "
+                "hits. Each entry includes title, URL, snippet, and (where fetched) "
+                "the cleaned page body."
+            ),
+        ),
+        "file_search": CatalogCard(
+            summary="Search a local file index by keyword and return matching file paths.",
+            input_prose=(
+                "Provide a search query. The tool matches against the configured file "
+                "index and returns paths plus snippet matches."
+            ),
+            output_prose=(
+                "Returns a list of matching files with relevance-ranked snippets and "
+                "absolute paths in the configured index root."
+            ),
+        ),
+        "compute": CatalogCard(
+            summary="Execute Python code in a sandboxed namespace and capture stdout/return value.",
+            input_prose=(
+                "Provide a Python code snippet as a string. The tool runs the code in "
+                "a restricted namespace (configurable allowed_modules), captures "
+                "stdout, and returns the trailing expression value when present."
+            ),
+            output_prose=(
+                "Returns captured stdout and the value of the last expression. "
+                "Variables defined here persist across compute calls in the same session "
+                "via the compute namespace."
+            ),
+        ),
+        "compute_namespace": CatalogCard(
+            summary="List variables currently bound in the compute tool's namespace.",
+            input_prose=(
+                "Takes no arguments. Reports the current state of the sibling compute "
+                "tool's namespace so subsequent compute calls can reference prior "
+                "results by name."
+            ),
+            output_prose=(
+                "Returns a mapping of variable names to short summaries (type and "
+                "shape/length where applicable) for everything currently bound in the "
+                "compute namespace."
+            ),
+        ),
+        "table_discovery": CatalogCard(
+            summary="List tables exposed to this agent and register discovered tables.",
+            input_prose=(
+                "Optionally provide a name_pattern substring filter and a detail level "
+                "(basic, schema, full). Tables returned are added to the binding "
+                "registry as DISCOVERED bindings so downstream table_* tools can "
+                "reference them by name."
+            ),
+            output_prose=(
+                "Returns a list of tables with name, fqn, and (when detail>=schema) "
+                "column types. Use the binding name in subsequent table_search / "
+                "table_read / table_aggregate calls."
+            ),
+        ),
+        "table_search": CatalogCard(
+            summary="Substring-search the content column of a registered table binding.",
+            input_prose=(
+                "Provide a binding name and a query substring; optionally narrow with a "
+                "TableFilter `where` and project additional columns. The tool runs a "
+                "parameterised SELECT with LIKE matching on the content column."
+            ),
+            output_prose=(
+                "Returns matching rows projected to the binding's id and content "
+                "columns plus any extras requested. Source identifiers are registered "
+                "so citations resolve back to the originating row."
+            ),
+        ),
+        "table_read": CatalogCard(
+            summary="Read rows from a registered table binding with filter / projection / pagination.",
+            input_prose=(
+                "Provide a binding name and optional `where` filter, `columns` "
+                "projection, `order_by` list (prefix '-' for DESC), `limit`, and "
+                "`offset`. Use this when you already know which rows you need."
+            ),
+            output_prose=(
+                "Returns a list of rows from the table, each row a mapping of column "
+                "name to value, in the requested order."
+            ),
+        ),
+        "table_neighbors": CatalogCard(
+            summary="Fetch sibling rows around an anchor by partition and ordering columns.",
+            input_prose=(
+                "Provide a binding name, the anchor row id, and `before` / `after` "
+                "window sizes. The tool returns rows in the same partition_column "
+                "whose order_column falls within [order - before, order + after]."
+            ),
+            output_prose=(
+                "Returns a contiguous window of rows from the binding ordered by the "
+                "binding's order_column."
+            ),
+        ),
+        "table_load": CatalogCard(
+            summary="Materialise specific row(s) from a binding into the compute namespace as Table objects.",
+            input_prose=(
+                "Provide a binding name and one or more id values. Optionally pass "
+                "`as_var` to bind the result under a specific name; otherwise the "
+                "loaded row is exposed as `last_table` and appended to `tables`."
+            ),
+            output_prose=(
+                "Returns the loaded row(s) as JSON. When a compute namespace is wired "
+                "and `as_var` is provided, the row is also injected into the compute "
+                "namespace as a `Table` object for use in compute() calls."
+            ),
+        ),
+        "table_aggregate": CatalogCard(
+            summary="Aggregate rows from a binding via count / sum / avg / min / max with optional GROUP BY.",
+            input_prose=(
+                "Provide a binding name and an op (count, sum, avg, min, max). For "
+                "non-count ops a target column is required and must appear in the "
+                "binding's numeric_columns. Optionally pass `where`, `group_by`, and "
+                "`limit`."
+            ),
+            output_prose=(
+                "Returns the aggregate result(s). When group_by is set, the response "
+                "carries one row per group with the requested aggregate value."
+            ),
+        ),
+    }
+
+    safe_probes: ClassVar[Mapping[str, SafeProbe | None]] = {
+        "web_search": None,
+        "web_crawl": None,
+        "web_research": None,
+        "file_search": None,
+        "compute": None,
+        "compute_namespace": None,
+        "table_discovery": None,
+        "table_search": None,
+        "table_read": None,
+        "table_neighbors": None,
+        "table_load": None,
+        "table_aggregate": None,
+    }
+
     def supports(self, kind: str) -> bool:
         return kind in _SUPPORTED_KINDS
 
@@ -85,7 +564,7 @@ class BuiltinToolFactory:
                     )
                 search_client = ctx.search_client
             else:
-                search_client = _resolve_search_provider(provider, ctx)
+                search_client = _resolve_search_provider(provider, ctx, decl.config)
 
             from databricks_deep_research.tools.builtins.web_search import WebSearchTool
 
@@ -112,6 +591,41 @@ class BuiltinToolFactory:
                 timeout=decl.config.get("timeout", 30.0),
                 max_content_length=decl.config.get("max_content_length", 50_000),
                 extract_tables=decl.config.get("extract_tables", True),
+            )
+
+        if decl.kind == "web_research":
+            # Merged tool: search + auto-crawl top K in one call. Lets the
+            # researcher get real source bodies on the FIRST tool invocation
+            # without relying on the LLM to orchestrate search→crawl correctly.
+            provider = decl.config.get("provider")
+            if provider is None:
+                if ctx.search_client is None:
+                    raise ValueError(
+                        f"search_client required in ToolFactoryContext for "
+                        f"web_research tool '{decl.name}' (set "
+                        f"brave_api_key in ToolFactoryContext.from_defaults "
+                        f"or provide search_client directly)"
+                    )
+                search_client = ctx.search_client
+            else:
+                search_client = _resolve_search_provider(provider, ctx, decl.config)
+
+            crawl_provider = decl.config.get("crawl_provider")
+            if crawl_provider is not None:
+                crawler = _resolve_crawl_provider(crawl_provider, ctx)
+            else:
+                crawler = ctx.crawler
+
+            from databricks_deep_research.tools.builtins.web_research import (
+                WebResearchTool,
+            )
+
+            return WebResearchTool(
+                search_client=search_client,
+                crawler=crawler,
+                auto_fetch_top_k=decl.config.get("auto_fetch_top_k", 5),
+                total_results=decl.config.get("total_results", 10),
+                max_body_chars=decl.config.get("max_body_chars", 8000),
             )
 
         if decl.kind == "file_search":
@@ -157,122 +671,190 @@ class BuiltinToolFactory:
                 description=decl.description,
             )
 
-        if decl.kind == "delta_read":
-            if not ctx.workspace_client:
+        if decl.kind == "table_discovery":
+            if ctx.table_registry is None:
                 raise ValueError(
-                    f"workspace_client required in ToolFactoryContext for "
-                    f"delta_read tool '{decl.name}'"
+                    f"table_registry required in ToolFactoryContext for "
+                    f"table_discovery tool '{decl.name}'"
                 )
-            from databricks_deep_research.tools.builtins.delta_read import DeltaReadTool
-
-            return DeltaReadTool(
-                name=decl.name,
-                description=decl.description,
-                table_name=decl.config["table_name"],
-                columns=decl.config.get("columns", ["*"]),
-                workspace_client=ctx.workspace_client,
-                warehouse_id=decl.config["warehouse_id"],
-                content_column=decl.config.get("content_column", "content"),
-                order_by=decl.config.get("order_by", "chunk_id"),
-                exclude_chunk_types=decl.config.get("exclude_chunk_types"),
+            from databricks_deep_research.tools.builtins.text_table.tools.discovery import (
+                TableDiscoveryTool,
             )
 
-        if decl.kind == "delta_grep":
-            if not ctx.workspace_client:
-                raise ValueError(
-                    f"workspace_client required in ToolFactoryContext for "
-                    f"delta_grep tool '{decl.name}'"
-                )
-            from databricks_deep_research.tools.builtins.delta_read import DeltaGrepTool
-
-            return DeltaGrepTool(
+            return TableDiscoveryTool(
+                provider=ctx.table_discovery_provider,
+                registry=ctx.table_registry,
+                schema_cache=ctx.schema_cache,
+                sql_executor=ctx.sql_executor,
                 name=decl.name,
-                description=decl.description,
-                table_name=decl.config["table_name"],
-                columns=decl.config.get("columns", ["*"]),
-                workspace_client=ctx.workspace_client,
-                warehouse_id=decl.config["warehouse_id"],
-                content_column=decl.config.get("content_column", "content"),
-                order_by=decl.config.get("order_by", "chunk_id"),
-                exclude_chunk_types=decl.config.get("exclude_chunk_types"),
-                date_column=decl.config.get("date_column"),
+                description=decl.description or None,
             )
 
-        if decl.kind == "delta_context":
-            if not ctx.workspace_client:
+        if decl.kind == "table_search":
+            default_binding = _ensure_declared_table_binding(decl, ctx)
+            if ctx.table_registry is None:
                 raise ValueError(
-                    f"workspace_client required in ToolFactoryContext for "
-                    f"delta_context tool '{decl.name}'"
+                    f"table_registry required in ToolFactoryContext for "
+                    f"table_search tool '{decl.name}'"
                 )
-            from databricks_deep_research.tools.builtins.delta_read import DeltaContextTool
-
-            return DeltaContextTool(
-                name=decl.name,
-                description=decl.description,
-                table_name=decl.config["table_name"],
-                columns=decl.config.get("columns", ["*"]),
-                workspace_client=ctx.workspace_client,
-                warehouse_id=decl.config["warehouse_id"],
-                content_column=decl.config.get("content_column", "content"),
-                order_by=decl.config.get("order_by", "chunk_id"),
+            if ctx.schema_cache is None:
+                raise ValueError(
+                    f"schema_cache required in ToolFactoryContext for "
+                    f"table_search tool '{decl.name}'"
+                )
+            if ctx.sql_executor is None:
+                raise ValueError(
+                    f"sql_executor required in ToolFactoryContext for "
+                    f"table_search tool '{decl.name}'"
+                )
+            from databricks_deep_research.tools.builtins.text_table.tools.search import (
+                TableSearchTool,
             )
 
-        if decl.kind == "delta_table_read":
-            if not ctx.workspace_client:
-                raise ValueError(
-                    f"workspace_client required in ToolFactoryContext for "
-                    f"delta_table_read tool '{decl.name}'"
-                )
-            from databricks_deep_research.tools.builtins.delta_read import (
-                DeltaTableReadTool,
-            )
-
-            # Optional: auto-inject parsed JSON into sibling compute namespace
-            _compute_resolver = None
-            store_as = decl.config.get("store_in_compute")
-            if store_as:
-                _compute_name = decl.config.get("compute_tool_name", "compute")
-
-                def _resolve_compute() -> Any:  # type: ignore[misc]
-                    cached = ctx.extras.get("_resolver_cache", {}).get(_compute_name)
-                    return cached if hasattr(cached, "inject_variable") else None
-
-                _compute_resolver = _resolve_compute
-
-            return DeltaTableReadTool(
+            return TableSearchTool(
+                registry=ctx.table_registry,
+                schema_cache=ctx.schema_cache,
+                sql_executor=ctx.sql_executor,
                 name=decl.name,
-                description=decl.description,
-                table_name=decl.config["table_name"],
-                columns=decl.config.get("columns", ["*"]),
-                workspace_client=ctx.workspace_client,
-                warehouse_id=decl.config["warehouse_id"],
-                content_column=decl.config.get("content_column", "content"),
-                pk_column=decl.config.get("pk_column", "chunk_id"),
-                store_in_compute=store_as,
-                compute_resolver=_compute_resolver,
-                structural_analysis=bool(decl.config.get("structural_analysis")),
+                description=decl.description or None,
+                default_binding=default_binding,
+                default_columns=_projection_columns_from_config(decl.config),
             )
 
         if decl.kind == "table_read":
-            from databricks_deep_research.tools.builtins.table_read import TableReadTool
-
-            # Optional: auto-inject table into sibling compute namespace
-            _compute_resolver = None
-            store_as = decl.config.get("store_in_compute", "web_table")
-            if store_as:
-                _compute_name = decl.config.get("compute_tool_name", "compute")
-
-                def _resolve_compute() -> Any:  # type: ignore[misc]
-                    cached = ctx.extras.get("_resolver_cache", {}).get(_compute_name)
-                    return cached if hasattr(cached, "inject_variable") else None
-
-                _compute_resolver = _resolve_compute
+            default_binding = _ensure_declared_table_binding(decl, ctx)
+            if ctx.table_registry is None:
+                raise ValueError(
+                    f"table_registry required in ToolFactoryContext for "
+                    f"table_read tool '{decl.name}'"
+                )
+            if ctx.schema_cache is None:
+                raise ValueError(
+                    f"schema_cache required in ToolFactoryContext for "
+                    f"table_read tool '{decl.name}'"
+                )
+            if ctx.sql_executor is None:
+                raise ValueError(
+                    f"sql_executor required in ToolFactoryContext for "
+                    f"table_read tool '{decl.name}'"
+                )
+            from databricks_deep_research.tools.builtins.text_table.tools.read import (
+                TableReadTool,
+            )
 
             return TableReadTool(
+                registry=ctx.table_registry,
+                schema_cache=ctx.schema_cache,
+                sql_executor=ctx.sql_executor,
                 name=decl.name,
                 description=decl.description or None,
-                store_in_compute=store_as,
-                compute_resolver=_compute_resolver,
+                default_binding=default_binding,
+                default_columns=_projection_columns_from_config(decl.config),
+                default_order_by=_order_by_from_config(decl.config),
+            )
+
+        if decl.kind == "table_neighbors":
+            default_binding = _ensure_declared_table_binding(decl, ctx)
+            if ctx.table_registry is None:
+                raise ValueError(
+                    f"table_registry required in ToolFactoryContext for "
+                    f"table_neighbors tool '{decl.name}'"
+                )
+            if ctx.schema_cache is None:
+                raise ValueError(
+                    f"schema_cache required in ToolFactoryContext for "
+                    f"table_neighbors tool '{decl.name}'"
+                )
+            if ctx.sql_executor is None:
+                raise ValueError(
+                    f"sql_executor required in ToolFactoryContext for "
+                    f"table_neighbors tool '{decl.name}'"
+                )
+            from databricks_deep_research.tools.builtins.text_table.tools.neighbors import (
+                TableNeighborsTool,
+            )
+
+            return TableNeighborsTool(
+                registry=ctx.table_registry,
+                schema_cache=ctx.schema_cache,
+                sql_executor=ctx.sql_executor,
+                name=decl.name,
+                description=decl.description or None,
+                default_binding=default_binding,
+            )
+
+        if decl.kind == "table_load":
+            default_binding = _ensure_declared_table_binding(decl, ctx)
+            if ctx.table_registry is None:
+                raise ValueError(
+                    f"table_registry required in ToolFactoryContext for "
+                    f"table_load tool '{decl.name}'"
+                )
+            if ctx.schema_cache is None:
+                raise ValueError(
+                    f"schema_cache required in ToolFactoryContext for "
+                    f"table_load tool '{decl.name}'"
+                )
+            if ctx.sql_executor is None:
+                raise ValueError(
+                    f"sql_executor required in ToolFactoryContext for "
+                    f"table_load tool '{decl.name}'"
+                )
+            from databricks_deep_research.tools.builtins.text_table.tools.load import (
+                TableLoadTool,
+            )
+
+            # Optional: route compute namespace mutations through the sibling
+            # compute tool's `inject_variable` API. We resolve eagerly via the
+            # _resolver_cache so namespace_setter is bound before the first
+            # tool call rather than per-call.
+            namespace_setter = None
+            compute_tool_name = decl.config.get("compute_tool_name", "compute")
+            cached = ctx.extras.get("_resolver_cache", {}).get(compute_tool_name)
+            if cached is not None and hasattr(cached, "inject_variable"):
+                namespace_setter = cached.inject_variable
+
+            return TableLoadTool(
+                registry=ctx.table_registry,
+                schema_cache=ctx.schema_cache,
+                sql_executor=ctx.sql_executor,
+                compute_namespace_setter=namespace_setter,
+                name=decl.name,
+                description=decl.description or None,
+                default_binding=default_binding,
+                default_columns=_projection_columns_from_config(decl.config),
+                default_as_var=_clean_str(decl.config.get("store_in_compute"))
+                or _clean_str(decl.config.get("as_var")),
+            )
+
+        if decl.kind == "table_aggregate":
+            default_binding = _ensure_declared_table_binding(decl, ctx)
+            if ctx.table_registry is None:
+                raise ValueError(
+                    f"table_registry required in ToolFactoryContext for "
+                    f"table_aggregate tool '{decl.name}'"
+                )
+            if ctx.schema_cache is None:
+                raise ValueError(
+                    f"schema_cache required in ToolFactoryContext for "
+                    f"table_aggregate tool '{decl.name}'"
+                )
+            if ctx.sql_executor is None:
+                raise ValueError(
+                    f"sql_executor required in ToolFactoryContext for "
+                    f"table_aggregate tool '{decl.name}'"
+                )
+            from databricks_deep_research.tools.builtins.text_table.tools.aggregate import (
+                TableAggregateTool,
+            )
+
+            return TableAggregateTool(
+                registry=ctx.table_registry,
+                schema_cache=ctx.schema_cache,
+                sql_executor=ctx.sql_executor,
+                name=decl.name,
+                description=decl.description or None,
+                default_binding=default_binding,
             )
 
         raise ValueError(f"Unsupported kind: {decl.kind}")

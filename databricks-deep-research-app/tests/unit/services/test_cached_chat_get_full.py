@@ -40,6 +40,8 @@ from deep_research.storage.documents import (  # noqa: E402
     ChatMeta,
     ChatMetaEmbed,
     ChatState,
+    Message,
+    ResearchSessionState,
 )
 from deep_research.storage.factory import StorageStack  # noqa: E402
 from deep_research.storage.queue import WriteQueue  # noqa: E402
@@ -191,6 +193,134 @@ async def test_get_full_uses_cache_for_fresh_state() -> None:
         assert view.title == "NewCacheTitle", (
             f"Expected cache-fresh title; got {view.title!r} "
             "(pre-fix, get_full returned the stale backend doc)"
+        )
+    finally:
+        await stack.stop()
+
+
+def _build_doc_with_research(
+    chat_id,
+    user_id,
+    *,
+    msg_id,
+    sessions,
+) -> ChatDocument:
+    """Build a doc with one agent message and one or more research sessions.
+
+    ``sessions`` is a list of ``ResearchSessionState`` so callers can exercise
+    the regeneration / multi-session dedup path.
+    """
+    now = datetime.now(UTC)
+    meta = ChatMeta(
+        chat_id=chat_id,
+        user_id=user_id,
+        title="seed",
+        preview="",
+        created_at=now,
+        updated_at=now,
+        deleted_at=None,
+        version=0,
+    )
+    state = ChatState(
+        chat=ChatMetaEmbed(title="seed"),
+        messages=[Message(id=msg_id, role="agent", content="Report body [1].", ts=now)],
+        research_sessions=list(sessions),
+    )
+    return ChatDocument(meta=meta, state=state)
+
+
+@pytest.mark.asyncio
+async def test_get_full_links_research_session_to_message() -> None:
+    """Regression: cached get_full must attach each message's research_session.
+
+    Pre-fix, ``_state_msg_to_view`` returned ``research_session=None`` ("linked
+    separately") and ``get_full`` never linked the separate
+    ``research_sessions`` list back to the messages. ``chats.py`` reads claims
+    EXCLUSIVELY from ``msg.research_session.verification_data``, so every
+    message surfaced ``claims=[]`` and ALL citations rendered grey (and the
+    frontend never even fired ``/messages/{id}/claims`` because
+    ``latestAgentMessageIdForCitations`` requires ``!!m.researchSession``).
+    """
+    stack = await _build_stack()
+    try:
+        chat_id = uuid4()
+        msg_id = uuid4()
+        verification_data = {
+            "claims": [
+                {"claim_id": str(uuid4()), "text": "A grounded fact.", "citation_key": "1"}
+            ],
+            "summary": {"total_claims": 1, "supported": 1},
+        }
+        doc = _build_doc_with_research(
+            chat_id,
+            "u1",
+            msg_id=msg_id,
+            sessions=[
+                ResearchSessionState(
+                    id=uuid4(),
+                    message_id=msg_id,
+                    status="completed",
+                    verification_data=verification_data,
+                    completed_at=datetime.now(UTC),
+                )
+            ],
+        )
+        await stack.backend.write_chat(doc, expected_version=0)
+
+        svc = CachedChatService(stack)
+        view = await svc.get_full(chat_id, user_id="u1")
+        assert view is not None
+
+        linked_msgs = [m for m in view.messages if m.id == msg_id]
+        assert len(linked_msgs) == 1
+        linked = linked_msgs[0].research_session
+        assert linked is not None, (
+            "message.research_session is None — sessions were not linked to "
+            "messages; chats.py emits claims=[] and citations render grey"
+        )
+        assert linked.verification_data == verification_data
+    finally:
+        await stack.stop()
+
+
+@pytest.mark.asyncio
+async def test_get_full_prefers_session_with_verification_data() -> None:
+    """When a message has multiple sessions (e.g. regeneration), the linked
+    session must be the one carrying verification_data so the report's claims
+    resolve rather than an earlier empty/in-progress attempt."""
+    stack = await _build_stack()
+    try:
+        chat_id = uuid4()
+        msg_id = uuid4()
+        earlier_empty = ResearchSessionState(
+            id=uuid4(),
+            message_id=msg_id,
+            status="failed",
+            verification_data={},
+            started_at=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+        later_with_claims = ResearchSessionState(
+            id=uuid4(),
+            message_id=msg_id,
+            status="completed",
+            verification_data={"claims": [{"claim_id": str(uuid4()), "citation_key": "1"}]},
+            started_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+        doc = _build_doc_with_research(
+            chat_id,
+            "u1",
+            msg_id=msg_id,
+            sessions=[earlier_empty, later_with_claims],
+        )
+        await stack.backend.write_chat(doc, expected_version=0)
+
+        svc = CachedChatService(stack)
+        view = await svc.get_full(chat_id, user_id="u1")
+        assert view is not None
+        linked = next(m for m in view.messages if m.id == msg_id).research_session
+        assert linked is not None
+        assert linked.verification_data.get("claims"), (
+            "linked the empty session; must prefer the one with verification_data"
         )
     finally:
         await stack.stop()

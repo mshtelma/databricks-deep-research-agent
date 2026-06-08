@@ -44,7 +44,7 @@ class CachedAuditLogService(_CachedServiceBase, IAuditLogService):
 
     _service_name = "audit_log"
 
-    def __init__(self, stack: "StorageStack") -> None:
+    def __init__(self, stack: StorageStack) -> None:
         super().__init__(stack)
 
     async def log(

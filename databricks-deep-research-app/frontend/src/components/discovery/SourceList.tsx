@@ -50,6 +50,12 @@ const TYPE_GROUPS: TypeGroup[] = [
     description: 'Semantic search over indexed documents',
   },
   {
+    type: 'delta_table',
+    label: 'Delta Tables',
+    icon: <DatabaseIcon className="h-5 w-5" />,
+    description: 'Structured tables queried through SQL warehouses',
+  },
+  {
     type: 'genie',
     label: 'Genie Spaces',
     icon: <SparklesIcon className="h-5 w-5" />,
@@ -85,7 +91,7 @@ export const SourceList: React.FC<SourceListProps> = ({
   className = '',
 }) => {
   const [expandedTypes, setExpandedTypes] = useState<Set<DataSourceType>>(
-    new Set(['vector_search', 'genie', 'knowledge_assistant'])
+    new Set(['vector_search', 'delta_table', 'genie', 'knowledge_assistant'])
   );
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -102,6 +108,7 @@ export const SourceList: React.FC<SourceListProps> = ({
   const sourcesByType = useMemo(() => {
     const grouped: Record<DataSourceType, DiscoveredSource[]> = {
       vector_search: [],
+      delta_table: [],
       genie: [],
       knowledge_assistant: [],
       web_search: [],

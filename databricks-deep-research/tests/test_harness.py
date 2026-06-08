@@ -17,6 +17,7 @@ from databricks_deep_research.agents.config import (
 from databricks_deep_research.agents.harness import (
     _build_input,
     _build_messages,
+    _compute_citation_stats,
     _extract_pool_items,
     _normalize_research_output,
     _parse_output,
@@ -71,6 +72,19 @@ def _mock_llm(content: str = "LLM says hello", usage: dict[str, int] | None = No
 
 def _make_pool(name: str = "sources") -> PoolState:
     return PoolState(PoolConfig(name=name, dedup_content_hash=False))
+
+
+# ---------------------------------------------------------------------------
+# 0. citation stats
+# ---------------------------------------------------------------------------
+
+def test_compute_citation_stats_counts_markdown_numeric_markers(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level("INFO", logger="databricks_deep_research.agents.harness")
+    report = "A grounded report cites source one [1] and source three [3], but not [99]."
+
+    _compute_citation_stats(report, total_sources=3)
+
+    assert "CITATION_STATS total=3 valid=2 invalid=1 coverage=100.0% fields=1/1" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -384,14 +398,22 @@ async def test_execute_agent_pool_writes() -> None:
     pw = PoolWriteConfig(pool="sources", extract="sources")
     config = _make_config(output_format="json", pool_writes=[pw])
     state = _make_state()
-    llm = _mock_llm('{"sources": ["s1", "s2"]}')
+    llm = _mock_llm(
+        '{"sources": ['
+        '{"url": "https://example.com/1", "snippet": "Evidence one."},'
+        '{"url": "https://example.com/2", "snippet": "Evidence two."}'
+        "]}"
+    )
     pool = _make_pool("sources")
 
     output = await execute_agent("n3", config, state, llm, tools=[], pools={"sources": pool})
 
     assert pool.count() == 2
-    assert pool.items == ["s1", "s2"]
-    assert output.pool_writes["sources"] == ["s1", "s2"]
+    assert output.pool_writes["sources"] == [
+        {"url": "https://example.com/1", "snippet": "Evidence one."},
+        {"url": "https://example.com/2", "snippet": "Evidence two."},
+    ]
+    assert pool.items == output.pool_writes["sources"]
 
 
 @pytest.mark.asyncio
@@ -922,7 +944,17 @@ async def test_researcher_empty_structured_output_synthesizes_observation_from_s
 
 def test_normalize_research_output_source_backed() -> None:
     config = _make_config(subtype="researcher", output_key="findings")
-    parsed = {"findings": "", "observation": "", "sources": [{"url": "enterprise://doc/1", "title": "Doc 1"}]}
+    parsed = {
+        "findings": "",
+        "observation": "",
+        "sources": [
+            {
+                "url": "enterprise://doc/1",
+                "title": "Doc 1",
+                "snippet": "Enterprise source with substantive evidence.",
+            }
+        ],
+    }
     normalized = _normalize_research_output(parsed, config, [])
     assert normalized is not None
     assert normalized.sources
@@ -932,7 +964,13 @@ def test_normalize_research_output_source_backed() -> None:
 def test_normalize_research_output_merges_tool_sources() -> None:
     config = _make_config(subtype="researcher", output_key="findings")
     parsed = {"findings": "", "observation": "", "sources": []}
-    tool_sources = [{"url": "enterprise://doc/2", "title": "Doc 2"}]
+    tool_sources = [
+        {
+            "url": "enterprise://doc/2",
+            "title": "Doc 2",
+            "snippet": "Tool source with substantive evidence.",
+        }
+    ]
 
     normalized = _normalize_research_output(parsed, config, tool_sources)
 

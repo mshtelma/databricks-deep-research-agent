@@ -52,7 +52,10 @@ export function TemplateEditor({
 
   // Extract current state
   const content = template?.content ?? '';
-  const variables: TemplateVariable[] = template?.variables ?? [];
+  const variables: TemplateVariable[] = React.useMemo(
+    () => template?.variables ?? [],
+    [template?.variables],
+  );
 
   // Detect variables from content for preview
   const detectedVariableNames = React.useMemo(() => extractVariables(content), [content]);

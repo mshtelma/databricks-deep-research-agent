@@ -10,10 +10,16 @@ import pytest
 from databricks_deep_research.events.types import WorkflowStartedEvent
 from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.runner import WorkflowResult, WorkflowRunner
+from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.workflow.definition import (
     NodeType,
     WorkflowDefinition,
     WorkflowNode,
+)
+from databricks_deep_research.workflow.runtime_core import TypedRuntimeStateStore
+from databricks_deep_research.workflow.runtime_core.models import (
+    EvidenceState,
+    SourceRecord,
 )
 from databricks_deep_research.workflow.state import WorkflowState
 
@@ -93,6 +99,41 @@ class TestWorkflowResultSources:
         state.pools["sources"] = mock_pool
         result = WorkflowResult(state=state, definition=_make_definition())
         assert result.sources == [{"url": "https://a.com", "title": "A"}]
+
+    def test_sources_from_typed_evidence_when_present(self) -> None:
+        state = WorkflowState(query="q")
+        store = TypedRuntimeStateStore(query="q")
+        store.runtime().capabilities.evidence = EvidenceState(
+            sources=[
+                SourceRecord(
+                    url="https://typed.example",
+                    title="Typed",
+                    snippet="Typed evidence.",
+                    evidence_quality="full_text",
+                )
+            ]
+        )
+        state.runtime_store = store
+        mock_pool = MagicMock()
+        mock_pool.items = [{"url": "https://pool.example", "title": "Pool"}]
+        state.pools["sources"] = mock_pool
+
+        result = WorkflowResult(state=state, definition=_make_definition())
+
+        assert result.sources[0]["url"] == "https://typed.example"
+
+    def test_empty_typed_evidence_falls_back_to_pool(self) -> None:
+        state = WorkflowState(query="q")
+        store = TypedRuntimeStateStore(query="q")
+        store.runtime().capabilities.evidence = EvidenceState()
+        state.runtime_store = store
+        mock_pool = MagicMock()
+        mock_pool.items = [{"url": "https://pool.example", "title": "Pool"}]
+        state.pools["sources"] = mock_pool
+
+        result = WorkflowResult(state=state, definition=_make_definition())
+
+        assert result.sources == [{"url": "https://pool.example", "title": "Pool"}]
 
     def test_sources_no_pool(self) -> None:
         state = WorkflowState(query="q")
@@ -239,6 +280,116 @@ class TestStream:
 
 
 # ===================================================================
+# WorkflowRunner.factory_context property + new kwargs (PR-1 unification)
+# ===================================================================
+
+
+class TestFactoryContextProperty:
+    def test_property_returns_default_context(self) -> None:
+        """Without an explicit context, the property returns the default
+        ToolFactoryContext.from_defaults() instance the runner builds."""
+        runner = WorkflowRunner(llm_client=_make_mock_client())
+        assert runner.factory_context is not None
+        assert runner.factory_context is runner._factory
+
+    def test_property_returns_caller_provided_context(self) -> None:
+        """Caller-supplied factory_context is exposed verbatim through the
+        property — used by app code to wire the same context into a custom
+        ToolResolver before delegating to runner.stream(...)."""
+        ctx = ToolFactoryContext()
+        runner = WorkflowRunner(llm_client=_make_mock_client(), factory_context=ctx)
+        assert runner.factory_context is ctx
+
+
+class TestExecutorKwargPassthrough:
+    """PR-1 regression — new kwargs on run()/stream() must thread through to
+    WorkflowExecutor.__init__ so app callers can collapse their direct
+    executor construction into a single runner.stream(...) call."""
+
+    @pytest.mark.asyncio
+    @patch("databricks_deep_research.runner.WorkflowExecutor")
+    async def test_run_threads_tool_resolver(
+        self, mock_executor_cls: MagicMock
+    ) -> None:
+        mock_executor = MagicMock()
+        mock_executor.execute = MagicMock(side_effect=_fake_execute)
+        mock_executor_cls.return_value = mock_executor
+
+        resolver_sentinel = MagicMock()
+        runner = WorkflowRunner(llm_client=_make_mock_client())
+        await runner.run(
+            _make_definition(), query="q", tool_resolver=resolver_sentinel
+        )
+
+        kwargs = mock_executor_cls.call_args.kwargs
+        assert kwargs["tool_resolver"] is resolver_sentinel
+
+    @pytest.mark.asyncio
+    @patch("databricks_deep_research.runner.WorkflowExecutor")
+    async def test_run_threads_tool_registry(
+        self, mock_executor_cls: MagicMock
+    ) -> None:
+        mock_executor = MagicMock()
+        mock_executor.execute = MagicMock(side_effect=_fake_execute)
+        mock_executor_cls.return_value = mock_executor
+
+        registry_sentinel = MagicMock()
+        runner = WorkflowRunner(llm_client=_make_mock_client())
+        await runner.run(
+            _make_definition(), query="q", tool_registry=registry_sentinel
+        )
+
+        kwargs = mock_executor_cls.call_args.kwargs
+        assert kwargs["tool_registry"] is registry_sentinel
+
+    @pytest.mark.asyncio
+    @patch("databricks_deep_research.runner.WorkflowExecutor")
+    async def test_stream_threads_context_and_strict(
+        self, mock_executor_cls: MagicMock
+    ) -> None:
+        mock_executor = MagicMock()
+        mock_executor.execute = MagicMock(side_effect=_fake_execute)
+        mock_executor_cls.return_value = mock_executor
+
+        context_sentinel = MagicMock()
+        runner = WorkflowRunner(llm_client=_make_mock_client())
+        events = [
+            e
+            async for e in runner.stream(
+                _make_definition(),
+                query="q",
+                context=context_sentinel,
+                strict_tool_resolution=True,
+            )
+        ]
+
+        assert len(events) == 1
+        kwargs = mock_executor_cls.call_args.kwargs
+        assert kwargs["context"] is context_sentinel
+        assert kwargs["strict_tool_resolution"] is True
+
+    @pytest.mark.asyncio
+    @patch("databricks_deep_research.runner.WorkflowExecutor")
+    async def test_defaults_preserve_existing_behavior(
+        self, mock_executor_cls: MagicMock
+    ) -> None:
+        """When the new kwargs aren't passed, they default to None/False —
+        existing callers see no change."""
+        mock_executor = MagicMock()
+        mock_executor.execute = MagicMock(side_effect=_fake_execute)
+        mock_executor_cls.return_value = mock_executor
+
+        runner = WorkflowRunner(llm_client=_make_mock_client())
+        await runner.run(_make_definition(), query="q")
+
+        kwargs = mock_executor_cls.call_args.kwargs
+        assert kwargs["tool_resolver"] is None
+        assert kwargs["tool_registry"] is None
+        assert kwargs["context"] is None
+        assert kwargs["strict_tool_resolution"] is False
+
+
+# ===================================================================
 # WorkflowRunner.from_databricks
 # ===================================================================
 
@@ -321,3 +472,38 @@ class TestFromDatabricks:
         mock_factory.assert_called_once_with(
             model="m", model_mapping=None, profile="my-prof"
         )
+
+    @patch(
+        "databricks_deep_research.runner.FrameworkLLMClient.from_databricks"
+    )
+    def test_accepts_factory_context(self, mock_factory: MagicMock) -> None:
+        mock_factory.return_value = _make_mock_client()
+        ctx = ToolFactoryContext(search_client=MagicMock())
+
+        runner = WorkflowRunner.from_databricks(factory_context=ctx)
+
+        assert runner._factory is ctx
+
+    @patch(
+        "databricks_deep_research.runner.FrameworkLLMClient.from_databricks"
+    )
+    @patch("databricks_deep_research.runner.ToolFactoryContext.from_defaults")
+    def test_builds_context_from_brave_api_key(
+        self,
+        mock_context_factory: MagicMock,
+        mock_llm_factory: MagicMock,
+    ) -> None:
+        mock_llm_factory.return_value = _make_mock_client()
+        ctx = ToolFactoryContext(search_client=MagicMock(), user_token="tok")
+        mock_context_factory.return_value = ctx
+
+        runner = WorkflowRunner.from_databricks(
+            brave_api_key="brave",
+            user_token="tok",
+        )
+
+        mock_context_factory.assert_called_once_with(
+            brave_api_key="brave",
+            user_token="tok",
+        )
+        assert runner._factory is ctx

@@ -40,9 +40,7 @@ import asyncio
 import json
 import logging
 import os
-import sys
 import uuid
-from datetime import datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -95,10 +93,9 @@ async def migrate(
         logger.info("migrating chunk of %d chats (first=%s)", len(chat_ids), chat_ids[0])
         if not dry_run:
             try:
-                async with session_maker() as session:
-                    async with session.begin():
-                        await _migrate_chunk(session, target_schema, chat_ids)
-                        await _save_cursor(session, target_schema, chat_ids[-1])
+                async with session_maker() as session, session.begin():
+                    await _migrate_chunk(session, target_schema, chat_ids)
+                    await _save_cursor(session, target_schema, chat_ids[-1])
             except Exception:  # noqa: BLE001
                 summary["errors"] = int(summary["errors"]) + 1
                 logger.exception("chunk failed; leaving cursor unchanged for retry")
@@ -108,9 +105,8 @@ async def migrate(
         cursor = chat_ids[-1]
 
     if include_append and not dry_run:
-        async with session_maker() as session:
-            async with session.begin():
-                await _migrate_append_only_tables(session, target_schema)
+        async with session_maker() as session, session.begin():
+            await _migrate_append_only_tables(session, target_schema)
 
     logger.info("migration done: %s", summary)
     return summary
@@ -194,7 +190,6 @@ async def _migrate_chunk(
               'type', COALESCE(c.chat_type, 'native'),
               'title', COALESCE(c.title, ''),
               'incognito_session_id', c.incognito_session_id,
-              'custom_agent_id', NULL,
               'metadata', COALESCE(c.metadata, '{{}}'::jsonb)
             ),
             'messages', COALESCE((

@@ -79,6 +79,16 @@ class Settings(BaseSettings):
     # infrastructure stalls.
     db_command_timeout: float | None = 60.0
 
+    # Lakebase connection-birth auth retry. A freshly-minted OAuth database
+    # credential can be transiently rejected ("password authentication failed")
+    # by the PgBouncer/databricks_auth layer for a few seconds until it
+    # propagates. We retry the SAME token with bounded exponential backoff at
+    # connection creation instead of force-minting a new token (which would hit
+    # the same race) and 500-ing the request. Defaults total ≈ 3.75s worst case.
+    lakebase_auth_retry_attempts: int = 5
+    lakebase_auth_retry_base_delay_s: float = 0.25
+    lakebase_auth_retry_max_delay_s: float = 2.0
+
     # --- Storage backend (chat-document architecture) -----------------
     # Axes are orthogonal:
     #   * storage_backend chooses the wire (lakebase / sql_warehouse / fake).
@@ -173,6 +183,25 @@ class Settings(BaseSettings):
             )
             self.brave_verify_ssl = True
         return self
+
+    # Deploy-here settings (Section S)
+    framework_git_url: str = "https://github.com/mshtelma/databricks-deep-research-agent"
+    github_api_token: str | None = None
+    deploy_here_reachability_timeout_seconds: float = 300.0
+    deploy_here_probe_ttl_seconds: float = 60.0
+    deploy_here_framework_tag_preflight: bool = True
+    # When True, reject deploys whose ``framework_git_tag`` resolves to a
+    # branch (refs/heads/...) rather than an immutable tag (refs/tags/...).
+    # Branches can be force-pushed; the shell-app's pyproject pins by ref and
+    # would silently pick up new framework code on next install. Defaults to
+    # False to allow branch refs during active development; flip to True for
+    # production tenants that require immutable framework pins. See plan
+    # Phase 3 M3 and the "IMMUTABLE GIT TAG REQUIRED" comment in
+    # ``templates/agent-shell-app/pyproject.toml.j2:7-8``.
+    deploy_here_require_tag_only: bool = False
+    deploy_here_disclose_owner: bool = True
+    deploy_here_brave_secret_scope: str = "deep-research-secrets"
+    deploy_here_brave_secret_key: str = "BRAVE_API_KEY"
 
     # MLflow
     mlflow_enabled: bool = True

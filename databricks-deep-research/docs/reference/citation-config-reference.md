@@ -86,6 +86,7 @@ Top-level configuration for the 7-stage citation verification pipeline.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | `bool` | `True` | Master toggle for the entire citation pipeline. |
+| `max_evidence_chars` | `int` | `3000` (200--10000) | Pipeline-wide cap on evidence quote length, applied at all evidence-truncation sites (evidence selection, claim-generation prompt, single-claim NLI, batch verification, retry verification). Supersedes the deprecated `evidence_preselection.max_span_length`. |
 | `synthesis_mode` | `SynthesisMode` | `interleaved` | Synthesis approach: `interleaved` or `react`. |
 | `generation_mode` | `GenerationMode` | `strict` | Generation mode: `classical`, `natural`, or `strict`. |
 | `react_synthesis` | `ReactSynthesisConfig` | *(defaults)* | Configuration for ReAct-based synthesis mode. |

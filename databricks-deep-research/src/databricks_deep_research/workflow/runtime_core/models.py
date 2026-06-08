@@ -147,7 +147,7 @@ class SourceRecord(BaseModel):
     source_type: str = ""
     tool_name: str = ""
     accepted: bool = True
-    evidence_quality: str = "empty"
+    evidence_quality: str = "builtin"
     admission_status: str = "accepted"
     admission_reason_code: str = ""
 
@@ -226,7 +226,13 @@ class VerificationState(BaseModel):
 
 
 class SynthesisState(BaseModel):
-    mode: Literal["full", "partial", "insufficient", "transform"] = "full"
+    # "soft_warn": the citation pipeline ran but could not produce real
+    # entailment judgments for any claim (typically because evidence was not
+    # attached, or the NLI call crashed). The report flows through with a
+    # prominent warning banner — the user sees an unverified report rather
+    # than the canned "Insufficient Evidence" fallback. See
+    # `_classify_grounding` in agents/builtins/synthesizer.py.
+    mode: Literal["full", "partial", "insufficient", "transform", "soft_warn"] = "full"
     input_pack: SynthesisInputPack = Field(default_factory=SynthesisInputPack)
     report_artifact_id: str | None = None
     verification_artifact_ids: list[str] = Field(default_factory=list)

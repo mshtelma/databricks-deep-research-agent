@@ -58,6 +58,27 @@ export default function ChatPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'all'>('active');
 
+  // Sidebar collapse state — shared with /agents and /designer/* pages via localStorage
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return window.localStorage?.getItem?.('chatSidebarCollapsed') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const handleToggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem('chatSidebarCollapsed', next ? '1' : '0');
+      } catch {
+        /* ignore */
+      }
+      return next;
+    });
+  }, []);
+
   // Get plugin-provided input configuration (controls mode selector visibility, etc.)
   const inputConfig = useMemo(() => ComponentRegistry.getInputConfig(), []);
 
@@ -205,6 +226,32 @@ export default function ChatPage() {
     }
   }, [chatId, isStreaming, activeJob, isLoadingActiveJob, activeSessionId, reconnectToJob, isDraftChat]);
 
+  // SSE-independent completion detection. The polled `useChatActiveJob` (3s
+  // cadence) returns `null` once the backend marks the job complete. When that
+  // transition is observed, invalidate the chat/message caches so the final
+  // report appears even if the SSE persistence_completed event was lost.
+  //
+  // Why this matters: SSE drops more often than persistence completes. Without
+  // this fallback, a user whose SSE connection broke mid-research stays on
+  // stale React Query data (staleTime=2min, gcTime=Infinity) — manual refresh
+  // helps only after staleTime elapses. Polling-based invalidation closes the
+  // gap to the 3s `useChatActiveJob` cadence.
+  const prevActiveJobIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!chatId || isDraftChat(chatId)) return;
+    const previousJobId = prevActiveJobIdRef.current;
+    const currentJobId = activeJob?.sessionId ?? null;
+    prevActiveJobIdRef.current = currentJobId;
+    // Transition from "job in progress" → "no active job" means the backend
+    // completed (or failed) the workflow. Refresh chat-scoped queries so the
+    // newly-persisted final report becomes visible.
+    if (previousJobId && !currentJobId) {
+      queryClient.invalidateQueries({ queryKey: ['messages', chatId] });
+      queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, chatId] });
+      queryClient.invalidateQueries({ queryKey: ['chats'] });
+    }
+  }, [activeJob?.sessionId, chatId, isDraftChat, queryClient]);
+
   // Get the latest agent message with research session from chatFullData
   // This provides claims, verification summary, and sources inline (no separate API call)
   const latestAgentFullMessage = useMemo(() => {
@@ -217,7 +264,10 @@ export default function ChatPage() {
 
   // Claims and verification summary from inline data (replaces useCitations for page load)
   // During streaming, streamingClaims from SSE events are used instead
-  const claims = latestAgentFullMessage?.claims ?? [];
+  const claims = useMemo(
+    () => latestAgentFullMessage?.claims ?? [],
+    [latestAgentFullMessage?.claims],
+  );
   const verificationSummary = latestAgentFullMessage?.verificationSummary ?? null;
 
   // Extract all sources from the latest research session (now populated from DB)
@@ -569,7 +619,7 @@ export default function ChatPage() {
   }, []);
 
   return (
-    <div className="flex h-screen bg-background">
+    <div className="db-root flex h-screen bg-db-oat-light font-db-sans text-db-navy-800">
       {/* Sidebar */}
       <ChatSidebar
         chats={chats}
@@ -587,6 +637,8 @@ export default function ChatPage() {
         statusFilter={statusFilter}
         onStatusFilterChange={setStatusFilter}
         isLoading={isLoadingChats}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={handleToggleSidebar}
       />
 
       {/* Main content */}

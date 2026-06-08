@@ -88,13 +88,28 @@ export function MessageList({
     return last.role === 'agent' && !!last.content && last.content.length > 50;
   }, [messages]);
 
-  // Fetch citations only for the latest persisted agent message.
-  // This avoids N network calls for long chat histories on initial load.
+  // Fetch citations only for the latest agent message that actually carries
+  // citation markers. This avoids N network calls for long chat histories on
+  // initial load, while still covering BOTH render paths:
+  //   - persisted reload: message arrives from /full with a linked
+  //     researchSession; and
+  //   - just-completed streaming: ChatPage emits a synthetic message with the
+  //     real backend id but NO researchSession yet — gating solely on
+  //     researchSession left those grey until a manual reload.
+  // Gating on [N] markers covers research reports either way and skips
+  // marker-free simple replies (no wasted polling). useCitations polls until
+  // the backend has persisted the claims, so this resolves without a reload.
   const latestAgentMessageIdForCitations = React.useMemo(() => {
+    const hasCitationMarkers = (content: string) => /\[\d+\]/.test(content);
     const latestAgent = messages
       .slice()
       .reverse()
-      .find((m) => m.role === 'agent' && isValidUUID(m.id) && !!m.researchSession);
+      .find(
+        (m) =>
+          m.role === 'agent' &&
+          isValidUUID(m.id) &&
+          (!!m.researchSession || hasCitationMarkers(m.content))
+      );
     return latestAgent?.id ?? null;
   }, [messages]);
 

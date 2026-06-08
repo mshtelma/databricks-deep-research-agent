@@ -43,14 +43,14 @@ endpoints:
     supports_prompt_caching: true  # Claude supports cache_control
 
   opus:
-    endpoint_identifier: databricks-claude-opus-4-6
+    endpoint_identifier: databricks-claude-opus-4-7
     max_context_window: 128000
-    tokens_per_minute: 200000  # Databricks allows 200k ITPM for Opus 4.5
+    tokens_per_minute: 200000
     supports_structured_output: true
     supports_prompt_caching: true  # Claude supports cache_control
 
   gpt5:
-    endpoint_identifier: databricks-gpt-5-4
+    endpoint_identifier: databricks-gpt-5-5
     max_context_window: 128000
     tokens_per_minute: 200000
     supports_structured_output: true
@@ -351,10 +351,63 @@ research_types:
 
 # Search configuration
 search:
+  # Active web-search provider for the builtin web_search tool:
+  #   databricks (default) | brave | jina.
+  # databricks = model-serving built-in web search; works out-of-the-box on a
+  # Databricks workspace with NO external search subscription. brave/jina are
+  # opt-in external search APIs and each require their own API key.
+  # A per-workflow / custom-agent YAML (or the designer per-agent inspector) can
+  # override via the web tool's config.provider without changing this default.
+  provider: databricks
+
   brave:
     requests_per_second: 1.0
     default_result_count: 10
     freshness: pm  # pd=day, pw=week, pm=month, py=year
+    # Process-wide cap on concurrent Brave API requests across all lanes.
+    # 7 parallel lanes × 5-6 searches each easily blows the rate limit
+    # without this gate. Defaults to paid-tier (~10 QPS); set
+    # BRAVE_MAX_CONCURRENCY=1 in the environment for the free tier.
+    max_concurrency: 10
+    # 429 retry attempts (with exponential backoff + jitter).
+    max_retries: 3
+
+  # Databricks built-in web search — the DEFAULT provider (above).
+  # WARNING: each query is a BILLED model generation — latency & cost far exceed
+  # a search REST API. Available only on pay-per-token endpoints; unavailable on
+  # provisioned-throughput, HIPAA/BAA, or cross-region-disabled workspaces (set
+  # `provider: brave` or `jina` on such workspaces).
+  databricks:
+    # The serving endpoint = how you choose gemini vs openai:
+    #   - Gemini (databricks-gemini-3-1-flash-lite, default): one fast call.
+    #   - OpenAI (databricks-gpt-5): direct URLs + real titles, but slower/agentic
+    #     (can exceed the web_search-mode timeout — raise timeout_seconds for it).
+    endpoint: databricks-gemini-3-1-flash-lite
+    # endpoint: databricks-gpt-5
+    # model_family: gemini          # openai|gemini; auto-detected from endpoint name
+    max_results: 10
+    # Process-wide cap on concurrent built-in-search generations (heavy calls).
+    # Override at runtime via env DBX_WEBSEARCH_MAX_CONCURRENCY.
+    max_concurrency: 4
+    timeout_seconds: 30
+    # Resolve Gemini grounding-redirect URLs to canonical publisher URLs.
+    resolve_redirects: true
+    # Push a per-agent INCLUDE-mode allowlist into the OpenAI Responses web_search
+    # filter (bare domains; OpenAI endpoints only; subdomains auto-included). Gemini
+    # and exclude mode are unaffected (no API knob). Set false to rely only on the
+    # instruction hint + post-hoc URL filter.
+    push_allowed_domains: true
+    # Selectable built-in-search endpoints per model family. The FIRST entry per
+    # family is the cheapest/default used when a web tool pins `model_family` but
+    # omits the endpoint. Also powers the designer's per-family endpoint dropdown
+    # and endpoint↔family validation. Only list endpoints that support built-in
+    # web search; add a custom one here to make it selectable + family-mapped.
+    endpoints_by_family:
+      gemini:
+        - databricks-gemini-3-1-flash-lite
+      openai:
+        - databricks-gpt-5-mini
+        - databricks-gpt-5
 
   # Domain whitelist/blacklist filtering
   # Supports wildcard patterns: *.gov, *.edu, news.*, *.example.*
@@ -490,6 +543,17 @@ citation_verification:
   # Master toggle for the feature
   enabled: true
 
+  # Pipeline-wide cap on evidence quote length (chars) applied to all 5
+  # truncation sites: evidence selection (Stage 1), claim generation prompt
+  # (Stage 2), single-claim NLI verification (Stage 4 full path), batch
+  # verification (Stage 4 batch path), and retry verification. Single source
+  # of truth — supersedes the legacy evidence_preselection.max_span_length
+  # below. Override per-agent in the agent's output_schema:
+  #   config:
+  #     citation_pipeline:
+  #       max_evidence_chars: 5000
+  max_evidence_chars: 3000
+
   # Synthesis mode: controls the overall synthesis approach
   # - "interleaved": Current approach - evidence in context, [N] markers
   # - "react": ReAct-based - LLM uses tools to retrieve evidence before claims
@@ -531,6 +595,9 @@ citation_verification:
   evidence_preselection:
     max_spans_per_source: 15
     min_span_length: 50
+    # DEPRECATED: superseded by citation_verification.max_evidence_chars above.
+    # If set here it routes to max_evidence_chars with a DeprecationWarning.
+    # Will be removed after the next release. Set max_evidence_chars instead.
     max_span_length: 500
     relevance_threshold: 0.3
     numeric_content_boost: 0.2
@@ -625,3 +692,14 @@ citation_verification:
     abstained: keep
     analysis_partial: keep
     analysis_unsupported: remove
+
+agent_designer:
+  tool_catalog:
+    max_chars: 4000
+    summary_only_above_n_tools: 8
+    include_probes: true
+  probe:
+    timeout_seconds: 30
+    max_concurrent_probes: 4
+    max_output_chars: 800
+    persist: false

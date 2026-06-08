@@ -1,0 +1,36 @@
+# Databricks App manifest. The runtime resolves resource references via
+# `valueFrom: '<resource-name>'` against the resources block in
+# databricks.yml. See plan Section E.2 for the canonical shape.
+command: ['uv', 'run', 'uvicorn', 'app:app', '--host', '0.0.0.0', '--port', '8000']
+
+env:
+  # MLflow tracing is opt-in for shell-apps. Synchronous trace export failures
+  # can otherwise block long SSE responses behind the Databricks Apps proxy.
+  - name: MLFLOW_ENABLED
+    value: 'false'
+  - name: MLFLOW_TRACKING_URI
+    value: 'databricks'
+  - name: MLFLOW_EXPERIMENT_NAME
+    value: '/Shared/deep-research-agent-experiments'
+  - name: SHELL_APP_SSE_HEARTBEAT_SECONDS
+    value: '15'
+  # Provenance — Jinja-interpolated at template-render time by
+  # ShellAppExporter so each deployed app's traces self-identify via
+  # ``dr.app_name``, ``dr.agent_v2_id``, ``dr.agent_name``, and
+  # ``dr.revision_id`` tags set in app.py's /api/chat handler.
+  - name: DR_APP_NAME
+    value: '{{ app_name }}'
+  - name: DR_AGENT_V2_ID
+    value: '{{ agent_id }}'
+  - name: DR_AGENT_NAME
+    value: '{{ agent_name }}'
+  - name: DR_REVISION_ID
+    value: '{{ revision_id }}'
+{% if brave_secret_scope and brave_secret_key %}
+  - name: BRAVE_API_KEY
+    valueFrom: '{{ brave_secret_resource_name }}'
+{% endif %}
+{% if requires_sql_warehouse %}
+  - name: STORAGE_WAREHOUSE_ID
+    value: '{{ storage_warehouse_id }}'
+{% endif %}

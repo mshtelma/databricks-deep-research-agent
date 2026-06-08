@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import logging
+import os
 import re as _re
+import warnings
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 
 from databricks_deep_research.agents.builtins.registry import register_builtin
 from databricks_deep_research.agents.config import AgentNodeConfig
+from databricks_deep_research.agents.execution.output_normalizer import (
+    source_is_substantive,
+)
 from databricks_deep_research.agents.grounding import resolve_grounding_mode
 from databricks_deep_research.agents.isolation import AgentOutput
 from databricks_deep_research.agents.output_models import SynthesizerOutput
@@ -60,7 +67,11 @@ from databricks_deep_research.citation.pipeline import (
     CitationVerificationPipeline,
     VerificationEvent,
 )
-from databricks_deep_research.citation.types import ClaimInfo, VerificationSummaryInfo
+from databricks_deep_research.citation.types import (
+    ClaimInfo,
+    ClaimRole,
+    VerificationSummaryInfo,
+)
 from databricks_deep_research.citation.verification_retriever import (
     VerificationRetriever,
 )
@@ -185,28 +196,78 @@ def _build_citation_config(config: AgentNodeConfig) -> CitationConfig:
         **{k: v for k, v in disposition_raw.items() if k in ClaimDispositionConfig.model_fields}
     ) if disposition_raw else ClaimDispositionConfig()
 
-    return CitationConfig(
-        generation_mode=generation_mode,
-        synthesis_mode=synthesis_mode,
-        react_synthesis=react_synthesis,
-        enable_verification_retrieval=bool(reclaim_cfg["enable_are_retrieval"]),
-        isolated_verification=IsolatedVerificationConfig(
-            verification_model_tier="bulk_analysis",
-            quick_verification_tier="fast",
-            max_concurrent_verifications=schema.get("max_concurrent_verifications", 10),
-        ),
-        verification_retrieval=VerificationRetrievalConfig(
-            decomposition_tier="simple",
-            entailment_tier="bulk_analysis",
-            reconstruction_tier="analytical",
-            softening_tier="fast",
-        ),
-        claim_disposition=claim_disposition,
+    # Pipeline-wide max_evidence_chars (nested override path).
+    # Precedence: agent override → legacy nested (with DeprecationWarning) → CitationConfig default.
+    citation_overrides = schema.get("citation_pipeline") or {}
+    max_evidence_chars = citation_overrides.get("max_evidence_chars")
+    if max_evidence_chars is None:
+        legacy = (schema.get("evidence_preselection") or {}).get("max_span_length")
+        if legacy is None:
+            legacy = (
+                (citation_overrides.get("evidence_preselection") or {}).get("max_span_length")
+            )
+        if legacy is not None:
+            warnings.warn(
+                "evidence_preselection.max_span_length is deprecated — use "
+                "citation_pipeline.max_evidence_chars (pipeline-wide cap applied to "
+                "all 5 truncation sites).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            max_evidence_chars = legacy
+
+    # Stage 4 (isolated verification) and Stage 7 (verification retrieval)
+    # tier overrides come from output_schema. When absent, the Pydantic
+    # defaults in citation/config.py apply — those defaults use only
+    # framework-canonical tiers (simple|analytical|complex) so shell-app
+    # deployments without app-level tier extensions (bulk_analysis, fast)
+    # resolve them safely.
+    isolated_verification_overrides = schema.get("isolated_verification") or {}
+    isolated_verification_kwargs: dict[str, Any] = {
+        k: v
+        for k, v in isolated_verification_overrides.items()
+        if k in IsolatedVerificationConfig.model_fields
+    }
+    isolated_verification_kwargs.setdefault(
+        "max_concurrent_verifications",
+        schema.get("max_concurrent_verifications", 10),
     )
+
+    verification_retrieval_overrides = schema.get("verification_retrieval") or {}
+    verification_retrieval_kwargs: dict[str, Any] = {
+        k: v
+        for k, v in verification_retrieval_overrides.items()
+        if k in VerificationRetrievalConfig.model_fields
+    }
+
+    citation_kwargs: dict[str, Any] = {
+        "generation_mode": generation_mode,
+        "synthesis_mode": synthesis_mode,
+        "react_synthesis": react_synthesis,
+        "enable_verification_retrieval": bool(reclaim_cfg["enable_are_retrieval"]),
+        "isolated_verification": IsolatedVerificationConfig(
+            **isolated_verification_kwargs
+        ),
+        "verification_retrieval": VerificationRetrievalConfig(
+            **verification_retrieval_kwargs
+        ),
+        "claim_disposition": claim_disposition,
+    }
+    if max_evidence_chars is not None:
+        citation_kwargs["max_evidence_chars"] = int(max_evidence_chars)
+
+    return CitationConfig(**citation_kwargs)
 
 
 def _build_reclaim_system_prompt() -> str:
-    """Return a specialised system prompt for reclaim mode."""
+    """Return a specialised system prompt for reclaim mode.
+
+    Reclaim mode is the strict-prompt grounding floor: zero extra LLM calls
+    vs ``grounding_mode=none``, but enforces explicit anti-confabulation
+    rules. Used by default on the parallel_lanes topology so that when a
+    lane produces no observations (e.g., transient API rate limits), the
+    synthesizer surfaces the gap rather than inventing content.
+    """
     return (
         "You are the Synthesizer agent for a deep research system operating "
         "in verified citation mode.\n\n"
@@ -217,6 +278,26 @@ def _build_reclaim_system_prompt() -> str:
         "3. GROUNDING: Do NOT state facts that lack evidence in the pool.\n"
         "4. HEDGING: When evidence is weak, hedge with \"reportedly\" or "
         "\"according to\".\n\n"
+        "## Anti-Confabulation Rules (HARD CONSTRAINTS)\n\n"
+        "- NEVER cite a URL that did not appear in the sources pool. The set "
+        "of URLs available to you is exactly the sources block below. If a "
+        "URL is not in that block, you cannot cite it.\n"
+        "- NEVER emit numerical claims (revenue, percentages, dates, market "
+        "shares, valuations, growth rates) without a direct supporting "
+        "observation in the pool. Search-result snippets are NOT a substitute "
+        "for an observation — they may be summaries written by the search "
+        "engine, not by the source.\n"
+        "- NEVER fabricate unsupported recommendations, forecasts, rankings, "
+        "diagnoses, probability estimates, scenario breakdowns, or other "
+        "judgment calls. If the observations contain such items, cite them; "
+        "if not, omit the section entirely.\n"
+        "- When observations from different sources conflict, surface the "
+        "contradiction explicitly (\"Source A reports X; source B reports Y\") "
+        "rather than picking one silently or averaging.\n"
+        "- When evidence is weak or partial, prefer hedging language "
+        "(\"reportedly\", \"one source claims\", \"as of report date\") or "
+        "omit the claim entirely. A shorter, honest report is better than a "
+        "long confabulated one.\n\n"
         "## Citation Format\n\n"
         "Use numbered markers: ``[1]``, ``[2]``, ``[1][3]``.\n"
         "Place markers immediately after the supported claim.\n"
@@ -246,10 +327,13 @@ def _build_reclaim_user_prompt() -> str:
         "## All Research Observations\n{all_observations}\n\n"
         "## Available Sources\n{sources_list}\n\n"
         "## Background Discovery Sources (fallback only)\n{fallback_discovery_sources}\n\n"
-        "## STRICT Length Requirement\n"
-        "- Target: {min_words}-{max_words} words\n"
-        "- Aim for the upper bound if content warrants it\n"
-        "- DO NOT exceed {max_words} words\n\n"
+        "## Length\n"
+        "Target range: {min_words}-{max_words} words.\n\n"
+        "Match the depth and length the user asked for in the ``Original Query``\n"
+        "above. A request for a 'brief' warrants a short report; a request for\n"
+        "a 'deep' or 'comprehensive' report warrants the depth its sources\n"
+        "support. Do not pad, but do not under-deliver against the user's\n"
+        "intent either.\n\n"
         "## Instructions\n"
         "Create a well-structured markdown report that:\n"
         "1. Directly answers the user's query\n"
@@ -261,8 +345,92 @@ def _build_reclaim_user_prompt() -> str:
     )
 
 
+def _format_report_contract_value(value: Any, *, indent: str = "") -> list[str]:
+    """Format a report-contract value as compact Markdown prompt text."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, dict):
+        lines: list[str] = []
+        for key, nested in value.items():
+            nested_lines = _format_report_contract_value(nested, indent=indent + "  ")
+            if not nested_lines:
+                continue
+            lines.append(f"{indent}- {key}:")
+            lines.extend(nested_lines)
+        return lines
+    if isinstance(value, list):
+        lines = []
+        for item in value:
+            item_lines = _format_report_contract_value(item, indent=indent + "  ")
+            if not item_lines:
+                continue
+            if len(item_lines) == 1 and item_lines[0].lstrip().startswith("- "):
+                lines.append(f"{indent}- {item_lines[0].lstrip()[2:]}")
+            else:
+                lines.extend(item_lines)
+        return lines
+    text = " ".join(str(value).strip().split())
+    return [f"{indent}- {text}"] if text else []
+
+
+def _format_report_contract(contract: Any) -> str:
+    """Render an output_schema ``report_contract`` value for generation."""
+    lines = _format_report_contract_value(contract)
+    return "\n".join(lines).strip()
+
+
+def _extract_prompt_section(prompt: str, heading: str) -> str:
+    """Return the text after a marker heading.
+
+    The reclaim prompt composer appends workflow-specific text as the final
+    section. That text may itself contain ``##`` headings for required report
+    sections, so keep it intact rather than truncating at the next heading.
+    """
+    if not prompt or heading not in prompt:
+        return ""
+    return prompt.split(heading, 1)[1].strip()
+
+
+def _build_reclaim_generation_instructions(config: AgentNodeConfig) -> str:
+    """Return workflow-specific report instructions for ReClaim generation.
+
+    Reclaim mode runs the citation pipeline directly, so the normal rendered
+    synthesizer user prompt is not the generation prompt. This extracts the
+    Designer-authored report contract and threads it into Stage 2 without
+    changing evidence selection.
+    """
+    parts: list[str] = []
+    schema = config.output_schema or {}
+    report_contract = _format_report_contract(schema.get("report_contract"))
+    if report_contract:
+        parts.append("### Output Contract\n" + report_contract)
+
+    system_specific = _extract_prompt_section(
+        config.system_prompt,
+        "## Workflow-Specific Report Format",
+    )
+    if system_specific:
+        parts.append("### Workflow-Specific Report Format\n" + system_specific)
+
+    user_specific = _extract_prompt_section(
+        config.user_prompt_template,
+        "## Workflow-Specific Instructions",
+    )
+    if user_specific:
+        parts.append("### Workflow-Specific Instructions\n" + user_specific)
+
+    instructions = "\n\n".join(part for part in parts if part.strip()).strip()
+    if not instructions:
+        return ""
+    # Keep the generation prompt bounded; the evidence pool still carries the
+    # factual payload, while this contract should only constrain shape and gates.
+    return instructions[:6000]
+
+
 def _normalize_source(source: Any) -> dict[str, Any] | None:
     """Normalize a pool source into a citation-pipeline-friendly dict."""
+    if not _source_is_normalizable_for_synthesis(source):
+        return None
     if isinstance(source, dict):
         url = source.get("url")
         if not url:
@@ -283,6 +451,8 @@ def _normalize_source(source: Any) -> dict[str, Any] | None:
         normalized["source_type"] = (
             source.get("source_type") or source.get("type") or "web"
         )
+        normalized["evidence_quality"] = source.get("evidence_quality", "")
+        normalized["admission_status"] = source.get("admission_status", "accepted")
         return normalized
 
     url = getattr(source, "url", None)
@@ -307,7 +477,46 @@ def _normalize_source(source: Any) -> dict[str, Any] | None:
         or "web",
         "source_kind": getattr(source, "source_kind", None),
         "relevance_score": getattr(source, "relevance_score", None),
+        "evidence_quality": getattr(source, "evidence_quality", ""),
+        "admission_status": getattr(source, "admission_status", "accepted"),
     }
+
+
+def _source_is_normalizable_for_synthesis(source: Any) -> bool:
+    """Allow URL/title-only records through so title fallback can run.
+
+    Generic source-admission gates are intentionally stricter because they
+    decide whether a source can independently support a citation. This
+    normalizer also handles sparse source records and may hydrate them from
+    observations later, so a URL-only source is acceptable unless it carries
+    explicit low-value or rejected metadata.
+    """
+    if source_is_substantive(source):
+        return True
+    if source is None:
+        return False
+
+    def _value(field: str, default: Any = None) -> Any:
+        if isinstance(source, dict):
+            return source.get(field, default)
+        return getattr(source, field, default)
+
+    status = str(_value("admission_status", "accepted") or "accepted").lower()
+    if status in {"rejected", "blocked", "failed", "accepted_low_value"}:
+        return False
+
+    explicit_quality = (
+        "evidence_quality" in source
+        if isinstance(source, dict)
+        else hasattr(source, "evidence_quality")
+    )
+    quality = str(_value("evidence_quality", "") or "").lower()
+    if quality in {"metadata_only", "title_only"}:
+        return False
+    if explicit_quality and quality in {"empty", "unknown", "none", "null"}:
+        return False
+
+    return bool(_value("url"))
 
 
 def _collect_sources(pools: dict[str, Any]) -> list[dict[str, Any]]:
@@ -406,6 +615,13 @@ def _build_reclaim_pipeline(
     if citation_config.generation_mode == CitationGenerationMode.STRICT:
         claim_generation_mode = ClaimGenerationMode.STRICT
 
+    # Pipeline-wide cap on evidence quote length. Single source of truth wired
+    # into every truncation site (evidence selection, claim generation prompt,
+    # single-claim NLI retry, batch verification). Default 3000; override via
+    # output_schema citation_pipeline.max_evidence_chars per-agent or
+    # app.yaml citation_pipeline.max_evidence_chars project-wide.
+    top_level_max_chars = citation_config.max_evidence_chars
+
     return CitationVerificationPipeline(
         llm_client,
         evidence_selector=_EvidenceSelectorAdapter(
@@ -414,7 +630,7 @@ def _build_reclaim_pipeline(
                 EvidenceSelectionConfig(
                     max_spans_per_source=evidence_cfg.max_spans_per_source,
                     min_span_length=evidence_cfg.min_span_length,
-                    max_span_length=evidence_cfg.max_span_length,
+                    max_span_length=top_level_max_chars,
                     relevance_threshold=evidence_cfg.relevance_threshold,
                     numeric_content_boost=evidence_cfg.numeric_content_boost,
                     chunk_size=evidence_cfg.chunk_size,
@@ -429,6 +645,7 @@ def _build_reclaim_pipeline(
             ClaimGenerationConfig(
                 min_evidence_similarity=generation_cfg.min_evidence_similarity,
                 generation_mode=claim_generation_mode,
+                max_evidence_chars=top_level_max_chars,
             ),
         ),
         confidence_classifier=ConfidenceClassifier(
@@ -442,6 +659,7 @@ def _build_reclaim_pipeline(
         isolated_verifier=IsolatedVerifier(
             llm_client,
             citation_config.isolated_verification,
+            max_evidence_chars=top_level_max_chars,
         ),
         citation_corrector=CitationCorrector(
             llm_client,
@@ -784,14 +1002,48 @@ def _build_framework_summary(summary: VerificationSummaryInfo | dict[str, Any] |
     }
 
 
+def _numeric_citation_keys(
+    named_key: str | None,
+    named_keys: list[str] | None,
+    key_to_numeric: dict[str, str],
+) -> list[str]:
+    """Map a record's human-readable citation key(s) to the numeric indices used
+    in the rendered report.
+
+    The citation pipeline tags claims with human-readable keys ("Arxiv"), but the
+    synthesizer rewrites the report to numeric markers ("[1]") via
+    ``_replace_human_citations_with_numeric`` using this same ``key_to_numeric``
+    map. The live UI matches markers by key, so streamed verdicts must carry the
+    *numeric* keys to color the rendered (numeric) report. Unmapped keys fall back
+    to the original value, mirroring the report rewrite (which also leaves them).
+    """
+    keys = list(named_keys or ([named_key] if named_key else []))
+    seen: set[str] = set()
+    numeric: list[str] = []
+    for key in keys:
+        mapped = key_to_numeric.get(key, key)
+        if mapped not in seen:
+            seen.add(mapped)
+            numeric.append(mapped)
+    return numeric
+
+
 def _normalize_verification_records(
     verifications: list[dict[str, Any]],
+    key_to_numeric: dict[str, str],
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for verification in verifications:
+        numeric_keys = _numeric_citation_keys(
+            verification.get("citation_key"),
+            verification.get("citation_keys"),
+            key_to_numeric,
+        )
         records.append(
             {
                 "claim_index": verification.get("claim_index", 0),
+                "citation_key": numeric_keys[0] if numeric_keys else None,
+                "citation_keys": numeric_keys,
                 "verdict": verification.get("verdict", "unsupported"),
                 "confidence": float(verification.get("confidence", 0.0)),
                 "verification_confidence": float(
@@ -938,6 +1190,8 @@ def _extract_claim_verified_events(
                 verification_method=verification.get("verification_method", ""),
                 evidence_snippet=verification.get("evidence_snippet", ""),
                 claim_text=verification.get("claim_text", ""),
+                citation_key=verification.get("citation_key"),
+                citation_keys=verification.get("citation_keys") or [],
             )
         )
     return events
@@ -1144,6 +1398,139 @@ def _extract_report_text(content: Any) -> str:
     return str(content or "")
 
 
+def _has_numeric_citation_markers(report: str, source_count: int) -> bool:
+    if not report or source_count <= 0:
+        return False
+    for marker in _re.findall(r"\[(\d+)\]", report):
+        index = int(marker)
+        if 0 <= index < source_count or 1 <= index <= source_count:
+            return True
+    return False
+
+
+def _insufficient_evidence_report(reason: str, *, source_count: int) -> str:
+    """Hard-fail template — only emitted when the verifier ran and rejected every claim."""
+    return (
+        "## Insufficient Evidence\n\n"
+        "The citation pipeline ran but could not produce a grounded report.\n\n"
+        f"- Reason: {reason}\n"
+        f"- Citeable sources available: {source_count}\n\n"
+        "Re-run the research step with a different retrieval strategy, or "
+        "refine the query to better match the available corpus."
+    )
+
+
+def _grounding_warning_banner(reason: str) -> str:
+    """Soft-warn banner — prepended to the LLM-written report when the verifier
+    could not produce real entailment judgments (typically because evidence was
+    not attached to claims, or the NLI call crashed). The report still flows
+    through, but the user sees an unambiguous warning that the claims have not
+    been independently verified.
+    """
+    return (
+        "> ⚠️ **Grounding warning** — the claims in this report have not "
+        "been independently verified by the citation pipeline.\n"
+        f"> {reason}\n\n"
+    )
+
+
+class _GroundingOutcome(StrEnum):
+    """How the grounding gate classifies a verification result."""
+
+    OK = "ok"
+    SOFT_WARN = "soft_warn"
+    HARD_FAIL = "hard_fail"
+    NO_CLAIMS_EXTRACTED = "no_claims_extracted"
+
+
+@dataclass(frozen=True)
+class _GroundingVerdict:
+    """Outcome + user-facing reason. Either field is always non-empty for non-OK outcomes."""
+
+    outcome: _GroundingOutcome
+    reason: str
+
+
+def _soft_warn_enabled() -> bool:
+    """Feature flag for the soft-warn rollout. Default ON; set to false to
+    revert to the legacy hard-fail-on-any-non-positive behavior."""
+    return os.environ.get("CITATION_SOFT_WARN_ENABLED", "true").lower() in {"1", "true", "yes"}
+
+
+def _classify_grounding(
+    claims: list[ClaimInfo] | None,
+    *,
+    report_content: str,
+) -> _GroundingVerdict:
+    """Classify a verification result into one of four grounding outcomes.
+
+    Operates on per-claim data (verdict + confidence + abstained), not the
+    aggregated summary dict, because the summary loses the confidence
+    breakdown needed to distinguish verifier-crash unsupported (confidence=0)
+    from real-LLM-NO unsupported (confidence=0.6 from _default_confidence).
+    """
+    if claims is None:
+        # No verification pipeline ran — defer to caller's other gates
+        # (e.g., empty-report check).
+        return _GroundingVerdict(_GroundingOutcome.OK, "")
+
+    fact_claims = [
+        c for c in claims if getattr(c, "claim_role", None) == ClaimRole.FACT.value
+    ]
+    has_report = bool((report_content or "").strip())
+
+    if not fact_claims:
+        if has_report:
+            return _GroundingVerdict(
+                _GroundingOutcome.NO_CLAIMS_EXTRACTED,
+                "The synthesizer produced report content but the citation "
+                "pipeline extracted no fact claims. The report is treated as "
+                "an LLM-only response and cannot be independently verified.",
+            )
+        return _GroundingVerdict(_GroundingOutcome.OK, "")
+
+    positive = 0
+    no_judgment = 0
+    real_rejection = 0
+
+    for c in fact_claims:
+        verdict = c.verification_verdict
+        conf = c.verification_confidence or 0.0
+        if verdict in {"supported", "partial"}:
+            positive += 1
+        elif c.abstained or (
+            verdict in {"unsupported", "contradicted"} and conf <= 0.0
+        ):
+            no_judgment += 1
+        elif verdict in {"unsupported", "contradicted"}:
+            real_rejection += 1
+        else:
+            # Unknown verdict / not yet verified → conservative bucket
+            no_judgment += 1
+
+    total = len(fact_claims)
+    if positive > 0:
+        return _GroundingVerdict(_GroundingOutcome.OK, "")
+
+    if no_judgment >= real_rejection and no_judgment > 0:
+        return _GroundingVerdict(
+            _GroundingOutcome.SOFT_WARN,
+            f"The verifier could not judge {no_judgment} of {total} claims "
+            "(no evidence attached, or NLI call failed). The LLM-written "
+            "report follows, but its claims have not been independently "
+            "verified. Inspect EVIDENCE_EXTRACTED and CLAIM_EVIDENCE_"
+            "ATTACHED logs for the upstream cause.",
+        )
+
+    return _GroundingVerdict(
+        _GroundingOutcome.HARD_FAIL,
+        f"The verifier judged {real_rejection} of {total} claims as "
+        f"unsupported or contradicted (positive={positive}, "
+        f"no_judgment={no_judgment}). Re-run with a different retrieval "
+        "strategy or refine the query.",
+    )
+
+
 def _persist_grounding_state(
     node_id: str,
     state: WorkflowState,
@@ -1182,12 +1569,33 @@ def _persist_grounding_state(
 
     payload = {
         "claims": claims,
-        "verifications": _normalize_verification_records(verifications),
+        "verifications": _normalize_verification_records(verifications, key_to_numeric),
         "corrections": _normalize_corrections(corrections, key_to_numeric),
         "numeric_claims": _normalize_numeric_claims(numeric_claims),
         "verification_summary": summary_data,
         "analysis_summary": summary_data.get("analysis_summary", {}),
     }
+
+    # Observability: surface drift between the numeric markers actually rendered in
+    # the report and the numeric keys carried by streamed verdicts. A non-empty diff
+    # means those markers render uncolored ("grey") in the live UI until the
+    # persisted/REST claims arrive. Cheap O(n) check; logs only, no behavior change.
+    report_marker_keys = set(_re.findall(r"\[(\d+)\]", report_content or ""))
+    verdict_keys = {
+        key
+        for record in payload["verifications"]
+        for key in (record.get("citation_keys") or [])
+    }
+    missing_verdicts = report_marker_keys - verdict_keys
+    if missing_verdicts:
+        logger.warning(
+            "SYNTHESIZER_CITATION_KEY_GAP node_id=%s markers_without_verdict=%s "
+            "report_markers=%d verdict_keys=%d",
+            node_id,
+            sorted(missing_verdicts),
+            len(report_marker_keys),
+            len(verdict_keys),
+        )
 
     if claims or summary_data:
         if state.runtime_store is None:
@@ -1237,7 +1645,7 @@ async def _execute(
     sources = _collect_sources(pools)
     observations = _collect_observations(state, pools)
     sources = _hydrate_sparse_sources(sources, observations)
-    # Filter sources that still have no usable text after hydration
+    # Filter sources that still have no usable text after hydration.
     pre_filter = len(sources)
     sources = [
         s for s in sources
@@ -1248,6 +1656,24 @@ async def _execute(
             "SYNTHESIZER_EMPTY_SOURCES_FILTERED before=%d after=%d",
             pre_filter,
             len(sources),
+        )
+    if not sources:
+        logger.warning(
+            "SYNTHESIZER_%s_INSUFFICIENT_EVIDENCE node_id=%s "
+            "reason=no_citeable_sources observations=%d",
+            grounding_mode.upper(),
+            node_id,
+            len(observations),
+        )
+        if state.runtime_store is not None:
+            state.runtime_store.set_synthesis_mode("insufficient")
+        return AgentOutput(
+            content=_insufficient_evidence_report(
+                "No citeable sources with usable text were available.",
+                source_count=0,
+            ),
+            output_key=config.output_key,
+            token_usage={},
         )
     pipeline = _build_reclaim_pipeline(llm_client, citation_config)
     mode_label = grounding_mode.upper()
@@ -1269,6 +1695,7 @@ async def _execute(
     numeric_claims: list[dict[str, Any]] = []
     summary_data: dict[str, Any] = {}
     token_usage: dict[str, int] = {}
+    generation_instructions = _build_reclaim_generation_instructions(config)
 
     draft_content = ""
     if grounding_mode == "classical_lite":
@@ -1295,6 +1722,7 @@ async def _execute(
         target_word_count=int(reclaim_cfg["target_word_count"]),
         max_tokens=int(reclaim_cfg["max_tokens"]),
         draft_content=draft_content or None,
+        generation_instructions=generation_instructions,
     ):
         if isinstance(item, str):
             report_content = item
@@ -1338,21 +1766,86 @@ async def _execute(
         summary_data,
     )
 
+    # Refresh summary_data from the persisted payload — `_persist_grounding_state`
+    # rebuilds the summary from `pipeline.last_verification_summary` when no
+    # verification_summary event was seen. Without this refresh the gate
+    # classifier (and the diagnostic log below) would see a stale dict.
+    summary_data = _payload.get("verification_summary", summary_data)
+
     if not report_content:
         logger.info(
-            "SYNTHESIZER_%s_FALLBACK node_id=%s reason=no_pipeline_content",
+            "SYNTHESIZER_%s_FAIL_CLOSED node_id=%s reason=no_pipeline_content",
             mode_label,
             node_id,
         )
-        fallback_output, fallback_usage = await _run_fallback_synthesis(
-            llm_client,
-            config,
-            messages,
-            int(reclaim_cfg["max_tokens"]),
+        report_content = _insufficient_evidence_report(
+            "The citation pipeline did not produce report content.",
+            source_count=len(sources),
         )
-        report_content = _extract_report_text(fallback_output)
-        if not token_usage:
-            token_usage = fallback_usage
+        if state.runtime_store is not None:
+            state.runtime_store.set_synthesis_mode("insufficient")
+    else:
+        verdict = _classify_grounding(
+            pipeline.last_generated_claims,
+            report_content=report_content,
+        )
+        if verdict.outcome == _GroundingOutcome.SOFT_WARN:
+            logger.warning(
+                "SYNTHESIZER_%s_GROUNDING_SOFT_WARN node_id=%s reason=%s summary=%s",
+                mode_label,
+                node_id,
+                verdict.reason,
+                summary_data,
+            )
+            if _soft_warn_enabled():
+                report_content = _grounding_warning_banner(verdict.reason) + report_content
+                if state.runtime_store is not None:
+                    state.runtime_store.set_synthesis_mode("soft_warn")
+            else:
+                report_content = _insufficient_evidence_report(
+                    verdict.reason,
+                    source_count=len(sources),
+                )
+                if state.runtime_store is not None:
+                    state.runtime_store.set_synthesis_mode("insufficient")
+        elif verdict.outcome == _GroundingOutcome.HARD_FAIL:
+            logger.warning(
+                "SYNTHESIZER_%s_FAIL_CLOSED node_id=%s reason=zero_grounded_claims "
+                "summary=%s",
+                mode_label,
+                node_id,
+                summary_data,
+            )
+            report_content = _insufficient_evidence_report(
+                verdict.reason,
+                source_count=len(sources),
+            )
+            if state.runtime_store is not None:
+                state.runtime_store.set_synthesis_mode("insufficient")
+        elif verdict.outcome == _GroundingOutcome.NO_CLAIMS_EXTRACTED:
+            logger.warning(
+                "SYNTHESIZER_%s_NO_CLAIMS_EXTRACTED node_id=%s reason=%s",
+                mode_label,
+                node_id,
+                verdict.reason,
+            )
+            report_content = _grounding_warning_banner(verdict.reason) + report_content
+            if state.runtime_store is not None:
+                state.runtime_store.set_synthesis_mode("partial")
+        elif not _has_numeric_citation_markers(report_content, len(sources)):
+            logger.warning(
+                "SYNTHESIZER_%s_FAIL_CLOSED node_id=%s "
+                "reason=no_numeric_citation_markers sources=%d",
+                mode_label,
+                node_id,
+                len(sources),
+            )
+            report_content = _insufficient_evidence_report(
+                "The generated report had no numeric citation markers.",
+                source_count=len(sources),
+            )
+            if state.runtime_store is not None:
+                state.runtime_store.set_synthesis_mode("insufficient")
 
     logger.info(
         "SYNTHESIZER_%s_COMPLETE node_id=%s final_chars=%d token_usage=%s",
@@ -1383,14 +1876,18 @@ def _post_process(
     state_src = 0
     for entry in sources_list:
         if isinstance(entry, list):
-            state_src += len(entry)
-        elif entry is not None:
+            state_src += sum(1 for source in entry if source_is_substantive(source))
+        elif source_is_substantive(entry):
             state_src += 1
 
     obs_pool = state.pools.get("observations") if state.pools else None
     src_pool = state.pools.get("sources") if state.pools else None
     pool_obs = obs_pool.count() if obs_pool else 0
-    pool_src = src_pool.count() if src_pool else 0
+    pool_src = (
+        sum(1 for source in src_pool.snapshot() if source_is_substantive(source))
+        if src_pool
+        else 0
+    )
 
     total_obs = max(state_obs, pool_obs)
     total_src = max(state_src, pool_src)
@@ -1423,6 +1920,17 @@ def _post_process(
     return events
 
 
+def _compose_reclaim_prompt(base_prompt: str, custom_prompt: str, *, heading: str) -> str:
+    custom = custom_prompt.strip()
+    if not custom:
+        return base_prompt
+    if "verified citation mode" in custom and "Anti-Confabulation Rules" in custom:
+        return custom
+    if "Create a verified research report based on the gathered observations" in custom:
+        return custom
+    return f"{base_prompt}\n\n## {heading}\n{custom}"
+
+
 def _enrich_config(
     config: AgentNodeConfig,
     _state: WorkflowState,
@@ -1433,10 +1941,16 @@ def _enrich_config(
 
     if _is_reclaim_mode(config):
         logger.info("SYNTHESIZER_ENRICH_RECLAIM node_subtype=%s", config.subtype)
-        if not config.system_prompt:
-            updates["system_prompt"] = _build_reclaim_system_prompt()
-        if not config.user_prompt_template:
-            updates["user_prompt_template"] = _build_reclaim_user_prompt()
+        updates["system_prompt"] = _compose_reclaim_prompt(
+            _build_reclaim_system_prompt(),
+            config.system_prompt,
+            heading="Workflow-Specific Report Format",
+        )
+        updates["user_prompt_template"] = _compose_reclaim_prompt(
+            _build_reclaim_user_prompt(),
+            config.user_prompt_template,
+            heading="Workflow-Specific Instructions",
+        )
         if config.max_tool_calls is None:
             updates["max_tool_calls"] = _RECLAIM_MAX_TOOL_CALLS
     else:

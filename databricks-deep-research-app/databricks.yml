@@ -25,6 +25,7 @@ sync:
     - "uv.lock"
     - "Makefile"
     - "README.md"
+    - "scripts/output/**"
   # NOTE: app.yaml IS synced intentionally. The Databricks Apps runtime
   # requires a file-based app spec. The config: section below overrides
   # env vars at deploy time with production values.
@@ -39,13 +40,54 @@ variables:
     description: "Database name in Lakebase (we create and own this)"
     default: "deep_research"
 
-  # Lakebase connection (set by deploy script after endpoint discovery)
+  # Lakebase connection (set by deploy script after endpoint discovery).
+  # Defaults to the literal sentinel "pending" so that read-only bundle
+  # commands (`bundle summary`, `bundle validate`) work without `--var`
+  # overrides — the Makefile uses `bundle summary` to resolve APP_NAME and
+  # cannot pass real values before Step 5. The app's credential_factory
+  # treats "pending" as unset at runtime (see `_meaningful()` in
+  # `src/deep_research/db/credential_factory.py`), so a "pending"-deployed
+  # bundle fails loudly at app boot rather than corrupting downstream
+  # behaviour.
   endpoint_name:
     description: "Autoscaling endpoint name (discovered during deploy)"
     default: "pending"
 
   pghost:
     description: "PostgreSQL host for Lakebase (discovered during deploy)"
+    default: "pending"
+
+  # DAB-managed Lakebase Postgres app resource binding.
+  # These two vars are resolved at deploy time from the live workspace by
+  # `app_postgres_resource.py --print-bundle-vars` (or `preflight.py`) and
+  # injected via `--var` from the Makefile. Defaulting to the literal
+  # "pending" sentinel makes `bundle summary` / `bundle validate` succeed
+  # without an --var override; the preflight asserts that "pending" never
+  # reaches `bundle deploy`. The lakebase-postgres app resource below
+  # references these values so the app binding is fully DAB-managed
+  # (no Apps-API write side).
+  postgres_branch:
+    description: "Lakebase Postgres branch resource path (resolved during deploy)"
+    default: "pending"
+
+  postgres_database_resource:
+    description: "Lakebase Postgres database resource path (resolved during deploy)"
+    default: "pending"
+
+  # SQL Warehouse used by the framework's text-table tools
+  # (table_search / table_read / table_neighbors / table_load /
+  # table_aggregate). Resolved at deploy time by `preflight.py
+  # resolve_warehouse_id_or_fail` and injected via `--var` from the
+  # Makefile. Defaulting to the literal "pending" sentinel keeps
+  # `bundle summary` / `bundle validate` working without an --var
+  # override; preflight asserts the sentinel never reaches `bundle
+  # deploy`. Without this var, the deployed app's
+  # `workflow_runner_factory` silently leaves `schema_cache` /
+  # `sql_executor` unset and any workflow that declares a table_*
+  # tool fails mid-stream as a misleading
+  # "missing declared tools" WorkflowError.
+  storage_warehouse_id:
+    description: "SQL Warehouse ID for text-table tools (resolved during deploy)"
     default: "pending"
 
   # Lakebase Autoscaling Configuration
@@ -93,7 +135,10 @@ resources:
       # On-behalf-of-user authorization:
       # These scopes allow the app to access enterprise data sources
       # on behalf of the authenticated user (discovery + query).
+      # `apps` is required by Deploy Here for app create/update/list calls.
+      # Source upload uses the app service principal, not the user's OBO token.
       user_api_scopes:
+        - apps
         - sql
         - dashboards.genie
         - serving.serving-endpoints
@@ -135,6 +180,12 @@ resources:
             value: ${var.endpoint_name}
           - name: PGHOST
             value: ${var.pghost}
+
+          # SQL Warehouse — used by the text-table tools
+          # (workflow_runner_factory wires schema_cache + sql_executor
+          # only when this is set).
+          - name: STORAGE_WAREHOUSE_ID
+            value: ${var.storage_warehouse_id}
 
           # Brave Search (references 'brave-api-key' resource binding)
           - name: BRAVE_API_KEY
@@ -209,6 +260,23 @@ resources:
             permission: CAN_QUERY
 
         # =================================================================
+        # Lakebase Postgres binding (DAB-managed)
+        # =================================================================
+        # The branch and database paths are resolved at deploy time by
+        # `app_postgres_resource.py --print-bundle-vars` and injected as
+        # `--var` arguments from the Makefile. A "pending" sentinel for
+        # either field blocks the deploy via preflight rather than
+        # producing a broken app binding. The Apps-API write side in
+        # `configure_app_postgres_resource()` is deprecated; this YAML
+        # block is now the single source of truth.
+        - name: lakebase-postgres
+          description: "Lakebase Postgres database used by the app"
+          postgres:
+            branch: ${var.postgres_branch}
+            database: ${var.postgres_database_resource}
+            permission: CAN_CONNECT_AND_CREATE
+
+        # =================================================================
         # Optional: MLflow Experiment
         # Databricks Apps does NOT support mlflow_experiment as a resource type.
         # Experiment permissions must be granted manually or via a setup script.
@@ -240,6 +308,11 @@ targets:
       profile: ais
     variables:
       resource_suffix: "ais"
+      # Pinned SQL Warehouse for text-table tools (Serverless Starter).
+      # Read by `make deploy`/`app-deploy` and passed to preflight via
+      # --storage-warehouse-id so the full deploy no longer depends on
+      # auto-discovering a single STARTED warehouse.
+      storage_warehouse_id: "d837825f69a03500"
     resources:
       postgres_projects:
         deep_research_project:
@@ -254,6 +327,7 @@ targets:
       profile: ais
     variables:
       resource_suffix: "e2e"
+      storage_warehouse_id: "d837825f69a03500"
     resources:
       postgres_projects:
         deep_research_project:
@@ -268,6 +342,7 @@ targets:
       profile: ais
     variables:
       resource_suffix: "local"
+      storage_warehouse_id: "d837825f69a03500"
     resources:
       postgres_projects:
         deep_research_project:

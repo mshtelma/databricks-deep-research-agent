@@ -364,6 +364,34 @@ async def test_stage2_interleaved_generation_yields_claims() -> None:
     assert any(c for _, c in results if c is not None)
 
 
+@pytest.mark.asyncio
+async def test_stage2_forwards_generation_instructions() -> None:
+    """Workflow-specific report contracts must reach Stage 2 generation."""
+    evidence = [_make_ranked_evidence()]
+    captured: dict[str, Any] = {}
+
+    async def _stream(*args: Any, **kwargs: Any) -> AsyncGenerator[
+        tuple[str, InterleavedClaim | None], None
+    ]:
+        captured.update(kwargs)
+        yield "Contract-aware content [0].", None
+        yield "", _make_interleaved_claim()
+
+    generator = MagicMock()
+    generator.synthesize_with_streaming = _stream
+    pipeline = _build_pipeline(claim_generator=generator)
+
+    async for _content, _claim in pipeline.generate_with_interleaving(
+        evidence_pool=evidence,
+        observations=[],
+        query="test query",
+        generation_instructions="Use sections A and B.",
+    ):
+        pass
+
+    assert captured["generation_instructions"] == "Use sections A and B."
+
+
 # ---------------------------------------------------------------------------
 # T105-5: Stage 3 confidence classification
 # ---------------------------------------------------------------------------
@@ -534,6 +562,27 @@ def test_stage21_classifies_fact_analysis_and_free_roles() -> None:
     assert claims[1].verification_method == "grounding"
     assert claims[2].claim_role == ClaimRole.FREE.value
     assert claims[2].abstained is True
+
+
+def test_stage21_trims_concessive_analysis_tail_from_fact_core() -> None:
+    """Fact-core extraction must not leave dangling connectors behind."""
+    pipeline = _build_pipeline()
+    claim = _make_claim_info(
+        claim_text=(
+            "Net revenue retention rate stood at 125% as of the most recent "
+            "fiscal year-end, down from a peak of 158% reported in an earlier "
+            "period, but still indicating meaningful expansion."
+        ),
+        claim_type="numeric",
+    )
+
+    pipeline._classify_and_link_claims([claim])
+
+    assert claim.claim_role == ClaimRole.FACT.value
+    assert claim.verification_text == (
+        "Net revenue retention rate stood at 125% as of the most recent "
+        "fiscal year-end, down from a peak of 158% reported in an earlier period"
+    )
 
 
 def test_stage21_keeps_structural_free_blocks_out_of_analysis_lane() -> None:
@@ -1010,8 +1059,14 @@ def test_build_verification_summary_splits_fact_and_analysis_metrics() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stage8_keeps_partial_analysis_claims_by_default() -> None:
-    """With default disposition, partial analysis claims are kept (not softened)."""
+async def test_stage8_softens_partial_analysis_claims_by_default() -> None:
+    """With default disposition, partial analysis claims are softened (not kept).
+
+    The framework's defaults were flipped to favour SOFTEN over KEEP/REMOVE
+    for non-contradicted verdicts so unverified content is preserved with
+    hedge language instead of being deleted (REMOVE) or presented as fact
+    (KEEP). See ``ClaimDispositionConfig`` docstring.
+    """
     pipeline = _build_pipeline()
     claim = _make_claim_info(
         claim_text="This indicates strong demand.",
@@ -1026,15 +1081,21 @@ async def test_stage8_keeps_partial_analysis_claims_by_default() -> None:
         [claim],
     )
 
-    # Default analysis_partial = KEEP, so no modifications
+    # New default analysis_partial = SOFTEN.
     assert removed == 0
-    assert softened == 0
+    assert softened == 1
     assert rewritten == 0
 
 
 @pytest.mark.asyncio
-async def test_stage8_disposition_remove() -> None:
-    """Unsupported fact claims are removed with default disposition."""
+async def test_stage8_disposition_softens_unsupported_fact_by_default() -> None:
+    """Unsupported fact claims are softened (not removed) with default disposition.
+
+    Flipped from REMOVE → SOFTEN to preserve report shape; see
+    ``ClaimDispositionConfig`` docstring for the rationale. Callers wanting
+    the old REMOVE behaviour pass an explicit config (see
+    ``test_stage8_disposition_keep`` for the symmetric escape hatch).
+    """
     pipeline = _build_pipeline()
     claim = _make_claim_info(
         claim_text="Revenue was $5B.",
@@ -1045,6 +1106,38 @@ async def test_stage8_disposition_remove() -> None:
     )
 
     content, removed, softened, rewritten = await pipeline.process_unverified_claims(
+        "Revenue was $5B.",
+        [claim],
+    )
+
+    # New default unsupported = SOFTEN (was REMOVE pre-flip).
+    assert removed == 0
+    assert softened == 1
+
+
+@pytest.mark.asyncio
+async def test_stage8_disposition_remove_when_explicitly_configured() -> None:
+    """Callers opting into the legacy REMOVE behaviour still get it.
+
+    Verifies the back-out path documented in ``ClaimDispositionConfig`` —
+    constructing the config with ``unsupported=REMOVE`` restores pre-flip
+    semantics for compliance pipelines that need hard-removal.
+    """
+    from databricks_deep_research.citation.config import ClaimDisposition, ClaimDispositionConfig
+
+    cfg = CitationConfig(
+        claim_disposition=ClaimDispositionConfig(unsupported=ClaimDisposition.REMOVE),
+    )
+    pipeline = _build_pipeline(config=cfg)
+    claim = _make_claim_info(
+        claim_text="Revenue was $5B.",
+        claim_role=ClaimRole.FACT.value,
+        verification_verdict="unsupported",
+        position_start=0,
+        position_end=16,
+    )
+
+    _, removed, softened, _ = await pipeline.process_unverified_claims(
         "Revenue was $5B.",
         [claim],
     )
@@ -1132,6 +1225,86 @@ async def test_stage8_rewrite_exclusive_with_soften() -> None:
     # Soften takes precedence — no rewrite should happen
     assert softened == 1
     assert rewritten == 0
+
+
+@pytest.mark.asyncio
+async def test_stage8_rewrite_keeps_claim_cited_and_sentence_safe() -> None:
+    """Fact-core rewrites should preserve citations and sentence boundaries."""
+    pipeline = _build_pipeline()
+    original_sentence = (
+        "Gross profit margin reached 67.16% on a trailing twelve-month basis "
+        "as of January 31, 2026, reflecting the asset-light delivery model "
+        "[Example]."
+    )
+    content = f"{original_sentence}\n\nNext sentence."
+    claim = _make_claim_info(
+        claim_text=(
+            "Gross profit margin reached 67.16% on a trailing twelve-month "
+            "basis as of January 31, 2026, reflecting the asset-light "
+            "delivery model."
+        ),
+        claim_role=ClaimRole.FACT.value,
+        claim_type="numeric",
+        citation_key="Example",
+        citation_keys=["Example"],
+        verification_verdict="supported",
+        verification_text=(
+            "Gross profit margin reached 67.16% on a trailing twelve-month "
+            "basis as of January 31, 2026"
+        ),
+        position_start=0,
+        position_end=len(original_sentence),
+    )
+
+    content, removed, softened, rewritten = await pipeline.process_unverified_claims(
+        content,
+        [claim],
+    )
+
+    assert removed == 0
+    assert softened == 0
+    assert rewritten == 1
+    assert (
+        "Gross profit margin reached 67.16% on a trailing twelve-month basis "
+        "as of January 31, 2026 [Example].\n\nNext sentence."
+    ) in content
+    assert "delivery model" not in content
+
+
+@pytest.mark.asyncio
+async def test_stage8_skips_malformed_dangling_fact_rewrite() -> None:
+    """A malformed factual core should not be spliced before the next sentence."""
+    pipeline = _build_pipeline()
+    original_sentence = (
+        "Net revenue retention rate stood at 125%, but still indicating "
+        "meaningful expansion [Example]."
+    )
+    content = f"{original_sentence} By April 30, customers grew."
+    claim = _make_claim_info(
+        claim_text=(
+            "Net revenue retention rate stood at 125%, but still indicating "
+            "meaningful expansion."
+        ),
+        claim_role=ClaimRole.FACT.value,
+        claim_type="numeric",
+        citation_key="Example",
+        citation_keys=["Example"],
+        verification_verdict="supported",
+        verification_text="Net revenue retention rate stood at 125%, but still",
+        position_start=0,
+        position_end=len(original_sentence),
+    )
+
+    content, removed, softened, rewritten = await pipeline.process_unverified_claims(
+        content,
+        [claim],
+    )
+
+    assert removed == 0
+    assert softened == 0
+    assert rewritten == 0
+    assert "but still By April" not in content
+    assert original_sentence in content
 
 
 @pytest.mark.asyncio

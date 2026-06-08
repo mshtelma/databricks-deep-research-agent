@@ -82,6 +82,8 @@ tools:
     kind: web_crawl
 ```
 
+> `web_search` is backend-agnostic — the backend is selectable via `config.provider` (`databricks` built-in / `brave` / `jina`), and `brave_api_key` is only needed for the Brave backend. With no `provider`, the tool inherits the workspace default. See [Search Providers](search-providers.md).
+
 Each tool declaration has:
 
 | Field | Required | Description |

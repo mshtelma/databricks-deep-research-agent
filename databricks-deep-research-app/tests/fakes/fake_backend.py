@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from datetime import datetime, timezone
-from typing import Any, Callable
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from deep_research.storage.backend import (
@@ -37,6 +38,7 @@ from deep_research.storage.documents import (
     ChatMeta,
     ChatState,
     PrepJobDocument,
+    ResearchSessionState,
     UserDocument,
 )
 
@@ -142,7 +144,7 @@ class FakeBackend(StorageBackend):
         # Upsert meta (keeping the caller's promoted columns).
         new_meta = doc.meta.model_copy(deep=True)
         new_meta.version = current_version + 1
-        new_meta.updated_at = datetime.now(tz=timezone.utc)
+        new_meta.updated_at = datetime.now(tz=UTC)
         self._chat_meta[chat_id] = new_meta
 
         # Upsert state.
@@ -346,6 +348,111 @@ class FakeBackend(StorageBackend):
         ]
         matched.sort(key=lambda r: r.get("chunk_index", 0))
         return matched
+
+    # -- Research session queries --------------------------------------
+
+    async def count_active_research_sessions(self, user_id: str) -> int:
+        self._log("count_active_research_sessions", (user_id,))
+        await self._tick()
+        self._assert_open()
+        count = 0
+        for chat_id, meta in self._chat_meta.items():
+            if meta.user_id != user_id or meta.deleted_at is not None:
+                continue
+            state = self._chat_state.get(chat_id)
+            if state is None:
+                continue
+            if any(rs.status == "in_progress" for rs in state.research_sessions):
+                count += 1
+        return count
+
+    async def list_user_jobs(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[tuple[UUID, ResearchSessionState]]:
+        self._log("list_user_jobs", (user_id, status, limit))
+        await self._tick()
+        self._assert_open()
+        rows: list[tuple[UUID, ResearchSessionState]] = []
+        for chat_id, meta in self._chat_meta.items():
+            if meta.user_id != user_id or meta.deleted_at is not None:
+                continue
+            state = self._chat_state.get(chat_id)
+            if state is None:
+                continue
+            for rs in state.research_sessions:
+                if status is not None and rs.status != status:
+                    continue
+                rows.append((chat_id, rs.model_copy(deep=True)))
+        rows.sort(key=lambda pair: pair[1].started_at, reverse=True)
+        return rows[: int(limit)]
+
+    async def get_active_session_for_chat(
+        self,
+        chat_id: UUID,
+        user_id: str,
+    ) -> ResearchSessionState | None:
+        self._log("get_active_session_for_chat", (chat_id, user_id))
+        await self._tick()
+        self._assert_open()
+        meta = self._chat_meta.get(chat_id)
+        if meta is None or meta.user_id != user_id:
+            return None
+        state = self._chat_state.get(chat_id)
+        if state is None:
+            return None
+        active = [rs for rs in state.research_sessions if rs.status == "in_progress"]
+        if not active:
+            return None
+        active.sort(key=lambda rs: rs.started_at, reverse=True)
+        return active[0].model_copy(deep=True)
+
+    async def mark_stale_research_sessions_failed(
+        self,
+        cutoff: datetime,
+        exclude_session_ids: Sequence[UUID],
+    ) -> int:
+        self._log("mark_stale_research_sessions_failed", (cutoff, exclude_session_ids))
+        await self._tick()
+        self._assert_open()
+        exclude_ids = {str(sid) for sid in exclude_session_ids}
+        chats_modified = 0
+        for state in self._chat_state.values():
+            mutated = False
+            for rs in state.research_sessions:
+                if rs.status != "in_progress":
+                    continue
+                if str(rs.id) in exclude_ids:
+                    continue
+                if rs.last_heartbeat is not None and rs.last_heartbeat >= cutoff:
+                    continue
+                rs.status = "failed"
+                rs.completed_at = datetime.now(UTC)
+                mutated = True
+            if mutated:
+                chats_modified += 1
+        return chats_modified
+
+    async def write_research_session_heartbeat(
+        self,
+        chat_id: UUID,
+        session_id: UUID,
+        ts: datetime,
+    ) -> None:
+        self._log("write_research_session_heartbeat", (chat_id, session_id, ts))
+        await self._tick()
+        self._assert_open()
+        state = self._chat_state.get(chat_id)
+        if state is None:
+            return
+        sid_str = str(session_id)
+        for rs in state.research_sessions:
+            if str(rs.id) == sid_str:
+                rs.last_heartbeat = ts
+                break
 
     # -- Lifecycle -----------------------------------------------------
 

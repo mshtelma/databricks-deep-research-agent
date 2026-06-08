@@ -30,9 +30,6 @@ from uuid import UUID, uuid4
 from deep_research.services._cached_base import _CachedServiceBase
 from deep_research.services._protocols import IFileUploadService
 from deep_research.services.file_upload_service import (
-    CHUNK_SIZE_MAX,
-    CHUNK_SIZE_MIN,
-    CHUNK_SIZE_TARGET,
     MAX_FILE_SIZE_BYTES,
     MAX_FILES_PER_SESSION,
     MAX_TOTAL_SESSION_SIZE_BYTES,
@@ -254,7 +251,7 @@ class CachedFileUploadService(_CachedServiceBase, IFileUploadService):
 
     def __init__(
         self,
-        stack: "StorageStack",
+        stack: StorageStack,
         storage_path: str | None = None,
     ) -> None:
         super().__init__(stack)

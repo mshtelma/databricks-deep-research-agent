@@ -1,5 +1,7 @@
 """Coordinator agent prompt templates."""
 
+from ._shared import TEMPORAL_ANCHOR_BLOCK as _TEMPORAL_ANCHOR_BLOCK
+
 __all__ = [
     "COORDINATOR_SYSTEM_PROMPT",
     "COORDINATOR_USER_PROMPT",
@@ -7,7 +9,9 @@ __all__ = [
     "SIMPLE_QUERY_TOOLS",
 ]
 
-COORDINATOR_SYSTEM_PROMPT = """You are the Coordinator agent for a deep research system. Your role is to:
+# NOTE: concatenation (not f-string) so ``{current_date}`` /
+# ``{current_timezone}`` reach the SafeTemplateRenderer at render time.
+COORDINATOR_SYSTEM_PROMPT = _TEMPORAL_ANCHOR_BLOCK + "\n\n" + """You are the Coordinator agent for a deep research system. Your role is to:
 
 1. Analyze incoming queries to determine their complexity and type
 2. Identify if a query is simple enough to answer directly
@@ -45,6 +49,30 @@ Flag a query as ambiguous if:
 - Context is missing
 
 When ambiguous, provide 1-3 focused clarifying questions.
+
+## Scope Extraction
+
+When the query references concrete named entities (organizations, products,
+people, locations, events, standards), extract them into
+``extracted_scope.entities`` so downstream lane researchers do not have to
+re-derive them from the raw query (this avoids burning 1-2 search calls per
+lane on entity extraction).
+
+Resolution rules:
+- Resolve informal references and short-form identifiers to their canonical
+  form. Keep both the canonical name AND the original token in ``entities``
+  when the original is a widely-used identifier (code, abbreviation).
+- Infer ``time_window`` from temporal cues
+  ("recent" → "last-90-days"; "this year" → "current-year"; "since 2024"
+  → "since-2024"). Leave null when no temporal cue is present.
+- If the primary entity has well-known peers in its category
+  (counterparts, sibling items, comparable references), list 3-5 in
+  ``comparables``. Do not invent obscure ones — only list comparables that
+  a domain expert would readily name.
+- Add 1-3 ``domain_hints`` describing the topical area.
+
+If the query is conversational, abstract, or scope cannot be reliably
+inferred, set ``extracted_scope`` to ``null``.
 """
 
 COORDINATOR_USER_PROMPT = """Analyze the following query and conversation context.
@@ -64,7 +92,13 @@ COORDINATOR_USER_PROMPT = """Analyze the following query and conversation contex
   "recommended_depth": "auto" | "light" | "medium" | "extended",
   "reasoning": "Brief explanation of classification",
   "is_simple_query": boolean,  // true if can answer directly without research
-  "direct_response": "Direct answer if is_simple_query is true, else null"
+  "direct_response": "Direct answer if is_simple_query is true, else null",
+  "extracted_scope": {{                       // null if not inferable
+    "entities": ["<canonical name>", "<original token>"],
+    "time_window": "<temporal-spec or null>",
+    "comparables": ["<peer 1>", "<peer 2>"],  // 3-5 peers; omit if irrelevant
+    "domain_hints": ["<topical label>"]       // 1-3 labels
+  }}
 }}
 
 Respond with only valid JSON."""

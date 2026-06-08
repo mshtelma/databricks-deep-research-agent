@@ -88,6 +88,10 @@ class InterleavedGenerationConfig:
 
     min_evidence_similarity: float = 0.5
     generation_mode: GenerationMode = GenerationMode.NATURAL
+    # Per-evidence-quote cap applied when formatting the generation prompt.
+    # Wired from the pipeline-wide CitationConfig.max_evidence_chars at
+    # construction time so all 5 truncation sites stay aligned.
+    max_evidence_chars: int = 3000
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +148,7 @@ For EVERY claim you make:
 
 ## Query
 {query}
+{generation_instructions_section}
 
 ## Generation Guidelines
 
@@ -154,7 +159,7 @@ For EVERY claim you make:
 
 ### Claim Types
 - **Fact Claims**: Verifiable source-grounded statements with inline citations
-- **Numeric Claims**: Statistics, values, metrics [1] - ensure exact match with source
+- **Numeric Claims**: Statistics, values, metrics [1] - ensure exact match with source, and state the value's unit of measure or currency exactly as the source expresses it (e.g. `$3.2 billion`, `15%`, `1,200 units`) — never a bare number
 - **Analysis Blocks**: Use `<analysis>...</analysis>` only for interpretation of already-established cited facts
 - **Free Blocks**: Use `<free>...</free>` ONLY for markdown headings (## or ###) and single-sentence transitions between sections — NOTHING else
 
@@ -176,6 +181,7 @@ Only use a markdown table if the query explicitly calls for tabular comparison.
 ### What NOT to Do
 - NEVER make claims without citing evidence
 - NEVER synthesize numbers not in the evidence
+- NEVER present a numeric value without its unit or currency, and NEVER use a source's internal field or column identifier (e.g. a raw column label) as the value's meaning — translate it into what it represents
 - NEVER paraphrase in a way that changes meaning
 - NEVER cite evidence that doesn't support your claim
 - NEVER add editorial framing like "strong foundation", "healthy performance", or "resilience"
@@ -214,6 +220,7 @@ You are a Research Synthesizer writing an engaging, comprehensive report.
 
 ## Query
 {query}
+{generation_instructions_section}
 
 ## Writing Guidelines
 
@@ -249,6 +256,7 @@ For comparative data, use markdown tables:
 ### What TO Do
 - Write for readability first, citations second
 - Cite specific facts, numbers, and claims that need attribution
+- Always state a numeric value's unit of measure or currency as the source expresses it (e.g. `$3.2 billion`, `15%`); never present a bare number or use a source's internal field/column identifier as its meaning
 - Let prose flow naturally between cited and non-cited material
 - Use all available evidence to build comprehensive coverage
 
@@ -408,9 +416,10 @@ class InterleavedGenerator:
         if not evidence_pool:
             return None, "none", "No evidence available"
 
+        evidence_cap = self._config.max_evidence_chars
         evidence_text = "\n".join(
-            f"[{i}] {e.quote_text[:1000]}..."
-            if len(e.quote_text) > 1000
+            f"[{i}] {e.quote_text[:evidence_cap]}..."
+            if len(e.quote_text) > evidence_cap
             else f"[{i}] {e.quote_text}"
             for i, e in enumerate(evidence_pool)
         )
@@ -467,6 +476,7 @@ class InterleavedGenerator:
         previous_content: str = "",
         target_word_count: int = 600,
         max_tokens: int = 2000,
+        generation_instructions: str = "",
     ) -> AsyncGenerator[tuple[str, InterleavedClaim | None], None]:
         """Generate content with interleaved claims and streaming.
 
@@ -500,20 +510,33 @@ class InterleavedGenerator:
         )
 
         # Format evidence pool for the prompt
+        evidence_cap = self._config.max_evidence_chars
         evidence_text = "\n".join(
             f"[{i}] Source: {e.source_title or 'Unknown'}\n"
-            f'   Quote: "{e.quote_text[:1000]}{"..." if len(e.quote_text) > 1000 else ""}"'
+            f'   Quote: "{e.quote_text[:evidence_cap]}{"..." if len(e.quote_text) > evidence_cap else ""}"'
             for i, e in enumerate(evidence_pool)
         )
 
         min_sources_to_cite = max(2, min(10, unique_sources // 3))
         max_word_count = int(target_word_count * 1.3)
+        instructions = generation_instructions.strip()
+        generation_instructions_section = (
+            "\n## Workflow-Specific Report Contract\n"
+            f"{instructions}\n\n"
+            "Apply this contract for section names, required deliverables, "
+            "tone, and quality gates as strictly as the evidence allows. If a "
+            "required section lacks citeable evidence, keep the section heading "
+            "but do not invent factual content."
+            if instructions
+            else ""
+        )
 
         # Select prompt template
         mode = self._config.generation_mode
         if mode == GenerationMode.NATURAL:
             prompt = _NATURAL_GENERATION_PROMPT.format(
                 query=query,
+                generation_instructions_section=generation_instructions_section,
                 evidence_pool=evidence_text,
                 target_word_count=target_word_count,
                 max_word_count=max_word_count,
@@ -528,6 +551,7 @@ class InterleavedGenerator:
         elif mode == GenerationMode.STRICT:
             prompt = _STRICT_GENERATION_PROMPT.format(
                 query=query,
+                generation_instructions_section=generation_instructions_section,
                 evidence_pool=evidence_text,
                 target_word_count=target_word_count,
                 max_word_count=max_word_count,
@@ -547,7 +571,21 @@ class InterleavedGenerator:
             )
 
         if previous_content:
-            prompt += f"\n\nPrevious content:\n{previous_content}\n\nContinue from here:"
+            # Reframe so the LLM does NOT autoregress over previous_content as
+            # prose to continue. The prior framing ("Previous content: ... /
+            # Continue from here:") caused the model to skip the [N] markers
+            # entirely (root cause of the 45-of-45 grounding-warning banner
+            # observed on shell-app deployments). Treat previous_content as
+            # background notes only and re-instruct the model to write from
+            # scratch with mandatory [N] citations.
+            prompt += (
+                "\n\n## Research Notes (background context only — NOT a draft to continue)\n"
+                f"{previous_content}\n\n"
+                "Now write the response from scratch. The instructions above are binding: "
+                "every factual claim MUST be followed by one or more [N] citation markers "
+                "from the evidence pool. Do NOT continue the research notes verbatim; "
+                "do NOT produce a citation-free narrative."
+            )
 
         try:
             key_map = build_citation_key_map(evidence_pool)

@@ -66,7 +66,7 @@ def _session_to_namespace(
 class CachedResearchSessionService(_CachedServiceBase, IResearchSessionService):
     """`IResearchSessionService` via `ChatState.research_sessions[]`."""
 
-    def __init__(self, stack: "StorageStack") -> None:
+    def __init__(self, stack: StorageStack) -> None:
         super().__init__(stack)
 
     async def create(

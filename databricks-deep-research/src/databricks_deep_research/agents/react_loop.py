@@ -13,6 +13,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -32,6 +34,7 @@ from databricks_deep_research.events.types import (
     ToolCallEvent,
     ToolResultEvent,
 )
+from databricks_deep_research.llm.budget import estimate_message_tokens
 from databricks_deep_research.llm.client import FrameworkLLMClient, LLMResponse, ToolCall
 from databricks_deep_research.tools.protocol import ResearchTool, ToolContext
 from databricks_deep_research.tracing import trace_span
@@ -42,6 +45,135 @@ logger = logging.getLogger(__name__)
 def _build_request_id(tool_name: str, arguments: dict[str, Any], scope: str) -> str:
     raw = json.dumps({"tool": tool_name, "args": arguments, "scope": scope}, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+# Planning-text prefixes the researcher LLM tends to emit when its tool budget
+# is exhausted mid-thought. These leak through as the structured `findings`
+# field, producing reports that say "Let me crawl..." instead of observations.
+_PLANNING_PREFIXES = (
+    "let me ", "let's ", "i'll ", "i will ", "i'm going to ", "i am going to ",
+    "next, i", "next i ", "now i ", "now i'", "now, i", "first, i", "first i ",
+    "to answer", "to investigate", "let's start", "i need to ", "i need ",
+    "i now need to ", "i now need ", "i still need to ", "i still need ",
+    "i've used my tool budget", "i have used my tool budget",
+    "my tool budget", "the tool budget",
+    "i should ", "i would ", "i can ",
+)
+
+
+def _looks_like_planning(text: str) -> bool:
+    """Heuristic: detect inner-monologue planning text vs structured output.
+
+    Returns True when the text reads like the LLM's planning prelude rather
+    than a final answer. Used at ReAct exit to detect budget-exhausted
+    researchers that serialized their next-action sentence as the final
+    `response.content` instead of emitting a JSON observation.
+
+    Conservative on length: structured findings can be long, so we only flag
+    short outputs that begin with a known planning prefix. JSON-shaped output
+    (starts with ``{`` or ``[``) is never flagged here — for that case, use
+    :func:`_planning_text_in_json_value` which inspects the parsed values.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("{") or stripped.startswith("["):
+        return False
+    if len(stripped) >= 400:
+        return False
+    lower = stripped.lower()
+    return any(lower.startswith(p) for p in _PLANNING_PREFIXES)
+
+
+def _starts_with_planning_prefix(text: str) -> bool:
+    """Detect a planning preamble without the short-output safety cap.
+
+    This is used only by opt-in tool agents whose final output is parsed from
+    tool state, not trusted prose. The default researcher guard keeps the
+    stricter length cap in :func:`_looks_like_planning`.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("{") or stripped.startswith("["):
+        return False
+    lower = stripped.lower()
+    return any(lower.startswith(p) for p in _PLANNING_PREFIXES)
+
+
+def _contains_structured_payload(text: str) -> bool:
+    """Return True when preface text is followed by a structured payload.
+
+    Some non-researcher tool agents are configured to suppress bare planning
+    final output because their authoritative result lives in tool state. That
+    suppression must not discard a valid JSON patch wrapped in a short preface,
+    because downstream parser tools can extract fenced JSON from the message.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("{") or stripped.startswith("["):
+        return True
+    return bool(re.search(r"```(?:json)?\s*[\{\[]", stripped, re.IGNORECASE))
+
+
+def _value_looks_like_planning(value: Any) -> bool:
+    """Like :func:`_looks_like_planning` but tolerates a value coming from a
+    parsed JSON document (strips JSON-shape early-return).
+
+    Designed for the Phase 3.2 JSON-value leak check: an LLM that wraps a
+    planning sentence inside a structured JSON ``findings`` / ``observation``
+    field bypasses the bare-string detector because the OUTER content starts
+    with ``{``. We reach into the value, treat it as prose, and apply the
+    same prefix heuristic.
+    """
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if len(stripped) >= 400:
+        return False
+    lower = stripped.lower()
+    return any(lower.startswith(p) for p in _PLANNING_PREFIXES)
+
+
+def _planning_text_in_json_value(text: str) -> bool:
+    """Detect JSON content whose findings/observation field is planning text.
+
+    The Phase 3 lane-output trace exposed this leak class: a researcher emits
+    a syntactically valid JSON object like ``{"findings": "Let me search for
+    ...", "observation": "Let me search for ..."}``. The outer string starts
+    with ``{`` so :func:`_looks_like_planning` returns False, and the
+    planning sentence rides through into the synthesizer as a legitimate
+    observation. This guard parses the JSON and checks each candidate field.
+
+    Returns False on JSON parse failure (the bare-string detector handles
+    non-JSON content) and on dicts whose fields are all concrete findings.
+    """
+    stripped = text.strip()
+    if not (stripped.startswith("{") or stripped.startswith("[")):
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    candidate_fields = ("findings", "observation", "findings_text", "summary")
+    for candidate_field in candidate_fields:
+        if _value_looks_like_planning(parsed.get(candidate_field)):
+            return True
+    # Also check lane-suffixed findings keys (findings_lane_5, etc.) — the
+    # output_normalizer / framework sometimes emits these directly.
+    for key, value in parsed.items():
+        if (
+            isinstance(key, str)
+            and key.startswith("findings_")
+            and _value_looks_like_planning(value)
+        ):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +210,18 @@ class ToolCallCache:
         scope: str = "",
     ) -> None:
         self._cache[self._make_key(tool_name, arguments, scope)] = (result, sources or [])
+
+
+def _tool_result_cacheable(meta: Mapping[str, Any]) -> bool:
+    """Return whether a tool result is safe to replay from the dedup cache."""
+    if not bool(meta.get("tool_success", True)):
+        return False
+    if str(meta.get("evidence_quality", "")) == "builtin":
+        return True
+    try:
+        return int(meta.get("accepted_source_count", 0)) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -119,9 +263,7 @@ def _is_structural_line(line: str) -> bool:
     if "chunk_type=" in lower or "page_info=" in lower or "file_name=" in lower:
         return True
     # Markdown table alignment row (keeps column structure interpretable)
-    if line.startswith("| ---") or line.startswith("|---"):
-        return True
-    return False
+    return line.startswith("| ---") or line.startswith("|---")
 
 
 _UNIT_INDICATORS = ("million", "thousand", "billion", "in percent")
@@ -204,6 +346,7 @@ class ReactLoop:
         convergence_rounds: int = 4,
         per_tool_limits: dict[str, int] | None = None,
         hint_queries: list[str] | None = None,
+        suppress_planning_final_output: bool = False,
     ) -> None:
         self._llm = llm_client
         self._ctx = tool_context or ToolContext()
@@ -234,6 +377,7 @@ class ReactLoop:
         self._same_tool_consecutive_rounds: int = 0
         self._last_round_tool: str = ""
         self._budget_warned: bool = False
+        self._midbudget_warned: bool = False
         self._force_convergence = force_convergence
         self._convergence_rounds = convergence_rounds
         self._active_tool_names: set[str] | None = None  # None = all tools allowed
@@ -242,12 +386,49 @@ class ReactLoop:
         self._jaccard_threshold = dedup_jaccard_threshold
         self._per_tool_limits: dict[str, int] = dict(per_tool_limits) if per_tool_limits else {}
         self._per_tool_counts: dict[str, int] = {}
+        self._suppress_planning_final_output = suppress_planning_final_output
         # Pre-compute set for O(1) lookup — budget-free tools don't count
         # against max_tool_calls budget.
         self._budget_free_tools: frozenset[str] = frozenset(
             t.definition.name for t in tools
             if t.definition.metadata.get("budget_free", False)
         )
+
+    # -- ReactLoopHook Protocol surface --------------------------------------
+    # Read-only views of private attrs so external collaborators (the HITL
+    # gate, tests) can depend on a typed Protocol instead of reaching into
+    # privates. ReactLoop satisfies ``ReactLoopHook`` structurally; no
+    # explicit base class is required.
+
+    @property
+    def node_id(self) -> str:
+        return self._node_id
+
+    @property
+    def extras(self) -> Mapping[str, Any]:
+        return self._ctx.extras
+
+    def emit_event(self, event: Any) -> None:
+        """Best-effort HITL event emission.
+
+        Always emits a structured log line. The ``hasattr``/``isinstance``
+        checks below are NOT a Constitution #4 violation per the
+        ``ReactLoopHook`` carve-out: they exist solely for the test
+        backward-compat surface during the migration window. The Protocol
+        contract is satisfied by the structured log line alone.
+        """
+        event_type = getattr(event, "event_type", "")
+        logger.info(
+            "REACT_HITL_EVENT node_id=%s event_type=%s",
+            self._node_id,
+            event_type,
+        )
+        # TODO(PR3b-followup): remove _pending_events back-compat after
+        # migration window — kept for tests that still inject a pending
+        # queue via the legacy attribute.
+        pending = getattr(self, "_pending_events", None)
+        if isinstance(pending, list):
+            pending.append(event)
 
     # -- Budget-aware guidance -----------------------------------------------
 
@@ -280,7 +461,7 @@ class ReactLoop:
                 if self._consecutive_zero_novel_rounds == self._convergence_rounds:
                     # Phase 1: compute-only for final calculations
                     messages.append({
-                        "role": "system",
+                        "role": "user",
                         "content": (
                             f"FORCED CONVERGENCE: {self._convergence_rounds} consecutive tool-call rounds returned no "
                             "new data. You have stored values in compute. Perform any final "
@@ -300,7 +481,7 @@ class ReactLoop:
                 else:
                     # Phase 2+: no tools — execution gate rejects all calls
                     messages.append({
-                        "role": "system",
+                        "role": "user",
                         "content": (
                             "FINAL WARNING: You must output your COMPLETE FINDINGS now. "
                             "No more tool calls are available. Write your full output."
@@ -313,13 +494,26 @@ class ReactLoop:
                     return []  # Empty → _active_tool_names = set() → gate rejects all
 
         if remaining <= 2:
+            researcher_directive = (
+                " You MUST emit your final findings as a JSON object matching "
+                "the RESEARCHER_OUTPUT_CONTRACT schema (fields: search_queries, "
+                "observation, key_points, sources_used, research_status, "
+                "findings). Do NOT write planning prose like 'Let me crawl...' "
+                "or 'I'll now search...' — emit the JSON observation directly. "
+                "If you have not gathered enough evidence, set "
+                "research_status=\"incomplete\" and explain why in "
+                "blocking_reason."
+                if self._subtype == "researcher"
+                else ""
+            )
             messages.append({
-                "role": "system",
+                "role": "user",
                 "content": (
                     f"CRITICAL: Only {remaining} tool call(s) remaining. "
                     "Include your COMPLETE FINAL OUTPUT text in this response. "
                     "Write your full findings/answer alongside any last tool call. "
                     "If you stored values via compute, reference them in your output."
+                    + researcher_directive
                 ),
             })
             logger.info(
@@ -334,10 +528,42 @@ class ReactLoop:
             return compute_defs if compute_defs else None
 
         remaining_pct = remaining / self._max_tool_calls if self._max_tool_calls > 0 else 1.0
+
+        # Phase 3.1: Mid-budget synthesis nudge for researchers. Fires once
+        # at the 50% threshold (researchers only) — earlier and gentler than
+        # the 25% warning below. The goal is to force the model to draft a
+        # concrete observation while it still has follow-up search budget,
+        # so it can't end on planning text ("Let me crawl..."). Without
+        # this, researchers spend their entire budget searching and then
+        # emit planning-leak findings when the loop exits.
+        if (
+            self._subtype == "researcher"
+            and remaining_pct <= 0.5
+            and not self._midbudget_warned
+        ):
+            self._midbudget_warned = True
+            used = self._max_tool_calls - remaining
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"You have used {used} of {self._max_tool_calls} tool "
+                    "calls. Begin drafting your findings now using the "
+                    "evidence gathered so far. You may issue follow-up "
+                    "searches if synthesis reveals a specific gap, but your "
+                    "next non-tool response MUST be a concrete draft "
+                    "observation tied to your sub-questions — not a planning "
+                    "sentence ('Let me search...', 'I'll now crawl...')."
+                ),
+            })
+            logger.info(
+                "REACT_BUDGET_MIDPOINT_NUDGE node=%s used=%d max=%d",
+                self._node_id, used, self._max_tool_calls,
+            )
+
         if remaining_pct <= 0.25 and not self._budget_warned:
             self._budget_warned = True
             messages.append({
-                "role": "system",
+                "role": "user",
                 "content": (
                     f"BUDGET: {remaining} tool calls remaining out of "
                     f"{self._max_tool_calls}. Start writing your findings. "
@@ -533,6 +759,17 @@ class ReactLoop:
                 else:
                     self._active_tool_names = None  # None = all tools allowed
 
+                # Diagnostic: estimated prompt size per ReAct iteration, so
+                # cross-iteration growth is reconstructable from logs.
+                logger.info(
+                    "REACT_PRECALL node=%s call=%d est_prompt_tokens=%d "
+                    "messages=%d tools=%d",
+                    self._node_id, call_count,
+                    estimate_message_tokens(messages, active_tool_defs),
+                    len(messages),
+                    len(active_tool_defs) if active_tool_defs else 0,
+                )
+
                 # LLM call
                 if self._stream and call_count == 0 and not first_turn_retried:
                     response, stream_events = await self._stream_call(messages)
@@ -572,7 +809,7 @@ class ReactLoop:
                     first_turn_retried = True
                     messages.append(self._assistant_msg(response))
                     messages.append({
-                        "role": "system",
+                        "role": "user",
                         "content": (
                             "You have search tools available. "
                             "Call at least one to gather evidence before responding."
@@ -600,7 +837,7 @@ class ReactLoop:
                     ):
                         self._fallback_retry_used = True
                         messages.append({
-                            "role": "system",
+                            "role": "user",
                             "content": (
                                 "You still have no accepted evidence. "
                                 "Call one of the available fallback tools before answering."
@@ -610,6 +847,120 @@ class ReactLoop:
                     exit_reason = (
                         "no_tool_calls" if not response.tool_calls
                         else "max_calls_reached"
+                    )
+
+                    # DR_LEAK_TRACE pre-guard: capture content BEFORE any leak
+                    # replacement so the downstream trace can show what the
+                    # researcher actually emitted.
+                    logger.info(
+                        "DR_LEAK_TRACE phase=react_exit_pre_guard "
+                        "node=%s subtype=%s exit_reason=%s sources=%d "
+                        "content_len=%d content_head=%r",
+                        self._node_id,
+                        self._subtype,
+                        exit_reason,
+                        len(sources),
+                        len(response.content),
+                        response.content[:300].replace("\n", "\\n"),
+                    )
+
+                    # ── Planning-text leak guards ───────────────────────
+                    # Budget-exhausted researchers sometimes serialize a
+                    # planning sentence ("Let me crawl…") as the final
+                    # response.content. Detect and replace with a structured
+                    # incomplete-observation JSON so the downstream
+                    # synthesizer doesn't treat the inner-monologue as
+                    # findings. Defense-in-depth alongside the critical-
+                    # budget directive in _inject_budget_guidance.
+                    bare_leak = (
+                        self._subtype == "researcher"
+                        and _looks_like_planning(response.content)
+                    )
+                    # Phase 3.2: JSON-value leak class — researcher emits
+                    # syntactically valid JSON whose findings/observation
+                    # field is itself a planning sentence ("Let me search
+                    # ..."). The bare-string detector misses this because
+                    # the OUTER content begins with ``{``. Catch it here.
+                    json_leak = (
+                        self._subtype == "researcher"
+                        and not bare_leak
+                        and _planning_text_in_json_value(response.content)
+                    )
+                    suppressed_bare_planning = (
+                        self._suppress_planning_final_output
+                        and not bare_leak
+                        and _starts_with_planning_prefix(response.content)
+                        and not _contains_structured_payload(response.content)
+                    )
+                    if bare_leak or json_leak:
+                        leaked_preview = response.content.strip()[:160]
+                        logger.warning(
+                            "REACT_PLANNING_LEAK node=%s exit_reason=%s "
+                            "leak_kind=%s content_preview=%r",
+                            self._node_id,
+                            exit_reason,
+                            "json_value" if json_leak else "bare_string",
+                            leaked_preview,
+                        )
+                        fallback_payload = {
+                            "search_queries": [],
+                            "observation": (
+                                "Research budget exhausted before this lane "
+                                "could complete its investigation. The "
+                                "researcher emitted planning text instead of "
+                                "a final observation; treat sources gathered "
+                                "via tool calls as the only ground-truth "
+                                "evidence for this lane."
+                            ),
+                            "key_points": [],
+                            "sources_used": [],
+                            "research_status": "incomplete",
+                            "blocking_reason": "tool_budget_exhausted",
+                            "findings": "",
+                        }
+                        response = LLMResponse(
+                            content=json.dumps(fallback_payload),
+                            tool_calls=[],
+                            model=response.model,
+                            usage=response.usage,
+                        )
+                        exit_reason = "planning_leak_replaced"
+                    elif suppressed_bare_planning:
+                        leaked_preview = response.content.strip()[:160]
+                        logger.warning(
+                            "REACT_PLANNING_LEAK_SUPPRESSED node=%s exit_reason=%s "
+                            "content_preview=%r",
+                            self._node_id,
+                            exit_reason,
+                            leaked_preview,
+                        )
+                        response = LLMResponse(
+                            content="",
+                            tool_calls=[],
+                            model=response.model,
+                            usage=response.usage,
+                        )
+                        exit_reason = "planning_leak_suppressed"
+
+                    # DR_LEAK_TRACE post-guard: capture content AFTER the leak
+                    # guard has had a chance to replace planning text. If
+                    # bare_leak/json_leak fired, content_head will show the
+                    # structured incomplete payload; if not, it shows the raw
+                    # researcher output that downstream sees.
+                    logger.info(
+                        "DR_LEAK_TRACE phase=react_exit "
+                        "node=%s subtype=%s exit_reason=%s "
+                        "bare_leak=%s json_leak=%s suppressed_bare_planning=%s sources=%d "
+                        "content_len=%d content_head=%r",
+                        self._node_id,
+                        self._subtype,
+                        exit_reason,
+                        bool(bare_leak),
+                        bool(json_leak),
+                        bool(suppressed_bare_planning),
+                        len(sources),
+                        len(response.content),
+                        response.content[:300].replace("\n", "\\n"),
                     )
 
                     # ── Compute namespace fallback ─────────────────────
@@ -750,21 +1101,22 @@ class ReactLoop:
                             exec_args = json.loads(tc.arguments) if tc.arguments else {}
                         except json.JSONDecodeError:
                             exec_args = {}
-                        self._cache.put(
-                            tc.function_name,
-                            exec_args,
-                            result_content,
-                            tool_srcs,
-                            scope=self._cache_scope,
-                        )
-                        # Global cross-step cache
-                        self._cache.put(
-                            tc.function_name,
-                            exec_args,
-                            result_content,
-                            tool_srcs,
-                            scope="",
-                        )
+                        if _tool_result_cacheable(tool_result_meta):
+                            self._cache.put(
+                                tc.function_name,
+                                exec_args,
+                                result_content,
+                                tool_srcs,
+                                scope=self._cache_scope,
+                            )
+                            # Global cross-step cache
+                            self._cache.put(
+                                tc.function_name,
+                                exec_args,
+                                result_content,
+                                tool_srcs,
+                                scope="",
+                            )
                         messages.append(self._tool_msg(tc.id, result_content))
                         responded_tc_ids.add(tc.id)
                         events.append(ToolResultEvent(
@@ -830,7 +1182,7 @@ class ReactLoop:
                         len(self._seen_source_urls),
                     )
                     messages.append({
-                        "role": "system",
+                        "role": "user",
                         "content": (
                             "The last 2 rounds of tool calls returned no new unique sources. "
                             "You likely have sufficient evidence. Synthesize your findings "
@@ -864,7 +1216,7 @@ class ReactLoop:
                         self._same_tool_consecutive_rounds, other_tools,
                     )
                     messages.append({
-                        "role": "system",
+                        "role": "user",
                         "content": (
                             f"You have used only '{self._last_round_tool}' for the last "
                             f"{self._same_tool_consecutive_rounds} rounds. "
@@ -933,6 +1285,18 @@ class ReactLoop:
             self._node_id, tool_name,
             {k: str(v)[:200] for k, v in log_args.items()},
         )
+
+        # ── HITL approval gate (Phase 2; opt-in, dead code for default subtypes) ──
+        if (
+            (tool.definition.metadata or {}).get("requires_confirmation")
+            and self._ctx.extras.get("_framework_approval_broker") is not None
+        ):
+            from databricks_deep_research.agents.react_loop_hitl import (
+                run_hitl_gate,
+            )
+            denied_meta = await run_hitl_gate(self, tool, args)
+            if denied_meta is not None:
+                return tc.id, denied_meta["content"], [], denied_meta["meta"]
 
         # ── Per-tool call limits ────────────────────────────
         if tool_name in self._per_tool_limits:
@@ -1068,10 +1432,10 @@ class ReactLoop:
                     [query[:200] for query in planned.alternate_queries],
                 )
 
-            # For delta tools (file_name + pattern), include all retrieval-
-            # shaping args in the dedup key so different patterns on the same
-            # file are not falsely deduplicated.
-            if source_kind in ("delta_table",):
+            # For text-table tools (binding + filter), include all retrieval-
+            # shaping args in the dedup key so different filters on the same
+            # binding are not falsely deduplicated.
+            if source_kind in ("text_table",):
                 dedup_parts = []
                 for k in sorted(planned.arguments.keys()):
                     v = planned.arguments[k]
@@ -1203,7 +1567,14 @@ class ReactLoop:
                 }
                 # Cache with rewritten args too (so post-rewrite lookup hits next time)
                 rewritten_put_args = {k: v for k, v in planned.arguments.items() if k != "_alternate_queries"}
-                self._cache.put(tc.function_name, rewritten_put_args, admitted.content, admitted.accepted_sources, scope="")
+                if _tool_result_cacheable(meta):
+                    self._cache.put(
+                        tc.function_name,
+                        rewritten_put_args,
+                        admitted.content,
+                        admitted.accepted_sources,
+                        scope="",
+                    )
 
                 self._record_tool_outcome(tool_name, meta, planned.rewritten_query)
                 return tc.id, admitted.content, admitted.accepted_sources, meta
@@ -1382,7 +1753,7 @@ class ReactLoop:
             list(self._fallback_tools.keys()),
         )
         messages.append({
-            "role": "system",
+            "role": "user",
             "content": (
                 "Preferred sources returned no accepted evidence for the current step. "
                 "Fallback sources are now available. Use them only to fill the gap."

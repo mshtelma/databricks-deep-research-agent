@@ -8,6 +8,11 @@ stored in the verification_data JSONB column on research_sessions.
 The enum types (ClaimType, VerificationVerdict, etc.) are kept for use in schemas.
 """
 
+from deep_research.models.agent_deployment import (
+    AgentDeployment,
+    DeploymentMode,
+    DeploymentStatus,
+)
 from deep_research.models.audit_log import AuditAction, AuditLog
 from deep_research.models.chat import Chat, ChatStatus, ChatType
 from deep_research.models.chat_memory_coverage import ChatMemoryCoverage
@@ -15,15 +20,6 @@ from deep_research.models.chat_memory_entity import ChatMemoryEntity
 from deep_research.models.chat_memory_file import ChatMemoryFile
 from deep_research.models.chat_memory_finding import ChatMemoryFinding
 from deep_research.models.chat_memory_plugin_ext import ChatMemoryPluginExt
-from deep_research.models.custom_agent import (
-    AgentOutputFormat,
-    AgentPresetStep,
-    AgentResearchDepth,
-    AgentSourceScope,
-    AgentVisibility,
-    AgentWorkflowMode,
-    CustomAgent,
-)
 from deep_research.models.data_source import (
     DataSourceType,
     DataSourceValidationStatus,
@@ -66,6 +62,7 @@ from deep_research.models.uploaded_file import (
 )
 from deep_research.models.user import User
 from deep_research.models.user_preferences import UserPreferences
+from deep_research.models.visibility import AgentVisibility
 
 __all__ = [
     # Chat
@@ -115,14 +112,12 @@ __all__ = [
     "PromptTemplate",
     "TemplateType",
     "TemplateVisibility",
-    # Custom Agent (US6)
-    "CustomAgent",
-    "AgentPresetStep",
+    # Agent visibility enum (shared, from models/visibility.py)
     "AgentVisibility",
-    "AgentSourceScope",
-    "AgentWorkflowMode",
-    "AgentOutputFormat",
-    "AgentResearchDepth",
+    # Agent deployment (Phase 1 backend)
+    "AgentDeployment",
+    "DeploymentMode",
+    "DeploymentStatus",
     # Chat Memory (attached-files + trajectory findings)
     "ChatMemoryFinding",
     "ChatMemoryEntity",

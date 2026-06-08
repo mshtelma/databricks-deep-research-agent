@@ -20,8 +20,8 @@ class ReadAttachedFileTool:
 
     def __init__(
         self,
-        memory: "ChatMemoryService",
-        file_service: "IFileUploadService",
+        memory: ChatMemoryService,
+        file_service: IFileUploadService,
     ) -> None:
         self._memory = memory
         self._file_service = file_service
@@ -63,7 +63,7 @@ class ReadAttachedFileTool:
     async def execute(
         self,
         arguments: dict[str, Any],
-        context: ResearchContext,
+        _context: ResearchContext,
     ) -> ToolResult:
         raw_id = arguments.get("file_id", "")
         offset = max(0, int(arguments.get("offset", 0) or 0))

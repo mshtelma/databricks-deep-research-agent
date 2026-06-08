@@ -186,8 +186,8 @@ class CachedDataSourceService(_CachedServiceBase, IDataSourceService):
 
     def __init__(
         self,
-        stack: "StorageStack",
-        obo_client: "OBODatabricksClient | None" = None,
+        stack: StorageStack,
+        obo_client: OBODatabricksClient | None = None,
     ) -> None:
         super().__init__(stack)
         if obo_client is None:

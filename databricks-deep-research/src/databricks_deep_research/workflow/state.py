@@ -85,6 +85,11 @@ class WorkflowState:
         Optional domain restriction for web searches.
     is_cancelled:
         Flag that nodes should check to abort early.
+    conversation_history:
+        List of ``{role, content}`` dicts in OpenAI message format.
+        Populated by the caller (chat orchestrator) so multi-turn workflows
+        can see prior turns.  Consumed by the agent harness via
+        ``_build_input → AgentInput.conversation_history``.
     """
 
     query: str = ""
@@ -96,6 +101,7 @@ class WorkflowState:
     domain_filter: str | None = None
     is_cancelled: bool = False
     runtime_store: TypedRuntimeStateStore | None = None
+    conversation_history: list[dict[str, Any]] = field(default_factory=list)
 
     # -- internal bookkeeping (not serialised) ------------------------------
     _latest_index: dict[str, int] = field(default_factory=dict, repr=False)

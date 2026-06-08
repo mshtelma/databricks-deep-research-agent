@@ -1,0 +1,39 @@
+[project]
+name = "{{ app_name }}"
+version = "0.1.0"
+description = "Standalone Databricks App — framework installed from bundled wheel"
+requires-python = ">=3.11"
+dependencies = [
+  # The framework is installed from a locally-bundled wheel under wheels/
+  # (see [tool.uv.sources] below). The bundled file is shipped inside this
+  # zip by the shell-app exporter so the deployed app does NOT need
+  # outbound GitHub access at startup.
+  "databricks-deep-research[tracing,web,crawl,search]",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "sse-starlette>=2.1",
+  "PyYAML>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+# Path source pointing at the wheel bundled into this zip. The filename is
+# stamped at export time so each shell-app zip is self-contained — no
+# network fetch at install. See plan imperative-wishing-lynx.md.
+databricks-deep-research = { path = "wheels/{{ framework_wheel_filename }}" }
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+only-include = [
+  "app.py",
+  "agent.yaml",
+  "static",
+]

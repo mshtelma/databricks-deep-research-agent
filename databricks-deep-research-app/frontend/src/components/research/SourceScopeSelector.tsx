@@ -220,6 +220,7 @@ function SourceToggleItem({ source, onToggle, disabled }: SourceToggleItemProps)
 function getSourceTypeLabel(type: DataSourceType): string {
   const labels: Record<DataSourceType, string> = {
     vector_search: 'Vector Search',
+    delta_table: 'Delta Table',
     genie: 'Genie',
     knowledge_assistant: 'Knowledge Assistant',
     web_search: 'Web Search',
@@ -239,6 +240,8 @@ function SourceTypeIcon({
   switch (type) {
     case 'vector_search':
       return <SearchIcon className={cn('text-blue-600', className)} />;
+    case 'delta_table':
+      return <DatabaseIcon className={cn('text-cyan-600', className)} />;
     case 'genie':
       return <DatabaseIcon className={cn('text-purple-600', className)} />;
     case 'knowledge_assistant':

@@ -23,8 +23,11 @@ Run with:
 
 import os
 
-import mlflow
 import pytest
+from databricks_deep_research.tracing import (
+    setup_mlflow_tracing,
+    shutdown_mlflow_tracing,
+)
 from tests.shared import (
     brave_client,  # noqa: F401
     cleanup_mlflow_run,  # noqa: F401
@@ -32,58 +35,61 @@ from tests.shared import (
     requires_all_credentials,  # noqa: F401
     requires_brave,  # noqa: F401
     requires_databricks,  # noqa: F401
+    resolve_trace_backend,
     web_crawler,  # noqa: F401
 )
 
 # ---------------------------------------------------------------------------
-# MLflow Configuration
+# MLflow Tracing
 # ---------------------------------------------------------------------------
-
-# Default experiment path for complex tests (matches app.yaml deployment config)
-DEFAULT_MLFLOW_EXPERIMENT = "/Shared/deep-research-agent"
 
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_mlflow_tracking() -> None:
-    """Configure MLflow to log to remote Databricks workspace.
+    """Enable MLflow tracing for complex / scaffold live runs (always on).
 
-    This fixture sets up MLflow tracking BEFORE any tests run:
-    1. Sets tracking URI to 'databricks' (uses DATABRICKS_HOST + auth)
-    2. Sets experiment from MLFLOW_EXPERIMENT_NAME env var or default
+    Delegates to the framework's ``setup_mlflow_tracing``, which sets the
+    tracking URI + experiment AND calls ``mlflow.tracing.enable()`` +
+    ``mlflow.openai.autolog()`` — the latter two are what actually make the
+    framework's existing ``trace_span`` instrumentation (agent harness, ReAct
+    loop, workflow executor, plan-execute runner, citation pipeline) record
+    spans. The legacy fixture set a URI + experiment but never enabled tracing,
+    so nothing was captured.
 
-    Required environment:
-    - DATABRICKS_HOST or DATABRICKS_CONFIG_PROFILE for authentication
-    - Optional: MLFLOW_EXPERIMENT_NAME to override default experiment
-
-    If Databricks credentials are not available, falls back to local tracking.
+    Backend is chosen by ``resolve_trace_backend()``: the Databricks workspace
+    experiment when creds are configured, otherwise a local MLflow OSS sqlite
+    store under ``tests/_runs/mlflow.db``. No test-body changes are required —
+    spans flow automatically once tracing is enabled.
     """
-    # Get experiment name from env or use default
-    experiment_name = os.getenv("MLFLOW_EXPERIMENT_NAME", DEFAULT_MLFLOW_EXPERIMENT)
-
-    # Check if we have Databricks credentials
-    has_databricks = bool(
-        os.getenv("DATABRICKS_TOKEN") or os.getenv("DATABRICKS_CONFIG_PROFILE")
+    tracking_uri, experiment_name = resolve_trace_backend()
+    # Local file/sqlite backends use MLflow's V3 span exporter, which writes
+    # synchronously and does NOT support flush_trace_async_logging() — enabling
+    # async logging there only emits a noisy "no attribute '_async_queue'" error
+    # at teardown (traces still land). Async logging matters only for the
+    # Databricks backend, where it avoids blocking on the network and the flush
+    # in shutdown_mlflow_tracing() works.
+    is_local_backend = tracking_uri.startswith(("sqlite:", "file:"))
+    ok = setup_mlflow_tracing(
+        tracking_uri=tracking_uri,
+        experiment_name=experiment_name,
+        async_logging=not is_local_backend,
     )
-
-    if has_databricks:
-        # Set tracking URI to Databricks
-        mlflow.set_tracking_uri("databricks")
-        print("\n📊 MLflow: Tracking to Databricks workspace")
+    if ok:
+        print(f"\n📊 MLflow tracing ON — uri={tracking_uri} experiment={experiment_name}")
+        if tracking_uri.startswith("sqlite:"):
+            print(
+                f"📊 Analyze later: mlflow ui --backend-store-uri {tracking_uri}"
+                "  (open the Traces tab)"
+            )
     else:
-        # Fall back to local tracking if no credentials
-        print("\n⚠️  MLflow: No Databricks credentials, using local tracking")
-
-    # Set or create the experiment
-    try:
-        mlflow.set_experiment(experiment_name)
-        print(f"📊 MLflow: Experiment = {experiment_name}")
-    except Exception as e:
-        # If experiment creation fails (e.g., permissions), log warning
-        print(f"⚠️  MLflow: Could not set experiment '{experiment_name}': {e}")
+        print(f"\n⚠️  MLflow tracing setup failed (uri={tracking_uri}); spans will not be recorded")
 
     yield
 
-    # No cleanup needed - MLflow handles connection lifecycle
+    # Flush async-buffered spans before the process exits (mirrors the
+    # benchmarks/run.py setup/shutdown pattern). Without this, async traces
+    # can be dropped at interpreter teardown.
+    shutdown_mlflow_tracing()
 
 
 # ---------------------------------------------------------------------------

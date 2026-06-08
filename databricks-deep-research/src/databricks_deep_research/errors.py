@@ -9,6 +9,10 @@ class WorkflowError(Exception):
     """Base exception for all framework errors."""
 
 
+class WorkflowConditionEvaluationError(WorkflowError):
+    """Raised when a workflow condition cannot be evaluated safely."""
+
+
 class PlanningContractError(WorkflowError):
     """Raised when a planning loop cannot satisfy its execution contract."""
 
@@ -37,6 +41,31 @@ class TokenBudgetExceededError(WorkflowError):
         self.used = used
         self.limit = limit
         super().__init__(f"Token budget exceeded: used {used} of {limit}")
+
+
+class ContextWindowExceededError(WorkflowError):
+    """Raised when an assembled prompt cannot fit any available model's context window.
+
+    Only raised when overflow handling is configured to ``fail`` (the default
+    behavior escalates to a larger-context endpoint and, as a last resort,
+    truncates). ``tried`` lists the endpoints considered, each as
+    ``(endpoint, window)``.
+    """
+
+    def __init__(
+        self,
+        required_tokens: int,
+        best_window: int,
+        tried: list[tuple[str, int]] | None = None,
+    ) -> None:
+        self.required_tokens = required_tokens
+        self.best_window = best_window
+        self.tried = tried or []
+        super().__init__(
+            f"Prompt requires ~{required_tokens} tokens but the largest "
+            f"available context window is {best_window}. "
+            f"Tried endpoints: {self.tried}"
+        )
 
 
 class NodeBudgetExceededError(WorkflowError):

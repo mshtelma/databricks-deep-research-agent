@@ -43,7 +43,7 @@ _TABLE = "message_feedback"
 class CachedFeedbackService(_CachedServiceBase, IFeedbackService):
     """`IFeedbackService` implementation over a `StorageStack` list-table."""
 
-    def __init__(self, stack: "StorageStack") -> None:
+    def __init__(self, stack: StorageStack) -> None:
         super().__init__(stack)
 
     async def create_feedback(

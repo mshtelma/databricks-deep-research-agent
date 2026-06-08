@@ -177,3 +177,20 @@ class TestWebSearchTableDetection:
 
         assert result.success
         assert len(reg) == 0  # nothing registered — capacity full
+
+
+class TestDomainMatches:
+    """_domain_matches: wildcard suffix + subdomain-inclusive bare domains (D1)."""
+
+    def test_exact_and_subdomain(self) -> None:
+        from databricks_deep_research.tools.builtins.web_search import _domain_matches
+
+        assert _domain_matches("https://reuters.com/x", ["reuters.com"]) is True
+        assert _domain_matches("https://www.reuters.com/x", ["reuters.com"]) is True
+        assert _domain_matches("https://notreuters.com/x", ["reuters.com"]) is False
+
+    def test_suffix_wildcard_unchanged(self) -> None:
+        from databricks_deep_research.tools.builtins.web_search import _domain_matches
+
+        assert _domain_matches("https://cdc.gov/x", ["*.gov"]) is True
+        assert _domain_matches("https://gov.example.com/x", ["*.gov"]) is False

@@ -53,7 +53,7 @@ def _msg_to_namespace(m: DocMessage, chat_id: UUID) -> SimpleNamespace:
 class CachedMessageService(_CachedServiceBase, IMessageService):
     """`IMessageService` via `ChatState.messages[]`."""
 
-    def __init__(self, stack: "StorageStack") -> None:
+    def __init__(self, stack: StorageStack) -> None:
         super().__init__(stack)
 
     async def create(

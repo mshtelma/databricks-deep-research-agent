@@ -436,4 +436,7 @@ def test_executor_exposes_both_compat_and_typed_run_helpers() -> None:
 
 def test_runner_uses_workflow_executor_compat_path() -> None:
     content = (SRC_ROOT / "runner.py").read_text()
-    assert 'executor = WorkflowExecutor(definition, effective_client, factory_context=self._factory)' in content
+    assert "executor = WorkflowExecutor(" in content
+    assert "definition," in content
+    assert "effective_client," in content
+    assert "factory_context=self._factory," in content

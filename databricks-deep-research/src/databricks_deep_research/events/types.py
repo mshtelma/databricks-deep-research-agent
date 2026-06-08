@@ -127,6 +127,19 @@ class AgentStreamChunkEvent(StreamEvent):
     subtype: str = ""
 
 
+class ModelCallEvent(StreamEvent):
+    """Emitted by FrameworkLLMClient after model resolution, before the HTTP
+    call. Lets observers see which concrete model handled each tier
+    request — used by the scaffold-and-run test to verify the designer's
+    architect used Opus (and critic used GPT-5)."""
+
+    event_type: Literal["model_call"] = "model_call"
+    node_id: str = ""
+    tier: str = ""           # logical tier name ("complex", "critic", etc.)
+    model: str = ""          # concrete endpoint identifier (e.g. "databricks-claude-opus-4-6")
+    request_id: str = ""     # OpenAI-API-style request id, optional
+
+
 # --- Typed output models (per-subtype Pydantic contracts) ---
 
 
@@ -486,6 +499,11 @@ class ClaimVerifiedEvent(StreamEvent):
     verification_method: str = ""
     evidence_snippet: str = ""
     claim_text: str = ""
+    # Numeric citation keys (e.g. "1", "2") matching the markers in the rendered
+    # report, so the live UI can color this claim's markers before persistence.
+    # Mirrors ClaimGeneratedEvent.citation_keys. See _normalize_verification_records.
+    citation_key: str | None = None
+    citation_keys: list[str] = Field(default_factory=list)
 
 
 class CitationCorrectedEvent(StreamEvent):
@@ -521,9 +539,13 @@ class VerificationSummaryEvent(StreamEvent):
     routing_summary: dict[str, Any] = Field(default_factory=dict)
 
 
-# --- Gate (HITL) events (deferred beyond P0) ---
-# GateWaitingEvent, GateResumedEvent, GateTimeoutEvent
-# Will be added when HITL gate support is implemented.
+# --- Gate (HITL) events (Phase 2) ---
+from databricks_deep_research.events.hitl import (  # noqa: E402
+    GateDeniedEvent,
+    GateResumedEvent,
+    GateTimeoutEvent,
+    GateWaitingEvent,
+)
 
 
 # --- Discriminated union type ---
@@ -543,6 +565,7 @@ FrameworkEvent = Annotated[
     # Agent
     | AgentOutputEvent
     | AgentStreamChunkEvent
+    | ModelCallEvent
     # Domain-specific (builtin subtypes)
     | PlanCreatedEvent
     | ReflectionDecisionEvent
@@ -577,6 +600,11 @@ FrameworkEvent = Annotated[
     | ClaimVerifiedEvent
     | CitationCorrectedEvent
     | NumericClaimDetectedEvent
-    | VerificationSummaryEvent,
+    | VerificationSummaryEvent
+    # HITL gate (Phase 2)
+    | GateWaitingEvent
+    | GateResumedEvent
+    | GateDeniedEvent
+    | GateTimeoutEvent,
     Field(discriminator="event_type"),
 ]

@@ -41,8 +41,8 @@ class ListAttachedFilesTool:
 
     async def execute(
         self,
-        arguments: dict[str, Any],
-        context: ResearchContext,
+        _arguments: dict[str, Any],
+        _context: ResearchContext,
     ) -> ToolResult:
         snapshot = self._memory.snapshot()
         if not snapshot.files:

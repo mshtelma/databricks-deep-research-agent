@@ -14,6 +14,21 @@ from deep_research.schemas.chat import (
     ChatUpdate,
 )
 from deep_research.schemas.common import ErrorResponse, HealthResponse, PaginatedResponse
+from deep_research.schemas.deployment import (
+    ActiveDeploymentsErrorResponse,
+    ActiveDeploymentSummary,
+    BatchDeploymentConfig,
+    CanRunFastResponse,
+    CanRunSlowResponse,
+    CreateDeploymentRequest,
+    DeploymentConfig,
+    DeploymentListResponse,
+    DeploymentResponse,
+    DeploymentStatusResponse,
+    InAppDeploymentConfig,
+    MlflowAgentDeploymentConfig,
+    ShellAppDeploymentConfig,
+)
 from deep_research.schemas.feedback import FeedbackRequest, FeedbackResponse
 from deep_research.schemas.message import (
     EditMessageRequest,
@@ -113,4 +128,18 @@ __all__ = [
     # Preferences
     "UpdatePreferencesRequest",
     "UserPreferencesResponse",
+    # Deployment (Phase 1 backend)
+    "ActiveDeploymentSummary",
+    "ActiveDeploymentsErrorResponse",
+    "BatchDeploymentConfig",
+    "CanRunFastResponse",
+    "CanRunSlowResponse",
+    "CreateDeploymentRequest",
+    "DeploymentConfig",
+    "DeploymentListResponse",
+    "DeploymentResponse",
+    "DeploymentStatusResponse",
+    "InAppDeploymentConfig",
+    "MlflowAgentDeploymentConfig",
+    "ShellAppDeploymentConfig",
 ]

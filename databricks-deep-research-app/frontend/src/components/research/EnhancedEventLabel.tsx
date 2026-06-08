@@ -1,5 +1,12 @@
 import { cn } from '@/lib/utils';
-import type { StreamEvent, ClaimVerifiedEvent, VerificationSummaryEvent } from '@/types';
+import type {
+  StreamEvent,
+  ClaimVerifiedEvent,
+  VerificationSummaryEvent,
+  ClaimGeneratedEvent,
+  CitationCorrectedEvent,
+  NumericClaimDetectedEvent,
+} from '@/types';
 import { formatActivityLabel, getActivityColor } from '@/utils/activityLabels';
 
 interface EnhancedEventLabelProps {
@@ -22,6 +29,18 @@ export function EnhancedEventLabel({ event, className }: EnhancedEventLabelProps
 
   if (event.eventType === 'verification_summary') {
     return <VerificationSummaryLabel event={event as VerificationSummaryEvent} className={className} />;
+  }
+
+  if (event.eventType === 'claim_generated') {
+    return <ClaimGeneratedLabel event={event as ClaimGeneratedEvent} className={className} />;
+  }
+
+  if (event.eventType === 'citation_corrected') {
+    return <CitationCorrectedLabel event={event as CitationCorrectedEvent} className={className} />;
+  }
+
+  if (event.eventType === 'numeric_claim_detected') {
+    return <NumericClaimDetectedLabel event={event as NumericClaimDetectedEvent} className={className} />;
   }
 
   return (
@@ -97,6 +116,123 @@ function VerificationSummaryLabel({ event, className }: VerificationSummaryLabel
           {unsupported} unsupported
         </span>
       )}
+    </div>
+  );
+}
+
+interface ClaimGeneratedLabelProps {
+  event: ClaimGeneratedEvent;
+  className?: string;
+}
+
+function ClaimGeneratedLabel({ event, className }: ClaimGeneratedLabelProps) {
+  const rawEvent = event as unknown as Record<string, unknown>;
+  const claimText = (event.claimText ?? rawEvent.claim_text ?? '') as string;
+  const confidenceLevel = (event.confidenceLevel ?? rawEvent.confidence_level ?? 'medium') as string;
+  const truncated = claimText ? truncate(claimText, 60) : '';
+
+  const badgeClass =
+    confidenceLevel === 'high'
+      ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
+      : confidenceLevel === 'low'
+        ? 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200'
+        : 'bg-indigo-100 text-indigo-800 dark:bg-indigo-900 dark:text-indigo-200';
+
+  return (
+    <div className={cn('flex items-center gap-2 text-sm', className)}>
+      <span aria-hidden="true">{'💡'}</span>
+      <span className="truncate text-muted-foreground">{truncated}</span>
+      <span className={cn('px-1.5 py-0.5 rounded text-xs font-medium', badgeClass)}>
+        Generated
+      </span>
+    </div>
+  );
+}
+
+interface CitationCorrectedLabelProps {
+  event: CitationCorrectedEvent;
+  className?: string;
+}
+
+function CitationCorrectedLabel({ event, className }: CitationCorrectedLabelProps) {
+  const rawEvent = event as unknown as Record<string, unknown>;
+  const correctionType = (event.correctionType ?? rawEvent.correction_type ?? 'keep') as string;
+  const claimId = (event.claimId ?? rawEvent.claim_id ?? '') as string;
+  const reasoning = (event.reasoning ?? rawEvent.reasoning ?? null) as string | null;
+
+  const badgeMap: Record<string, { label: string; badgeClass: string }> = {
+    keep: {
+      label: 'Kept',
+      badgeClass: 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200',
+    },
+    replace: {
+      label: 'Replaced',
+      badgeClass: 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200',
+    },
+    remove: {
+      label: 'Removed',
+      badgeClass: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+    },
+    add_alternate: {
+      label: 'Alt added',
+      badgeClass: 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200',
+    },
+  };
+  const info = badgeMap[correctionType] ?? badgeMap.keep ?? {
+    label: 'Updated',
+    badgeClass: 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200',
+  };
+  const claimSuffix = claimId ? ` ${truncate(claimId, 12)}` : '';
+
+  return (
+    <div className={cn('flex items-center gap-2 text-sm', className)}>
+      <span aria-hidden="true">{'🔧'}</span>
+      <span className="truncate text-muted-foreground">
+        Citation{claimSuffix}
+        {reasoning ? ` — ${truncate(reasoning, 60)}` : ''}
+      </span>
+      <span className={cn('px-1.5 py-0.5 rounded text-xs font-medium', info.badgeClass)}>
+        {info.label}
+      </span>
+    </div>
+  );
+}
+
+interface NumericClaimDetectedLabelProps {
+  event: NumericClaimDetectedEvent;
+  className?: string;
+}
+
+function NumericClaimDetectedLabel({ event, className }: NumericClaimDetectedLabelProps) {
+  const rawEvent = event as unknown as Record<string, unknown>;
+  const rawValue = (event.rawValue ?? rawEvent.raw_value ?? '') as string;
+  const normalizedValue = (event.normalizedValue ?? rawEvent.normalized_value ?? null) as string | null;
+  const unit = (event.unit ?? rawEvent.unit ?? null) as string | null;
+  const derivationType = (event.derivationType ?? rawEvent.derivation_type ?? 'direct') as string;
+  const qaVerified = (event.qaVerified ?? rawEvent.qa_verified ?? false) as boolean;
+
+  const display = normalizedValue || rawValue;
+  const unitSuffix = unit ? ` ${unit}` : '';
+  const badgeClass = qaVerified
+    ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
+    : 'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200';
+  const derivBadge = derivationType === 'computed'
+    ? 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200'
+    : 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200';
+
+  return (
+    <div className={cn('flex items-center gap-2 text-sm', className)}>
+      <span aria-hidden="true">{'🔢'}</span>
+      <span className="font-db-mono text-muted-foreground">
+        {display}
+        {unitSuffix}
+      </span>
+      <span className={cn('px-1.5 py-0.5 rounded text-xs font-medium', derivBadge)}>
+        {derivationType}
+      </span>
+      <span className={cn('px-1.5 py-0.5 rounded text-xs font-medium', badgeClass)}>
+        {qaVerified ? 'verified' : 'unverified'}
+      </span>
     </div>
   );
 }

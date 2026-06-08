@@ -12,6 +12,7 @@ import {
 } from '@/lib/markdown/citationPlugin';
 import { CitationMarker } from '@/components/citations';
 import type { Claim, VerificationVerdict } from '@/types/citation';
+import { useEventCallback } from '@/hooks/useEventCallback';
 
 interface MarkdownRendererProps {
   content: string;
@@ -31,8 +32,6 @@ interface MarkdownRendererProps {
   onCitationClick?: (citationKey: string, info?: LinkCitationInfo) => void;
   /** Callback when a citation is hovered - includes element for positioning */
   onCitationHover?: (citationKey: string | null, element?: HTMLElement | null) => void;
-  /** Currently active citation key */
-  activeCitationKey?: string | null;
 }
 
 /** Context data for a citation marker */
@@ -60,8 +59,15 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
   citationData,
   onCitationClick,
   onCitationHover,
-  activeCitationKey,
 }: MarkdownRendererProps) {
+  // Stabilise the caller callbacks so a fresh inline arrow each render can't bust
+  // the `components` memo below — that would remount the citation markers every
+  // render and, with the popover's anchor-resolving effect, cause an infinite
+  // update loop (React #185). The active-marker highlight flows via context
+  // (ActiveCitationContext), so it is intentionally NOT a dependency here.
+  const stableOnCitationClick = useEventCallback(onCitationClick);
+  const stableOnCitationHover = useEventCallback(onCitationHover);
+
   const isDarkMode =
     typeof document !== 'undefined' &&
     document.documentElement.classList.contains('dark');
@@ -162,10 +168,9 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
               index={citationIndex}
               title={info?.title}
               url={href}
-              isActive={activeCitationKey === citationKey}
-              onClick={() => onCitationClick?.(citationKey, info)}
-              onMouseEnter={(e) => onCitationHover?.(citationKey, e.currentTarget)}
-              onMouseLeave={() => onCitationHover?.(null, null)}
+              onClick={() => stableOnCitationClick(citationKey, info)}
+              onMouseEnter={(e) => stableOnCitationHover(citationKey, e.currentTarget)}
+              onMouseLeave={() => stableOnCitationHover(null, null)}
             />
           );
         }
@@ -212,10 +217,9 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
             verdict={verdict}
             url={url}
             isUnresolved={isUnresolved}
-            isActive={activeCitationKey === citationKey}
-            onClick={() => onCitationClick?.(citationKey)}
-            onMouseEnter={(e) => onCitationHover?.(citationKey, e.currentTarget)}
-            onMouseLeave={() => onCitationHover?.(null, null)}
+            onClick={() => stableOnCitationClick(citationKey)}
+            onMouseEnter={(e) => stableOnCitationHover(citationKey, e.currentTarget)}
+            onMouseLeave={() => stableOnCitationHover(null, null)}
           />
         );
       };
@@ -228,9 +232,8 @@ export const MarkdownRenderer = React.memo(function MarkdownRenderer({
     effectiveMode,
     citationData,
     linkCitationIndex,
-    activeCitationKey,
-    onCitationClick,
-    onCitationHover,
+    stableOnCitationClick,
+    stableOnCitationHover,
   ]);
 
   return (

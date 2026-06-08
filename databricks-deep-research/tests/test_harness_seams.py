@@ -32,7 +32,14 @@ def test_build_pool_batches_creates_text_and_source_batches() -> None:
     normalized = _normalize_research_output(
         {
             "findings": "fact",
-            "sources": [{"url": "https://example.com", "title": "Example"}],
+            "sources": [
+                {
+                    "url": "https://example.com",
+                    "title": "Example",
+                    "snippet": "Evidence text.",
+                    "evidence_quality": "snippet_only",
+                }
+            ],
         },
         config,
         [],
@@ -41,7 +48,14 @@ def test_build_pool_batches_creates_text_and_source_batches() -> None:
     batches = _build_pool_batches(normalized, config.pool_writes, config.output_key)
     # Normalizer serializes the full dict — "fact" is inside the JSON
     assert "fact" in batches[("observations", "findings")].items[0]
-    assert batches[("sources", "sources")].items == [{"url": "https://example.com", "title": "Example"}]
+    assert batches[("sources", "sources")].items == [
+        {
+            "url": "https://example.com",
+            "title": "Example",
+            "snippet": "Evidence text.",
+            "evidence_quality": "snippet_only",
+        }
+    ]
 
 
 def test_project_research_state_writes_structured_payload() -> None:
@@ -61,7 +75,14 @@ def test_normalize_output_excludes_sources_from_state_text() -> None:
     config = AgentNodeConfig(subtype="researcher", output_key="findings")
     parsed = {
         "operands": [{"id": "op1", "value": 42}],
-        "sources": [{"url": "https://example.com", "title": "Ex"}],
+        "sources": [
+            {
+                "url": "https://example.com",
+                "title": "Ex",
+                "snippet": "Evidence text.",
+                "evidence_quality": "snippet_only",
+            }
+        ],
         "sources_found": 1,
         "sources_used": [],
     }

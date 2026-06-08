@@ -12,18 +12,17 @@ whole thing rolls back and the WriteQueue's retry logic kicks in.
 
 from __future__ import annotations
 
-import importlib.resources
 import json
 import logging
 from collections.abc import Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import sqlalchemy.exc
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from deep_research.storage.backend import (
     ConflictError,
@@ -36,8 +35,12 @@ from deep_research.storage.documents import (
     ChatMeta,
     ChatState,
     PrepJobDocument,
+    ResearchSessionState,
     UserDocument,
 )
+
+if TYPE_CHECKING:
+    from deep_research.storage.cleanup import CleanupStats
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +73,38 @@ def _wrap_error(exc: BaseException) -> Exception:
     return PermanentError(str(exc))
 
 
+async def _wrap_error_with_auth_refresh(exc: BaseException) -> Exception:
+    """Map storage errors and force Lakebase credential refresh on auth failure."""
+    wrapped = _wrap_error(exc)
+    try:
+        from deep_research.db.session import (  # noqa: PLC0415
+            _is_db_auth_error,
+            log_lakebase_auth_failure_diagnostics,
+            refresh_engine_credentials,
+        )
+
+        if _is_db_auth_error(exc) or _is_db_auth_error(wrapped):
+            log_lakebase_auth_failure_diagnostics(exc)
+            logger.warning(
+                "LAKEBASE_STORAGE_AUTH_FAILED_REFRESH_TRIGGERED exc_class=%s",
+                type(exc).__name__,
+            )
+            await refresh_engine_credentials()
+    except Exception:  # noqa: BLE001
+        logger.exception("LAKEBASE_STORAGE_AUTH_REFRESH_FAILED")
+    return wrapped
+
+
 def _dumps(payload: Any) -> str:
     """Render a pydantic model or dict to a JSON string for ::jsonb casts."""
     if hasattr(payload, "model_dump_json"):
-        return payload.model_dump_json()
+        return str(payload.model_dump_json())
     return json.dumps(payload, default=str, sort_keys=True)
+
+
+def _result_rowcount(result: Any) -> int:
+    """Return SQLAlchemy rowcount while keeping async result typing local."""
+    return int(getattr(result, "rowcount", 0) or 0)
 
 
 def _coerce_jsonish(value: Any) -> Any:
@@ -95,9 +125,9 @@ def _coerce_jsonish(value: Any) -> Any:
 
 
 def _scoped_sm(
-    inner: "async_sessionmaker[AsyncSession]",
+    inner: async_sessionmaker[AsyncSession],
     schema: str,
-) -> "async_sessionmaker[AsyncSession]":
+) -> async_sessionmaker[AsyncSession]:
     """Schema-scoping wrapper — now an identity passthrough.
 
     Historical versions issued ``SET search_path …; COMMIT;`` on every
@@ -164,9 +194,7 @@ class LakebaseBackend:
         self._schema = schema
         self._sm = _scoped_sm(raw_sm, schema) if schema else raw_sm
 
-        self._ddl_path = ddl_path or (
-            Path(__file__).with_name("lakebase_ddl.sql")
-        )
+        self._ddl_path = ddl_path or (Path(__file__).with_name("lakebase_ddl.sql"))
         self._closed = False
 
     # -- Lifecycle -----------------------------------------------------
@@ -219,15 +247,11 @@ class LakebaseBackend:
                 from deep_research.db.session import get_session_maker
 
                 raw_sm = get_session_maker()
-                async with raw_sm() as session:
-                    async with session.begin():
-                        await session.execute(
-                            text(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"')
-                        )
-            async with self._sm() as session:
-                async with session.begin():
-                    for stmt in statements:
-                        await session.execute(text(stmt))
+                async with raw_sm() as session, session.begin():
+                    await session.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{self._schema}"'))
+            async with self._sm() as session, session.begin():
+                for stmt in statements:
+                    await session.execute(text(stmt))
         except Exception as exc:
             raise SchemaError(f"DDL application failed: {exc}") from exc
 
@@ -272,7 +296,8 @@ class LakebaseBackend:
                     )
                 ).first()
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
 
         if row is None:
             return None
@@ -302,81 +327,78 @@ class LakebaseBackend:
         state_json = doc.state.model_dump_json()
 
         try:
-            async with self._sm() as session:
-                async with session.begin():
-                    # Version-gated meta upsert. INSERT for new chats,
-                    # conditional UPDATE for existing ones. RETURNING
-                    # version lets us distinguish success from conflict.
-                    result = await session.execute(
-                        text(
-                            f"INSERT INTO {self._ns}.chat_meta "
-                            f"  (chat_id, user_id, title, preview, created_at, "
-                            f"   updated_at, deleted_at, version) "
-                            f"VALUES "
-                            f"  (:cid, :uid, :title, :preview, :created_at, "
-                            f"   now(), :deleted_at, 1) "
-                            f"ON CONFLICT (chat_id) DO UPDATE SET "
-                            f"  title = EXCLUDED.title, "
-                            f"  preview = EXCLUDED.preview, "
-                            f"  updated_at = now(), "
-                            f"  deleted_at = EXCLUDED.deleted_at, "
-                            f"  version = {self._ns}.chat_meta.version + 1 "
-                            f"WHERE {self._ns}.chat_meta.version = :expected "
-                            f"RETURNING version"
-                        ),
-                        {
-                            "cid": cid,
-                            "uid": doc.meta.user_id,
-                            "title": doc.meta.title,
-                            "preview": doc.meta.preview,
-                            "created_at": doc.meta.created_at,
-                            "deleted_at": doc.meta.deleted_at,
-                            "expected": expected_version,
-                        },
+            async with self._sm() as session, session.begin():
+                # Version-gated meta upsert. INSERT for new chats,
+                # conditional UPDATE for existing ones. RETURNING
+                # version lets us distinguish success from conflict.
+                result = await session.execute(
+                    text(
+                        f"INSERT INTO {self._ns}.chat_meta "
+                        f"  (chat_id, user_id, title, preview, created_at, "
+                        f"   updated_at, deleted_at, version) "
+                        f"VALUES "
+                        f"  (:cid, :uid, :title, :preview, :created_at, "
+                        f"   now(), :deleted_at, 1) "
+                        f"ON CONFLICT (chat_id) DO UPDATE SET "
+                        f"  title = EXCLUDED.title, "
+                        f"  preview = EXCLUDED.preview, "
+                        f"  updated_at = now(), "
+                        f"  deleted_at = EXCLUDED.deleted_at, "
+                        f"  version = {self._ns}.chat_meta.version + 1 "
+                        f"WHERE {self._ns}.chat_meta.version = :expected "
+                        f"RETURNING version"
+                    ),
+                    {
+                        "cid": cid,
+                        "uid": doc.meta.user_id,
+                        "title": doc.meta.title,
+                        "preview": doc.meta.preview,
+                        "created_at": doc.meta.created_at,
+                        "deleted_at": doc.meta.deleted_at,
+                        "expected": expected_version,
+                    },
+                )
+                row = result.first()
+                if row is None:
+                    # Either the row exists with a different version, or
+                    # a concurrent INSERT won the race (not possible in
+                    # single-worker, but defensively handle).
+                    raise ConflictError(
+                        f"version conflict on chat {cid}: expected {expected_version}"
                     )
-                    row = result.first()
-                    if row is None:
-                        # Either the row exists with a different version, or
-                        # a concurrent INSERT won the race (not possible in
-                        # single-worker, but defensively handle).
-                        raise ConflictError(
-                            f"version conflict on chat {cid}: expected "
-                            f"{expected_version}"
-                        )
-                    new_version = int(row.version)
+                new_version = int(row.version)
 
-                    # State upsert.
+                # State upsert.
+                await session.execute(
+                    text(
+                        f"INSERT INTO {self._ns}.chat_state (chat_id, state) "
+                        f"VALUES (:cid, CAST(:state AS jsonb)) "
+                        f"ON CONFLICT (chat_id) DO UPDATE SET "
+                        f"  state = EXCLUDED.state"
+                    ),
+                    {"cid": cid, "state": state_json},
+                )
+
+                # Rebuild chat_deleted_files projection for this chat.
+                await session.execute(
+                    text(f"DELETE FROM {self._ns}.chat_deleted_files WHERE chat_id = :cid"),
+                    {"cid": cid},
+                )
+                file_ids = doc.state.live_file_ids()
+                if file_ids:
                     await session.execute(
                         text(
-                            f"INSERT INTO {self._ns}.chat_state (chat_id, state) "
-                            f"VALUES (:cid, CAST(:state AS jsonb)) "
-                            f"ON CONFLICT (chat_id) DO UPDATE SET "
-                            f"  state = EXCLUDED.state"
+                            f"INSERT INTO {self._ns}.chat_deleted_files "
+                            f"  (chat_id, file_id) VALUES (:cid, :fid)"
                         ),
-                        {"cid": cid, "state": state_json},
+                        [{"cid": cid, "fid": fid} for fid in file_ids],
                     )
-
-                    # Rebuild chat_deleted_files projection for this chat.
-                    await session.execute(
-                        text(
-                            f"DELETE FROM {self._ns}.chat_deleted_files WHERE chat_id = :cid"
-                        ),
-                        {"cid": cid},
-                    )
-                    file_ids = doc.state.live_file_ids()
-                    if file_ids:
-                        await session.execute(
-                            text(
-                                f"INSERT INTO {self._ns}.chat_deleted_files "
-                                f"  (chat_id, file_id) VALUES (:cid, :fid)"
-                            ),
-                            [{"cid": cid, "fid": fid} for fid in file_ids],
-                        )
             return new_version
         except ConflictError:
             raise
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
 
     async def list_chat_metas(
         self,
@@ -390,7 +412,7 @@ class LakebaseBackend:
     ) -> list[ChatMeta]:
         self._ensure_open()
         conditions = ["user_id = :uid"]
-        params: dict = {"uid": user_id, "lim": limit, "off": offset}
+        params: dict[str, Any] = {"uid": user_id, "lim": limit, "off": offset}
         if not include_deleted:
             conditions.append("deleted_at IS NULL")
         if search:
@@ -417,7 +439,8 @@ class LakebaseBackend:
                     )
                 ).all()
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
         return [
             ChatMeta(
                 chat_id=r.chat_id,
@@ -444,7 +467,7 @@ class LakebaseBackend:
         """Single JOIN query returning full ChatDocuments for a user."""
         self._ensure_open()
         conditions = ["m.user_id = :uid", "m.deleted_at IS NULL"]
-        params: dict = {"uid": user_id, "lim": limit, "off": offset}
+        params: dict[str, Any] = {"uid": user_id, "lim": limit, "off": offset}
         if search:
             escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             conditions.append("m.title ILIKE :search ESCAPE '\\'")
@@ -471,7 +494,8 @@ class LakebaseBackend:
                     )
                 ).all()
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
         result = []
         for r in rows:
             meta = ChatMeta(
@@ -505,7 +529,8 @@ class LakebaseBackend:
                     )
                 ).first()
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
 
         if row is None:
             return None
@@ -529,21 +554,21 @@ class LakebaseBackend:
             }
         )
         try:
-            async with self._sm() as session:
-                async with session.begin():
-                    await session.execute(
-                        text(
-                            f"INSERT INTO {self._ns}.user_documents "
-                            f"  (user_id, created_at, updated_at, state) "
-                            f"VALUES (:uid, :ca, now(), CAST(:state AS jsonb)) "
-                            f"ON CONFLICT (user_id) DO UPDATE SET "
-                            f"  updated_at = now(), "
-                            f"  state = EXCLUDED.state"
-                        ),
-                        {"uid": doc.user_id, "ca": doc.created_at, "state": payload},
-                    )
+            async with self._sm() as session, session.begin():
+                await session.execute(
+                    text(
+                        f"INSERT INTO {self._ns}.user_documents "
+                        f"  (user_id, created_at, updated_at, state) "
+                        f"VALUES (:uid, :ca, now(), CAST(:state AS jsonb)) "
+                        f"ON CONFLICT (user_id) DO UPDATE SET "
+                        f"  updated_at = now(), "
+                        f"  state = EXCLUDED.state"
+                    ),
+                    {"uid": doc.user_id, "ca": doc.created_at, "state": payload},
+                )
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
 
     # -- Prep-job document -------------------------------------------
 
@@ -562,7 +587,8 @@ class LakebaseBackend:
                     )
                 ).first()
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
 
         if row is None:
             return None
@@ -591,51 +617,255 @@ class LakebaseBackend:
             }
         )
         try:
-            async with self._sm() as session:
-                async with session.begin():
-                    await session.execute(
-                        text(
-                            f"INSERT INTO {self._ns}.prep_job_documents "
-                            f"  (prep_job_id, account_id, status, heartbeat, "
-                            f"   created_at, updated_at, state) "
-                            f"VALUES (:jid, :acc, :st, :hb, :ca, now(), CAST(:state AS jsonb)) "
-                            f"ON CONFLICT (prep_job_id) DO UPDATE SET "
-                            f"  account_id = EXCLUDED.account_id, "
-                            f"  status = EXCLUDED.status, "
-                            f"  heartbeat = EXCLUDED.heartbeat, "
-                            f"  updated_at = now(), "
-                            f"  state = EXCLUDED.state"
-                        ),
-                        {
-                            "jid": doc.prep_job_id,
-                            "acc": doc.account_id,
-                            "st": doc.status,
-                            "hb": doc.heartbeat,
-                            "ca": doc.created_at,
-                            "state": payload,
-                        },
-                    )
+            async with self._sm() as session, session.begin():
+                await session.execute(
+                    text(
+                        f"INSERT INTO {self._ns}.prep_job_documents "
+                        f"  (prep_job_id, account_id, status, heartbeat, "
+                        f"   created_at, updated_at, state) "
+                        f"VALUES (:jid, :acc, :st, :hb, :ca, now(), CAST(:state AS jsonb)) "
+                        f"ON CONFLICT (prep_job_id) DO UPDATE SET "
+                        f"  account_id = EXCLUDED.account_id, "
+                        f"  status = EXCLUDED.status, "
+                        f"  heartbeat = EXCLUDED.heartbeat, "
+                        f"  updated_at = now(), "
+                        f"  state = EXCLUDED.state"
+                    ),
+                    {
+                        "jid": doc.prep_job_id,
+                        "acc": doc.account_id,
+                        "st": doc.status,
+                        "hb": doc.heartbeat,
+                        "ca": doc.created_at,
+                        "state": payload,
+                    },
+                )
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
 
     async def write_prep_heartbeat(self, job_id: UUID, ts: datetime) -> None:
         self._ensure_open()
         try:
-            async with self._sm() as session:
-                async with session.begin():
-                    result = await session.execute(
-                        text(
-                            f"UPDATE {self._ns}.prep_job_documents SET heartbeat = :ts "
-                            f"WHERE prep_job_id = :jid"
-                        ),
-                        {"ts": ts, "jid": job_id},
-                    )
-                    if result.rowcount == 0:
-                        raise PermanentError(
-                            f"prep_job {job_id} does not exist"
-                        )
+            async with self._sm() as session, session.begin():
+                result = await session.execute(
+                    text(
+                        f"UPDATE {self._ns}.prep_job_documents SET heartbeat = :ts "
+                        f"WHERE prep_job_id = :jid"
+                    ),
+                    {"ts": ts, "jid": job_id},
+                )
+                if _result_rowcount(result) == 0:
+                    raise PermanentError(f"prep_job {job_id} does not exist")
         except PermanentError:
             raise
+        except Exception as exc:
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
+
+    # -- Research session queries ------------------------------------
+    #
+    # Backed by ``chat_state.state.research_sessions`` JSONB array. The
+    # legacy ``research_sessions`` table was dropped during the
+    # cached-storage migration; these methods operate exclusively on
+    # JSONB to preserve a single source of truth.
+
+    async def count_active_research_sessions(self, user_id: str) -> int:
+        self._ensure_open()
+        sql = (
+            f"SELECT count(*) "
+            f"FROM {self._ns}.chat_meta cm "
+            f"JOIN {self._ns}.chat_state cs USING (chat_id) "
+            f"WHERE cm.user_id = :uid "
+            f"  AND cm.deleted_at IS NULL "
+            f"  AND EXISTS ("
+            f"    SELECT 1 FROM jsonb_array_elements(cs.state -> 'research_sessions') AS rs "
+            f"    WHERE rs ->> 'status' = 'in_progress'"
+            f"  )"
+        )
+        try:
+            async with self._sm() as session:
+                row = await session.execute(text(sql), {"uid": user_id})
+                return int(row.scalar() or 0)
+        except Exception as exc:
+            raise _wrap_error(exc) from exc
+
+    async def mark_stale_research_sessions_failed(
+        self,
+        cutoff: datetime,
+        exclude_session_ids: Sequence[UUID],
+    ) -> int:
+        self._ensure_open()
+        # ``rs ->> 'id'`` returns text; compare against text-cast UUIDs to
+        # avoid cross-type ANY array comparison surprises.
+        exclude_ids_text = [str(sid) for sid in exclude_session_ids]
+        # Single transactional UPDATE: re-aggregate the array, flipping
+        # in_progress entries whose last_heartbeat is older than cutoff
+        # (or NULL) and whose id is NOT in exclude_session_ids. The
+        # WHERE pre-filter guarantees we only touch chats that have at
+        # least one in_progress session — exact match on the JSONB
+        # contains operator is index-friendly. Returns count of CHATS
+        # whose state row was rewritten (a coarse proxy for sessions
+        # marked failed; the cleanup logger emits this as the action
+        # count and the recurring task tolerates over-counting).
+        sql = (
+            f"UPDATE {self._ns}.chat_state cs "
+            f"SET state = jsonb_set("
+            f"  cs.state,"
+            f"  '{{research_sessions}}',"
+            f"  COALESCE("
+            f"    ("
+            f"      SELECT jsonb_agg("
+            f"        CASE"
+            f"          WHEN rs ->> 'status' = 'in_progress'"
+            f"               AND ("
+            f"                 (rs ->> 'last_heartbeat') IS NULL"
+            f"                 OR (rs ->> 'last_heartbeat')::timestamptz < :cutoff"
+            f"               )"
+            f"               AND NOT ((rs ->> 'id') = ANY(CAST(:exclude_ids AS text[])))"
+            f"            THEN rs || jsonb_build_object("
+            f"              'status', 'failed',"
+            f"              'completed_at', to_jsonb(now())"
+            f"            )"
+            f"          ELSE rs"
+            f"        END"
+            f"      )"
+            f"      FROM jsonb_array_elements(cs.state -> 'research_sessions') AS rs"
+            f"    ),"
+            f"    '[]'::jsonb"
+            f"  ),"
+            f"  false"
+            f") "
+            f"WHERE cs.state ? 'research_sessions' "
+            f"  AND cs.state -> 'research_sessions' @> '[{{\"status\":\"in_progress\"}}]'"
+        )
+        try:
+            async with self._sm() as session, session.begin():
+                result = await session.execute(
+                    text(sql),
+                    {"cutoff": cutoff, "exclude_ids": exclude_ids_text},
+                )
+                return int(result.rowcount or 0)
+        except Exception as exc:
+            raise _wrap_error(exc) from exc
+
+    async def list_user_jobs(
+        self,
+        user_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+    ) -> list[tuple[UUID, ResearchSessionState]]:
+        self._ensure_open()
+        # CROSS JOIN LATERAL unnests the array; the optional status
+        # predicate is bound rather than interpolated so a NULL status
+        # passes the check via :status IS NULL. The ::text casts let
+        # asyncpg's prepared-statement type inference resolve $status
+        # — without them, `$N IS NULL OR x = $N` is ambiguous at PREPARE
+        # time and asyncpg raises AmbiguousParameterError.
+        sql = (
+            f"SELECT cs.chat_id, rs.value AS session_obj "
+            f"FROM {self._ns}.chat_meta cm "
+            f"JOIN {self._ns}.chat_state cs USING (chat_id) "
+            f"CROSS JOIN LATERAL jsonb_array_elements(cs.state -> 'research_sessions') AS rs(value) "
+            f"WHERE cm.user_id = :uid "
+            f"  AND cm.deleted_at IS NULL "
+            f"  AND (CAST(:status AS text) IS NULL OR rs.value ->> 'status' = CAST(:status AS text)) "
+            f"ORDER BY (rs.value ->> 'started_at')::timestamptz DESC "
+            f"LIMIT :limit"
+        )
+        try:
+            async with self._sm() as session:
+                rows = (
+                    await session.execute(
+                        text(sql),
+                        {"uid": user_id, "status": status, "limit": int(limit)},
+                    )
+                ).all()
+        except Exception as exc:
+            raise _wrap_error(exc) from exc
+        out: list[tuple[UUID, ResearchSessionState]] = []
+        for row in rows:
+            session_obj = row.session_obj
+            if isinstance(session_obj, str):
+                session_obj = json.loads(session_obj)
+            out.append((row.chat_id, ResearchSessionState.model_validate(session_obj)))
+        return out
+
+    async def get_active_session_for_chat(
+        self,
+        chat_id: UUID,
+        user_id: str,
+    ) -> ResearchSessionState | None:
+        self._ensure_open()
+        sql = (
+            f"SELECT rs.value AS session_obj "
+            f"FROM {self._ns}.chat_meta cm "
+            f"JOIN {self._ns}.chat_state cs USING (chat_id) "
+            f"CROSS JOIN LATERAL jsonb_array_elements(cs.state -> 'research_sessions') AS rs(value) "
+            f"WHERE cm.user_id = :uid "
+            f"  AND cm.deleted_at IS NULL "
+            f"  AND cs.chat_id = :cid "
+            f"  AND rs.value ->> 'status' = 'in_progress' "
+            f"ORDER BY (rs.value ->> 'started_at')::timestamptz DESC "
+            f"LIMIT 1"
+        )
+        try:
+            async with self._sm() as session:
+                row = (
+                    await session.execute(
+                        text(sql), {"cid": chat_id, "uid": user_id}
+                    )
+                ).first()
+        except Exception as exc:
+            raise _wrap_error(exc) from exc
+        if row is None:
+            return None
+        session_obj = row.session_obj
+        if isinstance(session_obj, str):
+            session_obj = json.loads(session_obj)
+        return ResearchSessionState.model_validate(session_obj)
+
+    async def write_research_session_heartbeat(
+        self,
+        chat_id: UUID,
+        session_id: UUID,
+        ts: datetime,
+    ) -> None:
+        self._ensure_open()
+        # Single-statement update: re-aggregate the chat's
+        # research_sessions array, attaching last_heartbeat=ts to the
+        # entry whose id matches session_id. Bypasses the WriteQueue;
+        # this is on the heartbeat hot path.
+        sql = (
+            f"UPDATE {self._ns}.chat_state cs "
+            f"SET state = jsonb_set("
+            f"  cs.state,"
+            f"  '{{research_sessions}}',"
+            f"  COALESCE("
+            f"    ("
+            f"      SELECT jsonb_agg("
+            f"        CASE"
+            f"          WHEN (rs ->> 'id') = :sid::text"
+            f"            THEN rs || jsonb_build_object('last_heartbeat', to_jsonb(:ts::timestamptz))"
+            f"          ELSE rs"
+            f"        END"
+            f"      )"
+            f"      FROM jsonb_array_elements(cs.state -> 'research_sessions') AS rs"
+            f"    ),"
+            f"    '[]'::jsonb"
+            f"  ),"
+            f"  false"
+            f") "
+            f"WHERE cs.chat_id = :cid "
+            f"  AND cs.state ? 'research_sessions'"
+        )
+        try:
+            async with self._sm() as session, session.begin():
+                await session.execute(
+                    text(sql),
+                    {"cid": chat_id, "sid": str(session_id), "ts": ts},
+                )
         except Exception as exc:
             raise _wrap_error(exc) from exc
 
@@ -667,7 +897,8 @@ class LakebaseBackend:
             async with self._sm() as session:
                 rows = (await session.execute(text(sql), params)).mappings().all()
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
         return [dict(r) for r in rows]
 
     async def upsert_row(
@@ -685,9 +916,7 @@ class LakebaseBackend:
             _assert_safe_identifier(c)
         cols_sql = ", ".join(cols)
         placeholders = ", ".join(f":{c}" for c in cols)
-        update_sql = ", ".join(
-            f"{c} = EXCLUDED.{c}" for c in cols if c != pk
-        )
+        update_sql = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != pk)
         sql = (
             f"INSERT INTO {self._ns}.{table} ({cols_sql}) VALUES ({placeholders}) "
             f"ON CONFLICT ({pk}) DO UPDATE SET {update_sql}"
@@ -698,14 +927,14 @@ class LakebaseBackend:
             )
         )
         try:
-            async with self._sm() as session:
-                async with session.begin():
-                    await session.execute(
-                        text(sql),
-                        {k: _coerce_jsonish(v) for k, v in row.items()},
-                    )
+            async with self._sm() as session, session.begin():
+                await session.execute(
+                    text(sql),
+                    {k: _coerce_jsonish(v) for k, v in row.items()},
+                )
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
 
     async def delete_row(
         self,
@@ -718,14 +947,14 @@ class LakebaseBackend:
         _assert_safe_identifier(table)
         _assert_safe_identifier(pk)
         try:
-            async with self._sm() as session:
-                async with session.begin():
-                    await session.execute(
-                        text(f"DELETE FROM {self._ns}.{table} WHERE {pk} = :pk"),
-                        {"pk": pk_value},
-                    )
+            async with self._sm() as session, session.begin():
+                await session.execute(
+                    text(f"DELETE FROM {self._ns}.{table} WHERE {pk} = :pk"),
+                    {"pk": pk_value},
+                )
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
 
     # -- Append-only tables -----------------------------------------
 
@@ -749,19 +978,16 @@ class LakebaseBackend:
                     _assert_safe_identifier(k)
                     cols.append(k)
         placeholders = ", ".join(f":{c}" for c in cols)
-        sql = (
-            f"INSERT INTO {self._ns}.{table} ({', '.join(cols)}) "
-            f"VALUES ({placeholders})"
-        )
+        sql = f"INSERT INTO {self._ns}.{table} ({', '.join(cols)}) VALUES ({placeholders})"
         try:
-            async with self._sm() as session:
-                async with session.begin():
-                    await session.execute(
-                        text(sql),
-                        [{c: _coerce_jsonish(r.get(c)) for c in cols} for r in rows],
-                    )
+            async with self._sm() as session, session.begin():
+                await session.execute(
+                    text(sql),
+                    [{c: _coerce_jsonish(r.get(c)) for c in cols} for r in rows],
+                )
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
 
     # -- Cleanup extension (optional; used by CleanupLoop) --------------
 
@@ -769,7 +995,7 @@ class LakebaseBackend:
         self,
         *,
         chat_retention_days: int,
-    ) -> "CleanupStats":
+    ) -> CleanupStats:
         """Delete rows for chats soft-deleted past the retention window.
 
         Order of operations:
@@ -783,60 +1009,59 @@ class LakebaseBackend:
 
         stats = CleanupStats()
         self._ensure_open()
-        async with self._sm() as session:
-            async with session.begin():
-                # 1) Remove orphaned file_chunks for chats that have been
-                # soft-deleted ≥ 1 day. Keep chunks within the 1-day window
-                # so accidental deletes can be reverted client-side.
-                r = await session.execute(
-                    text(
-                        f"DELETE FROM {self._ns}.file_chunks "
-                        f"WHERE file_id IN ( "
-                        f"  SELECT file_id FROM {self._ns}.chat_deleted_files "
-                        f"  WHERE chat_id IN ( "
-                        f"    SELECT chat_id FROM {self._ns}.chat_meta "
-                        f"    WHERE deleted_at IS NOT NULL "
-                        f"      AND deleted_at < now() - INTERVAL '1 day' "
-                        f"  ) "
-                        f")"
-                    )
+        async with self._sm() as session, session.begin():
+            # 1) Remove orphaned file_chunks for chats that have been
+            # soft-deleted ≥ 1 day. Keep chunks within the 1-day window
+            # so accidental deletes can be reverted client-side.
+            r = await session.execute(
+                text(
+                    f"DELETE FROM {self._ns}.file_chunks "
+                    f"WHERE file_id IN ( "
+                    f"  SELECT file_id FROM {self._ns}.chat_deleted_files "
+                    f"  WHERE chat_id IN ( "
+                    f"    SELECT chat_id FROM {self._ns}.chat_meta "
+                    f"    WHERE deleted_at IS NOT NULL "
+                    f"      AND deleted_at < now() - INTERVAL '1 day' "
+                    f"  ) "
+                    f")"
                 )
-                stats.file_chunks_deleted = r.rowcount or 0
+            )
+            stats.file_chunks_deleted = _result_rowcount(r)
 
-                # 2) Full purge past retention window.
-                r = await session.execute(
-                    text(
-                        f"DELETE FROM {self._ns}.chat_deleted_files WHERE chat_id IN ("
-                        f"  SELECT chat_id FROM {self._ns}.chat_meta "
-                        f"  WHERE deleted_at IS NOT NULL "
-                        f"    AND deleted_at < now() - make_interval(days => :days)"
-                        f")"
-                    ),
-                    {"days": chat_retention_days},
-                )
-                stats.chat_deleted_files_rows_deleted = r.rowcount or 0
+            # 2) Full purge past retention window.
+            r = await session.execute(
+                text(
+                    f"DELETE FROM {self._ns}.chat_deleted_files WHERE chat_id IN ("
+                    f"  SELECT chat_id FROM {self._ns}.chat_meta "
+                    f"  WHERE deleted_at IS NOT NULL "
+                    f"    AND deleted_at < now() - make_interval(days => :days)"
+                    f")"
+                ),
+                {"days": chat_retention_days},
+            )
+            stats.chat_deleted_files_rows_deleted = _result_rowcount(r)
 
-                r = await session.execute(
-                    text(
-                        f"DELETE FROM {self._ns}.chat_state WHERE chat_id IN ("
-                        f"  SELECT chat_id FROM {self._ns}.chat_meta "
-                        f"  WHERE deleted_at IS NOT NULL "
-                        f"    AND deleted_at < now() - make_interval(days => :days)"
-                        f")"
-                    ),
-                    {"days": chat_retention_days},
-                )
-                stats.chat_state_rows_deleted = r.rowcount or 0
+            r = await session.execute(
+                text(
+                    f"DELETE FROM {self._ns}.chat_state WHERE chat_id IN ("
+                    f"  SELECT chat_id FROM {self._ns}.chat_meta "
+                    f"  WHERE deleted_at IS NOT NULL "
+                    f"    AND deleted_at < now() - make_interval(days => :days)"
+                    f")"
+                ),
+                {"days": chat_retention_days},
+            )
+            stats.chat_state_rows_deleted = _result_rowcount(r)
 
-                r = await session.execute(
-                    text(
-                        f"DELETE FROM {self._ns}.chat_meta "
-                        f"WHERE deleted_at IS NOT NULL "
-                        f"  AND deleted_at < now() - make_interval(days => :days)"
-                    ),
-                    {"days": chat_retention_days},
-                )
-                stats.chat_meta_rows_deleted = r.rowcount or 0
+            r = await session.execute(
+                text(
+                    f"DELETE FROM {self._ns}.chat_meta "
+                    f"WHERE deleted_at IS NOT NULL "
+                    f"  AND deleted_at < now() - make_interval(days => :days)"
+                ),
+                {"days": chat_retention_days},
+            )
+            stats.chat_meta_rows_deleted = _result_rowcount(r)
         return stats
 
     async def read_chunk(
@@ -853,16 +1078,21 @@ class LakebaseBackend:
         try:
             async with self._sm() as session:
                 rows = (
-                    await session.execute(
-                        text(
-                            f"SELECT * FROM {self._ns}.file_chunks "
-                            f"WHERE {filter_sql} ORDER BY chunk_index"
-                        ),
-                        params,
+                    (
+                        await session.execute(
+                            text(
+                                f"SELECT * FROM {self._ns}.file_chunks "
+                                f"WHERE {filter_sql} ORDER BY chunk_index"
+                            ),
+                            params,
+                        )
                     )
-                ).mappings().all()
+                    .mappings()
+                    .all()
+                )
         except Exception as exc:
-            raise _wrap_error(exc) from exc
+            wrapped = await _wrap_error_with_auth_refresh(exc)
+            raise wrapped from exc
         return [dict(r) for r in rows]
 
 

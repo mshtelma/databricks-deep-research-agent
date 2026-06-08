@@ -11,6 +11,7 @@
 import React from 'react';
 import { VerificationVerdict } from '@/types/citation';
 import { safeOpenUrl } from '@/utils/urlSafety';
+import { ActiveCitationContext } from './ActiveCitationContext';
 
 interface CitationMarkerProps {
   /** Human-readable citation key (e.g., "Arxiv", "Zhipu", "Github-2") */
@@ -29,7 +30,7 @@ interface CitationMarkerProps {
   onMouseEnter?: (e: React.MouseEvent<HTMLElement>) => void;
   /** Mouse leave handler - passes event for element reference */
   onMouseLeave?: (e: React.MouseEvent<HTMLElement>) => void;
-  /** Whether the evidence card is currently visible */
+  /** Active highlight override. When omitted, derived from ActiveCitationContext. */
   isActive?: boolean;
   /** Whether citation data is not yet loaded (shows dimmed state) */
   isUnresolved?: boolean;
@@ -109,14 +110,21 @@ export const CitationMarker: React.FC<CitationMarkerProps> = ({
   onClick,
   onMouseEnter,
   onMouseLeave,
-  isActive = false,
+  isActive,
   isUnresolved = false,
 }) => {
+  // Active state comes from context (the currently-open citation key) unless an
+  // explicit isActive prop is provided. Sourcing it from context keeps this
+  // marker's DOM node stable across hovers (no remount), so the floating
+  // evidence-card anchor stays valid and the render loop (React #185) can't form.
+  const activeKey = React.useContext(ActiveCitationContext);
+  const active = isActive ?? (!!citationKey && activeKey === citationKey);
+
   // Use dimmed styling when citation data hasn't loaded yet
   const colorClass = isUnresolved
     ? 'text-gray-400 dark:text-gray-500'
     : getVerdictColorClass(verdict);
-  const activeClass = isActive && !isUnresolved ? getActiveBackgroundClass(verdict) : '';
+  const activeClass = active && !isUnresolved ? getActiveBackgroundClass(verdict) : '';
   const tooltipText = isUnresolved
     ? 'Loading citation data...'
     : buildTooltip(title, url, verdict);
@@ -127,12 +135,14 @@ export const CitationMarker: React.FC<CitationMarkerProps> = ({
   const handleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
 
-    // Always open URL in new tab if available (primary action)
-    if (url) {
+    // Cmd/Ctrl-click — or a click on an unresolved marker that still has a URL —
+    // opens the source directly. A plain click on a resolved marker defers to the
+    // parent, which pins the evidence card so it can be read / selected / copied.
+    if (((e.metaKey || e.ctrlKey) || isUnresolved) && url) {
       safeOpenUrl(url);
+      return;
     }
 
-    // Also call onClick handler for any additional handling
     onClick?.();
   };
 
@@ -147,7 +157,7 @@ export const CitationMarker: React.FC<CitationMarkerProps> = ({
         transition-colors duration-150
         ${colorClass}
         ${activeClass}
-        ${isActive && !isUnresolved ? 'ring-1 ring-current' : ''}
+        ${active && !isUnresolved ? 'ring-1 ring-current' : ''}
         ${isUnresolved ? 'opacity-60 bg-gray-100 dark:bg-gray-800' : 'hover:underline'}
       `}
       title={tooltipText}

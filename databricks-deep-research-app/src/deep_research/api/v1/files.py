@@ -68,7 +68,7 @@ def _file_to_response(file: Any) -> UploadedFileResponse:
 
 @router.post("/upload", response_model=list[UploadedFileResponse], status_code=201)
 async def upload_files(
-    request: Request,
+    _request: Request,
     user: CurrentUser,
     files: list[UploadFile] = File(..., description="File(s) to upload"),
     session_id: UUID | None = Query(None, description="Optional session ID for session-scoped files"),
@@ -140,7 +140,7 @@ async def upload_files(
 
 @router.get("", response_model=UploadedFileListResponse)
 async def list_files(
-    request: Request,
+    _request: Request,
     user: CurrentUser,
     session_id: UUID | None = Query(None, description="Filter by session ID"),
     limit: int = Query(20, ge=1, le=100),
@@ -174,7 +174,7 @@ async def list_files(
 
 @router.get("/{file_id}", response_model=UploadedFileResponse)
 async def get_file(
-    request: Request,
+    _request: Request,
     file_id: UUID,
     user: CurrentUser,
     service: IFileUploadService = Depends(get_file_upload_service),
@@ -195,7 +195,7 @@ async def get_file(
 
 @router.get("/{file_id}/preview", response_model=FilePreviewResponse)
 async def preview_file(
-    request: Request,
+    _request: Request,
     file_id: UUID,
     user: CurrentUser,
     service: IFileUploadService = Depends(get_file_upload_service),
@@ -242,7 +242,7 @@ async def preview_file(
 
 @router.delete("/{file_id}", status_code=204)
 async def delete_file(
-    request: Request,
+    _request: Request,
     file_id: UUID,
     user: CurrentUser,
     service: IFileUploadService = Depends(get_file_upload_service),

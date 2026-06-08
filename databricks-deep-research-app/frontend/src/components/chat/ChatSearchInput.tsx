@@ -11,7 +11,7 @@ interface ChatSearchInputProps {
 export function ChatSearchInput({
   value,
   onChange,
-  placeholder = 'Search chats...',
+  placeholder = 'Search chats',
   className,
 }: ChatSearchInputProps) {
   const inputRef = React.useRef<HTMLInputElement>(null);
@@ -29,8 +29,13 @@ export function ChatSearchInput({
   }, []);
 
   return (
-    <div className={cn('relative', className)}>
-      <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+    <div
+      className={cn(
+        'flex items-center gap-1.5 rounded-db-md border border-db-gray-lines bg-db-oat-light px-2.5 py-1.5 transition-colors focus-within:border-db-navy-400 focus-within:shadow-db-focus',
+        className,
+      )}
+    >
+      <SearchIcon className="h-3 w-3 shrink-0 text-db-navy-400" />
       <input
         ref={inputRef}
         type="text"
@@ -38,22 +43,17 @@ export function ChatSearchInput({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className={cn(
-          'w-full pl-9 pr-9 py-2 text-sm rounded-md',
-          'border border-input bg-background',
-          'placeholder:text-muted-foreground',
-          'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring'
-        )}
+        className="flex-1 border-0 bg-transparent text-[12px] font-normal text-db-navy-800 outline-none placeholder:text-db-gray-text"
       />
       {value && (
         <button
           type="button"
           data-testid="chat-search-clear"
           onClick={() => onChange('')}
-          className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+          className="text-db-gray-text hover:text-db-navy-800"
           aria-label="Clear search"
         >
-          <ClearIcon className="h-4 w-4" />
+          <ClearIcon className="h-3 w-3" />
         </button>
       )}
     </div>

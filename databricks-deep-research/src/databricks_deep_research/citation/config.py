@@ -106,7 +106,12 @@ class EvidencePreselectionConfig(BaseModel):
 
     max_spans_per_source: int = Field(default=10, ge=1, le=50)
     min_span_length: int = Field(default=50, ge=10)
-    max_span_length: int = Field(default=500, ge=50)
+    # DEPRECATED: use CitationConfig.max_evidence_chars (the pipeline-wide
+    # cap applied to all 5 truncation sites). This stage-specific knob is
+    # retained for one release cycle for backward compat — if set in YAML
+    # it routes to max_evidence_chars with a DeprecationWarning. Default
+    # bumped from 500 to 3000 to match the new pipeline-wide default.
+    max_span_length: int = Field(default=3000, ge=50)
     relevance_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     numeric_content_boost: float = Field(default=0.2, ge=0.0, le=1.0)
     relevance_computation_method: RelevanceMethod = RelevanceMethod.HYBRID
@@ -148,11 +153,21 @@ class ConfidenceClassificationConfig(BaseModel):
 
 
 class IsolatedVerificationConfig(BaseModel):
-    """Stage 4: Isolated Verification configuration."""
+    """Stage 4: Isolated Verification configuration.
+
+    Defaults use only framework-canonical tiers (``simple|analytical|complex``)
+    so the bare ``FrameworkLLMClient.from_databricks(...)`` used by shell-app
+    deployments resolves them without app-level extensions
+    (``bulk_analysis``, ``fast``). Cost-aware: ``analytical`` for the full path
+    and ``simple`` for the quick path keeps shell-app verification cheap by
+    default while still producing real entailment judgments. Override per-agent
+    via ``output_schema.isolated_verification`` in agent YAML when a richer
+    tier is justified.
+    """
 
     enable_nei_verdict: bool = True
-    verification_model_tier: str = Field(default="complex")
-    quick_verification_tier: str = Field(default="analytical")
+    verification_model_tier: str = Field(default="analytical")
+    quick_verification_tier: str = Field(default="simple")
     max_concurrent_verifications: int = Field(default=10, ge=1, le=50)
 
     model_config = {"frozen": True}
@@ -241,11 +256,18 @@ class VerificationRetrievalConfig(BaseModel):
         default=15.0, ge=1.0, le=60.0,
     )
 
-    # Model tiers for LLM calls
-    decomposition_tier: str = Field(default="bulk_analysis")
-    entailment_tier: str = Field(default="bulk_analysis")
-    reconstruction_tier: str = Field(default="analytical")
-    softening_tier: str = Field(default="fast")
+    # Model tiers for LLM calls.
+    #
+    # Defaults restricted to framework-canonical tiers
+    # (``simple|analytical|complex``) so shell-app deployments using
+    # ``FrameworkLLMClient.from_databricks(...)`` resolve them without
+    # app-level extensions (``bulk_analysis``, ``fast``). Cost-aware
+    # selection: structured fact decomposition / reconstruction / softening
+    # are all simple-tier appropriate; entailment scoring needs analytical.
+    decomposition_tier: str = Field(default="simple")
+    entailment_tier: str = Field(default="analytical")
+    reconstruction_tier: str = Field(default="simple")
+    softening_tier: str = Field(default="simple")
 
     model_config = {"frozen": True}
 
@@ -266,6 +288,18 @@ class GroundingValidationConfig(BaseModel):
     allow_topic_sentences: bool = Field(default=True)
     max_preceding_citations: int = Field(default=10, ge=1, le=20)
     hedging_prefix: str = Field(default="Based on the evidence presented, ")
+    abstained_unsupported_remove_threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "When a claim has verdict in {unsupported, contradicted} AND "
+            "abstained=True AND verification_confidence is below this "
+            "threshold, treat as REMOVE instead of KEEP. Default 0.5 — "
+            "raise toward 1.0 for stricter removal, lower toward 0.0 to "
+            "always keep abstained claims (legacy behavior)."
+        ),
+    )
 
     model_config = {"frozen": True}
 
@@ -317,15 +351,33 @@ class ClaimDispositionConfig(BaseModel):
     """Stage 8: Post-verification claim disposition.
 
     Maps each verification verdict to an action (keep, remove, soften).
+
+    Defaults favour SOFTEN over REMOVE for every non-contradicted verdict,
+    and SOFTEN over KEEP for any verdict the verifier marked uncertain.
+    Rationale (recorded for future contributors):
+
+      * REMOVE leaves visible holes in the report — truncated tables,
+        mid-sentence breaks, dangling section headers — that downstream
+        reviewers (coverage reflectors) flag as defects. SOFTEN hedges
+        the claim in place, preserving structure while signalling
+        uncertainty.
+      * KEEP for ``partial`` or ``abstained`` presents an unverified or
+        only-partly-verified claim as flat fact, which is overconfident.
+      * CONTRADICTED stays REMOVE — a contradicted claim is wrong, not
+        merely uncited; hedging would mislead readers.
+
+    Callers that need the old strict-removal behaviour (e.g., compliance
+    pipelines) can construct ``ClaimDispositionConfig(
+    unsupported=ClaimDisposition.REMOVE, ...)`` explicitly.
     """
 
     supported: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
-    partial: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
-    unsupported: ClaimDisposition = Field(default=ClaimDisposition.REMOVE)
+    partial: ClaimDisposition = Field(default=ClaimDisposition.SOFTEN)
+    unsupported: ClaimDisposition = Field(default=ClaimDisposition.SOFTEN)
     contradicted: ClaimDisposition = Field(default=ClaimDisposition.REMOVE)
-    abstained: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
-    analysis_partial: ClaimDisposition = Field(default=ClaimDisposition.KEEP)
-    analysis_unsupported: ClaimDisposition = Field(default=ClaimDisposition.REMOVE)
+    abstained: ClaimDisposition = Field(default=ClaimDisposition.SOFTEN)
+    analysis_partial: ClaimDisposition = Field(default=ClaimDisposition.SOFTEN)
+    analysis_unsupported: ClaimDisposition = Field(default=ClaimDisposition.SOFTEN)
 
     model_config = {"frozen": True}
 
@@ -351,6 +403,23 @@ class CitationConfig(BaseModel):
     # Master toggle
     enabled: bool = True
 
+    # Pipeline-wide cap on evidence quote length (chars). Applied at all five
+    # truncation sites: evidence selection (Stage 1), claim generation prompt
+    # (Stage 2), single-claim NLI verification (Stage 4 full path), batch
+    # verification (Stage 4 batch path), and retry verification. This is the
+    # single source of truth — supersedes the per-stage ad-hoc caps that
+    # previously diverged (500/1000/1500). Override per-agent via the agent's
+    # output_schema citation_pipeline.max_evidence_chars.
+    max_evidence_chars: int = Field(
+        default=3000, ge=200, le=10000,
+        description=(
+            "Pipeline-wide cap on evidence quote length applied across all "
+            "5 truncation sites. Default 3000 covers typical multi-row "
+            "markdown tables; raise for richer tabular corpora, lower for "
+            "budget-constrained prompts."
+        ),
+    )
+
     # Synthesis mode
     synthesis_mode: SynthesisMode = SynthesisMode.INTERLEAVED
     generation_mode: GenerationMode = GenerationMode.STRICT
@@ -363,6 +432,13 @@ class CitationConfig(BaseModel):
     enable_citation_correction: bool = True
     enable_numeric_qa_verification: bool = True
     enable_verification_retrieval: bool = False
+
+    # Defect E (prevention): when numeric QA corroborates a claim's value
+    # against the cited evidence (verbatim match -> 0.95, or all QA pairs
+    # agreeing -> 1.0), promote a PARTIAL/UNSUPPORTED NLI verdict to SUPPORTED
+    # so the grounded number is KEPT rather than hedged ("Reportedly, $X").
+    # Never promotes CONTRADICTED. Set False to restore NLI-only verdicts.
+    numeric_match_promotes_verdict: bool = True
 
     # Per-stage configuration
     evidence_preselection: EvidencePreselectionConfig = Field(

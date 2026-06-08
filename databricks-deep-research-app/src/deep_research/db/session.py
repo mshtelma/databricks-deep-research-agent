@@ -1,12 +1,16 @@
 """Database session management with Lakebase OAuth support."""
 
 import asyncio
+import hashlib
 import logging
-from collections.abc import AsyncGenerator
-from typing import Annotated
+import time
+from collections.abc import AsyncGenerator, Awaitable, Callable
+from typing import Annotated, Any
 
+import asyncpg  # type: ignore[import-untyped]
 import sqlalchemy.exc
 from fastapi import Depends, HTTPException, status
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -18,6 +22,7 @@ from deep_research.core.config import Settings, get_settings
 from deep_research.db.asyncpg_config import (
     lakebase_asyncpg_connect_args,
     lakebase_engine_kwargs,
+    lakebase_raw_asyncpg_kwargs,
 )
 from deep_research.db.credential_provider import BaseLakebaseCredentialProvider
 
@@ -30,6 +35,15 @@ _STALE_CONNECTION_MARKERS = (
     "connection is not open",
     "connection is lost",
     "another operation is in progress",
+)
+
+_AUTH_FAILURE_MARKERS = (
+    "password authentication failed",
+    "invalid password",
+    "invalid authorization",
+    "invalid credentials",
+    "authentication failed",
+    "authorization failed",
 )
 
 
@@ -50,6 +64,83 @@ def _is_stale_connection_error(exc: BaseException) -> bool:
         return False
     message = str(exc).lower()
     return any(marker in message for marker in _STALE_CONNECTION_MARKERS)
+
+
+def _is_db_auth_error(exc: BaseException) -> bool:
+    """Detect DB authentication failures that require credential invalidation.
+
+    Lakebase can reject an OAuth-derived password before our local
+    ``expires_at`` threshold says it is stale. In that case asyncpg raises
+    ``InvalidPasswordError: password authentication failed ...``; wrappers may
+    then turn it into a storage-layer ``PermanentError``. Match both the
+    exception class chain and the message so callers refresh the cached engine
+    instead of repeatedly reusing a poisoned credential.
+    """
+    current: BaseException | None = exc
+    while current is not None:
+        if "invalidpassword" in type(current).__name__.lower():
+            return True
+        message = str(current).lower()
+        if any(marker in message for marker in _AUTH_FAILURE_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def log_lakebase_auth_failure_diagnostics(exc: BaseException) -> None:
+    """Emit provider-specific, redacted context for Lakebase auth failures."""
+    if _credential_provider is None:
+        logger.warning(
+            "LAKEBASE_DB_AUTH_FAILURE_DIAGNOSTIC provider_exists=False "
+            "exc_class=%s error_fingerprint=%s",
+            type(exc).__name__,
+            _error_fingerprint(exc),
+        )
+        return
+
+    diagnostics_logger = getattr(
+        _credential_provider,
+        "log_auth_failure_diagnostics",
+        None,
+    )
+    if callable(diagnostics_logger):
+        try:
+            diagnostics_logger(exc)
+            return
+        except Exception:  # noqa: BLE001
+            logger.exception("LAKEBASE_DB_AUTH_FAILURE_DIAGNOSTIC_FAILED")
+
+    logger.warning(
+        "LAKEBASE_DB_AUTH_FAILURE_DIAGNOSTIC backend=%s credential_exists=%s "
+        "exc_class=%s error_fingerprint=%s",
+        _credential_provider.get_backend_type(),
+        _credential_provider.current_credential is not None,
+        type(exc).__name__,
+        _error_fingerprint(exc),
+    )
+
+
+def _error_fingerprint(exc: BaseException) -> str:
+    message = str(exc)
+    digest = hashlib.sha256(message.encode("utf-8")).hexdigest()[:12]
+    return f"sha256={digest}:len={len(message)}"
+
+
+def _redact_db_identity(value: object | None) -> str | None:
+    if value is None:
+        return None
+    rendered = str(value)
+    digest = hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:12]
+    if "@" in rendered:
+        kind = "email"
+    elif len(rendered) == 36 and rendered.count("-") == 4:
+        kind = "uuid"
+    elif rendered.isdigit():
+        kind = "numeric"
+    else:
+        kind = "other"
+    return f"kind={kind}:sha256={digest}:len={len(rendered)}"
+
 
 # Module-level state
 _engine: AsyncEngine | None = None
@@ -124,6 +215,123 @@ def get_database_url(settings: Settings) -> str:
     raise ValueError("No database configuration: set LAKEBASE_* or DATABASE_URL")
 
 
+def _maybe_log_endpoint_state(provider: BaseLakebaseCredentialProvider) -> None:
+    """Invoke the provider's non-fatal endpoint-state probe, if it has one."""
+    probe = getattr(provider, "log_endpoint_state_diagnostics", None)
+    if callable(probe):
+        try:
+            probe()
+        except Exception:  # noqa: BLE001 - diagnostics must never raise
+            logger.debug("ENDPOINT_STATE_PROBE_FAILED", exc_info=True)
+
+
+def _lakebase_connect_kwargs(
+    settings: Settings,
+    provider: BaseLakebaseCredentialProvider,
+) -> dict[str, Any]:
+    """Build raw ``asyncpg.connect`` kwargs from the current credential.
+
+    Mirrors the connection the SQLAlchemy URL would have produced, but lets us
+    own connection creation (and thus retry) via ``async_creator``. PgBouncer-
+    safe options come from ``lakebase_raw_asyncpg_kwargs`` so we do not regress
+    the statement-cache settings the URL path applied via ``connect_args``.
+    """
+    cred = provider.get_credential()
+    kwargs: dict[str, Any] = {
+        "host": provider.get_host(),
+        "port": provider.get_port(),
+        "user": cred.username,
+        "password": cred.token,
+        "database": provider.get_database(),
+        "ssl": True,
+        **lakebase_raw_asyncpg_kwargs(),
+    }
+    if settings.db_command_timeout is not None:
+        kwargs["command_timeout"] = settings.db_command_timeout
+    return kwargs
+
+
+def _make_lakebase_async_creator(
+    settings: Settings,
+    provider: BaseLakebaseCredentialProvider,
+) -> Callable[[], Awaitable[Any]]:
+    """Return an async connection creator with bounded auth-failure retry.
+
+    A freshly-minted Lakebase OAuth credential can be transiently rejected
+    ("password authentication failed") by the PgBouncer/databricks_auth layer
+    for a few seconds until it propagates. ``provider.get_credential()`` returns
+    the cached (non-expired) credential, so retrying reuses the SAME token —
+    which is exactly what a propagation race needs — rather than minting a new
+    token that would hit the same race. Only when the credential is genuinely
+    expired does ``get_credential()`` mint a new one. Bounded backoff caps the
+    worst case so a truly invalid credential still fails fast.
+
+    Retry/backoff settings are read inside the creator (per connection birth)
+    rather than at factory time so engine construction stays side-effect free.
+    """
+
+    async def _creator() -> Any:
+        attempts = max(1, settings.lakebase_auth_retry_attempts)
+        base = max(0.0, settings.lakebase_auth_retry_base_delay_s)
+        cap = max(base, settings.lakebase_auth_retry_max_delay_s)
+        start = time.monotonic()
+        first_token_fp: str | None = None
+        reused_same_token = True
+        last_exc: BaseException | None = None
+
+        for attempt in range(1, attempts + 1):
+            kwargs = _lakebase_connect_kwargs(settings, provider)
+            token_fp = hashlib.sha256(str(kwargs["password"]).encode()).hexdigest()[:12]
+            if first_token_fp is None:
+                first_token_fp = token_fp
+            elif token_fp != first_token_fp:
+                reused_same_token = False
+
+            try:
+                conn = await asyncpg.connect(**kwargs)
+                if attempt > 1:
+                    logger.warning(
+                        "LAKEBASE_AUTH_RECOVERED attempts=%d elapsed_ms=%.0f same_token=%s",
+                        attempt,
+                        (time.monotonic() - start) * 1000.0,
+                        reused_same_token,
+                    )
+                return conn
+            except Exception as exc:  # noqa: BLE001 - re-raised below if not auth
+                if not _is_db_auth_error(exc):
+                    raise
+                last_exc = exc
+                cred = provider.current_credential
+                expired = cred.is_expired if cred is not None else None
+                if attempt == 1:
+                    # Full redacted diagnostics + endpoint-state probe once.
+                    log_lakebase_auth_failure_diagnostics(exc)
+                    _maybe_log_endpoint_state(provider)
+                if attempt >= attempts:
+                    break
+                delay = min(cap, base * (2 ** (attempt - 1)))
+                logger.warning(
+                    "LAKEBASE_AUTH_RETRY attempt=%d/%d delay_s=%.2f token_expired=%s",
+                    attempt,
+                    attempts,
+                    delay,
+                    expired,
+                )
+                if delay > 0:
+                    await asyncio.sleep(delay)
+
+        logger.error(
+            "LAKEBASE_AUTH_RETRY_EXHAUSTED attempts=%d elapsed_ms=%.0f same_token=%s",
+            attempts,
+            (time.monotonic() - start) * 1000.0,
+            reused_same_token,
+        )
+        assert last_exc is not None  # loop only exits via return or after setting last_exc
+        raise last_exc
+
+    return _creator
+
+
 def get_engine(settings: Settings | None = None) -> AsyncEngine:
     """Get or create async database engine with proactive credential refresh.
 
@@ -187,23 +395,29 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
                     logger.info("LAKEBASE_ENGINE_DISPOSED deferred=True no_running_loop=True")
 
     if _engine is None:
-        database_url = get_database_url(settings)
-
         # PgBouncer-safe connection options (see db/asyncpg_config.py for why).
         connect_args = lakebase_asyncpg_connect_args(settings)
         engine_kwargs = lakebase_engine_kwargs(settings)
 
+        # For Lakebase we own connection creation via ``async_creator`` so we can
+        # retry a transient "password authentication failed" on a freshly-minted
+        # token (PgBouncer/databricks_auth propagation race) instead of 500-ing.
+        # The creator supplies host/credentials + PgBouncer-safe options itself,
+        # so we hand SQLAlchemy a credential-less dialect URL and omit connect_args.
+        lakebase_provider = (
+            get_credential_provider(settings) if settings.use_lakebase else None
+        )
+
         logger.info(
-            "DB_ENGINE_CREATED lakebase=%s statement_cache_size=%s "
-            "prepared_statement_cache_size=%s command_timeout=%s",
+            "DB_ENGINE_CREATED lakebase=%s auth_retry=%s statement_cache_size=%s "
+            "command_timeout=%s",
             settings.use_lakebase,
+            lakebase_provider is not None,
             connect_args.get("statement_cache_size"),
-            engine_kwargs.get("prepared_statement_cache_size"),
             connect_args.get("command_timeout"),
         )
 
-        _engine = create_async_engine(
-            database_url,
+        common_kwargs: dict[str, Any] = dict(
             echo=settings.debug and not settings.is_production,
             pool_size=settings.db_pool_size,
             max_overflow=settings.db_max_overflow,
@@ -212,9 +426,21 @@ def get_engine(settings: Settings | None = None) -> AsyncEngine:
             # refreshed BEFORE the 5-minute token expiry buffer kicks in at 55 min.
             # This prevents pooled connections from holding stale tokens.
             pool_recycle=2700 if settings.use_lakebase else 3600,
-            connect_args=connect_args,
             **engine_kwargs,
         )
+
+        if lakebase_provider is not None:
+            _engine = create_async_engine(
+                "postgresql+asyncpg://",
+                async_creator=_make_lakebase_async_creator(settings, lakebase_provider),
+                **common_kwargs,
+            )
+        else:
+            _engine = create_async_engine(
+                get_database_url(settings),
+                connect_args=connect_args,
+                **common_kwargs,
+            )
 
     return _engine
 
@@ -272,6 +498,40 @@ async def refresh_engine_credentials() -> None:
     # Engine will be recreated on next request
 
 
+async def log_lakebase_connection_self_test(settings: Settings | None = None) -> None:
+    """Run a non-fatal Lakebase connection probe and log redacted identity context."""
+    if settings is None:
+        settings = get_settings()
+    if not settings.use_lakebase:
+        return
+
+    try:
+        session_maker = get_session_maker(settings)
+        async with session_maker() as session:
+            result = await session.execute(
+                text(
+                    "SELECT current_user AS current_user, "
+                    "current_database() AS database, current_schema() AS schema"
+                )
+            )
+            row = result.mappings().one()
+        logger.info(
+            "LAKEBASE_SELF_TEST_OK current_user=%s database=%s schema=%s",
+            _redact_db_identity(row["current_user"]),
+            row["database"],
+            row["schema"],
+        )
+    except Exception as exc:  # noqa: BLE001 - diagnostic must not block startup
+        auth_error = _is_db_auth_error(exc)
+        if auth_error:
+            log_lakebase_auth_failure_diagnostics(exc)
+        logger.warning(
+            "LAKEBASE_SELF_TEST_FAILED exc_class=%s auth_error=%s",
+            type(exc).__name__,
+            auth_error,
+        )
+
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency for database session with auto-refresh on auth failure.
 
@@ -306,9 +566,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             # Snapshot pending writes BEFORE the commit attempt; a failed
             # commit puts the session into an aborted state where these
             # collections are unreliable.
-            had_pending_writes = (
-                bool(session.new) or bool(session.dirty) or bool(session.deleted)
-            )
+            had_pending_writes = bool(session.new) or bool(session.dirty) or bool(session.deleted)
             try:
                 await session.commit()
             except Exception as commit_err:
@@ -340,24 +598,47 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
                 await session.rollback()
             except Exception as rollback_err:
                 if not _is_stale_connection_error(rollback_err):
+                    logger.warning("DB_ROLLBACK_FAILED: %s", str(rollback_err)[:200])
+            # Auth failures that survive the connection-birth retry budget reach
+            # here. Distinguish two cases by the cached credential's expiry:
+            #  - expired/unknown → mint a fresh token so the NEXT request recovers.
+            #  - still valid     → this was a transient PgBouncer/databricks_auth
+            #                      propagation event, NOT a stale credential.
+            #                      Force-refreshing would mint another age-0 token
+            #                      that hits the same race, so we do NOT refresh;
+            #                      we surface a 503 for the client to retry.
+            if _is_db_auth_error(e):
+                cred = (
+                    _credential_provider.current_credential
+                    if _credential_provider is not None
+                    else None
+                )
+                expired = cred.is_expired if cred is not None else None
+                if expired is None or expired:
                     logger.warning(
-                        "DB_ROLLBACK_FAILED: %s", str(rollback_err)[:200]
+                        "Database auth failed on expired/unknown token; refreshing "
+                        "Lakebase credentials. exc_class=%s",
+                        type(e).__name__,
                     )
-            # Check if this is an auth error that might be fixed by credential refresh
-            error_str = str(e).lower()
-            if "invalid" in error_str and (
-                "password" in error_str or "authorization" in error_str
-            ):
-                logger.warning(f"Database auth failed: {e}")
-                logger.info("Triggering credential refresh for next request...")
-                await refresh_engine_credentials()
+                    await refresh_engine_credentials()
+                else:
+                    cred_age = cred.age_s if cred is not None else None
+                    logger.warning(
+                        "LAKEBASE_AUTH_FAILURE_ON_FRESH_TOKEN exc_class=%s cred_age_s=%s "
+                        "— not refreshing (transient propagation); surfacing 503.",
+                        type(e).__name__,
+                        f"{cred_age:.1f}" if cred_age is not None else None,
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Database temporarily unavailable (auth). Please retry.",
+                    headers={"Retry-After": "2"},
+                ) from e
             # Stale-connection on the yield itself (extremely rare) is still
             # not useful to propagate — the request already finished on the
             # caller side; turning it into a 500 helps no one.
             if _is_stale_connection_error(e):
-                logger.warning(
-                    "DB_YIELD_STALE_CONNECTION: %s", str(e)[:200]
-                )
+                logger.warning("DB_YIELD_STALE_CONNECTION: %s", str(e)[:200])
                 return
             raise
         finally:
@@ -370,9 +651,7 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
                         str(close_err)[:200],
                     )
                 else:
-                    logger.warning(
-                        "DB_CLOSE_FAILED: %s", str(close_err)[:200]
-                    )
+                    logger.warning("DB_CLOSE_FAILED: %s", str(close_err)[:200])
 
 
 # Type alias for dependency injection

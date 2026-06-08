@@ -47,7 +47,12 @@ def _make_role(
     )
 
 
-def _call_merge_config(role: ModelRole, endpoint: ModelEndpoint) -> dict:
+def _call_merge_config(
+    role: ModelRole,
+    endpoint: ModelEndpoint,
+    *,
+    force_tool_use: bool = False,
+) -> dict:
     """Call _merge_config via a minimal LLMClient mock.
 
     We test _merge_config as a standalone function by extracting it
@@ -56,7 +61,9 @@ def _call_merge_config(role: ModelRole, endpoint: ModelEndpoint) -> dict:
     from deep_research.services.llm.client import LLMClient
 
     # _merge_config is an instance method but doesn't use self beyond type
-    return LLMClient._merge_config(None, role, endpoint)  # type: ignore[arg-type]
+    return LLMClient._merge_config(  # type: ignore[arg-type]
+        None, role, endpoint, force_tool_use=force_tool_use
+    )
 
 
 class TestClaudeThinking:
@@ -191,6 +198,44 @@ class TestSupportsReasoningGuard:
         config = _call_merge_config(role, endpoint)
 
         assert "reasoning_effort" not in config
+
+
+class TestForceToolUseSuppressesThinking:
+    """force_tool_use=True → Claude thinking suppressed (structured output is a
+    forced tool call; the gateway rejects thinking + forced tool use).
+    """
+
+    def test_claude_force_tool_use_drops_thinking(self) -> None:
+        endpoint = _make_endpoint(endpoint_id="databricks-claude-haiku-4-5")
+        role = _make_role(reasoning_effort=ReasoningEffort.LOW)
+        config = _call_merge_config(role, endpoint, force_tool_use=True)
+
+        assert "extra_body" not in config
+        # temperature=1 override only happens inside the thinking block
+        assert config.get("temperature") != 1
+
+    def test_claude_force_tool_use_drops_thinking_high(self) -> None:
+        endpoint = _make_endpoint(endpoint_id="databricks-claude-opus-4-6")
+        role = _make_role(reasoning_effort=ReasoningEffort.HIGH)
+        config = _call_merge_config(role, endpoint, force_tool_use=True)
+
+        assert "extra_body" not in config
+
+    def test_claude_no_force_keeps_thinking(self) -> None:
+        """Default (force_tool_use=False) preserves existing thinking behavior."""
+        endpoint = _make_endpoint(endpoint_id="databricks-claude-opus-4-6")
+        role = _make_role(reasoning_effort=ReasoningEffort.HIGH)
+        config = _call_merge_config(role, endpoint, force_tool_use=False)
+
+        assert config["extra_body"]["thinking"]["type"] == "enabled"
+
+    def test_gpt_force_tool_use_keeps_reasoning_effort(self) -> None:
+        """Forced tool use is a Claude-only constraint; GPT is unaffected."""
+        endpoint = _make_endpoint(endpoint_id="databricks-gpt-5-4")
+        role = _make_role(reasoning_effort=ReasoningEffort.HIGH)
+        config = _call_merge_config(role, endpoint, force_tool_use=True)
+
+        assert config["reasoning_effort"] == "high"
 
 
 class TestEndpointOverridesRole:

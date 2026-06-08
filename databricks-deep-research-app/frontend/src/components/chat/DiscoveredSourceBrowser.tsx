@@ -56,6 +56,12 @@ const SOURCE_CATEGORIES: SourceCategory[] = [
     description: 'Semantic search over indexed documents',
   },
   {
+    type: 'delta_table',
+    label: 'Delta Tables',
+    icon: <DatabaseIcon className="h-4 w-4" />,
+    description: 'Structured tables queried through SQL warehouses',
+  },
+  {
     type: 'genie',
     label: 'Genie Spaces',
     icon: <ChartIcon className="h-4 w-4" />,
@@ -136,6 +142,7 @@ export function DiscoveredSourceBrowser({
   const groupedSources = React.useMemo(() => {
     const groups: Record<DataSourceType, DiscoveredSource[]> = {
       vector_search: [],
+      delta_table: [],
       genie: [],
       knowledge_assistant: [],
       web_search: [],

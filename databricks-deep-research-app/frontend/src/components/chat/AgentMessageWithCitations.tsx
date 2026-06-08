@@ -50,12 +50,20 @@ export function AgentMessageWithCitations({
 }: AgentMessageWithCitationsProps) {
   // Fetch citations for this message
   // Only fetch if message has a valid UUID (not a placeholder like 'streaming-*', 'session-*', etc.)
-  const shouldFetchCitations = enableCitationFetch && message.id && isValidUUID(message.id);
+  // The /claims endpoint requires chat_id (so the storage stack can resolve the
+  // chat document); only fetch when both the message id and its chat id are
+  // valid UUIDs (placeholders like 'streaming' carry chatId='' and never fetch).
+  const hasValidChat = !!message.chatId && isValidUUID(message.chatId);
+  const shouldFetchCitations =
+    enableCitationFetch && !!message.id && isValidUUID(message.id) && hasValidChat;
 
   const {
     claims,
     verificationSummary,
-  } = useCitations(shouldFetchCitations ? message.id : null);
+  } = useCitations(
+    shouldFetchCitations ? message.id : null,
+    shouldFetchCitations ? message.chatId : null,
+  );
 
   // Always enable citation parsing so [Key] markers render as interactive elements
   // Even when claims haven't loaded yet, markers should be clickable (shown as "unresolved")

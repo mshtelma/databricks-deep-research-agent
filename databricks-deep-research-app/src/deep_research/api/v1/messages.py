@@ -4,15 +4,15 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from deep_research.api.v1.utils import verify_chat_ownership
-from deep_research.core.deps import get_storage_optional
+from deep_research.core.deps import (
+    get_chat_service,
+    get_feedback_service,
+    get_message_service,
+)
 from deep_research.core.exceptions import NotFoundError
-from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
-from deep_research.models.message import Message, MessageRole
-from deep_research.models.research_session import ResearchSession
+from deep_research.models.message import MessageRole
 from deep_research.schemas.feedback import FeedbackRequest, FeedbackResponse
 from deep_research.schemas.message import (
     EditMessageRequest,
@@ -24,18 +24,19 @@ from deep_research.schemas.message import (
     SendMessageResponse,
 )
 from deep_research.schemas.research import ResearchSession as ResearchSessionSchema
-from deep_research.core.deps import get_chat_service
-from deep_research.services._protocols import IChatService
-from deep_research.services.feedback_service import FeedbackService
-from deep_research.services.message_service import MessageService
+from deep_research.services._protocols import (
+    IChatService,
+    IFeedbackService,
+    IMessageService,
+)
 
 router = APIRouter()
 
 
 def _research_session_to_schema(
-    session: ResearchSession | None,
+    session: Any | None,
 ) -> ResearchSessionSchema | None:
-    """Convert ResearchSession model to schema."""
+    """Convert ResearchSession (ORM or cached namespace) to schema."""
     if session is None:
         return None
 
@@ -45,17 +46,18 @@ def _research_session_to_schema(
         research_depth=session.research_depth,
         reasoning_steps=session.reasoning_steps or [],
         status=session.status,
-        current_agent=session.current_agent,
-        plan=session.plan,  # JSONB dict, frontend can parse as needed
-        current_step_index=session.current_step_index,
-        plan_iterations=session.plan_iterations,
+        current_agent=getattr(session, "current_agent", None),
+        plan=session.plan,
+        current_step_index=getattr(session, "current_step_index", None)
+        or getattr(session, "current_step", None),
+        plan_iterations=getattr(session, "plan_iterations", None),
         started_at=session.started_at,
         completed_at=session.completed_at,
         sources=[],  # Don't load sources to avoid N+1 queries
     )
 
 
-def _message_to_response(msg: Message) -> MessageResponse:
+def _message_to_response(msg: Any) -> MessageResponse:
     """Convert Message model to MessageResponse schema."""
     return MessageResponse(
         id=msg.id,
@@ -64,7 +66,9 @@ def _message_to_response(msg: Message) -> MessageResponse:
         content=msg.content or "",  # Content can be None for in-progress agent messages
         created_at=msg.created_at,
         is_edited=msg.is_edited,
-        research_session=_research_session_to_schema(msg.research_session),
+        research_session=_research_session_to_schema(
+            getattr(msg, "research_session", None)
+        ),
     )
 
 
@@ -72,17 +76,18 @@ def _message_to_response(msg: Message) -> MessageResponse:
 async def list_messages(
     chat_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-    stack: Any = Depends(get_storage_optional),
+    message_service: IMessageService = Depends(get_message_service),
+    chat_service: IChatService = Depends(get_chat_service),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> MessageListResponse:
     """List messages in a chat."""
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
+    chat = await chat_service.get_for_user(chat_id, user.user_id)
+    if not chat:
+        raise NotFoundError("Chat", str(chat_id))
 
-    service = MessageService(db)
-    messages, total = await service.list_messages(
+    messages, total = await message_service.list_messages(
         chat_id=chat_id,
         limit=limit,
         offset=offset,
@@ -101,8 +106,7 @@ async def send_message(
     chat_id: UUID,
     request: SendMessageRequest,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-    stack: Any = Depends(get_storage_optional),
+    message_service: IMessageService = Depends(get_message_service),
     chat_service: IChatService = Depends(get_chat_service),
 ) -> SendMessageResponse:
     """Send a message and get agent response.
@@ -111,9 +115,9 @@ async def send_message(
     with message IDs. Use SSE endpoint to stream the agent response.
     """
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
-
-    message_service = MessageService(db)
+    chat = await chat_service.get_for_user(chat_id, user.user_id)
+    if not chat:
+        raise NotFoundError("Chat", str(chat_id))
 
     # Create user message
     user_message = await message_service.create(
@@ -128,8 +132,6 @@ async def send_message(
     # Create placeholder agent message (will be filled by streaming)
     session_id = uuid4()
 
-    await db.commit()
-
     return SendMessageResponse(
         user_message=_message_to_response(user_message),
         agent_message_id=uuid4(),  # Placeholder, actual message created by stream
@@ -142,16 +144,17 @@ async def get_message(
     chat_id: UUID,
     message_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-    stack: Any = Depends(get_storage_optional),
+    message_service: IMessageService = Depends(get_message_service),
+    chat_service: IChatService = Depends(get_chat_service),
     include_research_session: bool = Query(False),
 ) -> MessageResponse:
     """Get message details."""
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
+    chat = await chat_service.get_for_user(chat_id, user.user_id)
+    if not chat:
+        raise NotFoundError("Chat", str(chat_id))
 
-    service = MessageService(db)
-    message = await service.get_with_chat(message_id, chat_id)
+    message = await message_service.get_with_chat(message_id, chat_id)
     if not message:
         raise NotFoundError("Message", str(message_id))
     return _message_to_response(message)
@@ -163,8 +166,8 @@ async def edit_message(
     message_id: UUID,
     request: EditMessageRequest,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-    stack: Any = Depends(get_storage_optional),
+    message_service: IMessageService = Depends(get_message_service),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> EditMessageResponse:
     """Edit a user message.
 
@@ -172,12 +175,12 @@ async def edit_message(
     messages in the conversation thread.
     """
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
-
-    service = MessageService(db)
+    chat = await chat_service.get_for_user(chat_id, user.user_id)
+    if not chat:
+        raise NotFoundError("Chat", str(chat_id))
 
     # Get the original message
-    original = await service.get_with_chat(message_id, chat_id)
+    original = await message_service.get_with_chat(message_id, chat_id)
     if not original:
         raise NotFoundError("Message", str(message_id))
 
@@ -185,22 +188,13 @@ async def edit_message(
     if original.role != MessageRole.USER:
         raise NotFoundError("Message", str(message_id))
 
-    try:
-        # Delete subsequent messages
-        deleted_count = await service.delete_subsequent(chat_id, original.created_at)
+    # Delete subsequent messages
+    deleted_count = await message_service.delete_subsequent(chat_id, original.created_at)
 
-        # Update the message content
-        updated = await service.update_content(message_id, request.content)
-        if not updated:
-            raise NotFoundError("Message", str(message_id))
-
-        await db.commit()
-    except NotFoundError:
-        await db.rollback()
-        raise
-    except Exception:
-        await db.rollback()
-        raise
+    # Update the message content
+    updated = await message_service.update_content(message_id, request.content, chat_id=chat_id)
+    if not updated:
+        raise NotFoundError("Message", str(message_id))
 
     return EditMessageResponse(
         message=_message_to_response(updated),
@@ -217,8 +211,8 @@ async def regenerate_message(
     chat_id: UUID,
     message_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-    stack: Any = Depends(get_storage_optional),
+    message_service: IMessageService = Depends(get_message_service),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> RegenerateResponse:
     """Regenerate agent response.
 
@@ -226,23 +220,21 @@ async def regenerate_message(
     Creates a new agent message with fresh research results.
     """
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
-
-    service = MessageService(db)
+    chat = await chat_service.get_for_user(chat_id, user.user_id)
+    if not chat:
+        raise NotFoundError("Chat", str(chat_id))
 
     # Get the message (should be an agent message)
-    original = await service.get_with_chat(message_id, chat_id)
+    original = await message_service.get_with_chat(message_id, chat_id)
     if not original:
         raise NotFoundError("Message", str(message_id))
 
     # Delete the old agent message and any after it
-    await service.delete_subsequent(chat_id, original.created_at)
+    await message_service.delete_subsequent(chat_id, original.created_at)
 
     # Create a new session for regeneration
     new_session_id = uuid4()
     new_message_id = uuid4()
-
-    await db.commit()
 
     return RegenerateResponse(
         new_message_id=new_message_id,
@@ -260,14 +252,15 @@ async def submit_feedback(
     message_id: UUID,
     request: FeedbackRequest,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-    stack: Any = Depends(get_storage_optional),
+    message_service: IMessageService = Depends(get_message_service),
+    feedback_service: IFeedbackService = Depends(get_feedback_service),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> FeedbackResponse:
     """Submit feedback on agent message."""
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
-
-    message_service = MessageService(db)
+    chat = await chat_service.get_for_user(chat_id, user.user_id)
+    if not chat:
+        raise NotFoundError("Chat", str(chat_id))
 
     # Verify message exists
     message = await message_service.get_with_chat(message_id, chat_id)
@@ -275,7 +268,6 @@ async def submit_feedback(
         raise NotFoundError("Message", str(message_id))
 
     # Create actual feedback record
-    feedback_service = FeedbackService(db)
     try:
         feedback = await feedback_service.create_feedback(
             message_id=message_id,
@@ -284,9 +276,7 @@ async def submit_feedback(
             feedback_text=request.feedback_text,
             feedback_category=request.feedback_category,
         )
-        await db.commit()
     except ValueError as e:
-        await db.rollback()
         raise NotFoundError("Feedback", str(e)) from e
 
     return FeedbackResponse(
@@ -304,18 +294,19 @@ async def get_message_content(
     chat_id: UUID,
     message_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-    stack: Any = Depends(get_storage_optional),
+    message_service: IMessageService = Depends(get_message_service),
+    chat_service: IChatService = Depends(get_chat_service),
 ) -> dict[str, Any]:
     """Get message content for clipboard.
 
     Returns plain text content suitable for copying to clipboard.
     """
     # Verify user owns the chat
-    await verify_chat_ownership(chat_id, user.user_id, db, storage_stack=stack)
+    chat = await chat_service.get_for_user(chat_id, user.user_id)
+    if not chat:
+        raise NotFoundError("Chat", str(chat_id))
 
-    service = MessageService(db)
-    message = await service.get_with_chat(message_id, chat_id)
+    message = await message_service.get_with_chat(message_id, chat_id)
     if not message:
         raise NotFoundError("Message", str(message_id))
 

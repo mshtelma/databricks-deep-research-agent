@@ -4,12 +4,13 @@ Replaces the 3769 LOC monolith orchestrator with a clean delegation to the
 multi-agent framework.  The pipeline is:
 
     config_translator.translate(config) → WorkflowDefinition
-    WorkflowExecutor(definition, llm_client, ...).execute(state) → yields StreamEvent
+    build_app_workflow_runner(...).stream(definition, ...) → yields StreamEvent
     DomainContextTracker.process_event(event) → list[AppSSEEvent]
     PersistenceDelta → DB writes
 
 All app-specific concerns (persistence, SSE format, cancellation, error
-handling) are handled here.  The framework handles workflow execution.
+handling) are handled here.  Tool context construction lives in
+``workflow_runner_factory.py``.  The framework handles workflow execution.
 """
 
 from __future__ import annotations
@@ -18,9 +19,10 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
 import traceback
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -38,30 +40,26 @@ from databricks_deep_research.workflow.context import (
     ExecutionContext,
 )
 from databricks_deep_research.workflow.definition import (
+    NodeType,
     WorkflowDefinition,
 )
-from databricks_deep_research.workflow.executor import (
-    WorkflowExecutor,
-)
+from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from databricks_deep_research.workflow.state import WorkflowState
 
 from deep_research.agent.adapters.config_translator import translate
-from deep_research.agent.chat_title import derive_chat_title_from_query
 from deep_research.agent.adapters.domain_context import (
     AppSSEEvent,
     DomainContextTracker,
 )
 from deep_research.agent.adapters.llm_adapter import create_framework_llm_client
 from deep_research.agent.adapters.tool_adapter import create_framework_tools
+from deep_research.agent.chat_title import derive_chat_title_from_query
 from deep_research.agent.tools.file_entities import GetFileEntitiesTool
 from deep_research.agent.tools.list_files import ListAttachedFilesTool
 from deep_research.agent.tools.read_file import ReadAttachedFileTool
-from deep_research.plugins.base import ContextEnricher
-from deep_research.services._impl_factory import make_chat_memory_service, make_file_upload_service
-from deep_research.services._protocols import IChatMemoryService
-from deep_research.services.chat_memory_service import ChatMemoryService
-from deep_research.services.file_upload_service import FileUploadService
+from deep_research.agent.workflow_runner_factory import build_app_workflow_runner
 from deep_research.core.tracing import safe_mlflow_run, safe_tool_span, safe_update_trace
+from deep_research.plugins.base import ContextEnricher
 from deep_research.schemas.streaming import (
     AgentCompletedEvent,
     AgentStartedEvent,
@@ -73,6 +71,8 @@ from deep_research.schemas.streaming import (
     SynthesisProgressEvent,
     SynthesisStartedEvent,
 )
+from deep_research.services._impl_factory import make_chat_memory_service, make_file_upload_service
+from deep_research.services._protocols import IChatMemoryService
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.embedder import DEFAULT_EMBEDDING_ENDPOINT
 from deep_research.services.research_event_buffer import EventBuffer
@@ -98,6 +98,18 @@ except ImportError:
     PluginManager = None  # type: ignore[misc, assignment]
 
 logger = logging.getLogger(__name__)
+
+
+class MissingOBOTokenError(RuntimeError):
+    """Raised when a Databricks-bound workflow runs under the Apps runtime
+    without an on-behalf-of user token.
+
+    Surfaced to the caller as a streamed error (via the orchestrator's
+    error handler) so the request fails fast with a clear message instead
+    of silently running every Databricks tool as the app service principal
+    and returning UC permission errors / empty results.
+    """
+
 
 # Regex matching [N] numeric citation markers produced by the framework synthesizer.
 # Captures the integer N.  Matches [1], [12], [1][2], etc.
@@ -174,6 +186,282 @@ def _resolve_workflow(
     )
 
 
+async def _resolve_agent_v2_workflow(
+    config: OrchestrationConfig,
+    user_id: str | None,
+    db: Any | None,
+) -> WorkflowDefinition | None:
+    """Load a selected Agent V2 workflow definition, if requested."""
+    if not config.agent_id:
+        return None
+    if not user_id:
+        raise ValueError("agent_id was provided but no user_id is available for visibility checks")
+
+    try:
+        agent_uuid = UUID(config.agent_id)
+    except ValueError as exc:
+        raise ValueError(f"Invalid agent_id {config.agent_id!r}") from exc
+
+    from deep_research.services.agent_v2_service import AgentV2Service
+
+    if db is not None:
+        agent = await AgentV2Service(db).get_for_user(agent_uuid, user_id)
+    else:
+        from deep_research.db.session import get_session_maker
+
+        session_maker = get_session_maker()
+        async with session_maker() as session:
+            agent = await AgentV2Service(session).get_for_user(agent_uuid, user_id)
+
+    if agent is None:
+        raise ValueError(f"Agent {config.agent_id!r} was not found or is not visible to the user")
+
+    workflow_def = load_workflow_from_dict(agent.definition)
+    logger.info(
+        "FWK_AGENT_V2_WORKFLOW_RESOLVED agent_id=%s workflow_id=%s workflow_name=%s",
+        config.agent_id,
+        workflow_def.id,
+        workflow_def.name,
+    )
+    return workflow_def
+
+
+def _visit_workflow_agent_configs(
+    workflow_def: WorkflowDefinition,
+    visitor: Callable[[dict[str, Any]], None],
+) -> None:
+    """Visit agent configs, including agent configs nested inside raw config bodies."""
+
+    def visit_raw(raw_node: dict[str, Any]) -> None:
+        config_dict = raw_node.get("config")
+        if isinstance(config_dict, dict):
+            if raw_node.get("type") == NodeType.agent.value:
+                visitor(config_dict)
+            elif raw_node.get("type") == NodeType.plan_and_execute.value:
+                for nested_key in ("planner", "evaluator"):
+                    nested = config_dict.get(nested_key)
+                    if isinstance(nested, dict):
+                        visitor(nested)
+                body = config_dict.get("body")
+                if isinstance(body, dict):
+                    visit_raw(body)
+        for child in raw_node.get("children") or []:
+            if isinstance(child, dict):
+                visit_raw(child)
+
+    def visit_node(node: Any) -> None:
+        if node.type == NodeType.agent:
+            visitor(node.config)
+        elif node.type == NodeType.plan_and_execute:
+            for nested_key in ("planner", "evaluator"):
+                nested = node.config.get(nested_key)
+                if isinstance(nested, dict):
+                    visitor(nested)
+            body = node.config.get("body")
+            if isinstance(body, dict):
+                visit_raw(body)
+        for child in node.children:
+            visit_node(child)
+
+    visit_node(workflow_def.root)
+
+
+def _apply_runtime_overlays_to_workflow(
+    workflow_def: WorkflowDefinition,
+    config: OrchestrationConfig,
+) -> WorkflowDefinition:
+    """Apply per-run chat toggles that are orthogonal to saved workflow shape."""
+    if not config.verify_sources:
+        return workflow_def
+
+    def maybe_enable_reclaim(agent_config: dict[str, Any]) -> None:
+        if agent_config.get("subtype") != "synthesizer":
+            return
+        output_schema = agent_config.get("output_schema")
+        has_legacy_grounding = (
+            isinstance(output_schema, dict)
+            and output_schema.get("synthesis_mode") in {"reclaim", "interleaved"}
+        )
+        has_explicit_grounding = agent_config.get("grounding_mode") in {
+            "none",
+            "classical_lite",
+            "reclaim",
+        }
+        if has_explicit_grounding or has_legacy_grounding:
+            return
+        schema = output_schema if isinstance(output_schema, dict) else {}
+        schema.setdefault("synthesis_mode", "reclaim")
+        schema.setdefault("enable_citation_verification", True)
+        agent_config["output_schema"] = schema
+
+    _visit_workflow_agent_configs(workflow_def, maybe_enable_reclaim)
+    return workflow_def
+
+
+def _tool_names_with_explicit_provider(workflow_def: WorkflowDefinition) -> set[str]:
+    """Tool names whose YAML declaration sets an explicit ``config.provider``.
+
+    Such tools must resolve via the factory chain (honoring the declared provider)
+    rather than being shadowed by an auto-injected resolver override —
+    ``ToolResolver.resolve()`` checks overrides BEFORE declarations, so without this
+    a per-workflow ``provider: databricks`` on ``web_search`` would be silently
+    ignored in favor of the app-default backend.
+    """
+    names: set[str] = set()
+    for tool in workflow_def.tools or []:
+        config = getattr(tool, "config", None)
+        if isinstance(config, dict) and config.get("provider"):
+            names.add(tool.name)
+    return names
+
+
+# Web-search tool kinds whose backend is provider-selectable. Mirrors
+# ``ast_normalizer._WEB_PROVIDER_TOOL_KINDS`` / ``registry._WEB_PROVIDER_TOOL_KINDS``.
+_WEB_PROVIDER_TOOL_KINDS: frozenset[str] = frozenset({"web_search", "web_research"})
+
+
+def _fill_databricks_tool_defaults(
+    workflow_def: WorkflowDefinition | None, search_cfg: Any
+) -> None:
+    """Fill app-config Databricks defaults onto per-tool databricks web tools.
+
+    Runs on EVERY app execution (main chat + UI-saved + hand-written YAML), not
+    only designer-normalized ASTs — a pure UI save bypasses ``normalize_ast``, so
+    without this a ``provider: databricks`` web tool that omits ``model`` would
+    reach the factory with no serving endpoint and raise. For a web tool whose
+    effective provider is databricks (explicit ``config.provider == 'databricks'``
+    or absent while the global default is databricks), the ``search.databricks``
+    endpoint/tuning is filled in when absent. Idempotent on configs the designer
+    normalizer already filled.
+    """
+    if workflow_def is None:
+        return
+    from deep_research.core.app_config import (
+        DEFAULT_SEARCH_PROVIDER,
+        fill_databricks_search_defaults,
+        resolve_effective_provider,
+    )
+
+    global_provider = getattr(search_cfg, "provider", DEFAULT_SEARCH_PROVIDER)
+    for tool in workflow_def.tools or []:
+        if getattr(tool, "kind", None) not in _WEB_PROVIDER_TOOL_KINDS:
+            continue
+        config = getattr(tool, "config", None)
+        if not isinstance(config, dict):
+            continue
+        effective = resolve_effective_provider(config.get("provider"), global_provider)
+        if effective != "databricks":
+            continue
+        min_results = 0
+        for count_key in ("total_results", "max_results"):
+            raw = config.get(count_key)
+            if isinstance(raw, int) and raw > min_results:
+                min_results = raw
+        if fill_databricks_search_defaults(
+            config, search_cfg.databricks, min_results=min_results
+        ):
+            logger.info(
+                "FWK_DBX_SEARCH_DEFAULTS tool=%s model=%s",
+                getattr(tool, "name", "?"),
+                config.get("model"),
+            )
+        # Tripwire: a model_family that contradicts the (now-resolved) endpoint
+        # is a guaranteed 400 (e.g. openai family on a Gemini endpoint => OpenAI
+        # Responses API on a Gemini serving endpoint). Save-time validation
+        # blocks newly-authored ones; this catches legacy / hand-written-YAML /
+        # API-imported configs. Shout loudly — built-in search would otherwise
+        # silently return zero results for every query.
+        model = config.get("model")
+        family = config.get("model_family")
+        if isinstance(model, str) and model and isinstance(family, str) and family:
+            detected = search_cfg.databricks.family_for_endpoint(model)
+            if detected is not None and detected != family:
+                logger.error(
+                    "DBX_SEARCH_FAMILY_ENDPOINT_MISMATCH tool=%s endpoint=%s "
+                    "declared_family=%s detected_family=%s — built-in web search "
+                    "will fail (wrong API for this endpoint); clear model_family "
+                    "or choose a matching endpoint.",
+                    getattr(tool, "name", "?"),
+                    model,
+                    family,
+                    detected,
+                )
+
+
+async def _resolve_and_prepare_workflow_def(
+    workflow_def: WorkflowDefinition | None,
+    config: OrchestrationConfig,
+    user_id: str | None,
+    db: Any,
+    tool_names: list[str],
+    plugin_manager: Any,
+    search_cfg: Any,
+) -> WorkflowDefinition:
+    """Resolve the workflow definition and prepare it for tool resolution.
+
+    Single owner of the resolve → runtime-overlay → source-scope →
+    databricks-fill sequence. The databricks web-search fill MUST stay coupled
+    to resolution here: a designer/UI-saved (agent-v2) workflow whose web tool
+    pins ``provider: databricks`` but omits ``model`` only becomes
+    self-describing once resolved. Filling before the workflow is bound (while
+    it is ``None``) is a silent no-op, and the tool then crashes construction
+    with 'requires a serving endpoint'.
+    """
+    if workflow_def is None:
+        workflow_def = (
+            await _resolve_agent_v2_workflow(config, user_id, db)
+            or _resolve_workflow(config, tool_names, plugin_manager)
+        )
+    workflow_def = _apply_runtime_overlays_to_workflow(workflow_def, config)
+    workflow_def = _apply_source_scope_to_workflow_declarations(workflow_def, config)
+    _fill_databricks_tool_defaults(workflow_def, search_cfg)
+    return workflow_def
+
+
+def _apply_source_scope_to_workflow_declarations(
+    workflow_def: WorkflowDefinition,
+    config: OrchestrationConfig,
+) -> WorkflowDefinition:
+    """Prevent saved workflow declarations from bypassing per-run source scope."""
+    if config.source_scope not in {"enterprise_only", "web_only"}:
+        return workflow_def
+
+    web_kinds = {"web_search", "web_crawl", "brave_search"}
+    enterprise_kinds = {"vector_search", "genie", "knowledge_assistant", "sql_analytics", "qa_assistant"}
+    blocked_tool_names: set[str] = set()
+    kept_declarations = []
+    for tool in workflow_def.tools:
+        kind = getattr(tool.kind, "value", str(tool.kind))
+        if config.source_scope == "enterprise_only" and kind in web_kinds:
+            blocked_tool_names.add(tool.name)
+            continue
+        if config.source_scope == "web_only" and kind in enterprise_kinds:
+            blocked_tool_names.add(tool.name)
+            continue
+        kept_declarations.append(tool)
+    if not blocked_tool_names:
+        return workflow_def
+
+    workflow_def.tools = kept_declarations
+
+    def filter_agent_tools(agent_config: dict[str, Any]) -> None:
+        tools = agent_config.get("tools")
+        if isinstance(tools, list):
+            agent_config["tools"] = [
+                tool
+                for tool in tools
+                if not (isinstance(tool, str) and tool in blocked_tool_names)
+            ]
+
+    _visit_workflow_agent_configs(workflow_def, filter_agent_tools)
+    logger.info(
+        "FWK_WORKFLOW_SOURCE_SCOPE_APPLIED source_scope=%s blocked_tools=%s",
+        config.source_scope,
+        sorted(blocked_tool_names),
+    )
+    return workflow_def
+
+
 def _filter_workflow_tools(
     defn: WorkflowDefinition, available_tools: list[str]
 ) -> None:
@@ -228,7 +516,7 @@ def _filter_node_tools(node: Any, available: set[str]) -> None:
                 body.config["tools"] = [t for t in tools if t in available]
 
 
-async def stream_research_via_framework(
+async def stream_workflow_via_framework(
     query: str,
     llm: LLMClient,
     brave_client: BraveSearchClient,
@@ -242,11 +530,14 @@ async def stream_research_via_framework(
     plugin_manager: PluginManager | None = None,
     plugin_data: dict[str, Any] | None = None,  # noqa: ARG001
     storage_stack: Any = None,
+    workflow_def: WorkflowDefinition | None = None,
+    extra_state: dict[str, Any] | None = None,
 ) -> AsyncGenerator[StreamEvent | str, None]:
-    """Stream research via the multi-agent framework.
+    """Stream a workflow via the multi-agent framework.
 
-    Drop-in replacement for ``stream_research()`` with identical external
-    interface.  Internally delegates to the framework executor.
+    Generalized entry point that backs both the main-chat research path and
+    any caller that supplies a pre-built ``WorkflowDefinition`` directly
+    (e.g. the designer-chat path).
 
     Args:
         query: User's research query.
@@ -261,6 +552,12 @@ async def stream_research_via_framework(
         db: Optional database session.
         plugin_manager: Optional plugin manager.
         plugin_data: Optional plugin context data.
+        workflow_def: When provided, skip agent_id/plugin lookup and use this
+            definition directly.  When ``None``, falls through to existing
+            lookup logic (preserves main-chat behaviour).
+        extra_state: Optional dict of additional state keys to seed into
+            ``wf_state`` after conversation_history seeding.  Caller-supplied
+            values win over any defaults.
 
     Yields:
         StreamEvent objects and synthesis content chunks (strings).
@@ -352,7 +649,10 @@ async def stream_research_via_framework(
                 _SpanType.CHAIN if _SpanType is not None else None,
                 {"research.query": query[:200], "research.use_framework": True},
             ):
-                # Trace metadata for MLflow correlation
+                # Trace metadata for MLflow correlation. The mlflow.trace.*
+                # fields populate the UI's user/session columns; the dr.*
+                # provenance tags below make the trace cross-surface
+                # filterable (designer-chat / main-chat / shell-app).
                 if user_id or chat_id:
                     trace_metadata: dict[str, str] = {}
                     if user_id:
@@ -361,6 +661,14 @@ async def stream_research_via_framework(
                         trace_metadata["mlflow.trace.session"] = chat_id
                     if trace_metadata:
                         safe_update_trace(trace_metadata)
+                from deep_research.core.trace_provenance import set_trace_provenance
+                set_trace_provenance(
+                    surface="main-chat",
+                    user_id=user_id,
+                    session_id=chat_id or session_id,
+                    agent_v2_id=config.agent_id,
+                    query_preview=query[:200] if query else "",
+                )
 
                 # -- 2. Build framework execution context --
                 framework_llm = create_framework_llm_client(
@@ -439,7 +747,7 @@ async def stream_research_via_framework(
                                     "CONTEXT_ENRICHER_DONE plugin=%s",
                                     plugin_label,
                                 )
-                            except asyncio.TimeoutError:
+                            except TimeoutError:
                                 logger.warning(
                                     "CONTEXT_ENRICHER_TIMEOUT plugin=%s",
                                     plugin_label,
@@ -456,6 +764,11 @@ async def stream_research_via_framework(
                     type(config.domain_filter).__name__ if config.domain_filter else "None",
                 )
 
+                from deep_research.core.app_config import (
+                    get_app_config as _get_app_cfg,
+                )
+
+                _search_cfg = _get_app_cfg().search
                 framework_tools = await create_framework_tools(
                     brave_client=brave_client,
                     crawler=crawler,
@@ -467,6 +780,12 @@ async def stream_research_via_framework(
                     file_search_tool=file_search_tool,
                     chat_id=chat_id,
                     user_id=user_id,
+                    # Central provider selection (brave default). The Databricks
+                    # built-in-search adapter reuses the framework LLM client's
+                    # serving-endpoints connection.
+                    search_provider=_search_cfg.provider,
+                    llm_client=framework_llm,
+                    databricks_search_cfg=_search_cfg.databricks,
                 )
 
                 # Register chat-memory tools when memory has any content.
@@ -535,6 +854,8 @@ async def stream_research_via_framework(
                     enterprise_tools=framework_tools,
                     model_overrides=config.model_overrides or {},
                     user_token=config.user_token,
+                    user_id=user_id,
+                    approval_broker=config.approval_broker,
                 )
 
                 # -- 3. Translate config to workflow definition --
@@ -551,7 +872,18 @@ async def stream_research_via_framework(
                             tool_names,
                         )
 
-                workflow_def = _resolve_workflow(config, tool_names, plugin_manager)
+                # Resolve + prepare the workflow definition in one place so the
+                # databricks web-search fill stays coupled to resolution — filling
+                # before workflow_def is bound is a silent no-op (see the helper).
+                workflow_def = await _resolve_and_prepare_workflow_def(
+                    workflow_def,
+                    config,
+                    user_id,
+                    db,
+                    tool_names,
+                    plugin_manager,
+                    _search_cfg,
+                )
 
                 logger.info(
                     "FWK_WORKFLOW_TRANSLATED workflow_id=%s tool_names=%s",
@@ -559,21 +891,41 @@ async def stream_research_via_framework(
                     tool_names,
                 )
 
-                # Build ToolResolver with YAML declarations + factories so
-                # declared tools (vector_search, genie, etc.) can be created
-                # on-demand by the factory chain.
+                # Build the shared WorkflowRunner (single execution code path
+                # for all app entry points — see workflow_runner_factory.py
+                # for the project convention).
+                # Fail closed (host policy): under the Databricks Apps runtime,
+                # a workflow that declares Databricks-bound tools MUST run on
+                # behalf of the user. Without an OBO token every Databricks
+                # tool falls back to the app service principal and hits UC
+                # permission errors, so reject the request with a clear error
+                # rather than returning a silently-degraded report. Local dev
+                # (no DATABRICKS_APP_NAME) and web-only workflows are exempt.
+                from databricks_deep_research import workflow_requires_databricks
                 from databricks_deep_research.tools.factories.builtin import (
                     BuiltinToolFactory,
                 )
                 from databricks_deep_research.tools.factories.databricks import (
                     DatabricksToolFactory,
                 )
-                from databricks_deep_research.tools.factory import (
-                    ToolFactoryContext,
-                )
                 from databricks_deep_research.tools.resolver import (
                     ToolResolver,
                 )
+
+                if (
+                    os.environ.get("DATABRICKS_APP_NAME")
+                    and (config is None or not config.user_token)
+                    and workflow_def is not None
+                    and workflow_requires_databricks(workflow_def)
+                ):
+                    raise MissingOBOTokenError(
+                        "This workflow needs your Databricks identity to query "
+                        "its data sources, but no user token "
+                        "(x-forwarded-access-token) reached the server. Open the "
+                        "app from the Databricks Apps page so your identity is "
+                        "forwarded, or include your OBO token when calling the "
+                        "API directly."
+                    )
 
                 _ws_client = None
                 if workflow_def.tools:
@@ -592,15 +944,23 @@ async def stream_research_via_framework(
                             str(exc)[:200],
                         )
 
+                runner = build_app_workflow_runner(
+                    llm_client=framework_llm,
+                    workspace_client=_ws_client,
+                    user_token=config.user_token,
+                )
+
+                # Build ToolResolver with YAML declarations + factories so
+                # declared tools (vector_search, genie, etc.) can be created
+                # on-demand by the factory chain. The resolver shares the
+                # runner's factory_context — both must see the same
+                # BRAVE_API_KEY / workspace_client / user_token wiring.
                 tool_resolver = ToolResolver(
                     declarations=list(workflow_def.tools) if workflow_def.tools else None,
                     # No kind overlap: builtin handles web_search/web_crawl/file_search;
                     # Databricks handles vector_search/genie/knowledge_assistant.
                     factories=[BuiltinToolFactory(), DatabricksToolFactory()],
-                    factory_context=ToolFactoryContext(
-                        workspace_client=_ws_client,
-                        user_token=config.user_token,
-                    ),
+                    factory_context=runner.factory_context,
                 )
                 logger.info(
                     "FWK_TOOL_RESOLVER_READY declarations=%d "
@@ -609,21 +969,45 @@ async def stream_research_via_framework(
                     "present" if _ws_client else "MISSING",
                     len(framework_tools),
                 )
+                # Precedence guard: a per-workflow tool declaration that sets an
+                # explicit ``config.provider`` (e.g. web_search with
+                # provider: databricks) must win over the auto-injected backend.
+                # Resolver overrides are checked BEFORE YAML declarations, so we
+                # skip overriding those names and let the factory build them.
+                _declared_provider_tools = _tool_names_with_explicit_provider(
+                    workflow_def
+                )
                 for tool in framework_tools:
+                    if tool.definition.name in _declared_provider_tools:
+                        logger.info(
+                            "FWK_OVERRIDE_SKIP tool=%s reason=workflow_declares_provider",
+                            tool.definition.name,
+                        )
+                        continue
                     tool_resolver.override(tool.definition.name, tool)
 
-                # -- 4. Execute workflow and stream events --
-                executor = WorkflowExecutor(
-                    workflow_def,
-                    framework_llm,
-                    tool_resolver=tool_resolver,
-                    context=context,
-                )
+                # Pre-execution guard — fail before LLM tokens are spent.
+                # Layer 3 of the layered tool-context validation: if a declared
+                # tool's factory cannot construct it (e.g. ``schema_cache`` is
+                # ``None`` because ``STORAGE_WAREHOUSE_ID`` was not propagated
+                # to the deployed app), raise here with the per-tool error
+                # list rather than letting the failure surface mid-stream as
+                # a misleading ``WorkflowError: missing declared tools``.
+                await tool_resolver.validate_all()
+
                 tracker = DomainContextTracker()
 
                 wf_state = WorkflowState(query=query)
                 if conversation_history:
                     wf_state.append("init", "conversation_history", conversation_history)
+                    # Also set the typed field so the framework harness picks it
+                    # up via AgentInput.conversation_history (US-06 W1 primitive).
+                    # Both paths coexist for backward compatibility.
+                    wf_state.conversation_history = list(conversation_history)
+
+                if extra_state:
+                    for key, value in extra_state.items():
+                        wf_state.append("init", key, value)
 
                 # Load existing sources for follow-up queries (Step 4)
                 existing_sources = await _load_existing_sources(
@@ -654,7 +1038,13 @@ async def stream_research_via_framework(
 
                 try:
                     async with asyncio.timeout(research_timeout):
-                        async for fw_event in executor.execute(wf_state):
+                        async for fw_event in runner.stream(
+                            workflow_def,
+                            state=wf_state,
+                            tool_resolver=tool_resolver,
+                            context=context,
+                            strict_tool_resolution=True,
+                        ):
                             # Detect simple query short-circuit (Step 2)
                             if isinstance(fw_event, CoordinatorClassifiedEvent) and fw_event.is_simple and fw_event.direct_response:
                                 simple_response = fw_event.direct_response
@@ -685,6 +1075,22 @@ async def stream_research_via_framework(
                             for app_evt in app_events:
                                 sse_event = _to_sse_event(app_evt)
                                 if sse_event:
+                                    # DR_LEAK_TRACE sse_emit: capture each
+                                    # SSE event sent to the client. Any
+                                    # planning text first observable here
+                                    # means it survived the entire pipeline.
+                                    try:
+                                        _evt_repr = repr(sse_event)[:300].replace("\n", "\\n")
+                                        logger.info(
+                                            "DR_LEAK_TRACE phase=sse_emit "
+                                            "event_type=%s payload_head=%r",
+                                            type(sse_event).__name__,
+                                            _evt_repr,
+                                        )
+                                    except Exception as _exc:  # pragma: no cover
+                                        logger.debug(
+                                            "DR_LEAK_TRACE sse_emit skipped: %s", _exc
+                                        )
                                     yield sse_event
                                     await _buffer_event(sse_event, event_buffer)
 
@@ -751,6 +1157,46 @@ async def stream_research_via_framework(
                     or (len(final_report) <= 200 and len(joined_chunks) > len(final_report))
                 ):
                     final_report = joined_chunks
+
+                # Plan v2.3 UX backstop (main-app surface). The framework's
+                # ``WorkflowResult.output`` carries an equivalent backstop
+                # for direct consumers (shell app, SDK, notebooks). We
+                # duplicate the logic here because the main-app
+                # orchestrator builds ``final_report`` from
+                # ``tracker.get_persistence_delta()`` + ``_synthesis_chunks``
+                # rather than from ``runner.last_result.output``; without
+                # this duplication the main-app chat would still surface
+                # an empty report when Stage 8 wiped every claim.
+                _verif = getattr(final_delta, "verification_summary", None) or {}
+                _verified_count = 0
+                _total_claims = 0
+                if isinstance(_verif, dict):
+                    _verified_count = int(_verif.get("verified_claims", 0) or 0)
+                    _total_claims = int(_verif.get("total_claims", 0) or 0)
+                _final_report_len = len(final_report) if final_report else 0
+                _chunks_len = len(joined_chunks)
+                if (
+                    _total_claims > 0
+                    and _verified_count == 0
+                    and _chunks_len > 200
+                    and _final_report_len < _chunks_len // 2
+                ):
+                    logger.warning(
+                        "FWK_VERIFICATION_BACKSTOP_TRIGGERED total_claims=%d "
+                        "verified_claims=%d final_report_len=%d chunks_len=%d",
+                        _total_claims,
+                        _verified_count,
+                        _final_report_len,
+                        _chunks_len,
+                    )
+                    _banner = (
+                        "> ⚠️ **Citations could not be verified.** "
+                        "The framework's entailment checker did not ground "
+                        f"any of the {_total_claims} claims this draft contains. "
+                        "Numbers below come directly from the retrieved corpus "
+                        "chunks; treat as a draft, not a final answer.\n\n"
+                    )
+                    final_report = _banner + joined_chunks
 
             # -- 5. Session completion --
 
@@ -898,7 +1344,13 @@ async def stream_research_via_framework(
                     chat_id=_chat_id_for_fail,
                 )
             except Exception:
-                pass
+                # PR4 CRITICAL fix: do not silently drop the failure-marker.
+                # Without this, the DB session row stays in 'running' forever
+                # while the user sees a frontend error (silent data loss).
+                logger.exception(
+                    "FWK_FAILURE_PERSISTENCE_FAILED research_session_id=%s",
+                    str(config.research_session_id)[:8],
+                )
 
     # ------------------------------------------------------------------
     # 6. Final completion event (always emitted)
@@ -913,6 +1365,41 @@ async def stream_research_via_framework(
         final_report=final_report,
         structured_output=structured_output,
     )
+
+
+async def stream_research_via_framework(
+    query: str,
+    llm: LLMClient,
+    brave_client: BraveSearchClient,
+    crawler: WebCrawler,
+    conversation_history: list[dict[str, str]] | None = None,
+    session_id: UUID | None = None,
+    user_id: str | None = None,
+    chat_id: str | None = None,
+    config: OrchestrationConfig | None = None,
+    db: AsyncSession | None = None,
+    plugin_manager: PluginManager | None = None,
+    plugin_data: dict[str, Any] | None = None,
+    storage_stack: Any = None,
+) -> AsyncGenerator[StreamEvent | str, None]:
+    """Back-compat alias for stream_workflow_via_framework. New callers should
+    use stream_workflow_via_framework directly and (optionally) pass workflow_def."""
+    async for event in stream_workflow_via_framework(
+        query=query,
+        llm=llm,
+        brave_client=brave_client,
+        crawler=crawler,
+        conversation_history=conversation_history,
+        session_id=session_id,
+        user_id=user_id,
+        chat_id=chat_id,
+        config=config,
+        db=db,
+        plugin_manager=plugin_manager,
+        plugin_data=plugin_data,
+        storage_stack=storage_stack,
+    ):
+        yield event
 
 
 # ---------------------------------------------------------------------------
@@ -1067,6 +1554,10 @@ def _to_sse_event(app_evt: AppSSEEvent) -> StreamEvent | None:
                 verdict=data.get("verdict", ""),
                 confidence_level=_conf_level,
                 evidence_preview=data.get("evidence_snippet", ""),
+                # Numeric citation keys → frontend citationData mapping for live
+                # (pre-persistence) marker coloring. Schema defaults handle absence.
+                citation_key=data.get("citation_key"),
+                citation_keys=data.get("citation_keys"),
             )
         elif progress_type == "verification_summary":
             from deep_research.schemas.streaming import (
@@ -1523,7 +2014,7 @@ async def _load_enterprise_tools(
 
 async def _persist_simple_response(
     config: OrchestrationConfig,
-    db: Any,
+    _db: Any,
     chat_id: str | None,
     user_id: str | None,
     query: str,
@@ -1711,7 +2202,13 @@ async def _persist_completion(
                     chat_id=chat_id_uuid,
                 )
             except Exception:
-                pass
+                # PR4 CRITICAL fix: do not silently drop the failure-marker.
+                # Without this, the DB row stays in 'running' forever after
+                # the completion-persist failure (silent data loss).
+                logger.exception(
+                    "FWK_FAILURE_PERSISTENCE_FAILED research_session_id=%s",
+                    str(config.research_session_id)[:8],
+                )
         return None
 
 
@@ -1729,265 +2226,108 @@ def _get_pool_sources(wf_state: WorkflowState | None) -> list[Any]:
     return list(sources_pool.get_recent(sources_pool.count()))
 
 
+def _adapt_framework_evidence(fw_evidence: Any) -> Any:
+    """Convert framework :class:`Evidence` into the app's :class:`EvidenceInfo`."""
+    from deep_research.agent.state import EvidenceInfo
+
+    if fw_evidence is None:
+        return None
+    return EvidenceInfo(
+        source_url=fw_evidence.source_url,
+        quote_text=fw_evidence.quote_text,
+        start_offset=fw_evidence.start_offset,
+        end_offset=fw_evidence.end_offset,
+        section_heading=fw_evidence.section_heading,
+        relevance_score=fw_evidence.relevance_score,
+        has_numeric_content=fw_evidence.has_numeric_content,
+    )
+
+
+def _adapt_framework_claim(fw_claim: Any) -> Any:
+    """Convert framework :class:`Claim` into the app's :class:`ClaimInfo`."""
+    from deep_research.agent.state import ClaimInfo
+
+    return ClaimInfo(
+        claim_text=fw_claim.claim_text,
+        claim_type=fw_claim.claim_type,
+        position_start=fw_claim.position_start,
+        position_end=fw_claim.position_end,
+        evidence=_adapt_framework_evidence(fw_claim.evidence),
+        confidence_level=fw_claim.confidence_level,
+        verification_verdict=fw_claim.verification_verdict,
+        verification_reasoning=fw_claim.verification_reasoning,
+        abstained=fw_claim.abstained,
+        citation_key=fw_claim.citation_key,
+        citation_keys=fw_claim.citation_keys,
+        from_free_block=fw_claim.from_free_block,
+    )
+
+
+def _adapt_framework_summary(fw_summary: Any) -> Any:
+    """Convert framework :class:`SummaryInfo` into app's :class:`VerificationSummaryInfo`."""
+    from deep_research.agent.state import VerificationSummaryInfo
+
+    if fw_summary is None:
+        return None
+    return VerificationSummaryInfo(
+        total_claims=fw_summary.total_claims,
+        supported_count=fw_summary.supported_count,
+        partial_count=fw_summary.partial_count,
+        unsupported_count=fw_summary.unsupported_count,
+        contradicted_count=fw_summary.contradicted_count,
+        abstained_count=fw_summary.abstained_count,
+        unsupported_rate=fw_summary.unsupported_rate,
+        contradicted_rate=fw_summary.contradicted_rate,
+        warning=fw_summary.warning,
+        citation_corrections=fw_summary.citation_corrections,
+        claim_revisions=fw_summary.claim_revisions,
+        atomic_facts_total=fw_summary.atomic_facts_total,
+        atomic_facts_verified=fw_summary.atomic_facts_verified,
+        atomic_facts_softened=fw_summary.atomic_facts_softened,
+        claims_fully_verified=fw_summary.claims_fully_verified,
+        claims_partially_softened=fw_summary.claims_partially_softened,
+        claims_fully_softened=fw_summary.claims_fully_softened,
+        external_searches=fw_summary.external_searches,
+        new_sources_added=fw_summary.new_sources_added,
+    )
+
+
 def _extract_verification_from_framework_state(
     wf_state: WorkflowState | None,
     sources: list[Any],
 ) -> tuple[list[Any], Any]:
-    """Prefer framework-native claims/summary over markdown re-parsing."""
-    from deep_research.agent.state import ClaimInfo, EvidenceInfo, VerificationSummaryInfo
+    """Backward-compat shim — delegates to the framework's extraction utility.
 
-    if wf_state is None:
-        return [], None
-
-    raw_claims = wf_state.get("claims") if hasattr(wf_state, "get") else None
-    raw_summary = (
-        wf_state.get("verification_summary") if hasattr(wf_state, "get") else None
+    Original ~116-LoC implementation relocated to
+    :mod:`databricks_deep_research.citation.extraction`. Field names match
+    1:1; we only adapt the wrapper types back to the app's dataclasses.
+    """
+    from databricks_deep_research.citation.extraction import (
+        extract_verification as _fw_extract,
     )
 
-    if not raw_claims and not raw_summary:
-        return [], None
-
-    claims: list[ClaimInfo] = []
-    if isinstance(raw_claims, list):
-        for raw_claim in raw_claims:
-            if not isinstance(raw_claim, dict):
-                continue
-
-            evidence_raw = raw_claim.get("evidence")
-            evidence: EvidenceInfo | None = None
-            if isinstance(evidence_raw, dict) and evidence_raw.get("source_url"):
-                evidence = EvidenceInfo(
-                    source_url=str(evidence_raw.get("source_url", "") or ""),
-                    quote_text=str(evidence_raw.get("quote_text", "") or ""),
-                    start_offset=evidence_raw.get("start_offset"),
-                    end_offset=evidence_raw.get("end_offset"),
-                    section_heading=evidence_raw.get("section_heading"),
-                    relevance_score=evidence_raw.get("relevance_score"),
-                    has_numeric_content=bool(
-                        evidence_raw.get("has_numeric_content", False)
-                    ),
-                )
-            else:
-                citation_keys = raw_claim.get("citation_keys") or []
-                citation_key = (
-                    raw_claim.get("citation_key")
-                    or (citation_keys[0] if citation_keys else None)
-                )
-                if isinstance(citation_key, str) and citation_key.isdigit():
-                    source_index = int(citation_key)
-                    if 0 <= source_index < len(sources):
-                        source = sources[source_index]
-                        if isinstance(source, dict):
-                            evidence = EvidenceInfo(
-                                source_url=str(source.get("url", "") or ""),
-                                quote_text=str(source.get("snippet", "") or ""),
-                            )
-                        else:
-                            evidence = EvidenceInfo(
-                                source_url=str(getattr(source, "url", "") or ""),
-                                quote_text=str(getattr(source, "snippet", "") or ""),
-                            )
-
-            claims.append(
-                ClaimInfo(
-                    claim_text=str(raw_claim.get("claim_text", "") or ""),
-                    claim_type=str(raw_claim.get("claim_type", "general") or "general"),
-                    position_start=int(raw_claim.get("position_start", 0) or 0),
-                    position_end=int(raw_claim.get("position_end", 0) or 0),
-                    evidence=evidence,
-                    confidence_level=raw_claim.get("confidence_level"),
-                    verification_verdict=raw_claim.get("verification_verdict"),
-                    verification_reasoning=raw_claim.get("verification_reasoning"),
-                    abstained=bool(raw_claim.get("abstained", False)),
-                    citation_key=raw_claim.get("citation_key"),
-                    citation_keys=raw_claim.get("citation_keys"),
-                    from_free_block=bool(raw_claim.get("from_free_block", False)),
-                )
-            )
-
-    summary = None
-    if isinstance(raw_summary, dict):
-        summary = VerificationSummaryInfo(
-            total_claims=int(raw_summary.get("total_claims", 0) or 0),
-            supported_count=int(
-                raw_summary.get(
-                    "verified_claims",
-                    raw_summary.get("supported_count", 0),
-                )
-                or 0
-            ),
-            partial_count=int(raw_summary.get("partial_count", 0) or 0),
-            unsupported_count=int(
-                raw_summary.get(
-                    "softened_claims",
-                    raw_summary.get("unsupported_count", 0),
-                )
-                or 0
-            ),
-            contradicted_count=int(
-                raw_summary.get(
-                    "removed_claims",
-                    raw_summary.get("contradicted_count", 0),
-                )
-                or 0
-            ),
-            abstained_count=int(raw_summary.get("abstained_count", 0) or 0),
-            unsupported_rate=float(raw_summary.get("unsupported_rate", 0.0) or 0.0),
-            contradicted_rate=float(raw_summary.get("contradicted_rate", 0.0) or 0.0),
-            warning=bool(raw_summary.get("warning", False)),
-            citation_corrections=int(
-                raw_summary.get(
-                    "corrected_citations",
-                    raw_summary.get("citation_corrections", 0),
-                )
-                or 0
-            ),
-        )
-
-    return claims, summary
+    summary = _fw_extract(wf_state, sources)
+    claims = [_adapt_framework_claim(c) for c in summary.claims]
+    return claims, _adapt_framework_summary(summary.summary)
 
 
 def _extract_verification_from_report(
     final_report: str,
     sources: list[Any],
 ) -> tuple[list[Any], Any]:
-    """Extract claims and verification summary from a report with [N] markers.
+    """Backward-compat shim — delegates to the framework's report extractor.
 
-    Parses the final report for ``[N]`` numeric citation markers produced by
-    the framework synthesizer.  Each sentence containing markers becomes a
-    claim linked to the corresponding source(s) in the pool.
-
-    Args:
-        final_report: The synthesizer's final report text.
-        sources: Ordered list of source objects (AppSourceInfo) from the pool.
-
-    Returns:
-        Tuple of (claims_list, verification_summary) where claims are
-        ``ClaimInfo`` objects and summary is ``VerificationSummaryInfo``.
+    Original ~136-LoC implementation relocated to
+    :mod:`databricks_deep_research.citation.extraction`. Field names match
+    1:1; we only adapt the wrapper types back to the app's dataclasses.
     """
-    from deep_research.agent.state import ClaimInfo, EvidenceInfo, VerificationSummaryInfo
-
-    if not final_report or not sources:
-        return [], None
-
-    # Split into sentences (rough but sufficient for claim extraction).
-    # We split on sentence-ending punctuation followed by whitespace,
-    # preserving markdown structure.
-    import re
-
-    # Split on ". ", "! ", "? " or newlines, keeping delimiters with the sentence
-    sentences = re.split(r"(?<=[.!?])\s+|\n+", final_report)
-
-    # Pre-scan: detect indexing convention.
-    # If any [0] marker exists → 0-indexed (evidence pool style).
-    # If smallest marker is >= 1 → 1-indexed (synthesizer prompt style).
-    all_marker_indices: set[int] = set()
-    for s in sentences:
-        s = s.strip()
-        if s:
-            all_marker_indices.update(int(m) for m in _NUMERIC_CITATION_RE.findall(s))
-    index_offset = 0 if 0 in all_marker_indices else 1
-
-    logger.info(
-        "FWK_VERIFICATION_INDEX_DETECT markers=%s offset=%d sources=%d",
-        sorted(all_marker_indices)[:10],
-        index_offset,
-        len(sources),
+    from databricks_deep_research.citation.extraction import (
+        extract_verification_from_report as _fw_extract_report,
     )
 
-    claims: list[ClaimInfo] = []
-    position = 0
-
-    for sentence in sentences:
-        sentence = sentence.strip()
-        if not sentence:
-            position += 1
-            continue
-
-        # Find all [N] markers in this sentence
-        markers = _NUMERIC_CITATION_RE.findall(sentence)
-        if not markers:
-            position += len(sentence) + 1
-            continue
-
-        # Clean the sentence text (remove [N] markers for claim_text)
-        claim_text = _NUMERIC_CITATION_RE.sub("", sentence).strip()
-        if len(claim_text) < 10:  # Skip trivially short "claims"
-            position += len(sentence) + 1
-            continue
-
-        # Map marker indices to sources
-        cited_indices = sorted({int(m) for m in markers})
-
-        # Build evidence from the first valid cited source
-        evidence: EvidenceInfo | None = None
-        # Citation keys MUST be the numeric index strings ("1", "2", etc.)
-        # because the frontend markdown parser extracts [N] and uses
-        # the number as the citationKey for lookup in citationData map.
-        citation_keys: list[str] = [str(idx) for idx in cited_indices]
-        for idx in cited_indices:
-            pool_idx = idx - index_offset
-            if 0 <= pool_idx < len(sources):
-                source = sources[pool_idx]
-                # Pool items can be dicts or objects (AppSourceInfo)
-                if isinstance(source, dict):
-                    source_url = source.get("url", "") or ""
-                    source_snippet = source.get("snippet", "") or ""
-                else:
-                    source_url = getattr(source, "url", "") or ""
-                    source_snippet = getattr(source, "snippet", "") or ""
-                if evidence is None and source_url:
-                    evidence = EvidenceInfo(
-                        source_url=source_url,
-                        quote_text=source_snippet[:300] if source_snippet else "",
-                    )
-                logger.debug(
-                    "FWK_CLAIM_EXTRACTED key=%s pool_idx=%d evidence_url=%s",
-                    str(idx),
-                    pool_idx,
-                    source_url[:60] if source_url else "none",
-                )
-
-        # Detect numeric claims (contains numbers like $35.1B, 1.2%, etc.)
-        has_numbers = bool(re.search(r"\$[\d,.]+|\d+\.\d+%|\d{2,}", claim_text))
-
-        claim = ClaimInfo(
-            claim_text=claim_text,
-            claim_type="numeric" if has_numbers else "general",
-            position_start=position,
-            position_end=position + len(sentence),
-            evidence=evidence,
-            confidence_level="high",
-            verification_verdict="supported",
-            verification_reasoning="Cited by synthesizer with source reference",
-            abstained=False,
-            citation_key=citation_keys[0] if citation_keys else None,
-            citation_keys=citation_keys if len(citation_keys) > 1 else None,
-        )
-        claims.append(claim)
-        position += len(sentence) + 1
-
-    # Build verification summary
-    summary = VerificationSummaryInfo(
-        total_claims=len(claims),
-        supported_count=len(claims),
-        partial_count=0,
-        unsupported_count=0,
-        contradicted_count=0,
-        abstained_count=0,
-        unsupported_rate=0.0,
-        contradicted_rate=0.0,
-        warning=False,
-        citation_corrections=0,
-    )
-
-    logger.info(
-        "FWK_VERIFICATION_EXTRACTED claims=%d sources_cited=%d",
-        len(claims),
-        len({c.evidence.source_url for c in claims if c.evidence}),
-    )
-
-    return claims, summary if claims else None
+    summary = _fw_extract_report(final_report, sources)
+    claims = [_adapt_framework_claim(c) for c in summary.claims]
+    return claims, _adapt_framework_summary(summary.summary)
 
 
 def _build_state_proxy(

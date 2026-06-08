@@ -211,6 +211,7 @@ The LLM sees integer indices only -- never raw URLs -- which prevents hallucinat
 | `qa_assistant` | `"qa_assistant"` | NL question to NL answer (Knowledge Assistants, endpoints). Returns prose answers. |
 | `file` | `"file"` | Keyword search over uploaded files. |
 | `builtin` | `"builtin"` | Framework internals (pool tools, crawl). Not a user-facing data source. |
+| `text_table` | `"text_table"` | Structured rows from a bound Delta table; navigated via the `table_*` tools. See [SQL / Table Tools](../guides/sql-table-tools.md). |
 
 ### ToolKind
 
@@ -224,6 +225,12 @@ The LLM sees integer indices only -- never raw URLs -- which prevents hallucinat
 | `vector_search` | `"vector_search"` | Databricks Vector Search index query. |
 | `genie` | `"genie"` | Databricks Genie NL-to-SQL analytics. |
 | `knowledge_assistant` | `"knowledge_assistant"` | Databricks Knowledge Assistant endpoint. |
+| `table_discovery` | `"table_discovery"` | List/register bound Delta tables. |
+| `table_search` | `"table_search"` | Substring search over a table's content column. |
+| `table_read` | `"table_read"` | Filter / project / paginate table rows. |
+| `table_neighbors` | `"table_neighbors"` | Sibling rows around an anchor row. |
+| `table_load` | `"table_load"` | Materialize specific rows for downstream compute. |
+| `table_aggregate` | `"table_aggregate"` | Aggregations with optional `GROUP BY`. |
 | `custom` | `"custom"` | Catch-all for externally defined tool kinds. |
 
 ---
@@ -248,6 +255,14 @@ Maps a `ToolKind` value to its corresponding `SourceKind` value. Returns `"built
 | `vector_search` | `vector_index` |
 | `genie` | `sql_analytics` |
 | `knowledge_assistant` | `qa_assistant` |
+| `table_discovery` | `text_table` |
+| `table_search` | `text_table` |
+| `table_read` | `text_table` |
+| `table_neighbors` | `text_table` |
+| `table_load` | `text_table` |
+| `table_aggregate` | `text_table` |
+
+The `table_*` family is documented in [SQL / Table Tools](../guides/sql-table-tools.md).
 
 ---
 
@@ -256,3 +271,5 @@ Maps a `ToolKind` value to its corresponding `SourceKind` value. Returns `"built
 - [Tool System](../concepts/tool-system.md)
 - [Custom Tools](../guides/custom-tools.md)
 - [Builtin Tools](../guides/builtin-tools.md)
+- [Search Providers](../guides/search-providers.md)
+- [SQL / Table Tools](../guides/sql-table-tools.md)

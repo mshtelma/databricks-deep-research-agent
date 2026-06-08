@@ -20,6 +20,9 @@ In YAML, set grounding_mode on the synthesizer:
 - classical_lite: Basic citation key mapping
 - reclaim: Full 7-stage pipeline
 
+### Soft-warn grounding banner
+When the verifier cannot produce real entailment judgments (e.g. evidence was not attached to claims, or the NLI call crashed), the synthesizer ships the LLM-written report prefixed with a `> ⚠️ Grounding warning` banner instead of hard-failing with an "Insufficient Evidence" template. This is controlled by the `CITATION_SOFT_WARN_ENABLED` environment variable (default `true`); set it to `false` to revert to the legacy hard-fail behavior.
+
 ## Stage-by-Stage Configuration
 For each of the 7 stages, show: purpose, key config fields, example config, when to tune.
 

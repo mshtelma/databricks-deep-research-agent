@@ -320,6 +320,31 @@ class TestIsStaleConnectionError:
         assert session._is_stale_connection_error(RuntimeError()) is False
 
 
+class TestIsDbAuthError:
+    """Tests for Lakebase auth-failure detection."""
+
+    def test_detects_asyncpg_password_auth_failure_message(self) -> None:
+        assert (
+            session._is_db_auth_error(
+                RuntimeError(
+                    "password authentication failed for user "
+                    "'a22fb8f7-c9db-46b3-9294-5c1f11eefb48'"
+                )
+            )
+            is True
+        )
+
+    def test_detects_invalid_password_class_in_cause_chain(self) -> None:
+        InvalidPasswordError = type("InvalidPasswordError", (Exception,), {})
+        err = RuntimeError("wrapped storage error")
+        err.__cause__ = InvalidPasswordError("server rejected credential")
+
+        assert session._is_db_auth_error(err) is True
+
+    def test_rejects_non_auth_error(self) -> None:
+        assert session._is_db_auth_error(RuntimeError("connection is closed")) is False
+
+
 class TestGetDbStaleConnectionCleanup:
     """Verify ``get_db`` distinguishes safe-to-swallow stale-connection
     cleanup from data-loss-bearing stale-connection.

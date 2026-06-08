@@ -25,33 +25,34 @@ from fastapi import Depends, HTTPException, Request
 from deep_research.core.config import Settings, get_settings
 from deep_research.services._impl_factory import (
     make_chat_service,
-    make_custom_agent_service,
     make_data_source_service,
     make_export_service,
     make_feedback_service,
     make_file_upload_service,
+    make_message_service,
     make_preferences_service,
     make_research_event_service,
+    make_research_session_service,
     make_session_service,
     make_template_service,
     make_user_service,
 )
 from deep_research.services._protocols import (
     IChatService,
-    ICustomAgentService,
     IDataSourceService,
     IExportService,
     IFeedbackService,
     IFileUploadService,
+    IMessageService,
     IPreferencesService,
     IResearchEventService,
+    IResearchSessionService,
     ISessionService,
     ITemplateService,
     IUserService,
 )
 
 if TYPE_CHECKING:
-    from sqlalchemy.ext.asyncio import AsyncSession
 
     from deep_research.storage.factory import StorageStack
 
@@ -59,7 +60,7 @@ if TYPE_CHECKING:
 # --- Storage stack --------------------------------------------------------
 
 
-def get_storage(request: Request) -> "StorageStack":
+def get_storage(request: Request) -> StorageStack:
     """Return the process-singleton `StorageStack`.
 
     Raises HTTP 503 if the stack was not initialized (either cached mode is
@@ -78,7 +79,7 @@ def get_storage(request: Request) -> "StorageStack":
     return stack
 
 
-def get_storage_optional(request: Request) -> "StorageStack | None":
+def get_storage_optional(request: Request) -> StorageStack | None:
     """Return the stack or None — use in services that support both impls."""
     return getattr(request.app.state, "storage_stack", None)
 
@@ -108,6 +109,42 @@ def get_chat_service(
     if settings.storage_service_impl == "cached":
         return make_chat_service(settings, stack)
     return _with_legacy_session(make_chat_service, settings, request, get_db)
+
+
+def get_research_session_service(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> IResearchSessionService:
+    """Return the research-session service matching `storage_service_impl`.
+
+    Cached path: `CachedResearchSessionService(stack)` — reads research
+    sessions (incl. `verification_data`) from `chat_state.state`. No SQLAlchemy.
+    """
+    from deep_research.db.session import get_db
+
+    stack = get_storage_optional(request)
+    if settings.storage_service_impl == "cached":
+        return make_research_session_service(settings, stack)
+    return _with_legacy_session(
+        make_research_session_service, settings, request, get_db
+    )
+
+
+def get_message_service(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> IMessageService:
+    """Return the message service matching `storage_service_impl`.
+
+    Cached path: `CachedMessageService(stack)` — reads/writes go through the
+    `StorageStack` (`chat_state.state.messages`). Legacy path: `MessageService`.
+    """
+    from deep_research.db.session import get_db
+
+    stack = get_storage_optional(request)
+    if settings.storage_service_impl == "cached":
+        return make_message_service(settings, stack)
+    return _with_legacy_session(make_message_service, settings, request, get_db)
 
 
 def get_feedback_service(
@@ -174,19 +211,6 @@ def get_file_upload_service(
     return _with_legacy_session(make_file_upload_service, settings, request, get_db)
 
 
-def get_custom_agent_service(
-    request: Request,
-    settings: Settings = Depends(get_settings),
-) -> ICustomAgentService:
-    """Return the custom-agent service matching ``storage_service_impl``."""
-    from deep_research.db.session import get_db
-
-    stack = get_storage_optional(request)
-    if settings.storage_service_impl == "cached":
-        return make_custom_agent_service(settings, stack)
-    return _with_legacy_session(make_custom_agent_service, settings, request, get_db)
-
-
 def get_data_source_service(
     request: Request,
     settings: Settings = Depends(get_settings),
@@ -248,7 +272,7 @@ def get_export_service(
 # --- Internal -------------------------------------------------------------
 
 
-def _with_legacy_session(factory, settings, request, get_db):  # type: ignore[no-untyped-def]
+def _with_legacy_session(factory, settings, request, _get_db):  # type: ignore[no-untyped-def]
     """Helper: call a factory with a legacy session if one is already
     attached to the request (e.g. via the existing Depends(get_db) in the
     route signature). Otherwise raise a 503 — the legacy path requires a

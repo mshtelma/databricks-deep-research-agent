@@ -13,16 +13,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
+from databricks_deep_research.tools.factory import ToolFactoryContext
 
 from deep_research.agent.framework_orchestrator import (
+    _apply_runtime_overlays_to_workflow,
+    _apply_source_scope_to_workflow_declarations,
     _build_state_proxy,
     _extract_verification_from_framework_state,
+    _fill_databricks_tool_defaults,
     _load_enterprise_tools,
     _load_existing_sources,
     _load_file_search_tool,
+    _resolve_agent_v2_workflow,
     _safe_uuid,
     _to_sse_event,
     _to_uuid,
+    _tool_names_with_explicit_provider,
     stream_research_via_framework,
 )
 from deep_research.schemas.streaming import (
@@ -73,6 +79,245 @@ def _mock_config(**overrides: Any) -> MagicMock:
     return config
 
 
+def _workflow_dict(output_schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "id": "saved-agent-workflow",
+        "name": "Saved Agent Workflow",
+        "version": 1,
+        "required_inputs": ["query"],
+        "output_keys": ["report"],
+        "root": {
+            "id": "root",
+            "type": "sequence",
+            "label": "Workflow",
+            "config": {},
+            "children": [
+                {
+                    "id": "synthesizer",
+                    "type": "agent",
+                    "label": "Synthesizer",
+                    "config": {
+                        "subtype": "synthesizer",
+                        "model_tier": "analytical",
+                        "input_keys": ["query"],
+                        "output_key": "report",
+                        "system_prompt": "Synthesize an answer.",
+                        "user_prompt_template": "{query}",
+                        **({"output_schema": output_schema} if output_schema is not None else {}),
+                    },
+                    "children": [],
+                },
+            ],
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
+# Tests — Agent V2 runtime workflow selection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_agent_v2_workflow_loads_saved_definition() -> None:
+    agent_id = uuid4()
+    workflow = _workflow_dict()
+
+    class _FakeAgentV2Service:
+        def __init__(self, session: object) -> None:
+            self.session = session
+
+        async def get_for_user(self, requested_id: UUID, user_id: str) -> object:
+            assert requested_id == agent_id
+            assert user_id == "user-1"
+            return SimpleNamespace(definition=workflow)
+
+    config = _mock_config(agent_id=str(agent_id), verify_sources=False)
+    with patch("deep_research.services.agent_v2_service.AgentV2Service", _FakeAgentV2Service):
+        definition = await _resolve_agent_v2_workflow(config, "user-1", object())
+
+    assert definition is not None
+    assert definition.id == "saved-agent-workflow"
+    assert definition.root.children[0].label == "Synthesizer"
+
+
+def test_runtime_overlay_enables_reclaim_when_verify_sources_requested() -> None:
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    definition = load_workflow_from_dict(_workflow_dict())
+    config = _mock_config(verify_sources=True)
+
+    updated = _apply_runtime_overlays_to_workflow(definition, config)
+    synth_config = updated.root.children[0].config
+
+    assert synth_config["output_schema"]["synthesis_mode"] == "reclaim"
+    assert synth_config["output_schema"]["enable_citation_verification"] is True
+
+
+def test_runtime_overlay_preserves_explicit_synthesizer_grounding() -> None:
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    workflow = _workflow_dict()
+    workflow["root"]["children"][0]["config"]["grounding_mode"] = "none"
+    definition = load_workflow_from_dict(workflow)
+    config = _mock_config(verify_sources=True)
+
+    updated = _apply_runtime_overlays_to_workflow(definition, config)
+
+    assert updated.root.children[0].config["grounding_mode"] == "none"
+    assert "output_schema" not in updated.root.children[0].config
+
+
+def test_source_scope_filters_saved_workflow_tool_declarations() -> None:
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    workflow = _workflow_dict()
+    workflow["tools"] = [{"name": "web_search", "kind": "web_search", "config": {}}]
+    workflow["root"]["children"][0]["config"]["tools"] = ["web_search"]
+    definition = load_workflow_from_dict(workflow)
+    config = _mock_config(source_scope="enterprise_only")
+
+    updated = _apply_source_scope_to_workflow_declarations(definition, config)
+
+    assert updated.tools == []
+    assert updated.root.children[0].config["tools"] == []
+
+
+def test_tool_names_with_explicit_provider_detects_declared_provider() -> None:
+    """A web_search declaration with config.provider must be flagged so the
+    auto-injected resolver override does not shadow it."""
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    workflow = _workflow_dict()
+    workflow["tools"] = [
+        {"name": "web_search", "kind": "web_search",
+         "config": {"provider": "databricks", "model": "databricks-gpt-5"}},
+        {"name": "web_crawl", "kind": "web_crawl", "config": {}},
+    ]
+    workflow["root"]["children"][0]["config"]["tools"] = ["web_search", "web_crawl"]
+    definition = load_workflow_from_dict(workflow)
+
+    assert _tool_names_with_explicit_provider(definition) == {"web_search"}
+
+
+def test_tool_names_with_explicit_provider_empty_when_none_declared() -> None:
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    workflow = _workflow_dict()
+    workflow["tools"] = [{"name": "web_search", "kind": "web_search", "config": {}}]
+    definition = load_workflow_from_dict(workflow)
+
+    assert _tool_names_with_explicit_provider(definition) == set()
+
+
+def test_fill_databricks_tool_defaults_fills_per_tool_databricks() -> None:
+    """A per-tool provider:databricks web tool missing model inherits the app
+    defaults at run time — covers UI-only saves that bypass normalize_ast."""
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    from deep_research.core.app_config import DatabricksSearchConfig, SearchConfig
+
+    workflow = _workflow_dict()
+    workflow["tools"] = [
+        {"name": "web_search", "kind": "web_search",
+         "config": {"provider": "databricks"}},
+    ]
+    workflow["root"]["children"][0]["config"]["tools"] = ["web_search"]
+    definition = load_workflow_from_dict(workflow)
+    search_cfg = SearchConfig(
+        provider="brave",
+        databricks=DatabricksSearchConfig(endpoint="databricks-gpt-5"),
+    )
+
+    _fill_databricks_tool_defaults(definition, search_cfg)
+
+    cfg = definition.tools[0].config
+    assert cfg["model"] == "databricks-gpt-5"
+    assert "timeout_seconds" in cfg and "resolve_redirects" in cfg
+
+
+def test_fill_databricks_tool_defaults_skips_non_databricks() -> None:
+    """brave/jina web tools and non-web tools are left untouched."""
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    from deep_research.core.app_config import SearchConfig
+
+    workflow = _workflow_dict()
+    workflow["tools"] = [
+        {"name": "web_search", "kind": "web_search", "config": {"provider": "jina"}},
+        {"name": "wc", "kind": "web_crawl", "config": {}},
+    ]
+    workflow["root"]["children"][0]["config"]["tools"] = ["web_search", "wc"]
+    definition = load_workflow_from_dict(workflow)
+
+    _fill_databricks_tool_defaults(definition, SearchConfig(provider="brave"))
+
+    assert definition.tools[0].config == {"provider": "jina"}
+    assert definition.tools[1].config == {}
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_prepare_fills_databricks_web_tool_for_agent_v2() -> None:
+    """Regression for the production crash: a designer-saved (agent-v2) workflow
+    whose web tool pins provider=databricks but omits model must get the model
+    filled by ``_resolve_and_prepare_workflow_def``. That helper couples the fill
+    to resolution; the original bug filled before the workflow was resolved
+    (workflow_def=None → silent no-op), so the tool later crashed construction
+    with 'requires a serving endpoint'."""
+    from deep_research.agent.framework_orchestrator import (
+        _resolve_and_prepare_workflow_def,
+    )
+    from deep_research.core.app_config import DatabricksSearchConfig, SearchConfig
+
+    agent_id = uuid4()
+    workflow = _workflow_dict()
+    workflow["tools"] = [
+        {"name": "web_research", "kind": "web_research",
+         "config": {"provider": "databricks"}},
+    ]
+    workflow["root"]["children"][0]["config"]["tools"] = ["web_research"]
+
+    class _FakeAgentV2Service:
+        def __init__(self, session: object) -> None:
+            self.session = session
+
+        async def get_for_user(self, requested_id: UUID, user_id: str) -> object:
+            return SimpleNamespace(definition=workflow)
+
+    config = _mock_config(agent_id=str(agent_id), verify_sources=False)
+    search_cfg = SearchConfig(
+        provider="brave",
+        databricks=DatabricksSearchConfig(endpoint="databricks-gemini-3-1-flash-lite"),
+    )
+
+    with patch(
+        "deep_research.services.agent_v2_service.AgentV2Service", _FakeAgentV2Service
+    ):
+        prepared = await _resolve_and_prepare_workflow_def(
+            None, config, "user-1", object(), [], None, search_cfg,
+        )
+
+    cfg = prepared.tools[0].config
+    assert cfg["provider"] == "databricks"
+    assert cfg["model"] == "databricks-gemini-3-1-flash-lite"
+    assert "timeout_seconds" in cfg and "resolve_redirects" in cfg
+
+
+def test_fill_databricks_tool_defaults_noop_on_none() -> None:
+    """Documents the trap behind the production crash: filling before the
+    workflow is resolved (workflow_def=None) is a no-op — hence the fill lives
+    inside ``_resolve_and_prepare_workflow_def``, after resolution."""
+    from deep_research.core.app_config import DatabricksSearchConfig, SearchConfig
+
+    # Must simply return without raising.
+    _fill_databricks_tool_defaults(
+        None,
+        SearchConfig(
+            provider="databricks",
+            databricks=DatabricksSearchConfig(endpoint="databricks-gpt-5"),
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests — Simple mode short-circuit
 # ---------------------------------------------------------------------------
@@ -98,18 +343,19 @@ class TestSimpleModeShortCircuit:
         )
 
         # Create an async generator that yields the classified event
-        async def _mock_execute(state: Any) -> Any:
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
             yield classified_evt
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config(query_mode="simple")
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -194,18 +440,19 @@ class TestSimpleModeShortCircuit:
             direct_response=direct_text,
         )
 
-        async def _mock_execute(state: Any) -> Any:
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
             yield classified_evt
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config(query_mode="simple")
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -332,6 +579,7 @@ class TestFileSearchLoading:
                 "deep_research.agent.framework_orchestrator.make_file_upload_service",
                 return_value=mock_service,
             ) as mock_factory,
+            patch("deep_research.core.config.get_settings", return_value=MagicMock()),
             patch(
                 "deep_research.agent.tools.file_search.create_file_search_tool",
                 return_value=mock_tool,
@@ -615,13 +863,26 @@ class TestExecutorInstantiation:
             direct_response="Hello",
         )
 
-        async def _mock_execute(state: Any) -> Any:
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
             yield classified_evt
 
-        mock_executor_cls = MagicMock()
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
-        mock_executor_cls.return_value = mock_executor_instance
+        # After the unification refactor (2026-05-24), framework_orchestrator
+        # no longer constructs WorkflowExecutor directly — it goes through
+        # build_app_workflow_runner + runner.stream(...). We verify the same
+        # contract (workflow_def, llm, tool_resolver, context plumbed
+        # correctly) at the runner.stream call site.
+        recorded_stream_calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        async def _record_stream(*args: Any, **kwargs: Any) -> Any:
+            recorded_stream_calls.append((args, kwargs))
+            async for evt in _mock_execute(*args, **kwargs):
+                yield evt
+
+        mock_runner = MagicMock()
+        mock_runner.stream = _record_stream
+        mock_runner.factory_context = ToolFactoryContext()
+
+        mock_builder = MagicMock(return_value=mock_runner)
 
         mock_workflow_def = MagicMock(name="workflow_def")
         mock_llm = MagicMock(name="framework_llm")
@@ -630,8 +891,8 @@ class TestExecutorInstantiation:
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                mock_executor_cls,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                mock_builder,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -687,13 +948,21 @@ class TestExecutorInstantiation:
             ):
                 events.append(evt)
 
-            # Verify WorkflowExecutor was called with definition and llm_client
-            mock_executor_cls.assert_called_once()
-            args, kwargs = mock_executor_cls.call_args
-            assert args[0] is mock_workflow_def, "1st arg should be workflow_def"
-            assert args[1] is mock_llm, "2nd arg should be framework_llm"
-            assert "tool_resolver" in kwargs, "should pass pre-populated tool_resolver"
-            assert "context" in kwargs
+            # Verify build_app_workflow_runner was called with the right LLM
+            mock_builder.assert_called_once()
+            builder_kwargs = mock_builder.call_args.kwargs
+            assert builder_kwargs.get("llm_client") is mock_llm
+
+            # Verify runner.stream was called with workflow_def + tool_resolver
+            # + context (plumbed through the unified entry point).
+            assert recorded_stream_calls, "runner.stream must be invoked"
+            stream_args, stream_kwargs = recorded_stream_calls[0]
+            assert stream_args[0] is mock_workflow_def, (
+                "1st positional arg to runner.stream is workflow_def"
+            )
+            assert "tool_resolver" in stream_kwargs
+            assert "context" in stream_kwargs
+            assert stream_kwargs.get("strict_tool_resolution") is True
 
     @pytest.mark.asyncio
     async def test_executor_receives_workflow_state(self) -> None:
@@ -712,19 +981,21 @@ class TestExecutorInstantiation:
 
         captured_state: dict[str, Any] = {}
 
-        async def _mock_execute(state: Any) -> Any:
-            captured_state["state"] = state
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
+            # state is passed as a keyword arg to runner.stream(...)
+            captured_state["state"] = kwargs.get("state")
             yield classified_evt
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config(query_mode="simple")
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -1654,19 +1925,20 @@ class TestResearchTimeout:
     async def test_slow_executor_yields_timeout_error(self) -> None:
         """Slow executor (sleeps 100s) + 1s timeout → StreamErrorEvent(RESEARCH_TIMEOUT)."""
 
-        async def _slow_execute(state: Any) -> Any:
+        async def _slow_execute(*args: Any, **kwargs: Any) -> Any:
             await asyncio.sleep(100)
             yield  # never reached
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _slow_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _slow_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config(research_timeout_seconds=1)
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -1762,24 +2034,23 @@ class TestToolRegistration:
 
         captured: dict[str, Any] = {}
 
-        def _capture_executor(*args: Any, **kwargs: Any) -> MagicMock:
+        async def _capture_stream(*args: Any, **kwargs: Any) -> Any:
             captured["tool_resolver"] = kwargs.get("tool_resolver")
             captured["enterprise_tools"] = kwargs.get("enterprise_tools")
-            mock_exec = MagicMock()
+            captured["strict_tool_resolution"] = kwargs.get("strict_tool_resolution")
+            return
+            yield  # noqa: F841 - makes it an async generator
 
-            async def _empty_execute(state: Any) -> Any:
-                return
-                yield  # noqa: F841 - makes it an async generator
-
-            mock_exec.execute = _empty_execute
-            return mock_exec
+        mock_runner = MagicMock()
+        mock_runner.stream = _capture_stream
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config()
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                side_effect=_capture_executor,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -1859,23 +2130,22 @@ class TestToolRegistration:
 
         captured: dict[str, Any] = {}
 
-        def _capture_executor(*args: Any, **kwargs: Any) -> MagicMock:
+        async def _capture_stream(*args: Any, **kwargs: Any) -> Any:
             captured["tool_resolver"] = kwargs.get("tool_resolver")
-            mock_exec = MagicMock()
+            captured["strict_tool_resolution"] = kwargs.get("strict_tool_resolution")
+            return
+            yield
 
-            async def _empty_execute(state: Any) -> Any:
-                return
-                yield
-
-            mock_exec.execute = _empty_execute
-            return mock_exec
+        mock_runner = MagicMock()
+        mock_runner.stream = _capture_stream
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config()
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                side_effect=_capture_executor,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -1974,7 +2244,7 @@ class TestFinalReportCapture:
 
         full_report = "# Research Report\n\n" + "Content. " * 500  # >200 chars
 
-        async def _mock_execute(state: Any) -> Any:
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
             # Emit 4 filler events to reach count=4
             for i in range(4):
                 yield FwkItemCompletedEvent(
@@ -1993,15 +2263,16 @@ class TestFinalReportCapture:
                 final_report=full_report,
             )
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config()
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -2069,7 +2340,7 @@ class TestFinalReportCapture:
 
         full_report = "# Off-boundary Report\n\n" + "Data. " * 500
 
-        async def _mock_execute(state: Any) -> Any:
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
             yield FwkItemCompletedEvent(
                 node_id="researcher",
                 timestamp="2026-01-01T00:00:00Z",
@@ -2085,15 +2356,16 @@ class TestFinalReportCapture:
                 final_report=full_report,
             )
 
-        mock_executor_instance = MagicMock()
-        mock_executor_instance.execute = _mock_execute
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
 
         config = _mock_config()
 
         with (
             patch(
-                "deep_research.agent.framework_orchestrator.WorkflowExecutor",
-                return_value=mock_executor_instance,
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
             ),
             patch(
                 "deep_research.agent.framework_orchestrator.create_framework_llm_client",
@@ -2173,6 +2445,32 @@ class TestResearchProgressForwarding:
         assert isinstance(result, ToolCallEvent)
         assert result.tool_name == "web_search"
         assert result.event_type == "tool_call"
+
+    def test_claim_verified_preserves_citation_keys(self) -> None:
+        """research_progress/claim_verified -> ClaimVerifiedEvent keeps numeric keys.
+
+        Regression guard: dropping these keys left every citation grey until reload.
+        """
+        from deep_research.agent.adapters.domain_context import AppSSEEvent
+        from deep_research.schemas.streaming import (
+            ClaimVerifiedEvent as AppClaimVerified,
+        )
+
+        app_evt = AppSSEEvent(
+            event_type="research_progress",
+            data={
+                "progress_type": "claim_verified",
+                "verdict": "supported",
+                "confidence": 0.9,
+                "citation_key": "1",
+                "citation_keys": ["1", "2"],
+            },
+        )
+        result = _to_sse_event(app_evt)
+        assert isinstance(result, AppClaimVerified)
+        assert result.verdict == "supported"
+        assert result.citation_key == "1"
+        assert result.citation_keys == ["1", "2"]
 
     def test_tool_result_event_forwarded(self) -> None:
         """research_progress with progress_type=tool_result -> ToolResultEvent."""
@@ -2349,3 +2647,123 @@ class TestResearchProgressForwarding:
         )
         result = _to_sse_event(app_evt)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Tests — PR4 inline fix: failure-persistence logging (lines 902, 1715)
+# ---------------------------------------------------------------------------
+
+
+class TestFailurePersistenceLogging:
+    """Regression tests for PR4 inline fix.
+
+    Before PR4, lines 902 and 1715 contained ``except Exception: pass`` which
+    silently dropped failures of ``persist_research_session_failed_independent``.
+    DB rows would stay in 'running' forever after a primary error, with NO log
+    line emitted (silent data loss).
+
+    PR4 replaced both ``pass`` statements with ``logger.exception(...)`` so the
+    failure path is observable. These tests assert the structured log line is
+    emitted when the failure-persist call itself raises.
+    """
+
+    @pytest.mark.asyncio
+    async def test_persist_completion_inner_failure_emits_log(
+        self, caplog: Any
+    ) -> None:
+        """When persist_research_session_complete_update_independent AND the
+        inner persist_research_session_failed_independent both raise, the
+        outer except logs ``FWK_PERSISTENCE_FAILED`` (existing) AND the inner
+        recovery emits ``FWK_FAILURE_PERSISTENCE_FAILED`` (PR4 fix at line 1715).
+        """
+        from deep_research.agent.framework_orchestrator import _persist_completion
+
+        config = _mock_config()
+        chat_id_uuid = uuid4()
+        event_buffer = MagicMock()  # truthy → two-phase path
+
+        async def _raise_complete(**_kwargs: Any) -> None:
+            raise RuntimeError("boom-complete")
+
+        async def _raise_failed(**_kwargs: Any) -> None:
+            raise RuntimeError("boom-failed")
+
+        import logging
+
+        with patch(
+            "deep_research.agent.persistence.persist_research_session_complete_update_independent",
+            side_effect=_raise_complete,
+        ), patch(
+            "deep_research.agent.persistence.persist_research_session_failed_independent",
+            side_effect=_raise_failed,
+        ), caplog.at_level(
+            logging.WARNING, logger="deep_research.agent.framework_orchestrator"
+        ):
+            result = await _persist_completion(
+                config,
+                chat_id_uuid,
+                user_id="alice",
+                query="q",
+                final_report="report",
+                event_buffer=event_buffer,
+                wf_state=None,
+                claims=None,
+                verification_summary=None,
+                storage_stack=None,
+            )
+
+        # Returns None on persistence failure (existing contract).
+        assert result is None
+        # Outer except line 1701 — pre-existing log line.
+        assert "FWK_PERSISTENCE_FAILED" in caplog.text
+        # PR4 fix: inner except line 1715 now also logs instead of silent pass.
+        assert "FWK_FAILURE_PERSISTENCE_FAILED" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_persist_completion_inner_succeeds_no_failure_log(
+        self, caplog: Any
+    ) -> None:
+        """If persist_research_session_failed_independent succeeds, the inner
+        except is never entered and FWK_FAILURE_PERSISTENCE_FAILED is NOT
+        emitted (no false-positive log noise on the happy failure path).
+        """
+        from deep_research.agent.framework_orchestrator import _persist_completion
+
+        config = _mock_config()
+        chat_id_uuid = uuid4()
+        event_buffer = MagicMock()
+
+        async def _raise_complete(**_kwargs: Any) -> None:
+            raise RuntimeError("boom-complete")
+
+        async def _ok_failed(**_kwargs: Any) -> None:
+            return None
+
+        import logging
+
+        with patch(
+            "deep_research.agent.persistence.persist_research_session_complete_update_independent",
+            side_effect=_raise_complete,
+        ), patch(
+            "deep_research.agent.persistence.persist_research_session_failed_independent",
+            side_effect=_ok_failed,
+        ), caplog.at_level(
+            logging.WARNING, logger="deep_research.agent.framework_orchestrator"
+        ):
+            await _persist_completion(
+                config,
+                chat_id_uuid,
+                user_id="alice",
+                query="q",
+                final_report="report",
+                event_buffer=event_buffer,
+                wf_state=None,
+                claims=None,
+                verification_summary=None,
+                storage_stack=None,
+            )
+
+        # Outer except still fires (the primary failure).
+        assert "FWK_PERSISTENCE_FAILED" in caplog.text
+        # Inner except is NOT entered → PR4 log line is absent.
+        assert "FWK_FAILURE_PERSISTENCE_FAILED" not in caplog.text

@@ -110,8 +110,10 @@ class TestEarlyStopNudge:
         # Verify the nudge system message was injected
         all_messages = llm.complete.call_args_list
         last_call_messages = all_messages[-1].args[0]
+        # Mid-conversation nudges use role:user (Databricks proxy drops
+        # mid-stream system messages — see commit history).
         nudge_msgs = [m for m in last_call_messages
-                      if m.get("role") == "system" and "no new unique sources" in m.get("content", "")]
+                      if m.get("role") == "user" and "no new unique sources" in m.get("content", "")]
         assert len(nudge_msgs) >= 1
 
     @pytest.mark.asyncio
@@ -151,8 +153,10 @@ class TestEarlyStopNudge:
         # No nudge should have been injected
         all_messages = llm.complete.call_args_list
         last_call_messages = all_messages[-1].args[0]
+        # Mid-conversation nudges use role:user (Databricks proxy drops
+        # mid-stream system messages — see commit history).
         nudge_msgs = [m for m in last_call_messages
-                      if m.get("role") == "system" and "no new unique sources" in m.get("content", "")]
+                      if m.get("role") == "user" and "no new unique sources" in m.get("content", "")]
         assert len(nudge_msgs) == 0
 
 

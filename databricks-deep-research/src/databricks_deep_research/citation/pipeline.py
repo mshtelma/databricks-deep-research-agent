@@ -51,6 +51,7 @@ from databricks_deep_research.citation.config import (
     ClaimDisposition,
     SynthesisMode,
 )
+from databricks_deep_research.citation.numeric_verifier import is_exact_numeric_match
 from databricks_deep_research.citation.types import (
     AnalysisSummaryInfo,
     ClaimInfo,
@@ -69,12 +70,80 @@ from databricks_deep_research.citation.types import (
     VerificationResult,
     VerificationSummaryInfo,
     VerificationVerdict,
+    is_corpus_source_value,
 )
 from databricks_deep_research.citation.utils import truncate as _truncate
 from databricks_deep_research.llm.client import FrameworkLLMClient
 from databricks_deep_research.tracing import trace_span
 
 logger = logging.getLogger(__name__)
+
+
+# Module-level monotonic counter so multiple invocations of
+# ``process_unverified_claims`` within a single run can be distinguished in
+# the trace logs (Stage 8 of the citation pipeline). PR3-0 instrumentation.
+_STAGE8_PASS_COUNTER = 0
+
+
+def _next_stage8_pass_id() -> int:
+    global _STAGE8_PASS_COUNTER
+    _STAGE8_PASS_COUNTER += 1
+    return _STAGE8_PASS_COUNTER
+
+
+# PR3-E R2.2: feature flag controlling the is_negative_existence classifier
+# + force-REMOVE rule. Default off; flip to "true" only after the
+# investment_research regression bar passes (per plan AC7).
+def _synth_pipeline_v2_enabled() -> bool:
+    import os
+
+    return os.environ.get("SYNTH_PIPELINE_V2", "").lower() in ("true", "1", "yes")
+
+
+async def _classify_negative_existence_batch(
+    claims: list[ClaimInfo],
+    llm_client: Any,
+) -> None:
+    """Set ``claim.is_negative_existence`` on eligible claims via the
+    Haiku-tier classifier.
+
+    PR3-E R2.2 wiring. Iterates claims with non-fully-supported verdicts
+    (abstained/unsupported/contradicted/partial) and consults
+    ``classify_negative_existence``. Mutates each claim in place;
+    failures and supported-verdict claims are no-ops. Latency budget
+    per plan: ≤30s sequential on ~25 claims.
+    """
+    from databricks_deep_research.citation.claim_classifier import (
+        classify_negative_existence,
+    )
+
+    eligible = [
+        c
+        for c in claims
+        if c.abstained
+        or (c.verification_verdict or "").lower()
+        in ("abstained", "unsupported", "contradicted", "partial")
+    ]
+    logger.info(
+        "DR_NEGATIVE_EXISTENCE_CLASSIFIER_RUN eligible=%d total=%d",
+        len(eligible),
+        len(claims),
+    )
+    for claim in eligible:
+        try:
+            flag, reasoning = await classify_negative_existence(
+                claim, llm_client
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.info(
+                "DR_NEGATIVE_EXISTENCE_CLASSIFIER_FAIL claim_head=%r error=%s",
+                claim.claim_text[:60],
+                exc,
+            )
+            continue
+        if flag:
+            claim.is_negative_existence = True
+            claim.is_negative_existence_reasoning = reasoning
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +153,79 @@ logger = logging.getLogger(__name__)
 def _counter_dict(values: list[str]) -> dict[str, int]:
     """Return a stable string counter for debug logging."""
     return dict(sorted(Counter(value for value in values if value).items()))
+
+
+_NUMERIC_PROMOTION_MIN_CONFIDENCE = 0.9
+
+# HIGH_ABSTAIN_RATE observability: an abstain ratio is only a meaningful signal
+# across a batch large enough for the ratio to mean something. Below this floor
+# (e.g. single-claim capability probes that legitimately abstain) the warning is
+# suppressed so it does not cry wolf at 1/1 = 100%.
+_HIGH_ABSTAIN_MIN_CLAIMS = 5
+_HIGH_ABSTAIN_RATE_THRESHOLD = 0.10
+
+
+def _warn_if_high_abstain(claims: list[ClaimInfo]) -> None:
+    """Warn on a high abstain rate, but only across a batch large enough for the
+    ratio to be meaningful.
+
+    Single-claim batches (e.g. capability probes that verify one synthetic claim
+    at a time) legitimately abstain and would otherwise trip this warning at
+    1/1 = 100%. A rate over a sub-threshold sample carries no signal, so stay
+    silent there.
+    """
+    if len(claims) < _HIGH_ABSTAIN_MIN_CLAIMS:
+        return
+    abstained = sum(1 for c in claims if c.abstained)
+    if abstained / len(claims) > _HIGH_ABSTAIN_RATE_THRESHOLD:
+        logger.warning(
+            "HIGH_ABSTAIN_RATE rate=%.1f%% abstained=%d total=%d",
+            abstained / len(claims) * 100,
+            abstained,
+            len(claims),
+        )
+
+
+def _should_promote_numeric_verdict(
+    verdict: str | None,
+    numeric_result: dict[str, Any],
+    *,
+    enabled: bool,
+    min_confidence: float = _NUMERIC_PROMOTION_MIN_CONFIDENCE,
+) -> bool:
+    """True when deterministic numeric corroboration should override a
+    non-supported NLI verdict (Defect E / Part 1).
+
+    The numeric verifier corroborates a claim's value against the cited
+    evidence (verbatim match -> confidence 0.95, every QA pair agreeing ->
+    1.0). The NLI judge under-credits verbatim numerics and routes them to
+    PARTIAL/UNSUPPORTED, which Stage 8 hedges -- wrong for a value read
+    straight from the corpus. Promote only PARTIAL/UNSUPPORTED; never
+    CONTRADICTED (a contradicted number is wrong, not merely uncited).
+    """
+    if not enabled or not numeric_result:
+        return False
+    if verdict not in ("partial", "unsupported"):
+        return False
+    if not numeric_result.get("overall_match"):
+        return False
+    return float(numeric_result.get("confidence") or 0.0) >= min_confidence
+
+
+# Ordering of verdicts from strongest support to weakest. Used by numeric
+# evidence recovery to ensure re-verification against a better source can only
+# *upgrade* a claim's standing, never downgrade it.
+_VERDICT_RANK: dict[str, int] = {
+    VerificationVerdict.SUPPORTED.value: 3,
+    VerificationVerdict.PARTIAL.value: 2,
+    VerificationVerdict.UNSUPPORTED.value: 1,
+    VerificationVerdict.CONTRADICTED.value: 0,
+}
+
+
+def _verdict_rank(verdict: str | None) -> int:
+    """Support-strength rank for *verdict* (higher = more supported)."""
+    return _VERDICT_RANK.get(verdict or "", 0)
 
 
 def _evidence_info_from_ranked(ranked: RankedEvidence) -> EvidenceInfo:
@@ -100,6 +242,7 @@ def _evidence_info_from_ranked(ranked: RankedEvidence) -> EvidenceInfo:
         has_numeric_content=ranked.has_numeric_content,
         source_pool_index=ranked.source_pool_index,
         evidence_pool_index=ranked.evidence_pool_index,
+        source_kind=ranked.source_kind,
     )
 
 
@@ -172,6 +315,7 @@ class ClaimGenerator(Protocol):
         previous_content: str = ...,
         target_word_count: int = ...,
         max_tokens: int = ...,
+        generation_instructions: str = ...,
     ) -> AsyncGenerator[tuple[str, InterleavedClaim | None], None]: ...
 
 
@@ -514,6 +658,7 @@ class CitationVerificationPipeline:
         query: str,
         target_word_count: int = 600,
         max_tokens: int = 2000,
+        generation_instructions: str = "",
     ) -> AsyncGenerator[tuple[str, InterleavedClaim | None], None]:
         """Stage 2: Generate synthesis with interleaved claim/evidence pairs.
 
@@ -539,6 +684,7 @@ class CitationVerificationPipeline:
             previous_content=previous_content,
             target_word_count=target_word_count,
             max_tokens=max_tokens,
+            generation_instructions=generation_instructions,
         ):
             if content:
                 yield content, None
@@ -548,6 +694,17 @@ class CitationVerificationPipeline:
                     "CLAIM_GENERATED index=%d text=%s",
                     claim_index,
                     _truncate(claim.claim_text, 50),
+                )
+                logger.info(
+                    "CLAIM_EVIDENCE_ATTACHED claim_index=%d claim_role=%s "
+                    "claim_chars=%d attached_count=%d total_quote_chars=%d "
+                    "citation_keys=%s",
+                    claim_index,
+                    getattr(claim, "claim_role", "?"),
+                    len(claim.claim_text or ""),
+                    len(claim.evidences or []),
+                    sum(len(ev.quote_text or "") for ev in (claim.evidences or [])),
+                    list(claim.citation_keys or []),
                 )
                 yield "", claim
 
@@ -731,6 +888,7 @@ class CitationVerificationPipeline:
                     has_numeric_content=evidence.has_numeric_content,
                     source_pool_index=evidence.source_pool_index,
                     evidence_pool_index=evidence.evidence_pool_index,
+                    source_kind=evidence.source_kind,
                 )
             )
         return ranked
@@ -767,6 +925,48 @@ class CitationVerificationPipeline:
             ),
             source_pool_index=evidences[0].source_pool_index,
         )
+
+    def _recover_numeric_evidence_from_pool(
+        self,
+        claim_text: str,
+        cited_evidence: RankedEvidence | None,
+    ) -> RankedEvidence | None:
+        """Find a pool span that contains the claim's exact figure(s).
+
+        The synthesizer sometimes cites a numeric claim to a span that does not
+        contain the figure (e.g. a vector "Entities:" metadata chunk) while the
+        actual cell lives in a structured table-read span elsewhere in the pool.
+        When the cited evidence cannot corroborate the number, search the full
+        Stage-1 evidence pool for a span that does, preferring corpus / structured
+        sources. Returns the best candidate or ``None``.
+
+        Generic across source kinds: ranks only on exact numeric match +
+        ``source_kind`` (corpus/structured) + numeric-content + relevance -- no
+        domain, table, or corpus identifiers.
+        """
+        pool = self.last_evidence_pool
+        if not pool:
+            return None
+        cited_quote = cited_evidence.quote_text if cited_evidence else ""
+        candidates = [
+            evidence
+            for evidence in pool
+            if evidence.quote_text
+            and evidence.quote_text != cited_quote
+            and is_exact_numeric_match(claim_text, evidence.quote_text)
+        ]
+        if not candidates:
+            return None
+
+        def _rank(evidence: RankedEvidence) -> tuple[int, int, float]:
+            return (
+                1 if is_corpus_source_value(evidence.source_kind) else 0,
+                1 if evidence.has_numeric_content else 0,
+                evidence.relevance_score or 0.0,
+            )
+
+        candidates.sort(key=_rank, reverse=True)
+        return candidates[0]
 
     def _link_analysis_claims(self, claims: list[ClaimInfo]) -> None:
         """Link analysis claims to nearby fact claims they interpret."""
@@ -938,6 +1138,7 @@ class CitationVerificationPipeline:
         analysis_evidences: list[RankedEvidence] = []
         numeric_result: dict[str, Any] = {}
         used_quick = False
+        numeric_recovered = False
         evidence_match_score = 0.0
         verification_started = time.monotonic()
         logger.debug(
@@ -1005,6 +1206,14 @@ class CitationVerificationPipeline:
         else:
             if verification_evidence is None:
                 claim.abstained = True
+                logger.info(
+                    "CITATION_ABSTAIN_SILENT claim_role=%s citation_keys=%s "
+                    "evidences_count=%d claim_head=%r",
+                    getattr(claim, "claim_role", "?"),
+                    [getattr(e, "citation_key", None) for e in (claim.evidences or [])],
+                    len(claim.evidences or []),
+                    _truncate(claim.claim_text, 80),
+                )
                 return []
 
             evidence_match_score = self._score_claim_evidence_text(
@@ -1027,6 +1236,65 @@ class CitationVerificationPipeline:
                     claim,
                     verification_evidence,
                 )
+                # Pool-wide evidence recovery: when the cited evidence does not
+                # contain the claim's figure, the NLI/numeric verdict was formed
+                # against the wrong span (e.g. a vector "Entities:" metadata chunk
+                # while the cell lives in a structured table read). Re-verify
+                # against a figure-bearing pool source and adopt the result only
+                # if it ranks strictly better -- never downgrade. Fixes false
+                # unsupported/contradicted verdicts on in-corpus table numbers.
+                cited_has_figure = bool(
+                    verification_evidence
+                    and is_exact_numeric_match(
+                        verification_text, verification_evidence.quote_text
+                    )
+                )
+                if result.verdict != VerificationVerdict.SUPPORTED and not cited_has_figure:
+                    recovered = self._recover_numeric_evidence_from_pool(
+                        verification_text, verification_evidence
+                    )
+                    if recovered is not None:
+                        recovered_nli = await self.verifier.verify_with_isolation(
+                            claim_text=verification_text,
+                            evidence=recovered,
+                            use_quick_verification=False,
+                        )
+                        recovered_numeric = await self._verify_numeric_claim(
+                            claim, recovered
+                        )
+                        effective_verdict = recovered_nli.verdict.value
+                        if _should_promote_numeric_verdict(
+                            effective_verdict,
+                            recovered_numeric,
+                            enabled=self.config.numeric_match_promotes_verdict,
+                        ):
+                            effective_verdict = VerificationVerdict.SUPPORTED.value
+                        if _verdict_rank(effective_verdict) > _verdict_rank(
+                            result.verdict.value
+                        ):
+                            logger.info(
+                                "NUMERIC_EVIDENCE_RECOVERED claim_index=%d "
+                                "from_verdict=%s to_verdict=%s recovered_source_kind=%s "
+                                "recovered_pool_index=%s claim=%s",
+                                claim_index,
+                                result.verdict.value,
+                                effective_verdict,
+                                recovered.source_kind,
+                                recovered.source_pool_index,
+                                _truncate(verification_text, 60),
+                            )
+                            result = recovered_nli
+                            numeric_result = recovered_numeric
+                            verification_evidence = recovered
+                            evidence_match_score = self._score_claim_evidence_text(
+                                verification_text, recovered.quote_text
+                            )
+                            numeric_recovered = True
+                            claim.evidence = _evidence_info_from_ranked(recovered)
+                            claim.evidences = [claim.evidence]
+                            self._refresh_claim_citation_keys(
+                                claim, self.last_evidence_pool
+                            )
                 if numeric_result:
                     claim.verification_method = VerificationMethod.NUMERIC_QA.value
 
@@ -1037,10 +1305,23 @@ class CitationVerificationPipeline:
         claim.evidence_match_score = evidence_match_score
         claim.used_quick_verification = used_quick
         claim.verification_latency_ms = verification_latency_ms
+        claim.abstained = claim.abstained or bool(getattr(result, "abstained", False))
         if claim.claim_role == ClaimRole.ANALYSIS.value:
             claim.verification_method = VerificationMethod.GROUNDING.value
         elif not claim.verification_method:
             claim.verification_method = VerificationMethod.ENTAILMENT.value
+
+        numeric_promoted = False
+        if _should_promote_numeric_verdict(
+            claim.verification_verdict,
+            numeric_result,
+            enabled=self.config.numeric_match_promotes_verdict,
+        ):
+            # Numeric QA corroborated the value against the cited evidence;
+            # the NLI judge under-credited a verbatim/corpus number. Keep it.
+            claim.verification_verdict = VerificationVerdict.SUPPORTED.value
+            claim.abstained = False
+            numeric_promoted = True
 
         routing_score = (
             claim.routing_confidence_score
@@ -1073,6 +1354,8 @@ class CitationVerificationPipeline:
                     "citation_keys": claim.citation_keys,
                     "claim_role": claim.claim_role,
                     "verification_method": claim.verification_method or "",
+                    "numeric_promoted": numeric_promoted,
+                    "numeric_recovered": numeric_recovered,
                 },
             )
         ]
@@ -1244,13 +1527,8 @@ class CitationVerificationPipeline:
                 for event in events:
                     yield event
 
-            # Observability: warn on high abstain rate
-            abstained = sum(1 for c in claims if c.abstained)
-            if claims and abstained / len(claims) > 0.10:
-                logger.warning(
-                    "HIGH_ABSTAIN_RATE rate=%.1f%% abstained=%d total=%d",
-                    abstained / len(claims) * 100, abstained, len(claims),
-                )
+            # Observability: warn on high abstain rate (no-op for tiny batches).
+            _warn_if_high_abstain(claims)
         finally:
             self._active_claims_context = []
 
@@ -1308,7 +1586,13 @@ class CitationVerificationPipeline:
         claim_evidence: EvidenceInfo,
         evidence_pool: list[RankedEvidence],
     ) -> int | None:
-        """Resolve a claim evidence reference back to an evidence-pool index."""
+        """Resolve a claim evidence reference back to an evidence-pool index.
+
+        Diagnostic log ``CITATION_RESOLVE_FAILED`` fires when all three
+        fallback paths miss; the ``reason`` field tells which one (out-of-pool
+        url, url/quote mismatch, source_pool_index miss) so we can attribute
+        Stage 4 silent-abstains to a specific upstream gap.
+        """
         if claim_evidence.evidence_pool_index is not None:
             return claim_evidence.evidence_pool_index
 
@@ -1320,12 +1604,26 @@ class CitationVerificationPipeline:
                 return evidence.evidence_pool_index if evidence.evidence_pool_index is not None else index
 
         if claim_evidence.source_pool_index is None:
+            logger.info(
+                "CITATION_RESOLVE_FAILED reason=no_source_pool_index "
+                "claim_url=%s pool_size=%d quote_head=%r",
+                (claim_evidence.source_url or "")[:80],
+                len(evidence_pool),
+                (claim_evidence.quote_text or "")[:60],
+            )
             return None
 
         for index, evidence in enumerate(evidence_pool):
             if evidence.source_pool_index == claim_evidence.source_pool_index:
                 return evidence.evidence_pool_index if evidence.evidence_pool_index is not None else index
 
+        logger.info(
+            "CITATION_RESOLVE_FAILED reason=source_pool_index_miss "
+            "claim_source_pool_index=%s pool_size=%d claim_url=%s",
+            claim_evidence.source_pool_index,
+            len(evidence_pool),
+            (claim_evidence.source_url or "")[:80],
+        )
         return None
 
     # ===================================================================
@@ -1616,9 +1914,68 @@ class CitationVerificationPipeline:
         """
         modifications: list[tuple[str, ClaimInfo]] = []
 
+        # Confidence threshold for promoting abstained-but-confident NLI
+        # rejections from KEEP → REMOVE. See GroundingValidationConfig.
+        _abstained_threshold = getattr(
+            self.config.grounding_validation,
+            "abstained_unsupported_remove_threshold",
+            0.5,
+        )
+
+        # PR3-E R2.2 wiring: when SYNTH_PIPELINE_V2 is enabled and an LLM
+        # client is available, classify negative-existence claims BEFORE
+        # the disposition loop runs so the force-REMOVE rule has the flag
+        # to read. Skipped on the disposition_applier path (which bypasses
+        # __init__ so self.llm is unset) and when the flag is off.
+        if _synth_pipeline_v2_enabled() and getattr(self, "llm", None) is not None:
+            await _classify_negative_existence_batch(claims, self.llm)
+
+        # PR3-0 instrumentation: trace what actually reaches Stage 8. The
+        # failing officeqa run had 7 contradicted + 39 abstained verdicts in
+        # events.jsonl but ``removed_claims=0`` in verification_summary; this
+        # trace identifies whether the claims list arriving here matches what
+        # the reflector emitted.
+        _pass_id = _next_stage8_pass_id()
+        _count_by_verdict = Counter(
+            (c.verification_verdict or "<none>") for c in claims
+        )
+        _count_by_role = Counter(c.claim_role for c in claims)
+        _abstained_count = sum(1 for c in claims if c.abstained)
+        _with_verification_text = sum(1 for c in claims if c.verification_text)
+        logger.info(
+            "STAGE8_INPUT_TRACE pass_id=%d input_claims=%d "
+            "by_verdict=%s by_role=%s abstained=%d with_verification_text=%d "
+            "abstained_threshold=%.2f",
+            _pass_id,
+            len(claims),
+            dict(_count_by_verdict),
+            dict(_count_by_role),
+            _abstained_count,
+            _with_verification_text,
+            _abstained_threshold,
+        )
+
         for claim in claims:
             # Determine verdict key for disposition lookup
-            if claim.abstained:
+            _claim_confidence = getattr(claim, "verification_confidence", None) or 0.0
+            if (
+                claim.abstained
+                and claim.verification_verdict in ("unsupported", "contradicted")
+                and _claim_confidence < _abstained_threshold
+            ):
+                # NLI judged unsupported and abstention reflects insufficient
+                # evidence rather than principled uncertainty — promote to
+                # REMOVE so it doesn't leak through the report uncited.
+                verdict_key = claim.verification_verdict
+                logger.info(
+                    "DR_LEAK_TRACE phase=abstained_promoted_to_remove "
+                    "verdict=%s confidence=%.2f threshold=%.2f claim_head=%r",
+                    claim.verification_verdict,
+                    _claim_confidence,
+                    _abstained_threshold,
+                    _truncate(claim.claim_text, 80),
+                )
+            elif claim.abstained:
                 verdict_key = "abstained"
             elif claim.claim_role == ClaimRole.ANALYSIS.value:
                 if claim.verification_verdict == "partial":
@@ -1637,6 +1994,51 @@ class CitationVerificationPipeline:
             disposition = getattr(
                 self.config.claim_disposition, verdict_key, ClaimDisposition.KEEP,
             )
+
+            # PR3-E R2.2: force REMOVE when is_negative_existence=True AND
+            # verdict is not fully supported. This wins over the per-verdict
+            # policy (e.g. abstained→SOFTEN default). Gated by
+            # SYNTH_PIPELINE_V2 so the legacy path is preserved unchanged.
+            forced_remove = False
+            if (
+                _synth_pipeline_v2_enabled()
+                and getattr(claim, "is_negative_existence", False)
+                and (
+                    claim.abstained
+                    or (claim.verification_verdict or "").lower()
+                    in ("abstained", "unsupported", "contradicted", "partial")
+                )
+            ):
+                disposition = ClaimDisposition.REMOVE
+                forced_remove = True
+                logger.info(
+                    "DR_NEGATIVE_EXISTENCE_FORCE_REMOVE pass_id=%d "
+                    "verdict=%s claim_head=%r",
+                    _pass_id,
+                    claim.verification_verdict,
+                    _truncate(claim.claim_text, 60),
+                )
+
+            # PR3-0 instrumentation: emit a per-claim disposition decision for
+            # every non-supported verdict so the events.jsonl-vs-summary
+            # discrepancy can be traced claim-by-claim. Tight conditional to
+            # avoid log spam on supported claims.
+            if (
+                claim.verification_verdict in ("contradicted", "unsupported")
+                or claim.abstained
+            ):
+                logger.info(
+                    "DR_DISPOSITION_DECISION pass_id=%d verdict_key=%s "
+                    "disposition=%s claim_role=%s confidence=%.2f "
+                    "forced_negative_existence=%s claim_head=%r",
+                    _pass_id,
+                    verdict_key,
+                    disposition.value if hasattr(disposition, "value") else str(disposition),
+                    claim.claim_role,
+                    _claim_confidence,
+                    forced_remove,
+                    _truncate(claim.claim_text, 60),
+                )
 
             if disposition == ClaimDisposition.REMOVE:
                 modifications.append(("remove", claim))
@@ -1677,12 +2079,22 @@ class CitationVerificationPipeline:
                     claim.abstained = True
                 removed_count += 1
                 logger.info(
-                    "CLAIM_REMOVED claim=%s verdict=%s",
-                    _truncate(claim.claim_text, 50),
+                    "STAGE8_CLAIM_REMOVED verdict=%s confidence=%.2f "
+                    "citation_keys=%s evidences_count=%d claim=%s",
                     claim.verification_verdict,
+                    float(getattr(claim, "verification_confidence", 0.0) or 0.0),
+                    [getattr(e, "citation_key", None) for e in (claim.evidences or [])],
+                    len(claim.evidences or []),
+                    _truncate(claim.claim_text, 50),
                 )
             elif action == "soften":
-                softened_text = _build_softened_fact_text(claim.claim_text, context)
+                corpus_grounded = any(
+                    is_corpus_source_value(getattr(ev, "source_kind", None))
+                    for ev in (claim.evidences or [])
+                )
+                softened_text = _build_softened_fact_text(
+                    claim.claim_text, context, corpus_grounded=corpus_grounded
+                )
                 content = _replace_claim_span(content, claim, softened_text)
                 claim.claim_text = softened_text
                 softened_count += 1
@@ -1705,6 +2117,18 @@ class CitationVerificationPipeline:
                 )
             else:
                 rewritten_text = claim.verification_text or claim.claim_text
+                if not _is_well_formed_claim_rewrite(rewritten_text):
+                    logger.info(
+                        "CLAIM_REWRITE_SKIPPED_MALFORMED claim=%s rewrite=%s",
+                        _truncate(claim.claim_text, 50),
+                        _truncate(rewritten_text, 50),
+                    )
+                    continue
+                rewritten_text = _format_claim_rewrite_text(
+                    claim,
+                    rewritten_text,
+                    context,
+                )
                 content = _replace_claim_span(content, claim, rewritten_text)
                 claim.claim_text = rewritten_text
                 rewritten_count += 1
@@ -1718,11 +2142,31 @@ class CitationVerificationPipeline:
 
         _recalculate_claim_positions(content, claims)
 
+        # PR3-0 instrumentation: per-verdict breakdown of how the disposition
+        # policy resolved each modification. Pair this with STAGE8_INPUT_TRACE
+        # via ``pass_id`` to see input → output for a given invocation.
+        _removed_by_verdict: Counter[str] = Counter()
+        _softened_by_verdict: Counter[str] = Counter()
+        for action, claim in modifications:
+            verdict_key = claim.verification_verdict or "<none>"
+            if action == "remove":
+                _removed_by_verdict[verdict_key] += 1
+            elif action in ("soften", "soften_analysis"):
+                _softened_by_verdict[verdict_key] += 1
+        _kept_count = len(claims) - len(modifications)
         logger.info(
-            "STAGE8_COMPLETE removed=%d softened=%d total=%d",
+            "STAGE8_COMPLETE pass_id=%d removed=%d softened=%d rewritten=%d "
+            "total_modifications=%d kept=%d input_claims=%d "
+            "removed_by_verdict=%s softened_by_verdict=%s",
+            _pass_id,
             removed_count,
             softened_count,
+            rewritten_count,
             len(modifications),
+            _kept_count,
+            len(claims),
+            dict(_removed_by_verdict),
+            dict(_softened_by_verdict),
         )
         return content, removed_count, softened_count, rewritten_count
 
@@ -1739,6 +2183,7 @@ class CitationVerificationPipeline:
         target_word_count: int = 600,
         max_tokens: int = 2000,
         draft_content: str | None = None,
+        generation_instructions: str = "",
     ) -> AsyncGenerator[VerificationEvent | str, None]:
         """Run the complete 7-stage citation verification pipeline.
 
@@ -1763,6 +2208,9 @@ class CitationVerificationPipeline:
             max_tokens: Maximum tokens to generate.
             draft_content: Existing report content to verify instead of running
                 interleaved generation. Used by classical-lite grounding.
+            generation_instructions: Workflow-specific report shape and quality
+                contract for Stage 2 generation. This does not affect evidence
+                pre-selection, which continues to use ``query`` only.
 
         Yields:
             ``str`` content chunks and ``VerificationEvent`` objects.
@@ -1879,7 +2327,14 @@ class CitationVerificationPipeline:
                         target_word_count=target_word_count,
                         max_tokens=max_tokens,
                         max_tool_calls=self.config.react_synthesis.max_tool_calls,
-                        section_descriptions="\n".join(observations) if observations else "",
+                        section_descriptions="\n".join(
+                            part
+                            for part in [
+                                generation_instructions,
+                                "\n".join(observations) if observations else "",
+                            ]
+                            if part
+                        ),
                     ):
                         if react_content:
                             full_content = react_content
@@ -1895,6 +2350,7 @@ class CitationVerificationPipeline:
                         query=query,
                         target_word_count=target_word_count,
                         max_tokens=max_tokens,
+                        generation_instructions=generation_instructions,
                     ):
                         if interleaved_content:
                             full_content = interleaved_content
@@ -2183,6 +2639,10 @@ class CitationVerificationPipeline:
                     )
 
             full_content = _strip_reclaim_block_tags(full_content)
+            # Normalize markdown header whitespace BEFORE recalc so subsequent
+            # claim-position consumers see positions valid against the final
+            # text the user will see.
+            full_content = _ensure_header_breaks(full_content)
             _recalculate_claim_positions(full_content, generated_claims)
 
             # ------------------------------------------------------------------
@@ -2212,6 +2672,23 @@ class CitationVerificationPipeline:
             self.last_verification_summary = summary
             self.last_final_content = full_content
             self.last_routing_summary = dict(summary.routing_summary)
+            # DR_LEAK_TRACE citation_final: capture the final processed report
+            # content. Compare to state_write (synthesizer) — if planning text
+            # is present here that wasn't present in the synthesizer's output,
+            # citation pipeline introduced it.
+            try:
+                _head = (full_content or "")[:300].replace("\n", "\\n")
+                _tail = (full_content or "")[-300:].replace("\n", "\\n")
+                logger.info(
+                    "DR_LEAK_TRACE phase=citation_final "
+                    "content_len=%d claims=%d head=%r tail=%r",
+                    len(full_content or ""),
+                    len(generated_claims),
+                    _head,
+                    _tail,
+                )
+            except Exception as _exc:  # pragma: no cover — diagnostic only
+                logger.debug("DR_LEAK_TRACE citation_final skipped: %s", _exc)
 
             yield VerificationEvent(
                 event_type="verification_summary",
@@ -2396,7 +2873,16 @@ def _detect_special_context(content: str, position: int) -> str | None:
         return None
 
     last_line = lines_before[-1]
-    if "|" in last_line:
+
+    # Examine the FULL line `position` sits on, not just the text before it.
+    # A claim whose span begins at a table-row boundary has `position` right
+    # after the preceding '\n' (before the leading '|'), so a backward-only
+    # check sees an empty `last_line` and misses the table — the hedge/rewrite
+    # is then spliced before the '|', corrupting the row. Include the forward
+    # remainder of the current line so row-start claims register as table
+    # context (also repairs _remove_claim / _format_claim_rewrite_text).
+    current_line = last_line + content[position : position + 200].split("\n", 1)[0]
+    if "|" in current_line:
         return "table"
 
     stripped = last_line.strip()
@@ -2411,22 +2897,87 @@ def _detect_special_context(content: str, position: int) -> str | None:
     return None
 
 
+def _claim_match_core(claim: ClaimInfo) -> str:
+    """Claim text used to verify span alignment: claim_text minus trailing
+    citation markers, stripped."""
+    return _TERMINAL_CITATION_RE.sub("", (claim.claim_text or "")).strip()
+
+
+def _aligned_claim_span(content: str, claim: ClaimInfo) -> tuple[int, int] | None:
+    """Validate — and if necessary re-locate — the (start, end) span to modify.
+
+    Stage-8 modifications splice ``content[start:end]``. If a drifted offset
+    (e.g. from the sentence-offset tracking in claim_generator) points mid-token,
+    blindly splicing corrupts unrelated prose — a cited claim ends up inside the
+    middle of a word (e.g. ``"...mark" + claim + "et targeted..."``). Trust the
+    stored offsets ONLY when the span actually contains the claim text; otherwise
+    re-locate by anchored search, and skip (return ``None``) when the claim text
+    cannot be found at all — keeping an uncited claim beats corrupting the report.
+
+    The misalignment is logged so the upstream offset drift remains diagnosable.
+    """
+    start, end = claim.position_start, claim.position_end
+    in_bounds = 0 <= start <= end <= len(content)
+
+    def _mid_word(pos: int) -> bool:
+        # A span boundary that lands between two alphanumerics is cutting a word —
+        # the signature of a drifted offset that would splice mid-token.
+        return (
+            0 < pos < len(content)
+            and content[pos - 1].isalnum()
+            and content[pos].isalnum()
+        )
+
+    # Normal path: in-bounds and neither boundary cuts a word -> trust the offsets.
+    # (Legitimate spans align to sentence/word boundaries even when they enclose
+    # citation markers the claim_text omits, so this does not over-skip.)
+    if in_bounds and not _mid_word(start) and not _mid_word(end):
+        return start, end
+    # Drifted (a boundary lands mid-word, or the span is out of bounds): re-locate
+    # by the claim's core text; skip entirely if it cannot be found, rather than
+    # splice the modification into unrelated prose.
+    core = _claim_match_core(claim)
+    if core:
+        located = content.find(core)
+        if located >= 0:
+            logger.warning(
+                "CITATION_SPAN_RELOCATED stored=(%d,%d) relocated=%d claim=%s",
+                start,
+                end,
+                located,
+                _truncate(core, 60),
+            )
+            return located, located + len(core)
+    logger.warning(
+        "CITATION_SPAN_MISALIGNED skip_modification stored=(%d,%d) claim=%s",
+        start,
+        end,
+        _truncate(core, 60),
+    )
+    return None
+
+
 def _remove_claim(content: str, claim: ClaimInfo, context: str | None) -> str:
     """Remove a contradicted claim from *content*."""
+    span = _aligned_claim_span(content, claim)
+    if span is None:
+        return content
+    start_pos, end_pos = span
+
     if context == "table":
-        before = content[: claim.position_start]
-        after = content[claim.position_end :]
+        before = content[:start_pos]
+        after = content[end_pos:]
         return before + "[removed for factual inaccuracy]" + after
 
     if context == "list":
-        start = content.rfind("\n", 0, claim.position_start) + 1
-        end = content.find("\n", claim.position_end)
+        start = content.rfind("\n", 0, start_pos) + 1
+        end = content.find("\n", end_pos)
         if end == -1:
             end = len(content)
         return content[:start] + content[end:]
 
-    before = content[: claim.position_start].rstrip()
-    after = content[claim.position_end :].lstrip()
+    before = content[:start_pos].rstrip()
+    after = content[end_pos:].lstrip()
     if (
         before
         and after
@@ -2438,10 +2989,73 @@ def _remove_claim(content: str, claim: ClaimInfo, context: str | None) -> str:
 
 
 def _replace_claim_span(content: str, claim: ClaimInfo, replacement: str) -> str:
-    """Replace a claim span with *replacement* using stored offsets."""
-    before = content[: claim.position_start]
-    after = content[claim.position_end :]
-    return before + replacement + after
+    """Replace a claim span with *replacement*, guarding against drifted offsets
+    that would splice the replacement mid-token (see _aligned_claim_span)."""
+    span = _aligned_claim_span(content, claim)
+    if span is None:
+        return content
+    start, end = span
+    return content[:start] + replacement + content[end:]
+
+
+_TERMINAL_CITATION_RE = re.compile(
+    r"(?:\s*\[[A-Za-z0-9-]+\])+\s*[.!?]?\s*$"
+)
+
+_CLAIM_TERMINAL_RE = re.compile(r"[.!?]\s*$")
+
+_DANGLING_REWRITE_TAIL_RE = re.compile(
+    r"(?:,|;|:|\b(?:and|or|but|still|with|including|while|although|though|as|"
+    r"at|to|from|of|for|by|in|on|than|versus|against|between))\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_well_formed_claim_rewrite(text: str) -> bool:
+    """Return True when *text* is safe to splice in as a standalone claim."""
+    clean_text = text.strip()
+    if not clean_text:
+        return False
+    return _DANGLING_REWRITE_TAIL_RE.search(clean_text) is None
+
+
+def _claim_citation_suffix(claim: ClaimInfo) -> str:
+    """Return existing claim citation keys as adjacent markdown markers."""
+    keys: list[str] = []
+    claim_keys = (
+        claim.citation_keys
+        or ([] if claim.citation_key is None else [claim.citation_key])
+    )
+    for key in claim_keys:
+        normalized = str(key).strip()
+        if normalized and normalized not in keys:
+            keys.append(normalized)
+    return "".join(f"[{key}]" for key in keys)
+
+
+def _ensure_terminal_punctuation(text: str) -> str:
+    """End prose replacements with sentence punctuation."""
+    clean_text = text.strip()
+    if not clean_text or _CLAIM_TERMINAL_RE.search(clean_text):
+        return clean_text
+    return f"{clean_text}."
+
+
+def _format_claim_rewrite_text(
+    claim: ClaimInfo,
+    replacement: str,
+    context: str | None,
+) -> str:
+    """Format a fact rewrite so it remains a cited, sentence-safe replacement."""
+    clean_text = replacement.strip()
+    if context == "table":
+        return clean_text
+
+    citation_suffix = _claim_citation_suffix(claim)
+    if citation_suffix and not _TERMINAL_CITATION_RE.search(clean_text):
+        clean_text = clean_text.rstrip(".!?;:, ")
+        clean_text = f"{clean_text} {citation_suffix}"
+    return _ensure_terminal_punctuation(clean_text)
 
 
 def _strip_citation_markers(text: str) -> str:
@@ -2460,12 +3074,17 @@ def _normalize_softened_lead(text: str) -> str:
     return text
 
 
-def _build_softened_fact_text(claim_text: str, context: str | None) -> str:
+def _build_softened_fact_text(
+    claim_text: str, context: str | None, *, corpus_grounded: bool = False
+) -> str:
     """Return a hedged version of a fact claim."""
     clean_text = _strip_citation_markers(claim_text)
     if not _needs_hedging(clean_text):
         return clean_text
-    if context == "table":
+    # Corpus-grounded facts come from a single authoritative source; a
+    # multi-source hedge ("Some sources indicate", "Reportedly") misrepresents
+    # their provenance. Use the same neutral marker as table context.
+    if context == "table" or corpus_grounded:
         return f"{clean_text} [unverified]"
     hedging_phrases = [
         "It has been suggested that",
@@ -2502,6 +3121,33 @@ def _needs_hedging(text: str) -> bool:
     ]
     lower = text.lower()
     return not any(h in lower for h in existing)
+
+
+_HEADER_FIX_RE = re.compile(r"([^\s#])([ \t]*)(#{1,6}\s)")
+
+
+def _ensure_header_breaks(text: str) -> str:
+    """Insert '\\n\\n' before any '#' header that isn't already on its own line.
+
+    Skips fenced code blocks so ``# inside`` is preserved verbatim. This
+    addresses synthesizer output where ``... margin of 8% [0]. ## Market``
+    leaves the header inline and the markdown renderer treats it as prose.
+    """
+    parts = re.split(r"(```[\s\S]*?```)", text)
+    fixups = 0
+    for i in range(0, len(parts), 2):  # Even indices are non-code
+        before = parts[i]
+        parts[i] = _HEADER_FIX_RE.sub(
+            lambda m: f"{m.group(1)}\n\n{m.group(3)}", before
+        )
+        if parts[i] != before:
+            fixups += 1
+    if fixups:
+        logger.info(
+            "DR_LEAK_TRACE phase=header_fix segments_fixed=%d total_len=%d",
+            fixups, len(text),
+        )
+    return "".join(parts)
 
 
 def _clean_empty_sections(content: str) -> str:
@@ -2629,6 +3275,7 @@ def _assign_fallback_evidence(
                 has_numeric_content=best.has_numeric_content,
                 source_pool_index=best.source_pool_index,
                 evidence_pool_index=best.evidence_pool_index,
+                source_kind=best.source_kind,
             )
             claim.evidences = [claim.evidence]
             claim.has_fallback_evidence = True

@@ -70,6 +70,76 @@ class TestSynthesizerPostProcess:
         assert any(isinstance(event, VerificationSummaryEvent) for event in events)
 
 
+class TestVerificationCitationKeyThreading:
+    """Live ``claim_verified`` events must carry the NUMERIC citation keys that
+    match the rendered (numeric) report, so the UI can color markers before
+    persistence. Regression guard for the "grey-until-reload" bug.
+    """
+
+    def test_numeric_citation_keys_maps_named_to_numeric(self) -> None:
+        from databricks_deep_research.agents.builtins.synthesizer import (
+            _numeric_citation_keys,
+        )
+
+        key_to_numeric = {"Arxiv": "0", "Github": "1"}
+        # named primary + list → numeric, order preserved
+        assert _numeric_citation_keys(
+            "Arxiv", ["Arxiv", "Github"], key_to_numeric
+        ) == ["0", "1"]
+        # single key, no list
+        assert _numeric_citation_keys("Github", None, key_to_numeric) == ["1"]
+        # unmapped key falls back to itself (mirrors the report rewrite)
+        assert _numeric_citation_keys("Unknown", None, key_to_numeric) == ["Unknown"]
+        # dedup after mapping
+        assert _numeric_citation_keys(None, ["Arxiv", "Arxiv"], key_to_numeric) == ["0"]
+        # empty input
+        assert _numeric_citation_keys(None, None, key_to_numeric) == []
+
+    def test_normalize_verification_records_emits_numeric_keys(self) -> None:
+        from databricks_deep_research.agents.builtins.synthesizer import (
+            _normalize_verification_records,
+        )
+
+        records = _normalize_verification_records(
+            [
+                {
+                    "claim_index": 0,
+                    "verdict": "supported",
+                    "citation_key": "Arxiv",
+                    "citation_keys": ["Arxiv", "Github"],
+                }
+            ],
+            {"Arxiv": "0", "Github": "1"},
+        )
+        assert records[0]["citation_key"] == "0"
+        assert records[0]["citation_keys"] == ["0", "1"]
+        assert records[0]["verdict"] == "supported"
+
+    def test_extract_claim_verified_events_carries_numeric_keys(self) -> None:
+        from databricks_deep_research.agents.builtins.synthesizer import (
+            _extract_claim_verified_events,
+        )
+
+        events = _extract_claim_verified_events(
+            "synth",
+            "2026-01-01T00:00:00Z",
+            [
+                {
+                    "claim_index": 0,
+                    "verdict": "supported",
+                    "confidence": 0.9,
+                    "citation_key": "0",
+                    "citation_keys": ["0", "1"],
+                }
+            ],
+        )
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, ClaimVerifiedEvent)
+        assert event.citation_key == "0"
+        assert event.citation_keys == ["0", "1"]
+
+
 @pytest.mark.asyncio
 async def test_execute_agent_reclaim_runs_pipeline_and_writes_state() -> None:
     config = AgentNodeConfig(

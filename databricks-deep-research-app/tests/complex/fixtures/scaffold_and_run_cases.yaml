@@ -1,0 +1,152 @@
+cases:
+  - id: investment_research
+    requires_brave: true
+    intent: |
+      Build an investment research assistant that takes a company name or ticker
+      and produces a deep, comprehensive investment report covering:
+      fundamentals (financials, valuation, balance sheet), risk analysis, market
+      trends, news sentiment, recent earnings, and competitor analysis. Use
+      plan-and-execute patterns across research domains and synthesize into a
+      single coherent report.
+    query: "Snowflake Inc. (SNOW)"
+    expected_min_node_count: 3
+    expected_min_tool_count: 1
+
+  - id: saas_competitive_intel
+    requires_brave: true
+    intent: |
+      Build a competitive intelligence assistant for a SaaS product. Given a
+      product name and category, research the top 3-5 competitors and produce
+      a comparison covering: pricing tiers, key feature differentiators, target
+      customer segments, recent product launches, and customer review sentiment.
+      Use parallel research lanes per competitor and synthesize into a
+      comparison report.
+    query: "Notion (personal knowledge management)"
+    expected_min_node_count: 3
+    expected_min_tool_count: 1
+
+  - id: officeqa_treasury_army_1945
+    requires_brave: false
+    intent: |
+      Build an OfficeQA-style research assistant for questions over selected
+      Databricks assets. Infer the needed tool configuration from these
+      resource names:
+      - Vector index: main.officeqa_benchmark.treasury_chunks_vs_index
+      - Delta table for exact Treasury document chunk reads:
+        main.officeqa_benchmark.treasury_chunks
+      - Delta table for structured Treasury bulletin tables:
+        main.officeqa_benchmark.treasury_tables
+
+      The assistant must use the vector index to find candidate Treasury
+      document chunks, use the Delta tables for exact text/table reads, use
+      compute for numeric table calculations, and synthesize a concise answer
+      with the fiscal/calendar-year distinction when the evidence supports it.
+      Do not use public web tools for this corpus-specific task unless these
+      named assets are unavailable.
+    query: "In the Treasury bulletin table titled Department of the Army 3/ for period range 1939-1952, what total is shown for 1945?"
+    expected_min_node_count: 3
+    expected_min_tool_count: 5
+    expected_tool_kinds:
+      - vector_search
+      - table_search
+      - table_read
+      - table_load
+      - compute
+    forbidden_tool_kinds:
+      - web_search
+      - web_crawl
+      - web_research
+    forbidden_runtime_tool_kinds:
+      - web_search
+      - web_crawl
+      - web_research
+    expected_runtime_tool_kinds:
+      - vector_search
+    expected_runtime_any_tool_kinds:
+      - table_search
+      - table_read
+      - table_load
+    # PR3 plan AC2: output.md contains either '45,238' (CY1945) or '50,337'
+    # (FY1945) — both are defensible canonical figures for the same question.
+    # The corpus contains both within the same chunk
+    # (treasury_bulletin_1953_02_c0022). Pre-R4 the workflow reliably
+    # produces FY1945=$50,337M (the more readily retrievable annual line
+    # item); after deeper retrieval lands, both can appear together.
+    # Each group passes if the output contains ANY of its terms; ALL groups
+    # must pass. Robust to the synthesizer's stochastic phrasing — a correct
+    # answer may say "50,337 million dollars", "$45,238M", or "45.2 billion".
+    expected_answer_term_groups:
+      - ["50,337", "50337", "45,238", "45238"]          # a canonical 1945 total (FY or CY)
+      - ["million", "billion", "dollars", "USD", "$"]   # the unit / currency is stated
+    requires_table_tools_warehouse: true
+    expected_resource_names:
+      - main.officeqa_benchmark.treasury_chunks_vs_index
+      - main.officeqa_benchmark.treasury_chunks
+      - main.officeqa_benchmark.treasury_tables
+
+  - id: correlated_stocks_7lane_investment
+    # Plan v2.1 generic-robustness regression case — mirrors the user's
+    # failed AIS workflow 5442205634071161 (2026-05-24 21:07) where every
+    # lane immediately called web_crawl{"url_index":0} and gave up after
+    # "No URL found for index 0". After F1+F2 land, web_crawl is no
+    # longer in the default tool list AND prompts mandate web_research
+    # first, so lanes cannot fall into this trap.
+    requires_brave: true
+    intent: |
+      Build an investment research assistant that takes a company name or ticker
+      and produces a deep, comprehensive investment report covering:
+      fundamentals (financials, valuation, balance sheet), risk analysis,
+      market trends, news sentiment, earnings call research, competitor
+      analysis, and correlated stocks that move together. Use parallel
+      research lanes per concern and synthesize into a single coherent report.
+    query: "NVIDIA Corporation (NVDA)"
+    expected_min_node_count: 3
+    expected_min_tool_count: 1
+
+  # ── Databricks built-in web search variants ──────────────────────────────
+  # Same investment_research intent/query, but the designer is configured (via a
+  # per-case app-config search override applied by the test) to use Databricks
+  # model-serving built-in web search instead of Brave. The designer stamps
+  # config.provider onto the generated web tools; the runner then resolves the
+  # DatabricksWebSearchAdapter. Needs Databricks creds + a built-in-search-capable
+  # pay-per-token workspace; BRAVE not required.
+  - id: investment_research_databricks_gemini
+    requires_brave: false
+    app_search_provider: databricks
+    app_search_endpoint: databricks-gemini-3-1-flash-lite
+    intent: |
+      Build an investment research assistant that takes a company name or ticker
+      and produces a deep, comprehensive investment report covering:
+      fundamentals (financials, valuation, balance sheet), risk analysis, market
+      trends, news sentiment, recent earnings, and competitor analysis. Use
+      plan-and-execute patterns across research domains and synthesize into a
+      single coherent report.
+    query: "Snowflake Inc. (SNOW)"
+    expected_min_node_count: 3
+    expected_min_tool_count: 1
+    expected_runtime_any_tool_kinds:
+      - web_search
+      - web_research
+    expected_min_source_count: 1
+
+  - id: investment_research_databricks_openai
+    requires_brave: false
+    app_search_provider: databricks
+    app_search_endpoint: databricks-gpt-5
+    # gpt-5's Responses web_search is agentic/slow — raise the per-call timeout
+    # (stamped onto the tool config) so searches complete within the run budget.
+    app_search_timeout: 90
+    intent: |
+      Build an investment research assistant that takes a company name or ticker
+      and produces a deep, comprehensive investment report covering:
+      fundamentals (financials, valuation, balance sheet), risk analysis, market
+      trends, news sentiment, recent earnings, and competitor analysis. Use
+      plan-and-execute patterns across research domains and synthesize into a
+      single coherent report.
+    query: "Snowflake Inc. (SNOW)"
+    expected_min_node_count: 3
+    expected_min_tool_count: 1
+    expected_runtime_any_tool_kinds:
+      - web_search
+      - web_research
+    expected_min_source_count: 1

@@ -197,6 +197,10 @@ citation_verification:
   enabled: true
   generation_mode: natural
 
+  # Pipeline-wide cap on evidence quote length (lower for fast e2e).
+  # See app.yaml citation_verification.max_evidence_chars for full docs.
+  max_evidence_chars: 1000
+
   enable_evidence_preselection: true
   enable_interleaved_generation: true
   enable_confidence_classification: true
@@ -207,7 +211,7 @@ citation_verification:
   evidence_preselection:
     max_spans_per_source: 5
     min_span_length: 50
-    max_span_length: 300
+    max_span_length: 300       # DEPRECATED — superseded by max_evidence_chars above
     relevance_threshold: 0.3
     numeric_content_boost: 0.2
     relevance_computation_method: hybrid

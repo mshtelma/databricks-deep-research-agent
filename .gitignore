@@ -105,6 +105,8 @@ secrets.yaml
 mlruns/
 mlartifacts/
 traces_output/
+**/scripts/output/
+**/tests/_runs/
 
 # Alembic
 alembic.ini.local
@@ -126,3 +128,11 @@ uv.lock
 
 *.zip
 *.omc
+.codex/*
+!.codex/agents/
+!.codex/agents/**
+!.codex/skills/
+!.codex/skills/**
+.codex/skills/.system/**
+!.codex/prompts/
+!.codex/prompts/**

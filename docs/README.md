@@ -34,6 +34,8 @@ The Deep Research Agent combines a **5-agent orchestration architecture** with a
 | [Data Models](./data-models.md) | Entity definitions and relationships |
 | [API Reference](./api.md) | REST endpoints and SSE event types |
 | [Deployment](./deployment.md) | Deployment, Lakebase operations, and troubleshooting guide |
+| [Agent Designer](./agent-designer.md) | Chat-based workflow authoring: design brief, designer tools, topologies, UI surfaces |
+| [Agent Deployment](./agent-deployment.md) | Deploying a designed agent to its five runtime targets |
 | [Framework Documentation](../databricks-deep-research/docs/index.md) | Workflow engine, agent system, tool protocol, YAML authoring, pool system, citation pipeline |
 
 ### Enterprise & Customization
@@ -43,7 +45,6 @@ The Deep Research Agent combines a **5-agent orchestration architecture** with a
 | [Custom Agents](./custom-agents.md) | Create reusable research profiles with model, source, and prompt overrides |
 | [Data Source Configuration](./data-source-config.md) | User guide for configuring Vector Search, Genie, and Knowledge Assistants |
 | [Plugin Development](./plugin-development.md) | Developer guide for creating custom data source plugins |
-| [Metrics & Dashboards](./metrics-dashboards.md) | Monitoring data source performance and creating dashboards |
 
 ## Quick Start
 
@@ -60,8 +61,8 @@ make test              # Unit tests
 make test-integration  # Integration tests (requires credentials)
 make e2e               # End-to-end Playwright tests
 
-# Deploy to Databricks
-make deploy TARGET=dev BRAVE_SCOPE=msh
+# Deploy to Databricks (BRAVE_SCOPE optional — only for provider: brave)
+make deploy TARGET=dev
 ```
 
 ## Architecture Diagram
@@ -90,8 +91,8 @@ make deploy TARGET=dev BRAVE_SCOPE=msh
 │  └─────────────┘    │  │ (Gemini)│ │  (Claude)  │ │(Claude ER)│          │ │
 │                     │  └─────────┘ └────────────┘ └───────────┘          │ │
 │  ┌─────────────┐    └─────────────────────────────────────────────────────┘ │
-│  │ Brave Search│    ┌─────────────────────────────────────────────────────┐ │
-│  │     API     │    │   Custom Agent Config Layer                         │ │
+│  │ Web Search  │    ┌─────────────────────────────────────────────────────┐ │
+│  │  providers  │    │   Custom Agent Config Layer                         │ │
 │  └─────────────┘    │   Model overrides │ Source scope │ Domain filters   │ │
 │  ┌─────────────┐    └─────────────────────────────────────────────────────┘ │
 │  │ Enterprise  │                                                            │
@@ -120,7 +121,7 @@ make deploy TARGET=dev BRAVE_SCOPE=msh
 | Database | Databricks Lakebase | Preview |
 | LLM Client | AsyncOpenAI | 1.10+ |
 | Observability | MLflow | 3.8+ |
-| Search | Brave Search API | - |
+| Web Search | Databricks built-in (default) · Brave · Jina | - |
 
 ## Key Files
 

@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, TypedDict
 from uuid import UUID, uuid4
@@ -157,7 +157,7 @@ class CachedSessionService(_CachedServiceBase):
 
     _service_name = "session"
 
-    def __init__(self, stack: "StorageStack") -> None:
+    def __init__(self, stack: StorageStack) -> None:
         super().__init__(stack)
 
     # -- Reads ---------------------------------------------------------------
@@ -257,7 +257,7 @@ class CachedSessionService(_CachedServiceBase):
         # The ``incognito_sessions`` table doesn't store chat counts.
         # We query the chat list table for chats linked to this session.
         # CachedChatService.list_incognito_for_session uses the same approach.
-        rows = await self._stack.backend.list_rows(
+        await self._stack.backend.list_rows(
             "incognito_sessions", {"incognito_session_id": str(session_id)}
         )
         # The count of active chats is tracked separately; defer to the

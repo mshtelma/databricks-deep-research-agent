@@ -23,7 +23,7 @@ import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -44,7 +44,7 @@ DirtyScope = Literal["state", "meta", "both"]
 
 
 def _utcnow() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 @dataclass
@@ -168,7 +168,7 @@ class ChatStateCache:
                             self._migration_cleared.wait(),
                             timeout=self._migration_timeout_sec,
                         )
-                    except asyncio.TimeoutError as exc:
+                    except TimeoutError as exc:
                         raise MigrationInProgressError(
                             f"cannot hydrate chat {chat_id} during migration"
                         ) from exc

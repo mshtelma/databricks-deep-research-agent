@@ -24,6 +24,19 @@ from deep_research.services.llm.types import (
 # ---------------------------------------------------------------------------
 
 
+def _primary(value: object) -> str:
+    """Return the primary endpoint identifier from a mapping value.
+
+    Single-endpoint tiers now produce a ``ModelTierConfig`` (so context-window
+    escalation is uniform), so callers extract the first endpoint instead of
+    relying on a bare string.
+    """
+    if isinstance(value, ModelTierConfig):
+        return value.endpoints[0]
+    assert isinstance(value, str)
+    return value
+
+
 def _make_endpoint(endpoint_id: str, identifier: str) -> ModelEndpoint:
     """Create a minimal ModelEndpoint for testing."""
     return ModelEndpoint(
@@ -120,9 +133,9 @@ class TestBuildModelMapping:
 
         mapping = _build_model_mapping(llm)
 
-        assert mapping["simple"] == "databricks-llama-8b"
-        assert mapping["analytical"] == "databricks-llama-70b"
-        assert mapping["complex"] == "databricks-o3-mini"
+        assert _primary(mapping["simple"]) == "databricks-llama-8b"
+        assert _primary(mapping["analytical"]) == "databricks-llama-70b"
+        assert _primary(mapping["complex"]) == "databricks-o3-mini"
 
     def test_multi_endpoint_produces_model_tier_config(self) -> None:
         """When a role has multiple endpoints, a ModelTierConfig is produced."""
@@ -142,8 +155,12 @@ class TestBuildModelMapping:
         assert cfg.endpoints == ["model-primary", "model-fallback"]
         assert cfg.rotation_strategy == "PRIORITY"
 
-    def test_single_endpoint_remains_string(self) -> None:
-        """A single-endpoint role produces a plain string (backward compat)."""
+    def test_single_endpoint_produces_model_tier_config(self) -> None:
+        """A single-endpoint role now produces a ModelTierConfig with its window.
+
+        Always emitting a ModelTierConfig (even for one endpoint) keeps the
+        context-window escalation path uniform across all tiers.
+        """
         from deep_research.agent.adapters.llm_adapter import _build_model_mapping
 
         ep = _make_endpoint("ep-a", "model-a")
@@ -154,8 +171,10 @@ class TestBuildModelMapping:
 
         mapping = _build_model_mapping(llm)
 
-        assert mapping["analytical"] == "model-a"
-        assert isinstance(mapping["analytical"], str)
+        cfg = mapping["analytical"]
+        assert isinstance(cfg, ModelTierConfig)
+        assert cfg.endpoints == ["model-a"]
+        assert cfg.endpoint_context_windows == {"model-a": 128_000}
 
     def test_complex_tier_produces_model_tier_config(self) -> None:
         """Complex tier with 3 endpoints → ModelTierConfig with correct fields."""
@@ -232,8 +251,8 @@ class TestBuildModelMapping:
 
         mapping = _build_model_mapping(llm)
 
-        assert mapping["simple"] == "databricks-llama-70b"
-        assert mapping["analytical"] == "databricks-llama-70b"
+        assert _primary(mapping["simple"]) == "databricks-llama-70b"
+        assert _primary(mapping["analytical"]) == "databricks-llama-70b"
 
     def test_fallback_complex_from_analytical(self) -> None:
         """When 'complex' is missing, it falls back to 'analytical'."""
@@ -247,7 +266,7 @@ class TestBuildModelMapping:
 
         mapping = _build_model_mapping(llm)
 
-        assert mapping["complex"] == "databricks-llama-70b"
+        assert _primary(mapping["complex"]) == "databricks-llama-70b"
 
     def test_complex_fallback_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         """When complex resolution fails, a WARNING is logged."""
@@ -276,9 +295,9 @@ class TestBuildModelMapping:
 
         mapping = _build_model_mapping(llm)
 
-        assert mapping["simple"] == "databricks-gemini"
-        assert mapping["analytical"] == "databricks-gemini"
-        assert mapping["complex"] == "databricks-gemini"
+        assert _primary(mapping["simple"]) == "databricks-gemini"
+        assert _primary(mapping["analytical"]) == "databricks-gemini"
+        assert _primary(mapping["complex"]) == "databricks-gemini"
 
     def test_empty_endpoints_raises(self) -> None:
         """A role with empty endpoints list is skipped; if no tiers map, ValueError is raised."""
@@ -306,10 +325,10 @@ class TestBuildModelMapping:
 
         mapping = _build_model_mapping(llm)
 
-        assert mapping["analytical"] == "model-a"
+        assert _primary(mapping["analytical"]) == "model-a"
         # simple and complex filled via fallback
-        assert mapping["simple"] == "model-a"
-        assert mapping["complex"] == "model-a"
+        assert _primary(mapping["simple"]) == "model-a"
+        assert _primary(mapping["complex"]) == "model-a"
 
     def test_overrides_take_precedence_over_fallback(self) -> None:
         """Overrides win even when the tier would have a fallback value."""
@@ -327,7 +346,7 @@ class TestBuildModelMapping:
         # Override wins for simple
         assert mapping["simple"] == "override-simple"
         # Analytical comes from config
-        assert mapping["analytical"] == "model-a"
+        assert _primary(mapping["analytical"]) == "model-a"
 
 
 # ---------------------------------------------------------------------------

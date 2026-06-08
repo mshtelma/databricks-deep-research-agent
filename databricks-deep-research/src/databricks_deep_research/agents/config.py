@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from databricks_deep_research.workflow.conditions import Condition, ConditionBranch
+from databricks_deep_research.workflow.definition import WorkflowNode
 
 # ---------------------------------------------------------------------------
 # Pool-related configs
@@ -126,10 +129,21 @@ class AgentNodeConfig(BaseModel):
     dedup_jaccard_threshold: float = 0.8  # Jaccard word overlap threshold for near-dedup (0.0-1.0)
     force_convergence: bool = False  # Gate novelty/anti-loop heuristics (convergence, nudges)
     convergence_rounds: int = 4  # Zero-novel rounds before forced convergence (requires force_convergence=True)
-    conversation_budget: int | None = None
+    # Claude's API default cap is 8192 output tokens when unset, which the
+    # planner/reflector regularly bump into producing structured plans. Bump
+    # the default so callers don't have to remember to set it per-agent.
+    # Overridable via YAML at any node. Claude Sonnet supports up to 64000,
+    # Opus up to 32000; Haiku is hard-capped at 8192 regardless.
+    conversation_budget: int | None = 32000
     pool_inject: list[PoolInjectConfig] = Field(default_factory=list)
     synthesis_context: SynthesisContextConfig | None = None
     output_model: Any = None  # Pydantic model class for structured output
+    # Reserved-prefix namespace for framework-attached runtime capabilities
+    # (approval broker, virtual filesystem, todos store, checkpointer, thread_id).
+    # Keys prefixed with ``_framework_`` are reserved for framework use; user-chosen
+    # keys MUST NOT use this prefix. Pydantic ``extra="forbid"`` is preserved at the
+    # model level — only this explicitly declared field accepts the dict.
+    extras: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("per_tool_limits")
     @classmethod
@@ -148,20 +162,40 @@ class AgentNodeConfig(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class ToolRefConfig(BaseModel):
+    """Typed legacy tool reference descriptor used by tool nodes."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: str
+    name: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_legacy_type(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "name" in value and "type" not in value:
+            return {**value, "type": "builtin"}
+        return value
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Small compatibility shim for older runtime code that treated refs as dicts."""
+        return getattr(self, key, default)
+
+
 class ToolNodeConfig(BaseModel):
     """Configuration for a pure-tool (no LLM) node."""
 
     model_config = ConfigDict(extra="forbid")
-    ref: dict[str, Any]  # tool reference descriptor
+    ref: ToolRefConfig  # tool reference descriptor
     input_mapping: dict[str, str] = Field(default_factory=dict)
     output_key: str = "tool_result"
+    output_schema: dict[str, Any] | None = None
 
 
 class LoopNodeConfig(BaseModel):
     """Configuration for a loop control node."""
 
     model_config = ConfigDict(extra="forbid")
-    until: dict[str, Any]  # Serialised Condition (StateCondition / LLMCondition / Composite)
+    until: Condition  # Serialised Condition (StateCondition / LLMCondition / Composite)
     min_iterations: int = 1
     max_iterations: int = 10
 
@@ -170,8 +204,21 @@ class ConditionalNodeConfig(BaseModel):
     """Configuration for a conditional branching node."""
 
     model_config = ConfigDict(extra="forbid")
-    conditions: list[dict[str, Any]]  # list of serialised ConditionBranch
+    conditions: list[ConditionBranch]  # list of serialised ConditionBranch
     default_branch: int = 0
+
+    @field_validator("conditions", mode="before")
+    @classmethod
+    def _wrap_legacy_condition_branches(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        wrapped: list[Any] = []
+        for index, item in enumerate(value):
+            if isinstance(item, dict) and "condition" not in item:
+                wrapped.append({"condition": item, "child_index": index})
+            else:
+                wrapped.append(item)
+        return wrapped
 
 
 class SubworkflowNodeConfig(BaseModel):
@@ -184,6 +231,12 @@ class SubworkflowNodeConfig(BaseModel):
     output_mapping: dict[str, str] = Field(default_factory=dict)
     output_key: str = "subworkflow_result"
     pool_mode: str = "inherit"  # inherit, isolate, merge
+    # Self-contained embedded sub-workflow: a WorkflowDefinition dump produced by
+    # api/compile.py when a SubAgent is compiled to a subworkflow node. Typed as a
+    # raw dict to decouple this config from re-validating the nested definition on
+    # every load; the P2 subworkflow executor parses it via
+    # WorkflowDefinition.model_validate(...) once subworkflow execution lands.
+    inline: dict[str, Any] | None = None
 
 
 class PlanAndExecuteNodeConfig(BaseModel):
@@ -193,7 +246,7 @@ class PlanAndExecuteNodeConfig(BaseModel):
     planner: dict[str, Any]  # Serialised AgentNodeConfig for the planner agent
     items_path: str = "steps"  # dot-path into planner output for the iterable
     item_state_key: str = "current_step"
-    body: dict[str, Any] = Field(default_factory=dict)  # Serialised child node(s) to run per item
+    body: WorkflowNode | None = None  # Serialised child node(s) to run per item
     evaluator: dict[str, Any] | None = None  # Optional evaluator agent config
     max_iterations: int = 10
     min_iterations: int = 1
@@ -201,6 +254,9 @@ class PlanAndExecuteNodeConfig(BaseModel):
     complete_on_exhaustion: bool = True
     planner_guidance: str = ""  # Free-text guidance injected into planner prompt
     synthesis_metadata: dict[str, str] = Field(default_factory=dict)  # Key-value pairs written to state for synthesizer
+    required_tool_kind_groups: list[list[str]] = Field(default_factory=list)
+    # Each inner list is an OR group; every group must be observed before an
+    # evaluator "complete" decision is accepted.
 
 
 # ---------------------------------------------------------------------------

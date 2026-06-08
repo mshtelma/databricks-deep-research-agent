@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import mlflow
 import pytest
@@ -20,6 +21,46 @@ def _has_databricks_creds() -> bool:
 def _has_brave_key() -> bool:
     """Check if Brave API key is available."""
     return bool(os.getenv("BRAVE_API_KEY"))
+
+
+# Default Databricks workspace experiment for traced live suites (matches the
+# app.yaml deployment config). Used for the Databricks and explicit-URI paths.
+DEFAULT_DATABRICKS_EXPERIMENT = "/Shared/deep-research-agent"
+# Experiment name used in the local MLflow OSS fallback (no Databricks creds).
+LOCAL_TRACE_EXPERIMENT = "deep-research-scaffold"
+
+
+def _local_trace_sqlite_uri() -> str:
+    """Absolute sqlite tracking URI under ``tests/_runs`` (gitignored).
+
+    Creates the directory if missing — sqlite needs the parent to exist and
+    ``make test-complex`` does not pre-create ``tests/_runs``. The path sits
+    next to the scaffold's per-case artifact dirs (``_RUNS_ROOT``).
+    """
+    runs_dir = Path(__file__).parent / "_runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{runs_dir / 'mlflow.db'}"
+
+
+def resolve_trace_backend() -> tuple[str, str]:
+    """Pick the MLflow ``(tracking_uri, experiment_name)`` for live test suites.
+
+    Precedence:
+
+    1. Explicit ``MLFLOW_TRACKING_URI`` env override (paired with
+       ``MLFLOW_EXPERIMENT_NAME`` or the Databricks default experiment).
+    2. Databricks workspace experiment when creds are configured
+       (``DATABRICKS_TOKEN`` / ``DATABRICKS_CONFIG_PROFILE``).
+    3. Local MLflow OSS sqlite store under ``tests/_runs/mlflow.db`` otherwise —
+       browse with ``mlflow ui --backend-store-uri <uri>`` (Traces tab) or query
+       via ``mlflow.search_traces()``.
+    """
+    explicit_uri = os.getenv("MLFLOW_TRACKING_URI")
+    if explicit_uri:
+        return explicit_uri, os.getenv("MLFLOW_EXPERIMENT_NAME", DEFAULT_DATABRICKS_EXPERIMENT)
+    if _has_databricks_creds():
+        return "databricks", os.getenv("MLFLOW_EXPERIMENT_NAME", DEFAULT_DATABRICKS_EXPERIMENT)
+    return _local_trace_sqlite_uri(), LOCAL_TRACE_EXPERIMENT
 
 
 requires_databricks = pytest.mark.skipif(

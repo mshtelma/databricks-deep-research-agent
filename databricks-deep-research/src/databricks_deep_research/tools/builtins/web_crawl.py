@@ -259,10 +259,36 @@ async def _default_crawl(
     return text, title
 
 
+def _fallback_text(html: str) -> str:
+    """Best-effort plain text when trafilatura extracts nothing.
+
+    Prefer BeautifulSoup (drops script/style/nav noise); fall back to a regex
+    tag-strip when bs4 is unavailable. Returns "" only when the HTML truly has no
+    readable text. This rescues JS-heavy / boilerplate pages that trafilatura
+    discards, so a successful fetch is not reported as an empty-content failure.
+    """
+    import re
+
+    try:
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style", "noscript", "template"]):
+            tag.decompose()
+        return re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
+    except ImportError:
+        # No bs4 in this env: drop script/style/etc. BLOCKS (content + tags), then
+        # remaining tags, so we don't leak inline JS/CSS into the extracted text.
+        cleaned = re.sub(r"(?is)<(script|style|noscript|template)\b.*?</\1>", " ", html)
+        cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _extract_with_trafilatura(html: str, base_url: str) -> tuple[str, str | None]:
     """Extract text and title using trafilatura (optional ``[crawl]`` extra).
 
-    Falls back to raw HTML truncation when trafilatura is not installed.
+    Falls back to raw HTML truncation when trafilatura is not installed, and to a
+    plain-text extraction (:func:`_fallback_text`) when trafilatura returns empty.
     """
     try:
         from trafilatura import bare_extraction
@@ -287,9 +313,11 @@ def _extract_with_trafilatura(html: str, base_url: str) -> tuple[str, str | None
         with_metadata=True,
         as_dict=False,
     )
-    if doc is None:
-        return "", None
-    return doc.text or "", doc.title  # type: ignore[union-attr]
+    title = doc.title if doc is not None else None  # type: ignore[union-attr]
+    text = (doc.text or "") if doc is not None else ""  # type: ignore[union-attr]
+    if not text.strip():
+        text = _fallback_text(html)
+    return text, title
 
 
 # ---------------------------------------------------------------------------
@@ -327,9 +355,10 @@ class WebCrawlTool:
         self._definition = ToolDefinition(
             name="web_crawl",
             description=(
-                "Fetch full content from a source. Use the INDEX number from "
-                "search results (0, 1, 2, etc.). Returns extracted page text "
-                "for analysis."
+                "Fetch full content from a source. Use only an INDEX number "
+                "from prior web_search results in this same workflow run "
+                "(0, 1, 2, etc.); call web_search first when no valid index "
+                "is available. Returns extracted page text for analysis."
             ),
             parameters={
                 "type": "object",

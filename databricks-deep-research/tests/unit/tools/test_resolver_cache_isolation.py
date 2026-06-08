@@ -2,7 +2,7 @@
 
 Reproduces the bug where multiple ToolResolver instances sharing a single
 ToolFactoryContext would overwrite each other's ``_resolver_cache`` in
-``extras``, causing ``DeltaTableReadTool`` to inject variables into the
+``extras``, causing ``TableLoadTool`` to inject variables into the
 wrong ``PythonComputeTool`` instance.
 
 See: resolver.py — ``dataclasses.replace(base_ctx, extras=...)`` fix.

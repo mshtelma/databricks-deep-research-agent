@@ -35,10 +35,11 @@ import this module for the Lakebase path.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from collections.abc import Mapping
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 if TYPE_CHECKING:
@@ -61,7 +62,7 @@ def _encode_value(value: Any) -> tuple[str | None, str | None]:
     if isinstance(value, datetime):
         # Normalize naive timestamps to UTC so the warehouse parses consistently.
         if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
+            value = value.replace(tzinfo=UTC)
         return value.isoformat(), "TIMESTAMP"
     if isinstance(value, date):
         return value.isoformat(), "DATE"

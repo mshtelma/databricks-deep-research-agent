@@ -37,6 +37,7 @@ import statistics
 import string as _string_mod
 import textwrap as _textwrap_mod
 import threading
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -176,6 +177,7 @@ def _restricted_import(
     Supports submodule imports (e.g. ``from numpy.polynomial import polynomial``)
     by traversing attributes of whitelisted root modules.
     """
+    del globals, locals, level
     root = name.split(".")[0]
     if root not in _ALLOWED_IMPORT_MODULES:
         available = ", ".join(sorted(_ALLOWED_IMPORT_MODULES.keys()))
@@ -353,6 +355,7 @@ class PythonComputeTool:
             fromlist: tuple[str, ...] = (),
             level: int = 0,
         ) -> Any:
+            del globals, locals, level
             root = name.split(".")[0]
             if root not in allowed_ref:
                 available = ", ".join(sorted(allowed_ref.keys()))
@@ -381,6 +384,9 @@ class PythonComputeTool:
 
         # ---- Persistent namespace for cross-call variable sharing ----
         self._namespace: dict[str, Any] = {}
+
+        # ---- Per-execution namespace refresh hooks ----
+        self._before_execute_hooks: dict[str, Callable[[PythonComputeTool], None]] = {}
 
     # -- ResearchTool protocol -----------------------------------------------
 
@@ -480,7 +486,7 @@ class PythonComputeTool:
     def inject_variable(self, name: str, value: Any) -> None:
         """Inject a variable into the compute namespace from an external tool.
 
-        Used by tools like ``DeltaTableReadTool`` to make structured data
+        Used by tools like ``TableLoadTool`` to make structured data
         directly available for agent ``compute()`` calls without requiring
         the LLM to paste large strings into code.
 
@@ -492,6 +498,26 @@ class PythonComputeTool:
             while len(self._namespace) > _MAX_NAMESPACE_ENTRIES:
                 oldest = next(iter(self._namespace))
                 del self._namespace[oldest]
+
+    def get_variable(self, name: str, default: Any = None) -> Any:
+        """Return one value from the persistent namespace without executing code."""
+        with self._lock:
+            return self._namespace.get(name, default)
+
+    def set_before_execute_hook(
+        self, name: str, hook: Callable[[PythonComputeTool], None]
+    ) -> None:
+        """Register or replace a hook that refreshes namespace entries.
+
+        Hooks run immediately before every sandbox execution. They are intended
+        for framework-owned variables whose values must be snapshotted at
+        compute-turn entry, such as text-table bindings and per-turn budgeted
+        callables.
+        """
+        if not name:
+            raise ValueError("hook name must be non-empty")
+        with self._lock:
+            self._before_execute_hooks[name] = hook
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         code = arguments.get("code", "")
@@ -506,10 +532,15 @@ class PythonComputeTool:
         arguments: dict[str, Any],
         context: ToolContext,
     ) -> ToolResult:
+        del context
         code = arguments["code"]
         loop = asyncio.get_running_loop()
 
         try:
+            with self._lock:
+                hooks = list(self._before_execute_hooks.values())
+            for hook in hooks:
+                hook(self)
             result_str = await asyncio.wait_for(
                 loop.run_in_executor(_EXECUTOR, self._run_sandboxed, code),
                 timeout=self._max_execution_seconds,

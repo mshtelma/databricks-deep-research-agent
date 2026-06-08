@@ -22,6 +22,9 @@ pip install databricks-deep-research[web,tracing]  # pick extras
 - **YAML-defined workflow DAGs** with 8 node types: `sequence`, `parallel`, `loop`, `conditional`, `agent`, `tool`, `subworkflow`, `plan_and_execute`
 - **6 builtin agent subtypes**: coordinator, planner, researcher, reflector, synthesizer, background
 - **ReAct tool-calling loop** with parallel execution and source-aware prompts
+- **Multi-provider web search** -- `web_search`/`web_research` are backend-agnostic over a `SearchClient` (Databricks built-in web search, Brave, or Jina)
+- **Delta/SQL table tools** -- the `table_*` family (discover, search, read, neighbors, load, aggregate) researches over bound Delta tables via `SourceKind.text_table`
+- **Dataflow validation** -- dangling-read / dead-store checks at load time, lint by default
 - **Shared research pools** with dedup, capacity limits, BM25+vector hybrid search
 - **50+ typed streaming events** via a discriminated union (`FrameworkEvent`)
 - **Model tier routing** (simple / analytical / complex) with health tracking and fallback
@@ -44,9 +47,11 @@ pip install databricks-deep-research[web,tracing]  # pick extras
 2. [YAML Workflow Authoring](guides/yaml-workflow-authoring.md)
 3. [Builtin Agents](guides/builtin-agents.md)
 4. [Builtin Tools](guides/builtin-tools.md)
-5. [Pool Configuration](guides/pool-configuration.md)
-6. [Model Configuration](guides/model-configuration.md)
-7. [Streaming and Events](guides/streaming-and-events.md)
+5. [Search Providers](guides/search-providers.md)
+6. [SQL / Table Tools](guides/sql-table-tools.md)
+7. [Pool Configuration](guides/pool-configuration.md)
+8. [Model Configuration](guides/model-configuration.md)
+9. [Streaming and Events](guides/streaming-and-events.md)
 
 ### Deep Dive (~half day)
 
@@ -55,7 +60,8 @@ pip install databricks-deep-research[web,tracing]  # pick extras
 3. [Custom Tools](guides/custom-tools.md)
 4. [Custom Agents](guides/custom-agents.md)
 5. [Citation Verification](guides/citation-verification.md)
-6. All [Reference](reference/) docs
+6. [Dataflow Validation](guides/dataflow-validation.md)
+7. All [Reference](reference/) docs
 
 ## Documentation Structure
 
@@ -65,6 +71,7 @@ pip install databricks-deep-research[web,tracing]  # pick extras
 | **Concepts** | [`concepts/`](concepts/) | Workflow engine, agent harness, runtime state, pools, events, citation pipeline |
 | **Guides** | [`guides/`](guides/) | YAML authoring, custom tools/agents, streaming, configuration |
 | **Reference** | [`reference/`](reference/) | API docs for builtins, event catalog, config schema |
+| **Security** | [`security/`](security/) | Threat-model notes (e.g. MCP/SSRF) |
 | **Examples** | [`examples/`](examples/) | Sample workflows, tool implementations, integration patterns |
 
 ## See Also

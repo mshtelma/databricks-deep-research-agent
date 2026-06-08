@@ -11,23 +11,32 @@ removed. Use the Jobs API (POST /api/v1/research/jobs) for new research requests
 and GET /api/v1/research/jobs/{session_id}/stream for SSE streaming.
 """
 
+import contextlib
 import logging
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from deep_research.api.v1.utils import verify_chat_access
 from deep_research.api.v1.utils.transformers import status_str
-from deep_research.core.deps import get_chat_service, get_research_event_service
-from deep_research.core.exceptions import AuthorizationError, NotFoundError
-from deep_research.db.session import get_db
+from deep_research.core.deps import (
+    get_chat_service,
+    get_message_service,
+    get_research_event_service,
+    get_research_session_service,
+    get_storage,
+)
+from deep_research.core.exceptions import NotFoundError
 from deep_research.middleware.auth import CurrentUser
+from deep_research.models.research_session import ResearchStatus
 from deep_research.schemas.research import CancelResearchResponse
-from deep_research.services._protocols import IChatService, IResearchEventService
-from deep_research.services.research_session_service import ResearchSessionService
+from deep_research.services._protocols import (
+    IChatService,
+    IMessageService,
+    IResearchEventService,
+    IResearchSessionService,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -36,34 +45,29 @@ logger = logging.getLogger(__name__)
 @router.post("/{session_id}/cancel", response_model=CancelResearchResponse)
 async def cancel_research(
     session_id: UUID,
+    request: Request,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-    chat_service: IChatService = Depends(get_chat_service),
+    rs_service: IResearchSessionService = Depends(get_research_session_service),
 ) -> CancelResearchResponse:
     """Cancel in-progress research.
 
     Stops the research operation within 2 seconds. Partial results are preserved.
     """
-    from deep_research.models.message import Message
-    from deep_research.models.research_session import ResearchSession
+    # SECURITY: Resolve chat_id via the storage stack job list, then verify ownership.
+    stack = get_storage(request)
+    pairs = await stack.backend.list_user_jobs(user.user_id)
 
-    # SECURITY: Verify ownership via session -> message -> chat -> user_id
-    session = await db.get(ResearchSession, session_id)
-    if not session:
+    chat_id: UUID | None = None
+    for pair_chat_id, pair_session in pairs:
+        if getattr(pair_session, "id", None) == session_id:
+            chat_id = pair_chat_id
+            break
+
+    if chat_id is None:
         raise NotFoundError("ResearchSession", str(session_id))
 
-    message = await db.get(Message, session.message_id)
-    if not message:
-        raise NotFoundError("ResearchSession", str(session_id))
-
-    chat = await chat_service.get_by_id(message.chat_id)
-    if not chat or chat.user_id != user.user_id:
-        # Return 404 to prevent information leakage (don't reveal session exists)
-        raise NotFoundError("ResearchSession", str(session_id))
-
-    # Proceed with cancellation after ownership verified
-    service = ResearchSessionService(db)
-    session = await service.cancel(session_id)
+    # Proceed with cancellation after ownership verified via list_user_jobs
+    session = await rs_service.cancel(session_id, chat_id=chat_id)
 
     if not session:
         raise NotFoundError("ResearchSession", str(session_id))
@@ -71,17 +75,19 @@ async def cancel_research(
     # Get partial results if available
     partial_results = None
     if session.observations:
-        # Join all observations collected so far
-        partial_results = "\n\n".join(
-            obs.get("observation", "") for obs in session.observations if obs.get("observation")
+        obs_list = (
+            session.observations.get("items", [])
+            if isinstance(session.observations, dict)
+            else session.observations
         )
-
-    await db.commit()
+        partial_results = "\n\n".join(
+            obs.get("observation", "") for obs in obs_list if obs.get("observation")
+        ) or None
 
     return CancelResearchResponse(
         session_id=session_id,
         status="cancelled",
-        partial_results=partial_results if partial_results else None,
+        partial_results=partial_results,
     )
 
 
@@ -107,60 +113,55 @@ class ActiveResearchResponse(BaseModel):
 
 @router.get("/{chat_id}/research/active")
 async def get_active_research(
-    request: Request,
     chat_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    chat_service: IChatService = Depends(get_chat_service),
+    rs_service: IResearchSessionService = Depends(get_research_session_service),
+    event_service: IResearchEventService = Depends(get_research_event_service),
 ) -> ActiveResearchResponse:
     """Check if there's an in-progress research session for this chat.
 
     Frontend calls this on page load to detect if reconnection is needed.
     Returns session info if research is in progress, otherwise has_active_research=False.
     """
-    from sqlalchemy import func, select
-
-    from deep_research.models.message import Message
-    from deep_research.models.research_event import ResearchEvent
-    from deep_research.models.research_session import ResearchSession, ResearchStatus
-
     # Verify user has access to this chat
-    try:
-        await verify_chat_access(chat_id, user.user_id, db, request=request)
-    except AuthorizationError:
+    chat = await chat_service.get_by_id(chat_id)
+    if chat is None or chat.user_id != user.user_id:
         return ActiveResearchResponse(has_active_research=False)
 
-    # Get most recent research session for this chat
-    stmt = (
-        select(ResearchSession)
-        .join(Message, ResearchSession.message_id == Message.id)
-        .where(Message.chat_id == chat_id)
-        .order_by(ResearchSession.created_at.desc())
-        .limit(1)
-    )
-    result = await db.execute(stmt)
-    session = result.scalar_one_or_none()
+    # Get most recent active research session for this chat
+    rs = await rs_service.get_active_session_by_chat(chat_id, user.user_id)
 
-    if not session:
+    if rs is None:
         return ActiveResearchResponse(has_active_research=False)
 
     # Get last sequence number from events
-    last_seq = await db.scalar(
-        select(func.max(ResearchEvent.sequence_number)).where(
-            ResearchEvent.research_session_id == session.id
-        )
+    events = await event_service.get_events_since_sequence(  # type: ignore[attr-defined]
+        research_session_id=rs.id,
+        since_sequence=0,
+        limit=100000,
     )
+    events_data = event_service.events_to_list(events)  # type: ignore[attr-defined]
+    last_seq = 0
+    for ev in events_data:
+        seq = ev.get("sequenceNumber") or ev.get("sequence_number")
+        if seq is not None:
+            with contextlib.suppress(ValueError, TypeError):
+                last_seq = max(last_seq, int(seq))
 
-    status_value = status_str(session.status)
+    status_value = status_str(rs.status)
     is_in_progress = status_value == ResearchStatus.IN_PROGRESS.value
+
+    query_mode = rs.execution_state.get("query_mode") if rs.execution_state else None
 
     return ActiveResearchResponse(
         has_active_research=is_in_progress,
-        session_id=session.id,
+        session_id=rs.id,
         status=status_value,
-        last_sequence_number=last_seq or 0,
-        query=session.query,
-        query_mode=session.query_mode,
-        started_at=session.started_at.isoformat() if session.started_at else None,
+        last_sequence_number=last_seq,
+        query=rs.query,
+        query_mode=query_mode,
+        started_at=rs.started_at.isoformat() if rs.started_at else None,
     )
 
 
@@ -179,26 +180,18 @@ async def get_research_events(
     user: CurrentUser,
     since_sequence: int = Query(0, alias="sinceSequence"),
     limit: int = Query(100),
-    db: AsyncSession = Depends(get_db),
-    event_service: IResearchEventService = Depends(get_research_event_service),
     chat_service: IChatService = Depends(get_chat_service),
+    rs_service: IResearchSessionService = Depends(get_research_session_service),
+    event_service: IResearchEventService = Depends(get_research_event_service),
 ) -> ResearchEventsResponse:
     """Get events for reconnection.
 
     Fetches events with sequence_number > since_sequence.
     Frontend polls this every 2 seconds during reconnection until has_more=False.
     """
-    from deep_research.models.message import Message
-    from deep_research.models.research_session import ResearchSession, ResearchStatus
-
-    # Verify session belongs to this chat (security)
-    session = await db.get(ResearchSession, session_id)
-    if not session:
-        raise NotFoundError("ResearchSession", str(session_id))
-
-    # Verify chat ownership via message
-    message = await db.get(Message, session.message_id)
-    if not message or message.chat_id != chat_id:
+    # Verify session belongs to this chat and user owns the chat (security)
+    rs = await rs_service.get(session_id, chat_id=chat_id)
+    if not rs:
         raise NotFoundError("ResearchSession", str(session_id))
 
     # Verify user has access to this chat
@@ -206,17 +199,17 @@ async def get_research_events(
     if chat and chat.user_id != user.user_id:
         raise NotFoundError("Chat", str(chat_id))
 
-    # Fetch events since sequence number (F-RE: routed through factory)
-    events = await event_service.get_events_since_sequence(
+    # Fetch events since sequence number
+    events = await event_service.get_events_since_sequence(  # type: ignore[attr-defined]
         research_session_id=session_id,
         since_sequence=since_sequence,
         limit=limit,
     )
 
     # Convert to frontend format
-    events_data = event_service.events_to_list(events)
+    events_data = event_service.events_to_list(events)  # type: ignore[attr-defined]
 
-    status_val = status_str(session.status)
+    status_val = status_str(rs.status)
 
     return ResearchEventsResponse(
         events=events_data,
@@ -244,24 +237,17 @@ async def get_research_state(
     chat_id: UUID,
     session_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
     chat_service: IChatService = Depends(get_chat_service),
+    rs_service: IResearchSessionService = Depends(get_research_session_service),
+    message_service: IMessageService = Depends(get_message_service),
 ) -> ResearchStateResponse:
     """Get final research state for completed session.
 
     Returns plan, observations, final_report for UI hydration after reconnection.
     """
-    from deep_research.models.message import Message
-    from deep_research.models.research_session import ResearchSession
-
-    # Verify session exists
-    session = await db.get(ResearchSession, session_id)
-    if not session:
-        raise NotFoundError("ResearchSession", str(session_id))
-
-    # Get agent message content
-    message = await db.get(Message, session.message_id)
-    if not message or message.chat_id != chat_id:
+    # Verify session exists and belongs to this chat
+    rs = await rs_service.get(session_id, chat_id=chat_id)
+    if not rs:
         raise NotFoundError("ResearchSession", str(session_id))
 
     # Verify user has access to this chat
@@ -269,16 +255,23 @@ async def get_research_state(
     if chat and chat.user_id != user.user_id:
         raise NotFoundError("Chat", str(chat_id))
 
-    status_value = status_str(session.status)
+    # Get agent message content (final report)
+    final_report: str | None = None
+    if rs.message_id:
+        message = await message_service.get_with_chat(rs.message_id, chat_id)
+        if message:
+            final_report = message.content
+
+    status_value = status_str(rs.status)
 
     return ResearchStateResponse(
-        session_id=session.id,
+        session_id=rs.id,
         status=status_value,
-        query=session.query,
-        plan=session.plan,
-        observations=session.observations,
-        current_step_index=session.current_step_index,
-        plan_iterations=session.plan_iterations,
-        final_report=message.content,
-        completed_at=session.completed_at.isoformat() if session.completed_at else None,
+        query=rs.query,
+        plan=rs.plan,
+        observations=rs.observations,
+        current_step_index=rs.current_step,
+        plan_iterations=None,
+        final_report=final_report,
+        completed_at=rs.completed_at.isoformat() if rs.completed_at else None,
     )

@@ -211,7 +211,7 @@ from databricks_deep_research.tools.factory import ToolFactoryContext
 
 # Auto-detect workspace client and search client
 ctx = ToolFactoryContext.from_defaults(
-    brave_api_key="...",       # optional, for web_search
+    brave_api_key="...",       # optional — only for the Brave web_search backend (see Search Providers)
     user_token="...",          # optional, for OBO
 )
 
@@ -582,9 +582,10 @@ config:
 
 - [Builtin Agents](builtin-agents.md)
 - [YAML Workflow Authoring](yaml-workflow-authoring.md)
+- [Search Providers](search-providers.md) -- web_search backends (databricks / brave / jina)
 - [Tool System](../concepts/tool-system.md)
 - [Authentication](../getting-started/authentication.md)
 - [Example: Enterprise Research](../../examples/enterprise_research.yaml)
 - [Example: Mixed Sources](../../examples/mixed_sources.yaml)
-- [Example: Genie Research](../../examples/genie_enterprise_research.yaml)
-- [Example: Vector Search Research](../../examples/classical_enterprise_vector_search.yaml)
+- [Example: Verified Enterprise Research](../../examples/verified_enterprise_research.yaml)
+- [Example: Multi-Source Research](../../examples/multi_source_research.yaml)

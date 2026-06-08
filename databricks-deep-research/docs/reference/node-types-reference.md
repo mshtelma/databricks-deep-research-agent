@@ -8,6 +8,8 @@ Each node in a workflow tree has a `type` that determines how it executes. The e
 
 Every node -- regardless of type -- emits `NodeStartedEvent` on entry and `NodeCompletedEvent` on success. If a node fails, it emits `NodeErrorEvent` and may emit `NodeSkippedEvent` when `error_handling.on_error` is `"skip"`.
 
+> **See also:** Nodes pass data through named state keys (`output_key` produces, `input_keys` / prompt variables / `input_mapping` consume). [Dataflow Validation](../guides/dataflow-validation.md) checks at load time that those reads and writes line up.
+
 ---
 
 ## 1. `agent`

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, ClassVar, Protocol
 
+from databricks_deep_research.tools.catalog_types import CatalogCard, SafeProbe
 from databricks_deep_research.tools.protocol import ResearchTool
 from databricks_deep_research.workflow.definition import ToolDeclaration
 
@@ -34,8 +36,24 @@ class ToolFactoryContext:
     workspace_client: Any | None = None  # databricks.sdk.WorkspaceClient
     user_token: str | None = None  # OBO token for authenticated calls
     search_client: Any | None = None  # SearchClient protocol (web_search)
+    # () -> AsyncOpenAI authenticated as the app / service principal and pointed
+    # at {host}/serving-endpoints. Used for model-serving calls (Databricks
+    # built-in web search), which run as the app — NOT the OBO user
+    # (``user_token``), which is reserved for user-scoped data tools and need not
+    # carry the ``model-serving`` scope the foundation-model passthrough requires.
+    serving_client_provider: Any | None = None
     crawler: Any | None = None  # ContentCrawler protocol (web_crawl)
     file_index: Any | None = None  # FileIndex for file_search
+    # text_table dependencies — wired together once per app boot and
+    # injected into the 6 ``table_*`` tools' factories. ``table_registry``
+    # holds the BOUND + DISCOVERED bindings, ``schema_cache`` resolves
+    # column types, ``sql_executor`` runs the parameterised SELECT
+    # statements, and ``table_discovery_provider`` (optional) drives
+    # ``table_discovery``.
+    table_registry: Any | None = None
+    schema_cache: Any | None = None
+    table_discovery_provider: Any | None = None
+    sql_executor: Any | None = None
     extras: dict[str, Any] = field(default_factory=dict)  # app-specific deps
     api_keys: dict[str, str] = field(default_factory=dict)  # provider API keys
 
@@ -116,6 +134,9 @@ class ToolFactoryContext:
 
 class ToolFactory(Protocol):
     """Protocol for creating ResearchTool instances from declarations."""
+
+    catalog_cards: ClassVar[Mapping[str, CatalogCard]]
+    safe_probes: ClassVar[Mapping[str, SafeProbe | None]]
 
     def supports(self, kind: str) -> bool:
         """Return ``True`` if this factory can create tools of the given kind."""

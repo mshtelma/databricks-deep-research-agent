@@ -7,7 +7,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from openai import BadRequestError, InternalServerError, PermissionDeniedError, RateLimitError
+from openai import (
+    AuthenticationError,
+    BadRequestError,
+    InternalServerError,
+    PermissionDeniedError,
+    RateLimitError,
+)
 
 from databricks_deep_research.llm.client import FrameworkLLMClient
 
@@ -154,6 +160,58 @@ async def test_permission_denied_refreshes_client_once() -> None:
     assert result.content == '{"steps": [{"id": "s1"}]}'
     assert first_client.chat.completions.create.await_count == 1
     assert second_client.chat.completions.create.await_count == 1
+
+
+def _make_authentication_error() -> AuthenticationError:
+    """401 — the status an expired/invalid OAuth bearer typically returns."""
+    response = httpx.Response(
+        status_code=401,
+        request=httpx.Request("POST", "https://api.example.com/chat/completions"),
+        json={"error": {"message": "unauthorized", "type": "authentication_error"}},
+    )
+    return AuthenticationError(
+        message="unauthorized",
+        response=response,
+        body={"error": {"message": "unauthorized"}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_401_refreshes_client_once() -> None:
+    """401 must trigger a client refresh + single retry, exactly like 403.
+
+    Regression guard for the token-expiry blockage: before the 401+403 broaden,
+    a 401 (expired OAuth bearer) was re-raised with no refresh, blocking every
+    research LLM call until the app was redeployed.
+    """
+    first_client = AsyncMock()
+    second_client = AsyncMock()
+    first_client.chat.completions.create = AsyncMock(side_effect=_make_authentication_error())
+    second_client.chat.completions.create = AsyncMock(return_value=_make_success_response())
+
+    provider_calls = 0
+
+    def provider() -> AsyncMock:
+        nonlocal provider_calls
+        provider_calls += 1
+        return second_client
+
+    client = FrameworkLLMClient(
+        openai_client=first_client,
+        model_mapping={"analytical": "test-model"},
+        client_provider=provider,
+    )
+
+    result = await client.complete(
+        [{"role": "user", "content": "test"}],
+        "analytical",
+    )
+
+    assert provider_calls == 1
+    assert result.content == '{"steps": [{"id": "s1"}]}'
+    assert first_client.chat.completions.create.await_count == 1
+    assert second_client.chat.completions.create.await_count == 1
+
 
 async def test_client_provider_is_not_called_for_every_request() -> None:
     """Provider should only be used for explicit refreshes, not normal calls."""

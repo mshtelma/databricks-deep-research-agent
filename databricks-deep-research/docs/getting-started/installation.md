@@ -25,7 +25,7 @@ pip install -e ".[all]"
 
 | Extra | Packages | Use Case |
 |-------|----------|----------|
-| `web` | `httpx>=0.24` | Web search tool (Brave API) |
+| `web` | `httpx>=0.24` | Web search tool (HTTP client for the `databricks`/`brave`/`jina` backends) |
 | `crawl` | `trafilatura>=1.6` | Web page crawling and text extraction |
 | `search` | `bm25s>=0.1`, `numpy>=1.24` | Pool hybrid BM25+vector search |
 | `tracing` | `mlflow>=2.10` | MLflow `trace_span` observability |
@@ -67,7 +67,7 @@ uv run ruff check src/
 |----------|----------|-------------|
 | `DATABRICKS_HOST` | For Databricks tools | Workspace URL |
 | `DATABRICKS_TOKEN` | For Databricks tools | API token |
-| `BRAVE_API_KEY` | For `web_search` | Brave Search API key |
+| `BRAVE_API_KEY` | Only for the Brave backend | Brave Search API key. `web_search` is backend-agnostic (`databricks` / `brave` / `jina`); this key is needed only when using the Brave backend. See [Search Providers](../guides/search-providers.md). |
 | `OPENAI_API_KEY` | For standalone use | OpenAI API key (if not using Databricks) |
 
 ## See Also

@@ -5,6 +5,7 @@ import os
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
+from typing import Any, Final, Literal, get_args
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -276,40 +277,249 @@ class BraveSearchConfig(BaseModel):
     requests_per_second: float = Field(default=1.0, gt=0, le=10)
     default_result_count: int = Field(default=10, ge=1, le=50)
     freshness: str = Field(default="pm", pattern=r"^(pd|pw|pm|py)$")
+    # Process-wide concurrency cap for the framework's BraveSearchAdapter.
+    # Default lowered from 4 → 2 after the NVDA-trace 429 cascade: 7 lanes
+    # firing ~5 queries each = ~35 in-flight competing for permits, then
+    # bursting when permits free up and tripping Brave's API-side rate
+    # limiter. With 2, bursts are throttled at the source.
+    max_concurrency: int = Field(default=2, ge=1, le=32)
+    # Number of attempts on 429 responses (with exponential backoff + jitter).
+    max_retries: int = Field(default=3, ge=1, le=10)
+    # Additional intra-permit sleep (uniform random in
+    # [0, inter_call_jitter_seconds)) before each request fires. Smooths
+    # bursts so consecutive calls inside the semaphore don't hit Brave
+    # back-to-back. Set to 0 to disable.
+    inter_call_jitter_seconds: float = Field(default=0.15, ge=0.0, le=2.0)
 
     model_config = {"frozen": True}
 
 
+class DatabricksSearchConfig(BaseModel):
+    """Configuration for Databricks built-in web search (model-serving grounding).
+
+    Built-in search is a *billed model generation* per query (latency/cost far
+    exceeds a search REST API), available only on **pay-per-token** endpoints and
+    unavailable on provisioned-throughput / HIPAA-BAA / cross-region-disabled
+    workspaces. Used only when ``SearchConfig.provider == "databricks"``.
+    """
+
+    # Serving endpoint that performs the search. Gemini (single fast call) is the
+    # default; gpt-5 (OpenAI Responses) returns direct URLs but is slower/agentic.
+    endpoint: str = Field(default="databricks-gemini-3-1-flash-lite")
+    # "openai" | "gemini"; auto-detected from the endpoint name when omitted.
+    model_family: str | None = Field(default=None)
+    max_results: int = Field(default=10, ge=1, le=20)
+    # Process-wide cap on concurrent built-in-search generations (heavy calls).
+    max_concurrency: int = Field(default=4, ge=1, le=32)
+    timeout_seconds: float = Field(default=30.0, gt=0, le=120)
+    # Resolve Gemini grounding-redirect URLs to canonical publisher URLs (no-op
+    # for the OpenAI path, which already returns direct URLs).
+    resolve_redirects: bool = Field(default=True)
+    # Push a per-agent INCLUDE-mode allowlist into the OpenAI Responses web_search
+    # ``filters.allowed_domains`` (bare domains; OpenAI endpoints only; subdomains
+    # auto-included). When False, allowlists rely on the instruction hint + post-hoc
+    # URL filter. No effect on Gemini (no API knob) or on exclude mode.
+    push_allowed_domains: bool = Field(default=True)
+    # Selectable built-in-search endpoints per model family — the single source
+    # for (a) the family→default endpoint (first entry = cheapest/default), (b)
+    # the designer's per-family endpoint dropdown, and (c) endpoint→family lookup
+    # in validation. Only list endpoints that support built-in web search; adding
+    # a custom one here makes it selectable in the designer and family-mapped.
+    endpoints_by_family: dict[str, list[str]] = Field(
+        default_factory=lambda: {
+            "gemini": ["databricks-gemini-3-1-flash-lite"],
+            "openai": ["databricks-gpt-5-mini", "databricks-gpt-5"],
+        }
+    )
+
+    model_config = {"frozen": True}
+
+    def default_endpoint_for_family(self, family: str | None) -> str:
+        """Cheapest/default endpoint for *family*; the global default otherwise.
+
+        Keeps the endpoint consistent with a declared ``model_family`` so a tool
+        that pins the family but omits the endpoint never inherits the global
+        (possibly different-family) endpoint — the exact mismatch that drives the
+        OpenAI Responses API onto a Gemini endpoint (a hard 400).
+        """
+        if isinstance(family, str):
+            endpoints = self.endpoints_by_family.get(family)
+            if endpoints:
+                return endpoints[0]
+        return self.endpoint
+
+    def family_for_endpoint(self, endpoint: str) -> str | None:
+        """Infer the model family of a serving endpoint, or ``None`` if unknown.
+
+        Prefers the explicit :attr:`endpoints_by_family` mapping, then falls back
+        to the endpoint-name heuristic (mirrors the framework adapter's private
+        ``_detect_family`` in ``tools/builtins/databricks_web_search.py`` but
+        returns ``None`` instead of raising on an undetectable name, so callers
+        can choose to trust an explicit family for custom endpoints).
+        """
+        for fam, endpoints in self.endpoints_by_family.items():
+            if endpoint in endpoints:
+                return fam
+        name = endpoint.lower()
+        if "gemini" in name:
+            return "gemini"
+        if any(token in name for token in ("gpt", "openai", "o1", "o3")):
+            return "openai"
+        return None
+
+
 class DomainFilterConfig(BaseModel):
-    """Configuration for domain whitelist/blacklist filtering.
+    """Configuration for per-agent domain handling.
 
-    Supports wildcard patterns:
-    - "*.gov" - matches any .gov domain (cdc.gov, www.nasa.gov)
-    - "*.edu" - matches any .edu domain
-    - "news.*" - matches news.com, news.org, etc.
-    - "exact.com" - exact match only
+    Combines two orthogonal mechanisms:
 
-    Filter modes:
-    - include: Only domains matching include_domains are allowed
-    - exclude: Domains matching exclude_domains are blocked
-    - both: Must match include_domains AND not match exclude_domains
+    1. **Binary filter** — ``mode`` + ``include_domains`` / ``exclude_domains``
+       run at web-search result time. A URL matching ``exclude_domains`` is
+       dropped before admission; in INCLUDE/BOTH mode, URLs must additionally
+       match ``include_domains``.
+
+    2. **Reputation ranking** — ``preferred_domains`` / ``deprecated_domains``
+       feed the framework's source-admission scorer with signed deltas
+       (boost / penalty). They do NOT filter; they only re-rank survivors of
+       step (1). A source matching both nets to the sum of deltas.
+
+    All four lists accept the same wildcard syntax (``*.gov``, ``news.*``,
+    ``exact.com``). Precedence: exclude → include → reputation.
+
+    Filter modes (binary, unchanged from prior versions):
+      * ``include``: Only domains matching include_domains are allowed.
+      * ``exclude``: Domains matching exclude_domains are blocked.
+      * ``both``: Must match include_domains AND not match exclude_domains.
+
+    All lists default to empty so legacy callers that pre-date the
+    reputation fields construct successfully without behaviour change.
     """
 
     mode: DomainFilterMode = DomainFilterMode.EXCLUDE
     include_domains: list[str] = Field(default_factory=list)
     exclude_domains: list[str] = Field(default_factory=list)
+    # Soft reputation ranking signals — never hard-filter; only adjust
+    # source admission scores. See databricks_deep_research.agents
+    # .source_reputation.SourceReputationScorer for the application logic.
+    preferred_domains: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Wildcard domain patterns whose sources receive a positive "
+            "admission-score delta. Used for ranking only — does not "
+            "filter. Editable per-agent via the designer UI / chat."
+        ),
+    )
+    deprecated_domains: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Wildcard domain patterns whose sources receive a negative "
+            "admission-score delta. Used for ranking only — does not "
+            "filter. Editable per-agent via the designer UI / chat."
+        ),
+    )
     log_filtered: bool = False
 
     model_config = {"frozen": True}
+
+    @property
+    def has_reputation_signal(self) -> bool:
+        """True if either reputation list contains at least one pattern.
+
+        Callers use this to decide whether to construct a
+        ``SourceReputationScorer`` at all — saves an allocation on the
+        per-source hot path when no agent has populated reputation.
+        """
+        return bool(self.preferred_domains) or bool(self.deprecated_domains)
+
+
+# Out-of-the-box web-search provider. Databricks model-serving built-in web
+# search is the default so research works on a Databricks workspace with NO
+# external search subscription; "brave"/"jina" are opt-in external APIs that
+# require their own API key. Single source of truth for the default — reused by
+# the Field default below and every defensive fallback so they cannot drift.
+DEFAULT_SEARCH_PROVIDER: Final = "databricks"
 
 
 class SearchConfig(BaseModel):
     """Configuration for search services."""
 
+    # Active web-search provider for the builtin web_search tool. "databricks"
+    # (default) uses model-serving built-in web search; "brave"/"jina" are opt-in
+    # external search APIs (each needs a key). Per-workflow YAML / per-agent
+    # designer config can still override via the web tool's config.provider.
+    provider: Literal["databricks", "brave", "jina"] = Field(
+        default=DEFAULT_SEARCH_PROVIDER
+    )
     brave: BraveSearchConfig = Field(default_factory=BraveSearchConfig)
+    databricks: DatabricksSearchConfig = Field(default_factory=DatabricksSearchConfig)
     domain_filter: DomainFilterConfig = Field(default_factory=DomainFilterConfig)
 
     model_config = {"frozen": True}
+
+
+# Supported web-search providers, derived from the SearchConfig.provider Literal
+# so the agent-designer registry enum and any other consumer cannot drift from
+# the canonical set. Order follows the Literal declaration (databricks first =
+# the default provider).
+SEARCH_PROVIDERS: tuple[str, ...] = get_args(
+    SearchConfig.model_fields["provider"].annotation
+)
+
+
+def resolve_effective_provider(
+    tool_provider: object, global_provider: str | None = None
+) -> str:
+    """Resolve a web tool's effective search provider.
+
+    Precedence (high → low): a non-empty per-tool ``config.provider`` wins; else
+    the workspace ``search.provider`` (``global_provider``); else the built-in
+    :data:`DEFAULT_SEARCH_PROVIDER`. Centralizes the precedence rule so the
+    orchestrator runtime fill and the designer normalizer cannot disagree.
+    """
+    if isinstance(tool_provider, str) and tool_provider:
+        return tool_provider
+    if isinstance(global_provider, str) and global_provider:
+        return global_provider
+    return DEFAULT_SEARCH_PROVIDER
+
+
+def fill_databricks_search_defaults(
+    config: dict[str, Any],
+    db: DatabricksSearchConfig,
+    *,
+    min_results: int = 0,
+) -> bool:
+    """Fill ABSENT Databricks built-in web-search keys from the app defaults.
+
+    Used by both the designer normalizer and the app orchestrator so a web tool
+    that selects ``provider: databricks`` without spelling out the endpoint /
+    tuning inherits the workspace ``search.databricks`` block. Only fills keys
+    that are absent — it never overwrites an explicit per-tool value (including a
+    deliberate ``resolve_redirects: false`` or a smaller ``timeout_seconds``).
+
+    ``min_results`` raises the ``max_results`` floor: ``web_research`` passes its
+    ``total_results`` as the search ``count``, and the adapter caps the returned
+    count at ``max_results`` — so without this floor a ``total_results: 20`` tool
+    would be silently truncated to the default ``max_results`` (10).
+
+    Returns ``True`` if it mutated ``config``.
+    """
+    before = dict(config)
+    # Resolve the endpoint CONSISTENTLY with any declared family: a tool that
+    # pins ``model_family`` but omits ``model`` gets THAT family's default
+    # endpoint, not the global (possibly different-family) default. Without this,
+    # ``model_family: openai`` + the global Gemini endpoint => OpenAI Responses
+    # API on a Gemini endpoint => hard 400 and zero search results.
+    if "model" not in config:
+        config["model"] = db.default_endpoint_for_family(config.get("model_family"))
+    if db.model_family is not None:
+        config.setdefault("model_family", db.model_family)
+    config.setdefault("timeout_seconds", db.timeout_seconds)
+    config.setdefault("resolve_redirects", db.resolve_redirects)
+    config.setdefault("push_allowed_domains", db.push_allowed_domains)
+    if "max_results" not in config:
+        config["max_results"] = max(db.max_results, min_results)
+    return config != before
 
 
 class TruncationConfig(BaseModel):
@@ -448,7 +658,13 @@ class EvidencePreselectionConfig(BaseModel):
 
     max_spans_per_source: int = Field(default=10, ge=1, le=50)
     min_span_length: int = Field(default=50, ge=10)
-    max_span_length: int = Field(default=500, ge=50)
+    # DEPRECATED: use CitationVerificationConfig.max_evidence_chars (the
+    # pipeline-wide cap applied to all 5 truncation sites). This stage-
+    # specific knob is retained for one release cycle for backward compat
+    # — if set in YAML it routes to max_evidence_chars with a
+    # DeprecationWarning. Default bumped from 500 to 3000 to match the new
+    # pipeline-wide default.
+    max_span_length: int = Field(default=3000, ge=50)
     relevance_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
     numeric_content_boost: float = Field(default=0.2, ge=0.0, le=1.0)
     relevance_computation_method: RelevanceMethod = RelevanceMethod.HYBRID
@@ -697,6 +913,23 @@ class CitationVerificationConfig(BaseModel):
 
     # Master toggle
     enabled: bool = True
+
+    # Pipeline-wide cap on evidence quote length (chars). Applied at all five
+    # truncation sites: evidence selection (Stage 1), claim generation prompt
+    # (Stage 2), single-claim NLI verification (Stage 4 full path), batch
+    # verification (Stage 4 batch path), and retry verification. This is the
+    # single source of truth — supersedes the per-stage ad-hoc caps that
+    # previously diverged (500/1000/1500). Override per-agent via the agent's
+    # output_schema citation_pipeline.max_evidence_chars.
+    max_evidence_chars: int = Field(
+        default=3000, ge=200, le=10000,
+        description=(
+            "Pipeline-wide cap on evidence quote length applied across all "
+            "5 truncation sites. Default 3000 covers typical multi-row "
+            "markdown tables; raise for richer tabular corpora, lower for "
+            "budget-constrained prompts."
+        ),
+    )
 
     # Synthesis mode: controls the overall synthesis approach
     # - "interleaved": Current approach - evidence in context, [N] markers
@@ -1428,6 +1661,69 @@ class JobConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class AgentDesignerToolCatalogConfig(BaseModel):
+    """Designer tool-catalog rendering configuration."""
+
+    max_chars: int = Field(
+        default=4000,
+        ge=1,
+        le=20000,
+        description="Hard character ceiling for rendered tool catalogs",
+    )
+    summary_only_above_n_tools: int = Field(
+        default=8,
+        ge=1,
+        le=100,
+        description="Render summary-only catalog entries above this tool count",
+    )
+    include_probes: bool = Field(
+        default=True,
+        description="Include sanitized SafeProbe samples in rendered catalogs",
+    )
+
+    model_config = {"frozen": True}
+
+
+class AgentDesignerProbeConfig(BaseModel):
+    """Designer SafeProbe sampling configuration."""
+
+    timeout_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        le=300,
+        description="Per-tool SafeProbe timeout",
+    )
+    max_concurrent_probes: int = Field(
+        default=4,
+        ge=1,
+        le=50,
+        description="Maximum SafeProbe calls to run concurrently",
+    )
+    max_output_chars: int = Field(
+        default=800,
+        ge=0,
+        le=20000,
+        description="Maximum sanitized probe output characters per tool",
+    )
+    persist: bool = Field(
+        default=False,
+        description="Default probe persistence policy; false avoids storing samples",
+    )
+
+    model_config = {"frozen": True}
+
+
+class AgentDesignerConfig(BaseModel):
+    """Agent Designer configuration."""
+
+    tool_catalog: AgentDesignerToolCatalogConfig = Field(
+        default_factory=AgentDesignerToolCatalogConfig
+    )
+    probe: AgentDesignerProbeConfig = Field(default_factory=AgentDesignerProbeConfig)
+
+    model_config = {"frozen": True}
+
+
 class AppConfig(BaseModel):
     """Central application configuration loaded from YAML."""
 
@@ -1477,6 +1773,11 @@ class AppConfig(BaseModel):
         default_factory=QueryRewritingConfig,
         description="Source-specific query rewriting configuration for enterprise tools.",
     )
+    # Agent Designer catalog/probe controls
+    agent_designer: AgentDesignerConfig = Field(
+        default_factory=AgentDesignerConfig,
+        description="Agent Designer tool catalog and SafeProbe settings.",
+    )
 
     @model_validator(mode="after")
     def validate_endpoint_references(self) -> "AppConfig":
@@ -1522,18 +1823,25 @@ def get_default_config() -> AppConfig:
                 supports_prompt_caching=True,
             ),
             "sonnet": EndpointConfig(
-                endpoint_identifier="databricks-claude-sonnet-4-5",
+                endpoint_identifier="databricks-claude-sonnet-4-6",
                 max_context_window=128000,
                 tokens_per_minute=50000,
                 supports_structured_output=True,
                 supports_prompt_caching=True,
             ),
             "opus": EndpointConfig(
-                endpoint_identifier="databricks-claude-opus-4-5",
+                endpoint_identifier="databricks-claude-opus-4-7",
                 max_context_window=128000,
                 tokens_per_minute=200000,
                 supports_structured_output=True,
                 supports_prompt_caching=True,
+            ),
+            "gpt5": EndpointConfig(
+                endpoint_identifier="databricks-gpt-5-5",
+                max_context_window=128000,
+                tokens_per_minute=200000,
+                supports_structured_output=True,
+                supports_temperature=False,
             ),
             "gpt5mini": EndpointConfig(
                 endpoint_identifier="databricks-gpt-5-mini",
@@ -1557,7 +1865,7 @@ def get_default_config() -> AppConfig:
                 reasoning_effort=ReasoningEffort.MEDIUM,
             ),
             "complex": ModelRoleConfig(
-                endpoints=["opus", "sonnet"],
+                endpoints=["opus", "sonnet", "gpt5"],
                 temperature=0.7,
                 max_tokens=16000,
                 reasoning_effort=ReasoningEffort.HIGH,

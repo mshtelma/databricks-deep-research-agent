@@ -46,11 +46,39 @@ def create_framework_llm_client(
     # Build model mapping from app config
     model_mapping = _build_model_mapping(app_llm, model_overrides)
 
+    # Global endpoint → context-window registry built from ALL configured
+    # endpoints (not just those referenced by a tier). This lets the framework
+    # escalate an overflowing prompt to a large-window model — e.g. a 1M-token
+    # endpoint reserved for overflow — even when no tier lists it.
+    endpoint_registry: dict[str, int] = {}
+    try:
+        for endpoint in app_llm._config.endpoints.values():
+            endpoint_registry[endpoint.endpoint_identifier] = endpoint.max_context_window
+    except (AttributeError, KeyError, ValueError):
+        logger.debug("LLM_ADAPTER_ENDPOINT_REGISTRY_SKIP")
+
+    # Diagnostic: makes "which token is the framework using?" answerable
+    # from the log stream. Compare token_prefix against the app's
+    # LLM_CLIENT_INITIALIZED / LLM_CLIENT_FORCE_REFRESHED logs to confirm
+    # the framework is on the same auth context as the main app.
+    logger.info(
+        "FWK_LLM_ADAPTER_BIND auth_mode=%s base_url=%s token_prefix=%s***",
+        app_llm._auth.auth_mode,
+        str(openai_client.base_url)[:80],
+        (openai_client.api_key or "")[:8],
+    )
+
     return FrameworkLLMClient(
         openai_client=openai_client,
         model_mapping=model_mapping,
         embedding_model=embedding_model,
-        client_provider=app_llm._ensure_fresh_client,
+        # Active refresh: invalidates DatabricksAuth + SDK cache and mints a
+        # fresh token. Previously this was `_ensure_fresh_client` (passive),
+        # which returned the same stale client when DatabricksAuth's
+        # locally-computed 1h expiry hadn't elapsed — causing the framework's
+        # 403-retry to loop with the same invalid bearer.
+        client_provider=app_llm.force_refresh_client,
+        endpoint_registry=endpoint_registry,
     )
 
 
@@ -83,26 +111,30 @@ def _build_model_mapping(
             role = config.get_role(tier)
             if not role or not role.endpoints:
                 continue
-            # Resolve ALL endpoint identifiers, skipping failures
+            # Resolve ALL endpoint identifiers, skipping failures. Track each
+            # endpoint's context window so the framework can escalate to a
+            # larger-window model when a prompt would overflow.
             resolved: list[str] = []
+            windows: dict[str, int] = {}
             for ep_id in role.endpoints:
                 try:
                     endpoint = config.get_endpoint(ep_id)
                     if endpoint:
                         resolved.append(endpoint.endpoint_identifier)
+                        windows[endpoint.endpoint_identifier] = endpoint.max_context_window
                 except (KeyError, AttributeError, ValueError):
                     logger.debug("ENDPOINT_RESOLVE_SKIP tier=%s ep=%s", tier_name, ep_id)
             if not resolved:
                 continue
-            if len(resolved) == 1:
-                mapping[tier_name] = resolved[0]
-            else:
-                mapping[tier_name] = ModelTierConfig(
-                    endpoints=resolved,
-                    fallback_on_429=role.fallback_on_429,
-                    rotation_strategy=cast(Literal["PRIORITY", "ROUND_ROBIN"], role.rotation_strategy.name),
-                    tokens_per_minute=0,
-                )
+            # Always emit a ModelTierConfig (even single-endpoint tiers) so
+            # context-window escalation logic is uniform across all tiers.
+            mapping[tier_name] = ModelTierConfig(
+                endpoints=resolved,
+                fallback_on_429=role.fallback_on_429,
+                rotation_strategy=cast(Literal["PRIORITY", "ROUND_ROBIN"], role.rotation_strategy.name),
+                tokens_per_minute=0,
+                endpoint_context_windows=windows,
+            )
         except (KeyError, IndexError, AttributeError, ValueError):
             logger.debug("TIER_MAPPING_SKIP tier=%s", tier_name)
 

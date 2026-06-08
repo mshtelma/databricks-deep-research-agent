@@ -32,7 +32,7 @@ class ParsedTable:
     """A table extracted from HTML or detected in markdown.
 
     ``table_json`` is a *dict* (not a JSON string) using the same schema as
-    :class:`~databricks_deep_research.tools.builtins.table_api.Table`:
+    :class:`~databricks_deep_research.tools.builtins.text_table.table_api.Table`:
 
     .. code-block:: python
 

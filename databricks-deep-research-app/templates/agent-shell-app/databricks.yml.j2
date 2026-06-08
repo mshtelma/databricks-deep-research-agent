@@ -1,0 +1,73 @@
+bundle:
+  name: {{ app_name }}
+
+resources:
+  apps:
+    {{ app_name }}:
+      name: '{{ app_name }}'
+      source_code_path: ./
+      config:
+        command:
+          - 'uv'
+          - 'run'
+          - 'uvicorn'
+          - 'app:app'
+          - '--host'
+          - '0.0.0.0'
+          - '--port'
+          - '8000'
+        env:
+          - name: MLFLOW_TRACKING_URI
+            value: 'databricks'
+{% if brave_secret_scope and brave_secret_key %}
+          - name: BRAVE_API_KEY
+            value_from: '{{ brave_secret_resource_name }}'
+{% endif %}
+{% if requires_sql_warehouse %}
+          - name: STORAGE_WAREHOUSE_ID
+            value: '{{ storage_warehouse_id }}'
+{% endif %}
+      resources:
+{% if brave_secret_scope and brave_secret_key %}
+        - name: '{{ brave_secret_resource_name }}'
+          description: 'Brave Search API key for web_search tools (provider: brave)'
+          secret:
+            scope: '{{ brave_secret_scope }}'
+            key: '{{ brave_secret_key }}'
+            permission: READ
+{% endif %}
+{% if requires_sql_warehouse %}
+        - name: '{{ sql_warehouse_resource_name }}'
+          description: 'SQL Warehouse for text-table tools'
+          sql_warehouse:
+            id: '{{ storage_warehouse_id }}'
+            permission: CAN_USE
+{% endif %}
+{% if not requires_web_search and not requires_sql_warehouse %}
+        # Add a serving_endpoint block here for any endpoint your agent calls
+        # (e.g., a Mode 3 agent serving endpoint or any of the workspace's
+        # bundled endpoints — databricks-claude-sonnet-4-5, etc.). Apps grants
+        # the App SP CAN_QUERY automatically when declared as a resource.
+        # - name: 'llm'
+        #   serving_endpoint:
+        #     name: 'databricks-claude-sonnet-4-5'
+        #     permission: 'CAN_QUERY'
+{% endif %}
+      # OBO scopes must match the surfaces a designer-built workflow can reach.
+      # vector-search-indexes is REQUIRED to query a VS index (endpoints scope
+      # alone is insufficient — the SDK calls query_index against the index
+      # path). dashboards.genie is required for any Genie tool. Keep this list
+      # in sync with the main DRE bundle (../databricks.yml) so "Test Run in
+      # DRE works → deployed shell app works" remains a true invariant.
+      user_api_scopes:
+        - sql
+        - serving.serving-endpoints
+        - vectorsearch.vector-search-endpoints
+        - vectorsearch.vector-search-indexes
+        - dashboards.genie
+
+targets:
+  dev:
+    default: true
+    workspace:
+      profile: '{{ target }}'

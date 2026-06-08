@@ -45,7 +45,7 @@ _DEFAULTS: dict[str, Any] = {
 class CachedPreferencesService(_CachedServiceBase, IPreferencesService):
     """`IPreferencesService` via `UserDocument.preferences`."""
 
-    def __init__(self, stack: "StorageStack") -> None:
+    def __init__(self, stack: StorageStack) -> None:
         super().__init__(stack)
 
     async def get_preferences(self, user_id: str) -> SimpleNamespace:

@@ -96,7 +96,10 @@ class SearchClient(Protocol):
 def _domain_matches(url: str, domains: list[str]) -> bool:
     """Return ``True`` if *url*'s host matches any entry in *domains*.
 
-    Supports simple wildcard prefixes (``*.gov``, ``*.edu``).
+    Supports simple wildcard prefixes (``*.gov``, ``*.edu``). A bare multi-label
+    pattern (``reuters.com``) is subdomain-inclusive — it also matches ``www.reuters.com``
+    and other subdomains — aligning with the OpenAI ``allowed_domains`` push-down (which
+    auto-includes subdomains) and most allowlist tools.
     """
     from urllib.parse import urlparse
 
@@ -114,7 +117,7 @@ def _domain_matches(url: str, domains: list[str]) -> bool:
             suffix = pattern[2:]  # e.g. "gov" from "*.gov"
             if host == suffix or host.endswith("." + suffix):
                 return True
-        elif host == pattern:
+        elif host == pattern or ("." in pattern and host.endswith("." + pattern)):
             return True
     return False
 

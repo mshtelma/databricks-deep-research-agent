@@ -1,15 +1,18 @@
 """Unit tests for Message API endpoints."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
 from deep_research.core.auth import UserIdentity
-from deep_research.core.deps import get_chat_service
+from deep_research.core.deps import (
+    get_chat_service,
+    get_feedback_service,
+    get_message_service,
+)
 from deep_research.core.exceptions import NotFoundError
-from deep_research.db.session import get_db
 from deep_research.main import app
 from deep_research.middleware.auth import get_current_user_identity
 from deep_research.models.message import Message, MessageRole
@@ -58,29 +61,55 @@ def mock_agent_message() -> Message:
 
 
 @pytest.fixture
-def mock_chat_service() -> MagicMock:
-    """Create a reusable mock chat service."""
+def mock_chat_service(mock_user: UserIdentity) -> MagicMock:
+    """Create a reusable mock chat service that passes ownership checks."""
     svc = MagicMock()
+    # get_for_user returns a chat-like object owned by the test user
+    mock_chat = MagicMock()
+    mock_chat.user_id = mock_user.user_id
+    svc.get_for_user = AsyncMock(return_value=mock_chat)
     svc.update_title_from_message = AsyncMock(return_value=None)
     return svc
 
 
 @pytest.fixture
-def client(mock_user: UserIdentity, mock_chat_service: MagicMock) -> TestClient:
-    """Create a test client with mocked dependencies."""
+def mock_message_service() -> MagicMock:
+    """Create a reusable mock message service."""
+    svc = MagicMock()
+    svc.list_messages = AsyncMock(return_value=([], 0))
+    svc.get_with_chat = AsyncMock(return_value=None)
+    svc.create = AsyncMock(return_value=None)
+    svc.update_content = AsyncMock(return_value=None)
+    svc.delete_subsequent = AsyncMock(return_value=0)
+    return svc
 
-    async def override_get_db():
-        mock_session = AsyncMock()
-        yield mock_session
+
+@pytest.fixture
+def mock_feedback_service() -> MagicMock:
+    """Create a reusable mock feedback service."""
+    svc = MagicMock()
+    svc.create_feedback = AsyncMock(return_value=None)
+    return svc
+
+
+@pytest.fixture
+def client(
+    mock_user: UserIdentity,
+    mock_chat_service: MagicMock,
+    mock_message_service: MagicMock,
+    mock_feedback_service: MagicMock,
+) -> TestClient:
+    """Create a test client with mocked dependencies."""
 
     async def override_get_current_user_identity():
         return mock_user
 
-    app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_current_user_identity] = (
         override_get_current_user_identity
     )
     app.dependency_overrides[get_chat_service] = lambda: mock_chat_service
+    app.dependency_overrides[get_message_service] = lambda: mock_message_service
+    app.dependency_overrides[get_feedback_service] = lambda: mock_feedback_service
 
     yield TestClient(app)
 
@@ -88,81 +117,81 @@ def client(mock_user: UserIdentity, mock_chat_service: MagicMock) -> TestClient:
     app.dependency_overrides.clear()
 
 
-@pytest.fixture(autouse=True)
-def mock_verify_chat_ownership() -> AsyncMock:
-    """Patch chat ownership checks so endpoint tests can assert the wiring."""
-    with patch(
-        "deep_research.api.v1.messages.verify_chat_ownership",
-        new_callable=AsyncMock,
-    ) as mock_verify:
-        yield mock_verify
-
-
 class TestListMessages:
     """Tests for GET /api/v1/chats/{chat_id}/messages endpoint."""
 
-    def test_list_messages_empty(self, client: TestClient):
+    def test_list_messages_empty(
+        self,
+        client: TestClient,
+        mock_message_service: MagicMock,
+    ):
         """Test listing messages when none exist."""
         chat_id = uuid4()
+        mock_message_service.list_messages = AsyncMock(return_value=([], 0))
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.list_messages = AsyncMock(return_value=([], 0))
-            MockService.return_value = mock_service
+        response = client.get(f"/api/v1/chats/{chat_id}/messages")
 
-            response = client.get(f"/api/v1/chats/{chat_id}/messages")
-
-            assert response.status_code == 200
-            data = response.json()
-            assert data["items"] == []
-            assert data["total"] == 0
+        assert response.status_code == 200
+        data = response.json()
+        assert data["items"] == []
+        assert data["total"] == 0
 
     def test_list_messages_with_results(
         self,
         client: TestClient,
         mock_message: Message,
-        mock_verify_chat_ownership: AsyncMock,
+        mock_message_service: MagicMock,
+        mock_chat_service: MagicMock,
     ):
         """Test listing messages with results."""
         chat_id = mock_message.chat_id
+        mock_message_service.list_messages = AsyncMock(
+            return_value=([mock_message], 1)
+        )
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.list_messages = AsyncMock(
-                return_value=([mock_message], 1)
-            )
-            MockService.return_value = mock_service
+        response = client.get(f"/api/v1/chats/{chat_id}/messages")
 
-            response = client.get(f"/api/v1/chats/{chat_id}/messages")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["items"]) == 1
+        assert data["total"] == 1
+        mock_chat_service.get_for_user.assert_awaited_once_with(
+            chat_id, "test-user-123"
+        )
+        mock_message_service.list_messages.assert_awaited_once_with(
+            chat_id=chat_id,
+            limit=20,
+            offset=0,
+        )
 
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data["items"]) == 1
-            assert data["total"] == 1
-            mock_verify_chat_ownership.assert_awaited_once()
-            assert mock_verify_chat_ownership.await_args.args[0] == chat_id
-            assert mock_verify_chat_ownership.await_args.args[1] == "test-user-123"
-            mock_service.list_messages.assert_awaited_once_with(
-                chat_id=chat_id,
-                limit=20,
-                offset=0,
-            )
-
-    def test_list_messages_with_pagination(self, client: TestClient):
+    def test_list_messages_with_pagination(
+        self,
+        client: TestClient,
+        mock_message_service: MagicMock,
+    ):
         """Test listing messages with pagination parameters."""
         chat_id = uuid4()
+        mock_message_service.list_messages = AsyncMock(return_value=([], 0))
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.list_messages = AsyncMock(return_value=([], 0))
-            MockService.return_value = mock_service
+        response = client.get(
+            f"/api/v1/chats/{chat_id}/messages?limit=10&offset=5"
+        )
 
-            response = client.get(
-                f"/api/v1/chats/{chat_id}/messages?limit=10&offset=5"
-            )
+        assert response.status_code == 200
+        mock_message_service.list_messages.assert_awaited_once()
 
-            assert response.status_code == 200
-            mock_service.list_messages.assert_awaited_once()
+    def test_list_messages_missing_chat_returns_404(
+        self,
+        client: TestClient,
+        mock_chat_service: MagicMock,
+    ):
+        """Chat not found / not owned → 404."""
+        chat_id = uuid4()
+        mock_chat_service.get_for_user = AsyncMock(return_value=None)
+
+        response = client.get(f"/api/v1/chats/{chat_id}/messages")
+
+        assert response.status_code == 404
 
 
 class TestSendMessage:
@@ -173,38 +202,33 @@ class TestSendMessage:
         client: TestClient,
         mock_message: Message,
         mock_chat_service: MagicMock,
-        mock_verify_chat_ownership: AsyncMock,
+        mock_message_service: MagicMock,
     ):
         """Test sending a message successfully."""
         chat_id = mock_message.chat_id
-        mock_chat_service.update_title_from_message = AsyncMock(return_value=None)
+        mock_message_service.create = AsyncMock(return_value=mock_message)
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockMessageService:
-            mock_message_service = MagicMock()
-            mock_message_service.create = AsyncMock(return_value=mock_message)
-            MockMessageService.return_value = mock_message_service
+        response = client.post(
+            f"/api/v1/chats/{chat_id}/messages",
+            json={"content": "What is quantum computing?"},
+        )
 
-            response = client.post(
-                f"/api/v1/chats/{chat_id}/messages",
-                json={"content": "What is quantum computing?"},
-            )
-
-            assert response.status_code == 201
-            data = response.json()
-            assert "userMessage" in data
-            assert "researchSessionId" in data
-            mock_verify_chat_ownership.assert_awaited_once()
-            assert mock_verify_chat_ownership.await_args.args[0] == chat_id
-            assert mock_verify_chat_ownership.await_args.args[1] == "test-user-123"
-            mock_message_service.create.assert_awaited_once_with(
-                chat_id=chat_id,
-                role=MessageRole.USER,
-                content="What is quantum computing?",
-            )
-            mock_chat_service.update_title_from_message.assert_awaited_once_with(
-                chat_id,
-                "What is quantum computing?",
-            )
+        assert response.status_code == 201
+        data = response.json()
+        assert "userMessage" in data
+        assert "researchSessionId" in data
+        mock_chat_service.get_for_user.assert_awaited_once_with(
+            chat_id, "test-user-123"
+        )
+        mock_message_service.create.assert_awaited_once_with(
+            chat_id=chat_id,
+            role=MessageRole.USER,
+            content="What is quantum computing?",
+        )
+        mock_chat_service.update_title_from_message.assert_awaited_once_with(
+            chat_id,
+            "What is quantum computing?",
+        )
 
     def test_send_message_empty_content(self, client: TestClient):
         """Test sending a message with empty content is rejected."""
@@ -230,11 +254,13 @@ class TestSendMessage:
     def test_send_message_missing_chat_returns_404(
         self,
         client: TestClient,
-        mock_verify_chat_ownership: AsyncMock,
+        mock_chat_service: MagicMock,
     ):
         """Ownership verification failures should map to 404."""
         chat_id = uuid4()
-        mock_verify_chat_ownership.side_effect = NotFoundError("Chat", str(chat_id))
+        mock_chat_service.get_for_user = AsyncMock(
+            side_effect=NotFoundError("Chat", str(chat_id))
+        )
 
         response = client.post(
             f"/api/v1/chats/{chat_id}/messages",
@@ -251,43 +277,42 @@ class TestGetMessage:
         self,
         client: TestClient,
         mock_message: Message,
-        mock_verify_chat_ownership: AsyncMock,
+        mock_message_service: MagicMock,
+        mock_chat_service: MagicMock,
     ):
         """Test getting an existing message."""
         chat_id = mock_message.chat_id
         message_id = mock_message.id
+        mock_message_service.get_with_chat = AsyncMock(return_value=mock_message)
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(return_value=mock_message)
-            MockService.return_value = mock_service
+        response = client.get(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}"
+        )
 
-            response = client.get(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}"
-            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == str(message_id)
+        assert data["content"] == mock_message.content
+        mock_chat_service.get_for_user.assert_awaited_once_with(
+            chat_id, "test-user-123"
+        )
+        mock_message_service.get_with_chat.assert_awaited_once_with(message_id, chat_id)
 
-            assert response.status_code == 200
-            data = response.json()
-            assert data["id"] == str(message_id)
-            assert data["content"] == mock_message.content
-            mock_verify_chat_ownership.assert_awaited_once()
-            mock_service.get_with_chat.assert_awaited_once_with(message_id, chat_id)
-
-    def test_get_nonexistent_message(self, client: TestClient):
+    def test_get_nonexistent_message(
+        self,
+        client: TestClient,
+        mock_message_service: MagicMock,
+    ):
         """Test getting a message that doesn't exist."""
         chat_id = uuid4()
         message_id = uuid4()
+        mock_message_service.get_with_chat = AsyncMock(return_value=None)
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(return_value=None)
-            MockService.return_value = mock_service
+        response = client.get(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}"
+        )
 
-            response = client.get(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}"
-            )
-
-            assert response.status_code == 404
+        assert response.status_code == 404
 
 
 class TestEditMessage:
@@ -297,7 +322,8 @@ class TestEditMessage:
         self,
         client: TestClient,
         mock_message: Message,
-        mock_verify_chat_ownership: AsyncMock,
+        mock_message_service: MagicMock,
+        mock_chat_service: MagicMock,
     ):
         """Test editing a message successfully."""
         chat_id = mock_message.chat_id
@@ -305,70 +331,67 @@ class TestEditMessage:
         mock_message.is_edited = True
         mock_message.content = "Updated content"
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(return_value=mock_message)
-            mock_service.delete_subsequent = AsyncMock(return_value=2)
-            mock_service.update_content = AsyncMock(return_value=mock_message)
-            MockService.return_value = mock_service
+        mock_message_service.get_with_chat = AsyncMock(return_value=mock_message)
+        mock_message_service.delete_subsequent = AsyncMock(return_value=2)
+        mock_message_service.update_content = AsyncMock(return_value=mock_message)
 
-            response = client.patch(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}",
-                json={"content": "Updated content"},
-            )
+        response = client.patch(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}",
+            json={"content": "Updated content"},
+        )
 
-            assert response.status_code == 200
-            data = response.json()
-            assert data["message"]["isEdited"] is True
-            assert data["removedMessageCount"] == 2
-            mock_verify_chat_ownership.assert_awaited_once()
-            mock_service.delete_subsequent.assert_awaited_once_with(
-                chat_id,
-                mock_message.created_at,
-            )
-            mock_service.update_content.assert_awaited_once_with(
-                message_id,
-                "Updated content",
-            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["message"]["isEdited"] is True
+        assert data["removedMessageCount"] == 2
+        mock_chat_service.get_for_user.assert_awaited_once_with(
+            chat_id, "test-user-123"
+        )
+        mock_message_service.delete_subsequent.assert_awaited_once_with(
+            chat_id,
+            mock_message.created_at,
+        )
+        mock_message_service.update_content.assert_awaited_once_with(
+            message_id,
+            "Updated content",
+            chat_id=chat_id,
+        )
 
-    def test_edit_nonexistent_message(self, client: TestClient):
+    def test_edit_nonexistent_message(
+        self,
+        client: TestClient,
+        mock_message_service: MagicMock,
+    ):
         """Test editing a message that doesn't exist."""
         chat_id = uuid4()
         message_id = uuid4()
+        mock_message_service.get_with_chat = AsyncMock(return_value=None)
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(return_value=None)
-            MockService.return_value = mock_service
+        response = client.patch(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}",
+            json={"content": "Updated content"},
+        )
 
-            response = client.patch(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}",
-                json={"content": "Updated content"},
-            )
-
-            assert response.status_code == 404
+        assert response.status_code == 404
 
     def test_edit_agent_message_rejected(
-        self, client: TestClient, mock_agent_message: Message
+        self,
+        client: TestClient,
+        mock_agent_message: Message,
+        mock_message_service: MagicMock,
     ):
         """Test that editing an agent message is rejected."""
         chat_id = mock_agent_message.chat_id
         message_id = mock_agent_message.id
+        mock_message_service.get_with_chat = AsyncMock(return_value=mock_agent_message)
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(
-                return_value=mock_agent_message
-            )
-            MockService.return_value = mock_service
+        response = client.patch(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}",
+            json={"content": "Try to edit agent message"},
+        )
 
-            response = client.patch(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}",
-                json={"content": "Try to edit agent message"},
-            )
-
-            # Should return 404 as only user messages can be edited
-            assert response.status_code == 404
+        # Should return 404 as only user messages can be edited
+        assert response.status_code == 404
 
 
 class TestRegenerateMessage:
@@ -378,56 +401,57 @@ class TestRegenerateMessage:
         self,
         client: TestClient,
         mock_agent_message: Message,
-        mock_verify_chat_ownership: AsyncMock,
+        mock_message_service: MagicMock,
+        mock_chat_service: MagicMock,
     ):
         """Test regenerating an agent message."""
         chat_id = mock_agent_message.chat_id
         message_id = mock_agent_message.id
+        mock_message_service.get_with_chat = AsyncMock(return_value=mock_agent_message)
+        mock_message_service.delete_subsequent = AsyncMock(return_value=1)
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(
-                return_value=mock_agent_message
-            )
-            mock_service.delete_subsequent = AsyncMock(return_value=1)
-            MockService.return_value = mock_service
+        response = client.post(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}/regenerate"
+        )
 
-            response = client.post(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}/regenerate"
-            )
+        assert response.status_code == 201
+        data = response.json()
+        assert "newMessageId" in data
+        assert "researchSessionId" in data
+        mock_chat_service.get_for_user.assert_awaited_once_with(
+            chat_id, "test-user-123"
+        )
+        mock_message_service.delete_subsequent.assert_awaited_once_with(
+            chat_id,
+            mock_agent_message.created_at,
+        )
 
-            assert response.status_code == 201
-            data = response.json()
-            assert "newMessageId" in data
-            assert "researchSessionId" in data
-            mock_verify_chat_ownership.assert_awaited_once()
-            mock_service.delete_subsequent.assert_awaited_once_with(
-                chat_id,
-                mock_agent_message.created_at,
-            )
-
-    def test_regenerate_nonexistent_message(self, client: TestClient):
+    def test_regenerate_nonexistent_message(
+        self,
+        client: TestClient,
+        mock_message_service: MagicMock,
+    ):
         """Test regenerating a message that doesn't exist."""
         chat_id = uuid4()
         message_id = uuid4()
+        mock_message_service.get_with_chat = AsyncMock(return_value=None)
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(return_value=None)
-            MockService.return_value = mock_service
+        response = client.post(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}/regenerate"
+        )
 
-            response = client.post(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}/regenerate"
-            )
-
-            assert response.status_code == 404
+        assert response.status_code == 404
 
 
 class TestSubmitFeedback:
     """Tests for POST /api/v1/chats/{chat_id}/messages/{message_id}/feedback endpoint."""
 
     def test_submit_positive_feedback(
-        self, client: TestClient, mock_agent_message: Message
+        self,
+        client: TestClient,
+        mock_agent_message: Message,
+        mock_message_service: MagicMock,
+        mock_feedback_service: MagicMock,
     ):
         """Test submitting positive feedback."""
         from datetime import UTC, datetime
@@ -446,32 +470,25 @@ class TestSubmitFeedback:
         mock_feedback.feedback_category = None
         mock_feedback.created_at = datetime.now(UTC)
 
-        with (
-            patch("deep_research.api.v1.messages.MessageService") as MockMessageService,
-            patch("deep_research.api.v1.messages.FeedbackService") as MockFeedbackService,
-        ):
-            mock_message_service = MagicMock()
-            mock_message_service.get_with_chat = AsyncMock(
-                return_value=mock_agent_message
-            )
-            MockMessageService.return_value = mock_message_service
+        mock_message_service.get_with_chat = AsyncMock(return_value=mock_agent_message)
+        mock_feedback_service.create_feedback = AsyncMock(return_value=mock_feedback)
 
-            mock_feedback_service = MagicMock()
-            mock_feedback_service.create_feedback = AsyncMock(return_value=mock_feedback)
-            MockFeedbackService.return_value = mock_feedback_service
+        response = client.post(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}/feedback",
+            json={"rating": "positive"},
+        )
 
-            response = client.post(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}/feedback",
-                json={"rating": "positive"},
-            )
-
-            assert response.status_code == 201
-            data = response.json()
-            assert data["rating"] == "positive"
-            assert data["messageId"] == str(message_id)
+        assert response.status_code == 201
+        data = response.json()
+        assert data["rating"] == "positive"
+        assert data["messageId"] == str(message_id)
 
     def test_submit_negative_feedback_with_report(
-        self, client: TestClient, mock_agent_message: Message
+        self,
+        client: TestClient,
+        mock_agent_message: Message,
+        mock_message_service: MagicMock,
+        mock_feedback_service: MagicMock,
     ):
         """Test submitting negative feedback with error report."""
         from datetime import UTC, datetime
@@ -490,88 +507,74 @@ class TestSubmitFeedback:
         mock_feedback.feedback_category = None
         mock_feedback.created_at = datetime.now(UTC)
 
-        with (
-            patch("deep_research.api.v1.messages.MessageService") as MockMessageService,
-            patch("deep_research.api.v1.messages.FeedbackService") as MockFeedbackService,
-        ):
-            mock_message_service = MagicMock()
-            mock_message_service.get_with_chat = AsyncMock(
-                return_value=mock_agent_message
-            )
-            MockMessageService.return_value = mock_message_service
+        mock_message_service.get_with_chat = AsyncMock(return_value=mock_agent_message)
+        mock_feedback_service.create_feedback = AsyncMock(return_value=mock_feedback)
 
-            mock_feedback_service = MagicMock()
-            mock_feedback_service.create_feedback = AsyncMock(return_value=mock_feedback)
-            MockFeedbackService.return_value = mock_feedback_service
+        response = client.post(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}/feedback",
+            json={
+                "rating": "negative",
+                "feedback_text": "The dates mentioned are incorrect",
+            },
+        )
 
-            response = client.post(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}/feedback",
-                json={
-                    "rating": "negative",
-                    "feedback_text": "The dates mentioned are incorrect",
-                },
-            )
+        assert response.status_code == 201
+        data = response.json()
+        assert data["rating"] == "negative"
+        assert data["feedbackText"] is not None
 
-            assert response.status_code == 201
-            data = response.json()
-            assert data["rating"] == "negative"
-            assert data["feedbackText"] is not None
-
-    def test_submit_feedback_nonexistent_message(self, client: TestClient):
+    def test_submit_feedback_nonexistent_message(
+        self,
+        client: TestClient,
+        mock_message_service: MagicMock,
+    ):
         """Test submitting feedback for a message that doesn't exist."""
         chat_id = uuid4()
         message_id = uuid4()
+        mock_message_service.get_with_chat = AsyncMock(return_value=None)
 
-        with (
-            patch("deep_research.api.v1.messages.MessageService") as MockMessageService,
-        ):
-            mock_message_service = MagicMock()
-            mock_message_service.get_with_chat = AsyncMock(return_value=None)
-            MockMessageService.return_value = mock_message_service
+        response = client.post(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}/feedback",
+            json={"rating": "positive"},
+        )
 
-            response = client.post(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}/feedback",
-                json={"rating": "positive"},
-            )
-
-            assert response.status_code == 404
+        assert response.status_code == 404
 
 
 class TestGetMessageContent:
     """Tests for GET /api/v1/chats/{chat_id}/messages/{message_id}/copy endpoint."""
 
     def test_get_message_content(
-        self, client: TestClient, mock_message: Message
+        self,
+        client: TestClient,
+        mock_message: Message,
+        mock_message_service: MagicMock,
     ):
         """Test getting message content for clipboard."""
         chat_id = mock_message.chat_id
         message_id = mock_message.id
+        mock_message_service.get_with_chat = AsyncMock(return_value=mock_message)
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(return_value=mock_message)
-            MockService.return_value = mock_service
+        response = client.get(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}/copy"
+        )
 
-            response = client.get(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}/copy"
-            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["content"] == mock_message.content
 
-            assert response.status_code == 200
-            data = response.json()
-            assert data["content"] == mock_message.content
-
-    def test_get_message_content_nonexistent(self, client: TestClient):
+    def test_get_message_content_nonexistent(
+        self,
+        client: TestClient,
+        mock_message_service: MagicMock,
+    ):
         """Test getting content for a message that doesn't exist."""
         chat_id = uuid4()
         message_id = uuid4()
+        mock_message_service.get_with_chat = AsyncMock(return_value=None)
 
-        with patch("deep_research.api.v1.messages.MessageService") as MockService:
-            mock_service = MagicMock()
-            mock_service.get_with_chat = AsyncMock(return_value=None)
-            MockService.return_value = mock_service
+        response = client.get(
+            f"/api/v1/chats/{chat_id}/messages/{message_id}/copy"
+        )
 
-            response = client.get(
-                f"/api/v1/chats/{chat_id}/messages/{message_id}/copy"
-            )
-
-            assert response.status_code == 404
+        assert response.status_code == 404

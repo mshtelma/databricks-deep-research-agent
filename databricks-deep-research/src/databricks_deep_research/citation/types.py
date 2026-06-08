@@ -73,6 +73,32 @@ class VerificationMethod(StrEnum):
 
 
 # ---------------------------------------------------------------------------
+# Source-kind classification (shared Stage 1 <-> Stage 8)
+# ---------------------------------------------------------------------------
+
+# Source kinds/types that denote a pre-curated authoritative corpus (vector
+# index, Genie/SQL, knowledge assistant, file) as opposed to the open web.
+# Generic across source kinds -- does NOT hardcode any domain, table name, or
+# corpus identifier. Shared by Stage-1 extraction routing (evidence_selector)
+# and Stage-8 hedge-register selection (pipeline) so both agree on what
+# "corpus-grounded" means.
+CORPUS_SOURCE_KINDS: frozenset[str] = frozenset(
+    {"vector_index", "sql_analytics", "qa_assistant", "file"}
+)
+CORPUS_SOURCE_TYPES: frozenset[str] = frozenset(
+    {"vector_search", "genie", "knowledge_assistant"}
+)
+
+
+def is_corpus_source_value(value: str | None) -> bool:
+    """True if *value* (a ``source_kind`` or ``source_type`` string) denotes a
+    pre-curated authoritative corpus rather than the open web."""
+    if not value:
+        return False
+    return value in CORPUS_SOURCE_KINDS or value in CORPUS_SOURCE_TYPES
+
+
+# ---------------------------------------------------------------------------
 # Evidence types  (Stage 1)
 # ---------------------------------------------------------------------------
 
@@ -95,6 +121,7 @@ class EvidenceInfo:
     has_numeric_content: bool = False
     source_pool_index: int | None = None
     evidence_pool_index: int | None = None
+    source_kind: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
@@ -110,6 +137,7 @@ class EvidenceInfo:
             "has_numeric_content": self.has_numeric_content,
             "source_pool_index": self.source_pool_index,
             "evidence_pool_index": self.evidence_pool_index,
+            "source_kind": self.source_kind,
         }
 
 
@@ -136,6 +164,10 @@ class RankedEvidence:
     is_snippet_based: bool = False
     """True if evidence was derived from a search snippet rather than
     full crawled content.  Snippet-based evidence has lower confidence."""
+    source_kind: str | None = None
+    """Resolved source kind/type (e.g. ``vector_index``, ``web``) used at
+    Stage 8 to pick a source-appropriate softening register. ``None`` for
+    legacy/unknown provenance -> treated as non-corpus."""
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +238,14 @@ class ClaimInfo:
     """True if extracted from a ``<free>`` block (needs verification)."""
     has_fallback_evidence: bool = False
     """True if evidence was assigned via fallback keyword matching (not LLM citation)."""
+    is_negative_existence: bool = False
+    """PR3-E R2.2: True when the claim asserts that a specific fact, entity,
+    period, or value is NOT present / NOT available / DOES NOT exist in the
+    source corpus. Classified by a small Haiku call gated behind
+    ``SYNTH_PIPELINE_V2``; downstream disposition forces REMOVE when this
+    flag is true AND the verdict is not fully supported."""
+    is_negative_existence_reasoning: str | None = None
+    """Optional one-line reasoning from the is_negative_existence classifier."""
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""

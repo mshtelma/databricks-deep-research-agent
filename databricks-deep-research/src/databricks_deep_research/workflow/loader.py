@@ -152,6 +152,7 @@ def _definition_from_raw(raw: dict[str, Any]) -> WorkflowDefinition:
         models=raw.get("models", {}),
         required_inputs=raw.get("required_inputs", ["query"]),
         output_keys=raw.get("output_keys", ["output"]),
+        runtime_injected_keys=raw.get("runtime_injected_keys", []),
         token_budget=raw.get("token_budget", 0),
         timeout_seconds=raw.get("timeout_seconds", 1800),
     )

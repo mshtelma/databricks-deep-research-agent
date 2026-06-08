@@ -20,7 +20,7 @@ Schema-evolution safety (plan section "Document pydantic models"):
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
@@ -47,7 +47,7 @@ STATE_HARD_BUDGET_BYTES: int = 4 * 1024 * 1024  # 4 MiB reject
 
 
 def _utcnow() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 # --- Leaf-node models -------------------------------------------------------
@@ -66,7 +66,6 @@ class ChatMetaEmbed(BaseModel):
     type: str = "native"
     title: str = ""
     incognito_session_id: UUID | None = None
-    custom_agent_id: UUID | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -172,6 +171,7 @@ class ResearchSessionState(BaseModel):
     current_step: int = 0
     started_at: datetime = Field(default_factory=_utcnow)
     completed_at: datetime | None = None
+    last_heartbeat: datetime | None = None
 
     # Legacy chats were persisted with plan/verification_data=None because the
     # SQL ResearchSession model columns are nullable and the complete-path

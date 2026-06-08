@@ -99,6 +99,36 @@ class TestMatchDomainPattern:
         assert match_domain_pattern("example.com", " example.com ") is True
         assert match_domain_pattern(" example.com ", "example.com") is True
 
+    def test_bare_domain_is_subdomain_inclusive(self) -> None:
+        """A bare multi-label pattern matches its subdomains (D1) — aligns with the
+        OpenAI allowed_domains push-down (auto-includes subdomains) and user intuition."""
+        assert match_domain_pattern("reuters.com", "reuters.com") is True
+        assert match_domain_pattern("www.reuters.com", "reuters.com") is True
+        assert match_domain_pattern("feeds.news.reuters.com", "reuters.com") is True
+
+    def test_bare_domain_subdomain_no_false_positive(self) -> None:
+        assert match_domain_pattern("notreuters.com", "reuters.com") is False
+        assert match_domain_pattern("reuters.com.evil.com", "reuters.com") is False
+
+
+class TestSubdomainInclusiveFilter:
+    """DomainFilter end-to-end: bare include/exclude domains cover subdomains (D1)."""
+
+    def test_include_admits_subdomain(self) -> None:
+        flt = DomainFilter(
+            DomainFilterConfig(mode=DomainFilterMode.INCLUDE, include_domains=["reuters.com"])
+        )
+        assert flt.is_allowed("https://www.reuters.com/x").allowed is True
+        assert flt.is_allowed("https://reuters.com/x").allowed is True
+        assert flt.is_allowed("https://other.com/x").allowed is False
+
+    def test_exclude_blocks_subdomain(self) -> None:
+        flt = DomainFilter(
+            DomainFilterConfig(mode=DomainFilterMode.EXCLUDE, exclude_domains=["spam.com"])
+        )
+        assert flt.is_allowed("https://www.spam.com/x").allowed is False
+        assert flt.is_allowed("https://ham.com/x").allowed is True
+
 
 class TestDomainFilterExcludeMode:
     """Tests for DomainFilter in exclude (blacklist) mode."""

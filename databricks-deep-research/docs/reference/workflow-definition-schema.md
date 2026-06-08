@@ -23,6 +23,7 @@ These are the fields of `WorkflowDefinition`, the root object of every workflow 
 | `models` | `dict[str, str \| dict]` | `{}` | no | Per-tier model endpoint configuration. Keys are tier names; values are endpoint strings or dicts with `endpoints`, `fallback_on_429`, `rotation_strategy`, `tokens_per_minute`. See [Model Configuration](../guides/model-configuration.md). |
 | `required_inputs` | `list[str]` | `["query"]` | no | State keys that **must** be present before execution begins. |
 | `output_keys` | `list[str]` | `["output"]` | no | State keys the workflow is expected to produce. |
+| `runtime_injected_keys` | `list[str]` | `[]` | no | Keys injected at runtime (not produced by any node `output_key`); the dataflow checker treats them as both available (a read is not dangling) and consumed (a producer is not a dead store). See [Dataflow Validation](../guides/dataflow-validation.md). |
 | `token_budget` | `int` | `0` | no | Maximum total tokens across all LLM calls. `0` means unlimited. |
 | `timeout_seconds` | `int` | `1800` | no | Hard wall-clock timeout for the entire workflow execution. |
 
@@ -524,3 +525,4 @@ root:
 - [Workflow Engine](../concepts/workflow-engine.md)
 - [Node Types Reference](node-types-reference.md)
 - [YAML Workflow Authoring](../guides/yaml-workflow-authoring.md)
+- [Dataflow Validation](../guides/dataflow-validation.md) -- how `validate_workflow` checks reads/writes line up (and what `runtime_injected_keys` exempts). Note: `dataflow_contracts` (`workflow/dataflow_contracts.py`) is the validation module that runs this check, not a YAML field.

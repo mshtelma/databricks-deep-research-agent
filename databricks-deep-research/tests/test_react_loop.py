@@ -207,6 +207,59 @@ async def test_duplicate_tool_calls_skipped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_tool_results_are_not_cached() -> None:
+    """Failed retrieval attempts must not be replayed as cache hits."""
+    tool = _make_tool("web_crawl")
+    type(tool).definition = PropertyMock(
+        return_value=ToolDefinition(
+            name="web_crawl",
+            description="Mock crawler",
+            parameters={
+                "type": "object",
+                "properties": {"url_index": {"type": "integer"}},
+            },
+            source_type="web_crawl",
+            source_kind="web",
+        )
+    )
+    tool.execute = AsyncMock(
+        return_value=ToolResult(
+            content="No URL found for index 0. Valid indices: 0--1.",
+            success=False,
+            error="Invalid url_index: 0",
+        )
+    )
+    same_args = {"url_index": 0}
+    cache = ToolCallCache()
+    llm_one = AsyncMock()
+    llm_one.complete = AsyncMock(
+        side_effect=[
+            _llm_response(tool_calls=[_tool_call("web_crawl", same_args, tc_id="tc1")]),
+            _llm_response(content="first done"),
+        ]
+    )
+
+    first_loop = ReactLoop(llm_one, tools=[tool], cache=cache, max_tool_calls=5)
+    first_result = await first_loop.execute([{"role": "user", "content": "crawl"}])
+
+    llm_two = AsyncMock()
+    llm_two.complete = AsyncMock(
+        side_effect=[
+            _llm_response(tool_calls=[_tool_call("web_crawl", same_args, tc_id="tc2")]),
+            _llm_response(content="second done"),
+        ]
+    )
+    second_loop = ReactLoop(llm_two, tools=[tool], cache=cache, max_tool_calls=5)
+    second_result = await second_loop.execute([{"role": "user", "content": "crawl again"}])
+
+    assert first_result.content == "first done"
+    assert second_result.content == "second done"
+    assert tool.execute.await_count == 2
+    assert not [e for e in first_result.events if isinstance(e, ToolCacheHitEvent)]
+    assert not [e for e in second_result.events if isinstance(e, ToolCacheHitEvent)]
+
+
+@pytest.mark.asyncio
 async def test_result_contains_expected_events() -> None:
     """ReactResult.events should contain call, result, and cache events."""
     tool = _make_tool("crawl", result_content="page body")

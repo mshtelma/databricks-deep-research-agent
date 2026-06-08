@@ -13,11 +13,16 @@ A **uv workspace monorepo** containing two packages: a standalone multi-agent or
 
 ## Key Features
 
+- **Agent Designer** - Build a multi-agent research workflow from a one-line prompt in a chat + canvas UI, then deploy it to any of five runtime targets ([designer](docs/agent-designer.md) · [deployment](docs/agent-deployment.md))
 - **YAML Workflow Engine** - Declarative research pipelines with 8 node types and plan-and-execute orchestration ([framework docs](databricks-deep-research/docs/index.md))
 - **5-Agent Architecture** - Coordinator, Planner, Researcher, Reflector, and Synthesizer with step-by-step reflection
 - **7-Stage Citation Pipeline** - Evidence pre-selection, interleaved generation, confidence classification, isolated verification, citation correction, numeric QA, and ARE-style revision
+- **Multi-Provider Web Search** - Databricks built-in web search (default, no external key), Brave, or Jina behind one `SearchClient` protocol ([search providers](databricks-deep-research/docs/guides/search-providers.md))
+- **Delta / SQL Table Tools** - Structured research directly over Delta tables with the `table_*` tool family ([SQL table tools](databricks-deep-research/docs/guides/sql-table-tools.md))
 - **Tiered Query Modes** - Simple (<3s), Web Search (<15s), and Deep Research (<2min) for progressive disclosure
+- **Dataflow Validation** - Workflows are checked for dangling reads and dead stores at load time ([dataflow validation](databricks-deep-research/docs/guides/dataflow-validation.md))
 - **Scientific Grounding** - Every factual claim traced to evidence with verification verdicts based on ARE, FActScore, SAFE, CoVe, and ReClaim patterns
+- **Conversation Memory & HITL** - Chat memory (entities, files, findings, coverage) and human-in-the-loop approval gates
 - **Real-time Streaming** - Server-Sent Events (SSE) for live research progress updates
 - **Enterprise Ready** - OAuth token refresh, automatic failover, atomic persistence on Databricks Lakebase
 
@@ -53,6 +58,15 @@ A **uv workspace monorepo** containing two packages: a standalone multi-agent or
 │                     └─────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+## Agent Designer
+
+The **Agent Designer** turns a one-line prompt ("a research agent over our docs index plus public web, with reflection, under 30s") into a runnable multi-agent workflow. An LLM *architect* assembles a typed workflow AST through tool calls; a chat panel and a visual canvas are two synchronized views over that same AST. YAML and Mermaid are deterministic *export* formats — the AST (stored as JSONB on Lakebase, with immutable revisions) is the source of truth.
+
+A designed agent deploys to five runtime targets from the same AST: **In-App** (run inside this app), **MLflow Agent** (Model Serving endpoint), **Shell App** (standalone Databricks App with the framework bundled as a wheel, per-request OBO), **Spark Batch** (run over a Delta table column), and **direct programmatic serving**.
+
+- [Agent Designer](docs/agent-designer.md) — authoring, the design brief, designer tools, topologies, and the chat/canvas UI.
+- [Deploying a Designed Agent](docs/agent-deployment.md) — the five deploy targets, the deployment API, and pre-flight permission probes.
 
 ## Quick Start
 
@@ -284,7 +298,7 @@ make logs TARGET=dev FOLLOW=-f SEARCH="--search ERROR"
 
 ### Framework Documentation
 
-The **databricks-deep-research** framework has 42 documentation files covering the workflow engine, agent harness, tool protocol, pool system, streaming events, and citation pipeline.
+The **databricks-deep-research** framework ships extensive documentation covering the workflow engine, agent harness, tool protocol, pool system, streaming events, search providers, SQL/table tools, dataflow validation, and the citation pipeline.
 
 Full index: [`databricks-deep-research/docs/index.md`](databricks-deep-research/docs/index.md)
 
@@ -307,6 +321,8 @@ Full index: [`databricks-deep-research/docs/index.md`](databricks-deep-research/
 | [Data Models](./docs/data-models.md) | Entity definitions and relationships |
 | [API Reference](./docs/api.md) | REST endpoints and SSE event types |
 | [Deployment](./docs/deployment.md) | Databricks Apps deployment guide |
+| [Agent Designer](./docs/agent-designer.md) | Chat-based workflow authoring: design brief, designer tools, topologies, UI |
+| [Agent Deployment](./docs/agent-deployment.md) | Deploying a designed agent to its five runtime targets |
 
 ## Technology Stack
 
@@ -386,8 +402,8 @@ See [Scientific Foundations](./docs/scientific-foundations.md) for detailed expl
 pyproject.toml                          # uv workspace root
 databricks-deep-research/               # Framework package (v0.2.0)
 ├── src/databricks_deep_research/       # Workflow engine, agents, tools, pools, citation
-├── docs/                               # Framework documentation (43 files)
-├── examples/                           # 13 YAML workflow examples
+├── docs/                               # Framework docs (concepts, guides, reference, security)
+├── examples/                           # YAML workflow examples
 └── tests/
 databricks-deep-research-app/           # Application package
 ├── src/deep_research/                  # FastAPI backend

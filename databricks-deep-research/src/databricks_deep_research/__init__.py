@@ -30,6 +30,59 @@ Builtin tools::
 # Errors
 # Register builtin subtypes (side-effect import)
 import databricks_deep_research.agents.builtins  # noqa: F401
+
+# Python authoring API (Phases 1 + 2)
+from databricks_deep_research.api import (
+    Agent,
+    AgentResult,
+    ApiKey,
+    ApprovalBroker,
+    ApprovalDecision,
+    BearerToken,
+    Cite,
+    Claim,
+    CustomHeaders,
+    DeltaCheckpointer,
+    Description,
+    Evidence,
+    GateDeniedEvent,
+    GateResumedEvent,
+    GateTimeoutEvent,
+    GateWaitingEvent,
+    InMemoryBackend,
+    InMemoryTodoStore,
+    InProcessApprovalBroker,
+    MCPAuth,
+    MCPSchemaError,
+    MCPSecurityError,
+    MCPToolset,
+    Parallel,
+    PoolInjectSpec,
+    PoolWriteSpec,
+    RunContext,
+    Sequence,
+    SubAgent,
+    SummaryInfo,
+    Team,
+    TeamStrategy,
+    Todo,
+    TodoStore,
+    UCVolumeBackend,
+    VerificationSummary,
+    VirtualFilesystem,
+    create_deep_agent,
+    extract_verification,
+    extract_verification_from_report,
+    requires_approval,
+    tool,
+    write_todos_tool,
+)
+
+# Reusable Databricks OBO/SP tool wiring (shared by every host app)
+from databricks_deep_research.core.databricks_auth import (
+    build_obo_workspace_client,
+    resolve_workspace_client,
+)
 from databricks_deep_research.errors import (
     NodeBudgetExceededError,
     TokenBudgetExceededError,
@@ -54,16 +107,22 @@ from databricks_deep_research.llm.client import (
     parse_model_config,
 )
 from databricks_deep_research.runner import WorkflowResult, WorkflowRunner
+from databricks_deep_research.tools.builtins.databricks_runner import (
+    build_databricks_workflow_runner,
+    workflow_requires_databricks,
+)
 
 # Tool protocol
 from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.tools.protocol import (
+    DATABRICKS_BOUND_TOOL_KINDS,
     RegisteredTable,
     ResearchTool,
     TableRegistry,
     ToolContext,
     ToolDefinition,
     ToolResult,
+    required_ctx_fields_for_kind,
 )
 from databricks_deep_research.tracing import (
     setup_mlflow_tracing,
@@ -117,6 +176,13 @@ __all__ = [
     "ToolDefinition",
     "ToolResult",
     "ToolFactoryContext",
+    "required_ctx_fields_for_kind",
+    # Databricks OBO/SP tool wiring (reusable by host apps)
+    "build_databricks_workflow_runner",
+    "build_obo_workspace_client",
+    "resolve_workspace_client",
+    "workflow_requires_databricks",
+    "DATABRICKS_BOUND_TOOL_KINDS",
     # Loader
     "load_workflow",
     "load_workflow_from_dict",
@@ -142,4 +208,54 @@ __all__ = [
     "WorkflowCancelledError",
     "TokenBudgetExceededError",
     "NodeBudgetExceededError",
+    # Python authoring API (Phase 1)
+    "Agent",
+    "AgentResult",
+    "SubAgent",
+    "Sequence",
+    "Parallel",
+    "tool",
+    "RunContext",
+    "Cite",
+    "Description",
+    "PoolWriteSpec",
+    "PoolInjectSpec",
+    "VerificationSummary",
+    "Claim",
+    "Evidence",
+    "SummaryInfo",
+    "extract_verification",
+    "extract_verification_from_report",
+    "create_deep_agent",
+    # Phase 2: HITL
+    "ApprovalBroker",
+    "ApprovalDecision",
+    "InProcessApprovalBroker",
+    "requires_approval",
+    "GateWaitingEvent",
+    "GateResumedEvent",
+    "GateDeniedEvent",
+    "GateTimeoutEvent",
+    # Phase 2: Todos
+    "Todo",
+    "TodoStore",
+    "InMemoryTodoStore",
+    "write_todos_tool",
+    # Phase 2: VFS
+    "VirtualFilesystem",
+    "InMemoryBackend",
+    "UCVolumeBackend",
+    # Phase 2: Checkpoint
+    "DeltaCheckpointer",
+    # Phase 3: Team
+    "Team",
+    "TeamStrategy",
+    # Phase 3: MCP
+    "MCPToolset",
+    "MCPSchemaError",
+    "MCPSecurityError",
+    "MCPAuth",
+    "BearerToken",
+    "ApiKey",
+    "CustomHeaders",
 ]

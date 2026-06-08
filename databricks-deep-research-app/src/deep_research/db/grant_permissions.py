@@ -26,6 +26,7 @@ Scope notes:
 
 import asyncio
 import logging
+import os
 import re
 
 import asyncpg  # type: ignore[import-untyped]
@@ -37,6 +38,20 @@ from deep_research.db.session import get_credential_provider
 logger = logging.getLogger(__name__)
 
 _SQL_IDENTIFIER_RE = re.compile(r'^[a-zA-Z0-9_\-\.]+$')
+
+# Opt-out env var for the strict role-existence check. When unset (default),
+# a failed ``pg_roles`` query raises so the deploy fails loudly instead of
+# silently shipping an app whose SP role does not exist in Lakebase. Set to
+# any truthy value (``1``, ``true``, etc.) to fall back to the legacy
+# "skip create on check failure" behaviour — useful only when an operator
+# has already verified the role state out-of-band.
+_TOLERATE_ROLE_CHECK_FAILURE_ENV = "GRANT_PERMISSIONS_TOLERATE_ROLE_CHECK_FAILURE"
+
+
+def _tolerate_role_check_failure() -> bool:
+    """Return True when the strict-mode opt-out env var is set to a truthy value."""
+    raw = os.environ.get(_TOLERATE_ROLE_CHECK_FAILURE_ENV, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _validate_sql_identifier(name: str, label: str = "identifier") -> str:
@@ -174,9 +189,12 @@ async def grant_permissions_to_app(
             # Three-state (True/False/None):
             #   True  → role exists; skip create (idempotent).
             #   False → role missing; create it.
-            #   None  → verification failed; do NOT create (avoid accidental
-            #           recreate). Operator can create the role manually via
-            #           the Lakebase SQL Editor if this is a fresh deploy.
+            #   None  → verification failed. STRICT mode (default): raise so
+            #           the deploy fails loudly instead of silently shipping
+            #           an app whose role does not exist. Operators with
+            #           verified out-of-band role state can opt back into
+            #           the legacy skip-on-check-failure behaviour by setting
+            #           ``GRANT_PERMISSIONS_TOLERATE_ROLE_CHECK_FAILURE=1``.
             role_exists: bool | None
             try:
                 role_exists = bool(
@@ -185,15 +203,31 @@ async def grant_permissions_to_app(
                     )
                 )
             except Exception as check_err:
-                logger.warning(
-                    "pg_roles check failed for %s: %s — SKIPPING "
-                    "databricks_create_role to avoid accidental role "
-                    "recreation. If this is a fresh deploy, create the role "
-                    "manually via the Lakebase SQL Editor.",
-                    sp_username,
-                    check_err,
-                )
-                role_exists = None
+                if _tolerate_role_check_failure():
+                    logger.warning(
+                        "pg_roles check failed for %s: %s — SKIPPING "
+                        "databricks_create_role because "
+                        "%s is set. If this is a fresh deploy, create the "
+                        "role manually via the Lakebase SQL Editor.",
+                        sp_username,
+                        check_err,
+                        _TOLERATE_ROLE_CHECK_FAILURE_ENV,
+                    )
+                    role_exists = None
+                else:
+                    raise RuntimeError(
+                        f"pg_roles existence check failed for SP "
+                        f"{sp_username!r}: {check_err!r}. Refusing to proceed "
+                        f"because skipping role creation here would silently "
+                        f"ship an app whose Lakebase role does not exist "
+                        f"(symptom: 'password authentication failed for user "
+                        f"{sp_username}' at runtime). Either: (a) verify the "
+                        f"role exists in the Lakebase SQL Editor and re-run "
+                        f"this command with {_TOLERATE_ROLE_CHECK_FAILURE_ENV}=1, "
+                        f"or (b) create the role manually with "
+                        f"`SELECT databricks_create_role('{sp_username}', "
+                        f"'SERVICE_PRINCIPAL');`."
+                    ) from check_err
 
             if role_exists is False:
                 try:
@@ -214,8 +248,7 @@ async def grant_permissions_to_app(
                 logger.info(
                     f"Autoscaling role already exists for {sp_username}, skipping"
                 )
-            # role_exists is None → verification failed; skip create entirely
-            # (already logged above).
+            # role_exists is None → opt-out branch taken above; skip create.
 
         # SECURITY INVARIANT: DDL statements below use f-string interpolation with
         # double-quoted identifiers. Safe ONLY because _validate_sql_identifier()
@@ -274,6 +307,56 @@ async def grant_permissions_to_app(
             '''
         )
         logger.info("Set default privileges for sequences")
+
+        # Post-flight verification. Postgres GRANT statements succeed silently
+        # against a nonexistent grantee in some PG versions/configurations, so
+        # earlier success logs do NOT prove the role is usable. Re-query
+        # pg_roles here to assert the SP can actually log in; raise a loud
+        # error otherwise so the deploy fails BEFORE the app is started.
+        # Mirrors strict-mode behaviour above: opt-out env var skips this too.
+        if _tolerate_role_check_failure():
+            logger.info(
+                "Skipping post-flight role verification because %s is set",
+                _TOLERATE_ROLE_CHECK_FAILURE_ENV,
+            )
+        else:
+            try:
+                rolcanlogin = await conn.fetchval(
+                    "SELECT rolcanlogin FROM pg_roles WHERE rolname = $1",
+                    sp_username,
+                )
+            except Exception as verify_err:
+                raise RuntimeError(
+                    f"Post-flight role verification failed for SP "
+                    f"{sp_username!r}: {verify_err!r}. Grants may have been "
+                    f"applied against a missing role; the app will fail with "
+                    f"'password authentication failed' at runtime. Re-run "
+                    f"this command after the Lakebase endpoint is healthy, or "
+                    f"set {_TOLERATE_ROLE_CHECK_FAILURE_ENV}=1 if you have "
+                    f"verified the role state out-of-band."
+                ) from verify_err
+            if rolcanlogin is None:
+                raise RuntimeError(
+                    f"Post-flight check: Lakebase role {sp_username!r} does "
+                    f"NOT exist in database {settings.lakebase_database!r}. "
+                    f"GRANT statements above ran but had no effective grantee; "
+                    f"the app will hit 'password authentication failed for "
+                    f"user {sp_username}' at first request. Create the role "
+                    f"with `SELECT databricks_create_role('{sp_username}', "
+                    f"'SERVICE_PRINCIPAL');` in the Lakebase SQL Editor and "
+                    f"re-run this command."
+                )
+            if not rolcanlogin:
+                raise RuntimeError(
+                    f"Post-flight check: Lakebase role {sp_username!r} exists "
+                    f"but rolcanlogin=False. The role cannot authenticate. "
+                    f"Run `ALTER ROLE \"{sp_username}\" LOGIN;` in the "
+                    f"Lakebase SQL Editor and re-run this command."
+                )
+            logger.info(
+                "Post-flight verification OK for SP %s (rolcanlogin=true)",
+                sp_username,
+            )
 
     finally:
         await conn.close()

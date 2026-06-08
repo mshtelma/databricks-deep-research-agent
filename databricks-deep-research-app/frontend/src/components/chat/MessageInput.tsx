@@ -10,9 +10,11 @@ import { UploadedFileList } from '@/components/files/UploadedFileList';
 import { useQueryMode, useSourceScope } from '@/hooks';
 import { useDiscoveredSources, useRefreshDiscovery } from '@/hooks/useDiscoveredSources';
 import { useFileUpload } from '@/hooks/useFileUpload';
-import { useCustomAgents } from '@/hooks/useCustomAgents';
+import { useAgentsV2List } from '@/hooks/useAgentsV2';
+import { ComponentRegistry } from '@/core/plugins';
 import type { AvailableSource } from '@/types/dataSources';
 import type { CustomAgentSummary } from '@/types/customAgents';
+import type { AgentV2Summary } from '@/types/agentDesigner';
 import type { InputConfig } from '@/core/plugins/types';
 import type { QuerySubmission } from '@/types/querySubmission';
 
@@ -77,6 +79,18 @@ function writeEnabledEnterpriseSources(ids: Set<string>): void {
   }
 }
 
+function agentV2ToSelectorSummary(agent: AgentV2Summary): CustomAgentSummary {
+  return {
+    id: agent.id,
+    name: agent.name,
+    description: agent.description,
+    avatarUrl: null,
+    visibility: agent.visibility === 'workspace' ? 'workspace' : 'private',
+    ownerId: agent.visibility === 'system' ? 'system' : agent.owner_id,
+    inAppActive: agent.in_app_active,
+  };
+}
+
 export function MessageInput({
   onSubmit,
   onStop,
@@ -127,6 +141,22 @@ export function MessageInput({
     !effectiveShowVerifySources
       ? (inputConfig?.defaultVerifySources ?? true)
       : false
+  );
+
+  // Deliverable (output type) selection. Sourced from the registered output
+  // renderers (plugin-provided), so the dropdown lists exactly the structured
+  // deliverables this deployment can produce. Internal/default renderers are
+  // excluded; the selector only shows when there's an actual choice (>= 2).
+  const deliverableOptions = React.useMemo(
+    () =>
+      ComponentRegistry.listOutputTypes()
+        .filter((t) => !t.startsWith('__') && t !== 'synthesis_report')
+        .map((t) => ({ value: t, label: ComponentRegistry.getRenderer(t)?.displayName ?? t })),
+    []
+  );
+  const showDeliverableSelector = deliverableOptions.length >= 2;
+  const [selectedOutputType, setSelectedOutputType] = React.useState<string | undefined>(
+    () => inputConfig?.defaultOutputType
   );
 
   // State for source browser modal
@@ -204,11 +234,17 @@ export function MessageInput({
       document.removeEventListener('mousedown', handleClickOutside);
     };
   }, [showAgentPicker]);
-  const { data: agentsData } = useCustomAgents(
-    { include_system: true },
-    { enabled: queryMode === 'deep_research' }
+  const {
+    data: agentsData,
+    isLoading: isLoadingAgents,
+    isFetching: isFetchingAgents,
+    isError: isAgentsError,
+    refetch: refetchAgents,
+  } = useAgentsV2List();
+  const agents = React.useMemo(
+    () => (queryMode === 'deep_research' ? (agentsData?.items ?? []).map(agentV2ToSelectorSummary) : []),
+    [agentsData?.items, queryMode],
   );
-  const agents = agentsData?.agents ?? [];
 
   // Restore selected agent from localStorage on mount / when agents load
   React.useEffect(() => {
@@ -373,7 +409,7 @@ export function MessageInput({
         queryMode,
         researchDepth,
         verifySources,
-        outputType: inputConfig?.defaultOutputType,
+        outputType: selectedOutputType ?? inputConfig?.defaultOutputType,
         sourceScope: shouldShowSourceScope ? sourceScope : undefined,
         enabledSources: enabledSourceIds,
         disabledSources: disabledSourceIds,
@@ -480,13 +516,37 @@ export function MessageInput({
             <span>Verify sources</span>
           </label>
         )}
+        {/* Deliverable selector — choose the structured output type when >1 exists */}
+        {showDeliverableSelector && (
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground select-none">
+            <span>Deliverable</span>
+            <select
+              data-testid="deliverable-selector"
+              value={selectedOutputType ?? deliverableOptions[0]?.value ?? ''}
+              onChange={(e) => setSelectedOutputType(e.target.value)}
+              disabled={disabled || isLoading}
+              className="bg-background border border-input rounded px-1.5 py-1 text-xs cursor-pointer"
+            >
+              {deliverableOptions.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         {/* Agent selector (deep_research mode) */}
         {queryMode === 'deep_research' && effectiveShowModeSelector && (
           <div className="relative" ref={agentPickerRef}>
             <button
               type="button"
               data-testid="agent-selector-trigger"
-              onClick={() => setShowAgentPicker(!showAgentPicker)}
+              onClick={() => {
+                if (!showAgentPicker) {
+                  void refetchAgents();
+                }
+                setShowAgentPicker(!showAgentPicker);
+              }}
               disabled={disabled || isLoading}
               className={cn(
                 'flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors',
@@ -526,6 +586,8 @@ export function MessageInput({
             {showAgentPicker && (
               <AgentPickerDropdown
                 agents={agents}
+                isLoading={isLoadingAgents || isFetchingAgents}
+                isError={isAgentsError}
                 selectedAgent={selectedAgent}
                 onSelect={(agent) => {
                   handleAgentSelect(agent);
@@ -812,16 +874,22 @@ function XCloseIcon({ className }: { className?: string }) {
 
 function AgentPickerDropdown({
   agents,
+  isLoading,
+  isError,
   selectedAgent,
   onSelect,
 }: {
   agents: CustomAgentSummary[];
+  isLoading: boolean;
+  isError: boolean;
   selectedAgent: CustomAgentSummary | null;
   onSelect: (agent: CustomAgentSummary) => void;
 }) {
-  // Group agents by visibility: private ("My Agents") vs workspace ("Workspace")
+  // Group agents: private ("My Agents") vs in_app-active ("Workspace").
+  // TODO(Q4): remove visibility='workspace' shim from DeploymentJobRunner once
+  // this filter has soaked and the backfill migration (029) has run everywhere.
   const myAgents = agents.filter((a) => a.visibility === 'private');
-  const workspaceAgents = agents.filter((a) => a.visibility === 'workspace');
+  const workspaceAgents = agents.filter((a) => a.inAppActive === true);
 
   const renderAgent = (agent: CustomAgentSummary) => (
     <button
@@ -875,7 +943,17 @@ function AgentPickerDropdown({
           {workspaceAgents.map(renderAgent)}
         </>
       )}
-      {myAgents.length === 0 && workspaceAgents.length === 0 && (
+      {isLoading && agents.length === 0 && (
+        <div className="px-3 py-2 text-sm text-muted-foreground">
+          Loading agents...
+        </div>
+      )}
+      {!isLoading && isError && agents.length === 0 && (
+        <div className="px-3 py-2 text-sm text-destructive">
+          Failed to load agents
+        </div>
+      )}
+      {!isLoading && !isError && myAgents.length === 0 && workspaceAgents.length === 0 && (
         <div className="px-3 py-2 text-sm text-muted-foreground">
           No agents yet —{' '}
           <a href="/agents" className="text-primary hover:underline">

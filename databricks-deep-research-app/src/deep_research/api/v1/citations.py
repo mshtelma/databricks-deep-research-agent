@@ -5,35 +5,40 @@ Provides API endpoints for claim-level citation access:
 - GET /claims/{id} - Get a specific claim with evidence
 - GET /claims/{id}/evidence - Get evidence for a claim
 - GET /messages/{id}/verification-summary - Get verification summary
-- GET /messages/{id}/provenance - Export provenance data for a message (JSON or Markdown)
+- GET /messages/{id}/provenance - Export provenance data (JSON or Markdown)
 - GET /messages/{id}/report - Export research report as Markdown
 
-JSONB Migration (Migration 011):
-Claims and verification data are now read from the verification_data JSONB column
-on the research_sessions table instead of normalized tables.
+Storage model:
+Claims and verification data live in the event-sourced storage stack
+(``chat_state.state.research_sessions[].verification_data``) and are read via
+the cached ``IResearchSessionService``. The JSON endpoints require ``chat_id``
+(the frontend always knows the active chat) so the lookup is a single
+chat-document read and ownership can be enforced; the legacy normalized
+``research_sessions`` table is no longer queried. The ``/report`` and
+``/provenance?format=markdown`` endpoints already compose cached services via
+``IExportService`` and need no ``chat_id``.
 """
 
+import logging
 from datetime import UTC
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import PlainTextResponse
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.api.v1.utils import (
     build_empty_verification_summary,
     generate_claim_uuid,
     jsonb_claim_to_response,
     jsonb_summary_to_response,
-    verify_message_ownership,
 )
-from deep_research.core.deps import get_export_service
+from deep_research.core.deps import (
+    get_chat_service,
+    get_export_service,
+    get_research_session_service,
+)
 from deep_research.core.exceptions import NotFoundError
-from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
-from deep_research.services._protocols import IExportService
-from deep_research.models.research_session import ResearchSession
 from deep_research.schemas.citation import (
     CitationResponse,
     ClaimEvidenceResponse,
@@ -49,49 +54,79 @@ from deep_research.schemas.citation import (
     VerificationSummary,
     VerificationVerdictEnum,
 )
+from deep_research.services._protocols import (
+    IChatService,
+    IExportService,
+    IResearchSessionService,
+)
 
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
+
+
+async def _load_verification_data(
+    message_id: UUID,
+    chat_id: UUID,
+    user_id: str,
+    chat_service: IChatService,
+    rs_service: IResearchSessionService,
+) -> dict | None:
+    """Return the ``verification_data`` dict for ``message_id`` within ``chat_id``.
+
+    Reads from the event-sourced storage stack. Returns ``None`` when:
+    - the user does not own ``chat_id`` (ownership check — closes IDOR: a user
+      passing their own ``chat_id`` with a foreign ``message_id`` gets nothing),
+    - no research session in that chat matches ``message_id``, or
+    - no verification data has been persisted yet.
+
+    Callers map ``None`` to an empty response so the frontend can poll during the
+    post-synthesis persistence window without leaking message existence.
+    """
+    chat = await chat_service.get_for_user(chat_id, user_id)
+    if chat is None:
+        logger.info(
+            "CITATIONS_LOAD message_id=%s chat_id=%s result=chat_not_owned",
+            message_id, chat_id,
+        )
+        return None
+    rs = await rs_service.get_by_message(message_id, chat_id=chat_id)
+    if rs is None:
+        logger.info(
+            "CITATIONS_LOAD message_id=%s chat_id=%s result=session_not_found_for_message",
+            message_id, chat_id,
+        )
+        return None
+    verification_data = getattr(rs, "verification_data", None)
+    n_claims = len((verification_data or {}).get("claims", [])) if verification_data else 0
+    logger.info(
+        "CITATIONS_LOAD message_id=%s chat_id=%s result=ok n_claims=%s",
+        message_id, chat_id, n_claims,
+    )
+    return verification_data or None
 
 
 @router.get("/messages/{message_id}/claims", response_model=MessageClaimsResponse)
 async def list_message_claims(
     message_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    chat_id: UUID = Query(..., description="Chat that owns the message"),
     include_corrections: bool = Query(False),
+    chat_service: IChatService = Depends(get_chat_service),
+    rs_service: IResearchSessionService = Depends(get_research_session_service),
 ) -> MessageClaimsResponse:
     """List all claims for a message with verification summary.
 
-    Returns all claims extracted from the agent message, including
-    their citations, verification verdicts, and corrections.
-
-    NOTE: Returns empty claims (200 OK) instead of 404 when message not found.
-    This supports frontend polling during the persistence race condition:
-    - Message UUID is pre-generated before streaming
-    - Claims are persisted after synthesis completes (~10-30s)
-    - Frontend polls this endpoint until claims are available
-
-    JSONB Migration: Now reads from verification_data JSONB column.
+    Returns empty claims (200 OK) when the claims are not yet persisted, the
+    message is unknown, or the chat is not owned by the user. This supports
+    frontend polling during the persistence race condition (the message UUID is
+    pre-generated before streaming; claims land after synthesis completes) and
+    avoids leaking message existence across users.
     """
-    # Try to verify ownership - return empty claims if message doesn't exist yet
-    try:
-        await verify_message_ownership(message_id, user.user_id, db, allow_dev_anonymous=True)
-    except NotFoundError:
-        # Message not persisted yet - return empty claims to allow frontend polling
-        return MessageClaimsResponse(
-            message_id=message_id,
-            claims=[],
-            verification_summary=build_empty_verification_summary(),
-            correction_metrics=None,
-        )
-
-    # Get research session with verification_data JSONB
-    result = await db.execute(
-        select(ResearchSession).where(ResearchSession.message_id == message_id)
+    verification_data = await _load_verification_data(
+        message_id, chat_id, user.user_id, chat_service, rs_service
     )
-    session = result.scalar_one_or_none()
-
-    if not session or not session.verification_data:
+    if not verification_data:
         return MessageClaimsResponse(
             message_id=message_id,
             claims=[],
@@ -99,18 +134,15 @@ async def list_message_claims(
             correction_metrics=None,
         )
 
-    # Transform JSONB to response schemas
-    verification_data = session.verification_data
     claims = [
         jsonb_claim_to_response(c, message_id)
         for c in verification_data.get("claims", [])
     ]
     summary = jsonb_summary_to_response(verification_data.get("summary", {}))
 
-    # Correction metrics not tracked in JSONB (deprecated feature)
+    # Correction metrics are not tracked in JSONB (deprecated feature).
     correction_metrics = None
     if include_corrections:
-        # Return zero metrics for backwards compatibility
         correction_metrics = CorrectionMetrics(
             total_corrections=0,
             keep_count=0,
@@ -132,34 +164,22 @@ async def list_message_claims(
 async def get_claim(
     claim_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-    message_id: UUID | None = Query(None, description="Message ID for JSONB lookup"),
+    message_id: UUID = Query(..., description="Message ID for the claim lookup"),
+    chat_id: UUID = Query(..., description="Chat that owns the message"),
+    chat_service: IChatService = Depends(get_chat_service),
+    rs_service: IResearchSessionService = Depends(get_research_session_service),
 ) -> ClaimResponse:
     """Get a specific claim with all its evidence and metadata.
 
-    JSONB Migration: Claims are now stored in JSONB and looked up by position.
-    The claim_id is a deterministic UUID generated from (message_id, position_start, position_end).
-    Requires message_id query parameter for efficient lookup.
+    The claim_id is a deterministic UUID generated from (message_id,
+    position_start, position_end); we scan the message's claims for the match.
     """
-    if not message_id:
-        # Without message_id, we can't efficiently look up the claim in JSONB
-        # Return 404 as this endpoint requires the new query parameter
-        raise NotFoundError("Claim", str(claim_id))
-
-    # Verify ownership
-    await verify_message_ownership(message_id, user.user_id, db, allow_dev_anonymous=True)
-
-    # Get research session with verification_data
-    result = await db.execute(
-        select(ResearchSession).where(ResearchSession.message_id == message_id)
+    verification_data = await _load_verification_data(
+        message_id, chat_id, user.user_id, chat_service, rs_service
     )
-    session = result.scalar_one_or_none()
-
-    if not session or not session.verification_data:
+    if not verification_data:
         raise NotFoundError("Claim", str(claim_id))
 
-    # Search for the claim by matching generated UUID
-    verification_data = session.verification_data
     for claim_dict in verification_data.get("claims", []):
         generated_id = generate_claim_uuid(
             message_id,
@@ -176,34 +196,22 @@ async def get_claim(
 async def get_claim_evidence(
     claim_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
-    message_id: UUID | None = Query(None, description="Message ID for JSONB lookup"),
+    message_id: UUID = Query(..., description="Message ID for the claim lookup"),
+    chat_id: UUID = Query(..., description="Chat that owns the message"),
+    chat_service: IChatService = Depends(get_chat_service),
+    rs_service: IResearchSessionService = Depends(get_research_session_service),
 ) -> ClaimEvidenceResponse:
     """Get evidence for a specific claim.
 
-    Returns the claim text and all supporting evidence spans
-    with source metadata for evidence card display.
-
-    JSONB Migration: Evidence is now embedded in the claim JSONB.
-    Requires message_id query parameter for efficient lookup.
+    Returns the claim text and all supporting evidence spans with source
+    metadata for evidence card display.
     """
-    if not message_id:
-        raise NotFoundError("Claim", str(claim_id))
-
-    # Verify ownership
-    await verify_message_ownership(message_id, user.user_id, db, allow_dev_anonymous=True)
-
-    # Get research session with verification_data
-    result = await db.execute(
-        select(ResearchSession).where(ResearchSession.message_id == message_id)
+    verification_data = await _load_verification_data(
+        message_id, chat_id, user.user_id, chat_service, rs_service
     )
-    session = result.scalar_one_or_none()
-
-    if not session or not session.verification_data:
+    if not verification_data:
         raise NotFoundError("Claim", str(claim_id))
 
-    # Search for the claim by matching generated UUID
-    verification_data = session.verification_data
     for claim_dict in verification_data.get("claims", []):
         generated_id = generate_claim_uuid(
             message_id,
@@ -266,29 +274,21 @@ async def get_claim_evidence(
 async def get_verification_summary(
     message_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    chat_id: UUID = Query(..., description="Chat that owns the message"),
+    chat_service: IChatService = Depends(get_chat_service),
+    rs_service: IResearchSessionService = Depends(get_research_session_service),
 ) -> VerificationSummary:
     """Get verification summary for a message.
 
-    Returns aggregated verification statistics including
-    counts by verdict and warning status.
-
-    JSONB Migration: Summary is now read from verification_data JSONB.
+    Returns aggregated verification statistics including counts by verdict and
+    warning status. Reads from the storage stack ``verification_data`` JSONB.
     """
-    # Verify ownership
-    await verify_message_ownership(message_id, user.user_id, db, allow_dev_anonymous=True)
-
-    # Get research session with verification_data
-    result = await db.execute(
-        select(ResearchSession).where(ResearchSession.message_id == message_id)
+    verification_data = await _load_verification_data(
+        message_id, chat_id, user.user_id, chat_service, rs_service
     )
-    session = result.scalar_one_or_none()
-
-    if not session or not session.verification_data:
+    if not verification_data:
         return build_empty_verification_summary()
-
-    summary_dict = session.verification_data.get("summary", {})
-    return jsonb_summary_to_response(summary_dict)
+    return jsonb_summary_to_response(verification_data.get("summary", {}))
 
 
 @router.get("/messages/{message_id}/report")
@@ -299,8 +299,9 @@ async def export_report(
 ) -> PlainTextResponse:
     """Export research report as standalone markdown.
 
-    Returns the agent synthesis with metadata and sources list
-    as a downloadable markdown file.
+    Returns the agent synthesis with metadata and sources list as a downloadable
+    markdown file. ``IExportService`` composes cached services and resolves the
+    chat from the message internally, so no ``chat_id`` is required here.
     """
     import logging
 
@@ -330,22 +331,21 @@ async def export_report(
 async def export_provenance(
     message_id: UUID,
     user: CurrentUser,
-    db: AsyncSession = Depends(get_db),
+    chat_id: UUID = Query(..., description="Chat that owns the message"),
     format: str = Query("json", pattern="^(json|markdown)$"),
     export_service: IExportService = Depends(get_export_service),
+    chat_service: IChatService = Depends(get_chat_service),
+    rs_service: IResearchSessionService = Depends(get_research_session_service),
 ) -> ProvenanceExport | PlainTextResponse:
     """Export provenance data for a message.
 
-    Returns all claims with their citations, verification verdicts,
-    corrections, and verification summary in an exportable format.
-    Suitable for audit trails, compliance, and downstream processing.
+    Returns all claims with their citations, verification verdicts, and
+    verification summary in an exportable format for audit trails / compliance.
 
     Args:
-        format: Export format - "json" (default) or "markdown"
-
-    JSONB Migration: Now reads from verification_data JSONB.
+        format: Export format - "json" (default) or "markdown".
     """
-    # Handle markdown format
+    # Markdown format (composes cached services via IExportService).
     if format == "markdown":
         import logging
 
@@ -370,27 +370,19 @@ async def export_provenance(
             },
         )
 
-    # JSON format (default)
+    # JSON format (default) — read verification_data from the storage stack.
     from datetime import datetime
 
-    # Verify ownership
-    await verify_message_ownership(message_id, user.user_id, db, allow_dev_anonymous=True)
-
-    # Get research session with verification_data
-    result = await db.execute(
-        select(ResearchSession).where(ResearchSession.message_id == message_id)
+    verification_data = await _load_verification_data(
+        message_id, chat_id, user.user_id, chat_service, rs_service
     )
-    session = result.scalar_one_or_none()
-
-    if not session or not session.verification_data:
+    if not verification_data:
         return ProvenanceExport(
             exported_at=datetime.now(UTC),
             message_id=message_id,
             claims=[],
             summary=build_empty_verification_summary(),
         )
-
-    verification_data = session.verification_data
 
     # Build export claims from JSONB
     export_claims: list[ClaimProvenanceExport] = []
@@ -427,7 +419,6 @@ async def export_provenance(
             )
         )
 
-    # Get summary from JSONB
     summary = jsonb_summary_to_response(verification_data.get("summary", {}))
 
     return ProvenanceExport(

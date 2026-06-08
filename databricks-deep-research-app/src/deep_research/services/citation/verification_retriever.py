@@ -30,7 +30,7 @@ import json
 import re
 from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from mlflow.entities import SpanType
 from pydantic import BaseModel, Field
@@ -105,9 +105,24 @@ if TYPE_CHECKING:
 
     from deep_research.agent.state import ClaimInfo, SourceInfo
     from deep_research.agent.tools.web_crawler import CrawlResult, WebCrawler
-    from deep_research.services.search.brave import BraveSearchClient
+    from deep_research.services.search.brave import SearchResponse
 
 logger = get_logger(__name__)
+
+
+class ExternalSearchClient(Protocol):
+    """Structural contract for Stage-7 external web search (provider-agnostic).
+
+    Any provider-selected search client with this shape can be injected — the
+    dependency is no longer coupled to the concrete Brave client. NOTE the app
+    ``SearchResponse`` return shape (``.results`` → each ``.url``): a framework
+    ``SearchClient`` returns a bare ``list[SearchResult]`` and would need a thin
+    bridge before it can be used here (deferred — see the search-provider rollout).
+    """
+
+    async def search(
+        self, query: str, count: int | None = None
+    ) -> SearchResponse: ...
 
 
 # =============================================================================
@@ -355,20 +370,25 @@ class VerificationRetriever:
     def __init__(
         self,
         llm: LLMClient,
-        brave_client: BraveSearchClient | None = None,
+        search_client: ExternalSearchClient | None = None,
         web_crawler: WebCrawler | None = None,
         config: VerificationRetrievalConfig | None = None,
+        *,
+        brave_client: ExternalSearchClient | None = None,
     ) -> None:
         """Initialize the verification retriever.
 
         Args:
             llm: LLM client for entailment checks and reconstruction.
-            brave_client: Brave Search client for external search.
+            search_client: Provider-selected external web-search client (any
+                backend with the ``ExternalSearchClient`` shape). Stage-7
+                external search is skipped when it (or ``web_crawler``) is None.
             web_crawler: Web crawler for fetching external pages.
             config: Verification retrieval configuration.
+            brave_client: Deprecated alias for ``search_client`` (back-compat).
         """
         self.llm = llm
-        self.brave_client = brave_client
+        self.search_client = search_client or brave_client
         self.web_crawler = web_crawler
         self.config = (
             config or get_app_config().citation_verification.verification_retrieval
@@ -728,7 +748,7 @@ class VerificationRetriever:
                     internal_span.set_attributes({ATTR_VERIFIED: False})
 
             # Step 2: External search if internal didn't find supporting evidence
-            if not fact.is_verified and self.brave_client and self.web_crawler:
+            if not fact.is_verified and self.search_client and self.web_crawler:
                 await self._search_external(
                     fact=fact,
                     claim_index=claim_index,
@@ -770,7 +790,7 @@ class VerificationRetriever:
             research_query: Original research query for context.
             _sources: List of sources (unused; kept for interface compat).
         """
-        if not self.brave_client or not self.web_crawler:
+        if not self.search_client or not self.web_crawler:
             return
 
         span_name = citation_span_name(STAGE_7_ARE, OP_EXTERNAL_SEARCH, claim_index, fact.fact_index)
@@ -798,7 +818,7 @@ class VerificationRetriever:
                 try:
                     # Brave search
                     search_response = await asyncio.wait_for(
-                        self.brave_client.search(
+                        self.search_client.search(
                             query,
                             count=self.config.max_external_urls_per_search,
                         ),
